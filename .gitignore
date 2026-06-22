@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pytype/
+*.pytype
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+.coverage.*
+*.coverage.*
+
+# Environment
+.venv/
+.env
+.env.local
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Packaging
+*.whl
+*.tar.gz
+
+*.testmondata
