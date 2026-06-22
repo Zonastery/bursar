@@ -43,7 +43,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql postgresql-client
-          sudo curl -sL -o /usr/local/bin/pg_tmp https://raw.githubusercontent.com/eradman/ephemeralpg/e6631785b1fd189c4d7a5118ec4f3db018a71212/pg_tmp.sh
+          PG_BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | head -1)
+          if [ -n "$PG_BIN" ]; then echo "$PG_BIN" >> "$GITHUB_PATH"; fi
+          sudo curl -sL -o /usr/local/bin/pg_tmp \
+            https://raw.githubusercontent.com/eradman/ephemeralpg/e6631785b1fd189c4d7a5118ec4f3db018a71212/pg_tmp.sh
           sudo chmod +x /usr/local/bin/pg_tmp
       - run: pip install -e ".[test,postgres,supabase]"
       - run: pytest
