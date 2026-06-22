@@ -4,13 +4,33 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Declarative credit calculation engine for AI SaaS platforms.
+Add usage-based credits to your AI SaaS in minutes — not weeks.
 
-Pricing expressions stored in a `credit_pricing_config` table enable live
-updates without redeploys. A safe AST-walking expression engine calculates
-credit costs from usage metrics. Supports per-model formulas, tool costs, search/RAG pricing,
-cache discounts, fixed-cost batch jobs, and a full reserve-then-deduct
-lifecycle.
+ducto is a drop-in credit calculation engine. Define pricing as math expressions
+(per-model, per-tool, search/RAG, cache, fixed jobs), connect a database, and
+start deducting credits. No billing infrastructure to build. No YAML configs.
+Pricing lives in your DB — update it live without redeploys.
+
+```python
+from ducto import CreditManager, UsageMetrics
+from ducto.interface.supabase import HttpxSupabaseStore
+
+# 3 lines. Your users now have credits.
+store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
+manager = CreditManager(store=store)
+manager.load_pricing_from_store()
+
+# Deduct credits from a single LLM call
+manager.deduct(
+    user_id="user_abc",
+    metrics=UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200),
+    idempotency_key="chat_42_turn_7",
+)
+```
+
+Run `ducto migrate "postgresql://..." && ducto pricing set config.json` and
+you're live. Balance tracking, idempotent deductions, overuse protection —
+all handled.
 
 ## Features
 
@@ -27,6 +47,8 @@ lifecycle.
   costs and metadata.
 - **Pluggable storage** — Reserve-then-deduct pattern via `CreditStore`
   adapters: Supabase, raw PostgreSQL, or in-memory for testing.
+- **Safe defaults** — Configurable `min_balance` floor, reservation expiry
+  (10 min), non-negative balance enforcement at the database level.
 
 ## Installation
 
@@ -47,28 +69,52 @@ Requires Python 3.11+.
 
 ## Quick Start
 
-### Full lifecycle with store
+### 1. Install and migrate
+
+```bash
+pip install "ducto[postgres]"
+ducto migrate "postgresql://user:pass@host:5432/db"
+```
+
+Creates all tables (`user_credits`, `credit_transactions`,
+`credit_reservations`) and RPCs — idempotent, safe to run on every deploy.
+
+### 2. Seed pricing
+
+```bash
+ducto pricing set - <<'JSON'
+{
+  "version": 1,
+  "models": {
+    "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+    "_default": "input_tokens * 0.001 + output_tokens * 0.003"
+  }
+}
+JSON
+```
+
+Pricing is stored in `credit_pricing_config`. Update it at any time — no
+redeploy needed.
+
+### 3. Deduct credits
 
 ```python
 from ducto import CreditManager, UsageMetrics
-from ducto.interface.supabase import HttpxSupabaseStore
+from ducto.interface.postgres import PostgresStore
 
-store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
+store = PostgresStore("postgresql://user:pass@host:5432/db")
 manager = CreditManager(store=store)
-
-# Load pricing from the credit_pricing_config table
 manager.load_pricing_from_store()
 
-# Deduct credits for a usage event
+manager.add_credits("user_abc", 1000)
+
 result = manager.deduct(
     user_id="user_abc",
-    metrics=UsageMetrics(model="claude-opus-4", input_tokens=500, output_tokens=200),
-    idempotency_key="chat_42_turn_7",
+    metrics=UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200),
+    idempotency_key="chat_session_42",
 )
+print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 ```
-
-Requires existing schema (run `ducto migrate`) and seeded pricing config
-(run `ducto pricing set defaults.yaml`).
 
 ### Calculation only (no database)
 
