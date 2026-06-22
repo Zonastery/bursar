@@ -64,28 +64,24 @@ result = manager.deduct(
 ```
 
 Requires existing schema (run `ducto migrate`) and seeded pricing config
-(run `ducto pricing set defaults.json`).
+(run `ducto pricing set defaults.yaml`).
 
 ### Calculation only (no database)
 
 For testing or stateless calculation without a store:
 
 ```python
-from ducto import CreditManager
-from ducto.interface.supabase import HttpxSupabaseStore
+from ducto import PricingEngine, UsageMetrics
 
-store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
-manager = CreditManager(store=store)
+engine = PricingEngine.from_dict({
+    "version": 1,
+    "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
+})
 
-# Load pricing from the credit_pricing_config table
-manager.load_pricing_from_store()
-
-# Deduct credits for a usage event
-result = manager.deduct(
-    user_id="user_abc",
-    metrics=UsageMetrics(model="claude-opus-4", input_tokens=500, output_tokens=200),
-    idempotency_key="chat_42_turn_7",
+result = engine.calculate(
+    UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200),
 )
+print(f"Total credits: {result.total}")
 ```
 
 ## Pricing Configuration
@@ -206,7 +202,7 @@ result = manager.deduct(
 Pricing can also be loaded from a dict (no database):
 
 ```python
-manager.load_pricing_from_dict({
+manager.publish_pricing_from_dict({
     "version": 1,
     "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
 })
@@ -233,8 +229,8 @@ ducto migrate "postgresql://user:pass@host:5432/db"
 # Show current active pricing config
 ducto pricing get
 
-# Update active pricing from a JSON file
-ducto pricing set config.json
+# Update active pricing from a JSON or YAML file
+ducto pricing set config.yaml
 ```
 
 The `pricing` commands require `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
