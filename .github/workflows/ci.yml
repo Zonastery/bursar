@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql postgresql-client
-          sudo curl -sL -o /usr/local/bin/pg_tmp https://raw.githubusercontent.com/eradman/ephemeralpg/main/pg_tmp
+          sudo curl -sL -o /usr/local/bin/pg_tmp https://raw.githubusercontent.com/eradman/ephemeralpg/e6631785b1fd189c4d7a5118ec4f3db018a71212/pg_tmp.sh
           sudo chmod +x /usr/local/bin/pg_tmp
       - run: pip install -e ".[test,postgres,supabase]"
       - run: pytest
