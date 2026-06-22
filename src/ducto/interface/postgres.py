@@ -45,7 +45,7 @@ class PostgresStore(CreditStore):
 
     # ── Schema management ──────────────────────────────────────────────
 
-    def setup(self) -> SetupResult:
+    def setup(self, database_url: str | None = None) -> SetupResult:
         """Run bundled SQL migrations."""
         result = SetupResult()
         conn = self._conn()

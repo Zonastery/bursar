@@ -1,55 +1,57 @@
 """Seed default pricing config into credit_pricing_config table.
 
-One-shot init container. Runs alongside agent-py (tables created by
-setup_credit_schema). Retries until the get_active_pricing RPC is
-available, then seeds default pricing if none exists.
+One-shot init container. Runs migrations then seeds default pricing
+if none exists.
 """
 
-import json
 import os
 import sys
 import time
 from pathlib import Path
 
-from supabase import create_client
+import httpx
+import yaml
 
 from ducto.interface.models import PricingConfigData
-from ducto.interface.supabase import SupabaseStore
+from ducto.interface.supabase import HttpxSupabaseStore, run_migrations
 
 RETRY_MAX = 30
 RETRY_DELAY = 2
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL") or sys.exit("SUPABASE_URL required")
 SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or sys.exit("SUPABASE_SERVICE_ROLE_KEY required")
+DATABASE_URL = os.environ.get("SUPABASE_DB_URL")
 
-_DEFAULTS_PATH = Path(__file__).parent / "pricing-defaults.json"
-DEFAULT_CONFIG = PricingConfigData.model_validate(json.loads(_DEFAULTS_PATH.read_text()))
-
-
-def _rpc_ready(supabase) -> bool:
-    """Check if the get_active_pricing_config RPC exists."""
-    try:
-        supabase.rpc("get_active_pricing_config").execute()
-        return True
-    except Exception:
-        return False
+_DEFAULTS_PATH = Path(__file__).parent / "pricing-defaults.yaml"
+DEFAULT_CONFIG = PricingConfigData.model_validate(yaml.safe_load(_DEFAULTS_PATH.read_text()))
 
 
 def main() -> None:
-    supabase = create_client(SUPABASE_URL, SERVICE_KEY)
-    rest = SupabaseStore(supabase)
+    rest = HttpxSupabaseStore(url=SUPABASE_URL, key=SERVICE_KEY)
 
-    # Wait for the RPC to exist (created by agent-py's setup_credit_schema)
+    # Run schema migrations before seeding
+    if DATABASE_URL:
+        result = run_migrations(DATABASE_URL)
+        if result.errors:
+            print(f"[seed-pricing] Migration errors: {result.errors}")
+        else:
+            print(f"[seed-pricing] Schema ready: {result.tables_created}")
+    else:
+        print("[seed-pricing] No SUPABASE_DB_URL — skipping migrations")
+
+    # Wait for the get_active_pricing_config RPC to be available
+    existing = None
     for attempt in range(RETRY_MAX):
-        if _rpc_ready(supabase):
+        try:
+            existing = rest.get_active_pricing()
             print(f"[seed-pricing] RPC ready after {attempt * RETRY_DELAY}s")
             break
-        if attempt == RETRY_MAX - 1:
-            print("[seed-pricing] RPC not available after max retries — exiting")
-            sys.exit(1)
-        time.sleep(RETRY_DELAY)
+        except httpx.HTTPStatusError:
+            if attempt == RETRY_MAX - 1:
+                print("[seed-pricing] RPC not available after max retries — exiting")
+                sys.exit(1)
+            time.sleep(RETRY_DELAY)
 
-    existing = rest.get_active_pricing()
     if existing is not None:
         print(f"[seed-pricing] Active pricing already exists (id={existing.id}) — skipping")
         return

@@ -1,0 +1,19 @@
+version: 1
+models:
+  gpt-4.1-mini: input_tokens * 10 + output_tokens * 30
+  gemini-2.5-flash: input_tokens * 5 + output_tokens * 15
+  gemini-2.5-pro: input_tokens * 25 + output_tokens * 75
+  claude-opus-4: input_tokens * 50 + output_tokens * 150
+  deepseek-v4-pro: input_tokens * 12 + output_tokens * 36
+  local-qwen: input_tokens * 1 + output_tokens * 3
+  local-deepseek-r1: input_tokens * 1 + output_tokens * 3
+  _default: input_tokens * 10 + output_tokens * 30
+tools:
+  _default: tool_calls * 0
+search:
+  costs: search_queries * 0
+cache:
+  discount: cache_read_tokens * 0
+min_balance: 5000
+fixed:
+  batch_job: 100

@@ -6,9 +6,9 @@ Orchestrates the full credit lifecycle:
 Example::
 
     from ducto import CreditManager, UsageMetrics
-    from ducto.interface.supabase import SupabaseStore
+    from ducto.interface.supabase import HttpxSupabaseStore
 
-    store = SupabaseStore(supabase_client)
+    store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
     manager = CreditManager(store=store)
 
     # One-time setup (creates tables + RPCs)
@@ -56,9 +56,9 @@ class CreditManager:
     """Orchestrates credit operations: pricing -> reserve -> deduct.
 
     Args:
-        store: A ``CreditStore`` adapter (SupabaseStore, PostgresStore, etc.).
+        store: A ``CreditStore`` adapter (HttpxSupabaseStore, PostgresStore, etc.).
         engine: An optional pre-configured ``PricingEngine``. If omitted,
-            call ``load_pricing_from_store()`` or ``load_pricing_from_dict()``
+            call ``load_pricing_from_store()`` or ``publish_pricing_from_dict()``
             before ``deduct()``.
     """
 
@@ -78,7 +78,7 @@ class CreditManager:
 
     # -- Pricing configuration -------------------------------------------
 
-    def load_pricing_from_dict(self, data: PricingConfigData | dict[str, Any]) -> None:
+    def publish_pricing_from_dict(self, data: PricingConfigData | dict[str, Any]) -> None:
         """Load pricing from a ``PricingConfigData`` or raw dict and sync it."""
         raw = data if isinstance(data, dict) else data.model_dump()
         engine = PricingEngine.from_dict(raw)
@@ -92,7 +92,7 @@ class CreditManager:
         if active is None:
             raise PricingNotLoadedError(
                 "No active pricing config found in the store. "
-                "Call load_pricing_from_dict() or set_active_pricing() first."
+                "Call publish_pricing_from_dict() or set_active_pricing() first."
             )
         engine_dict = active.config.model_dump(exclude_none=True)
         engine_dict["version"] = active.version
@@ -166,8 +166,7 @@ class CreditManager:
         """
         if not self._engine:
             raise PricingNotLoadedError(
-                "PricingEngine not loaded. Call load_pricing_from_dict() "
-                "or load_pricing_from_store() first."
+                "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
             )
 
         # 1) Calculate cost

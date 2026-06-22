@@ -1,14 +1,18 @@
-"""Supabase-backed credit store adapter.
+"""HTTPX-based Supabase credit store adapter.
 
-Uses ``supabase-py`` client for runtime RPC calls and an optional raw
-Postgres connection for schema setup.
+Makes Supabase RPC calls via ``httpx`` (sync) directly — no supabase-py
+dependency in the critical path.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ducto.interface.base import CreditStore
+
+if TYPE_CHECKING:
+    pass
 from ducto.interface.models import (
     AddCreditsResult,
     BalanceResult,
@@ -20,77 +24,101 @@ from ducto.interface.models import (
     SetupResult,
 )
 
+_SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+
 
 def _get_sql_files() -> list[Path]:
-    """Return bundled SQL file paths in order."""
-    sql_dir = Path(__file__).resolve().parent.parent / "sql"
-    return sorted(sql_dir.glob("[0-9]*.sql"))
+    """Return bundled SQL file paths in order by leading numeric prefix."""
+    return sorted(
+        _SQL_DIR.glob("[0-9]*.sql"),
+        key=lambda p: int(p.stem.split("_", 1)[0]),
+    )
 
 
-class SupabaseStore(CreditStore):
-    """Credit store backed by Supabase RPCs.
+def run_migrations(database_url: str) -> SetupResult:
+    """Run bundled SQL migrations against a database.
+
+    Standalone one-shot migration entry point. Idempotent (all DDL uses
+    ``IF NOT EXISTS`` / ``CREATE OR REPLACE``).
 
     Args:
-        client: Authenticated ``supabase.Client`` instance (service_role key).
-        database_url: Postgres connection string for ``psycopg2``, required
-            for ``setup()``. If ``None``, setup will raise.
+        database_url: Postgres connection string.
+
+    Returns:
+        ``SetupResult`` with created tables and any errors.
+    """
+    import psycopg2
+
+    result = SetupResult()
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor() as cur:
+            for sql_file in _get_sql_files():
+                sql = sql_file.read_text()
+                cur.execute(sql)
+                conn.commit()
+                result.tables_created.append(sql_file.name)
+
+        # Refresh PostgREST schema cache (harmless if no pgrst listener)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("NOTIFY pgrst, 'reload schema'")
+                conn.commit()
+        except Exception:
+            conn.rollback()
+    finally:
+        conn.close()
+    return result
+
+
+class HttpxSupabaseStore(CreditStore):
+    """Credit store backed by Supabase RPCs via raw httpx.
+
+    No dependency on supabase-py's sync client — makes direct HTTP
+    POST requests to the Supabase REST API.
+
+    Args:
+        url: Supabase project URL (e.g. ``https://<project>.supabase.co``).
+        key: Supabase ``service_role`` key.
     """
 
-    def __init__(self, client=None, database_url: str | None = None) -> None:
-        self._client = client
-        self._database_url = database_url
+    def __init__(self, url: str, key: str) -> None:
+        import httpx
 
-    @classmethod
-    def for_setup(cls, database_url: str) -> SupabaseStore:
-        """Create a store instance suitable for schema setup only.
-
-        Args:
-            database_url: Postgres connection string for ``psycopg2``.
-
-        Returns:
-            A ``SupabaseStore`` whose ``setup()`` method runs the bundled SQL
-            migrations. Runtime operations (``get_balance``, ``add_credits``,
-            etc.) will raise ``NotImplementedError`` — use a full client
-            for those.
-        """
-        return cls(client=None, database_url=database_url)
+        self._url = url.rstrip("/")
+        self._key = key
+        self._http = httpx.Client(timeout=30.0)
 
     # ── Schema management ──────────────────────────────────────────────
 
-    def setup(self) -> SetupResult:
-        """Run bundled SQL via raw pg connection."""
-        if not self._database_url:
-            raise RuntimeError(
-                "SupabaseStore.setup() requires database_url. "
-                "Pass it to the constructor, or use Supabase CLI / "
-                "supabase migration up to run the SQL files manually."
-            )
+    def setup(self, database_url: str | None = None) -> SetupResult:
+        """Run bundled SQL migrations via ``run_migrations()``.
 
-        import psycopg2
-
-        result = SetupResult()
-        conn = psycopg2.connect(self._database_url)
-        try:
-            with conn.cursor() as cur:
-                for sql_file in _get_sql_files():
-                    sql = sql_file.read_text()
-                    try:
-                        cur.execute(sql)
-                        conn.commit()
-                        result.tables_created.append(sql_file.name)
-                    except Exception as exc:
-                        conn.rollback()
-                        result.errors.append(f"{sql_file.name}: {exc}")
-        finally:
-            conn.close()
-
-        return result
+        Args:
+            database_url: Postgres connection string. Required.
+        """
+        if not database_url:
+            raise RuntimeError("HttpxSupabaseStore.setup() requires database_url")
+        return run_migrations(database_url)
 
     # ── Runtime operations ─────────────────────────────────────────────
 
+    def _rpc(self, fn: str, params: dict[str, object]) -> dict[str, Any]:
+        """Call a Postgres RPC function via raw HTTP POST."""
+        resp = self._http.post(
+            f"{self._url}/rest/v1/rpc/{fn}",
+            json=params,
+            headers={
+                "apikey": self._key,
+                "authorization": f"Bearer {self._key}",
+                "content-type": "application/json",
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def get_balance(self, user_id: str) -> BalanceResult:
-        data = self._client.rpc("get_credits_balance", {"p_user_id": user_id}).execute()
-        row = data.data if data.data else {}
+        row = self._rpc("get_credits_balance", {"p_user_id": user_id})
         return BalanceResult(
             user_id=str(row.get("user_id", user_id)),
             balance=int(row.get("balance", 0)),
@@ -104,7 +132,7 @@ class SupabaseStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
     ) -> AddCreditsResult:
-        data = self._client.rpc(
+        row = self._rpc(
             "credits_add",
             {
                 "p_user_id": user_id,
@@ -112,8 +140,7 @@ class SupabaseStore(CreditStore):
                 "p_type": type,
                 "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
             },
-        ).execute()
-        row = data.data if data.data else {}
+        )
         return AddCreditsResult(
             transaction_id=str(row.get("id", "")),
             user_id=str(row.get("user_id", user_id)),
@@ -130,7 +157,7 @@ class SupabaseStore(CreditStore):
         metadata: CreditMetadata | None = None,
         min_balance: int = 5,
     ) -> ReserveResult:
-        data = self._client.rpc(
+        row = self._rpc(
             "reserve_credits",
             {
                 "p_user_id": user_id,
@@ -139,8 +166,7 @@ class SupabaseStore(CreditStore):
                 "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
                 "p_min_balance": min_balance,
             },
-        ).execute()
-        row = data.data if data.data else {}
+        )
 
         if "error" in row:
             return ReserveResult(
@@ -151,7 +177,7 @@ class SupabaseStore(CreditStore):
             )
 
         return ReserveResult(
-            reservation_id=str(row.get("reservation_id", "")),
+            reservation_id=str(row["reservation_id"]),
             user_id=str(row.get("user_id", user_id)),
             amount=int(row.get("amount", 0)),
             balance=int(row.get("balance", 0)),
@@ -170,7 +196,7 @@ class SupabaseStore(CreditStore):
         if idempotency_key:
             meta["idempotency_key"] = idempotency_key
 
-        data = self._client.rpc(
+        row = self._rpc(
             "deduct_credits",
             {
                 "p_user_id": user_id,
@@ -178,8 +204,7 @@ class SupabaseStore(CreditStore):
                 "p_amount": amount,
                 "p_metadata": meta,
             },
-        ).execute()
-        row = data.data if data.data else {}
+        )
 
         if "error" in row:
             return DeductionResult(
@@ -191,22 +216,19 @@ class SupabaseStore(CreditStore):
             )
 
         return DeductionResult(
-            transaction_id=str(row.get("id", "")),
+            transaction_id=str(row["id"]),
             user_id=str(row.get("user_id", user_id)),
             amount=int(row.get("amount", -amount)),
-            balance_after=int(row.get("new_balance", 0)),
+            balance_after=int(row["new_balance"]),
             idempotent=bool(row.get("idempotent", False)),
         )
 
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
-        data = self._client.rpc("get_active_pricing_config", {}).execute()
-        row = data.data if data.data else None
-
+        row = self._rpc("get_active_pricing_config", {})
         if not row:
             return None
-
         return PricingConfigResult.model_validate(row)
 
     def set_active_pricing(
@@ -214,9 +236,8 @@ class SupabaseStore(CreditStore):
         config: PricingConfigData,
         label: str | None = None,
     ) -> str:
-        data = self._client.rpc(
+        row = self._rpc(
             "set_active_pricing_config",
             {"p_config": config.model_dump(mode="json"), "p_label": label},
-        ).execute()
-        row = data.data if data.data else {}
+        )
         return str(row.get("id", ""))

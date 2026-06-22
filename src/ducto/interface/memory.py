@@ -60,7 +60,7 @@ class MemoryStore(CreditStore):
 
     # ── Schema management ──────────────────────────────────────────────
 
-    def setup(self) -> SetupResult:
+    def setup(self, database_url: str | None = None) -> SetupResult:
         return SetupResult(
             tables_created=[
                 "001_credit_tables.sql",

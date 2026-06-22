@@ -17,7 +17,7 @@ def store() -> MemoryStore:
 @pytest.fixture
 def manager(store: MemoryStore) -> CreditManager:
     m = CreditManager(store=store)
-    m.load_pricing_from_dict(
+    m.publish_pricing_from_dict(
         {
             "version": 1,
             "models": {
@@ -25,7 +25,7 @@ def manager(store: MemoryStore) -> CreditManager:
                 "_default": "input_tokens * 0.001 + output_tokens * 0.003",
             },
             "tools": {"_default": "tool_calls * 0"},
-            "fixed": {"roadmap_gen": 20},
+            "fixed": {"batch_job": 20},
             "min_balance": 5,
         }
     )
@@ -52,7 +52,7 @@ class TestPricingLoading:
 
     def test_load_from_store(self, store: MemoryStore) -> None:
         manager = CreditManager(store=store)
-        manager.load_pricing_from_dict(
+        manager.publish_pricing_from_dict(
             {
                 "version": 1,
                 "models": {"_default": "input_tokens * 1"},
@@ -127,7 +127,7 @@ class TestDeduct:
 
         result = manager.deduct_fixed(
             user_id="user_1",
-            job_name="roadmap_gen",
+            job_name="batch_job",
             idempotency_key="roadmap_1",
         )
 

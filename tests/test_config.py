@@ -87,7 +87,7 @@ class TestConfigValidation:
             {
                 "version": 1,
                 "models": {"_default": "input_tokens * 1"},
-                "fixed": {"roadmap_gen": 20, "topic_gen": 10},
+                "fixed": {"batch_job": 20, "slow_job": 10},
             }
         )
-        assert config.fixed["roadmap_gen"] == 20
+        assert config.fixed["batch_job"] == 20

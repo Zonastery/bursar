@@ -31,8 +31,8 @@ FULL_PRICING = {
     },
     "min_balance": 5,
     "fixed": {
-        "roadmap_gen": 20,
-        "topic_gen": 10,
+        "batch_job": 20,
+        "slow_job": 10,
     },
 }
 
@@ -124,7 +124,7 @@ class TestPricingEngineCalculate:
         result = engine.calculate(
             UsageMetrics(
                 model="none",  # _default: 0*0.001 + 0*0.003 = 0
-                fixed_job="roadmap_gen",
+                fixed_job="batch_job",
             )
         )
         assert result.fixed_credits == 20.0
@@ -197,12 +197,12 @@ class TestPricingEngineCalculate:
 class TestEngineFixedJob:
     """Fixed-cost job calculations."""
 
-    def test_fixed_job_roadmap_gen(self) -> None:
+    def test_fixed_job_batch(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model=None,
-                fixed_job="roadmap_gen",
+                fixed_job="batch_job",
             )
         )
         assert result.fixed_credits == 20.0

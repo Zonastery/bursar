@@ -31,10 +31,15 @@ class CreditStore(ABC):
     # ── Schema management ──────────────────────────────────────────────
 
     @abstractmethod
-    def setup(self) -> SetupResult:
+    def setup(self, database_url: str | None = None) -> SetupResult:
         """Run bundled SQL migrations (tables, indexes, RPCs).
 
         Idempotent — safe to call on every deploy.
+
+        Args:
+            database_url: Postgres connection string. Required for stores
+                that manage schema setup directly (``HttpxSupabaseStore``,
+                ``PostgresStore``). Ignored by in-memory stores.
         """
         ...
 

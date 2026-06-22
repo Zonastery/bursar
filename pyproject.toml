@@ -5,6 +5,7 @@ description = "Declarative credit calculation engine AI SaaS platforms"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",
+    "pyyaml>=6.0.3",
 ]
 keywords = ["credits", "billing", "llm", "usage-metering", "pricing"]
 classifiers = [
@@ -18,21 +19,26 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/apoorwv/zonastery/tree/main/packages/ducto"
-Source = "https://github.com/apoorwv/zonastery"
-Documentation = "https://github.com/apoorwv/zonastery/tree/main/packages/ducto#readme"
-Issues = "https://github.com/apoorwv/zonastery/issues"
+Homepage = "https://github.com/apoorwv/ducto"
+Source = "https://github.com/apoorwv/ducto"
+Documentation = "https://github.com/apoorwv/ducto#readme"
+Issues = "https://github.com/apoorwv/ducto/issues"
 
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
+
+[project.scripts]
+ducto = "ducto.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [project.optional-dependencies]
 supabase = [
-    "supabase>=2.0",
+    "httpx>=0.27",
+    "psycopg2-binary>=2.9",
+    "PyYAML>=6.0",
 ]
 postgres = [
     "psycopg2-binary>=2.9",
@@ -40,6 +46,7 @@ postgres = [
 test = [
     "pytest>=8.0",
     "ruff>=0.15.0",
+    "pyright",
     "pytest-testmon>=2.0.0",
 ]
 

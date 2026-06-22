@@ -2,9 +2,9 @@
 
 Declarative credit calculation engine for AI SaaS platforms.
 
-Define pricing expressions stored in a database or loaded from a dict — a
-safe AST-walking expression engine calculates credit costs from usage
-metrics. Supports per-model formulas, tool costs, search/RAG pricing,
+Pricing expressions stored in a `credit_pricing_config` table enable live
+updates without redeploys. A safe AST-walking expression engine calculates
+credit costs from usage metrics. Supports per-model formulas, tool costs, search/RAG pricing,
 cache discounts, fixed-cost batch jobs, and a full reserve-then-deduct
 lifecycle.
 
@@ -15,7 +15,7 @@ lifecycle.
   no imports). Validated at config load time.
 - **Database-backed pricing** — Pricing expressions stored in a
   `credit_pricing_config` table. Enables live pricing updates without
-  redeploys. Can also load from a dict for testing.
+  redeploys. Dict loading available for testing and stateless calculation.
 - **Multi-dimensional** — Per-model formulas (with `_default` fallback),
   per-tool overrides, search/RAG, cache read discounts, fixed-cost jobs.
 - **Stateless core** — Pure calculation layer has zero database dependency.
@@ -43,40 +43,39 @@ Requires Python 3.11+.
 
 ## Quick Start
 
-### Calculation only (no database)
+### Full lifecycle with store
 
 ```python
-from ducto import PricingEngine, UsageMetrics, ToolCall
+from ducto import CreditManager, UsageMetrics
+from ducto.interface.supabase import HttpxSupabaseStore
 
-engine = PricingEngine.from_dict({
-    "version": 1,
-    "models": {
-        "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
-    },
-})
+store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
+manager = CreditManager(store=store)
 
-result = engine.calculate(UsageMetrics(
-    model="gpt-4",
-    input_tokens=342,
-    output_tokens=1204,
-    tool_calls=[ToolCall(name="web_search")],
-    web_search_calls=1,
-))
+# Load pricing from the credit_pricing_config table
+manager.load_pricing_from_store()
 
-print(f"Total credits: {result.total}")
+# Deduct credits for a usage event
+result = manager.deduct(
+    user_id="user_abc",
+    metrics=UsageMetrics(model="claude-opus-4", input_tokens=500, output_tokens=200),
+    idempotency_key="chat_42_turn_7",
+)
 ```
 
-### Full lifecycle with database
+Requires existing schema (run `ducto migrate`) and seeded pricing config
+(run `ducto pricing set defaults.json`).
+
+### Calculation only (no database)
+
+For testing or stateless calculation without a store:
 
 ```python
 from ducto import CreditManager
-from ducto.interface.supabase import SupabaseStore
+from ducto.interface.supabase import HttpxSupabaseStore
 
-store = SupabaseStore(client=supabase_client)
+store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
 manager = CreditManager(store=store)
-
-# One-time setup: runs bundled SQL migrations
-manager.setup()
 
 # Load pricing from the credit_pricing_config table
 manager.load_pricing_from_store()
@@ -117,7 +116,7 @@ for reference.
     "discount": "-cache_read_tokens * 0.0045"
   },
   "fixed": {
-    "roadmap_gen": 20
+    "batch_job": 20
   },
   "min_balance": 5
 }
@@ -166,11 +165,9 @@ manager = CreditManager(store=store)
 ### SupabaseStore
 
 ```python
-from supabase import create_client
-from ducto.interface.supabase import SupabaseStore
+from ducto.interface.supabase import HttpxSupabaseStore
 
-client = create_client(url, service_role_key)
-store = SupabaseStore(client=client)
+store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
 ```
 
 ### PostgresStore
@@ -198,7 +195,6 @@ integrate with any backend.
 
 ```python
 manager = CreditManager(store=store)
-manager.setup()
 manager.load_pricing_from_store()
 result = manager.deduct(
     user_id="user_abc",
@@ -207,7 +203,7 @@ result = manager.deduct(
 )
 ```
 
-Pricing can also be loaded from a dict for testing:
+Pricing can also be loaded from a dict (no database):
 
 ```python
 manager.load_pricing_from_dict({
@@ -227,6 +223,31 @@ Three bundled SQL files create the required schema:
 | `003_pricing_config.sql` | `credit_pricing_config` table, `get_active_pricing_config`, `set_active_pricing_config` RPCs |
 
 All DDL is idempotent (uses `IF NOT EXISTS` / `CREATE OR REPLACE`).
+
+### CLI reference
+
+```bash
+# Create tables, indexes, and RPC functions
+ducto migrate "postgresql://user:pass@host:5432/db"
+
+# Show current active pricing config
+ducto pricing get
+
+# Update active pricing from a JSON file
+ducto pricing set config.json
+```
+
+The `pricing` commands require `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+environment variables.
+
+Or from Python:
+
+```python
+from ducto.interface.supabase import run_migrations
+
+result = run_migrations("postgresql://user:pass@host:5432/db")
+assert result.success, result.errors
+```
 
 ## Expression Safety
 
@@ -260,7 +281,7 @@ ducto/
     base.py        # CreditStore ABC
     models.py      # Pydantic schemas for store operations
     memory.py      # MemoryStore (in-memory for testing)
-    supabase.py    # SupabaseStore adapter
+    supabase.py    # HttpxSupabaseStore adapter + run_migrations()
     postgres.py    # PostgresStore adapter
   sql/
     001_credit_tables.sql
