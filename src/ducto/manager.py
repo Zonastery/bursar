@@ -1,7 +1,7 @@
 """High-level credit manager.
 
 Orchestrates the full credit lifecycle:
-  calculate → reserve → deduct
+  calculate -> reserve -> deduct
 
 Example::
 
@@ -14,8 +14,8 @@ Example::
     # One-time setup (creates tables + RPCs)
     manager.setup()
 
-    # Load pricing from DB or YAML
-    manager.load_pricing_from_yaml("pricing.yaml")
+    # Load pricing from store (credit_pricing_config table)
+    manager.load_pricing_from_store()
 
     # Deduct credits for a usage event
     result = manager.deduct(
@@ -28,7 +28,6 @@ Example::
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from ducto.engine import PricingEngine
@@ -54,12 +53,12 @@ class PricingNotLoadedError(Exception):
 
 
 class CreditManager:
-    """Orchestrates credit operations: pricing → reserve → deduct.
+    """Orchestrates credit operations: pricing -> reserve -> deduct.
 
     Args:
         store: A ``CreditStore`` adapter (SupabaseStore, PostgresStore, etc.).
         engine: An optional pre-configured ``PricingEngine``. If omitted,
-            call ``load_pricing_from_yaml()`` or ``load_pricing_from_db()``
+            call ``load_pricing_from_store()`` or ``load_pricing_from_dict()``
             before ``deduct()``.
     """
 
@@ -71,19 +70,13 @@ class CreditManager:
         self._store = store
         self._engine = engine
 
-    # ── Schema management ──────────────────────────────────────────────
+    # -- Schema management -----------------------------------------------
 
     def setup(self) -> SetupResult:
         """Run bundled SQL migrations through the store."""
         return self._store.setup()
 
-    # ── Pricing configuration ──────────────────────────────────────────
-
-    def load_pricing_from_yaml(self, path: str | Path) -> None:
-        """Load pricing from a YAML file and sync it to the store."""
-        engine = PricingEngine.from_yaml(path)
-        self._engine = engine
-        self._store.set_active_pricing(engine.pricing_schema())
+    # -- Pricing configuration -------------------------------------------
 
     def load_pricing_from_dict(self, data: PricingConfigData | dict[str, Any]) -> None:
         """Load pricing from a ``PricingConfigData`` or raw dict and sync it."""
@@ -99,9 +92,8 @@ class CreditManager:
         if active is None:
             raise PricingNotLoadedError(
                 "No active pricing config found in the store. "
-                "Call load_pricing_from_yaml() or set_active_pricing() first."
+                "Call load_pricing_from_dict() or set_active_pricing() first."
             )
-        # Strip None fields — PricingConfig expects dict, not Optional[dict]
         engine_dict = active.config.model_dump(exclude_none=True)
         engine_dict["version"] = active.version
         self._engine = PricingEngine.from_dict(engine_dict)
@@ -122,7 +114,7 @@ class CreditManager:
         """The current PricingEngine, or None if not loaded."""
         return self._engine
 
-    # ── Credit operations ──────────────────────────────────────────────
+    # -- Credit operations -----------------------------------------------
 
     def get_balance(self, user_id: str) -> BalanceResult:
         """Get a user's current credit balance."""
@@ -156,7 +148,7 @@ class CreditManager:
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
-        """Full deduction flow: calculate → reserve → deduct.
+        """Full deduction flow: calculate -> reserve -> deduct.
 
         Args:
             user_id: The user to charge.
@@ -174,8 +166,8 @@ class CreditManager:
         """
         if not self._engine:
             raise PricingNotLoadedError(
-                "PricingEngine not loaded. Call load_pricing_from_yaml(), "
-                "load_pricing_from_dict(), or load_pricing_from_store() first."
+                "PricingEngine not loaded. Call load_pricing_from_dict() "
+                "or load_pricing_from_store() first."
             )
 
         # 1) Calculate cost
@@ -240,12 +232,7 @@ class CreditManager:
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
-        """Shortcut for fixed-cost batch jobs (roadmap gen, topic gen, etc.).
-
-        Shorthand for::
-
-            manager.deduct(user_id, UsageMetrics(fixed_job=job_name), ...)
-        """
+        """Shortcut for fixed-cost batch jobs (roadmap gen, topic gen, etc.)."""
         return self.deduct(
             user_id=user_id,
             metrics=UsageMetrics(fixed_job=job_name),

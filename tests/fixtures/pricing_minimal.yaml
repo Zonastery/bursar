@@ -1,4 +1,0 @@
-version: 1
-
-models:
-  _default: "input_tokens * 0.001 + output_tokens * 0.003"

@@ -2,19 +2,20 @@
 
 Declarative credit calculation engine for AI SaaS platforms.
 
-Define pricing expressions (in YAML or a database) — a safe AST-walking
-expression engine calculates credit costs from usage metrics. Supports
-per-model formulas, tool costs, search/RAG pricing, cache discounts,
-fixed-cost batch jobs, and a full reserve-then-deduct lifecycle.
+Define pricing expressions stored in a database or loaded from a dict — a
+safe AST-walking expression engine calculates credit costs from usage
+metrics. Supports per-model formulas, tool costs, search/RAG pricing,
+cache discounts, fixed-cost batch jobs, and a full reserve-then-deduct
+lifecycle.
 
 ## Features
 
 - **Safe expression engine** — Uses Python's `ast` module with a strict
   allowlist (no `eval()` of raw strings, no `exec()`, no attribute access,
   no imports). Validated at config load time.
-- **Flexible configuration** — Pricing expressions can be defined in YAML
-  files (local dev/testing) or stored in a database table
-  (`credit_pricing_config`) for live updates without redeploys.
+- **Database-backed pricing** — Pricing expressions stored in a
+  `credit_pricing_config` table. Enables live pricing updates without
+  redeploys. Can also load from a dict for testing.
 - **Multi-dimensional** — Per-model formulas (with `_default` fallback),
   per-tool overrides, search/RAG, cache read discounts, fixed-cost jobs.
 - **Stateless core** — Pure calculation layer has zero database dependency.
@@ -38,7 +39,7 @@ pip install "ducto[postgres]"
 pip install "ducto[test]"
 ```
 
-Requires Python ≥ 3.11.
+Requires Python 3.11+.
 
 ## Quick Start
 
@@ -47,7 +48,12 @@ Requires Python ≥ 3.11.
 ```python
 from ducto import PricingEngine, UsageMetrics, ToolCall
 
-engine = PricingEngine.from_yaml("pricing.yaml")
+engine = PricingEngine.from_dict({
+    "version": 1,
+    "models": {
+        "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+    },
+})
 
 result = engine.calculate(UsageMetrics(
     model="gpt-4",
@@ -72,7 +78,7 @@ manager = CreditManager(store=store)
 # One-time setup: runs bundled SQL migrations
 manager.setup()
 
-# Load pricing from database (stored in credit_pricing_config table)
+# Load pricing from the credit_pricing_config table
 manager.load_pricing_from_store()
 
 # Deduct credits for a usage event
@@ -85,40 +91,42 @@ result = manager.deduct(
 
 ## Pricing Configuration
 
-Pricing can be configured in two ways:
-
-### Option 1: YAML file (local dev / testing)
-
-```yaml
-version: 1
-models:
-  claude-opus-4: "input_tokens * 0.005 + output_tokens * 0.015"
-  _default: "input_tokens * 0.001 + output_tokens * 0.003"
-tools:
-  _default: "tool_calls * 0"
-  web_search: "web_search_calls * 0.5"
-search:
-  costs: "search_queries * 0.5 + search_results * 0.05"
-cache:
-  discount: "-cache_read_tokens * 0.0045"
-fixed:
-  roadmap_gen: 20
-min_balance: 5
-```
-
-### Option 2: Database-backed (production)
-
 Pricing is stored in the `credit_pricing_config` table via the
-`set_active_pricing_config` RPC. The `CreditManager.load_pricing_from_store()`
-method fetches the active config at runtime. Seed scripts can populate
-defaults — see [`scripts/seed_pricing.py`](scripts/seed_pricing.py).
+`set_active_pricing_config` RPC. The
+`CreditManager.load_pricing_from_store()` method fetches the active
+config at runtime. See [`scripts/seed_pricing.py`](scripts/seed_pricing.py)
+for reference.
 
-This approach enables live pricing updates without redeploys.
+### Expression format
+
+```json
+{
+  "version": 1,
+  "models": {
+    "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+    "_default": "input_tokens * 0.001 + output_tokens * 0.003"
+  },
+  "tools": {
+    "_default": "tool_calls * 0",
+    "web_search": "web_search_calls * 0.5"
+  },
+  "search": {
+    "costs": "search_queries * 0.5 + search_results * 0.05"
+  },
+  "cache": {
+    "discount": "-cache_read_tokens * 0.0045"
+  },
+  "fixed": {
+    "roadmap_gen": 20
+  },
+  "min_balance": 5
+}
+```
 
 ### Available expression variables
 
 | Variable | Source field in `UsageMetrics` |
-|----------|------------------------------|
+|----------|--------------------------------|
 | `input_tokens` | `metrics.input_tokens` |
 | `output_tokens` | `metrics.output_tokens` |
 | `cache_read_tokens` | `metrics.cache_read_tokens` |
@@ -129,7 +137,7 @@ This approach enables live pricing updates without redeploys.
 | `web_search_calls` | `metrics.web_search_calls` |
 | `code_exec_calls` | `metrics.code_exec_calls` |
 
-### Supported functions in expressions
+### Supported functions
 
 `ceil`, `floor`, `min`, `max`, `round`
 
@@ -175,29 +183,31 @@ store = PostgresStore("postgresql://user:pass@host:5432/db")
 
 ### Custom adapters
 
-Implement `ducto.interface.base.CreditStore` (an ABC with
-8 methods) to integrate with any backend.
+Implement `ducto.interface.base.CreditStore` (an ABC with 8 methods) to
+integrate with any backend.
 
 ## Credit Lifecycle
 
 `CreditManager` orchestrates a three-step reserve-then-deduct pattern:
 
-1. **Calculate** — `PricingEngine.calculate(UsageMetrics)` → `CostBreakdown`
-2. **Reserve** — `store.reserve_credits(user_id, amount)` → `ReserveResult`
+1. **Calculate** — `PricingEngine.calculate(UsageMetrics)` -> `CostBreakdown`
+2. **Reserve** — `store.reserve_credits(user_id, amount)` -> `ReserveResult`
    (locks the user row; reservations auto-expire after 10 minutes)
 3. **Deduct** — `store.deduct_credits(user_id, reservation_id, amount)`
-   → `DeductionResult` (idempotent, atomic)
+   -> `DeductionResult` (idempotent, atomic)
 
 ```python
 manager = CreditManager(store=store)
-manager.setup()                               # run SQL migrations
-manager.load_pricing_from_store()             # load pricing from DB
-result = manager.deduct(user_id="user_abc",
+manager.setup()
+manager.load_pricing_from_store()
+result = manager.deduct(
+    user_id="user_abc",
     metrics=UsageMetrics(model="gpt-4", input_tokens=100, output_tokens=50),
-    idempotency_key="tx_42")
+    idempotency_key="tx_42",
+)
 ```
 
-Pricing can also be loaded from a YAML dict:
+Pricing can also be loaded from a dict for testing:
 
 ```python
 manager.load_pricing_from_dict({
@@ -223,37 +233,39 @@ All DDL is idempotent (uses `IF NOT EXISTS` / `CREATE OR REPLACE`).
 The expression engine uses a strict AST-walking validator:
 
 1. Parse `ast.parse(expr, mode="eval")`
-2. Walk the AST — every node type must be in an allowlist (~25 node types:
-   binary ops, comparisons, conditionals, booleans, constants, names, calls)
+2. Walk the AST -- every node type must be in an allowlist (~25 node
+   types: binary ops, comparisons, conditionals, booleans, constants,
+   names, calls)
 3. Function calls must be in a whitelist (`ceil`, `floor`, `min`, `max`,
    `round`)
 4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas,
    comprehensions, imports, starred expressions
-5. Evaluation namespace has `__builtins__` emptied — only the 5 whitelisted
-   math/python builtins and user-provided variable names are available
-6. All expression strings are validated at config load time —
-   invalid configs never reach the engine
+5. Evaluation namespace has `__builtins__` emptied -- only the 5
+   whitelisted math/python builtins and user-provided variable names are
+   available
+6. All expression strings are validated at config load time -- invalid
+   configs never reach the engine
 
 ## Architecture
 
 ```
 ducto/
-├── expr.py          # Safe AST expression evaluator
-├── config.py        # Pydantic model + YAML loading for PricingConfig
-├── engine.py        # PricingEngine — core calculation logic
-├── metrics.py       # UsageMetrics, ToolCall dataclasses
-├── breakdown.py     # CostBreakdown dataclass
-├── manager.py       # CreditManager — orchestrates calculate→reserve→deduct
-└── interface/
-    ├── base.py      # CreditStore ABC
-    ├── models.py    # Pydantic schemas for store operations
-    ├── memory.py    # MemoryStore (in-memory for testing)
-    ├── supabase.py  # SupabaseStore adapter
-    └── postgres.py  # PostgresStore adapter
-sql/
-    ├── 001_credit_tables.sql
-    ├── 002_credit_rpcs.sql
-    └── 003_pricing_config.sql
+  expr.py          # Safe AST expression evaluator
+  config.py        # Pydantic model + dict loading for PricingConfig
+  engine.py        # PricingEngine -- core calculation logic
+  metrics.py       # UsageMetrics, ToolCall dataclasses
+  breakdown.py     # CostBreakdown dataclass
+  manager.py       # CreditManager -- calculate -> reserve -> deduct
+  interface/
+    base.py        # CreditStore ABC
+    models.py      # Pydantic schemas for store operations
+    memory.py      # MemoryStore (in-memory for testing)
+    supabase.py    # SupabaseStore adapter
+    postgres.py    # PostgresStore adapter
+  sql/
+    001_credit_tables.sql
+    002_credit_rpcs.sql
+    003_pricing_config.sql
 ```
 
 ## Development
@@ -275,4 +287,4 @@ pyright
 
 ## License
 
-MIT © [Apurv Wagh](LICENSE)
+MIT (c) Apurv Wagh

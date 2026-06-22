@@ -1,6 +1,4 @@
-"""Tests for YAML config parsing and validation."""
-
-from pathlib import Path
+"""Tests for pricing config parsing and validation."""
 
 import pytest
 from pydantic import ValidationError
@@ -8,7 +6,6 @@ from pydantic import ValidationError
 from ducto.config import (
     ConfigError,
     load_config_from_dict,
-    load_config_from_path,
 )
 
 
@@ -94,14 +91,3 @@ class TestConfigValidation:
             }
         )
         assert config.fixed["roadmap_gen"] == 20
-
-    def test_load_config_from_path(self, tmp_path: Path) -> None:
-        """Loading from a YAML file path works."""
-        yaml_file = tmp_path / "pricing.yaml"
-        yaml_file.write_text("""\
-version: 1
-models:
-  _default: "input_tokens * 1"
-""")
-        config = load_config_from_path(str(yaml_file))
-        assert config.models["_default"] == "input_tokens * 1"

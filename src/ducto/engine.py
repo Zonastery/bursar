@@ -1,18 +1,12 @@
 """Core engine that loads config and calculates credit costs.
 
 The ``PricingEngine`` class is the main entry point for the ducto
-package. It loads a validated ``PricingConfig`` from YAML or a dict,
+package. It loads a validated ``PricingConfig`` from a dict or DB,
 then calculates credit costs from ``UsageMetrics``.
 """
 
-from pathlib import Path
-
 from ducto.breakdown import CostBreakdown
-from ducto.config import (
-    PricingConfig,
-    load_config_from_dict,
-    load_config_from_path,
-)
+from ducto.config import PricingConfig, load_config_from_dict
 from ducto.expr import evaluate_expression
 from ducto.interface.models import PricingConfigData
 from ducto.metrics import UsageMetrics
@@ -26,12 +20,12 @@ def _safe_total(value: float) -> float:
 class PricingEngine:
     """Credit calculation engine.
 
-    Loads a YAML pricing config and calculates credit costs from
-    usage metrics.
-
     Usage::
 
-        engine = PricingEngine.from_yaml("pricing.yaml")
+        engine = PricingEngine.from_dict({
+            "version": 1,
+            "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
+        })
         result = engine.calculate(UsageMetrics(
             model="claude-opus-4",
             input_tokens=1000,
@@ -44,27 +38,11 @@ class PricingEngine:
         self._config = config
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "PricingEngine":
-        """Load engine from a YAML config file.
-
-        Args:
-            path: Path to a YAML pricing config file.
-
-        Returns:
-            A new PricingEngine instance.
-
-        Raises:
-            ConfigError: If the file can't be read or the config is invalid.
-        """
-        config = load_config_from_path(path)
-        return cls(config)
-
-    @classmethod
     def from_dict(cls, data: dict) -> "PricingEngine":
         """Load engine from a config dictionary.
 
         Args:
-            data: Dictionary representation of a YAML pricing config.
+            data: Dictionary representation of a pricing config.
 
         Returns:
             A new PricingEngine instance.
@@ -147,10 +125,7 @@ class PricingEngine:
 
     @property
     def min_balance(self) -> int:
-        """Minimum balance users must keep (prevents spending last N credits).
-
-        Set via ``min_balance`` in the pricing YAML config. Defaults to 5.
-        """
+        """Minimum balance users must keep (prevents spending last N credits)."""
         return self._config.min_balance
 
     def has_model(self, model_name: str) -> bool:
@@ -174,11 +149,7 @@ class PricingEngine:
         return None
 
     def get_fixed_cost(self, job_name: str) -> int | None:
-        """Get the fixed credit cost for a named batch job.
-
-        Returns ``None`` when no fixed pricing is configured or the job
-        name is not found.
-        """
+        """Get the fixed credit cost for a named batch job."""
         if self._config.fixed and job_name in self._config.fixed:
             return int(self._config.fixed[job_name])
         return None
@@ -198,12 +169,7 @@ class PricingEngine:
         }
 
     def _calc_model(self, model_name: str | None, variables: dict) -> float:
-        """Evaluate model expression for the given model name.
-
-        If the model name is ``None`` or ``"none"`` it is treated as
-        ``"_default"``.  Falls back to ``_default`` when the specific
-        model is not found (if ``_default`` exists).
-        """
+        """Evaluate model expression for the given model name."""
         if model_name is None or model_name == "none":
             model_name = "_default"
 
@@ -220,17 +186,13 @@ class PricingEngine:
     def _calc_tools(self, metrics: UsageMetrics, variables: dict) -> float:
         """Evaluate tool costs.
 
-        For each tool *name* present in metrics, use the specific tool
-        formula if available.  Tools without a specific override fall
-        back to ``_default``.  No double-counting -- if a tool has a
-        specific override, ``_default`` is NOT also applied for that
-        tool.
+        Uses specific tool formula if available, falls back to _default.
+        No double-counting when a specific override exists.
         """
         tools_config = self._config.tools
         default_expr = tools_config.get("_default", "tool_calls * 0")
         total = 0.0
 
-        # Collect unique tool names from the tool_calls list
         tool_names = {t.name for t in metrics.tool_calls}
 
         seen_specific = set()
@@ -239,7 +201,6 @@ class PricingEngine:
                 total += evaluate_expression(tools_config[tool_name], variables)
                 seen_specific.add(tool_name)
 
-        # Apply _default for tools without specific override
         unknown_tool_count = sum(1 for t in metrics.tool_calls if t.name not in seen_specific)
         if unknown_tool_count > 0:
             local_vars = dict(variables)

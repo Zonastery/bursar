@@ -1,8 +1,5 @@
-"""YAML config loading with pydantic validation and expression validation."""
+"""Pricing config loading with pydantic validation and expression validation."""
 
-from pathlib import Path
-
-import yaml
 from pydantic import BaseModel, Field, NonNegativeInt, model_validator
 
 from ducto.expr import ExpressionError, validate_expression
@@ -13,7 +10,7 @@ class ConfigError(Exception):
 
 
 class PricingConfig(BaseModel):
-    """Validated pricing configuration loaded from YAML."""
+    """Validated pricing configuration."""
 
     version: int = Field(ge=1, le=1)
     models: dict[str, str]
@@ -68,7 +65,7 @@ def load_config_from_dict(data: dict) -> PricingConfig:
     """Load and validate a pricing config from a dictionary.
 
     Args:
-        data: Dictionary representation of a YAML pricing config.
+        data: Dictionary representation of a pricing config.
 
     Returns:
         Validated PricingConfig instance.
@@ -76,36 +73,5 @@ def load_config_from_dict(data: dict) -> PricingConfig:
     Raises:
         ConfigError: If the config structure or expressions are invalid.
     """
-    cleaned = _validate_and_clean(data)
-    return PricingConfig.model_validate(cleaned)
-
-
-def load_config_from_path(path: str | Path) -> PricingConfig:
-    """Load and validate a pricing config from a YAML file.
-
-    Args:
-        path: Path to a YAML pricing config file.
-
-    Returns:
-        Validated PricingConfig instance.
-
-    Raises:
-        ConfigError: If the file can't be read or the config is invalid.
-    """
-    path = Path(path)
-    if not path.exists():
-        raise ConfigError(f"config file not found: {path}")
-    if not path.is_file():
-        raise ConfigError(f"path is not a file: {path}")
-
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise ConfigError(f"yaml parse error: {e}") from e
-
-    if not isinstance(data, dict):
-        raise ConfigError("yaml root must be a mapping (dict)")
-
     cleaned = _validate_and_clean(data)
     return PricingConfig.model_validate(cleaned)

@@ -1,26 +1,51 @@
 """Tests for the credit calculation engine.
 
-Tests loading config (YAML/dict), calculating costs across all pricing
-dimensions, clamping, batch operations, and schema introspection.
+Tests loading config, calculating costs across all pricing dimensions,
+clamping, batch operations, and schema introspection.
 """
 
 import pytest
 
-from ducto.config import ConfigError
 from ducto.engine import PricingEngine
 from ducto.metrics import ToolCall, UsageMetrics
 
+FULL_PRICING = {
+    "version": 1,
+    "models": {
+        "claude-opus-4": "input_tokens * 0.005 + output_tokens * 0.015",
+        "claude-sonnet-4": "input_tokens * 0.003 + output_tokens * 0.009",
+        "gemini-2.5-pro": "input_tokens * 0.0025 + output_tokens * 0.0075",
+        "gemini-2.5-flash": "input_tokens * 0.0005 + output_tokens * 0.0015",
+        "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+    },
+    "tools": {
+        "_default": "tool_calls * 0",
+        "web_search": "web_search_calls * 0.5",
+        "code_exec": "code_exec_calls * 0.3",
+    },
+    "search": {
+        "costs": "search_queries * 0.5 + search_results * 0.05",
+    },
+    "cache": {
+        "discount": "-cache_read_tokens * 0.0045",
+    },
+    "min_balance": 5,
+    "fixed": {
+        "roadmap_gen": 20,
+        "topic_gen": 10,
+    },
+}
+
+MINIMAL_PRICING = {
+    "version": 1,
+    "models": {
+        "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+    },
+}
+
 
 class TestPricingEngineLoading:
-    """PricingEngine construction from YAML and dict sources."""
-
-    def test_from_yaml_with_full_config(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
-        assert engine is not None
-
-    def test_from_yaml_with_minimal_config(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_minimal.yaml")
-        assert engine is not None
+    """PricingEngine construction from dict sources."""
 
     def test_from_dict(self) -> None:
         engine = PricingEngine.from_dict(
@@ -31,16 +56,20 @@ class TestPricingEngineLoading:
         )
         assert engine is not None
 
-    def test_invalid_yaml_path_raises_error(self) -> None:
-        with pytest.raises(ConfigError, match="config file not found"):
-            PricingEngine.from_yaml("tests/fixtures/nonexistent.yaml")
+    def test_from_dict_with_full_config(self) -> None:
+        engine = PricingEngine.from_dict(FULL_PRICING)
+        assert engine is not None
+
+    def test_from_dict_with_minimal_config(self) -> None:
+        engine = PricingEngine.from_dict(MINIMAL_PRICING)
+        assert engine is not None
 
 
 class TestPricingEngineCalculate:
     """Single-request cost calculations."""
 
     def test_model_cost_only(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="claude-opus-4",
@@ -53,7 +82,7 @@ class TestPricingEngineCalculate:
         assert result.total == pytest.approx(35.0, rel=1e-3)
 
     def test_fallback_to_default_model(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="unknown-model",
@@ -66,7 +95,7 @@ class TestPricingEngineCalculate:
         assert result.total == pytest.approx(4.0, rel=1e-3)
 
     def test_full_calculation_all_dimensions(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="gemini-2.5-flash",
@@ -91,7 +120,7 @@ class TestPricingEngineCalculate:
         assert result.total == pytest.approx(2.85, rel=1e-3)
 
     def test_fixed_cost_job(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="none",  # _default: 0*0.001 + 0*0.003 = 0
@@ -102,7 +131,7 @@ class TestPricingEngineCalculate:
         assert result.total == 20.0
 
     def test_total_clamped_to_zero(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="claude-opus-4",
@@ -116,7 +145,7 @@ class TestPricingEngineCalculate:
         assert result.total == 0.0
 
     def test_zero_metrics_returns_zero(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_minimal.yaml")
+        engine = PricingEngine.from_dict(MINIMAL_PRICING)
         result = engine.calculate(UsageMetrics(model="unknown"))
         assert result.total == 0.0
 
@@ -131,7 +160,7 @@ class TestPricingEngineCalculate:
             engine.calculate(UsageMetrics(model="unknown"))
 
     def test_tool_specific_override_used(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model="claude-opus-4",
@@ -145,7 +174,7 @@ class TestPricingEngineCalculate:
         assert result.tool_credits == pytest.approx(1.0, rel=1e-3)
 
     def test_batch_calculation(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         results = engine.calculate_batch(
             [
                 UsageMetrics(model="claude-opus-4", input_tokens=1000, output_tokens=2000),
@@ -157,7 +186,7 @@ class TestPricingEngineCalculate:
         assert results[1].total == pytest.approx(1.75, rel=1e-3)
 
     def test_pricing_schema_returns_pydantic_model(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         schema = engine.pricing_schema()
         assert schema.models
         assert "claude-opus-4" in schema.models
@@ -169,7 +198,7 @@ class TestEngineFixedJob:
     """Fixed-cost job calculations."""
 
     def test_fixed_job_roadmap_gen(self) -> None:
-        engine = PricingEngine.from_yaml("tests/fixtures/pricing_full.yaml")
+        engine = PricingEngine.from_dict(FULL_PRICING)
         result = engine.calculate(
             UsageMetrics(
                 model=None,
