@@ -124,6 +124,52 @@ class TestPlanManagement:
         assert store.check_allowance("user-1").allowance_remaining == 120
 
 
+# ── Refunds ────────────────────────────────────────────────────────────────
+
+
+class TestRefund:
+    def test_full_refund_restores_balance(self) -> None:
+        store = MemoryStore()
+        store.add_credits("user_1", 100, "purchase")
+        # Deduct 30
+        reserve = store.reserve_credits("user_1", 30, "usage")
+        deduct = store.deduct_credits("user_1", reserve.reservation_id, 30)
+        assert store.get_balance("user_1").balance == 70
+
+        refund = store.refund_credits(deduct.transaction_id)
+        assert refund.error is None
+        assert refund.amount == 30
+        assert store.get_balance("user_1").balance == 100
+
+    def test_partial_refund(self) -> None:
+        store = MemoryStore()
+        store.add_credits("user_1", 100)
+        reserve = store.reserve_credits("user_1", 50, "usage")
+        deduct = store.deduct_credits("user_1", reserve.reservation_id, 50)
+
+        refund = store.refund_credits(deduct.transaction_id, amount=20)
+        assert refund.error is None
+        assert refund.amount == 20
+        assert store.get_balance("user_1").balance == 70  # 50 + 20
+
+    def test_double_refund_returns_error(self) -> None:
+        store = MemoryStore()
+        store.add_credits("user_1", 100)
+        reserve = store.reserve_credits("user_1", 30, "usage")
+        deduct = store.deduct_credits("user_1", reserve.reservation_id, 30)
+
+        r1 = store.refund_credits(deduct.transaction_id)
+        assert r1.error is None
+
+        r2 = store.refund_credits(deduct.transaction_id)
+        assert r2.error == "already_refunded"
+
+    def test_unknown_transaction_returns_error(self) -> None:
+        store = MemoryStore()
+        refund = store.refund_credits("non-existent-id")
+        assert refund.error == "transaction_not_found"
+
+
 def test_load_pricing_file_json(tmp_path) -> None:
     """Load a JSON pricing file via _load_pricing_file."""
     from ducto.__main__ import _load_pricing_file

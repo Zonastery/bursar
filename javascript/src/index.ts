@@ -25,6 +25,7 @@ export type {
   PricingConfigData,
   PricingConfigV2,
   PricingConfigResult,
+  RefundResult,
   SetUserPlanResult,
   BalanceResult,
   AddCreditsResult,

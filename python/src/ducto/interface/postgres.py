@@ -18,6 +18,7 @@ from ducto.interface.models import (
     GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
+    RefundResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -314,3 +315,48 @@ class PostgresStore(CreditStore):
             conn.commit()
         finally:
             conn.close()
+
+    # ── Refunds ─────────────────────────────────────────────────────────
+
+    def refund_credits(
+        self,
+        transaction_id: str,
+        amount: int | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "refund_credits",
+                    [
+                        transaction_id,
+                        amount,
+                        reason,
+                        json.dumps(metadata.model_dump(mode="json") if metadata else {}),
+                    ],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        if "error" in result_dict and result_dict["error"]:
+            return RefundResult(
+                refund_transaction_id="",
+                original_transaction_id=transaction_id,
+                user_id=str(result_dict.get("user_id", "")),
+                amount=0,
+                new_balance=int(result_dict.get("new_balance", 0)),
+                error=str(result_dict["error"]),
+            )
+
+        return RefundResult(
+            refund_transaction_id=str(result_dict.get("refund_transaction_id", "")),
+            original_transaction_id=transaction_id,
+            user_id=str(result_dict.get("user_id", "")),
+            amount=int(result_dict.get("amount", 0)),
+            new_balance=int(result_dict.get("new_balance", 0)),
+        )

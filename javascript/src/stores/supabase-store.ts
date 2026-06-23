@@ -7,6 +7,7 @@ import type {
   GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
+  RefundResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -215,5 +216,38 @@ export class HttpxSupabaseStore implements CreditStore {
       p_plan_id: planId,
       p_amount: amount,
     });
+  }
+
+  // ── Refunds ──────────────────────────────────────────────────────────
+
+  async refundCredits(
+    transactionId: string,
+    amount?: number,
+    reason?: string,
+    metadata?: CreditMetadata | null,
+  ): Promise<RefundResult> {
+    const row = await this.rpc("refund_credits", {
+      p_transaction_id: transactionId,
+      p_amount: amount ?? null,
+      p_reason: reason ?? null,
+      p_metadata: metadata ?? {},
+    });
+    if ("error" in row && row.error) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: String(row.user_id ?? ""),
+        amount: 0,
+        newBalance: Number(row.new_balance ?? 0),
+        error: String(row.error),
+      };
+    }
+    return {
+      refundTransactionId: String(row.refund_transaction_id ?? ""),
+      originalTransactionId: transactionId,
+      userId: String(row.user_id ?? ""),
+      amount: Number(row.amount ?? 0),
+      newBalance: Number(row.new_balance ?? 0),
+    };
   }
 }

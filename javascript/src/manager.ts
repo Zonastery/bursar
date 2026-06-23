@@ -7,6 +7,7 @@ import type {
   CreditMetadata,
   DeductionResult,
   PricingConfigData,
+  RefundResult,
   ReserveResult,
   SetupResult,
 } from "./types.js";
@@ -185,6 +186,18 @@ export class CreditManager {
 
     if (deduction.error) throw new InsufficientCreditsError(deduction.error);
     return deduction;
+  }
+
+  /**
+   * Refund a previous credit deduction.
+   */
+  async refundCredits(
+    transactionId: string,
+    amount?: number,
+    reason?: string,
+    metadata?: CreditMetadata | null,
+  ): Promise<RefundResult> {
+    return await this.store.refundCredits(transactionId, amount, reason, metadata);
   }
 
   /**

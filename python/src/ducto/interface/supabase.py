@@ -18,6 +18,7 @@ from ducto.interface.models import (
     GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
+    RefundResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -267,4 +268,41 @@ class HttpxSupabaseStore(CreditStore):
         self._rpc(
             "increment_usage_window",
             {"p_user_id": user_id, "p_plan_id": plan_id, "p_amount": amount},
+        )
+
+    # ── Refunds ─────────────────────────────────────────────────────────
+
+    def refund_credits(
+        self,
+        transaction_id: str,
+        amount: int | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        row = self._rpc(
+            "refund_credits",
+            {
+                "p_transaction_id": transaction_id,
+                "p_amount": amount,
+                "p_reason": reason,
+                "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
+            },
+        )
+
+        if "error" in row and row["error"]:
+            return RefundResult(
+                refund_transaction_id="",
+                original_transaction_id=transaction_id,
+                user_id=str(row.get("user_id", "")),
+                amount=0,
+                new_balance=int(row.get("new_balance", 0)),
+                error=str(row["error"]),
+            )
+
+        return RefundResult(
+            refund_transaction_id=str(row.get("refund_transaction_id", "")),
+            original_transaction_id=transaction_id,
+            user_id=str(row.get("user_id", "")),
+            amount=int(row.get("amount", 0)),
+            new_balance=int(row.get("new_balance", 0)),
         )

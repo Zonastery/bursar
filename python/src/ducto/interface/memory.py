@@ -18,6 +18,7 @@ from ducto.interface.models import (
     PlanDefinition,
     PricingConfigData,
     PricingConfigResult,
+    RefundResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -74,6 +75,7 @@ class MemoryStore(CreditStore):
                 "002_credit_rpcs.sql",
                 "003_pricing_config.sql",
                 "004_user_plans.sql",
+                "005_credit_refunds.sql",
             ],
         )
 
@@ -295,4 +297,69 @@ class MemoryStore(CreditStore):
                 "billing_period": billing_period,
                 "usage": amount,
             }
+        )
+
+    # ── Refunds ─────────────────────────────────────────────────────────
+
+    def refund_credits(
+        self,
+        transaction_id: str,
+        amount: int | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        # Find original transaction
+        orig_tx = next((t for t in self._transactions if t.id == transaction_id), None)
+        if orig_tx is None:
+            return RefundResult(
+                refund_transaction_id="",
+                original_transaction_id=transaction_id,
+                user_id="",
+                amount=0,
+                new_balance=0,
+                error="transaction_not_found",
+            )
+
+        # Check for duplicate refund
+        is_refunded = any(t.type == "refund" and t.reference_id == transaction_id for t in self._transactions)
+        if is_refunded:
+            return RefundResult(
+                refund_transaction_id="",
+                original_transaction_id=transaction_id,
+                user_id=orig_tx.user_id,
+                amount=0,
+                new_balance=self._balances.get(orig_tx.user_id, 0),
+                error="already_refunded",
+            )
+
+        refund_amount = amount if amount is not None else abs(orig_tx.amount)
+        max_refund = abs(orig_tx.amount)
+        actual_refund = min(refund_amount, max_refund)
+
+        # Restore balance
+        current = self._balances.get(orig_tx.user_id, 0)
+        self._balances[orig_tx.user_id] = current + actual_refund
+
+        tx_id = str(uuid.uuid4())
+        tx_meta = metadata.model_dump() if metadata else {}
+        if reason:
+            tx_meta["reason"] = reason
+        self._transactions.append(
+            _TransactionRecord(
+                id=tx_id,
+                user_id=orig_tx.user_id,
+                amount=actual_refund,
+                type="refund",
+                reference_type=reason,
+                reference_id=transaction_id,
+                metadata=tx_meta,
+            )
+        )
+
+        return RefundResult(
+            refund_transaction_id=tx_id,
+            original_transaction_id=transaction_id,
+            user_id=orig_tx.user_id,
+            amount=actual_refund,
+            new_balance=self._balances[orig_tx.user_id],
         )

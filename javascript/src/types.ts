@@ -108,3 +108,13 @@ export interface SetUserPlanResult {
   userId: string;
   planId: string;
 }
+
+/** Result of refunding a credit deduction. */
+export interface RefundResult {
+  refundTransactionId: string;
+  originalTransactionId: string;
+  userId: string;
+  amount: number;
+  newBalance: number;
+  error?: string | null;
+}

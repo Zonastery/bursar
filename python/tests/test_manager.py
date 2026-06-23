@@ -243,6 +243,32 @@ class TestPlanAllowance:
         allowance = store.check_allowance("user_1")
         assert allowance.allowance_remaining == 0
 
+    def test_full_refund_through_manager(self, manager: CreditManager) -> None:
+        manager.add_credits("user_1", 100)
+        deduct = manager.deduct(
+            user_id="user_1",
+            metrics=UsageMetrics(model="gpt-4", input_tokens=100, output_tokens=0),
+        )
+        assert deduct.amount == -1
+
+        refund = manager.refund_credits(deduct.transaction_id)
+        assert refund.error is None
+        assert refund.amount == 1
+
+        balance = manager.get_balance("user_1")
+        assert balance.balance == 100
+
+    def test_partial_refund_through_manager_fixed(self, manager: CreditManager) -> None:
+        """Refund via deduct_fixed path."""
+        manager.add_credits("user_1", 100)
+        deduct = manager.deduct_fixed(user_id="user_1", job_name="batch_job")
+        assert deduct.amount == -20
+
+        refund = manager.refund_credits(deduct.transaction_id, amount=10)
+        assert refund.error is None
+        assert refund.amount == 10
+        assert manager.get_balance("user_1").balance == 90  # 100 - 20 + 10
+
     def test_no_plan_uses_balance_only(self) -> None:
         """Without plan, existing deduct flow works unchanged."""
         store = MemoryStore()

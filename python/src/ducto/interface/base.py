@@ -18,6 +18,7 @@ from ducto.interface.models import (
     GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
+    RefundResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -136,4 +137,28 @@ class CreditStore(ABC):
     @abstractmethod
     def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
         """Record allowance consumption for current billing period."""
+        ...
+
+    # ── Refunds ─────────────────────────────────────────────────────────
+
+    @abstractmethod
+    def refund_credits(
+        self,
+        transaction_id: str,
+        amount: int | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        """Refund a previous credit deduction.
+
+        Args:
+            transaction_id: The transaction to refund.
+            amount: Optional partial refund amount. Full refund if omitted.
+            reason: Optional reason for the refund.
+            metadata: Extra metadata to attach to the refund transaction.
+
+        Returns:
+            ``RefundResult`` with the refund transaction details, or
+            ``error`` set if the transaction doesn't exist or is already refunded.
+        """
         ...

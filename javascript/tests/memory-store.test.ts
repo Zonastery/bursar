@@ -13,7 +13,7 @@ describe("MemoryStore", () => {
     it("returns setup result with table names", async () => {
       const result = await store.setup();
       expect(result.success).toBe(true);
-      expect(result.tablesCreated).toHaveLength(4);
+      expect(result.tablesCreated).toHaveLength(5);
     });
   });
 
@@ -191,6 +191,52 @@ describe("MemoryStore", () => {
       await store.incrementUsageWindow("user-1", "plan-basic", 30);
       const allowance2 = await store.checkAllowance("user-1");
       expect(allowance2.allowanceRemaining).toBe(120);
+    });
+  });
+
+  describe("refunds", () => {
+    it("refunds a full deduction and restores balance", async () => {
+      await store.addCredits("user-1", 100, "purchase");
+      // Full lifecycle: reserve + deduct
+      const reserve = await store.reserveCredits("user-1", 30, "usage");
+      const deduct = await store.deductCredits("user-1", reserve.reservationId, 30);
+      const balanceAfterDeduct = (await store.getBalance("user-1")).balance;
+      expect(balanceAfterDeduct).toBe(70);
+
+      // Refund
+      const refund = await store.refundCredits(deduct.transactionId);
+      expect(refund.error).toBeUndefined();
+      expect(refund.amount).toBe(30);
+      const balanceAfterRefund = await store.getBalance("user-1");
+      expect(balanceAfterRefund.balance).toBe(100);
+    });
+
+    it("partial refund restores partial amount", async () => {
+      await store.addCredits("user-1", 100);
+      const reserve = await store.reserveCredits("user-1", 50, "usage");
+      const deduct = await store.deductCredits("user-1", reserve.reservationId, 50);
+
+      const refund = await store.refundCredits(deduct.transactionId, 20);
+      expect(refund.error).toBeUndefined();
+      expect(refund.amount).toBe(20);
+      expect((await store.getBalance("user-1")).balance).toBe(70); // 50 + 20
+    });
+
+    it("double refund returns error", async () => {
+      await store.addCredits("user-1", 100);
+      const reserve = await store.reserveCredits("user-1", 30, "usage");
+      const deduct = await store.deductCredits("user-1", reserve.reservationId, 30);
+
+      const refund1 = await store.refundCredits(deduct.transactionId);
+      expect(refund1.error).toBeUndefined();
+
+      const refund2 = await store.refundCredits(deduct.transactionId);
+      expect(refund2.error).toBe("already_refunded");
+    });
+
+    it("unknown transaction returns error", async () => {
+      const refund = await store.refundCredits("non-existent-id");
+      expect(refund.error).toBe("transaction_not_found");
     });
   });
 });

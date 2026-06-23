@@ -7,6 +7,7 @@ import type {
   GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
+  RefundResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -44,4 +45,12 @@ export interface CreditStore {
   setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
   checkAllowance(userId: string): Promise<AllowanceResult>;
   incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void>;
+
+  // ── Refunds ────────────────────────────────────────────────────────
+  refundCredits(
+    transactionId: string,
+    amount?: number,
+    reason?: string,
+    metadata?: CreditMetadata | null,
+  ): Promise<RefundResult>;
 }

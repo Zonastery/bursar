@@ -7,6 +7,7 @@ import type {
   GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
+  RefundResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -263,5 +264,39 @@ export class PostgresStore implements CreditStore {
 
   async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
     await this.callproc("increment_usage_window", [userId, planId, amount]);
+  }
+
+  // ── Refunds ──────────────────────────────────────────────────────────
+
+  async refundCredits(
+    transactionId: string,
+    amount?: number,
+    reason?: string,
+    metadata?: CreditMetadata | null,
+  ): Promise<RefundResult> {
+    const rows = await this.callproc("refund_credits", [
+      transactionId,
+      amount ?? null,
+      reason ?? null,
+      JSON.stringify(metadata ?? {}),
+    ]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if ("error" in row && row.error) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: String(row.user_id ?? ""),
+        amount: 0,
+        newBalance: Number(row.new_balance ?? 0),
+        error: String(row.error),
+      };
+    }
+    return {
+      refundTransactionId: String(row.refund_transaction_id ?? ""),
+      originalTransactionId: transactionId,
+      userId: String(row.user_id ?? ""),
+      amount: Number(row.amount ?? 0),
+      newBalance: Number(row.new_balance ?? 0),
+    };
   }
 }

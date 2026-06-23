@@ -9,6 +9,7 @@ import type {
   PlanDefinition,
   PricingConfigData,
   PricingConfigResult,
+  RefundResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -60,6 +61,7 @@ export class MemoryStore implements CreditStore {
         "002_credit_rpcs.sql",
         "003_pricing_config.sql",
         "004_user_plans.sql",
+        "005_credit_refunds.sql",
       ],
       rpcsCreated: [],
       errors: [],
@@ -262,5 +264,69 @@ export class MemoryStore implements CreditStore {
     } else {
       this.usageWindows.push({ userId, planId, billingPeriod, usage: amount });
     }
+  }
+
+  // ── Refunds ──────────────────────────────────────────────────────────
+
+  async refundCredits(
+    transactionId: string,
+    amount?: number,
+    reason?: string,
+    _metadata?: CreditMetadata | null,
+  ): Promise<RefundResult> {
+    // Find original transaction
+    const origTx = this.transactions.find((t) => t.id === transactionId);
+    if (!origTx) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: "",
+        amount: 0,
+        newBalance: 0,
+        error: "transaction_not_found",
+      };
+    }
+
+    // Check for duplicate refund
+    const isRefunded = this.transactions.some(
+      (t) => t.type === "refund" && t.referenceId === transactionId,
+    );
+    if (isRefunded) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: origTx.userId,
+        amount: 0,
+        newBalance: this.balances.get(origTx.userId) ?? 0,
+        error: "already_refunded",
+      };
+    }
+
+    const refundAmount = amount ?? Math.abs(origTx.amount);
+    const maxRefund = Math.abs(origTx.amount);
+    const actualRefund = Math.min(refundAmount, maxRefund);
+
+    // Restore balance
+    const current = this.balances.get(origTx.userId) ?? 0;
+    this.balances.set(origTx.userId, current + actualRefund);
+
+    const txId = randomUUID();
+    this.transactions.push({
+      id: txId,
+      userId: origTx.userId,
+      amount: actualRefund,
+      type: "refund",
+      referenceType: reason ?? null,
+      referenceId: transactionId as string,
+      metadata: reason ? { reason } : undefined,
+    });
+
+    return {
+      refundTransactionId: txId,
+      originalTransactionId: transactionId,
+      userId: origTx.userId,
+      amount: actualRefund,
+      newBalance: current + actualRefund,
+    };
   }
 }

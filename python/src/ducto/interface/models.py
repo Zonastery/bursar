@@ -153,3 +153,14 @@ class SetUserPlanResult(BaseModel):
 
     user_id: str
     plan_id: str
+
+
+class RefundResult(BaseModel):
+    """Result of refunding a credit deduction."""
+
+    refund_transaction_id: str
+    original_transaction_id: str
+    user_id: str
+    amount: int = 0
+    new_balance: int = 0
+    error: str | None = None

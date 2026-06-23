@@ -216,4 +216,38 @@ describe("CreditManager", () => {
       expect(result.transactionId).toBeTruthy();
     });
   });
+
+  describe("refunds", () => {
+    it("refunds a full deduction through manager", async () => {
+      manager.publishPricingFromDict(TEST_CONFIG);
+      await manager.addCredits("user-1", 1000);
+
+      const deduct = await manager.deduct("user-1", {
+        model: "gpt-4",
+        inputTokens: 100,
+      });
+      expect(deduct.amount).toBe(-1);
+
+      const refund = await manager.refundCredits(deduct.transactionId);
+      expect(refund.error).toBeUndefined();
+      expect(refund.amount).toBe(1);
+
+      const balance = await manager.getBalance("user-1");
+      expect(balance.balance).toBe(1000);
+    });
+
+    it("partial refund through manager", async () => {
+      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      await manager.addCredits("user-1", 100);
+
+      const deduct = await manager.deduct("user-1", { inputTokens: 50 });
+
+      const refund = await manager.refundCredits(deduct.transactionId, 20);
+      expect(refund.error).toBeUndefined();
+      expect(refund.amount).toBe(20);
+
+      const balance = await manager.getBalance("user-1");
+      expect(balance.balance).toBe(70); // 100 - 50 + 20
+    });
+  });
 });

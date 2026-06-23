@@ -38,6 +38,7 @@ from ducto.interface.models import (
     CreditMetadata,
     DeductionResult,
     PricingConfigData,
+    RefundResult,
     ReserveResult,
     SetupResult,
 )
@@ -248,6 +249,26 @@ class CreditManager:
             balance_after=deduction.balance_after,
             idempotent=deduction.idempotent,
         )
+
+    def refund_credits(
+        self,
+        transaction_id: str,
+        amount: int | None = None,
+        reason: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> RefundResult:
+        """Refund a previous credit deduction.
+
+        Args:
+            transaction_id: The transaction to refund.
+            amount: Optional partial refund amount. Full refund if omitted.
+            reason: Optional reason for the refund.
+            metadata: Extra metadata to attach to the refund transaction.
+
+        Returns:
+            ``RefundResult`` with the refund transaction details.
+        """
+        return self._store.refund_credits(transaction_id, amount, reason, metadata)
 
     def deduct_fixed(
         self,
