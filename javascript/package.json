@@ -1,6 +1,6 @@
 {
   "name": "@apoorwv/ducto",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Declarative credit calculation engine for AI SaaS platforms",
   "type": "module",
   "main": "./dist/index.js",
