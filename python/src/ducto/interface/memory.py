@@ -10,13 +10,17 @@ from pydantic import BaseModel
 from ducto.interface.base import CreditStore
 from ducto.interface.models import (
     AddCreditsResult,
+    AllowanceResult,
     BalanceResult,
     CreditMetadata,
     DeductionResult,
+    GetUserPlanResult,
+    PlanDefinition,
     PricingConfigData,
     PricingConfigResult,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
 )
 
 
@@ -57,6 +61,9 @@ class MemoryStore(CreditStore):
         self._pricing_config: PricingConfigData | None = None
         self._pricing_version: int = 0
         self._pricing_label: str | None = None
+        self._plan_definitions: dict[str, PlanDefinition] = {}
+        self._user_plan_map: dict[str, str] = {}
+        self._usage_windows: list[dict] = []
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -66,6 +73,7 @@ class MemoryStore(CreditStore):
                 "001_credit_tables.sql",
                 "002_credit_rpcs.sql",
                 "003_pricing_config.sql",
+                "004_user_plans.sql",
             ],
         )
 
@@ -220,4 +228,71 @@ class MemoryStore(CreditStore):
         self._pricing_config = config
         self._pricing_version += 1
         self._pricing_label = label
+        # Extract plan definitions from v2 config
+        plans = getattr(config, "plans", None)
+        if plans:
+            for plan in plans.values():
+                self._plan_definitions[plan.id] = plan
         return str(uuid.uuid4())
+
+    # ── Plan management ────────────────────────────────────────────────
+
+    def get_user_plan(self, user_id: str) -> GetUserPlanResult:
+        plan_id = self._user_plan_map.get(user_id)
+        plan_def = self._plan_definitions.get(plan_id) if plan_id else None
+        return GetUserPlanResult(
+            user_id=user_id,
+            plan_id=plan_id,
+            plan_name=plan_def.name if plan_def else None,
+            free_allowance=plan_def.free_allowance if plan_def else 0,
+        )
+
+    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+        self._user_plan_map[user_id] = plan_id
+        return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
+
+    def check_allowance(self, user_id: str) -> AllowanceResult:
+        plan_id = self._user_plan_map.get(user_id)
+        if not plan_id or plan_id not in self._plan_definitions:
+            return AllowanceResult(
+                plan_id="",
+                allowance_remaining=0,
+                period_start="",
+                period_end="",
+            )
+        plan_def = self._plan_definitions[plan_id]
+        now = __import__("datetime").datetime.now()
+        period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if now.month == 12:
+            period_end = now.replace(year=now.year + 1, month=1, day=1) - __import__("datetime").timedelta(days=1)
+        else:
+            period_end = now.replace(month=now.month + 1, day=1) - __import__("datetime").timedelta(days=1)
+        period_end = period_end.replace(hour=0, minute=0, second=0, microsecond=0)
+        billing_period = period_start.strftime("%Y-%m-%d")
+        usage = sum(
+            w["usage"]
+            for w in self._usage_windows
+            if w["user_id"] == user_id and w["plan_id"] == plan_id and w["billing_period"] == billing_period
+        )
+        return AllowanceResult(
+            plan_id=plan_id,
+            allowance_remaining=max(plan_def.free_allowance - usage, 0),
+            period_start=period_start.isoformat(),
+            period_end=period_end.isoformat(),
+        )
+
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+        now = __import__("datetime").datetime.now()
+        billing_period = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d")
+        for w in self._usage_windows:
+            if w["user_id"] == user_id and w["plan_id"] == plan_id and w["billing_period"] == billing_period:
+                w["usage"] += amount
+                return
+        self._usage_windows.append(
+            {
+                "user_id": user_id,
+                "plan_id": plan_id,
+                "billing_period": billing_period,
+                "usage": amount,
+            }
+        )

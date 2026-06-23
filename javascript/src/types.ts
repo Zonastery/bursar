@@ -71,3 +71,40 @@ export interface SetupResult {
   errors: string[];
   readonly success: boolean;
 }
+
+/** Definition of a subscription plan with free allowance and rate overrides. */
+export interface PlanDefinition {
+  id: string;
+  name: string;
+  freeAllowance: number;
+  rateOverrides?: Record<string, string> | null;
+  features?: Record<string, boolean> | null;
+}
+
+/** Version 2 pricing config with optional plan definitions. */
+export interface PricingConfigV2 extends PricingConfigData {
+  version: 2;
+  plans?: Record<string, PlanDefinition> | null;
+}
+
+/** Result of checking plan allowance. */
+export interface AllowanceResult {
+  planId: string;
+  allowanceRemaining: number;
+  periodStart: string;
+  periodEnd: string;
+}
+
+/** Result of fetching a user's current plan. */
+export interface GetUserPlanResult {
+  userId: string;
+  planId: string | null;
+  planName: string | null;
+  freeAllowance: number;
+}
+
+/** Result of assigning a plan to a user. */
+export interface SetUserPlanResult {
+  userId: string;
+  planId: string;
+}

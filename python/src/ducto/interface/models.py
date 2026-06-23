@@ -108,3 +108,48 @@ class SetupResult(BaseModel):
     @property
     def success(self) -> bool:
         return len(self.errors) == 0
+
+
+# ── Plan types ─────────────────────────────────────────────────────────
+
+
+class PlanDefinition(BaseModel):
+    """Definition of a subscription plan with free allowance and rate overrides."""
+
+    id: str
+    name: str
+    free_allowance: int = 0
+    rate_overrides: dict[str, str] | None = None
+    features: dict[str, bool] | None = None
+
+
+class PricingConfigV2(PricingConfigData):
+    """Version 2 pricing config with optional plan definitions."""
+
+    version: int = 2
+    plans: dict[str, PlanDefinition] | None = None
+
+
+class AllowanceResult(BaseModel):
+    """Result of checking plan allowance."""
+
+    plan_id: str
+    allowance_remaining: int
+    period_start: str
+    period_end: str
+
+
+class GetUserPlanResult(BaseModel):
+    """Result of fetching a user's current plan."""
+
+    user_id: str
+    plan_id: str | None = None
+    plan_name: str | None = None
+    free_allowance: int = 0
+
+
+class SetUserPlanResult(BaseModel):
+    """Result of assigning a plan to a user."""
+
+    user_id: str
+    plan_id: str

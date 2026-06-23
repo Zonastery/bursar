@@ -1,11 +1,14 @@
 import type {
   AddCreditsResult,
+  AllowanceResult,
   BalanceResult,
   CreditMetadata,
   DeductionResult,
+  GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
   ReserveResult,
+  SetUserPlanResult,
   SetupResult,
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
@@ -122,12 +125,26 @@ export class PostgresStore implements CreditStore {
     ]);
 
     if (!rows || rows.length === 0) {
-      return { reservationId: "", userId, amount: 0, balance: 0, reservedTotal: 0, error: "no result" };
+      return {
+        reservationId: "",
+        userId,
+        amount: 0,
+        balance: 0,
+        reservedTotal: 0,
+        error: "no result",
+      };
     }
 
     const row = (rows[0] as Record<string, unknown>) ?? {};
     if ("error" in row) {
-      return { reservationId: "", userId, amount: 0, balance: 0, reservedTotal: 0, error: String(row.error) };
+      return {
+        reservationId: "",
+        userId,
+        amount: 0,
+        balance: 0,
+        reservedTotal: 0,
+        error: String(row.error),
+      };
     }
 
     return {
@@ -157,12 +174,26 @@ export class PostgresStore implements CreditStore {
     ]);
 
     if (!rows || rows.length === 0) {
-      return { transactionId: "", userId, amount: -amount, balanceAfter: 0, idempotent: false, error: "no result" };
+      return {
+        transactionId: "",
+        userId,
+        amount: -amount,
+        balanceAfter: 0,
+        idempotent: false,
+        error: "no result",
+      };
     }
 
     const row = (rows[0] as Record<string, unknown>) ?? {};
     if ("error" in row) {
-      return { transactionId: "", userId, amount: -amount, balanceAfter: 0, idempotent: false, error: String(row.error) };
+      return {
+        transactionId: "",
+        userId,
+        amount: -amount,
+        balanceAfter: 0,
+        idempotent: false,
+        error: String(row.error),
+      };
     }
 
     return {
@@ -189,5 +220,48 @@ export class PostgresStore implements CreditStore {
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return String(row.id ?? "");
+  }
+
+  // ── Plan management ────────────────────────────────────────────────
+
+  async getUserPlan(userId: string): Promise<GetUserPlanResult> {
+    const rows = await this.callproc("get_user_plan", [userId]);
+    if (!rows || rows.length === 0) {
+      return { userId, planId: null, planName: null, freeAllowance: 0 };
+    }
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      userId: String(row.user_id ?? userId),
+      planId: (row.plan_id as string) ?? null,
+      planName: (row.plan_name as string) ?? null,
+      freeAllowance: Number(row.free_allowance ?? 0),
+    };
+  }
+
+  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
+    const rows = await this.callproc("set_user_plan", [userId, planId]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    return {
+      userId: String(row.user_id ?? userId),
+      planId: String(row.plan_id ?? planId),
+    };
+  }
+
+  async checkAllowance(userId: string): Promise<AllowanceResult> {
+    const rows = await this.callproc("check_plan_allowance", [userId]);
+    if (!rows || rows.length === 0) {
+      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+    }
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      planId: String(row.plan_id ?? ""),
+      allowanceRemaining: Number(row.allowance_remaining ?? 0),
+      periodStart: String(row.period_start ?? ""),
+      periodEnd: String(row.period_end ?? ""),
+    };
+  }
+
+  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
+    await this.callproc("increment_usage_window", [userId, planId, amount]);
   }
 }

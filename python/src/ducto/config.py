@@ -14,7 +14,7 @@ class ConfigError(Exception):
 class PricingConfig(BaseModel):
     """Validated pricing configuration."""
 
-    version: int = Field(ge=1, le=1)
+    version: int = Field(ge=1, le=2)
     models: dict[str, str]
     tools: dict[str, str] = Field(default_factory=lambda: {"_default": "tool_calls * 0"})
     search: dict[str, str] = Field(default_factory=dict)
@@ -30,8 +30,8 @@ class PricingConfig(BaseModel):
             return data
         if "version" not in data:
             raise ConfigError("missing required field: version")
-        if data.get("version") != 1:
-            raise ConfigError(f"unsupported version: {data['version']} — must be 1")
+        if data.get("version") not in (1, 2):
+            raise ConfigError(f"unsupported version: {data['version']} — must be 1 or 2")
         if "models" not in data:
             raise ConfigError("missing required section: models")
         if not isinstance(data["models"], dict) or len(data["models"]) == 0:

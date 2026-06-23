@@ -6,6 +6,7 @@ import pytest
 
 from ducto import CreditManager, UsageMetrics
 from ducto.interface.memory import MemoryStore
+from ducto.interface.models import PlanDefinition, PricingConfigV2
 from ducto.manager import InsufficientCreditsError, PricingNotLoadedError
 
 
@@ -193,3 +194,67 @@ class TestReserve:
         r2 = manager.reserve_credits("user_1", 80)  # 80 > 70 → insufficient credits
         assert r2.error == "insufficient_credits"
         assert r2.amount == 0
+
+
+class TestPlanAllowance:
+    def test_full_allowance_covers_cost(self) -> None:
+        """Deduct with full plan allowance skips balance deduction."""
+        store = MemoryStore()
+        v2 = PricingConfigV2(
+            version=2,
+            models={"_default": "input_tokens * 1"},
+            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=100)},
+        )
+        store.set_active_pricing(v2)
+        store.set_user_plan("user_1", "free")
+        store.add_credits("user_1", 10)
+
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+
+        result = mgr.deduct("user_1", UsageMetrics(input_tokens=5))
+        assert result.amount == 0
+        assert result.transaction_id == ""  # no actual transaction
+        assert result.balance_after == 10  # balance unchanged
+
+        allowance = store.check_allowance("user_1")
+        assert allowance.allowance_remaining == 95
+
+    def test_partial_allowance_with_balance_deduct(self) -> None:
+        """Plan covers part, remaining deducted from balance."""
+        store = MemoryStore()
+        v2 = PricingConfigV2(
+            version=2,
+            models={"_default": "input_tokens * 1"},
+            plans={"starter": PlanDefinition(id="starter", name="Starter", free_allowance=10)},
+        )
+        store.set_active_pricing(v2)
+        store.set_user_plan("user_1", "starter")
+        store.add_credits("user_1", 100)
+
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+
+        result = mgr.deduct("user_1", UsageMetrics(input_tokens=25))
+        assert result.amount == -15  # 10 from allowance, 15 from balance
+        assert result.balance_after == 85
+        assert result.transaction_id != ""
+
+        allowance = store.check_allowance("user_1")
+        assert allowance.allowance_remaining == 0
+
+    def test_no_plan_uses_balance_only(self) -> None:
+        """Without plan, existing deduct flow works unchanged."""
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "models": {"_default": "input_tokens * 1"},
+            }
+        )
+        mgr.add_credits("user_1", 50)
+
+        result = mgr.deduct("user_1", UsageMetrics(input_tokens=10))
+        assert result.amount == -10
+        assert result.balance_after == 40

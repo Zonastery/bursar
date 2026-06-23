@@ -1,11 +1,14 @@
 import type {
   AddCreditsResult,
+  AllowanceResult,
   BalanceResult,
   CreditMetadata,
   DeductionResult,
+  GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
   ReserveResult,
+  SetUserPlanResult,
   SetupResult,
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
@@ -32,8 +35,8 @@ export class HttpxSupabaseStore implements CreditStore {
     const resp = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
       method: "POST",
       headers: {
-        "apikey": this.key,
-        "authorization": `Bearer ${this.key}`,
+        apikey: this.key,
+        authorization: `Bearer ${this.key}`,
         "content-type": "application/json",
       },
       body: JSON.stringify(params),
@@ -46,7 +49,9 @@ export class HttpxSupabaseStore implements CreditStore {
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    throw new Error("HttpxSupabaseStore.setup() requires a database_url — use PostgresStore.setup() instead");
+    throw new Error(
+      "HttpxSupabaseStore.setup() requires a database_url — use PostgresStore.setup() instead",
+    );
   }
 
   async getBalance(userId: string): Promise<BalanceResult> {
@@ -95,7 +100,14 @@ export class HttpxSupabaseStore implements CreditStore {
     });
 
     if ("error" in row) {
-      return { reservationId: "", userId, amount: 0, balance: 0, reservedTotal: 0, error: String(row.error) };
+      return {
+        reservationId: "",
+        userId,
+        amount: 0,
+        balance: 0,
+        reservedTotal: 0,
+        error: String(row.error),
+      };
     }
 
     return {
@@ -125,7 +137,14 @@ export class HttpxSupabaseStore implements CreditStore {
     });
 
     if ("error" in row) {
-      return { transactionId: "", userId, amount: -amount, balanceAfter: 0, idempotent: false, error: String(row.error) };
+      return {
+        transactionId: "",
+        userId,
+        amount: -amount,
+        balanceAfter: 0,
+        idempotent: false,
+        error: String(row.error),
+      };
     }
 
     return {
@@ -149,5 +168,52 @@ export class HttpxSupabaseStore implements CreditStore {
       p_label: label ?? null,
     });
     return String(row.id ?? "");
+  }
+
+  // ── Plan management ────────────────────────────────────────────────
+
+  async getUserPlan(userId: string): Promise<GetUserPlanResult> {
+    const row = await this.rpc("get_user_plan", { p_user_id: userId });
+    if (!row || Object.keys(row).length === 0) {
+      return { userId, planId: null, planName: null, freeAllowance: 0 };
+    }
+    return {
+      userId: String(row.user_id ?? userId),
+      planId: (row.plan_id as string) ?? null,
+      planName: (row.plan_name as string) ?? null,
+      freeAllowance: Number(row.free_allowance ?? 0),
+    };
+  }
+
+  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
+    const row = await this.rpc("set_user_plan", {
+      p_user_id: userId,
+      p_plan_id: planId,
+    });
+    return {
+      userId: String(row.user_id ?? userId),
+      planId: String(row.plan_id ?? planId),
+    };
+  }
+
+  async checkAllowance(userId: string): Promise<AllowanceResult> {
+    const row = await this.rpc("check_plan_allowance", { p_user_id: userId });
+    if (!row || Object.keys(row).length === 0) {
+      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+    }
+    return {
+      planId: String(row.plan_id ?? ""),
+      allowanceRemaining: Number(row.allowance_remaining ?? 0),
+      periodStart: String(row.period_start ?? ""),
+      periodEnd: String(row.period_end ?? ""),
+    };
+  }
+
+  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
+    await this.rpc("increment_usage_window", {
+      p_user_id: userId,
+      p_plan_id: planId,
+      p_amount: amount,
+    });
   }
 }

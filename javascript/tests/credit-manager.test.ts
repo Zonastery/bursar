@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { CreditManager } from "../src/manager.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { InsufficientCreditsError, PricingNotLoadedError } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
+import type { PlanDefinition, PricingConfigData } from "../src/types.js";
 
 const TEST_CONFIG: PricingConfigData = {
   version: 1,
@@ -23,8 +23,9 @@ describe("CreditManager", () => {
   });
 
   it("rejects deduct before pricing is loaded", async () => {
-    await expect(() => manager.deduct("user-1", { model: "gpt-4", inputTokens: 100 }))
-      .rejects.toThrow(PricingNotLoadedError);
+    await expect(() =>
+      manager.deduct("user-1", { model: "gpt-4", inputTokens: 100 }),
+    ).rejects.toThrow(PricingNotLoadedError);
   });
 
   it("completes full flow: publish pricing → add credits → deduct", async () => {
@@ -53,17 +54,25 @@ describe("CreditManager", () => {
     manager.publishPricingFromDict(TEST_CONFIG);
     await manager.addCredits("user-1", 500);
 
-    const result1 = await manager.deduct("user-1", {
-      model: "gpt-4",
-      inputTokens: 100,
-    }, "idem-key-1");
+    const result1 = await manager.deduct(
+      "user-1",
+      {
+        model: "gpt-4",
+        inputTokens: 100,
+      },
+      "idem-key-1",
+    );
     expect(result1.idempotent).toBe(false);
 
     // Same idempotency key — should return cached result
-    const result2 = await manager.deduct("user-1", {
-      model: "gpt-4",
-      inputTokens: 100,
-    }, "idem-key-1");
+    const result2 = await manager.deduct(
+      "user-1",
+      {
+        model: "gpt-4",
+        inputTokens: 100,
+      },
+      "idem-key-1",
+    );
     expect(result2.idempotent).toBe(true);
   });
 
@@ -71,10 +80,12 @@ describe("CreditManager", () => {
     manager.publishPricingFromDict(TEST_CONFIG);
     await manager.addCredits("user-1", 1);
 
-    await expect(() => manager.deduct("user-1", {
-      model: "gpt-4",
-      inputTokens: 10_000,
-    })).rejects.toThrow(InsufficientCreditsError);
+    await expect(() =>
+      manager.deduct("user-1", {
+        model: "gpt-4",
+        inputTokens: 10_000,
+      }),
+    ).rejects.toThrow(InsufficientCreditsError);
   });
 
   it("loads pricing from store", async () => {
@@ -131,5 +142,78 @@ describe("CreditManager", () => {
     balance = await manager.getBalance("user-1");
     expect(balance.balance).toBe(1493);
     expect(balance.lifetimePurchased).toBe(500);
+  });
+
+  describe("plan allowance", () => {
+    it("fully covers cost with plan allowance, skipping balance deduct", async () => {
+      const store = new MemoryStore();
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          free: { id: "plan-free", name: "Free", freeAllowance: 100 },
+        },
+      };
+      store.setActivePricing(v2Config);
+      store.setUserPlan("user-1", "plan-free");
+
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict(v2Config);
+      await mgr.addCredits("user-1", 10); // small balance
+
+      // Deduct 5 — fully covered by allowance
+      const result = await mgr.deduct("user-1", { inputTokens: 5 });
+      expect(result.amount).toBe(0); // no credits deducted
+      expect(result.transactionId).toBe("");
+
+      // Balance unchanged
+      const balance = await mgr.getBalance("user-1");
+      expect(balance.balance).toBe(10);
+
+      // Allowance reduced
+      const allowance = await store.checkAllowance("user-1");
+      expect(allowance.allowanceRemaining).toBe(95);
+    });
+
+    it("partially covers cost with plan allowance, deducts remainder from balance", async () => {
+      const store = new MemoryStore();
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          starter: { id: "plan-starter", name: "Starter", freeAllowance: 10 },
+        },
+      };
+      store.setActivePricing(v2Config);
+      store.setUserPlan("user-1", "plan-starter");
+
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict(v2Config);
+      await mgr.addCredits("user-1", 100);
+
+      // Deduct 25 — covers 10 from allowance, 15 from balance
+      const result = await mgr.deduct("user-1", { inputTokens: 25 });
+      expect(result.amount).toBe(-15);
+      expect(result.transactionId).toBeTruthy();
+
+      const balance = await mgr.getBalance("user-1");
+      expect(balance.balance).toBe(85);
+
+      const allowance = await store.checkAllowance("user-1");
+      expect(allowance.allowanceRemaining).toBe(0);
+    });
+
+    it("no plan uses existing balance-only deduct flow", async () => {
+      manager.publishPricingFromDict(TEST_CONFIG);
+      await manager.addCredits("user-1", 100);
+
+      const result = await manager.deduct("user-1", {
+        model: "gpt-4",
+        inputTokens: 100,
+        outputTokens: 50,
+      });
+      expect(result.amount).toBe(-2);
+      expect(result.transactionId).toBeTruthy();
+    });
   });
 });

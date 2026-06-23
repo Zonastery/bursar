@@ -11,13 +11,16 @@ import json
 from ducto.interface.base import CreditStore
 from ducto.interface.models import (
     AddCreditsResult,
+    AllowanceResult,
     BalanceResult,
     CreditMetadata,
     DeductionResult,
+    GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
 )
 from ducto.sql import _get_sql_files
 
@@ -244,3 +247,70 @@ class PostgresStore(CreditStore):
 
         result_dict = row[0] if row and isinstance(row[0], dict) else {}
         return str(result_dict.get("id", ""))
+
+    # ── Plan management ────────────────────────────────────────────────
+
+    def get_user_plan(self, user_id: str) -> GetUserPlanResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("get_user_plan", [user_id])
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=0)
+
+        result_dict = row[0] if isinstance(row[0], dict) else {}
+        return GetUserPlanResult(
+            user_id=str(result_dict.get("user_id", user_id)),
+            plan_id=result_dict.get("plan_id") or None,
+            plan_name=result_dict.get("plan_name") or None,
+            free_allowance=int(result_dict.get("free_allowance", 0)),
+        )
+
+    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("set_user_plan", [user_id, plan_id])
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        return SetUserPlanResult(
+            user_id=str(result_dict.get("user_id", user_id)),
+            plan_id=str(result_dict.get("plan_id", plan_id)),
+        )
+
+    def check_allowance(self, user_id: str) -> AllowanceResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("check_plan_allowance", [user_id])
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            return AllowanceResult(plan_id="", allowance_remaining=0, period_start="", period_end="")
+
+        result_dict = row[0] if isinstance(row[0], dict) else {}
+        return AllowanceResult(
+            plan_id=str(result_dict.get("plan_id", "")),
+            allowance_remaining=int(result_dict.get("allowance_remaining", 0)),
+            period_start=str(result_dict.get("period_start", "")),
+            period_end=str(result_dict.get("period_end", "")),
+        )
+
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("increment_usage_window", [user_id, plan_id, amount])
+            conn.commit()
+        finally:
+            conn.close()

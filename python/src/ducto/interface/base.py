@@ -11,13 +11,16 @@ from abc import ABC, abstractmethod
 
 from ducto.interface.models import (
     AddCreditsResult,
+    AllowanceResult,
     BalanceResult,
     CreditMetadata,
     DeductionResult,
+    GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
 )
 
 
@@ -111,4 +114,26 @@ class CreditStore(ABC):
         Deactivates the previous active config and inserts a new one.
         Returns the new config id.
         """
+        ...
+
+    # ── Plan management ────────────────────────────────────────────────
+
+    @abstractmethod
+    def get_user_plan(self, user_id: str) -> GetUserPlanResult:
+        """Fetch user's current plan (if any)."""
+        ...
+
+    @abstractmethod
+    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+        """Assign a plan to a user."""
+        ...
+
+    @abstractmethod
+    def check_allowance(self, user_id: str) -> AllowanceResult:
+        """Get remaining free allowance for current billing period."""
+        ...
+
+    @abstractmethod
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+        """Record allowance consumption for current billing period."""
         ...

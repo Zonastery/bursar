@@ -80,7 +80,7 @@ class CreditManager:
 
     def publish_pricing_from_dict(self, data: PricingConfigData | dict[str, Any]) -> None:
         """Load pricing from a ``PricingConfigData`` or raw dict and sync it."""
-        raw = data if isinstance(data, dict) else data.model_dump()
+        raw = data if isinstance(data, dict) else data.model_dump(exclude_none=True)
         engine = PricingEngine.from_dict(raw)
         self._engine = engine
         config = data if isinstance(data, PricingConfigData) else PricingConfigData.model_validate(data)
@@ -177,6 +177,26 @@ class CreditManager:
         breakdown = self._engine.calculate(metrics)
         # Truncate fractional credits (always rounds down — consumer-friendly pricing)
         cost = int(breakdown.total) if breakdown.total > 0 else 0
+
+        # ── Plan allowance check ─────────────────────────────────────────
+        # Consume free plan allowance before deducting from balance
+        if cost > 0:
+            allowance = self._store.check_allowance(user_id)
+            if allowance.allowance_remaining > 0:
+                consume = min(cost, allowance.allowance_remaining)
+                self._store.increment_usage_window(user_id, allowance.plan_id, consume)
+                cost -= consume
+
+        if cost <= 0:
+            # Fully covered by plan allowance — no balance deduction
+            balance = self._store.get_balance(user_id)
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=0,
+                balance_after=balance.balance,
+                idempotent=False,
+            )
 
         # 2) Build transaction metadata (merge user-provided over defaults)
         base = {

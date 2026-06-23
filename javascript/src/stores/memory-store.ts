@@ -1,12 +1,16 @@
 import { randomUUID } from "crypto";
 import type {
   AddCreditsResult,
+  AllowanceResult,
   BalanceResult,
   CreditMetadata,
   DeductionResult,
+  GetUserPlanResult,
+  PlanDefinition,
   PricingConfigData,
   PricingConfigResult,
   ReserveResult,
+  SetUserPlanResult,
   SetupResult,
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
@@ -40,6 +44,14 @@ export class MemoryStore implements CreditStore {
   private reservations = new Map<string, ReservationRecord>();
   private pricingConfig: PricingConfigData | null = null;
   private pricingVersion = 0;
+  private planDefinitions = new Map<string, PlanDefinition>();
+  private userPlanMap = new Map<string, string>();
+  private usageWindows: Array<{
+    userId: string;
+    planId: string;
+    billingPeriod: string;
+    usage: number;
+  }> = [];
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
     return {
@@ -47,6 +59,7 @@ export class MemoryStore implements CreditStore {
         "001_credit_tables.sql",
         "002_credit_rpcs.sql",
         "003_pricing_config.sql",
+        "004_user_plans.sql",
       ],
       rpcsCreated: [],
       errors: [],
@@ -102,7 +115,14 @@ export class MemoryStore implements CreditStore {
 
     const available = balance - reservedTotal;
     if (available - amount < minBalance) {
-      return { reservationId: "", userId, amount, balance, reservedTotal, error: "insufficient_credits" };
+      return {
+        reservationId: "",
+        userId,
+        amount,
+        balance,
+        reservedTotal,
+        error: "insufficient_credits",
+      };
     }
 
     const rid = randomUUID();
@@ -134,7 +154,14 @@ export class MemoryStore implements CreditStore {
 
     const current = this.balances.get(userId) ?? 0;
     if (current < amount) {
-      return { transactionId: "", userId, amount, balanceAfter: current, idempotent: false, error: "insufficient_credits" };
+      return {
+        transactionId: "",
+        userId,
+        amount,
+        balanceAfter: current,
+        idempotent: false,
+        error: "insufficient_credits",
+      };
     }
 
     this.balances.set(userId, current - amount);
@@ -170,6 +197,70 @@ export class MemoryStore implements CreditStore {
   async setActivePricing(config: PricingConfigData, _label?: string | null): Promise<string> {
     this.pricingConfig = config;
     this.pricingVersion += 1;
+    // Extract plan definitions from v2 config
+    if ("plans" in config && config.plans) {
+      for (const planData of Object.values(config.plans)) {
+        const plan = planData as PlanDefinition;
+        this.planDefinitions.set(plan.id, plan);
+      }
+    }
     return randomUUID();
+  }
+
+  // ── Plan management ────────────────────────────────────────────────
+
+  async getUserPlan(userId: string): Promise<GetUserPlanResult> {
+    const planId = this.userPlanMap.get(userId) ?? null;
+    const planDef = planId ? this.planDefinitions.get(planId) : null;
+    return {
+      userId,
+      planId,
+      planName: planDef?.name ?? null,
+      freeAllowance: planDef?.freeAllowance ?? 0,
+    };
+  }
+
+  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
+    this.userPlanMap.set(userId, planId);
+    return { userId, planId };
+  }
+
+  async checkAllowance(userId: string): Promise<AllowanceResult> {
+    const planId = this.userPlanMap.get(userId);
+    if (!planId) {
+      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+    }
+    const planDef = this.planDefinitions.get(planId);
+    if (!planDef) {
+      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+    }
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const billingPeriod = periodStart.toISOString().slice(0, 10);
+    const usage = this.usageWindows
+      .filter(
+        (w) => w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod,
+      )
+      .reduce((sum, w) => sum + w.usage, 0);
+    return {
+      planId,
+      allowanceRemaining: Math.max(planDef.freeAllowance - usage, 0),
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+    };
+  }
+
+  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
+    const now = new Date();
+    const billingPeriod = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+    const existing = this.usageWindows.find(
+      (w) => w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod,
+    );
+    if (existing) {
+      existing.usage += amount;
+    } else {
+      this.usageWindows.push({ userId, planId, billingPeriod, usage: amount });
+    }
   }
 }

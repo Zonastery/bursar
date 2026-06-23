@@ -9,13 +9,18 @@ from ducto.expr import ExpressionError, evaluate_expression, validate_expression
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import (
     AddCreditsResult,
+    AllowanceResult,
     BalanceResult,
     CreditMetadata,
     DeductionResult,
+    GetUserPlanResult,
+    PlanDefinition,
     PricingConfigData,
     PricingConfigResult,
+    PricingConfigV2,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
 )
 from ducto.manager import CreditManager, InsufficientCreditsError, PricingNotLoadedError
 from ducto.metrics import ToolCall, UsageMetrics
@@ -35,6 +40,11 @@ __all__ = [
     "PricingNotLoadedError",
     "CreditMetadata",
     "PricingConfigData",
+    "PricingConfigV2",
+    "PlanDefinition",
+    "AllowanceResult",
+    "GetUserPlanResult",
+    "SetUserPlanResult",
     "BalanceResult",
     "AddCreditsResult",
     "ReserveResult",

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryStore } from "../src/stores/memory-store.js";
-import type { PricingConfigData } from "../src/types.js";
+import type { PlanDefinition, PricingConfigData } from "../src/types.js";
 
 describe("MemoryStore", () => {
   let store: MemoryStore;
@@ -13,7 +13,7 @@ describe("MemoryStore", () => {
     it("returns setup result with table names", async () => {
       const result = await store.setup();
       expect(result.success).toBe(true);
-      expect(result.tablesCreated).toHaveLength(3);
+      expect(result.tablesCreated).toHaveLength(4);
     });
   });
 
@@ -121,6 +121,76 @@ describe("MemoryStore", () => {
       const id1 = await store.setActivePricing(config);
       const id2 = await store.setActivePricing(config);
       expect(id1).not.toBe(id2);
+    });
+  });
+
+  describe("plan management", () => {
+    it("getUserPlan returns null plan for user with no plan", async () => {
+      const result = await store.getUserPlan("user-1");
+      expect(result.planId).toBeNull();
+      expect(result.planName).toBeNull();
+      expect(result.freeAllowance).toBe(0);
+    });
+
+    it("setUserPlan and getUserPlan round-trips", async () => {
+      // Seed plan definition via v2 pricing config
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "1" },
+        plans: {
+          free: { id: "plan-free", name: "Free Plan", freeAllowance: 100 },
+        },
+      };
+      await store.setActivePricing(v2Config);
+
+      await store.setUserPlan("user-1", "plan-free");
+      const result = await store.getUserPlan("user-1");
+      expect(result.planId).toBe("plan-free");
+      expect(result.planName).toBe("Free Plan");
+      expect(result.freeAllowance).toBe(100);
+    });
+
+    it("checkAllowance returns remaining allowance", async () => {
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "1" },
+        plans: {
+          pro: { id: "plan-pro", name: "Pro Plan", freeAllowance: 500 },
+        },
+      };
+      await store.setActivePricing(v2Config);
+      await store.setUserPlan("user-1", "plan-pro");
+
+      const allowance = await store.checkAllowance("user-1");
+      expect(allowance.planId).toBe("plan-pro");
+      expect(allowance.allowanceRemaining).toBe(500);
+      expect(allowance.periodStart).toBeTruthy();
+      expect(allowance.periodEnd).toBeTruthy();
+    });
+
+    it("checkAllowance returns zero for user with no plan", async () => {
+      const allowance = await store.checkAllowance("no-plan-user");
+      expect(allowance.allowanceRemaining).toBe(0);
+    });
+
+    it("incrementUsageWindow reduces remaining allowance", async () => {
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "1" },
+        plans: {
+          basic: { id: "plan-basic", name: "Basic", freeAllowance: 200 },
+        },
+      };
+      await store.setActivePricing(v2Config);
+      await store.setUserPlan("user-1", "plan-basic");
+
+      await store.incrementUsageWindow("user-1", "plan-basic", 50);
+      const allowance = await store.checkAllowance("user-1");
+      expect(allowance.allowanceRemaining).toBe(150);
+
+      await store.incrementUsageWindow("user-1", "plan-basic", 30);
+      const allowance2 = await store.checkAllowance("user-1");
+      expect(allowance2.allowanceRemaining).toBe(120);
     });
   });
 });

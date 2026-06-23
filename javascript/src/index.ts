@@ -18,13 +18,18 @@ export { CreditManager } from "./manager.js";
 
 // Types
 export type {
+  AllowanceResult,
   CreditMetadata,
+  GetUserPlanResult,
+  PlanDefinition,
   PricingConfigData,
+  PricingConfigV2,
+  PricingConfigResult,
+  SetUserPlanResult,
   BalanceResult,
   AddCreditsResult,
   ReserveResult,
   DeductionResult,
-  PricingConfigResult,
   SetupResult,
 } from "./types.js";
 

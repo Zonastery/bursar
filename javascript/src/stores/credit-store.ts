@@ -1,11 +1,14 @@
 import type {
   AddCreditsResult,
+  AllowanceResult,
   BalanceResult,
   CreditMetadata,
   DeductionResult,
+  GetUserPlanResult,
   PricingConfigData,
   PricingConfigResult,
   ReserveResult,
+  SetUserPlanResult,
   SetupResult,
 } from "../types.js";
 
@@ -35,4 +38,10 @@ export interface CreditStore {
   ): Promise<DeductionResult>;
   getActivePricing(): Promise<PricingConfigResult | null>;
   setActivePricing(config: PricingConfigData, label?: string | null): Promise<string>;
+
+  // ── Plan management ────────────────────────────────────────────────
+  getUserPlan(userId: string): Promise<GetUserPlanResult>;
+  setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
+  checkAllowance(userId: string): Promise<AllowanceResult>;
+  incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void>;
 }

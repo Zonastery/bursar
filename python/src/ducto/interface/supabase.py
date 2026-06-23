@@ -11,13 +11,16 @@ from typing import Any
 from ducto.interface.base import CreditStore
 from ducto.interface.models import (
     AddCreditsResult,
+    AllowanceResult,
     BalanceResult,
     CreditMetadata,
     DeductionResult,
+    GetUserPlanResult,
     PricingConfigData,
     PricingConfigResult,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
 )
 from ducto.sql import _get_sql_files
 
@@ -228,3 +231,40 @@ class HttpxSupabaseStore(CreditStore):
             {"p_config": config.model_dump(mode="json"), "p_label": label},
         )
         return str(row.get("id", ""))
+
+    # ── Plan management ────────────────────────────────────────────────
+
+    def get_user_plan(self, user_id: str) -> GetUserPlanResult:
+        row = self._rpc("get_user_plan", {"p_user_id": user_id})
+        if not row:
+            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=0)
+        return GetUserPlanResult(
+            user_id=str(row.get("user_id", user_id)),
+            plan_id=row.get("plan_id") or None,
+            plan_name=row.get("plan_name") or None,
+            free_allowance=int(row.get("free_allowance", 0)),
+        )
+
+    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+        row = self._rpc("set_user_plan", {"p_user_id": user_id, "p_plan_id": plan_id})
+        return SetUserPlanResult(
+            user_id=str(row.get("user_id", user_id)),
+            plan_id=str(row.get("plan_id", plan_id)),
+        )
+
+    def check_allowance(self, user_id: str) -> AllowanceResult:
+        row = self._rpc("check_plan_allowance", {"p_user_id": user_id})
+        if not row:
+            return AllowanceResult(plan_id="", allowance_remaining=0, period_start="", period_end="")
+        return AllowanceResult(
+            plan_id=str(row.get("plan_id", "")),
+            allowance_remaining=int(row.get("allowance_remaining", 0)),
+            period_start=str(row.get("period_start", "")),
+            period_end=str(row.get("period_end", "")),
+        )
+
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+        self._rpc(
+            "increment_usage_window",
+            {"p_user_id": user_id, "p_plan_id": plan_id, "p_amount": amount},
+        )

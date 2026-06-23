@@ -33,13 +33,14 @@ export class CreditManager {
 
   /** Load pricing from a PricingConfigData or raw dict and sync it. */
   publishPricingFromDict(data: PricingConfigData | Record<string, unknown>): void {
-    const raw = ("models" in data && data.models != null)
-      ? (data as Record<string, unknown>)
-      : data as Record<string, unknown>;
+    const raw =
+      "models" in data && data.models != null
+        ? (data as Record<string, unknown>)
+        : (data as Record<string, unknown>);
 
     this.engine = PricingEngineClass.fromDict(raw);
     void this.store.setActivePricing(
-      "version" in data ? data as PricingConfigData : loadConfigFromDict(raw),
+      "version" in data ? (data as PricingConfigData) : loadConfigFromDict(raw),
     );
   }
 
@@ -119,10 +120,36 @@ export class CreditManager {
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
-    if (!this.engine) throw new PricingNotLoadedError("pricing not loaded: call loadPricingFromStore or publishPricing first");
+    if (!this.engine)
+      throw new PricingNotLoadedError(
+        "pricing not loaded: call loadPricingFromStore or publishPricing first",
+      );
 
     const breakdown = this.engine.calculate(metrics);
-    const cost = breakdown.total > 0 ? Math.trunc(breakdown.total) : 0;
+    let cost = breakdown.total > 0 ? Math.trunc(breakdown.total) : 0;
+
+    // --- Plan allowance check ---
+    // Consume free plan allowance before deducting from balance
+    if (cost > 0) {
+      const allowance = await this.store.checkAllowance(userId);
+      if (allowance.allowanceRemaining > 0) {
+        const consumeFromAllowance = Math.min(cost, allowance.allowanceRemaining);
+        await this.store.incrementUsageWindow(userId, allowance.planId, consumeFromAllowance);
+        cost -= consumeFromAllowance;
+      }
+    }
+
+    if (cost <= 0) {
+      // Fully covered by plan allowance — no balance deduction
+      const balance = await this.store.getBalance(userId);
+      return {
+        transactionId: "",
+        userId,
+        amount: 0,
+        balanceAfter: balance.balance,
+        idempotent: false,
+      };
+    }
 
     const metaBase: Record<string, unknown> = {
       inputTokens: metrics.inputTokens ?? 0,
@@ -169,11 +196,6 @@ export class CreditManager {
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
-    return await this.deduct(
-      userId,
-      { fixedJob: jobName },
-      idempotencyKey,
-      metadata,
-    );
+    return await this.deduct(userId, { fixedJob: jobName }, idempotencyKey, metadata);
   }
 }
