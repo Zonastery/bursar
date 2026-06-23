@@ -16,8 +16,13 @@
   ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "format": "prettier --check src/ tests/",
+    "format:fix": "prettier --write src/ tests/",
+    "knip": "knip",
     "prepublishOnly": "npm run build && vitest run"
   },
   "keywords": [
@@ -37,12 +42,17 @@
   "homepage": "https://github.com/apoorwv/ducto#readme",
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.20.0",
+    "eslint": "^10.5.0",
     "js-yaml": "^4.2.0",
+    "knip": "^6.18.0",
     "pg": "^8.22.0",
+    "prettier": "^3.8.4",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.62.0",
     "vitest": "^3.0.0"
   }
 }

@@ -1,0 +1,60 @@
+# ── Pre-Commit Hooks ────────────────────────────────────────────────
+
+pre-commit:
+  piped: true
+  commands:
+    python-format:
+      root: "python/"
+      glob: "*.py"
+      run: uvx ruff format --quiet {staged_files}
+      stage_fixed: true
+    python-lint:
+      root: "python/"
+      glob: "*.py"
+      run: uvx ruff check --fix {staged_files}
+      stage_fixed: true
+    js-format:
+      root: "javascript/"
+      glob: "*.{ts,js,mjs,cjs}"
+      run: npx prettier --write {staged_files}
+      stage_fixed: true
+    js-lint:
+      root: "javascript/"
+      glob: "*.{ts,js,mjs,cjs}"
+      run: npx eslint {staged_files}
+    trailing-whitespace:
+      run: git diff --cached --name-only --diff-filter=ACM | xargs -r git diff --check --cached --
+    merge-conflicts:
+      run: |
+        files=$(git diff --cached --name-only --diff-filter=ACM | grep -v '^lefthook\.yml$')
+        if [ -z "$files" ]; then exit 0; fi
+        if echo "$files" | xargs grep -l -E '^(<{7} |={7}|>{7})' > /dev/null 2>&1; then
+          echo "Merge conflict markers found in staged files" >&2
+          exit 1
+        fi
+
+# ── Pre-Push Hooks ──────────────────────────────────────────────────
+
+pre-push:
+  parallel: true
+  commands:
+    python-typecheck:
+      root: "python/"
+      glob: "{src,tests}/**/*.py"
+      run: uv run pyright
+    python-test:
+      root: "python/"
+      glob: "{src,tests}/**/*.py"
+      run: uv run python -m pytest tests/ -q
+    js-typecheck:
+      root: "javascript/"
+      glob: "src/**/*.ts"
+      run: npx tsc --noEmit
+    js-test:
+      root: "javascript/"
+      glob: "src/**/*.ts"
+      run: npx vitest run
+    js-knip:
+      root: "javascript/"
+      glob: "src/**/*.ts"
+      run: npx knip
