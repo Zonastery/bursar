@@ -215,6 +215,30 @@ describe("CreditManager", () => {
       expect(result.amount).toBe(-2);
       expect(result.transactionId).toBeTruthy();
     });
+
+    it("setUserPlan/getUserPlan round-trip before deduct", async () => {
+      const store = new MemoryStore();
+      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
+        version: 2,
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          pro: { id: "plan-pro", name: "Pro", freeAllowance: 500 },
+        },
+      };
+      store.setActivePricing(v2Config);
+      store.setUserPlan("user-1", "plan-pro");
+
+      const plan = await store.getUserPlan("user-1");
+      expect(plan.planId).toBe("plan-pro");
+      expect(plan.freeAllowance).toBe(500);
+
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict(v2Config);
+      await mgr.addCredits("user-1", 100);
+
+      const result = await mgr.deduct("user-1", { inputTokens: 10 });
+      expect(result.amount).toBe(0); // fully covered by plan allowance
+    });
   });
 
   describe("refunds", () => {
@@ -248,6 +272,26 @@ describe("CreditManager", () => {
 
       const balance = await manager.getBalance("user-1");
       expect(balance.balance).toBe(70); // 100 - 50 + 20
+    });
+
+    it("double refund returns error through manager", async () => {
+      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      await manager.addCredits("user-1", 100);
+
+      const deduct = await manager.deduct("user-1", { inputTokens: 40 });
+      const first = await manager.refundCredits(deduct.transactionId);
+      expect(first.error).toBeUndefined();
+
+      const second = await manager.refundCredits(deduct.transactionId);
+      expect(second.error).toBe("already_refunded");
+    });
+
+    it("refund of unknown transaction returns error through manager", async () => {
+      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      await manager.addCredits("user-1", 100);
+
+      const result = await manager.refundCredits("no-such-transaction");
+      expect(result.error).toBe("transaction_not_found");
     });
   });
 
@@ -332,6 +376,25 @@ describe("CreditManager", () => {
       expect(result.dryRun).toBe(true);
       expect((await manager.getBalance("user-1")).balance).toBe(100);
     });
+
+    it("credits without expiry never expire through manager", async () => {
+      manager.publishPricingFromDict(TEST_CONFIG);
+      await manager.addCredits("user-1", 100);
+
+      const result = await manager.sweepExpiredCredits();
+      expect(result.expiredCount).toBe(0);
+      expect(result.expiredAmount).toBe(0);
+      expect((await manager.getBalance("user-1")).balance).toBe(100);
+    });
+
+    it("sweep with no expired returns zero through manager", async () => {
+      manager.publishPricingFromDict(TEST_CONFIG);
+      await manager.addCredits("user-1", 50);
+
+      const result = await manager.sweepExpiredCredits();
+      expect(result.expiredCount).toBe(0);
+      expect(result.expiredAmount).toBe(0);
+    });
   });
 
   describe("team balance pools", () => {
@@ -391,6 +454,48 @@ describe("CreditManager", () => {
       const team = await store.createTeam("Closed Team", 500);
       const result = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 10 });
       expect(result.error).toBe("user_not_in_team");
+    });
+
+    it("createTeam via store with initial balance", async () => {
+      const store = new MemoryStore();
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+
+      const team = await store.createTeam("Dev Team", 300);
+      expect(team.teamId).toBeTruthy();
+      expect(team.name).toBe("Dev Team");
+
+      const balance = await store.getTeamBalance(team.teamId);
+      expect(balance.balance).toBe(300);
+    });
+
+    it("addTeamMember via store then deduct via manager", async () => {
+      const store = new MemoryStore();
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+
+      const team = await store.createTeam("Squad", 200);
+      await store.addTeamMember(team.teamId, "user-1", "member");
+
+      const members = await store.getTeamMembers(team.teamId);
+      expect(members).toHaveLength(1);
+      expect(members[0].userId).toBe("user-1");
+      expect(members[0].role).toBe("member");
+    });
+
+    it("team balance reflects deductions through manager", async () => {
+      const store = new MemoryStore();
+      const mgr = new CreditManager(store);
+      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+
+      const team = await store.createTeam("Pipeline Team", 500);
+      await store.addTeamMember(team.teamId, "user-1", "member");
+
+      const result = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 150 });
+      expect(result.teamBalanceAfter).toBe(350);
+
+      const balance = await store.getTeamBalance(team.teamId);
+      expect(balance.balance).toBe(350);
     });
   });
 
