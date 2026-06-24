@@ -8,9 +8,11 @@ CREATE TABLE IF NOT EXISTS public.credit_spend_caps (
   model TEXT,
   cap_limit INTEGER NOT NULL,
   action TEXT NOT NULL DEFAULT 'deny' CHECK (action IN ('deny', 'warn', 'notify')),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (user_id, cap_type, COALESCE(model, ''))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_spend_caps_unique
+    ON public.credit_spend_caps (user_id, cap_type, COALESCE(model, ''));
 
 ALTER TABLE public.credit_spend_caps ENABLE ROW LEVEL SECURITY;
 DO $$
@@ -39,6 +41,10 @@ DECLARE
   v_spend INTEGER;
   v_window TIMESTAMPTZ;
 BEGIN
+  IF auth.role() IS DISTINCT FROM 'service_role' THEN
+    RETURN jsonb_build_object('capped', false, 'error', 'unauthorized');
+  END IF;
+
   -- Check deny caps first (hard limit)
   FOR v_cap IN
     SELECT action, cap_type, model, cap_limit

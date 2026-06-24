@@ -58,7 +58,11 @@ export class CreditEventEmitter {
     const handlers = this.listeners.get(event.type);
     if (handlers) {
       for (const handler of handlers) {
-        handler(event);
+        try {
+          handler(event);
+        } catch (err) {
+          console.error(`[CreditEventEmitter] handler error for event ${event.type}:`, err);
+        }
       }
     }
   }

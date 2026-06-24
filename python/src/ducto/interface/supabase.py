@@ -9,7 +9,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from ducto.interface.base import CreditStore
+import httpx
+
+from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
@@ -32,7 +34,7 @@ from ducto.interface.models import (
     SweepResult,
     TeamBalanceResult,
     TeamDeductionResult,
-    TeamMemberResult,
+    TeamMember,
     TopUserRow,
 )
 from ducto.sql import _get_sql_files
@@ -86,8 +88,6 @@ class HttpxSupabaseStore(CreditStore):
     """
 
     def __init__(self, url: str, key: str) -> None:
-        import httpx
-
         self._url = url.rstrip("/")
         self._key = key
         self._http = httpx.Client(timeout=30.0)
@@ -108,32 +108,46 @@ class HttpxSupabaseStore(CreditStore):
 
     def _rpc(self, fn: str, params: dict[str, object]) -> dict[str, Any]:
         """Call a Postgres RPC function via raw HTTP POST."""
-        resp = self._http.post(
-            f"{self._url}/rest/v1/rpc/{fn}",
-            json=params,
-            headers={
-                "apikey": self._key,
-                "authorization": f"Bearer {self._key}",
-                "content-type": "application/json",
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = self._http.post(
+                f"{self._url}/rest/v1/rpc/{fn}",
+                json=params,
+                headers={
+                    "apikey": self._key,
+                    "authorization": f"Bearer {self._key}",
+                    "content-type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPStatusError as e:
+            raise StoreError(f"supabase request failed: {e.response.status_code}") from e
+        except httpx.TimeoutException as e:
+            raise StoreError("supabase request timed out") from e
 
     def _rpc_list(self, fn: str, params: dict[str, object]) -> list[dict[str, Any]]:
         """Call a Postgres RPC that returns multiple rows."""
-        resp = self._http.post(
-            f"{self._url}/rest/v1/rpc/{fn}",
-            json=params,
-            headers={
-                "apikey": self._key,
-                "authorization": f"Bearer {self._key}",
-                "content-type": "application/json",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return list(data) if isinstance(data, list) else [data]
+        try:
+            resp = self._http.post(
+                f"{self._url}/rest/v1/rpc/{fn}",
+                json=params,
+                headers={
+                    "apikey": self._key,
+                    "authorization": f"Bearer {self._key}",
+                    "content-type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data is None:
+                return []
+            if not isinstance(data, list):
+                return [data]
+            return [r for r in data if r is not None]
+        except httpx.HTTPStatusError as e:
+            raise StoreError(f"supabase request failed: {e.response.status_code}") from e
+        except httpx.TimeoutException as e:
+            raise StoreError("supabase request timed out") from e
 
     def get_balance(self, user_id: str) -> BalanceResult:
         row = self._rpc("get_credits_balance", {"p_user_id": user_id})
@@ -472,10 +486,10 @@ class HttpxSupabaseStore(CreditStore):
             role=str(row.get("role", role)),
         )
 
-    def get_team_members(self, team_id: str) -> list[TeamMemberResult]:
+    def get_team_members(self, team_id: str) -> list[TeamMember]:
         rows = self._rpc_list("get_team_members", {"p_team_id": team_id})
         return [
-            TeamMemberResult(
+            TeamMember(
                 user_id=str(r.get("user_id", "")),
                 role=str(r.get("role", "member")),
                 spend_cap=r.get("spend_cap"),

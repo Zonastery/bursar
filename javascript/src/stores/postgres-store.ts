@@ -50,10 +50,19 @@ export interface PgPoolConstructor {
 export class PostgresStore implements CreditStore {
   private databaseUrl: string;
   private poolCtor: PgPoolConstructor;
+  private pool: PgPool | null = null;
 
   constructor(databaseUrl: string, poolCtor?: PgPoolConstructor) {
     this.databaseUrl = databaseUrl;
     this.poolCtor = poolCtor ?? null!; // lazy-loaded
+  }
+
+  private async getPool(): Promise<PgPool> {
+    if (!this.pool) {
+      const Pool = await this.getPoolCtor();
+      this.pool = new Pool({ connectionString: this.databaseUrl });
+    }
+    return this.pool;
   }
 
   private async getPoolCtor(): Promise<PgPoolConstructor> {
@@ -64,13 +73,15 @@ export class PostgresStore implements CreditStore {
   }
 
   private async query(text: string, params?: unknown[]): Promise<unknown[]> {
-    const Pool = await this.getPoolCtor();
-    const pool = new Pool({ connectionString: this.databaseUrl });
-    try {
-      const res = await pool.query(text, params);
-      return res.rows;
-    } finally {
-      await pool.end();
+    const pool = await this.getPool();
+    const res = await pool.query(text, params);
+    return res.rows;
+  }
+
+  async close(): Promise<void> {
+    if (this.pool) {
+      await this.pool.end();
+      this.pool = null;
     }
   }
 

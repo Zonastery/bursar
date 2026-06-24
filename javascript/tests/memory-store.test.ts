@@ -284,101 +284,6 @@ describe("MemoryStore", () => {
       expect(result.expiredAmount).toBe(0);
     });
 
-    describe("usage analytics", () => {
-      it("spendByUser returns correct totals", async () => {
-        await store.addCredits("user-1", 1000);
-        await store.addCredits("user-2", 2000);
-
-        // Create usage transactions via reserve + deduct
-        const r1 = await store.reserveCredits("user-1", 100, "usage");
-        await store.deductCredits("user-1", r1.reservationId, 100);
-        const r2 = await store.reserveCredits("user-1", 50, "usage");
-        await store.deductCredits("user-1", r2.reservationId, 50);
-        const r3 = await store.reserveCredits("user-2", 200, "usage");
-        await store.deductCredits("user-2", r3.reservationId, 200);
-
-        const start = new Date(Date.now() - 1000);
-        const end = new Date(Date.now() + 1000);
-        const rows = await store.spendByUser(start, end);
-        expect(rows).toHaveLength(2);
-
-        const u1 = rows.find((r) => r.userId === "user-1");
-        expect(u1).toBeDefined();
-        expect(u1!.totalSpend).toBe(150); // 100 + 50
-        expect(u1!.transactionCount).toBe(2);
-
-        const u2 = rows.find((r) => r.userId === "user-2");
-        expect(u2).toBeDefined();
-        expect(u2!.totalSpend).toBe(200);
-        expect(u2!.transactionCount).toBe(1);
-      });
-
-      it("spendByModel returns correct totals", async () => {
-        await store.addCredits("user-1", 1000);
-        const r1 = await store.reserveCredits("user-1", 100, "usage");
-        await store.deductCredits("user-1", r1.reservationId, 100);
-        const r2 = await store.reserveCredits("user-1", 50, "usage");
-        await store.deductCredits("user-1", r2.reservationId, 50);
-
-        const now = new Date();
-        const rows = await store.spendByModel(
-          new Date(now.getTime() - 1000),
-          new Date(now.getTime() + 1000),
-        );
-        expect(rows.length).toBeGreaterThanOrEqual(1);
-        // Both deductions have no model metadata in MemoryStore deductCredits
-        const unknown = rows.find((r) => r.model === "unknown");
-        expect(unknown).toBeDefined();
-        expect(unknown!.totalSpend).toBe(150);
-      });
-
-      it("empty time window returns empty", async () => {
-        await store.addCredits("user-1", 100);
-        const r = await store.reserveCredits("user-1", 10, "usage");
-        await store.deductCredits("user-1", r.reservationId, 10);
-
-        const result = await store.spendByUser(new Date("2020-01-01"), new Date("2020-01-02"));
-        expect(result).toHaveLength(0);
-      });
-
-      it("topUsers respects limit", async () => {
-        await store.addCredits("user-1", 1000);
-        await store.addCredits("user-2", 1000);
-        await store.addCredits("user-3", 1000);
-
-        const r1 = await store.reserveCredits("user-1", 300, "usage");
-        await store.deductCredits("user-1", r1.reservationId, 300);
-        const r2 = await store.reserveCredits("user-2", 200, "usage");
-        await store.deductCredits("user-2", r2.reservationId, 200);
-        const r3 = await store.reserveCredits("user-3", 100, "usage");
-        await store.deductCredits("user-3", r3.reservationId, 100);
-
-        const now = new Date();
-        const top = await store.topUsers(
-          2,
-          new Date(now.getTime() - 1000),
-          new Date(now.getTime() + 1000),
-        );
-        expect(top).toHaveLength(2);
-        expect(top[0].totalSpend).toBeGreaterThanOrEqual(top[1].totalSpend);
-      });
-
-      it("dailySpend bucketing correct", async () => {
-        await store.addCredits("user-1", 1000);
-        const r = await store.reserveCredits("user-1", 75, "usage");
-        await store.deductCredits("user-1", r.reservationId, 75);
-
-        const now = new Date();
-        const rows = await store.dailySpend(
-          new Date(now.getTime() - 86400000),
-          new Date(now.getTime() + 86400000),
-        );
-        expect(rows.length).toBeGreaterThanOrEqual(1);
-        expect(rows[0].totalSpend).toBe(75);
-        expect(rows[0].transactionCount).toBe(1);
-      });
-    });
-
     it("partial expiry caps at current balance", async () => {
       const expiresAt = new Date(Date.now() + 1);
       await store.addCredits("user-1", 50, "purchase", null, expiresAt);
@@ -390,6 +295,101 @@ describe("MemoryStore", () => {
       // 50 expired, balance is 80, so expire min(50, 80) = 50
       expect(result.expiredAmount).toBe(50);
       expect((await store.getBalance("user-1")).balance).toBe(30);
+    });
+  });
+
+  describe("usage analytics", () => {
+    it("spendByUser returns correct totals", async () => {
+      await store.addCredits("user-1", 1000);
+      await store.addCredits("user-2", 2000);
+
+      // Create usage transactions via reserve + deduct
+      const r1 = await store.reserveCredits("user-1", 100, "usage");
+      await store.deductCredits("user-1", r1.reservationId, 100);
+      const r2 = await store.reserveCredits("user-1", 50, "usage");
+      await store.deductCredits("user-1", r2.reservationId, 50);
+      const r3 = await store.reserveCredits("user-2", 200, "usage");
+      await store.deductCredits("user-2", r3.reservationId, 200);
+
+      const start = new Date(Date.now() - 1000);
+      const end = new Date(Date.now() + 1000);
+      const rows = await store.spendByUser(start, end);
+      expect(rows).toHaveLength(2);
+
+      const u1 = rows.find((r) => r.userId === "user-1");
+      expect(u1).toBeDefined();
+      expect(u1!.totalSpend).toBe(150); // 100 + 50
+      expect(u1!.transactionCount).toBe(2);
+
+      const u2 = rows.find((r) => r.userId === "user-2");
+      expect(u2).toBeDefined();
+      expect(u2!.totalSpend).toBe(200);
+      expect(u2!.transactionCount).toBe(1);
+    });
+
+    it("spendByModel returns correct totals", async () => {
+      await store.addCredits("user-1", 1000);
+      const r1 = await store.reserveCredits("user-1", 100, "usage");
+      await store.deductCredits("user-1", r1.reservationId, 100);
+      const r2 = await store.reserveCredits("user-1", 50, "usage");
+      await store.deductCredits("user-1", r2.reservationId, 50);
+
+      const now = new Date();
+      const rows = await store.spendByModel(
+        new Date(now.getTime() - 1000),
+        new Date(now.getTime() + 1000),
+      );
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      // Both deductions have no model metadata in MemoryStore deductCredits
+      const unknown = rows.find((r) => r.model === "unknown");
+      expect(unknown).toBeDefined();
+      expect(unknown!.totalSpend).toBe(150);
+    });
+
+    it("empty time window returns empty", async () => {
+      await store.addCredits("user-1", 100);
+      const r = await store.reserveCredits("user-1", 10, "usage");
+      await store.deductCredits("user-1", r.reservationId, 10);
+
+      const result = await store.spendByUser(new Date("2020-01-01"), new Date("2020-01-02"));
+      expect(result).toHaveLength(0);
+    });
+
+    it("topUsers respects limit", async () => {
+      await store.addCredits("user-1", 1000);
+      await store.addCredits("user-2", 1000);
+      await store.addCredits("user-3", 1000);
+
+      const r1 = await store.reserveCredits("user-1", 300, "usage");
+      await store.deductCredits("user-1", r1.reservationId, 300);
+      const r2 = await store.reserveCredits("user-2", 200, "usage");
+      await store.deductCredits("user-2", r2.reservationId, 200);
+      const r3 = await store.reserveCredits("user-3", 100, "usage");
+      await store.deductCredits("user-3", r3.reservationId, 100);
+
+      const now = new Date();
+      const top = await store.topUsers(
+        2,
+        new Date(now.getTime() - 1000),
+        new Date(now.getTime() + 1000),
+      );
+      expect(top).toHaveLength(2);
+      expect(top[0].totalSpend).toBeGreaterThanOrEqual(top[1].totalSpend);
+    });
+
+    it("dailySpend bucketing correct", async () => {
+      await store.addCredits("user-1", 1000);
+      const r = await store.reserveCredits("user-1", 75, "usage");
+      await store.deductCredits("user-1", r.reservationId, 75);
+
+      const now = new Date();
+      const rows = await store.dailySpend(
+        new Date(now.getTime() - 86400000),
+        new Date(now.getTime() + 86400000),
+      );
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows[0].totalSpend).toBe(75);
+      expect(rows[0].transactionCount).toBe(1);
     });
   });
 

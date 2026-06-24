@@ -383,6 +383,7 @@ export class MemoryStore implements CreditStore {
   async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
     const now = new Date();
     const expiredByUser = new Map<string, number>();
+    const expiredTxs: TransactionRecord[] = [];
 
     // Find all expired grant transactions
     for (const tx of this.transactions) {
@@ -390,6 +391,7 @@ export class MemoryStore implements CreditStore {
         if (new Date(tx.expiresAt) <= now) {
           const current = expiredByUser.get(tx.userId) ?? 0;
           expiredByUser.set(tx.userId, current + tx.amount);
+          expiredTxs.push(tx);
         }
       }
     }
@@ -407,6 +409,13 @@ export class MemoryStore implements CreditStore {
 
         if (!dryRun) {
           this.balances.set(userId, currentBalance - toExpire);
+
+          // Null out expiresAt on swept grants to prevent re-sweeping
+          for (const et of expiredTxs) {
+            if (et.userId === userId) {
+              et.expiresAt = null;
+            }
+          }
 
           const txId = randomUUID();
           this.transactions.push({

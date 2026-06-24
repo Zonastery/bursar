@@ -15,11 +15,14 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # All credit lifecycle event types
 CREDIT_EVENT_TYPES = frozenset(
@@ -79,7 +82,10 @@ class CreditEventEmitter:
         handlers = self._listeners.get(event.type)
         if handlers:
             for handler in handlers:
-                handler(event)
+                try:
+                    handler(event)
+                except Exception:
+                    logger.exception("Credit event handler failed for event %s", event.type)
 
     def clear_type(self, event_type: CreditEventType) -> None:
         """Remove all handlers for a specific type."""

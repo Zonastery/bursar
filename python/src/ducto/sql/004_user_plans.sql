@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS public.credit_usage_window (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_credit_usage_window_plan_id ON public.credit_usage_window (plan_id);
+
 -- One usage window per user/plan/period
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_usage_window_unique
     ON public.credit_usage_window (user_id, plan_id, billing_period);
@@ -176,6 +178,10 @@ DECLARE
     v_period_start DATE;
     v_new_usage INTEGER;
 BEGIN
+    IF p_amount <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
+    END IF;
+
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;

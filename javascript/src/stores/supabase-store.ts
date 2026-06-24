@@ -78,7 +78,9 @@ export class HttpxSupabaseStore implements CreditStore {
       throw new Error(`Supabase RPC ${fn} failed (${resp.status}): ${text}`);
     }
     const data = await resp.json();
-    return Array.isArray(data) ? data : [data];
+    if (data === null || data === undefined) return [];
+    if (!Array.isArray(data)) return [data];
+    return data.filter((r: unknown) => r != null);
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {

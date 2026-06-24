@@ -6,6 +6,8 @@ raw dicts — validation at the boundary, clarity in the call sites.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 # ── Metadata ──────────────────────────────────────────────────────────
@@ -118,7 +120,7 @@ class PlanDefinition(BaseModel):
 
     id: str
     name: str
-    free_allowance: int = 0
+    free_allowance: int = Field(default=0, ge=0)
     rate_overrides: dict[str, str] | None = None
     features: dict[str, bool] | None = None
 
@@ -215,10 +217,10 @@ class SpendCap(BaseModel):
     """Configuration for a per-user spend cap."""
 
     user_id: str = ""
-    cap_type: str = "daily"  # daily | monthly
+    cap_type: Literal["daily", "monthly"] = Field(default="daily", alias="type")
     model: str | None = None
-    limit: int = 0
-    action: str = "deny"  # deny | warn | notify
+    limit: int = Field(default=0, ge=0)
+    action: Literal["deny", "warn", "notify"] = "deny"
 
 
 class CapCheckResult(BaseModel):
@@ -226,12 +228,22 @@ class CapCheckResult(BaseModel):
 
     capped: bool = False
     current_spend: int = 0
-    cap_limit: int = 0
+    cap_limit: int = Field(default=0, alias="limit")
     action: str | None = None
     model: str | None = None
 
 
 # ── Team/shared balance pools ─────────────────────────────────────────
+
+
+class Team(BaseModel):
+    """A team with a shared credit balance pool."""
+
+    team_id: str = ""
+    name: str = ""
+    balance: int = 0
+    member_count: int = 0
+    created_at: str = ""
 
 
 class TeamBalanceResult(BaseModel):
@@ -243,7 +255,7 @@ class TeamBalanceResult(BaseModel):
     member_count: int = 0
 
 
-class TeamMemberResult(BaseModel):
+class TeamMember(BaseModel):
     """A member of a team with optional spend cap."""
 
     user_id: str = ""

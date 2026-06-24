@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field, NonNegativeInt, model_validator
 
 from ducto.expr import ExpressionError, validate_expression
+from ducto.interface.models import PricingConfigV2
 
 
 class ConfigError(Exception):
@@ -36,6 +37,12 @@ class PricingConfig(BaseModel):
             raise ConfigError("missing required section: models")
         if not isinstance(data["models"], dict) or len(data["models"]) == 0:
             raise ConfigError("models must be a non-empty dict")
+        if data.get("version") == 2:
+            plans = data.get("plans")
+            if plans is not None:
+                plan_names = [p["name"] if isinstance(p, dict) else p.name for p in plans.values()]
+                if len(plan_names) != len(set(plan_names)):
+                    raise ConfigError("duplicate plan names in pricing config")
         return data
 
     @model_validator(mode="after")
@@ -78,4 +85,6 @@ def load_config_from_dict(data: dict) -> PricingConfig:
     Raises:
         ConfigError: If the config structure or expressions are invalid.
     """
+    if data.get("version") == 2:
+        return PricingConfigV2.model_validate(data)
     return PricingConfig.model_validate(data)

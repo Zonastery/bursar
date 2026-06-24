@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from ducto.interface.base import CreditStore
+import psycopg2
+
+from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
@@ -32,7 +34,7 @@ from ducto.interface.models import (
     SweepResult,
     TeamBalanceResult,
     TeamDeductionResult,
-    TeamMemberResult,
+    TeamMember,
     TopUserRow,
 )
 from ducto.sql import _get_sql_files
@@ -50,9 +52,10 @@ class PostgresStore(CreditStore):
         self._database_url = database_url
 
     def _conn(self):
-        import psycopg2
-
-        return psycopg2.connect(self._database_url)
+        try:
+            return psycopg2.connect(self._database_url)
+        except psycopg2.Error as e:
+            raise StoreError(f"database connection failed: {e}") from e
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -547,7 +550,7 @@ class PostgresStore(CreditStore):
             role=str(result_dict.get("role", role)),
         )
 
-    def get_team_members(self, team_id: str) -> list[TeamMemberResult]:
+    def get_team_members(self, team_id: str) -> list[TeamMember]:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -558,7 +561,7 @@ class PostgresStore(CreditStore):
             conn.close()
 
         return [
-            TeamMemberResult(
+            TeamMember(
                 user_id=str(r[0].get("user_id", "")),
                 role=str(r[0].get("role", "member")),
                 spend_cap=r[0].get("spend_cap"),

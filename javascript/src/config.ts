@@ -38,6 +38,11 @@ function validateConfigData(data: Record<string, unknown>): void {
           }
         }
       }
+      // Validate duplicate plan names
+      const planNames = Object.values(plans).map((p) => p.name as string);
+      if (new Set(planNames).size !== planNames.length) {
+        throw new ConfigError("duplicate plan names in pricing config");
+      }
     }
   }
 }
@@ -87,5 +92,11 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
   };
   if (config.minBalance < 0) throw new ConfigError("min_balance must be >= 0");
   validateExpressions(config);
+  if (data.version === 2) {
+    return {
+      ...config,
+      plans: data.plans as Record<string, unknown> | undefined,
+    } as PricingConfig & { plans?: Record<string, unknown> };
+  }
   return config;
 }

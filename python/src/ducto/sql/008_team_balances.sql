@@ -1,6 +1,8 @@
 -- ducto: team/shared balance pools.
 -- credit_teams, credit_team_members tables, RPCs for team credit operations.
 
+ALTER TYPE public.credit_tx_type ADD VALUE IF NOT EXISTS 'team_usage';
+
 CREATE TABLE IF NOT EXISTS public.credit_teams (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   name TEXT NOT NULL,
@@ -138,23 +140,20 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-DECLARE
-  v_member RECORD;
 BEGIN
-  FOR v_member IN
-    SELECT user_id, role, spend_cap, total_spent
-    FROM public.credit_team_members
-    WHERE team_id = p_team_id
-    ORDER BY joined_at ASC
-  LOOP
-    RETURN NEXT jsonb_build_object(
-      'user_id', v_member.user_id,
-      'role', v_member.role,
-      'spend_cap', v_member.spend_cap,
-      'total_spent', v_member.total_spent
-    );
-  END LOOP;
-  RETURN;
+  RETURN QUERY
+  SELECT jsonb_build_object(
+    'user_id', tm.user_id,
+    'role', tm.role,
+    'spend_cap', tm.spend_cap,
+    'total_spent', COALESCE(SUM(ct.amount) FILTER (WHERE ct.type = 'team_usage' AND ct.created_at >= date_trunc('month', NOW())), 0),
+    'joined_at', tm.joined_at
+  )
+  FROM public.credit_team_members tm
+  LEFT JOIN public.credit_transactions ct ON ct.user_id = tm.user_id AND ct.team_id = p_team_id
+  WHERE tm.team_id = p_team_id
+  GROUP BY tm.user_id, tm.role, tm.spend_cap, tm.joined_at
+  ORDER BY tm.joined_at;
 END;
 $$;
 
@@ -175,6 +174,10 @@ DECLARE
   v_spend_cap INTEGER;
   v_total_spent INTEGER;
 BEGIN
+  IF p_amount <= 0 THEN
+    RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
+  END IF;
+
   IF auth.role() DISTINCT FROM 'service_role' THEN
     RETURN jsonb_build_object('error', 'unauthorized');
   END IF;

@@ -31,9 +31,10 @@ from ducto.interface.models import (
     SpendByUserRow,
     SpendCap,
     SweepResult,
+    Team,
     TeamBalanceResult,
     TeamDeductionResult,
-    TeamMemberResult,
+    TeamMember,
     TopUserRow,
 )
 from ducto.manager import CreditManager, InsufficientCreditsError, PricingNotLoadedError
@@ -73,9 +74,10 @@ __all__ = [
     "SpendByUserRow",
     "SpendCap",
     "SweepResult",
+    "Team",
     "TeamBalanceResult",
     "TeamDeductionResult",
-    "TeamMemberResult",
+    "TeamMember",
     "ToolCall",
     "TopUserRow",
     "UsageMetrics",
