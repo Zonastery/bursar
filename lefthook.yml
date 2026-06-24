@@ -1,7 +1,6 @@
 # ── Pre-Commit Hooks ────────────────────────────────────────────────
 
 pre-commit:
-  piped: true
   commands:
     python-format:
       root: "python/"
