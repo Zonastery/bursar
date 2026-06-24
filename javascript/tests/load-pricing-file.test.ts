@@ -7,27 +7,33 @@ const tmpDir = join(tmpdir(), "ducto-js-test-" + Date.now());
 
 beforeAll(() => {
   mkdirSync(tmpDir, { recursive: true });
-  writeFileSync(join(tmpDir, "test.json"), JSON.stringify({ version: 1, models: { a: "1" } }));
-  writeFileSync(join(tmpDir, "test.yaml"), "version: 1\nmodels:\n  a: \"1\"\n");
+  writeFileSync(join(tmpDir, "test.json"), JSON.stringify({ models: { a: "1" } }));
+  writeFileSync(join(tmpDir, "test.yaml"), 'models:\n  a: "1"\n');
 });
 
 afterAll(() => {
-  try { unlinkSync(join(tmpDir, "test.json")); } catch { /* ignore */ }
-  try { unlinkSync(join(tmpDir, "test.yaml")); } catch { /* ignore */ }
+  try {
+    unlinkSync(join(tmpDir, "test.json"));
+  } catch {
+    /* ignore */
+  }
+  try {
+    unlinkSync(join(tmpDir, "test.yaml"));
+  } catch {
+    /* ignore */
+  }
 });
 
 describe("loadPricingFile", () => {
   it("loads JSON file", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
     const result = await loadPricingFile(join(tmpDir, "test.json"));
-    expect(result.version).toBe(1);
     expect(result.models).toEqual({ a: "1" });
   });
 
   it("loads YAML file", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
     const result = await loadPricingFile(join(tmpDir, "test.yaml"));
-    expect(result.version).toBe(1);
     expect(result.models).toEqual({ a: "1" });
   });
 

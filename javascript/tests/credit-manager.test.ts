@@ -2,10 +2,9 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { CreditManager } from "../src/manager.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { InsufficientCreditsError, PricingNotLoadedError } from "../src/errors.js";
-import type { PlanDefinition, PricingConfigData } from "../src/types.js";
+import type { PricingConfigData } from "../src/types.js";
 
 const TEST_CONFIG: PricingConfigData = {
-  version: 1,
   models: {
     "gpt-4": "input_tokens * (10 / 1000) + output_tokens * (30 / 1000)",
   },
@@ -111,7 +110,6 @@ describe("CreditManager", () => {
 
   it("deductFixed shortcut works", async () => {
     const config: PricingConfigData = {
-      version: 1,
       models: { _default: "input_tokens * 1" },
       fixed: { batch_job: 50 },
     };
@@ -147,18 +145,17 @@ describe("CreditManager", () => {
   describe("plan allowance", () => {
     it("fully covers cost with plan allowance, skipping balance deduct", async () => {
       const store = new MemoryStore();
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      const config: PricingConfigData = {
         models: { _default: "input_tokens * 1" },
         plans: {
           free: { id: "plan-free", name: "Free", freeAllowance: 100 },
         },
       };
-      store.setActivePricing(v2Config);
+      store.setActivePricing(config);
       store.setUserPlan("user-1", "plan-free");
 
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict(v2Config);
+      mgr.publishPricingFromDict(config);
       await mgr.addCredits("user-1", 10); // small balance
 
       // Deduct 5 — fully covered by allowance
@@ -177,18 +174,17 @@ describe("CreditManager", () => {
 
     it("partially covers cost with plan allowance, deducts remainder from balance", async () => {
       const store = new MemoryStore();
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      const config: PricingConfigData = {
         models: { _default: "input_tokens * 1" },
         plans: {
           starter: { id: "plan-starter", name: "Starter", freeAllowance: 10 },
         },
       };
-      store.setActivePricing(v2Config);
+      store.setActivePricing(config);
       store.setUserPlan("user-1", "plan-starter");
 
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict(v2Config);
+      mgr.publishPricingFromDict(config);
       await mgr.addCredits("user-1", 100);
 
       // Deduct 25 — covers 10 from allowance, 15 from balance
@@ -218,14 +214,13 @@ describe("CreditManager", () => {
 
     it("setUserPlan/getUserPlan round-trip before deduct", async () => {
       const store = new MemoryStore();
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      const config: PricingConfigData = {
         models: { _default: "input_tokens * 1" },
         plans: {
           pro: { id: "plan-pro", name: "Pro", freeAllowance: 500 },
         },
       };
-      store.setActivePricing(v2Config);
+      store.setActivePricing(config);
       store.setUserPlan("user-1", "plan-pro");
 
       const plan = await store.getUserPlan("user-1");
@@ -233,7 +228,7 @@ describe("CreditManager", () => {
       expect(plan.freeAllowance).toBe(500);
 
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict(v2Config);
+      mgr.publishPricingFromDict(config);
       await mgr.addCredits("user-1", 100);
 
       const result = await mgr.deduct("user-1", { inputTokens: 10 });
@@ -261,7 +256,7 @@ describe("CreditManager", () => {
     });
 
     it("partial refund through manager", async () => {
-      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await manager.addCredits("user-1", 100);
 
       const deduct = await manager.deduct("user-1", { inputTokens: 50 });
@@ -275,7 +270,7 @@ describe("CreditManager", () => {
     });
 
     it("double refund returns error through manager", async () => {
-      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await manager.addCredits("user-1", 100);
 
       const deduct = await manager.deduct("user-1", { inputTokens: 40 });
@@ -287,7 +282,7 @@ describe("CreditManager", () => {
     });
 
     it("refund of unknown transaction returns error through manager", async () => {
-      manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await manager.addCredits("user-1", 100);
 
       const result = await manager.refundCredits("no-such-transaction");
@@ -425,7 +420,7 @@ describe("CreditManager", () => {
     it("deductTeam calculates cost and debits team pool", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Team", 500);
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -439,7 +434,7 @@ describe("CreditManager", () => {
     it("deductTeam zero-cost returns without deducting", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Team", 500);
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -461,7 +456,7 @@ describe("CreditManager", () => {
     it("deductTeam insufficient balance returns error", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Poor Team", 10);
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -473,7 +468,7 @@ describe("CreditManager", () => {
     it("deductTeam user not in team returns error", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Closed Team", 500);
       const result = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 10 });
@@ -483,7 +478,7 @@ describe("CreditManager", () => {
     it("createTeam via store with initial balance", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Dev Team", 300);
       expect(team.teamId).toBeTruthy();
@@ -496,7 +491,7 @@ describe("CreditManager", () => {
     it("addTeamMember via store then deduct via manager", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Squad", 200);
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -510,7 +505,7 @@ describe("CreditManager", () => {
     it("team balance reflects deductions through manager", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const team = await store.createTeam("Pipeline Team", 500);
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -527,7 +522,7 @@ describe("CreditManager", () => {
     it("daily deny cap blocks 11th credit", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 10, action: "deny" });
@@ -541,7 +536,7 @@ describe("CreditManager", () => {
     it("warn action allows deduction through", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 10, action: "warn" });
@@ -553,7 +548,7 @@ describe("CreditManager", () => {
     it("notify action allows deduction through", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 10, action: "notify" });
@@ -565,7 +560,7 @@ describe("CreditManager", () => {
     it("spend cap does not affect deductions within limit", async () => {
       const store = new MemoryStore();
       const mgr = new CreditManager(store);
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 100, action: "deny" });
@@ -581,7 +576,7 @@ describe("CreditManager", () => {
       const emitter = new (await import("../src/stores/events.js")).CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 100);
 
       const events: Array<{ type: string; userId: string }> = [];
@@ -600,7 +595,7 @@ describe("CreditManager", () => {
       const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
       emitter.on("credits.added", (e) => events.push({ type: e.type, data: e.data }));
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 50);
 
       expect(events).toHaveLength(1);
@@ -612,7 +607,7 @@ describe("CreditManager", () => {
       const emitter = new (await import("../src/stores/events.js")).CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 100);
 
       const events: Array<{ type: string }> = [];
@@ -630,7 +625,7 @@ describe("CreditManager", () => {
       const emitter = new (await import("../src/stores/events.js")).CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 100);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 5, action: "deny" });
 
@@ -649,7 +644,7 @@ describe("CreditManager", () => {
       const emitter = new (await import("../src/stores/events.js")).CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 100);
       store.setSpendCap({ userId: "user-1", type: "daily", limit: 5, action: "warn" });
 
@@ -666,7 +661,7 @@ describe("CreditManager", () => {
       const emitter = new (await import("../src/stores/events.js")).CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
       emitter.on("credits.expired", (e) => events.push({ type: e.type, data: e.data }));
@@ -688,7 +683,7 @@ describe("CreditManager", () => {
       emitter.on("credits.deducted", () => called.push(1));
       emitter.on("credits.deducted", () => called.push(2));
 
-      mgr.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+      mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 100);
       await mgr.deduct("user-1", { inputTokens: 10 });
 

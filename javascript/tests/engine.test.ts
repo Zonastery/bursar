@@ -4,11 +4,10 @@ import { ConfigError } from "../src/errors.js";
 import type { UsageMetrics } from "../src/metrics.js";
 
 const TEST_CONFIG = {
-  version: 1,
   models: {
     "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
     "gpt-3.5-turbo": "input_tokens * (0.001 / 1000) + output_tokens * (0.002 / 1000)",
-    "_default": "input_tokens * (0.05 / 1000)",
+    _default: "input_tokens * (0.05 / 1000)",
   },
   tools: {
     _default: "tool_calls * 5 / 1000",
@@ -27,7 +26,7 @@ describe("PricingEngine", () => {
   });
 
   it("rejects invalid config", () => {
-    expect(() => PricingEngine.fromDict({ version: 1, models: {} })).toThrow(ConfigError);
+    expect(() => PricingEngine.fromDict({ models: {} })).toThrow(ConfigError);
   });
 
   describe("calculate", () => {
@@ -135,7 +134,6 @@ describe("PricingEngine", () => {
 
     it("throws for missing model with no _default", () => {
       const cfg = {
-        version: 1,
         models: { "gpt-4": "input_tokens * 1" },
       };
       const engine = PricingEngine.fromDict(cfg);
@@ -174,7 +172,6 @@ describe("PricingEngine", () => {
 
     it("returns null if no match and no _default", () => {
       const engine = PricingEngine.fromDict({
-        version: 1,
         models: { "gpt-4": "input_tokens * 1" },
       });
       expect(engine.resolveModel("claude-3")).toBeNull();
@@ -209,7 +206,6 @@ describe("PricingEngine", () => {
     it("returns config as PricingConfigData", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
       const schema = engine.pricingSchema();
-      expect(schema.version).toBe(1);
       expect(schema.models["gpt-4"]).toBeTruthy();
       expect(schema.tools).toBeTruthy();
       expect(schema.search).toBeTruthy();

@@ -148,7 +148,8 @@ BEGIN
     v_period_end := (date_trunc('month', now()) + interval '1 month' - interval '1 day')::DATE;
 
     -- Get current usage this period
-    SELECT COALESCE(usage, 0) INTO v_current_usage
+    -- SUM+COALESCE ensures exactly one row even when no matching window exists
+    SELECT COALESCE(SUM(usage), 0) INTO v_current_usage
     FROM public.credit_usage_window
     WHERE user_id = p_user_id
       AND plan_id = v_plan_id

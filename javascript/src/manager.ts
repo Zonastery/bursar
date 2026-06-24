@@ -20,7 +20,6 @@ import type {
 } from "./types.js";
 import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEventEmitter, CreditEventType } from "./stores/events.js";
-import { loadConfigFromDict } from "./config.js";
 import type { UsageMetrics } from "./metrics.js";
 
 /**
@@ -56,15 +55,9 @@ export class CreditManager {
 
   /** Load pricing from a PricingConfigData or raw dict and sync it. */
   publishPricingFromDict(data: PricingConfigData | Record<string, unknown>): void {
-    const raw =
-      "models" in data && data.models != null
-        ? (data as Record<string, unknown>)
-        : (data as Record<string, unknown>);
-
+    const raw = data as Record<string, unknown>;
     this.engine = PricingEngineClass.fromDict(raw);
-    void this.store.setActivePricing(
-      "version" in data ? (data as PricingConfigData) : loadConfigFromDict(raw),
-    );
+    void this.store.setActivePricing(data as PricingConfigData);
   }
 
   /** Load the active pricing config from the store. */
@@ -72,15 +65,15 @@ export class CreditManager {
     const active = await this.store.getActivePricing();
     if (!active) throw new PricingNotLoadedError("no active pricing config in store");
 
-    const { version, models, tools, search, cache, fixed, minBalance } = active.config;
+    const { models, tools, search, cache, fixed, minBalance, plans } = active.config;
     const engineDict: Record<string, unknown> = {
-      version,
       models,
       tools: tools ?? { _default: "tool_calls * 0" },
       search: search ?? {},
       cache: cache ?? {},
       fixed: fixed ?? {},
       minBalance: minBalance ?? 5,
+      ...(plans ? { plans } : {}),
     };
 
     this.engine = PricingEngineClass.fromDict(engineDict);
@@ -88,15 +81,15 @@ export class CreditManager {
 
   /** Publish new pricing and update the engine in one call. */
   publishPricing(config: PricingConfigData, label?: string | null): void {
-    const { version, models, tools, search, cache, fixed, minBalance } = config;
+    const { models, tools, search, cache, fixed, minBalance, plans } = config;
     const raw: Record<string, unknown> = {
-      version,
       models,
       tools: tools ?? { _default: "tool_calls * 0" },
       search: search ?? {},
       cache: cache ?? {},
       fixed: fixed ?? {},
       minBalance: minBalance ?? 5,
+      ...(plans ? { plans } : {}),
     };
     this.engine = PricingEngineClass.fromDict(raw);
     void this.store.setActivePricing(config, label);

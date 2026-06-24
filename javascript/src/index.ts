@@ -29,7 +29,6 @@ export type {
   GetUserPlanResult,
   PlanDefinition,
   PricingConfigData,
-  PricingConfigV2,
   PricingConfigResult,
   RefundResult,
   ReserveResult,

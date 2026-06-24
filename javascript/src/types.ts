@@ -10,15 +10,15 @@ export interface CreditMetadata {
   [key: string]: unknown;
 }
 
-/** Schema for a versioned pricing configuration. */
+/** Schema for a pricing configuration. */
 export interface PricingConfigData {
-  version: number;
   models: Record<string, string>;
   tools?: Record<string, string> | null;
   search?: Record<string, string> | null;
   cache?: Record<string, string> | null;
   fixed?: Record<string, number> | null;
   minBalance?: number | null;
+  plans?: Record<string, PlanDefinition> | null;
 }
 
 /** Current credit balance for a user. */
@@ -79,12 +79,6 @@ export interface PlanDefinition {
   freeAllowance: number;
   rateOverrides?: Record<string, string> | null;
   features?: Record<string, boolean> | null;
-}
-
-/** Version 2 pricing config with optional plan definitions. */
-export interface PricingConfigV2 extends PricingConfigData {
-  version: 2;
-  plans?: Record<string, PlanDefinition> | null;
 }
 
 /** Result of checking plan allowance. */

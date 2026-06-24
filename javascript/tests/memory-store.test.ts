@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryStore } from "../src/stores/memory-store.js";
-import type { PlanDefinition, PricingConfigData } from "../src/types.js";
+import type { PricingConfigData } from "../src/types.js";
 
 describe("MemoryStore", () => {
   let store: MemoryStore;
@@ -107,7 +107,6 @@ describe("MemoryStore", () => {
 
     it("stores and retrieves pricing config", async () => {
       const config: PricingConfigData = {
-        version: 1,
         models: { "gpt-4": "input_tokens * 0.01" },
       };
       await store.setActivePricing(config);
@@ -117,7 +116,7 @@ describe("MemoryStore", () => {
     });
 
     it("increments version on each set", async () => {
-      const config: PricingConfigData = { version: 1, models: { a: "1" } };
+      const config: PricingConfigData = { models: { a: "1" } };
       const id1 = await store.setActivePricing(config);
       const id2 = await store.setActivePricing(config);
       expect(id1).not.toBe(id2);
@@ -133,15 +132,14 @@ describe("MemoryStore", () => {
     });
 
     it("setUserPlan and getUserPlan round-trips", async () => {
-      // Seed plan definition via v2 pricing config
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      // Seed plan definition via pricing config
+      const config: PricingConfigData = {
         models: { _default: "1" },
         plans: {
           free: { id: "plan-free", name: "Free Plan", freeAllowance: 100 },
         },
       };
-      await store.setActivePricing(v2Config);
+      await store.setActivePricing(config);
 
       await store.setUserPlan("user-1", "plan-free");
       const result = await store.getUserPlan("user-1");
@@ -151,14 +149,13 @@ describe("MemoryStore", () => {
     });
 
     it("checkAllowance returns remaining allowance", async () => {
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      const config: PricingConfigData = {
         models: { _default: "1" },
         plans: {
           pro: { id: "plan-pro", name: "Pro Plan", freeAllowance: 500 },
         },
       };
-      await store.setActivePricing(v2Config);
+      await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-pro");
 
       const allowance = await store.checkAllowance("user-1");
@@ -174,14 +171,13 @@ describe("MemoryStore", () => {
     });
 
     it("incrementUsageWindow reduces remaining allowance", async () => {
-      const v2Config: PricingConfigData & { plans: Record<string, PlanDefinition> } = {
-        version: 2,
+      const config: PricingConfigData = {
         models: { _default: "1" },
         plans: {
           basic: { id: "plan-basic", name: "Basic", freeAllowance: 200 },
         },
       };
-      await store.setActivePricing(v2Config);
+      await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-basic");
 
       await store.incrementUsageWindow("user-1", "plan-basic", 50);

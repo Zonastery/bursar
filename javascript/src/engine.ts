@@ -60,13 +60,13 @@ export class PricingEngine {
   /** Return the pricing config as a typed model. */
   pricingSchema(): PricingConfigData {
     return {
-      version: this.config.version,
       models: { ...this.config.models },
       tools: Object.keys(this.config.tools).length > 0 ? { ...this.config.tools } : null,
       search: Object.keys(this.config.search).length > 0 ? { ...this.config.search } : null,
       cache: Object.keys(this.config.cache).length > 0 ? { ...this.config.cache } : null,
       fixed: Object.keys(this.config.fixed).length > 0 ? { ...this.config.fixed } : null,
       minBalance: this.config.minBalance,
+      plans: this.config.plans ? { ...this.config.plans } : null,
     };
   }
 
@@ -113,7 +113,7 @@ export class PricingEngine {
   }
 
   private calcModel(modelName: string | null, variables: Record<string, number>): number {
-    const name = (modelName === null || modelName === "none") ? "_default" : modelName;
+    const name = modelName === null || modelName === "none" ? "_default" : modelName;
     let expr: string | undefined;
 
     if (name in this.config.models) {

@@ -3,7 +3,6 @@ import { loadConfigFromDict } from "../src/config.js";
 import { ConfigError } from "../src/errors.js";
 
 const VALID_CONFIG = {
-  version: 1,
   models: { "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   tools: { _default: "tool_calls * 5 / 1000" },
   search: { costs: "search_queries * 0.5" },
@@ -15,51 +14,44 @@ const VALID_CONFIG = {
 describe("loadConfigFromDict", () => {
   it("loads a valid config", () => {
     const config = loadConfigFromDict(VALID_CONFIG);
-    expect(config.version).toBe(1);
     expect(config.models["gpt-4"]).toBeTruthy();
     expect(config.minBalance).toBe(10);
     expect(config.tools["_default"]).toBe("tool_calls * 5 / 1000");
     expect(config.fixed["batch_process"]).toBe(50);
   });
 
-  it("rejects missing version", () => {
-    expect(() => loadConfigFromDict({ models: { a: "1" } } as any)).toThrow(ConfigError);
-  });
-
-  it("rejects unsupported version", () => {
-    expect(() => loadConfigFromDict({ version: 2, models: { a: "1" } })).toThrow(ConfigError);
-  });
-
   it("rejects missing models", () => {
-    expect(() => loadConfigFromDict({ version: 1 } as any)).toThrow(ConfigError);
+    expect(() => loadConfigFromDict({} as any)).toThrow(ConfigError);
   });
 
   it("rejects empty models", () => {
-    expect(() => loadConfigFromDict({ version: 1, models: {} })).toThrow(ConfigError);
+    expect(() => loadConfigFromDict({ models: {} })).toThrow(ConfigError);
   });
 
   it("rejects invalid expressions in models", () => {
-    expect(() => loadConfigFromDict({
-      version: 1,
-      models: { "gpt-4": "invalid_expr @" },
-    })).toThrow(ConfigError);
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "invalid_expr @" },
+      }),
+    ).toThrow(ConfigError);
   });
 
   it("rejects invalid expressions in tools", () => {
-    expect(() => loadConfigFromDict({
-      version: 1,
-      models: { "gpt-4": "input_tokens * 0.01" },
-      tools: { _default: "bad || expr" },
-    })).toThrow(ConfigError);
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.01" },
+        tools: { _default: "bad || expr" },
+      }),
+    ).toThrow(ConfigError);
   });
 
   it("applies default for missing tools", () => {
-    const config = loadConfigFromDict({ version: 1, models: { a: "input_tokens * 1" } });
+    const config = loadConfigFromDict({ models: { a: "input_tokens * 1" } });
     expect(config.tools["_default"]).toBe("tool_calls * 0");
   });
 
   it("applies defaults for missing optional fields", () => {
-    const config = loadConfigFromDict({ version: 1, models: { a: "input_tokens * 1" } });
+    const config = loadConfigFromDict({ models: { a: "input_tokens * 1" } });
     expect(config.minBalance).toBe(5);
     expect(config.search).toEqual({});
     expect(config.cache).toEqual({});
@@ -67,10 +59,11 @@ describe("loadConfigFromDict", () => {
   });
 
   it("rejects negative minBalance", () => {
-    expect(() => loadConfigFromDict({
-      version: 1,
-      models: { a: "1" },
-      minBalance: -1,
-    })).toThrow(ConfigError);
+    expect(() =>
+      loadConfigFromDict({
+        models: { a: "1" },
+        minBalance: -1,
+      }),
+    ).toThrow(ConfigError);
   });
 });

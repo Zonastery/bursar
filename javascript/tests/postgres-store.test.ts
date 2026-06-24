@@ -28,9 +28,10 @@ describe("PostgresStore", () => {
   });
 
   it("getBalance parses row result", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([
-      { user_id: "user-1", balance: 100, lifetime_purchased: 200 },
-    ]));
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([{ user_id: "user-1", balance: 100, lifetime_purchased: 200 }]),
+    );
     const result = await store.getBalance("user-1");
     expect(result.balance).toBe(100);
     expect(result.lifetimePurchased).toBe(200);
@@ -44,9 +45,12 @@ describe("PostgresStore", () => {
   });
 
   it("addCredits parses row result", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([
-      { id: "tx-1", user_id: "user-1", amount: 100, new_balance: 200, lifetime_purchased: 500 },
-    ]));
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([
+        { id: "tx-1", user_id: "user-1", amount: 100, new_balance: 200, lifetime_purchased: 500 },
+      ]),
+    );
     const result = await store.addCredits("user-1", 100);
     expect(result.transactionId).toBe("tx-1");
     expect(result.newBalance).toBe(200);
@@ -59,18 +63,22 @@ describe("PostgresStore", () => {
   });
 
   it("reserveCredits parses row result", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([
-      { reservation_id: "res-1", user_id: "user-1", amount: 50, balance: 150, reserved: 50 },
-    ]));
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([
+        { reservation_id: "res-1", user_id: "user-1", amount: 50, balance: 150, reserved: 50 },
+      ]),
+    );
     const result = await store.reserveCredits("user-1", 50, "usage");
     expect(result.reservationId).toBe("res-1");
     expect(result.amount).toBe(50);
   });
 
   it("reserveCredits maps error result", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([
-      { error: "insufficient_credits" },
-    ]));
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([{ error: "insufficient_credits" }]),
+    );
     const result = await store.reserveCredits("user-1", 50, "usage");
     expect(result.error).toBe("insufficient_credits");
   });
@@ -82,9 +90,12 @@ describe("PostgresStore", () => {
   });
 
   it("deductCredits parses row result", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([
-      { id: "tx-1", user_id: "user-1", amount: -50, new_balance: 50, idempotent: false },
-    ]));
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([
+        { id: "tx-1", user_id: "user-1", amount: -50, new_balance: 50, idempotent: false },
+      ]),
+    );
     const result = await store.deductCredits("user-1", "rid", 50);
     expect(result.transactionId).toBe("tx-1");
     expect(result.amount).toBe(-50);
@@ -99,7 +110,7 @@ describe("PostgresStore", () => {
 
   it("setActivePricing returns empty id for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    const result = await store.setActivePricing({ version: 1, models: { a: "1" } });
+    const result = await store.setActivePricing({ models: { a: "1" } });
     expect(result).toBe("");
   });
 });

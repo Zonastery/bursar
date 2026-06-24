@@ -40,7 +40,25 @@ const sidebars: SidebarsConfig = {
     'storage-backends',
     'cli',
     'architecture',
+    {
+      type: 'category',
+      label: 'Notebooks',
+      link: {type: 'generated-index', slug: 'notebooks'},
+      items: [
+        'notebooks/pricing_basics',
+        'notebooks/credit_lifecycle',
+        'notebooks/plans_and_allowances',
+        'notebooks/analytics',
+        'notebooks/spend_caps',
+        'notebooks/teams',
+        'notebooks/events',
+        'notebooks/custom_store',
+        'notebooks/expression_evaluator',
+        'notebooks/credit_expiry',
+      ],
+    },
   ],
 };
+
 
 export default sidebars;
