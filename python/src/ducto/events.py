@@ -18,9 +18,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,7 @@ CREDIT_EVENT_TYPES = frozenset(
 CreditEventType = str
 
 
-@dataclass
-class CreditEvent:
+class CreditEvent(BaseModel):
     """A typed credit lifecycle event."""
 
     type: CreditEventType

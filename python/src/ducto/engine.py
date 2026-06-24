@@ -5,6 +5,8 @@ package. It loads a validated ``PricingConfig`` from a dict or DB,
 then calculates credit costs from ``UsageMetrics``.
 """
 
+from typing import Any
+
 from ducto.breakdown import CostBreakdown
 from ducto.config import PricingConfig, load_config_from_dict
 from ducto.expr import evaluate_expression
@@ -38,7 +40,7 @@ class PricingEngine:
         self._config = config
 
     @classmethod
-    def from_dict(cls, data: dict) -> "PricingEngine":
+    def from_dict(cls, data: dict[str, Any]) -> "PricingEngine":
         """Load engine from a config dictionary.
 
         Args:

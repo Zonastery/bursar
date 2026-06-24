@@ -8,7 +8,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ducto.interface.supabase import HttpxSupabaseStore
@@ -92,7 +92,7 @@ def _migrate(args: list[str]) -> None:
         sys.exit(1)
 
 
-def _load_pricing_file(filepath: str) -> dict:
+def _load_pricing_file(filepath: str) -> dict[str, Any]:
     """Read a JSON or YAML pricing config file."""
     if filepath.endswith((".yaml", ".yml")):
         try:

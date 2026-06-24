@@ -1,14 +1,17 @@
 """Aggregated cost breakdown produced by ``PricingEngine.calculate()``.
 
-The ``CostBreakdown`` dataclass holds per-category credit costs and
-computes a ``total`` in ``__post_init__``.
+The ``CostBreakdown`` model holds per-category credit costs and
+computes a ``total`` via a model validator.
 """
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 
-@dataclass
-class CostBreakdown:
+class CostBreakdown(BaseModel):
     """Granular credit cost report for a usage event or batch.
 
     ``total`` is automatically computed from the component fields
@@ -21,10 +24,12 @@ class CostBreakdown:
     cache_savings: float = 0.0
     fixed_credits: float = 0.0
     total: float = 0.0
-    breakdown: dict = field(default_factory=dict)
+    breakdown: dict[str, Any] = Field(default_factory=dict)
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _compute_total(self) -> CostBreakdown:
         self.total = max(
             0.0,
             self.model_credits + self.tool_credits + self.search_credits + self.fixed_credits + self.cache_savings,
         )
+        return self

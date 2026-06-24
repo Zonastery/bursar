@@ -63,6 +63,34 @@ class _ReservationRecord(BaseModel):
     metadata: dict[str, Any] = {}
 
 
+class _UsageWindowRecord(BaseModel):
+    """Internal usage window record for MemoryStore."""
+
+    user_id: str
+    plan_id: str
+    billing_period: str
+    usage: int
+
+
+class _TeamRecord(BaseModel):
+    """Internal team record for MemoryStore."""
+
+    id: str
+    name: str
+    balance: int
+    member_count: int
+    created_at: str
+
+
+class _TeamMemberRecord(BaseModel):
+    """Internal team member record for MemoryStore."""
+
+    user_id: str
+    role: str
+    spend_cap: int | None = None
+    total_spent: int = 0
+
+
 class MemoryStore(CreditStore):
     """Credit store backed by in-memory dicts. Zero dependencies.
 
@@ -80,9 +108,9 @@ class MemoryStore(CreditStore):
         self._pricing_label: str | None = None
         self._plan_definitions: dict[str, PlanDefinition] = {}
         self._user_plan_map: dict[str, str] = {}
-        self._usage_windows: list[dict] = []
-        self._teams: dict[str, dict] = {}
-        self._team_members: dict[str, dict[str, dict]] = {}
+        self._usage_windows: list[_UsageWindowRecord] = []
+        self._teams: dict[str, _TeamRecord] = {}
+        self._team_members: dict[str, dict[str, _TeamMemberRecord]] = {}
         self._spend_caps: list[SpendCap] = []
 
     # ── Schema management ──────────────────────────────────────────────
@@ -300,9 +328,9 @@ class MemoryStore(CreditStore):
         period_end = period_end.replace(hour=0, minute=0, second=0, microsecond=0)
         billing_period = period_start.strftime("%Y-%m-%d")
         usage = sum(
-            w["usage"]
+            w.usage
             for w in self._usage_windows
-            if w["user_id"] == user_id and w["plan_id"] == plan_id and w["billing_period"] == billing_period
+            if w.user_id == user_id and w.plan_id == plan_id and w.billing_period == billing_period
         )
         return AllowanceResult(
             plan_id=plan_id,
@@ -315,16 +343,16 @@ class MemoryStore(CreditStore):
         now = datetime.now()
         billing_period = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d")
         for w in self._usage_windows:
-            if w["user_id"] == user_id and w["plan_id"] == plan_id and w["billing_period"] == billing_period:
-                w["usage"] += amount
+            if w.user_id == user_id and w.plan_id == plan_id and w.billing_period == billing_period:
+                w.usage += amount
                 return
         self._usage_windows.append(
-            {
-                "user_id": user_id,
-                "plan_id": plan_id,
-                "billing_period": billing_period,
-                "usage": amount,
-            }
+            _UsageWindowRecord(
+                user_id=user_id,
+                plan_id=plan_id,
+                billing_period=billing_period,
+                usage=amount,
+            )
         )
 
     # ── Refunds ─────────────────────────────────────────────────────────
@@ -610,25 +638,25 @@ class MemoryStore(CreditStore):
 
     def create_team(self, name: str, initial_balance: int = 0) -> CreateTeamResult:
         team_id = str(uuid.uuid4())
-        self._teams[team_id] = {
-            "id": team_id,
-            "name": name,
-            "balance": initial_balance,
-            "member_count": 0,
-            "created_at": datetime.now().isoformat(),
-        }
+        self._teams[team_id] = _TeamRecord(
+            id=team_id,
+            name=name,
+            balance=initial_balance,
+            member_count=0,
+            created_at=datetime.now().isoformat(),
+        )
         self._team_members[team_id] = {}
         return CreateTeamResult(team_id=team_id, name=name)
 
     def get_team_balance(self, team_id: str) -> TeamBalanceResult:
         team = self._teams.get(team_id)
-        if not team:
+        if team is None:
             return TeamBalanceResult(team_id=team_id)
         return TeamBalanceResult(
-            team_id=team["id"],
-            name=team["name"],
-            balance=team["balance"],
-            member_count=team["member_count"],
+            team_id=team.id,
+            name=team.name,
+            balance=team.balance,
+            member_count=team.member_count,
         )
 
     def add_team_member(
@@ -641,15 +669,15 @@ class MemoryStore(CreditStore):
         members = self._team_members.get(team_id)
         if members is None:
             return AddTeamMemberResult(team_id=team_id, user_id=user_id, role="")
-        members[user_id] = {
-            "user_id": user_id,
-            "role": role,
-            "spend_cap": spend_cap,
-            "total_spent": 0,
-        }
+        members[user_id] = _TeamMemberRecord(
+            user_id=user_id,
+            role=role,
+            spend_cap=spend_cap,
+            total_spent=0,
+        )
         team = self._teams.get(team_id)
-        if team:
-            team["member_count"] = len(members)
+        if team is not None:
+            team.member_count = len(members)
         return AddTeamMemberResult(team_id=team_id, user_id=user_id, role=role)
 
     def get_team_members(self, team_id: str) -> list[TeamMember]:
@@ -658,10 +686,10 @@ class MemoryStore(CreditStore):
             return []
         return [
             TeamMember(
-                user_id=m["user_id"],
-                role=m["role"],
-                spend_cap=m.get("spend_cap"),
-                total_spent=m["total_spent"],
+                user_id=m.user_id,
+                role=m.role,
+                spend_cap=m.spend_cap,
+                total_spent=m.total_spent,
             )
             for m in members.values()
         ]
@@ -674,7 +702,7 @@ class MemoryStore(CreditStore):
         metadata: CreditMetadata | None = None,
     ) -> TeamDeductionResult:
         team = self._teams.get(team_id)
-        if not team:
+        if team is None:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
@@ -686,40 +714,39 @@ class MemoryStore(CreditStore):
 
         members = self._team_members.get(team_id)
         member = members.get(user_id) if members else None
-        if not member:
+        if member is None:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=0,
-                team_balance_after=team["balance"],
+                team_balance_after=team.balance,
                 error="user_not_in_team",
             )
 
         # Enforce spend cap
-        spend_cap = member.get("spend_cap")
-        if spend_cap is not None and (member["total_spent"] + amount) > spend_cap:
+        if member.spend_cap is not None and (member.total_spent + amount) > member.spend_cap:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=0,
-                team_balance_after=team["balance"],
+                team_balance_after=team.balance,
                 error="spend_cap_exceeded",
             )
 
-        if team["balance"] < amount:
+        if team.balance < amount:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=0,
-                team_balance_after=team["balance"],
+                team_balance_after=team.balance,
                 error="insufficient_team_balance",
             )
 
-        team["balance"] -= amount
-        member["total_spent"] += amount
+        team.balance -= amount
+        member.total_spent += amount
 
         tx_id = str(uuid.uuid4())
         tx_meta = {
@@ -743,5 +770,5 @@ class MemoryStore(CreditStore):
             team_id=team_id,
             user_id=user_id,
             amount=-amount,
-            team_balance_after=team["balance"],
+            team_balance_after=team.balance,
         )
