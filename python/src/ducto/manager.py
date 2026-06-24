@@ -129,7 +129,6 @@ class CreditManager:
     ) -> None:
         """Publish new pricing and update the engine in one call."""
         raw = config.model_dump(exclude_none=True)
-        raw["version"] = config.version
         self._engine = PricingEngine.from_dict(raw)
         self._store.set_active_pricing(config, label=label)
 

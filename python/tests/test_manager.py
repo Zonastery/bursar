@@ -9,7 +9,7 @@ import pytest
 from ducto import CreditManager, UsageMetrics
 from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.interface.memory import MemoryStore
-from ducto.interface.models import PlanDefinition, PricingConfigV2, SpendCap
+from ducto.interface.models import PlanDefinition, PricingConfigData, SpendCap
 from ducto.manager import InsufficientCreditsError, PricingNotLoadedError
 
 
@@ -23,7 +23,6 @@ def manager(store: MemoryStore) -> CreditManager:
     m = CreditManager(store=store)
     m.publish_pricing_from_dict(
         {
-            "version": 1,
             "models": {
                 "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
                 "_default": "input_tokens * 0.001 + output_tokens * 0.003",
@@ -58,7 +57,6 @@ class TestPricingLoading:
         manager = CreditManager(store=store)
         manager.publish_pricing_from_dict(
             {
-                "version": 1,
                 "models": {"_default": "input_tokens * 1"},
             }
         )
@@ -203,8 +201,7 @@ class TestPlanAllowance:
     def test_full_allowance_covers_cost(self) -> None:
         """Deduct with full plan allowance skips balance deduction."""
         store = MemoryStore()
-        v2 = PricingConfigV2(
-            version=2,
+        v2 = PricingConfigData(
             models={"_default": "input_tokens * 1"},
             plans={"free": PlanDefinition(id="free", name="Free", free_allowance=100)},
         )
@@ -226,8 +223,7 @@ class TestPlanAllowance:
     def test_partial_allowance_with_balance_deduct(self) -> None:
         """Plan covers part, remaining deducted from balance."""
         store = MemoryStore()
-        v2 = PricingConfigV2(
-            version=2,
+        v2 = PricingConfigData(
             models={"_default": "input_tokens * 1"},
             plans={"starter": PlanDefinition(id="starter", name="Starter", free_allowance=10)},
         )
@@ -278,7 +274,6 @@ class TestPlanAllowance:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "version": 1,
                 "models": {"_default": "input_tokens * 1"},
             }
         )
@@ -361,7 +356,6 @@ class TestCreditExpiry:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "version": 1,
                 "models": {"_default": "input_tokens * 1"},
             }
         )
@@ -378,7 +372,6 @@ class TestCreditExpiry:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "version": 1,
                 "models": {"_default": "input_tokens * 1"},
             }
         )
@@ -395,7 +388,7 @@ class TestTeamDeduct:
     def test_deduct_team_calculates_cost_and_debits_team(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         team = store.create_team("Team", 500)
         store.add_team_member(team.team_id, "user-1")
 
@@ -407,7 +400,7 @@ class TestTeamDeduct:
     def test_deduct_team_zero_cost_noop(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         team = store.create_team("Team", 500)
         store.add_team_member(team.team_id, "user-1")
 
@@ -424,7 +417,7 @@ class TestTeamDeduct:
     def test_deduct_team_insufficient_balance(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         team = store.create_team("Poor Team", 10)
         store.add_team_member(team.team_id, "user-1")
 
@@ -434,7 +427,7 @@ class TestTeamDeduct:
     def test_deduct_team_user_not_in_team(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         team = store.create_team("Closed Team", 500)
         result = mgr.deduct_team(team.team_id, "user-1", UsageMetrics(input_tokens=10))
         assert result.error == "user_not_in_team"
@@ -444,7 +437,7 @@ class TestSpendCapsManager:
     def test_daily_deny_cap_blocks_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         store.add_credits("user-1", 1000)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=10, action="deny"))
 
@@ -454,7 +447,7 @@ class TestSpendCapsManager:
     def test_warn_action_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         store.add_credits("user-1", 1000)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=10, action="warn"))
 
@@ -464,7 +457,7 @@ class TestSpendCapsManager:
     def test_notify_action_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         store.add_credits("user-1", 1000)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=10, action="notify"))
 
@@ -474,7 +467,7 @@ class TestSpendCapsManager:
     def test_cap_within_limit_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         store.add_credits("user-1", 1000)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=100, action="deny"))
 
@@ -489,7 +482,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -503,7 +496,7 @@ class TestEventSystem:
     def test_emits_added_event(self) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=MemoryStore(), emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
 
         events: list[CreditEvent] = []
         emitter.on("credits.added", lambda e: events.append(e))
@@ -517,7 +510,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -531,7 +524,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=5, action="deny"))
 
@@ -547,7 +540,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
 
         events: list[CreditEvent] = []
         emitter.on("credits.expired", lambda e: events.append(e))
@@ -564,7 +557,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
 
         called: list[int] = []
@@ -583,7 +576,7 @@ class TestEventSystem:
         emitter = CreditEventEmitter()
         store = MemoryStore()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
 
         called: list[str] = []
@@ -601,7 +594,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
         mgr.add_credits("user-1", 100)
         store.set_spend_cap(SpendCap(user_id="user-1", cap_type="daily", limit=5, action="warn"))
 

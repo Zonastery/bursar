@@ -46,7 +46,7 @@ from ducto.manager import CreditManager
 from ducto.engine import PricingEngine
 from ducto.metrics import UsageMetrics, ToolCall
 from ducto.interface.models import (
-    PricingConfigData, PricingConfigV2, PlanDefinition,
+    PricingConfigData, PlanDefinition,
     CreditMetadata,
 )
 from shared import start_postgres_store, cleanup
@@ -69,7 +69,7 @@ from ducto.manager import CreditManager
 from ducto.engine import PricingEngine
 from ducto.metrics import UsageMetrics, ToolCall
 from ducto.interface.models import (
-    PricingConfigData, PricingConfigV2, PlanDefinition,
+    PricingConfigData, PlanDefinition,
     CreditMetadata, SpendCap,
 )
 
@@ -102,7 +102,6 @@ Each model maps to an expression with these variables:
 `tool_calls`, `search_queries`, `search_results` \\
 `web_search_calls`, `code_exec_calls`, `fixed_job`"""),
         code("""config = {
-    "version": 1,
     "models": {
         "gpt-4o": "input_tokens * 5 + output_tokens * 15",
         "claude-sonnet-4": "input_tokens * 3 + output_tokens * 15",
@@ -207,11 +206,10 @@ The v2 pricing config embeds plan definitions alongside model formulas.
 > plan definitions inline."""),
         memory_setup(),
         md("""### Persist plan definitions in pricing config v2"""),
-        code("""# MemoryStore extracts plan definitions from PricingConfigV2
+        code("""# MemoryStore extracts plan definitions from PricingConfigData
 # via set_active_pricing().
 store.set_active_pricing(
-    PricingConfigV2(
-        version=2,
+    PricingConfigData(
         models={
             "gpt-4o": "input_tokens * 5 + output_tokens * 15",
         },
@@ -445,7 +443,6 @@ manager.add_credits(user, 500)
 
 print("\\n--- deduct (end-to-end) ---")
 engine = PricingEngine.from_dict({
-    "version": 1,
     "models": {"_default": "input_tokens * 1"},
 })
 manager = CreditManager(store, engine=engine, emitter=emitter)

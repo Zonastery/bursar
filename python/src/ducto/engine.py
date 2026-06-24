@@ -10,7 +10,7 @@ from typing import Any
 from ducto.breakdown import CostBreakdown
 from ducto.config import PricingConfig, load_config_from_dict
 from ducto.expr import evaluate_expression
-from ducto.interface.models import PricingConfigData, PricingConfigV2
+from ducto.interface.models import PricingConfigData
 from ducto.metrics import UsageMetrics
 
 
@@ -25,7 +25,6 @@ class PricingEngine:
     Usage::
 
         engine = PricingEngine.from_dict({
-            "version": 1,
             "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
         })
         result = engine.calculate(UsageMetrics(
@@ -36,7 +35,7 @@ class PricingEngine:
         print(result.total)  # 35.0
     """
 
-    def __init__(self, config: PricingConfig | PricingConfigV2) -> None:
+    def __init__(self, config: PricingConfig) -> None:
         self._config = config
 
     @classmethod
@@ -116,13 +115,13 @@ class PricingEngine:
             ``PricingConfigData`` with all pricing sections and expressions.
         """
         return PricingConfigData(
-            version=self._config.version,
             models=dict(self._config.models),
             tools=dict(self._config.tools),
             search=dict(self._config.search),
             cache=dict(self._config.cache),
             min_balance=self._config.min_balance,
             fixed=dict(self._config.fixed),
+            plans=self._config.plans,
         )
 
     @property

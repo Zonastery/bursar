@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from ducto import ConfigError, CreditManager, MemoryStore
-from ducto.interface.models import PlanDefinition, PricingConfigData, PricingConfigV2, SpendCap
+from ducto.interface.models import PlanDefinition, PricingConfigData, SpendCap
 
 
 def test_get_pricing_when_none() -> None:
@@ -19,7 +19,6 @@ def test_get_pricing_when_none() -> None:
 def test_set_and_get_pricing() -> None:
     store = MemoryStore()
     config = PricingConfigData(
-        version=1,
         models={"gpt-4": "input_tokens * 0.01"},
     )
     returned_id = store.set_active_pricing(config, label="v1")
@@ -32,10 +31,10 @@ def test_set_and_get_pricing() -> None:
 
 def test_set_pricing_replaces_active() -> None:
     store = MemoryStore()
-    c1 = PricingConfigData(version=1, models={"_default": "input_tokens * 1"})
+    c1 = PricingConfigData(models={"_default": "input_tokens * 1"})
     store.set_active_pricing(c1, label="first")
 
-    c2 = PricingConfigData(version=1, models={"_default": "input_tokens * 2"})
+    c2 = PricingConfigData(models={"_default": "input_tokens * 2"})
     store.set_active_pricing(c2, label="second")
 
     result = store.get_active_pricing()
@@ -47,7 +46,7 @@ def test_publish_pricing_from_dict_invalid_data() -> None:
     manager = CreditManager(store=MemoryStore())
 
     with pytest.raises(ConfigError):
-        manager.publish_pricing_from_dict({"version": 1})
+        manager.publish_pricing_from_dict({})
 
 
 def test_load_pricing_file_yaml(tmp_path) -> None:
@@ -57,7 +56,6 @@ def test_load_pricing_file_yaml(tmp_path) -> None:
     f = tmp_path / "pricing.yaml"
     f.write_text("version: 1\nmodels:\n  _default: input_tokens * 1\n")
     data = _load_pricing_file(str(f))
-    assert data["version"] == 1
     assert data["models"]["_default"] == "input_tokens * 1"
 
 
@@ -75,8 +73,7 @@ class TestPlanManagement:
     def test_set_and_get_user_plan(self) -> None:
         store = MemoryStore()
         # Seed plan via v2 config
-        v2 = PricingConfigV2(
-            version=2,
+        v2 = PricingConfigData(
             models={"_default": "1"},
             plans={
                 "pro": PlanDefinition(id="pro", name="Pro Plan", free_allowance=500),
@@ -97,8 +94,7 @@ class TestPlanManagement:
 
     def test_check_allowance_with_allowance(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigV2(
-            version=2,
+        v2 = PricingConfigData(
             models={"_default": "1"},
             plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=200)},
         )
@@ -111,8 +107,7 @@ class TestPlanManagement:
 
     def test_increment_usage_window_reduces_allowance(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigV2(
-            version=2,
+        v2 = PricingConfigData(
             models={"_default": "1"},
             plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=200)},
         )
@@ -338,9 +333,8 @@ def test_load_pricing_file_json(tmp_path) -> None:
     from ducto.__main__ import _load_pricing_file
 
     f = tmp_path / "pricing.json"
-    f.write_text('{"version": 1, "models": {"_default": "input_tokens * 1"}}')
+    f.write_text('{"models": {"_default": "input_tokens * 1"}}')
     data = _load_pricing_file(str(f))
-    assert data["version"] == 1
     assert data["models"]["_default"] == "input_tokens * 1"
 
 

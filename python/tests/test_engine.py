@@ -10,7 +10,6 @@ from ducto.engine import PricingEngine
 from ducto.metrics import ToolCall, UsageMetrics
 
 FULL_PRICING = {
-    "version": 1,
     "models": {
         "claude-opus-4": "input_tokens * 0.005 + output_tokens * 0.015",
         "claude-sonnet-4": "input_tokens * 0.003 + output_tokens * 0.009",
@@ -37,7 +36,6 @@ FULL_PRICING = {
 }
 
 MINIMAL_PRICING = {
-    "version": 1,
     "models": {
         "_default": "input_tokens * 0.001 + output_tokens * 0.003",
     },
@@ -50,7 +48,6 @@ class TestPricingEngineLoading:
     def test_from_dict(self) -> None:
         engine = PricingEngine.from_dict(
             {
-                "version": 1,
                 "models": {"_default": "input_tokens * 1"},
             }
         )
@@ -152,7 +149,6 @@ class TestPricingEngineCalculate:
     def test_model_not_found_and_no_default_raises_error(self) -> None:
         engine = PricingEngine.from_dict(
             {
-                "version": 1,
                 "models": {"gpt-4": "input_tokens * 1"},
             }
         )

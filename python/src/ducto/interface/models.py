@@ -32,18 +32,19 @@ class CreditMetadata(BaseModel, extra="allow"):
 
 
 class PricingConfigData(BaseModel):
-    """Schema for a versioned pricing configuration.
+    """Pricing configuration schema.
 
     Mirrors the YAML config structure used by ``PricingEngine``.
+    Unified format with optional plan definitions — no version field.
     """
 
-    version: int
     models: dict[str, str]
     tools: dict[str, str] = Field(default_factory=lambda: {"_default": "tool_calls * 0"})
     search: dict[str, str] = Field(default_factory=dict)
     cache: dict[str, str] = Field(default_factory=dict)
     fixed: dict[str, int] = Field(default_factory=dict)
     min_balance: int = 5
+    plans: dict[str, PlanDefinition] | None = None
 
 
 # ── Runtime results ───────────────────────────────────────────────────
@@ -123,13 +124,6 @@ class PlanDefinition(BaseModel):
     free_allowance: int = Field(default=0, ge=0)
     rate_overrides: dict[str, str] | None = None
     features: dict[str, bool] | None = None
-
-
-class PricingConfigV2(PricingConfigData):
-    """Version 2 pricing config with optional plan definitions."""
-
-    version: int = 2
-    plans: dict[str, PlanDefinition] | None = None
 
 
 class AllowanceResult(BaseModel):

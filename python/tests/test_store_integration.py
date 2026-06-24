@@ -21,7 +21,6 @@ from ducto.interface.supabase import HttpxSupabaseStore
 # ---------------------------------------------------------------------------
 
 _PRICING = {
-    "version": 1,
     "models": {
         "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
         "_default": "input_tokens * 0.001 + output_tokens * 0.003",
@@ -262,6 +261,6 @@ class TestHttpxSupabaseStoreIntegration:
         from ducto.interface.models import PricingConfigData
 
         self._mock_post(store, {"id": "cfg_1"})
-        config = PricingConfigData(version=1, models={"_default": "1"})
+        config = PricingConfigData(models={"_default": "1"})
         result = store.set_active_pricing(config, label="v1")
         assert result == "cfg_1"
