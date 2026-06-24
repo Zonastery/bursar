@@ -17,7 +17,6 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 
 manager.publishPricingFromDict({
-  version: 2,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
     free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
@@ -33,7 +32,7 @@ Works in Node.js 18+, Bun, and Deno.
 ## Features
 
 - **Safe expression engine** — Recursive descent parser with strict allowlist. `min`, `max`, `if`, `tier`, `clamp`, `ceil`, `floor`, `round`, `percentile`. No eval/Function().
-- **Plan-based pricing (v2)** — Subscription plans with free monthly allowances and rate overrides. Allowance consumed before balance.
+- **Plan-based pricing** — Subscription plans with free monthly allowances and rate overrides. Allowance consumed before balance.
 - **Refunds** — Full and partial credit reversals with duplicate detection.
 - **Credit expiry / TTL** — Time-bound credits with `expiresAt` on `addCredits`. Sweep with dry-run mode.
 - **Team / shared balances** — Separate team credit pools with per-member spend caps.
@@ -72,7 +71,6 @@ Requires Node.js 18+ (native `fetch` for Supabase store).
 import { PricingEngine } from "@apoorwv/ducto";
 
 const engine = PricingEngine.fromDict({
-  version: 1,
   models: {
     "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
     "_default": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)",
@@ -96,7 +94,6 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 
 manager.publishPricingFromDict({
-  version: 2,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
     free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
@@ -137,7 +134,6 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 
 manager.publishPricingFromDict({
-  version: 2,
   models: { "_default": "input_tokens * 1" },
   plans: {
     free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
@@ -207,11 +203,10 @@ emitter.on("credits.low_balance", (e) => sendAlert(e.userId, e.data?.balance));
 
 ## Pricing Configuration
 
-Version 1 example:
+Basic example:
 
 ```json
 {
-  "version": 1,
   "models": {
     "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
     "_default": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)"

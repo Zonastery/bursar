@@ -32,7 +32,7 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 ## Features
 
 - **Safe expression engine** — Python `ast` module with strict allowlist. `min`, `max`, `if`, `tier`, `clamp`, `ceil`, `floor`, `round`, `percentile`. No eval/exec, no attribute access, no imports.
-- **Plan-based pricing (v2)** — Subscription plans with free monthly allowances, rate overrides, and feature flags. Allowance consumed before balance.
+- **Plan-based pricing** — Subscription plans with free monthly allowances, rate overrides, and feature flags. Allowance consumed before balance.
 - **Refunds** — Full and partial credit reversals with duplicate detection and idempotency.
 - **Credit expiry / TTL** — Time-bound credits with `expires_at` on `add_credits`. Sweep with dry-run mode.
 - **Team / shared balances** — Separate team credit pools with per-member spend caps and attribution.
@@ -74,7 +74,6 @@ Requires Python 3.11+.
 from ducto import PricingEngine, UsageMetrics
 
 engine = PricingEngine.from_dict({
-    "version": 1,
     "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
 })
 
@@ -98,7 +97,6 @@ Creates all tables (`user_credits`, `credit_transactions`, `credit_reservations`
 ```bash
 ducto pricing set - <<'JSON'
 {
-  "version": 2,
   "models": { "_default": "input_tokens * 0.01 + output_tokens * 0.03" },
   "plans": {
     "free": { "id": "free", "name": "Free Tier", "free_allowance": 50000 },
@@ -129,11 +127,10 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 
 ## Pricing Configuration
 
-### Version 1 (flat)
+### Basic config
 
 ```json
 {
-  "version": 1,
   "models": {
     "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
     "_default": "input_tokens * 0.001 + output_tokens * 0.003"
@@ -146,11 +143,10 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 }
 ```
 
-### Version 2 (with plans)
+### With plans
 
 ```json
 {
-  "version": 2,
   "models": { "_default": "input_tokens * 0.01 + output_tokens * 0.03" },
   "plans": {
     "free": {

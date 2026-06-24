@@ -25,7 +25,6 @@ import { CreditManager, MemoryStore } from "@apoorwv/ducto";
 const store = new MemoryStore();
 const manager = new CreditManager(store);
 manager.publishPricingFromDict({
-  version: 2,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
     free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
@@ -94,7 +93,7 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 
 ```python
 from ducto import PricingEngine, UsageMetrics
-engine = PricingEngine.from_dict({"version": 1, "models": {"_default": "input_tokens * 0.001"}})
+engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 0.001"}})
 cost = engine.calculate(UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200))
 ```
 
