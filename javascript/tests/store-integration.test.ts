@@ -43,6 +43,8 @@ describe.runIf(DATABASE_URL)("PostgresStore integration", () => {
           CREATE SCHEMA IF NOT EXISTS auth;
           CREATE FUNCTION auth.role() RETURNS text
           LANGUAGE SQL IMMUTABLE AS $func$ SELECT 'service_role'::text $func$;
+          CREATE FUNCTION auth.uid() RETURNS uuid
+          LANGUAGE SQL IMMUTABLE AS $func$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $func$;
         END IF;
       END
       $$;
