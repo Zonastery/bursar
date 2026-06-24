@@ -24,7 +24,14 @@ import { CreditManager, MemoryStore } from "@apoorwv/ducto";
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
-manager.publishPricingFromDict({ version: 1, models: { "gpt-4": "input_tokens * (0.01 / 1000)" } });
+manager.publishPricingFromDict({
+  version: 2,
+  models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
+  plans: {
+    free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
+    pro: { id: "pro", name: "Pro Plan", freeAllowance: 500000 },
+  },
+});
 
 await manager.addCredits("user_abc", 1000);
 await manager.deduct("user_abc", { model: "gpt-4", inputTokens: 500, outputTokens: 200 });
@@ -90,7 +97,3 @@ from ducto import PricingEngine, UsageMetrics
 engine = PricingEngine.from_dict({"version": 1, "models": {"_default": "input_tokens * 0.001"}})
 cost = engine.calculate(UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200))
 ```
-
-## License
-
-MIT

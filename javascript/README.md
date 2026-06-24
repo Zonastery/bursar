@@ -17,17 +17,15 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 
 manager.publishPricingFromDict({
-  version: 1,
-  models: { "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
+  version: 2,
+  models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
+  plans: {
+    free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
+    pro: { id: "pro", name: "Pro Plan", freeAllowance: 500000 },
+  },
 });
 
 await manager.addCredits("user_abc", 1000);
-const result = await manager.deduct("user_abc", {
-  model: "gpt-4",
-  inputTokens: 500,
-  outputTokens: 200,
-});
-console.log(`Deducted ${Math.abs(result.amount)} credits`);
 ```
 
 Works in Node.js 18+, Bun, and Deno.
@@ -98,8 +96,12 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 
 manager.publishPricingFromDict({
-  version: 1,
-  models: { "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
+  version: 2,
+  models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
+  plans: {
+    free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
+    pro: { id: "pro", name: "Pro Plan", freeAllowance: 500000 },
+  },
 });
 
 await manager.addCredits("user_abc", 1000);
