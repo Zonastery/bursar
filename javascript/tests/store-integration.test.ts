@@ -71,7 +71,6 @@ describe.runIf(DATABASE_URL)("PostgresStore integration", () => {
       await pool.query("DELETE FROM public.credit_transactions");
       await pool.query("DELETE FROM public.user_credits");
       await pool.query("DELETE FROM public.credit_team_members");
-      await pool.query("DELETE FROM public.usage_windows");
     }
   });
 
