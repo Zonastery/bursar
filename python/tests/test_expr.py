@@ -146,21 +146,22 @@ def _eval(expr: str) -> float:
 
 def test_in_operator_behavior() -> None:
     """Verify Python 'in' matches JS String(l).includes(String(r))."""
+    # Expression engine returns float (0.0=truthy, 1.0=truthy)
     # JS: String(2).includes(String(20)) = "2".includes("20") = False
-    assert _eval("2 in 20") is False
+    assert not _eval("2 in 20")
     # JS: String(20).includes(String(2)) = "20".includes("2") = True
-    assert _eval("20 in 2") is True
+    assert _eval("20 in 2")
     # JS: String(2.0).includes(String(2)) = "2.0".includes("2") = True
-    assert _eval("2.0 in 2") is True
+    assert _eval("2.0 in 2")
     # JS: String("hello world").includes(String("hello")) = True
-    assert _eval('"hello world" in "hello"') is True
+    assert _eval('"hello world" in "hello"')
     # not in
-    assert _eval("2 not in 20") is True
-    assert _eval("20 not in 2") is False
+    assert _eval("2 not in 20")
+    assert not _eval("20 not in 2")
 
 
 def test_not_precedence() -> None:
     """Verify 'not' binds tighter than comparison (matching JS)."""
-    assert _eval("not 5 > 10") is True  # not (5 > 10) = not False = True
-    assert _eval("not 10 > 5") is False  # not (10 > 5) = not True = False
-    assert _eval("not 5 > 10 and 3 > 1") is True  # (not (5 > 10)) and (3 > 1)
+    assert _eval("not 5 > 10")  # not (5 > 10) = not False = True
+    assert not _eval("not 10 > 5")  # not (10 > 5) = not True = False
+    assert _eval("not 5 > 10 and 3 > 1")  # (not (5 > 10)) and (3 > 1)
