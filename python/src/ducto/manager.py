@@ -1,23 +1,12 @@
 """High-level credit manager.
 
-Orchestrates the full credit lifecycle:
-  calculate -> reserve -> deduct
+Orchestrates the full credit lifecycle: calculate, reserve, deduct.
 
-Example::
-
-    from ducto import CreditManager, UsageMetrics
-    from ducto.interface.supabase import HttpxSupabaseStore
-
+Usage:
     store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
     manager = CreditManager(store=store)
-
-    # One-time setup (creates tables + RPCs)
     manager.setup()
-
-    # Load pricing from store (credit_pricing_config table)
     manager.load_pricing_from_store()
-
-    # Deduct credits for a usage event
     result = manager.deduct(
         user_id="user_abc",
         metrics=UsageMetrics(model="claude-opus-4", input_tokens=500, output_tokens=200),

@@ -15,7 +15,7 @@ if python3 -c "import sphinx; import sphinx_markdown_builder" 2>/dev/null; then
   echo "[python] Running sphinx-apidoc..."
   python3 -m sphinx.ext.apidoc --separate --force -o /tmp/ducto-sphinx "$PYTHON_SRC"
 
-  printf '%s\n' 'ducto API Reference' '""""""""""""""""""' '' '.. toctree::' '   :maxdepth: 2' '' '   modules' > /tmp/ducto-sphinx/index.rst
+  printf '%s\n' 'ducto API Reference' '=====================' ' '.. toctree::' '   :maxdepth: 2' ' 'modules'> /tmp/ducto-sphinx/index.rst
 
   echo "[python] Building markdown..."
   sphinx-build -b markdown -c "$SCRIPT_DIR" /tmp/ducto-sphinx /tmp/ducto-sphinx-out
