@@ -1,6 +1,6 @@
 [project]
 name = "ducto"
-version = "1.0.0"
+version = "1.0.1"
 description = "Declarative credit calculation engine for AI SaaS platforms"
 readme = "README.md"
 requires-python = ">=3.11"
