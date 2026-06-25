@@ -55,6 +55,7 @@ const sidebars: SidebarsConfig = {
         'notebooks/custom_store',
         'notebooks/expression_evaluator',
         'notebooks/credit_expiry',
+        'notebooks/using_the_cli',
       ],
     },
   ],
