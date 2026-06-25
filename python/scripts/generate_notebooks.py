@@ -1523,7 +1523,7 @@ print(f"  Remaining balance: {remaining.balance} credits")"""),
     ]
 
 
-def n11() -> list[dict]:
+def n00() -> list[dict]:
     """11 — Using the ducto CLI."""
     return [
         md("""# Using the ducto CLI
@@ -1798,7 +1798,7 @@ ALL: list[tuple[str, list[dict]]] = [
     ("08_custom_store.ipynb", n08()),
     ("09_expression_evaluator.ipynb", n09()),
     ("10_credit_expiry.ipynb", n10()),
-    ("11_using_the_cli.ipynb", n11()),
+    ("00_using_the_cli.ipynb", n00()),
 ]
 
 

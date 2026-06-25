@@ -45,6 +45,7 @@ const sidebars: SidebarsConfig = {
       label: 'Notebooks',
       link: {type: 'generated-index', slug: 'notebooks'},
       items: [
+        'notebooks/using_the_cli',
         'notebooks/pricing_basics',
         'notebooks/credit_lifecycle',
         'notebooks/plans_and_allowances',
@@ -55,7 +56,6 @@ const sidebars: SidebarsConfig = {
         'notebooks/custom_store',
         'notebooks/expression_evaluator',
         'notebooks/credit_expiry',
-        'notebooks/using_the_cli',
       ],
     },
   ],
