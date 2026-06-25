@@ -39,7 +39,7 @@
   "bugs": {
     "url": "https://github.com/apoorwv/ducto/issues"
   },
-  "homepage": "https://github.com/apoorwv/ducto#readme",
+  "homepage": "https://apoorwv.github.io/ducto/",
   "license": "MIT",
   "devDependencies": {
     "@eslint/js": "^10.0.1",

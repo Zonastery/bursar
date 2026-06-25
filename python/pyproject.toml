@@ -22,9 +22,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/apoorwv/ducto"
+Homepage = "https://apoorwv.github.io/ducto/"
 Source = "https://github.com/apoorwv/ducto"
-Documentation = "https://github.com/apoorwv/ducto#readme"
+Documentation = "https://apoorwv.github.io/ducto/"
 Issues = "https://github.com/apoorwv/ducto/issues"
 
 [build-system]
