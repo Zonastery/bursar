@@ -10,19 +10,21 @@ import { MemoryStore } from "@apoorwv/ducto";
 const store = new MemoryStore();
 ```
 
-Full `CreditStore` interface (18 async methods):
+Full `CreditStore` interface (28 async methods). All money arguments and result fields are `Decimal` (from `decimal.js`):
 
 | Category | Methods |
 |----------|---------|
 | Setup | `setup(databaseUrl?)` |
-| Balances | `getBalance(userId)`, `addCredits(userId, amount, type?, metadata?, expiresAt?)`, `reserveCredits(userId, amount, opType?, metadata?, minBalance?)`, `deductCredits(userId, reservationId, amount, idempotencyKey?, metadata?)` |
+| Balances | `getBalance(userId)`, `addCredits(userId, amount, type?, metadata?, expiresAt?)`, `deductWithAllowance(userId, amount, options?)`, `reserveCredits(userId, amount, opType?, metadata?, minBalance?)`, `deductCredits(userId, reservationId, amount, idempotencyKey?, metadata?)` |
 | Pricing | `getActivePricing()`, `setActivePricing(config, label?)` |
-| Plans | `getUserPlan(userId)`, `setUserPlan(userId, planId)`, `checkAllowance(userId)`, `incrementUsageWindow(userId, planId, amount)` |
+| Plans | `getUserPlan(userId)`, `setUserPlan(userId, planId)`, `checkFeature(userId, feature)`, `checkAllowance(userId)`, `incrementUsageWindow(userId, planId, amount)` |
 | Spend caps | `checkSpendCap(userId, model?, amount?)` |
 | Refunds | `refundCredits(transactionId, amount?, reason?, metadata?)` |
 | Expiry | `sweepExpiredCredits(dryRun?)` |
-| Analytics | `spendByUser(start, end)`, `spendByModel(start, end)`, `topUsers(limit, start, end)`, `dailySpend(start, end)`, `aggregateStats(start, end)` |
-| Teams | `createTeam(name, initialBalance?)`, `getTeamBalance(teamId)`, `addTeamMember(teamId, userId, role?, spendCap?)`, `getTeamMembers(teamId)`, `deductTeam(teamId, userId, amount, metadata?)` |
+| Analytics | `spendByUser(start, end)`, `spendByModel(start, end)`, `topUsers(limit, start, end)`, `dailySpend(start, end)`, `aggregateStats(start, end)`, `listUserTransactions(userId, options?)`, `listUsageEvents(userId, options?)` |
+| Teams | `createTeam(name, initialBalance?)`, `getTeamBalance(teamId)`, `addTeamMember(teamId, userId, role?, spendCap?)`, `getTeamMembers(teamId)`, `deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` |
+
+`deductWithAllowance(userId, amount, options?)` is the atomic deduction path used by `CreditManager.deduct()`; `options` is `{ idempotencyKey?, minBalance?, model?, metadata? }`. Postgres `NUMERIC` values arrive as strings and are parsed back into `Decimal`, so credit amounts never round-trip through binary `number`.
 
 ## HttpxSupabaseStore
 
@@ -55,14 +57,26 @@ Delegates all operations to Postgres RPC functions via `callproc`.
 
 Implement the `CreditStore` interface:
 
+Money is `Decimal` (from `decimal.js`), not `number`:
+
 ```typescript
-import type { CreditStore, ReserveResult, DeductionResult, BalanceResult, AddCreditsResult } from "@apoorwv/ducto";
+import Decimal from "decimal.js";
+import type {
+  CreditStore,
+  DeductWithAllowanceOptions,
+  DeductionResult,
+  BalanceResult,
+  AddCreditsResult,
+} from "@apoorwv/ducto";
 
 class MyStore implements CreditStore {
   async getBalance(userId: string): Promise<BalanceResult> { ... }
-  async addCredits(userId: string, amount: number, ...): Promise<AddCreditsResult> { ... }
-  async reserveCredits(userId: string, amount: number, ...): Promise<ReserveResult> { ... }
-  async deductCredits(userId: string, reservationId: string, amount: number): Promise<DeductionResult> { ... }
-  // ... 14 more methods (see CreditStore interface)
+  async addCredits(userId: string, amount: Decimal, ...): Promise<AddCreditsResult> { ... }
+  async deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<DeductionResult> { ... }
+  // ... the remaining methods (see the CreditStore interface)
 }
 ```

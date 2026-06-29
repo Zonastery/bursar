@@ -15,7 +15,11 @@ store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
 manager = CreditManager(store=store)
 manager.load_pricing_from_store()
 
-manager.add_credits("user_abc", 1000)
+from decimal import Decimal
+
+manager.add_credits("user_abc", Decimal("1000"))
+# deduct() calculates the cost (a fractional Decimal — sub-credit costs are NOT
+# truncated) and charges it atomically in a single server-side transaction.
 manager.deduct("user_abc", UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200))
 ```
 
@@ -33,7 +37,10 @@ manager.publishPricingFromDict({
   },
 });
 
+// Amounts accept a number or a decimal.js Decimal; money is tracked as Decimal
+// internally (no float drift) and sub-credit costs are charged in full.
 await manager.addCredits("user_abc", 1000);
+// deduct() calculates the fractional cost and charges it atomically.
 await manager.deduct("user_abc", { model: "gpt-4", inputTokens: 500, outputTokens: 200 });
 ```
 
@@ -76,7 +83,10 @@ npm install @apoorwv/ducto  # TypeScript
 ducto migrate "postgresql://user:pass@host:5432/db"
 ```
 
-Creates 10 tables/RPC groups for credits, pricing, plans, refunds, expiry, analytics, teams, and spend caps.
+Applies 15 SQL migrations — tables and RPCs for credits (including the atomic
+`deduct_with_allowance` deduction), pricing versions, plans, refunds, expiry,
+analytics, teams, spend caps, feature entitlements, transaction/usage listing,
+and `NUMERIC` (fractional) money columns.
 
 ### 2. Pricing version management
 
@@ -108,8 +118,12 @@ ducto pricing validate pricing.json
 ### 3. Deduct credits
 
 ```python
-manager.add_credits("user_abc", 5000)
+from decimal import Decimal
+
+manager.add_credits("user_abc", Decimal("5000"))
 result = manager.deduct("user_abc", UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200))
+# amount / balance_after are Decimal; allowance_consumed reports any free
+# allowance applied. The whole deduction is one atomic, idempotency-keyable RPC.
 print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 ```
 

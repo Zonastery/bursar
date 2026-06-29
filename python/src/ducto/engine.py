@@ -3,20 +3,31 @@
 The ``PricingEngine`` class is the main entry point for the ducto
 package. It loads a validated ``PricingConfig`` from a dict or DB,
 then calculates credit costs from ``UsageMetrics``.
+
+Money safety (REFACTOR_CONTRACT §1): every cost is computed in
+:class:`decimal.Decimal`. Components and the total are quantized to 4 dp
+ROUND_HALF_UP at this boundary; the total is the single source of truth and
+is clamped to ``>= 0`` exactly once. There is **no** integer truncation of
+costs anywhere -- a 0.4-credit operation costs 0.4, not 0.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from ducto.breakdown import CostBreakdown
 from ducto.config import PricingConfig, load_config_from_dict
 from ducto.expr import evaluate_expression
 from ducto.interface.models import PricingConfigData
-from ducto.metrics import UsageMetrics
+from ducto.metrics import METRIC_VARIABLES, UsageMetrics
+
+__all__ = ["METRIC_VARIABLES", "PricingEngine"]
+
+_QUANTUM = Decimal("0.0001")
 
 
-def _safe_total(value: float) -> float:
-    """Clamp negative values to zero, keeping 2-decimal precision."""
-    return max(0.0, round(value, 2))
+def _q(value: Decimal) -> Decimal:
+    """Quantize a credit amount to 4 dp using ROUND_HALF_UP (contract §1)."""
+    return value.quantize(_QUANTUM, rounding=ROUND_HALF_UP)
 
 
 class PricingEngine:
@@ -32,7 +43,7 @@ class PricingEngine:
             input_tokens=1000,
             output_tokens=2000,
         ))
-        print(result.total)  # 35.0
+        print(result.total)  # Decimal('5.0000')
     """
 
     def __init__(self, config: PricingConfig) -> None:
@@ -61,11 +72,14 @@ class PricingEngine:
             metrics: Usage metrics including model, tokens, tool calls.
 
         Returns:
-            CostBreakdown with per-dimension and total costs.
+            CostBreakdown with per-dimension and total costs, all ``Decimal``
+            quantized to 4 dp. ``total`` is clamped to ``>= 0``.
 
         Raises:
             ValueError: If the model is not found and no ``_default``
                 exists in the config.
+            ExpressionError: If an expression evaluates unsafely (div/mod by
+                zero, non-finite, overflow).
         """
         variables = self._build_variables(metrics)
 
@@ -75,19 +89,16 @@ class PricingEngine:
         cache_savings = self._calc_cache(variables)
         fixed_credits = self._calc_fixed(metrics)
 
-        total = _safe_total(model_credits + tool_credits + search_credits + cache_savings + fixed_credits)
-        model_credits = _safe_total(model_credits)
-        tool_credits = _safe_total(tool_credits)
-        search_credits = _safe_total(search_credits)
-        cache_savings = round(cache_savings, 2)
-        fixed_credits = float(fixed_credits)
+        # Single source of truth: sum in exact Decimal, clamp to >= 0, quantize once.
+        raw_total = model_credits + tool_credits + search_credits + cache_savings + fixed_credits
+        total = _q(max(Decimal(0), raw_total))
 
         return CostBreakdown(
-            model_credits=model_credits,
-            tool_credits=tool_credits,
-            search_credits=search_credits,
-            cache_savings=cache_savings,
-            fixed_credits=fixed_credits,
+            model_credits=_q(model_credits),
+            tool_credits=_q(tool_credits),
+            search_credits=_q(search_credits),
+            cache_savings=_q(cache_savings),
+            fixed_credits=_q(fixed_credits),
             total=total,
             breakdown={
                 "model": metrics.model,
@@ -125,7 +136,7 @@ class PricingEngine:
         )
 
     @property
-    def min_balance(self) -> int:
+    def min_balance(self) -> Decimal:
         """Minimum balance users must keep (prevents spending last N credits)."""
         return self._config.min_balance
 
@@ -149,14 +160,18 @@ class PricingEngine:
             return "_default"
         return None
 
-    def get_fixed_cost(self, job_name: str) -> int | None:
-        """Get the fixed credit cost for a named batch job."""
+    def get_fixed_cost(self, job_name: str) -> Decimal | None:
+        """Get the fixed credit cost for a named batch job.
+
+        Returns ``None`` for an unknown / unconfigured job so callers (the
+        manager) can reject it rather than silently charging 0 (L1).
+        """
         if self._config.fixed and job_name in self._config.fixed:
-            return int(self._config.fixed[job_name])
+            return _q(Decimal(self._config.fixed[job_name]))
         return None
 
-    def _build_variables(self, metrics: UsageMetrics) -> dict[str, float | int]:
-        """Build variable dict from UsageMetrics."""
+    def _build_variables(self, metrics: UsageMetrics) -> dict[str, int]:
+        """Build variable dict from UsageMetrics. Keys == ``METRIC_VARIABLES``."""
         return {
             "input_tokens": metrics.input_tokens,
             "output_tokens": metrics.output_tokens,
@@ -169,7 +184,7 @@ class PricingEngine:
             "code_exec_calls": metrics.code_exec_calls,
         }
 
-    def _calc_model(self, model_name: str | None, variables: dict) -> float:
+    def _calc_model(self, model_name: str | None, variables: dict[str, int]) -> Decimal:
         """Evaluate model expression for the given model name."""
         if model_name is None or model_name == "none":
             model_name = "_default"
@@ -184,7 +199,7 @@ class PricingEngine:
 
         return evaluate_expression(expr, variables)
 
-    def _calc_tools(self, metrics: UsageMetrics, variables: dict) -> float:
+    def _calc_tools(self, metrics: UsageMetrics, variables: dict[str, int]) -> Decimal:
         """Evaluate tool costs.
 
         Uses specific tool formula if available, falls back to _default.
@@ -192,7 +207,7 @@ class PricingEngine:
         """
         tools_config = self._config.tools
         default_expr = tools_config.get("_default", "tool_calls * 0")
-        total = 0.0
+        total = Decimal(0)
 
         tool_names = {t.name for t in metrics.tool_calls}
 
@@ -210,23 +225,23 @@ class PricingEngine:
 
         return total
 
-    def _calc_search(self, variables: dict) -> float:
+    def _calc_search(self, variables: dict[str, int]) -> Decimal:
         """Evaluate search cost expression if configured."""
         if not self._config.search or "costs" not in self._config.search:
-            return 0.0
+            return Decimal(0)
         return evaluate_expression(self._config.search["costs"], variables)
 
-    def _calc_cache(self, variables: dict) -> float:
+    def _calc_cache(self, variables: dict[str, int]) -> Decimal:
         """Evaluate cache discount expression if configured."""
         if not self._config.cache or "discount" not in self._config.cache:
-            return 0.0
+            return Decimal(0)
         return evaluate_expression(self._config.cache["discount"], variables)
 
-    def _calc_fixed(self, metrics: UsageMetrics) -> float:
+    def _calc_fixed(self, metrics: UsageMetrics) -> Decimal:
         """Lookup fixed cost for a batch job, if applicable."""
         if not self._config.fixed or not metrics.fixed_job:
-            return 0.0
+            return Decimal(0)
         job = metrics.fixed_job
         if job in self._config.fixed:
-            return float(self._config.fixed[job])
-        return 0.0
+            return Decimal(self._config.fixed[job])
+        return Decimal(0)

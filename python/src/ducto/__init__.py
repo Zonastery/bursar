@@ -1,6 +1,11 @@
 """ducto — declarative credit calculation engine for AI SaaS platforms."""
 
-__version__ = "0.1.2"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("ducto")
+except PackageNotFoundError:  # pragma: no cover - source checkout without install
+    __version__ = "0.0.0+unknown"
 
 from ducto.breakdown import CostBreakdown
 from ducto.config import ConfigError, PricingConfig

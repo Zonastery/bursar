@@ -1,0 +1,42 @@
+{
+  "_comment": "Cross-SDK parity fixture. Python and JS engines MUST produce byte-identical decimal strings (quantized to 4dp, ROUND_HALF_UP) for every case, or raise for expect_error. Numeric literals in expressions MUST be parsed as exact decimals from their string form (not via binary float). Both core agents load this file; the seed values are authoritative and hand-verified. See REFACTOR_CONTRACT.md §7.",
+  "expression_cases": [
+    {"name": "linear_input", "expr": "input_tokens * 0.001", "vars": {"input_tokens": 1000}, "expected": "1.0000"},
+    {"name": "two_term_rate", "expr": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)", "vars": {"input_tokens": 500, "output_tokens": 200}, "expected": "0.0110"},
+    {"name": "decimal_precision", "expr": "input_tokens * 0.1 + output_tokens * 0.2", "vars": {"input_tokens": 1, "output_tokens": 1}, "expected": "0.3000"},
+    {"name": "sub_one_credit_not_truncated", "expr": "input_tokens * 0.0004", "vars": {"input_tokens": 1000}, "expected": "0.4000"},
+    {"name": "min", "expr": "min(input_tokens, 100)", "vars": {"input_tokens": 500}, "expected": "100.0000"},
+    {"name": "max", "expr": "max(input_tokens, 100)", "vars": {"input_tokens": 50}, "expected": "100.0000"},
+    {"name": "clamp_high", "expr": "clamp(input_tokens, 0, 100)", "vars": {"input_tokens": 500}, "expected": "100.0000"},
+    {"name": "clamp_low", "expr": "clamp(input_tokens, 0, 100)", "vars": {"input_tokens": -5}, "expected": "0.0000"},
+    {"name": "if_true", "expr": "if(input_tokens > 100, 5, 1)", "vars": {"input_tokens": 200}, "expected": "5.0000"},
+    {"name": "if_false", "expr": "if(input_tokens > 100, 5, 1)", "vars": {"input_tokens": 50}, "expected": "1.0000"},
+    {"name": "tier_first", "expr": "tier(input_tokens, 100, 1, 500, 2, 3)", "vars": {"input_tokens": 50}, "expected": "1.0000"},
+    {"name": "tier_middle", "expr": "tier(input_tokens, 100, 1, 500, 2, 3)", "vars": {"input_tokens": 300}, "expected": "2.0000"},
+    {"name": "tier_default", "expr": "tier(input_tokens, 100, 1, 500, 2, 3)", "vars": {"input_tokens": 1000}, "expected": "3.0000"},
+    {"name": "tier_single_pair_default", "expr": "tier(input_tokens, 100, 1, 9)", "vars": {"input_tokens": 150}, "expected": "9.0000"},
+    {"name": "tier_single_pair_hit", "expr": "tier(input_tokens, 100, 1, 9)", "vars": {"input_tokens": 50}, "expected": "1.0000"},
+    {"name": "ceil", "expr": "ceil(input_tokens * 0.0011)", "vars": {"input_tokens": 1000}, "expected": "2.0000"},
+    {"name": "floor", "expr": "floor(input_tokens * 0.0019)", "vars": {"input_tokens": 1000}, "expected": "1.0000"},
+    {"name": "round_half_up", "expr": "round(input_tokens * 0.0025)", "vars": {"input_tokens": 1000}, "expected": "3.0000"},
+
+    {"name": "div_by_zero", "expr": "1 / 0", "vars": {}, "expect_error": true},
+    {"name": "mod_by_zero", "expr": "input_tokens % 0", "vars": {"input_tokens": 5}, "expect_error": true},
+    {"name": "pow_rejected", "expr": "2 ** 3", "vars": {}, "expect_error": true},
+    {"name": "pow_bomb_rejected", "expr": "9 ** 9 ** 9", "vars": {}, "expect_error": true},
+    {"name": "unknown_variable_typo", "expr": "inputtokens * 0.001", "vars": {"input_tokens": 1000}, "expect_error": true},
+    {"name": "proto_identifier_rejected", "expr": "__proto__ * 1", "vars": {"input_tokens": 1}, "expect_error": true},
+    {"name": "constructor_identifier_rejected", "expr": "constructor + input_tokens", "vars": {"input_tokens": 1}, "expect_error": true},
+    {"name": "attribute_access_rejected", "expr": "input_tokens.__class__", "vars": {"input_tokens": 1}, "expect_error": true},
+    {"name": "clamp_wrong_arity", "expr": "clamp(input_tokens)", "vars": {"input_tokens": 1}, "expect_error": true},
+    {"name": "if_wrong_arity", "expr": "if(input_tokens > 0, 5)", "vars": {"input_tokens": 1}, "expect_error": true},
+    {"name": "tier_odd_arity", "expr": "tier(input_tokens, 100, 1, 500, 2)", "vars": {"input_tokens": 50}, "expect_error": true},
+    {"name": "tier_too_few_args", "expr": "tier(input_tokens, 100)", "vars": {"input_tokens": 50}, "expect_error": true},
+    {"name": "percentile_out_of_range", "expr": "percentile(150, 1, 2, 3)", "vars": {}, "expect_error": true}
+  ],
+  "pricing_cases": [
+    {"name": "default_model", "config": {"version": 1, "models": {"_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)"}}, "metrics": {"model": "gpt-4", "input_tokens": 500, "output_tokens": 200}, "expected_total": "0.0110"},
+    {"name": "fractional_total", "config": {"version": 1, "models": {"_default": "input_tokens * 0.001"}}, "metrics": {"model": "gpt-4", "input_tokens": 1500}, "expected_total": "1.5000"},
+    {"name": "per_model_override", "config": {"version": 1, "models": {"gpt-4": "input_tokens * 0.002", "_default": "input_tokens * 0.001"}}, "metrics": {"model": "gpt-4", "input_tokens": 1000}, "expected_total": "2.0000"}
+  ]
+}

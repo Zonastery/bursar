@@ -1,4 +1,7 @@
 import { randomUUID } from "crypto";
+import Decimal from "decimal.js";
+import { quantizeMoney } from "../expr.js";
+import { StoreError } from "../errors.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -11,6 +14,7 @@ import type {
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
+  DeductWithAllowanceOptions,
   GetUserPlanResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
@@ -33,33 +37,54 @@ import type {
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
 
+const ZERO = new Decimal(0);
+
+/** Coerce a presence-or-truthiness feature value per contract §5 (M6). */
+function featurePresent(value: unknown): boolean {
+  // Identity form: numeric 0 / "" count as present. Matches Python
+  // `value is not None and value is not False`. Do NOT use Boolean(value).
+  return value !== null && value !== undefined && value !== false;
+}
+
 interface TransactionRecord {
   id: string;
   userId: string;
-  amount: number;
+  amount: Decimal;
   type: string;
   metadata?: Record<string, unknown>;
   referenceType?: string | null;
   referenceId?: string | null;
-  expiresAt?: string | null;
-  createdAt: string;
+  expiresAt?: Date | null;
+  /** Timestamp at which an expired grant was swept (H4: prevents re-sweep). */
+  sweptAt?: Date | null;
+  createdAt: Date;
 }
 
 interface ReservationRecord {
   id: string;
   userId: string;
-  amount: number;
+  amount: Decimal;
   operationType: string;
   metadata?: Record<string, unknown>;
+  expiresAt: Date;
 }
 
+/** Default reservation TTL (seconds) — matches the SQL `credit_reservations` default. */
+const RESERVATION_TTL_MS = 10 * 60 * 1000;
+
 /**
- * Credit store backed by in-memory dicts.
+ * Credit store backed by in-memory maps.
  * Zero dependencies. Useful for unit testing and local development.
+ *
+ * Money is exact `Decimal` everywhere (contract §1). Because JavaScript is
+ * single-threaded, every mutating method performs its read-modify-write
+ * **synchronously** (no `await` between reading a balance and writing it back),
+ * so a `Promise.all` of concurrent deductions cannot interleave and double-spend
+ * (C2). A test-only injectable clock is exposed for deterministic time tests.
  */
 export class MemoryStore implements CreditStore {
-  private balances = new Map<string, number>();
-  private lifetime = new Map<string, number>();
+  private balances = new Map<string, Decimal>();
+  private lifetime = new Map<string, Decimal>();
   private transactions: TransactionRecord[] = [];
   private reservations = new Map<string, ReservationRecord>();
   private pricingConfig: PricingConfigData | null = null;
@@ -70,17 +95,43 @@ export class MemoryStore implements CreditStore {
     userId: string;
     planId: string;
     billingPeriod: string;
-    usage: number;
+    usage: Decimal;
   }> = [];
   private spendCaps: SpendCap[] = [];
   private teams = new Map<
     string,
-    { id: string; name: string; balance: number; memberCount: number; createdAt: string }
+    { id: string; name: string; balance: Decimal; memberCount: number; createdAt: Date }
   >();
   private teamMembers = new Map<
     string,
-    Map<string, { userId: string; role: string; spendCap: number | null; totalSpent: number }>
+    Map<string, { userId: string; role: string; spendCap: Decimal | null; totalSpent: Decimal }>
   >();
+
+  /**
+   * Injectable clock for deterministic time-dependent tests. Defaults to the
+   * real wall clock. Tests set this to a fixed `Date` to avoid `setTimeout`
+   * sleeps (contract §8).
+   */
+  private clock: () => Date = () => new Date();
+
+  /** Override the clock used for all time comparisons (test-only). */
+  setClock(clock: () => Date): void {
+    this.clock = clock;
+  }
+
+  private now(): Date {
+    return this.clock();
+  }
+
+  private balance(userId: string): Decimal {
+    return this.balances.get(userId) ?? ZERO;
+  }
+
+  /** Billing-period key (UTC month start, YYYY-MM-DD) for the current clock. */
+  private billingPeriod(): string {
+    const now = this.now();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
     return {
@@ -104,62 +155,107 @@ export class MemoryStore implements CreditStore {
   async getBalance(userId: string): Promise<BalanceResult> {
     return {
       userId,
-      balance: this.balances.get(userId) ?? 0,
-      lifetimePurchased: this.lifetime.get(userId) ?? 0,
+      balance: this.balance(userId),
+      lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
     };
   }
 
   async addCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     type = "adjustment",
-    _metadata?: CreditMetadata | null,
+    metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
   ): Promise<AddCreditsResult> {
-    const current = this.balances.get(userId) ?? 0;
-    this.balances.set(userId, current + amount);
+    // L2: reject non-finite amounts always, and non-positive amounts unless this
+    // is an explicit `adjustment` (parity with SQL `credits_add`). A negative or
+    // zero purchase/grant must never drive the balance below the floor.
+    if (!amount.isFinite()) {
+      throw new StoreError(`addCredits: amount must be finite, got ${amount.toString()}`);
+    }
+    if (type !== "adjustment" && amount.lte(0)) {
+      throw new StoreError(
+        `addCredits: ${type} amount must be > 0, got ${amount.toString()} (use type='adjustment' for negative/zero)`,
+      );
+    }
 
-    const lifetimeAdd = type === "purchase" ? amount : 0;
-    this.lifetime.set(userId, (this.lifetime.get(userId) ?? 0) + lifetimeAdd);
+    const amt = quantizeMoney(amount);
+    const current = this.balance(userId);
+    this.balances.set(userId, current.plus(amt));
+
+    const lifetimeAdd = type === "purchase" ? amt : ZERO;
+    this.lifetime.set(userId, (this.lifetime.get(userId) ?? ZERO).plus(lifetimeAdd));
 
     const txId = randomUUID();
     const tx: TransactionRecord = {
       id: txId,
       userId,
-      amount,
+      amount: amt,
       type,
-      createdAt: new Date().toISOString(),
+      metadata: metadata ? this.cleanMetadata(metadata) : undefined,
+      createdAt: this.now(),
+      expiresAt: expiresAt ?? null,
     };
-    if (expiresAt) {
-      tx.expiresAt = expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt);
-    }
     this.transactions.push(tx);
 
     return {
       transactionId: txId,
       userId,
-      amount,
-      newBalance: current + amount,
-      lifetimePurchased: this.lifetime.get(userId) ?? 0,
+      amount: amt,
+      newBalance: this.balance(userId),
+      lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
     };
+  }
+
+  private cleanMetadata(metadata: CreditMetadata): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(metadata)) {
+      if (v != null) out[k] = v;
+    }
+    return out;
+  }
+
+  /** Remove expired reservations for a user (keeps the active-reservation sum honest). */
+  private pruneReservations(userId: string): void {
+    const now = this.now();
+    for (const [id, r] of this.reservations) {
+      if (r.userId === userId && r.expiresAt <= now) {
+        this.reservations.delete(id);
+      }
+    }
   }
 
   async reserveCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     operationType: string,
-    _metadata?: CreditMetadata | null,
-    minBalance = 5,
+    metadata?: CreditMetadata | null,
+    minBalance: Decimal = new Decimal(5),
   ): Promise<ReserveResult> {
-    const balance = this.balances.get(userId) ?? 0;
-
-    let reservedTotal = 0;
-    for (const r of this.reservations.values()) {
-      if (r.userId === userId) reservedTotal += r.amount;
+    // ── critical section (synchronous; no awaits) ──
+    if (!amount.isFinite() || amount.lte(0)) {
+      return {
+        reservationId: "",
+        userId,
+        amount: ZERO,
+        balance: this.balance(userId),
+        reservedTotal: ZERO,
+        error: "invalid_amount",
+      };
     }
 
-    const available = balance - reservedTotal;
-    if (available - amount < minBalance) {
+    this.pruneReservations(userId);
+
+    const balance = this.balance(userId);
+    let reservedTotal = ZERO;
+    for (const r of this.reservations.values()) {
+      if (r.userId === userId) reservedTotal = reservedTotal.plus(r.amount);
+    }
+
+    const available = balance.minus(reservedTotal);
+    // Canonical rule (contract §3): REJECT (do not cap) if reserving the full
+    // amount would push available below min_balance.
+    if (available.minus(amount).lt(minBalance)) {
       return {
         reservationId: "",
         userId,
@@ -171,71 +267,267 @@ export class MemoryStore implements CreditStore {
     }
 
     const rid = randomUUID();
-    this.reservations.set(rid, { id: rid, userId, amount, operationType });
-    return { reservationId: rid, userId, amount, balance, reservedTotal: reservedTotal + amount };
+    this.reservations.set(rid, {
+      id: rid,
+      userId,
+      amount,
+      operationType,
+      metadata: metadata ? this.cleanMetadata(metadata) : undefined,
+      expiresAt: new Date(this.now().getTime() + RESERVATION_TTL_MS),
+    });
+    return {
+      reservationId: rid,
+      userId,
+      amount,
+      balance,
+      reservedTotal: reservedTotal.plus(amount),
+    };
   }
 
   async deductCredits(
     userId: string,
     reservationId: string,
-    amount: number,
+    amount: Decimal,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
+    // ── critical section (synchronous; no awaits) ──
+    // Idempotency-first (user-scoped).
     if (idempotencyKey) {
       const existing = this.transactions.find(
-        (t) => t.metadata && t.metadata["idempotencyKey"] === idempotencyKey,
+        (t) => t.userId === userId && t.metadata?.["idempotencyKey"] === idempotencyKey,
       );
       if (existing) {
         return {
           transactionId: existing.id,
-          userId: existing.userId,
+          userId,
           amount: existing.amount,
-          balanceAfter: this.balances.get(userId) ?? 0,
+          allowanceConsumed: ZERO,
+          balanceAfter: this.balance(userId),
           idempotent: true,
+          capWarning: null,
         };
       }
     }
 
-    const current = this.balances.get(userId) ?? 0;
-    if (current < amount) {
+    if (!amount.isFinite() || amount.lte(0)) {
       return {
         transactionId: "",
         userId,
-        amount,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: this.balance(userId),
+        idempotent: false,
+        capWarning: null,
+        error: "invalid_amount",
+      };
+    }
+
+    // C3: the reservation is the authority on the maximum deductible amount.
+    // It must exist, belong to this user, and be unexpired. Clamp amount to it.
+    const reservation = this.reservations.get(reservationId);
+    if (!reservation || reservation.userId !== userId || reservation.expiresAt <= this.now()) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: this.balance(userId),
+        idempotent: false,
+        capWarning: null,
+        error: "not_found",
+      };
+    }
+
+    const deductAmount = Decimal.min(amount, reservation.amount);
+
+    const current = this.balance(userId);
+    if (current.lt(deductAmount)) {
+      return {
+        transactionId: "",
+        userId,
+        amount: deductAmount.negated(),
+        allowanceConsumed: ZERO,
         balanceAfter: current,
         idempotent: false,
+        capWarning: null,
         error: "insufficient_credits",
       };
     }
 
-    this.balances.set(userId, current - amount);
+    this.balances.set(userId, current.minus(deductAmount));
     this.reservations.delete(reservationId);
 
-    const txMeta: Record<string, unknown> = {};
-    if (metadata) {
-      for (const [k, v] of Object.entries(metadata)) {
-        if (v != null) txMeta[k] = v;
-      }
-    }
+    const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
 
     const txId = randomUUID();
     this.transactions.push({
       id: txId,
       userId,
-      amount: -amount,
+      amount: deductAmount.negated(),
       type: "usage",
       metadata: txMeta,
-      createdAt: new Date().toISOString(),
+      createdAt: this.now(),
     });
 
     return {
       transactionId: txId,
       userId,
-      amount: -amount,
-      balanceAfter: current - amount,
+      amount: deductAmount.negated(),
+      allowanceConsumed: ZERO,
+      balanceAfter: current.minus(deductAmount),
       idempotent: false,
+      capWarning: null,
+    };
+  }
+
+  /**
+   * Atomic "calculate-then-charge" in a single synchronous critical section
+   * (contract §2). Mirrors the SQL `deduct_with_allowance` RPC:
+   * idempotency-first → consume allowance → cap on net → balance floor → debit.
+   * A `deny` cap or floor breach consumes NO allowance.
+   */
+  async deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<DeductionResult> {
+    const idempotencyKey = options?.idempotencyKey ?? null;
+    const minBalance = options?.minBalance ?? ZERO;
+    const model = options?.model ?? null;
+    const metadata = options?.metadata ?? null;
+
+    // ── critical section (synchronous; no awaits) ──
+
+    // Reject non-finite / negative amounts. Zero is a valid no-op charge.
+    if (!amount.isFinite() || amount.lt(0)) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: this.balance(userId),
+        idempotent: false,
+        capWarning: null,
+        error: "invalid_amount",
+      };
+    }
+
+    // (2) Idempotency (user-scoped): replay the original result.
+    if (idempotencyKey) {
+      const existing = this.transactions.find(
+        (t) => t.userId === userId && t.metadata?.["idempotencyKey"] === idempotencyKey,
+      );
+      if (existing) {
+        const consumed = existing.metadata?.["allowanceConsumed"];
+        return {
+          transactionId: existing.id,
+          userId,
+          amount: existing.amount.abs(),
+          allowanceConsumed: consumed instanceof Decimal ? consumed : new Decimal(String(consumed ?? 0)),
+          balanceAfter: this.balance(userId),
+          idempotent: true,
+          capWarning: null,
+        };
+      }
+    }
+
+    const gross = quantizeMoney(amount);
+
+    // (3) Allowance: consume as much of the cost as remaining free allowance covers.
+    let consume = ZERO;
+    const planId = this.userPlanMap.get(userId);
+    const planDef = planId ? this.planDefinitions.get(planId) : undefined;
+    if (planId && planDef) {
+      const billingPeriod = this.billingPeriod();
+      let used = ZERO;
+      for (const w of this.usageWindows) {
+        if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
+          used = used.plus(w.usage);
+        }
+      }
+      const remaining = Decimal.max(ZERO, planDef.freeAllowance.minus(used));
+      consume = Decimal.min(remaining, gross);
+    }
+
+    const net = gross.minus(consume);
+
+    // (4) Spend cap on the NET amount. Deny aborts WITHOUT consuming allowance.
+    let capWarning: string | null = null;
+    const userCaps = this.spendCaps.filter(
+      (c) => c.userId === userId && (c.model == null || c.model === model),
+    );
+    // Deny caps first (most restrictive), then soft caps.
+    const ordered = [...userCaps].sort(
+      (a, b) => (a.action === "deny" ? 0 : 1) - (b.action === "deny" ? 0 : 1),
+    );
+    for (const cap of ordered) {
+      const windowStart = this.capWindowStart(cap.type);
+      const currentSpend = this.spendInWindow(userId, windowStart, cap.model);
+      if (currentSpend.plus(net).gt(cap.limit)) {
+        if (cap.action === "deny") {
+          // Abort: no allowance consumed, no balance change.
+          return {
+            transactionId: "",
+            userId,
+            amount: ZERO,
+            allowanceConsumed: ZERO,
+            balanceAfter: this.balance(userId),
+            idempotent: false,
+            capWarning: null,
+            error: "cap_reached",
+          };
+        }
+        if (capWarning === null) capWarning = cap.action;
+      }
+    }
+
+    // (5) Balance floor on the NET amount.
+    const current = this.balance(userId);
+    if (current.minus(net).lt(minBalance)) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: current,
+        idempotent: false,
+        capWarning: null,
+        error: "insufficient_credits",
+      };
+    }
+
+    // (6) Commit: consume allowance, debit balance, insert ledger row.
+    if (consume.gt(0) && planId) {
+      this.incrementUsageWindowSync(userId, planId, consume);
+    }
+
+    this.balances.set(userId, current.minus(net));
+
+    const txMeta = metadata ? this.cleanMetadata(metadata) : {};
+    if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
+    if (model != null) txMeta["model"] = model;
+    txMeta["allowanceConsumed"] = consume;
+
+    const txId = randomUUID();
+    this.transactions.push({
+      id: txId,
+      userId,
+      amount: net.negated(),
+      type: "usage",
+      metadata: txMeta,
+      createdAt: this.now(),
+    });
+
+    return {
+      transactionId: txId,
+      userId,
+      amount: net,
+      allowanceConsumed: consume,
+      balanceAfter: current.minus(net),
+      idempotent: false,
+      capWarning,
     };
   }
 
@@ -270,19 +562,21 @@ export class MemoryStore implements CreditStore {
       userId,
       planId,
       planName: planDef?.name ?? null,
-      freeAllowance: planDef?.freeAllowance ?? 0,
+      freeAllowance: planDef?.freeAllowance ?? ZERO,
       features: (planDef?.features as Record<string, unknown>) ?? {},
     };
   }
 
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
-    const value = plan.features[feature] ?? null;
+    const present = Object.prototype.hasOwnProperty.call(plan.features, feature);
+    const value = present ? plan.features[feature] : null;
     return {
       userId,
       feature,
       value,
-      hasFeature: value != null && Boolean(value),
+      // M6: presence-vs-truthiness — numeric 0 / "" count as present.
+      hasFeature: present && featurePresent(value),
     };
   }
 
@@ -294,142 +588,193 @@ export class MemoryStore implements CreditStore {
   async checkAllowance(userId: string): Promise<AllowanceResult> {
     const planId = this.userPlanMap.get(userId);
     if (!planId) {
-      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+      return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
     const planDef = this.planDefinitions.get(planId);
     if (!planDef) {
-      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+      return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
-    const now = new Date();
-    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    const now = this.now();
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
     const billingPeriod = periodStart.toISOString().slice(0, 10);
-    const usage = this.usageWindows
-      .filter(
-        (w) => w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod,
-      )
-      .reduce((sum, w) => sum + w.usage, 0);
+    let usage = ZERO;
+    for (const w of this.usageWindows) {
+      if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
+        usage = usage.plus(w.usage);
+      }
+    }
     return {
       planId,
-      allowanceRemaining: Math.max(planDef.freeAllowance - usage, 0),
+      allowanceRemaining: Decimal.max(planDef.freeAllowance.minus(usage), ZERO),
       periodStart: periodStart.toISOString(),
       periodEnd: periodEnd.toISOString(),
     };
   }
 
-  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
-    const now = new Date();
-    const billingPeriod = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  private incrementUsageWindowSync(userId: string, planId: string, amount: Decimal): void {
+    const billingPeriod = this.billingPeriod();
     const existing = this.usageWindows.find(
       (w) => w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod,
     );
     if (existing) {
-      existing.usage += amount;
+      existing.usage = existing.usage.plus(amount);
     } else {
       this.usageWindows.push({ userId, planId, billingPeriod, usage: amount });
     }
+  }
+
+  async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
+    this.incrementUsageWindowSync(userId, planId, amount);
   }
 
   // ── Refunds ──────────────────────────────────────────────────────────
 
   async refundCredits(
     transactionId: string,
-    amount?: number,
+    amount?: Decimal,
     reason?: string,
-    _metadata?: CreditMetadata | null,
+    metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
-    // Find original transaction
+    // ── critical section (synchronous; no awaits) ──
     const origTx = this.transactions.find((t) => t.id === transactionId);
     if (!origTx) {
       return {
         refundTransactionId: "",
         originalTransactionId: transactionId,
         userId: "",
-        amount: 0,
-        newBalance: 0,
-        error: "transaction_not_found",
+        amount: ZERO,
+        newBalance: ZERO,
+        error: "not_found",
       };
     }
 
-    // Check for duplicate refund
-    const isRefunded = this.transactions.some(
-      (t) => t.type === "refund" && t.referenceId === transactionId,
-    );
-    if (isRefunded) {
+    // Only a usage/team_usage debit (negative amount) is refundable. Anything
+    // else (purchase/refund/adjustment/bonus) has zero refundable amount, so any
+    // refund over-refunds (parity with SQL refund RPC).
+    if (
+      (origTx.type !== "usage" && origTx.type !== "team_usage") ||
+      origTx.amount.gte(0)
+    ) {
       return {
         refundTransactionId: "",
         originalTransactionId: transactionId,
         userId: origTx.userId,
-        amount: 0,
-        newBalance: this.balances.get(origTx.userId) ?? 0,
+        amount: ZERO,
+        newBalance: this.balance(origTx.userId),
+        error: "over_refund",
+      };
+    }
+
+    const originalDebit = origTx.amount.abs();
+
+    // Back-compat: an exact duplicate of a prior FULL refund → already_refunded.
+    const fullRefundExists = this.transactions.some(
+      (t) => t.type === "refund" && t.referenceId === transactionId && t.amount.eq(originalDebit),
+    );
+    if (fullRefundExists) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: origTx.userId,
+        amount: ZERO,
+        newBalance: this.balance(origTx.userId),
         error: "already_refunded",
       };
     }
 
-    const refundAmount = amount ?? Math.abs(origTx.amount);
-    const maxRefund = Math.abs(origTx.amount);
-    const actualRefund = Math.min(refundAmount, maxRefund);
+    // Sum prior refunds for cumulative-partial over-refund detection.
+    let priorRefunded = ZERO;
+    for (const t of this.transactions) {
+      if (t.type === "refund" && t.referenceId === transactionId) {
+        priorRefunded = priorRefunded.plus(t.amount);
+      }
+    }
+    const remaining = originalDebit.minus(priorRefunded);
 
-    // Restore balance
-    const current = this.balances.get(origTx.userId) ?? 0;
-    this.balances.set(origTx.userId, current + actualRefund);
+    const refundAmount = quantizeMoney(amount ?? remaining);
+
+    // Over-refund: non-positive request, or one exceeding what remains.
+    if (refundAmount.lte(0) || refundAmount.gt(remaining)) {
+      return {
+        refundTransactionId: "",
+        originalTransactionId: transactionId,
+        userId: origTx.userId,
+        amount: ZERO,
+        newBalance: this.balance(origTx.userId),
+        error: "over_refund",
+      };
+    }
+
+    // Restore balance and append the refund ledger row.
+    const current = this.balance(origTx.userId);
+    this.balances.set(origTx.userId, current.plus(refundAmount));
+
+    const txMeta = metadata ? this.cleanMetadata(metadata) : {};
+    if (reason) txMeta["reason"] = reason;
 
     const txId = randomUUID();
     this.transactions.push({
       id: txId,
       userId: origTx.userId,
-      amount: actualRefund,
+      amount: refundAmount,
       type: "refund",
       referenceType: reason ?? null,
-      referenceId: transactionId as string,
-      metadata: reason ? { reason } : undefined,
-      createdAt: new Date().toISOString(),
+      referenceId: transactionId,
+      metadata: txMeta,
+      createdAt: this.now(),
     });
 
     return {
       refundTransactionId: txId,
       originalTransactionId: transactionId,
       userId: origTx.userId,
-      amount: actualRefund,
-      newBalance: current + actualRefund,
+      amount: refundAmount,
+      newBalance: current.plus(refundAmount),
     };
   }
 
   // ── Credit expiry ─────────────────────────────────────────────────────
 
   async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
-    const now = new Date();
-    const expiredByUser = new Map<string, number>();
+    // ── critical section (synchronous; no awaits) ──
+    const now = this.now();
+    const expiredByUser = new Map<string, Decimal>();
     const expiredTxs: TransactionRecord[] = [];
 
-    // Find all expired grant transactions
+    // Find all expired, not-yet-swept grant transactions.
     for (const tx of this.transactions) {
-      if (tx.expiresAt && (tx.type === "purchase" || tx.type === "adjustment")) {
-        if (new Date(tx.expiresAt) <= now) {
-          const current = expiredByUser.get(tx.userId) ?? 0;
-          expiredByUser.set(tx.userId, current + tx.amount);
+      if (
+        tx.expiresAt &&
+        !tx.sweptAt && // H4: never re-sweep a previously swept grant
+        (tx.type === "purchase" || tx.type === "adjustment")
+      ) {
+        if (tx.expiresAt <= now) {
+          const current = expiredByUser.get(tx.userId) ?? ZERO;
+          expiredByUser.set(tx.userId, current.plus(tx.amount));
           expiredTxs.push(tx);
         }
       }
     }
 
     let expiredCount = 0;
-    let expiredAmount = 0;
+    let expiredAmount = ZERO;
 
     for (const [userId, totalExpired] of expiredByUser) {
-      const currentBalance = this.balances.get(userId) ?? 0;
-      const toExpire = Math.min(totalExpired, currentBalance);
+      const currentBalance = this.balance(userId);
+      const toExpire = Decimal.min(totalExpired, currentBalance);
 
-      if (toExpire > 0) {
+      if (toExpire.gt(0)) {
         expiredCount++;
-        expiredAmount += toExpire;
+        expiredAmount = expiredAmount.plus(toExpire);
 
         if (!dryRun) {
-          this.balances.set(userId, currentBalance - toExpire);
+          this.balances.set(userId, currentBalance.minus(toExpire));
 
-          // Null out expiresAt on swept grants to prevent re-sweeping
+          // H4: mark swept grants so a second sweep reports zero.
           for (const et of expiredTxs) {
             if (et.userId === userId) {
+              et.sweptAt = now;
               et.expiresAt = null;
             }
           }
@@ -438,10 +783,10 @@ export class MemoryStore implements CreditStore {
           this.transactions.push({
             id: txId,
             userId,
-            amount: -toExpire,
+            amount: toExpire.negated(),
             type: "adjustment",
             metadata: { reason: "credit_expired", expiredAmount: toExpire },
-            createdAt: new Date().toISOString(),
+            createdAt: now,
           });
         }
       }
@@ -455,50 +800,53 @@ export class MemoryStore implements CreditStore {
   /** Filter transactions to usage records in the time window. */
   private _usageInWindow(start: Date, end: Date): TransactionRecord[] {
     return this.transactions.filter(
-      (t) =>
-        t.type === "usage" &&
-        t.amount < 0 &&
-        new Date(t.createdAt) >= start &&
-        new Date(t.createdAt) <= end,
+      (t) => t.type === "usage" && t.amount.lt(0) && t.createdAt >= start && t.createdAt <= end,
     );
   }
 
   async spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]> {
     const usage = this._usageInWindow(start, end);
-    const byUser = new Map<string, { total: number; count: number }>();
+    const byUser = new Map<string, { total: Decimal; count: number }>();
     for (const t of usage) {
-      const entry = byUser.get(t.userId) ?? { total: 0, count: 0 };
-      entry.total += Math.abs(t.amount);
+      const entry = byUser.get(t.userId) ?? { total: ZERO, count: 0 };
+      entry.total = entry.total.plus(t.amount.abs());
       entry.count++;
       byUser.set(t.userId, entry);
     }
-    return Array.from(byUser.entries()).map(([userId, { total, count }]) => ({
-      userId,
-      totalSpend: total,
-      transactionCount: count,
-    }));
+    return Array.from(byUser.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([userId, { total, count }]) => ({
+        userId,
+        totalSpend: total,
+        transactionCount: count,
+      }));
   }
 
   async spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]> {
     const usage = this._usageInWindow(start, end);
-    const byModel = new Map<string, { total: number; count: number }>();
+    const byModel = new Map<string, { total: Decimal; count: number }>();
     for (const t of usage) {
       const model = (t.metadata?.model as string) ?? "unknown";
-      const entry = byModel.get(model) ?? { total: 0, count: 0 };
-      entry.total += Math.abs(t.amount);
+      const entry = byModel.get(model) ?? { total: ZERO, count: 0 };
+      entry.total = entry.total.plus(t.amount.abs());
       entry.count++;
       byModel.set(model, entry);
     }
-    return Array.from(byModel.entries()).map(([model, { total, count }]) => ({
-      model,
-      totalSpend: total,
-      transactionCount: count,
-    }));
+    return Array.from(byModel.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([model, { total, count }]) => ({
+        model,
+        totalSpend: total,
+        transactionCount: count,
+      }));
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {
     const byUser = await this.spendByUser(start, end);
-    return byUser.sort((a, b) => b.totalSpend - a.totalSpend).slice(0, limit);
+    return byUser
+      .sort((a, b) => b.totalSpend.comparedTo(a.totalSpend))
+      .slice(0, limit)
+      .map((r) => ({ userId: r.userId, totalSpend: r.totalSpend }));
   }
 
   // ── Transaction listing ─────────────────────────────────────────────
@@ -513,13 +861,13 @@ export class MemoryStore implements CreditStore {
     const filtered = this.transactions.filter((t) => {
       if (t.userId !== userId) return false;
       if (options?.types && !options.types.includes(t.type)) return false;
-      if (options?.fromDate && new Date(t.createdAt) < options.fromDate) return false;
-      if (options?.toDate && new Date(t.createdAt) > options.toDate) return false;
+      if (options?.fromDate && t.createdAt < options.fromDate) return false;
+      if (options?.toDate && t.createdAt > options.toDate) return false;
       return true;
     });
 
     // Sort newest first
-    filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    filtered.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
     const total = filtered.length;
     const items = filtered.slice(offset, offset + limit);
@@ -534,7 +882,7 @@ export class MemoryStore implements CreditStore {
         referenceType: t.referenceType ?? null,
         referenceId: t.referenceId ?? null,
         metadata: (t.metadata as Record<string, unknown> | null) ?? null,
-        createdAt: t.createdAt,
+        createdAt: t.createdAt.toISOString(),
       })),
     };
   }
@@ -546,19 +894,19 @@ export class MemoryStore implements CreditStore {
     let items = this.transactions.filter((t) => t.userId === userId && t.type === "usage");
 
     if (options?.fromDate) {
-      const from = new Date(options.fromDate);
-      items = items.filter((t) => new Date(t.createdAt) >= from);
+      const from = options.fromDate;
+      items = items.filter((t) => t.createdAt >= from);
     }
     if (options?.toDate) {
-      const to = new Date(options.toDate);
-      items = items.filter((t) => new Date(t.createdAt) <= to);
+      const to = options.toDate;
+      items = items.filter((t) => t.createdAt <= to);
     }
 
     const total = items.length;
     const offset = options?.offset ?? 0;
     const limit = options?.limit ?? 50;
     const page = items
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(offset, offset + limit);
 
     return {
@@ -571,7 +919,7 @@ export class MemoryStore implements CreditStore {
         referenceType: t.referenceType ?? null,
         referenceId: t.referenceId ?? null,
         metadata: (t.metadata as Record<string, unknown> | null) ?? null,
-        createdAt: t.createdAt,
+        createdAt: t.createdAt.toISOString(),
       })),
     };
   }
@@ -582,31 +930,33 @@ export class MemoryStore implements CreditStore {
     const usage = this._usageInWindow(start, end);
     if (usage.length === 0) {
       return {
-        totalCreditsConsumed: 0,
+        totalCreditsConsumed: ZERO,
         activeUsers: 0,
-        avgDailySpend: 0,
+        avgDailySpend: ZERO,
         topModel: "",
         topUser: "",
       };
     }
-    const total = usage.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    let total = ZERO;
+    for (const t of usage) total = total.plus(t.amount.abs());
     const activeUsers = new Set(usage.map((t) => t.userId)).size;
-    const days = new Set(usage.map((t) => new Date(t.createdAt).toISOString().slice(0, 10))).size;
-    const avgDailySpend = days > 0 ? Math.trunc(total / days) : 0;
-    const byModel = new Map<string, number>();
-    const byUser = new Map<string, number>();
+    const days = new Set(usage.map((t) => t.createdAt.toISOString().slice(0, 10))).size;
+    // NUMERIC division (no integer truncation) — quantize to 4dp.
+    const avgDailySpend = days > 0 ? quantizeMoney(total.div(days)) : ZERO;
+    const byModel = new Map<string, Decimal>();
+    const byUser = new Map<string, Decimal>();
     for (const t of usage) {
       const model = (t.metadata?.model as string) ?? "unknown";
-      byModel.set(model, (byModel.get(model) ?? 0) + Math.abs(t.amount));
-      byUser.set(t.userId, (byUser.get(t.userId) ?? 0) + Math.abs(t.amount));
+      byModel.set(model, (byModel.get(model) ?? ZERO).plus(t.amount.abs()));
+      byUser.set(t.userId, (byUser.get(t.userId) ?? ZERO).plus(t.amount.abs()));
     }
     const topModel =
       byModel.size > 0
-        ? [...byModel.entries()].reduce((best, curr) => (curr[1] > best[1] ? curr : best))[0]
+        ? [...byModel.entries()].reduce((best, curr) => (curr[1].gt(best[1]) ? curr : best))[0]
         : "";
     const topUser =
       byUser.size > 0
-        ? [...byUser.entries()].reduce((best, curr) => (curr[1] > best[1] ? curr : best))[0]
+        ? [...byUser.entries()].reduce((best, curr) => (curr[1].gt(best[1]) ? curr : best))[0]
         : "";
     return { totalCreditsConsumed: total, activeUsers, avgDailySpend, topModel, topUser };
   }
@@ -618,40 +968,45 @@ export class MemoryStore implements CreditStore {
     this.spendCaps.push(cap);
   }
 
+  private capWindowStart(type: "daily" | "monthly"): Date {
+    const now = this.now();
+    if (type === "daily") {
+      return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    }
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  }
+
+  /** Sum spend (positive magnitude) in a window, optionally restricted to a model. */
+  private spendInWindow(userId: string, windowStart: Date, capModel?: string | null): Decimal {
+    let total = ZERO;
+    for (const t of this.transactions) {
+      if (t.userId !== userId) continue;
+      if (t.type !== "usage" && t.type !== "team_usage") continue;
+      if (t.amount.gte(0)) continue;
+      if (capModel != null && t.metadata?.model !== capModel) continue;
+      if (t.createdAt >= windowStart) total = total.plus(t.amount.abs());
+    }
+    return total;
+  }
+
   async checkSpendCap(
     userId: string,
     model?: string | null,
-    amount?: number,
+    amount?: Decimal,
   ): Promise<CapCheckResult> {
+    const amt = amount ?? ZERO;
     const userCaps = this.spendCaps.filter((c) => c.userId === userId);
     if (userCaps.length === 0) {
-      return { capped: false, currentSpend: 0, limit: 0, action: null };
+      return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
     }
-
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    // Helper: compute spend in a time window
-    const spendInWindow = (windowStart: Date, capModel?: string | null): number => {
-      return this.transactions
-        .filter((t) => {
-          if (t.userId !== userId) return false;
-          if (t.type !== "usage" && t.type !== "team_usage") return false;
-          if (t.amount >= 0) return false;
-          if (capModel != null && t.metadata?.model !== capModel) return false;
-          return new Date(t.createdAt) >= windowStart;
-        })
-        .reduce((sum, t) => sum + Math.abs(t.amount), 0);
-    };
 
     // Check deny caps first — most restrictive
     for (const cap of userCaps) {
       if (cap.model && cap.model !== model) continue;
       if (cap.action !== "deny") continue;
-      const windowStart = cap.type === "daily" ? todayStart : monthStart;
-      const currentSpend = spendInWindow(windowStart, cap.model);
-      if (currentSpend + (amount ?? 0) > cap.limit) {
+      const windowStart = this.capWindowStart(cap.type);
+      const currentSpend = this.spendInWindow(userId, windowStart, cap.model);
+      if (currentSpend.plus(amt).gt(cap.limit)) {
         return {
           capped: true,
           currentSpend,
@@ -666,9 +1021,9 @@ export class MemoryStore implements CreditStore {
     for (const cap of userCaps) {
       if (cap.model && cap.model !== model) continue;
       if (cap.action === "deny") continue;
-      const windowStart = cap.type === "daily" ? todayStart : monthStart;
-      const currentSpend = spendInWindow(windowStart, cap.model);
-      if (currentSpend + (amount ?? 0) > cap.limit) {
+      const windowStart = this.capWindowStart(cap.type);
+      const currentSpend = this.spendInWindow(userId, windowStart, cap.model);
+      if (currentSpend.plus(amt).gt(cap.limit)) {
         return {
           capped: false,
           currentSpend,
@@ -679,19 +1034,19 @@ export class MemoryStore implements CreditStore {
       }
     }
 
-    return { capped: false, currentSpend: 0, limit: 0, action: null };
+    return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
   }
 
   // ── Team/shared balance pools ────────────────────────────────────────
 
-  async createTeam(name: string, initialBalance = 0): Promise<CreateTeamResult> {
+  async createTeam(name: string, initialBalance: Decimal = ZERO): Promise<CreateTeamResult> {
     const teamId = randomUUID();
     this.teams.set(teamId, {
       id: teamId,
       name,
       balance: initialBalance,
       memberCount: 0,
-      createdAt: new Date().toISOString(),
+      createdAt: this.now(),
     });
     this.teamMembers.set(teamId, new Map());
     return { teamId, name };
@@ -700,7 +1055,7 @@ export class MemoryStore implements CreditStore {
   async getTeamBalance(teamId: string): Promise<TeamBalanceResult> {
     const team = this.teams.get(teamId);
     if (!team) {
-      return { teamId, name: "", balance: 0, memberCount: 0 };
+      return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
     return {
       teamId: team.id,
@@ -714,13 +1069,13 @@ export class MemoryStore implements CreditStore {
     teamId: string,
     userId: string,
     role = "member",
-    spendCap?: number | null,
+    spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
     const members = this.teamMembers.get(teamId);
     if (!members) {
       return { teamId, userId, role: "" };
     }
-    members.set(userId, { userId, role, spendCap: spendCap ?? null, totalSpent: 0 });
+    members.set(userId, { userId, role, spendCap: spendCap ?? null, totalSpent: ZERO });
     const team = this.teams.get(teamId);
     if (team) {
       team.memberCount = members.size;
@@ -737,20 +1092,42 @@ export class MemoryStore implements CreditStore {
   async deductTeam(
     teamId: string,
     userId: string,
-    amount: number,
+    amount: Decimal,
     metadata?: CreditMetadata | null,
+    idempotencyKey?: string | null,
   ): Promise<TeamDeductionResult> {
+    // ── critical section (synchronous; no awaits) ──
     const team = this.teams.get(teamId);
     if (!team) {
       return {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
-        teamBalanceAfter: 0,
+        amount: ZERO,
+        teamBalanceAfter: ZERO,
         error: "team_not_found",
       };
     }
+
+    // Idempotency-first (user/team-scoped): replay the original team debit.
+    if (idempotencyKey) {
+      const existing = this.transactions.find(
+        (t) =>
+          t.type === "team_usage" &&
+          t.metadata?.["teamId"] === teamId &&
+          t.metadata?.["idempotencyKey"] === idempotencyKey,
+      );
+      if (existing) {
+        return {
+          transactionId: existing.id,
+          teamId,
+          userId: existing.userId,
+          amount: existing.amount,
+          teamBalanceAfter: team.balance,
+        };
+      }
+    }
+
     const members = this.teamMembers.get(teamId);
     const member = members?.get(userId);
     if (!member) {
@@ -758,58 +1135,81 @@ export class MemoryStore implements CreditStore {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
+        amount: ZERO,
         teamBalanceAfter: team.balance,
         error: "user_not_in_team",
       };
     }
 
-    // Enforce spend cap
-    if (member.spendCap != null && member.totalSpent + amount > member.spendCap) {
+    if (!amount.isFinite() || amount.lte(0)) {
       return {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
+        amount: ZERO,
+        teamBalanceAfter: team.balance,
+        error: "invalid_amount",
+      };
+    }
+
+    // Enforce spend cap
+    if (member.spendCap != null && member.totalSpent.plus(amount).gt(member.spendCap)) {
+      return {
+        transactionId: "",
+        teamId,
+        userId,
+        amount: ZERO,
         teamBalanceAfter: team.balance,
         error: "spend_cap_exceeded",
       };
     }
 
-    if (team.balance < amount) {
+    if (team.balance.lt(amount)) {
       return {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
+        amount: ZERO,
         teamBalanceAfter: team.balance,
         error: "insufficient_team_balance",
       };
     }
 
-    team.balance -= amount;
-    member.totalSpent += amount;
+    team.balance = team.balance.minus(amount);
+    member.totalSpent = member.totalSpent.plus(amount);
+
+    const txMeta: Record<string, unknown> = {
+      ...(metadata ? this.cleanMetadata(metadata) : {}),
+      teamId,
+    };
+    if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
 
     const txId = randomUUID();
     this.transactions.push({
       id: txId,
       userId,
-      amount: -amount,
+      amount: amount.negated(),
       type: "team_usage",
-      metadata: { ...((metadata as Record<string, unknown>) ?? {}), teamId },
-      createdAt: new Date().toISOString(),
+      metadata: txMeta,
+      createdAt: this.now(),
     });
 
-    return { transactionId: txId, teamId, userId, amount: -amount, teamBalanceAfter: team.balance };
+    return {
+      transactionId: txId,
+      teamId,
+      userId,
+      amount: amount.negated(),
+      teamBalanceAfter: team.balance,
+    };
   }
 
   async dailySpend(start: Date, end: Date): Promise<DailySpendRow[]> {
     const usage = this._usageInWindow(start, end);
-    const byDay = new Map<string, { total: number; count: number }>();
+    const byDay = new Map<string, { total: Decimal; count: number }>();
     for (const t of usage) {
-      const date = new Date(t.createdAt).toISOString().slice(0, 10);
-      const entry = byDay.get(date) ?? { total: 0, count: 0 };
-      entry.total += Math.abs(t.amount);
+      const date = t.createdAt.toISOString().slice(0, 10);
+      const entry = byDay.get(date) ?? { total: ZERO, count: 0 };
+      entry.total = entry.total.plus(t.amount.abs());
       entry.count++;
       byDay.set(date, entry);
     }

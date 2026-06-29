@@ -7,18 +7,25 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded PR/branch runs, but NEVER cancel a release (tag) run — a
+# half-cancelled publish desyncs the PyPI/npm registries (audit H13).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Least-privilege default for every job. Jobs that need more (the publish jobs)
+# opt in explicitly.
+permissions:
+  contents: read
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - run: pip install ruff
       - working-directory: python
         run: ruff check src/ tests/ scripts/
@@ -26,65 +33,97 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - run: pip install -e "python/[test,postgres,supabase]"
       - working-directory: python
         run: pyright src/
 
   test:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - name: Install pg_tmp for Postgres integration tests
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql postgresql-client
-          PG_BIN=$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | head -1)
-          if [ -n "$PG_BIN" ]; then echo "$PG_BIN" >> "$GITHUB_PATH"; fi
-          sudo curl -sL -o /usr/local/bin/pg_tmp \
-            https://raw.githubusercontent.com/eradman/ephemeralpg/e6631785b1fd189c4d7a5118ec4f3db018a71212/pg_tmp.sh
-          sudo chmod +x /usr/local/bin/pg_tmp
-      - run: pip install -e "python/[test,postgres,supabase]"
-      - working-directory: python
-        run: pytest
-
-  js-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The advertised support window (README badge: 3.11 | 3.12 | 3.13).
+        python-version: ["3.11", "3.12", "3.13"]
+    # Real Postgres so the store/manager/SQL integration tests RUN (not skip).
+    # A bare container is enough: the conftest.py fixtures bootstrap the `auth`
+    # stubs/roles and apply python/src/ducto/sql/*.sql themselves.
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: ducto_test
-          POSTGRES_USER: ducto
-          POSTGRES_PASSWORD: ducto
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ducto
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+    env:
+      # conftest.py resolves a real Postgres from DATABASE_URL first, then the
+      # legacy DUCTO_TEST_PG_URL. Setting it makes the integration tests
+      # (concurrency / double-spend / idempotency / migration idempotency)
+      # FAIL rather than skip when something regresses (acceptance §8).
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ducto
+      DUCTO_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/ducto
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e "python/[test,postgres,supabase]"
+      # Loads tests/parity/expression_cases.json (parity gate, §7) AND runs the
+      # real-Postgres concurrency/double-spend suite via the DATABASE_URL above.
+      - working-directory: python
+        run: pytest
+
+  js-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported window per javascript/README.md ("Works in Node.js 18+").
+        node-version: ["18", "20", "22"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ducto
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # store-integration.test.ts runs under describe.runIf(DATABASE_URL); with
+      # this set the PostgresStore integration + concurrency tests RUN, not skip.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ducto
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: "22"
+          node-version: ${{ matrix.node-version }}
+      # Also loads tests/parity/expression_cases.json (parity gate, §7).
       - working-directory: javascript
         run: |
           npm install
-          DATABASE_URL="postgres://ducto:ducto@localhost:5432/ducto_test" npx vitest run
+          npx vitest run
 
   js-typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
       - working-directory: javascript
@@ -92,33 +131,60 @@ jobs:
           npm install
           npx tsc --noEmit
 
-  release:
+  # Cross-SDK parity gate (§7): both SDK test suites load the SAME
+  # tests/parity/expression_cases.json fixture, so a divergence between the
+  # Python and JS engines fails one of them. This aggregating job makes that
+  # explicit and is a convenient single required status check.
+  parity-gate:
+    needs: [test, js-test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Python and JS suites both passed against tests/parity/expression_cases.json — engines agree."
+
+  # ── Release ───────────────────────────────────────────────────────────────
+  # Split PyPI and npm into separate jobs so one registry failing does not leave
+  # the other half-published (audit H13). Both use OIDC trusted publishing (no
+  # long-lived tokens) and a protected `release` environment so only an approved
+  # tag push can publish.
+
+  release-pypi:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, typecheck, test, js-test, js-typecheck]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
-      id-token: write
+      contents: read
+      id-token: write # PyPI OIDC trusted publishing
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - run: pip install uv
       - working-directory: python
         run: |
           uv build
-          uv publish
+          uv publish # uses PyPI OIDC (id-token: write); no token needed
 
-      - uses: actions/setup-node@v4
+  release-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, typecheck, test, js-test, js-typecheck]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm OIDC trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      # npm >= 11.5.1 supports OIDC trusted publishing; the npm CLI mints a
+      # short-lived token from the id-token, so no NODE_AUTH_TOKEN is required.
       - run: npm install -g npm@latest
       - working-directory: javascript
         run: |
           npm install
           npm run build
           npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ""

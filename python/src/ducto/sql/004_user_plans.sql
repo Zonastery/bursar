@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS public.credit_plans (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
-    free_allowance INTEGER NOT NULL DEFAULT 0,
+    free_allowance NUMERIC(18,4) NOT NULL DEFAULT 0,
     rate_overrides JSONB DEFAULT '{}'::jsonb,
     features JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS public.credit_usage_window (
     user_id UUID NOT NULL REFERENCES public.user_credits(user_id),
     plan_id UUID NOT NULL REFERENCES public.credit_plans(id),
     billing_period DATE NOT NULL,
-    usage INTEGER NOT NULL DEFAULT 0,
+    usage NUMERIC(18,4) NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -30,6 +30,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_usage_window_unique
 
 -- Add plan_id to user_credits
 ALTER TABLE public.user_credits ADD COLUMN IF NOT EXISTS plan_id UUID REFERENCES public.credit_plans(id);
+
+-- increment_usage_window's amount param moved INTEGER -> NUMERIC (M11). Drop the
+-- old overload so CREATE OR REPLACE below fully replaces it (no-op on fresh installs).
+DROP FUNCTION IF EXISTS public.increment_usage_window(UUID, UUID, INTEGER);
 
 -- RLS: server-only access (managed through RPCs)
 ALTER TABLE public.credit_plans ENABLE ROW LEVEL SECURITY;
@@ -60,7 +64,7 @@ AS $$
 DECLARE
     v_plan_id UUID;
     v_plan_name TEXT;
-    v_free_allowance INTEGER;
+    v_free_allowance NUMERIC;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN NULL;
@@ -118,8 +122,8 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_plan_id UUID;
-    v_free_allowance INTEGER;
-    v_current_usage INTEGER;
+    v_free_allowance NUMERIC;
+    v_current_usage NUMERIC;
     v_period_start DATE;
     v_period_end DATE;
 BEGIN
@@ -143,9 +147,9 @@ BEGIN
         );
     END IF;
 
-    -- Calculate current billing period (monthly)
-    v_period_start := date_trunc('month', now())::DATE;
-    v_period_end := (date_trunc('month', now()) + interval '1 month' - interval '1 day')::DATE;
+    -- Calculate current billing period (monthly, pinned to UTC for determinism — M16)
+    v_period_start := (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE;
+    v_period_end := (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - interval '1 day')::DATE;
 
     -- Get current usage this period
     -- SUM+COALESCE ensures exactly one row even when no matching window exists
@@ -168,7 +172,7 @@ $$;
 CREATE OR REPLACE FUNCTION public.increment_usage_window(
     p_user_id UUID,
     p_plan_id UUID,
-    p_amount INTEGER
+    p_amount NUMERIC
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -177,7 +181,7 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_period_start DATE;
-    v_new_usage INTEGER;
+    v_new_usage NUMERIC;
 BEGIN
     IF p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
@@ -187,7 +191,7 @@ BEGIN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    v_period_start := date_trunc('month', now())::DATE;
+    v_period_start := (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE;
 
     INSERT INTO public.credit_usage_window (user_id, plan_id, billing_period, usage)
     VALUES (p_user_id, p_plan_id, v_period_start, p_amount)

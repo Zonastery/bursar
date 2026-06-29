@@ -1,32 +1,40 @@
 # CLI Reference
 
-ducto ships a CLI for database migrations and pricing management.
+ducto ships an `argparse`-based CLI for database migrations and pricing management. Connection secrets are read from the **environment**, never passed on the command line (which would leak via `ps`, shell history and CI logs).
+
+```bash
+ducto <command> [options]
+```
+
+Run `ducto --help`, `ducto migrate --help`, or `ducto pricing --help` for the full, generated usage.
 
 ## Commands
 
-### `ducto migrate <database_url>`
+### `ducto migrate`
 
-Create tables, indexes, and RPC functions.
+Create tables, indexes, and RPC functions. Reads the connection string from the **`DATABASE_URL`** environment variable.
 
 ```bash
-ducto migrate "postgresql://user:pass@host:5432/db"
+DATABASE_URL="postgresql://user:pass@host:5432/db" ducto migrate
 ```
 
-Idempotent — safe to run on every deploy.
+Idempotent — safe to run on every deploy. Requires the `postgres` extra (`pip install "ducto[postgres]"`).
+
+:::note
+A positional URL (`ducto migrate "postgresql://…"`) is still accepted as a fallback, but it is **discouraged** and prints a warning, because the password is then visible in the process list and shell history. Prefer `DATABASE_URL`.
+:::
 
 ### `ducto pricing get`
 
-Show the current active pricing config.
-
-Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` environment variables.
+Print the active pricing config as JSON.
 
 ### `ducto pricing set <file>`
 
-Update the active pricing config from a JSON or YAML file.
+Apply a pricing config from a JSON or YAML file (always creates a new immutable version). `--label` attaches an optional message.
 
 ```bash
 # From file
-ducto pricing set config.yaml
+ducto pricing set config.yaml --label "Q3 rates"
 
 # From stdin
 ducto pricing set - <<'JSON'
@@ -37,12 +45,40 @@ ducto pricing set - <<'JSON'
 JSON
 ```
 
-Requires `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` environment variables.
+Only transient PostgREST schema-cache/connection errors are retried; a write that may have committed is never blind-retried, so duplicate versions are not created.
+
+### `ducto pricing list`
+
+List all pricing versions; the active version is marked with `*`.
+
+### `ducto pricing activate <version>`
+
+Switch the active version to the given version number.
+
+```bash
+ducto pricing activate 3
+```
+
+### `ducto pricing validate <file>`
+
+Validate a pricing file (JSON/YAML, or `-` for stdin) without applying it.
+
+### `ducto pricing export <version>`
+
+Dump a specific version as JSON.
+
+### `ducto pricing diff <version_a> <version_b>`
+
+Print a unified diff between two pricing versions.
+
+All `pricing` subcommands require the `supabase` extra and the `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` environment variables.
 
 ## Environment Variables
 
 | Variable | Required For | Description |
 |----------|-------------|-------------|
+| `DATABASE_URL` | `migrate` | PostgreSQL connection string (primary; never put it on the command line) |
 | `SUPABASE_URL` | `pricing` commands | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | `pricing` commands | Supabase service_role key |
-| `DATABASE_URL` | Direct PG usage | PostgreSQL connection string |
+| `SUPABASE_SERVICE_ROLE_KEY` | `pricing` commands | Supabase `service_role` key |
+
+A `.env` file in the current directory is loaded automatically (existing environment variables take precedence).

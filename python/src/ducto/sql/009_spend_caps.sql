@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS public.credit_spend_caps (
   user_id UUID NOT NULL REFERENCES public.user_credits(user_id),
   cap_type TEXT NOT NULL CHECK (cap_type IN ('daily', 'monthly')),
   model TEXT,
-  cap_limit INTEGER NOT NULL,
+  cap_limit NUMERIC(18,4) NOT NULL,
   action TEXT NOT NULL DEFAULT 'deny' CHECK (action IN ('deny', 'warn', 'notify')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -23,13 +23,20 @@ BEGIN
 END;
 $$;
 
+-- Money param moved INTEGER -> NUMERIC (M11). Drop the old overload so the
+-- NUMERIC definition fully replaces it (no-op on fresh installs).
+DROP FUNCTION IF EXISTS public.check_spend_cap(UUID, TEXT, INTEGER);
+
 -- check_spend_cap: evaluate whether a pending deduction would exceed any cap.
 -- Returns JSONB with capped, current_spend, cap_limit, action, model.
 -- Checks deny caps first (hard block), then warn/notify (soft).
+-- Windows are pinned to UTC for deterministic daily/monthly buckets (M16).
+-- NOTE: this is a non-authoritative pre-check; the authoritative cap
+-- enforcement happens atomically inside deduct_with_allowance (contract §2).
 CREATE OR REPLACE FUNCTION public.check_spend_cap(
   p_user_id UUID,
   p_model TEXT DEFAULT NULL,
-  p_amount INTEGER DEFAULT 0
+  p_amount NUMERIC DEFAULT 0
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -38,7 +45,7 @@ SET search_path = ''
 AS $$
 DECLARE
   v_cap RECORD;
-  v_spend INTEGER;
+  v_spend NUMERIC;
   v_window TIMESTAMPTZ;
 BEGIN
   IF auth.role() IS DISTINCT FROM 'service_role' THEN
@@ -54,7 +61,7 @@ BEGIN
       AND (model IS NULL OR model = p_model)
     ORDER BY cap_limit ASC
   LOOP
-    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now()) ELSE date_trunc('month', now()) END;
+    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC') ELSE date_trunc('month', now() AT TIME ZONE 'UTC') END;
 
     SELECT COALESCE(SUM(ABS(ct.amount)), 0) INTO v_spend
     FROM public.credit_transactions ct
@@ -78,7 +85,7 @@ BEGIN
       AND (model IS NULL OR model = p_model)
     ORDER BY cap_limit ASC
   LOOP
-    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now()) ELSE date_trunc('month', now()) END;
+    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC') ELSE date_trunc('month', now() AT TIME ZONE 'UTC') END;
 
     SELECT COALESCE(SUM(ABS(ct.amount)), 0) INTO v_spend
     FROM public.credit_transactions ct

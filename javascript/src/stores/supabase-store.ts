@@ -1,3 +1,5 @@
+import Decimal from "decimal.js";
+import { StoreError } from "../errors.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -10,6 +12,7 @@ import type {
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
+  DeductWithAllowanceOptions,
   GetUserPlanResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
@@ -30,10 +33,40 @@ import type {
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
 
+const ZERO = new Decimal(0);
+
+/**
+ * Parse a JSON money value into an exact `Decimal`. Supabase returns NUMERIC as
+ * a JSON number or string; we coerce via `String(x)` so binary-float precision
+ * is never introduced (contract §1). `null`/`undefined` → fallback.
+ */
+function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
+  if (value === null || value === undefined) return fallback;
+  if (value instanceof Decimal) return value;
+  try {
+    return new Decimal(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
+/** A money serialized for a JSON RPC parameter: send as a decimal string. */
+function decParam(value: Decimal): string {
+  return value.toString();
+}
+
 /**
  * Credit store backed by Supabase RPCs via raw HTTP (fetch).
  *
  * No supabase-js dependency — makes direct POST requests to the Supabase REST API.
+ *
+ * Error handling (M10 parity): network/fetch failures and JSON-decode errors are
+ * wrapped in `StoreError`; a non-2xx HTTP response throws `StoreError`. *Business*
+ * outcomes that the RPC returns as a `{"error": code}` envelope (insufficient
+ * credits, cap reached, over-refund, …) are NOT thrown — they are surfaced on the
+ * result model's `.error` field (e.g. `DeductionResult.error`), consistent with
+ * how the Postgres store and the Python SDK behave. The manager maps codes to
+ * typed exceptions.
  *
  * Args:
  *   url: Supabase project URL (e.g. ``https://<project>.supabase.co``).
@@ -48,64 +81,102 @@ export class HttpxSupabaseStore implements CreditStore {
     this.key = key;
   }
 
-  private async rpc(fn: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const resp = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
-      method: "POST",
-      headers: {
-        apikey: this.key,
-        authorization: `Bearer ${this.key}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(params),
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`Supabase RPC ${fn} failed (${resp.status}): ${text}`);
+  /** POST to an RPC, returning the parsed JSON body. Wraps transport/parse errors. */
+  private async post(fn: string, params: Record<string, unknown>): Promise<unknown> {
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
+        method: "POST",
+        headers: {
+          apikey: this.key,
+          authorization: `Bearer ${this.key}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(params),
+      });
+    } catch (err) {
+      // Network / DNS / connection-refused etc.
+      throw new StoreError(
+        `Supabase RPC ${fn} request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    return resp.json() as Promise<Record<string, unknown>>;
+
+    if (!resp.ok) {
+      let text = "";
+      try {
+        text = await resp.text();
+      } catch {
+        // ignore body-read failures
+      }
+      throw new StoreError(`Supabase RPC ${fn} failed (${resp.status}): ${text}`);
+    }
+
+    try {
+      return await resp.json();
+    } catch (err) {
+      throw new StoreError(
+        `Supabase RPC ${fn} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
+  /** RPC returning a single JSONB object. */
+  private async rpc(fn: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const data = await this.post(fn, params);
+    if (data === null || data === undefined) return {};
+    if (Array.isArray(data)) {
+      const first = data[0];
+      return first != null && typeof first === "object" ? (first as Record<string, unknown>) : {};
+    }
+    if (typeof data === "object") return data as Record<string, unknown>;
+    return { value: data };
+  }
+
+  /** RPC returning a set of rows. Always returns ALL rows. */
   private async rpcAll(
     fn: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>[]> {
-    const resp = await fetch(`${this.url}/rest/v1/rpc/${fn}`, {
-      method: "POST",
-      headers: {
-        apikey: this.key,
-        authorization: `Bearer ${this.key}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(params),
-    });
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`Supabase RPC ${fn} failed (${resp.status}): ${text}`);
-    }
-    const data = await resp.json();
+    const data = await this.post(fn, params);
     if (data === null || data === undefined) return [];
-    if (!Array.isArray(data)) return [data];
+    if (!Array.isArray(data)) return [data as Record<string, unknown>];
     return data.filter((r: unknown): r is Record<string, unknown> => r != null);
   }
 
+  /**
+   * Return the business-error code if `row` is an `{"error": code}` envelope,
+   * else null. An unexpected `error` value that is not a known business code is
+   * still surfaced (callers decide), but recognised codes are the contract set.
+   */
+  private errorCode(row: Record<string, unknown>): string | null {
+    if ("error" in row && row.error) {
+      return String(row.error);
+    }
+    return null;
+  }
+
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    throw new Error(
-      "HttpxSupabaseStore.setup() requires a database_url — use PostgresStore.setup() instead",
+    throw new StoreError(
+      "HttpxSupabaseStore.setup() cannot run migrations over the REST API. Apply the " +
+        "bundled SQL migrations via the Python CLI (`ducto migrate`) or by executing " +
+        "`python/src/ducto/sql/*.sql` (in filename order) against your database.",
     );
   }
 
   async getBalance(userId: string): Promise<BalanceResult> {
     const row = await this.rpc("get_credits_balance", { p_user_id: userId });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`get_credits_balance: ${code}`);
     return {
       userId: String(row.user_id ?? userId),
-      balance: Number(row.balance ?? 0),
-      lifetimePurchased: Number(row.lifetime_purchased ?? 0),
+      balance: dec(row.balance),
+      lifetimePurchased: dec(row.lifetime_purchased),
     };
   }
 
   async addCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     type = "adjustment",
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
@@ -116,58 +187,61 @@ export class HttpxSupabaseStore implements CreditStore {
     }
     const row = await this.rpc("credits_add", {
       p_user_id: userId,
-      p_amount: amount,
+      p_amount: decParam(amount),
       p_type: type,
       p_metadata: meta,
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`credits_add: ${code}`);
     return {
       transactionId: String(row.id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? amount),
-      newBalance: Number(row.new_balance ?? 0),
-      lifetimePurchased: Number(row.lifetime_purchased ?? 0),
+      amount: dec(row.amount, amount),
+      newBalance: dec(row.new_balance),
+      lifetimePurchased: dec(row.lifetime_purchased),
     };
   }
 
   async reserveCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     operationType: string,
     metadata?: CreditMetadata | null,
-    minBalance = 5,
+    minBalance: Decimal = new Decimal(5),
   ): Promise<ReserveResult> {
     const row = await this.rpc("reserve_credits", {
       p_user_id: userId,
-      p_amount: amount,
+      p_amount: decParam(amount),
       p_operation_type: operationType,
       p_metadata: metadata ?? {},
-      p_min_balance: minBalance,
+      p_min_balance: decParam(minBalance),
     });
 
-    if ("error" in row) {
+    const code = this.errorCode(row);
+    if (code) {
       return {
         reservationId: "",
         userId,
-        amount: 0,
-        balance: 0,
-        reservedTotal: 0,
-        error: String(row.error),
+        amount: ZERO,
+        balance: dec(row.balance),
+        reservedTotal: dec(row.reserved),
+        error: code,
       };
     }
 
     return {
-      reservationId: String(row.reservation_id),
+      reservationId: String(row.reservation_id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? 0),
-      balance: Number(row.balance ?? 0),
-      reservedTotal: Number(row.reserved ?? 0),
+      amount: dec(row.amount),
+      balance: dec(row.balance),
+      reservedTotal: dec(row.reserved),
     };
   }
 
   async deductCredits(
     userId: string,
     reservationId: string,
-    amount: number,
+    amount: Decimal,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
@@ -177,33 +251,84 @@ export class HttpxSupabaseStore implements CreditStore {
     const row = await this.rpc("deduct_credits", {
       p_user_id: userId,
       p_reservation_id: reservationId,
-      p_amount: amount,
+      p_amount: decParam(amount),
       p_metadata: meta,
     });
 
-    if ("error" in row) {
+    const code = this.errorCode(row);
+    if (code) {
       return {
         transactionId: "",
         userId,
-        amount: -amount,
-        balanceAfter: 0,
+        amount: amount.negated(),
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.new_balance),
         idempotent: false,
-        error: String(row.error),
+        capWarning: null,
+        error: code,
       };
     }
 
     return {
-      transactionId: String(row.id),
+      transactionId: String(row.id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? -amount),
-      balanceAfter: Number(row.new_balance ?? 0),
+      amount: dec(row.amount, amount.negated()),
+      allowanceConsumed: ZERO,
+      balanceAfter: dec(row.new_balance),
       idempotent: Boolean(row.idempotent),
+      capWarning: null,
+    };
+  }
+
+  async deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<DeductionResult> {
+    const idempotencyKey = options?.idempotencyKey ?? null;
+    const minBalance = options?.minBalance ?? ZERO;
+    const model = options?.model ?? null;
+    const metadata = options?.metadata ?? {};
+
+    const row = await this.rpc("deduct_with_allowance", {
+      p_user_id: userId,
+      p_amount: decParam(amount),
+      p_idempotency_key: idempotencyKey,
+      p_min_balance: decParam(minBalance),
+      p_model: model,
+      p_metadata: metadata ?? {},
+    });
+
+    const code = this.errorCode(row);
+    if (code) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.balance_after),
+        idempotent: false,
+        capWarning: null,
+        error: code,
+      };
+    }
+
+    return {
+      transactionId: String(row.transaction_id ?? ""),
+      userId,
+      amount: dec(row.amount),
+      allowanceConsumed: dec(row.allowance_consumed),
+      balanceAfter: dec(row.balance_after),
+      idempotent: Boolean(row.idempotent),
+      capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
     };
   }
 
   async getActivePricing(): Promise<PricingConfigResult | null> {
     const row = await this.rpc("get_active_pricing_config", {});
     if (!row || Object.keys(row).length === 0) return null;
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`get_active_pricing_config: ${code}`);
     return row as unknown as PricingConfigResult;
   }
 
@@ -212,6 +337,8 @@ export class HttpxSupabaseStore implements CreditStore {
       p_config: config,
       p_label: label ?? null,
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`set_active_pricing_config: ${code}`);
     return String(row.id ?? "");
   }
 
@@ -220,25 +347,29 @@ export class HttpxSupabaseStore implements CreditStore {
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const row = await this.rpc("get_user_plan", { p_user_id: userId });
     if (!row || Object.keys(row).length === 0) {
-      return { userId, planId: null, planName: null, freeAllowance: 0, features: {} };
+      return { userId, planId: null, planName: null, freeAllowance: ZERO, features: {} };
     }
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`get_user_plan: ${code}`);
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
       planName: (row.plan_name as string) ?? null,
-      freeAllowance: Number(row.free_allowance ?? 0),
+      freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
     };
   }
 
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
-    const value = plan.features[feature] ?? null;
+    const present = Object.prototype.hasOwnProperty.call(plan.features, feature);
+    const value = present ? plan.features[feature] : null;
     return {
       userId,
       feature,
       value,
-      hasFeature: value != null && Boolean(value),
+      // M6: presence-vs-truthiness — numeric 0 / "" count as present.
+      hasFeature: present && value !== null && value !== undefined && value !== false,
     };
   }
 
@@ -247,6 +378,8 @@ export class HttpxSupabaseStore implements CreditStore {
       p_user_id: userId,
       p_plan_key: planId,
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`set_user_plan: ${code}`);
     return {
       userId: String(row.user_id ?? userId),
       planId: String(row.plan_id ?? planId),
@@ -256,22 +389,26 @@ export class HttpxSupabaseStore implements CreditStore {
   async checkAllowance(userId: string): Promise<AllowanceResult> {
     const row = await this.rpc("check_plan_allowance", { p_user_id: userId });
     if (!row || Object.keys(row).length === 0) {
-      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+      return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`check_plan_allowance: ${code}`);
     return {
       planId: String(row.plan_id ?? ""),
-      allowanceRemaining: Number(row.allowance_remaining ?? 0),
+      allowanceRemaining: dec(row.allowance_remaining),
       periodStart: String(row.period_start ?? ""),
       periodEnd: String(row.period_end ?? ""),
     };
   }
 
-  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
-    await this.rpc("increment_usage_window", {
+  async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
+    const row = await this.rpc("increment_usage_window", {
       p_user_id: userId,
       p_plan_id: planId,
-      p_amount: amount,
+      p_amount: decParam(amount),
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`increment_usage_window: ${code}`);
   }
 
   // ── Spend caps and rate limiting ──────────────────────────────────────
@@ -279,20 +416,20 @@ export class HttpxSupabaseStore implements CreditStore {
   async checkSpendCap(
     userId: string,
     model?: string | null,
-    amount?: number,
+    amount?: Decimal,
   ): Promise<CapCheckResult> {
     const row = await this.rpc("check_spend_cap", {
       p_user_id: userId,
       p_model: model ?? null,
-      p_amount: amount ?? 0,
+      p_amount: decParam(amount ?? ZERO),
     });
     if (!row || Object.keys(row).length === 0) {
-      return { capped: false, currentSpend: 0, limit: 0, action: null };
+      return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
     }
     return {
       capped: Boolean(row.capped),
-      currentSpend: Number(row.current_spend ?? 0),
-      limit: Number(row.cap_limit ?? 0),
+      currentSpend: dec(row.current_spend),
+      limit: dec(row.cap_limit),
       action: (row.action as CapCheckResult["action"]) ?? null,
       model: row.model ? String(row.model) : undefined,
     };
@@ -302,32 +439,33 @@ export class HttpxSupabaseStore implements CreditStore {
 
   async refundCredits(
     transactionId: string,
-    amount?: number,
+    amount?: Decimal,
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
     const row = await this.rpc("refund_credits", {
       p_transaction_id: transactionId,
-      p_amount: amount ?? null,
+      p_amount: amount != null ? decParam(amount) : null,
       p_reason: reason ?? null,
       p_metadata: metadata ?? {},
     });
-    if ("error" in row && row.error) {
+    const code = this.errorCode(row);
+    if (code) {
       return {
         refundTransactionId: "",
         originalTransactionId: transactionId,
         userId: String(row.user_id ?? ""),
-        amount: 0,
-        newBalance: Number(row.new_balance ?? 0),
-        error: String(row.error),
+        amount: ZERO,
+        newBalance: dec(row.new_balance),
+        error: code,
       };
     }
     return {
       refundTransactionId: String(row.refund_transaction_id ?? ""),
       originalTransactionId: transactionId,
       userId: String(row.user_id ?? ""),
-      amount: Number(row.amount ?? 0),
-      newBalance: Number(row.new_balance ?? 0),
+      amount: dec(row.amount),
+      newBalance: dec(row.new_balance),
     };
   }
 
@@ -340,7 +478,7 @@ export class HttpxSupabaseStore implements CreditStore {
     });
     return rows.map((row) => ({
       userId: String(row.user_id ?? ""),
-      totalSpend: Number(row.total_spend ?? 0),
+      totalSpend: dec(row.total_spend),
       transactionCount: Number(row.transaction_count ?? 0),
     }));
   }
@@ -352,7 +490,7 @@ export class HttpxSupabaseStore implements CreditStore {
     });
     return rows.map((row) => ({
       model: String(row.model ?? ""),
-      totalSpend: Number(row.total_spend ?? 0),
+      totalSpend: dec(row.total_spend),
       transactionCount: Number(row.transaction_count ?? 0),
     }));
   }
@@ -365,7 +503,7 @@ export class HttpxSupabaseStore implements CreditStore {
     });
     return rows.map((row) => ({
       userId: String(row.user_id ?? ""),
-      totalSpend: Number(row.total_spend ?? 0),
+      totalSpend: dec(row.total_spend),
     }));
   }
 
@@ -376,7 +514,7 @@ export class HttpxSupabaseStore implements CreditStore {
     });
     return rows.map((row) => ({
       date: String(row.date ?? ""),
-      totalSpend: Number(row.total_spend ?? 0),
+      totalSpend: dec(row.total_spend),
       transactionCount: Number(row.transaction_count ?? 0),
     }));
   }
@@ -398,7 +536,7 @@ export class HttpxSupabaseStore implements CreditStore {
     const items = rows.map((r) => ({
       id: String(r.id ?? ""),
       userId: String(r.user_id ?? ""),
-      amount: Number(r.amount ?? 0),
+      amount: dec(r.amount),
       type: String(r.type ?? ""),
       referenceType: r.reference_type != null ? String(r.reference_type) : null,
       referenceId: r.reference_id != null ? String(r.reference_id) : null,
@@ -424,7 +562,7 @@ export class HttpxSupabaseStore implements CreditStore {
     const items = rows.map((r) => ({
       id: String(r.id ?? ""),
       userId: String(r.user_id ?? ""),
-      amount: Number(r.amount ?? 0),
+      amount: dec(r.amount),
       type: String(r.type ?? ""),
       referenceType: r.reference_type != null ? String(r.reference_type) : null,
       referenceId: r.reference_id != null ? String(r.reference_id) : null,
@@ -444,9 +582,9 @@ export class HttpxSupabaseStore implements CreditStore {
       p_end: end.toISOString(),
     });
     return {
-      totalCreditsConsumed: Number(row.total_credits_consumed ?? 0),
+      totalCreditsConsumed: dec(row.total_credits_consumed),
       activeUsers: Number(row.active_users ?? 0),
-      avgDailySpend: Number(row.avg_daily_spend ?? 0),
+      avgDailySpend: dec(row.avg_daily_spend),
       topModel: String(row.top_model ?? ""),
       topUser: String(row.top_user ?? ""),
     };
@@ -454,8 +592,13 @@ export class HttpxSupabaseStore implements CreditStore {
 
   // ── Team/shared balance pools ────────────────────────────────────────
 
-  async createTeam(name: string, initialBalance = 0): Promise<CreateTeamResult> {
-    const row = await this.rpc("create_team", { p_name: name, p_initial_balance: initialBalance });
+  async createTeam(name: string, initialBalance: Decimal = ZERO): Promise<CreateTeamResult> {
+    const row = await this.rpc("create_team", {
+      p_name: name,
+      p_initial_balance: decParam(initialBalance),
+    });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`create_team: ${code}`);
     return {
       teamId: String(row.team_id ?? ""),
       name: String(row.name ?? name),
@@ -465,12 +608,12 @@ export class HttpxSupabaseStore implements CreditStore {
   async getTeamBalance(teamId: string): Promise<TeamBalanceResult> {
     const row = await this.rpc("get_team_balance", { p_team_id: teamId });
     if (!row || Object.keys(row).length === 0 || ("error" in row && row.error)) {
-      return { teamId, name: "", balance: 0, memberCount: 0 };
+      return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
     return {
       teamId: String(row.team_id ?? teamId),
       name: String(row.name ?? ""),
-      balance: Number(row.balance ?? 0),
+      balance: dec(row.balance),
       memberCount: Number(row.member_count ?? 0),
     };
   }
@@ -479,14 +622,16 @@ export class HttpxSupabaseStore implements CreditStore {
     teamId: string,
     userId: string,
     role = "member",
-    spendCap?: number | null,
+    spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
     const row = await this.rpc("add_team_member", {
       p_team_id: teamId,
       p_user_id: userId,
       p_role: role,
-      p_spend_cap: spendCap ?? null,
+      p_spend_cap: spendCap != null ? decParam(spendCap) : null,
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`add_team_member: ${code}`);
     return {
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
@@ -499,39 +644,43 @@ export class HttpxSupabaseStore implements CreditStore {
     return rows.map((row) => ({
       userId: String(row.user_id ?? ""),
       role: String(row.role ?? "member"),
-      spendCap: (row.spend_cap as number | null) ?? null,
-      totalSpent: Number(row.total_spent ?? 0),
+      spendCap: row.spend_cap != null ? dec(row.spend_cap) : null,
+      totalSpent: dec(row.total_spent),
     }));
   }
 
   async deductTeam(
     teamId: string,
     userId: string,
-    amount: number,
+    amount: Decimal,
     metadata?: CreditMetadata | null,
+    idempotencyKey?: string | null,
   ): Promise<TeamDeductionResult> {
+    const meta: Record<string, unknown> = { ...(metadata ?? {}) };
+    if (idempotencyKey) meta.idempotency_key = idempotencyKey;
     const row = await this.rpc("deduct_team", {
       p_team_id: teamId,
       p_user_id: userId,
-      p_amount: amount,
-      p_metadata: metadata ?? {},
+      p_amount: decParam(amount),
+      p_metadata: meta,
     });
-    if ("error" in row && row.error) {
+    const code = this.errorCode(row);
+    if (code) {
       return {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
-        teamBalanceAfter: Number(row.team_balance_after ?? 0),
-        error: String(row.error),
+        amount: ZERO,
+        teamBalanceAfter: dec(row.team_balance_after),
+        error: code,
       };
     }
     return {
       transactionId: String(row.transaction_id ?? ""),
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? -amount),
-      teamBalanceAfter: Number(row.team_balance_after ?? 0),
+      amount: dec(row.amount, amount.negated()),
+      teamBalanceAfter: dec(row.team_balance_after),
     };
   }
 
@@ -541,9 +690,11 @@ export class HttpxSupabaseStore implements CreditStore {
     const row = await this.rpc("expire_credits", {
       p_dry_run: dryRun,
     });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`expire_credits: ${code}`);
     return {
       expiredCount: Number(row.expired_count ?? 0),
-      expiredAmount: Number(row.expired_amount ?? 0),
+      expiredAmount: dec(row.expired_amount),
       dryRun,
     };
   }

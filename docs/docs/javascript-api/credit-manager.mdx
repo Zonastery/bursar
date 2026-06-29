@@ -1,6 +1,6 @@
 # CreditManager — JavaScript
 
-Orchestrates the full credit lifecycle: calculate → reserve → deduct.
+Orchestrates the credit lifecycle. The hot path (`deduct()`) calculates the cost and charges it in **one atomic store transaction** (`deductWithAllowance`): allowance, spend cap, balance floor and debit all commit or roll back together. All money is `Decimal` (from `decimal.js`).
 
 ## Constructor
 
@@ -11,14 +11,19 @@ const store = new MemoryStore();
 const manager = new CreditManager(store);
 ```
 
-Optionally pass a pre-configured `PricingEngine` and/or `CreditEventEmitter`:
+Optionally pass a pre-configured `PricingEngine`, a `CreditEventEmitter`, and/or an options object:
 
 ```typescript
+import Decimal from "decimal.js";
 import { CreditEventEmitter } from "@apoorwv/ducto";
 
 const emitter = new CreditEventEmitter();
-const manager = new CreditManager(store, engine, emitter);
+const manager = new CreditManager(store, engine, emitter, {
+  lowBalanceThreshold: new Decimal(25), // absolute floor for the edge-triggered alert
+});
 ```
+
+The constructor is `new CreditManager(store, engine?, emitter?, options?)`. `options.lowBalanceThreshold` is the absolute balance at or below which a deduction that *crosses* it emits `credits.low_balance` (edge-triggered). When omitted it defaults to `minBalance * 2`.
 
 ## Pricing
 
@@ -37,7 +42,7 @@ Fetch active pricing from the database store.
 
 ### `publishPricing(config, label?)`
 
-Load from a `PricingConfig` object.
+Publish a `PricingConfigData` and update the engine in one call. It is `async` and awaits the store write (`await manager.publishPricing(config)`), so the persisted config and the in-memory engine never drift.
 
 ## Balance Operations
 
@@ -51,11 +56,11 @@ Add credits. Optional `expiresAt` for time-bound credits.
 
 ### `deduct(userId, metrics, idempotencyKey?, metadata?)`
 
-Full lifecycle: calculate cost → consume plan allowance → check spend caps → reserve → deduct.
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deductWithAllowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Resolves to a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowanceConsumed`, `balanceAfter`, `idempotent` and `capWarning`. Throws `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap). A zero/negative cost short-circuits to a zero-amount result.
 
 ### `deductFixed(userId, jobName, idempotencyKey?, metadata?)`
 
-Deduct a fixed cost (configured in pricing `fixed` section).
+Deduct a fixed cost (configured in pricing `fixed` section). Throws for an unknown/unconfigured `jobName` instead of charging 0.
 
 ## Plan Management
 
@@ -91,11 +96,12 @@ const result = await manager.deduct("user-1", { inputTokens: 5 });
 
 ### `refundCredits(transactionId, amount?, reason?, metadata?)`
 
-Refund a previous deduction. Supports partial refunds. Returns error for duplicate refunds or unknown transactions.
+Refund a previous deduction. Supports partial refunds. On a business failure (over-refund, duplicate, refunding a refund/purchase, not found) `result.error` is set (`over_refund` / `already_refunded` / `not_found`), `credits.refund_failed` is emitted, and **no** `credits.refunded` event fires. `amount` and `newBalance` are `Decimal`.
 
 ```typescript
 const result = await manager.refundCredits(txId);
-// result.amount === 1, result.newBalance === 100
+// result.error is null; result.amount and result.newBalance are Decimals
+console.log(result.amount.toString(), result.newBalance.toString());
 ```
 
 ## Usage Analytics
@@ -109,6 +115,10 @@ Time-windowed aggregation queries. All accept `start` / `end` `Date` range.
 | `topUsers(limit, start, end)` | `TopUserRow[]` — sorted by spend desc |
 | `dailySpend(start, end)` | `DailySpendRow[]` — bucketed by day |
 | `aggregateStats(start, end)` | `AggregateStats` — total, active users, avg daily, top model, top user |
+| `listUserTransactions(userId, options?)` | `PaginatedTransactions` — paginated transaction history (`{ items, total }`) |
+| `listUsageEvents(userId, options?)` | `PaginatedTransactions` — paginated `usage`/`team_usage` events |
+
+`options` for the listing methods is `{ types?, fromDate?, toDate?, limit?, offset? }` (`listUsageEvents` omits `types`).
 
 ## Credit Expiry
 
@@ -138,9 +148,11 @@ store.setSpendCap({
 });
 ```
 
-- **deny** — throws `InsufficientCreditsError` when exceeded
-- **warn** — emits `credits.cap_warning` event but allows the deduction
-- **notify** — emits `credits.cap_warning` event
+- **deny** — throws `CapReachedError` when exceeded (the deduction aborts atomically; no allowance is consumed)
+- **warn** — allows the deduction; the store returns `capWarning="warn"` and the manager emits `credits.cap_warning`
+- **notify** — allows the deduction; emits `credits.cap_warning` with `action="notify"`
+
+The cap is enforced **inside** the atomic `deductWithAllowance` transaction (accumulating prior spend in the same window), not as a separate racy pre-check.
 
 ## Team / Shared Balances
 
@@ -152,14 +164,18 @@ Teams have their own credit pool separate from individual user balances.
 | `store.getTeamBalance(teamId)` | Fetch team balance + member count |
 | `store.addTeamMember(teamId, userId, role?, spendCap?)` | Add member with optional per-user cap |
 | `store.getTeamMembers(teamId)` | List team members with spend + caps |
-| `store.deductTeam(teamId, userId, cost, metadata?)` | Deduct from team pool (user-attributed) |
-| `manager.deductTeam(teamId, userId, metrics, metadata?)` | Pricing-engine cost + team deduction |
+| `store.deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` | Deduct from team pool (user-attributed) |
+| `manager.deductTeam(teamId, userId, metrics, idempotencyKey?, metadata?)` | Pricing-engine cost + team deduction |
+
+`deductTeam` now threads an `idempotencyKey` (parity with Python) so a retried team deduction returns the original result instead of double-charging the shared pool.
 
 ```typescript
-const team = await store.createTeam("Engineering", 1000);
-await store.addTeamMember(team.teamId, "user-1", "admin", { spendCap: 500 });
+import Decimal from "decimal.js";
+
+const team = await store.createTeam("Engineering", new Decimal(1000));
+await store.addTeamMember(team.teamId, "user-1", "admin", new Decimal(500));
 const result = await manager.deductTeam(team.teamId, "user-1", { inputTokens: 100 });
-// result.amount === -100, result.teamBalanceAfter === 900
+// result.amount and result.teamBalanceAfter are Decimals (e.g. "-100", "900")
 ```
 
 ## Events
@@ -177,10 +193,13 @@ emitter.on("credits.deducted", (event) => {
 });
 
 // Available events:
-// "credits.deducted" | "credits.added" | "credits.refunded"
-// | "credits.expired" | "credits.cap_reached"
-// | "credits.cap_warning" | "credits.low_balance"
+// "credits.deducted" | "credits.deduct_failed" | "credits.added"
+// | "credits.refunded" | "credits.refund_failed" | "credits.expired"
+// | "credits.cap_reached" | "credits.cap_warning"
+// | "credits.low_balance" | "credits.plan_changed"
 ```
+
+Success events fire only after the operation completes; failures fire dedicated `*_failed` events. Handler exceptions are isolated and never break the deduction.
 
 ## Properties
 

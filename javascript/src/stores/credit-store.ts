@@ -1,3 +1,4 @@
+import type { Decimal } from "decimal.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -10,6 +11,7 @@ import type {
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
+  DeductWithAllowanceOptions,
   GetUserPlanResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
@@ -35,24 +37,34 @@ export interface CreditStore {
   getBalance(userId: string): Promise<BalanceResult>;
   addCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     type?: string,
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
   ): Promise<AddCreditsResult>;
   reserveCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     operationType: string,
     metadata?: CreditMetadata | null,
-    minBalance?: number,
+    minBalance?: Decimal,
   ): Promise<ReserveResult>;
   deductCredits(
     userId: string,
     reservationId: string,
-    amount: number,
+    amount: Decimal,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
+  ): Promise<DeductionResult>;
+  /**
+   * Atomically calculate-and-charge in one server-side transaction:
+   * consume free allowance, enforce spend caps, apply the balance floor,
+   * and debit the net amount — idempotency-keyed end-to-end. See contract §2.
+   */
+  deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
   ): Promise<DeductionResult>;
   getActivePricing(): Promise<PricingConfigResult | null>;
   setActivePricing(config: PricingConfigData, label?: string | null): Promise<string>;
@@ -62,15 +74,15 @@ export interface CreditStore {
   setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
   checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
   checkAllowance(userId: string): Promise<AllowanceResult>;
-  incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void>;
+  incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void>;
 
   // ── Spend caps and rate limiting ────────────────────────────────────
-  checkSpendCap(userId: string, model?: string | null, amount?: number): Promise<CapCheckResult>;
+  checkSpendCap(userId: string, model?: string | null, amount?: Decimal): Promise<CapCheckResult>;
 
   // ── Refunds ────────────────────────────────────────────────────────
   refundCredits(
     transactionId: string,
-    amount?: number,
+    amount?: Decimal,
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult>;
@@ -95,19 +107,20 @@ export interface CreditStore {
   aggregateStats(start: Date, end: Date): Promise<AggregateStats>;
 
   // ── Team/shared balance pools ──────────────────────────────────────
-  createTeam(name: string, initialBalance?: number): Promise<CreateTeamResult>;
+  createTeam(name: string, initialBalance?: Decimal): Promise<CreateTeamResult>;
   getTeamBalance(teamId: string): Promise<TeamBalanceResult>;
   addTeamMember(
     teamId: string,
     userId: string,
     role?: string,
-    spendCap?: number | null,
+    spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult>;
   getTeamMembers(teamId: string): Promise<TeamMember[]>;
   deductTeam(
     teamId: string,
     userId: string,
-    amount: number,
+    amount: Decimal,
     metadata?: CreditMetadata | null,
+    idempotencyKey?: string | null,
   ): Promise<TeamDeductionResult>;
 }

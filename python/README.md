@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/apoorwv/ducto/actions/workflows/ci.yml/badge.svg)](https://github.com/apoorwv/ducto/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)(LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 
@@ -41,8 +41,8 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 - **Event hooks** — Typed pub/sub for `credits.deducted`, `credits.added`, `credits.refunded`, `credits.expired`, `credits.cap_reached`, `credits.cap_warning`, `credits.low_balance`.
 - **Database-backed pricing** — Live updates without redeploys. Dict loading for testing.
 - **Multi-dimensional** — Per-model (with `_default` fallback), per-tool overrides, search/RAG, cache discounts, fixed-cost jobs.
-- **Pluggable storage** — Reserve-then-deduct via `CreditStore` adapters: Supabase, PostgreSQL, in-memory.
-- **Safe defaults** — `min_balance` floor, reservation expiry (10 min), idempotent deductions, concurrent protection.
+- **Pluggable storage** — `CreditStore` adapters: Supabase, PostgreSQL, in-memory.
+- **Safe defaults** — `min_balance` floor, atomic idempotent deductions, fractional `Decimal` credits (no truncation).
 - **Auditable** — Structured `CostBreakdown` with per-dimension costs.
 
 ## Installation
@@ -86,8 +86,16 @@ print(f"Total credits: {result.total}")
 
 ```bash
 pip install "ducto[postgres]"
-ducto migrate "postgresql://user:pass@host:5432/db"
+
+# The connection string is read from DATABASE_URL (recommended) — keeping the
+# password out of your shell history, `ps` output and CI logs.
+export DATABASE_URL="postgresql://user:pass@host:5432/db"
+ducto migrate
 ```
+
+> A positional URL (`ducto migrate "postgresql://…"`) still works for convenience
+> but is discouraged and prints a warning, since it leaks the password via the
+> process list, shell history and CI logs.
 
 Creates all tables (`user_credits`, `credit_transactions`, `credit_reservations`,
 `credit_plans`, `credit_usage_window`, `credit_teams`, `credit_team_members`,
@@ -259,7 +267,7 @@ emitter.on("credits.low_balance", lambda e: send_alert(e.user_id, e.data["balanc
 
 | Feature | Example |
 |---------|---------|
-| Arithmetic | `+`, `-`, `*`, `/`, `//`, `%`, `**` |
+| Arithmetic | `+`, `-`, `*`, `/`, `//`, `%` (exponentiation `**` is rejected at validate time) |
 | Comparisons | `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in` |
 | Boolean | `and`, `or`, `not` |
 | Ternary | `X if cond else Y` |
@@ -289,17 +297,20 @@ emitter.on("credits.low_balance", lambda e: send_alert(e.user_id, e.data["balanc
 
 ### Custom stores
 
-Implement `ducto.interface.base.CreditStore` (ABC with 18 abstract methods).
+Implement `ducto.interface.base.CreditStore` (ABC with 29 abstract methods).
 
 ## Credit Lifecycle
 
-`CreditManager.deduct()` orchestrates:
+`CreditManager.deduct()`:
 
-1. **Calculate** — `PricingEngine.calculate(metrics)` → cost
-2. **Plan allowance** — consume free allowance if user has a plan
-3. **Spend cap check** — deny/warn/notify if configured limit exceeded
-4. **Reserve** — `store.reserve_credits()` locks credits (auto-expires 10 min)
-5. **Deduct** — `store.deduct_credits()` atomic deduction (idempotent)
+1. **Calculate** — `PricingEngine.calculate(metrics)` → `cost` (exact `Decimal`, no truncation)
+2. **Short-circuit** — if `cost <= 0`, return a zero-amount result without touching the store
+3. **Atomic charge** — one `store.deduct_with_allowance(...)` call applies plan allowance,
+   spend-cap enforcement, the `min_balance` floor and the balance debit inside a **single
+   transaction**, keyed by `idempotency_key` (a replay returns the original result)
+
+The legacy two-phase `reserve_credits` + `deduct_credits` API is still available on the store
+for callers that need a reservation step.
 
 ### Additional operations
 
@@ -311,7 +322,7 @@ Implement `ducto.interface.base.CreditStore` (ABC with 18 abstract methods).
 
 ## SQL Migrations
 
-10 bundled migrations (`ducto migrate <url>`):
+15 bundled migrations (`DATABASE_URL=… ducto migrate`):
 
 | File | Contents |
 |------|----------|
@@ -325,6 +336,11 @@ Implement `ducto.interface.base.CreditStore` (ABC with 18 abstract methods).
 | `008_team_balances.sql` | Teams + members |
 | `009_spend_caps.sql` | Spend cap RPC |
 | `010_aggregate_stats.sql` | Aggregate stats RPC |
+| `011_feature_entitlements.sql` | Feature entitlement RPC |
+| `012_list_transactions.sql` | List user transactions RPC |
+| `013_list_usage_events.sql` | List usage events RPC |
+| `014_numeric_money.sql` | Convert money columns to `NUMERIC(18,4)` |
+| `015_atomic_deduct.sql` | Atomic `deduct_with_allowance` RPC |
 
 ## Architecture
 
@@ -338,12 +354,12 @@ ducto/
   events.py            # CreditEventEmitter pub/sub
   manager.py           # CreditManager orchestration
   interface/
-    base.py            # CreditStore ABC (18 methods)
+    base.py            # CreditStore ABC (29 abstract methods)
     models.py          # Pydantic schemas
     memory.py          # MemoryStore
     supabase.py        # HttpxSupabaseStore + run_migrations()
     postgres.py        # PostgresStore
-  sql/                 # 010_*.sql
+  sql/                 # 001_*.sql … 015_*.sql (15 migrations)
 ```
 
 ## Expression Safety
@@ -351,9 +367,10 @@ ducto/
 1. Parse `ast.parse(expr, mode="eval")`
 2. Walk AST — each node type in an allowlist
 3. Allowed functions: `ceil`, `floor`, `round`, `min`, `max`, `if`, `tier`, `clamp`, `percentile`
-4. Rejects: attributes, subscripts, lambdas, comprehensions, imports
-5. `__builtins__` emptied at evaluation time
-6. All expressions validated at config load time
+4. Rejects: attributes, subscripts, lambdas, comprehensions, imports, exponentiation (`**`)
+5. Division / modulo by zero and non-finite results raise `ExpressionError` (never `inf`/`NaN`)
+6. `__builtins__` emptied at evaluation time
+7. All expressions — and their variable names — validated at config load time
 
 ## Development
 

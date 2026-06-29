@@ -25,12 +25,19 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# All credit lifecycle event types
+# All credit lifecycle event types.
+#
+# Success events fire only after the underlying store operation committed; the
+# failure events (``credits.deduct_failed``/``credits.refund_failed``) fire on a
+# business error so a billing system can observe denials/over-refunds (contract
+# §6, H3). Event payload money is ``Decimal``.
 CREDIT_EVENT_TYPES = frozenset(
     {
         "credits.deducted",
+        "credits.deduct_failed",
         "credits.added",
         "credits.refunded",
+        "credits.refund_failed",
         "credits.expired",
         "credits.cap_reached",
         "credits.cap_warning",

@@ -4,17 +4,17 @@
 
 ```
 ducto/
-├── expr.py              # Safe AST expression evaluator
+├── expr.py              # Safe AST expression evaluator (exact Decimal math)
 ├── config.py            # Pydantic model + dict loading for PricingConfig
-├── engine.py            # PricingEngine — core calculation logic
+├── engine.py            # PricingEngine — core calculation logic (Decimal)
 ├── metrics.py           # UsageMetrics, ToolCall dataclasses
-├── breakdown.py         # CostBreakdown dataclass
+├── breakdown.py         # CostBreakdown model (Decimal components + total)
 ├── events.py            # CreditEventEmitter — typed pub/sub for lifecycle events
 ├── manager.py           # CreditManager — orchestration layer
 ├── interface/
-│   ├── base.py          # CreditStore ABC (18 abstract methods)
+│   ├── base.py          # CreditStore ABC (29 abstract methods + check_feature)
 │   ├── models.py        # Pydantic schemas for all store operations
-│   ├── memory.py        # MemoryStore (in-memory for testing)
+│   ├── memory.py        # MemoryStore (thread-safe, in-memory for testing)
 │   ├── supabase.py      # HttpxSupabaseStore adapter + run_migrations()
 │   └── postgres.py      # PostgresStore adapter
 └── sql/
@@ -27,63 +27,94 @@ ducto/
     ├── 007_usage_analytics.sql
     ├── 008_team_balances.sql
     ├── 009_spend_caps.sql
-    └── 010_aggregate_stats.sql
+    ├── 010_aggregate_stats.sql
+    ├── 011_feature_entitlements.sql
+    ├── 012_list_transactions.sql
+    ├── 013_list_usage_events.sql
+    ├── 014_numeric_money.sql     # widens money columns to NUMERIC(18,4)
+    └── 015_atomic_deduct.sql     # deduct_with_allowance() atomic RPC
 ```
+
+`CreditStore` (`interface/base.py`) declares **29 abstract methods** plus one concrete convenience method, `check_feature`. The JavaScript `CreditStore` interface mirrors it with **28 methods** (it folds `listUserTransactions`/`listUsageEvents` into the same surface but exposes `deductWithAllowance` and the analytics methods identically).
 
 ## Credit Lifecycle
 
-`CreditManager.deduct()` orchestrates a multi-step flow:
+`CreditManager.deduct()` is now a thin wrapper around a single **atomic, idempotency-keyed** store transaction, `deduct_with_allowance` (`deductWithAllowance` in JS). The manager only calculates the cost and maps the result; allowance consumption, spend-cap enforcement, the balance floor and the debit all happen **inside one server-side transaction** that is all-or-nothing.
 
 ```
-User → CreditManager.deduct(metrics)
+User → CreditManager.deduct(metrics, idempotency_key)
           │
           ├─▶ 1. Calculate cost
           │     PricingEngine.calculate(UsageMetrics) → CostBreakdown
+          │     cost = breakdown.total   (exact Decimal — NO truncation)
+          │     if cost <= 0: short-circuit with a zero-amount result
           │
-          ├─▶ 2. Consume plan allowance (if user has a plan)
-          │     store.check_allowance(user_id) → remaining allowance
-          │     store.increment_usage_window(user_id, plan_id, used)
-          │     (cost reduced by allowance amount; full coverage → skip to end)
+          └─▶ 2. store.deduct_with_allowance(user_id, cost, idempotency_key,
+                                              min_balance, model, metadata)
+                ────────────── ONE transaction (all-or-nothing) ──────────────
+                a. SELECT ... FOR UPDATE  (lock the user's credit row)
+                b. Idempotency FIRST (user-scoped): if this idempotency_key was
+                   already used by this user, return the original result with
+                   idempotent=true — no double charge, no double allowance.
+                c. Allowance: consume = LEAST(remaining_allowance, cost);
+                   increment the monthly usage window by `consume`;
+                   net = cost - consume.
+                d. Spend cap on `net`: a `deny` cap RAISEs and aborts → returns
+                   {"error":"cap_reached"} (allowance NOT consumed);
+                   `warn`/`notify` set cap_warning and continue.
+                e. Balance floor: if balance - net < min_balance → returns
+                   {"error":"insufficient_credits"} and aborts.
+                f. Debit balance by `net`; insert ONE `usage` transaction with
+                   idempotency_key, allowance_consumed, model, merged metadata.
+                ───────────────────────────────────────────────────────────────
           │
-          ├─▶ 3. Check spend caps (if configured)
-          │     store.check_spend_cap(user_id, model, cost)
-          │     deny → raises InsufficientCreditsError
-          │     warn/notify → emits event, continues
-          │
-          ├─▶ 4. Reserve credits
-          │     store.reserve_credits(user_id, amount) → ReserveResult
-          │     (locks user row, auto-expires after 10 min)
-          │
-          └─▶ 5. Deduct
-                store.deduct_credits(user_id, reservation_id, amount)
-                → DeductionResult (idempotent, atomic)
+          └─▶ 3. Map the result:
+                error → emit credits.deduct_failed, raise the typed exception
+                        (cap_reached → CapReachedError;
+                         insufficient_credits → InsufficientCreditsError)
+                ok    → emit credits.deducted (and credits.cap_warning if the
+                        store returned a warn/notify cap signal)
 ```
 
-Additionally after step 5, emits `credits.low_balance` event if balance is at or below `min_balance * 2`.
+Any failure rolls back the allowance consumption **and** the balance change together — there is no partial state, no stranded reservation, and no allowance leak on a failed charge. Idempotency is checked **first**, so a retried request with the same key replays the original result instead of re-consuming allowance.
+
+### Why this replaced the old multi-step flow
+
+The previous design issued four independent store calls (consume allowance → check cap → reserve → deduct) with no spanning transaction and idempotency checked *last*. That allowed double-consumed allowance on retry, stranded reservations, and racy cap bypass under concurrency. Consolidating into `deduct_with_allowance` makes the hot path transactional and idempotent end-to-end. Money columns were also widened to `NUMERIC(18,4)` (migration 014) and all windows are pinned to UTC for determinism.
+
+### Two-phase reserve/deduct (legacy, fixed but kept)
+
+The `reserve_credits` + `deduct_credits` pair is retained for callers that genuinely need a reserve-then-finalize flow. It was hardened: `deduct_credits` now looks up the reservation `FOR UPDATE`, verifies it exists and is unexpired, and clamps the deducted amount to the reserved amount — so a `reserve(10)` can no longer be finalized as a `deduct(1000)`. Reserve semantics (reject when `available - amount < min_balance`, no silent capping) are identical between the SQL stores and `MemoryStore`.
+
+### Low-balance alerts
+
+After a successful deduction the manager may emit `credits.low_balance`. The threshold is **configurable** via the `CreditManager(low_balance_threshold=...)` constructor argument; when unset it defaults to `min_balance * 2`. The alert is **edge-triggered** — it fires only on the deduction that takes the balance from above the threshold to at-or-below it (`balance_before > threshold >= balance_after`), not on every call near the threshold.
 
 ## Additional Operations
 
-- **Refunds:** `manager.refund_credits()` → store restores balance, logs refund transaction. Supports full and partial refunds with duplicate detection.
-- **Expiry:** `manager.sweep_expired_credits()` → store finds expired grants, debits balance. Dry-run mode for preview.
-- **Team deduction:** `manager.deduct_team()` → PricingEngine calculates cost → store debits team pool, enforces per-member caps.
-- **Analytics:** Queries (`spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`) filter `credit_transactions` in a time window — backed by SQL window functions (Postgres) or in-memory scan (MemoryStore).
+- **Refunds:** `manager.refund_credits()` → store restores balance, logs a refund transaction. Supports full and partial refunds; rejects over-refunds, duplicates, and refunding a refund/purchase (`error` set to `over_refund`/`already_refunded`/`not_found`). The manager checks `result.error` before emitting — a failed refund emits `credits.refund_failed`, never a false `credits.refunded`.
+- **Expiry:** `manager.sweep_expired_credits()` → store finds expired grants, debits the balance, and **marks swept grants** so a second sweep reports zero and never double-debits. Dry-run mode previews without modifying. SQL and `MemoryStore` behave identically.
+- **Team deduction:** `manager.deduct_team()` → `PricingEngine` calculates the cost → store debits the team pool, attributed to a user. Threads an `idempotency_key` (both SDKs) so a retried team deduction does not double-charge the shared pool.
+- **Analytics:** `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, plus `list_user_transactions` / `list_usage_events` (the latter on the SQL stores and the JS manager) filter `credit_transactions` in a time window — backed by SQL window functions (Postgres/Supabase) or an in-memory scan (`MemoryStore`).
 
 ## Events
 
-`CreditEventEmitter` is an optional typed pub/sub injected into `CreditManager`. All events fire synchronously after the operation completes. Available event types: `credits.deducted`, `credits.added`, `credits.refunded`, `credits.expired`, `credits.cap_reached`, `credits.cap_warning`, `credits.low_balance`, `credits.plan_changed`.
+`CreditEventEmitter` is an optional typed pub/sub injected into `CreditManager`. Success events fire only **after** the underlying operation commits (`not result.error`); failures fire dedicated failure events. Handler exceptions are isolated and never break the main flow. Available event types: `credits.deducted`, `credits.deduct_failed`, `credits.added`, `credits.refunded`, `credits.refund_failed`, `credits.expired`, `credits.cap_reached`, `credits.cap_warning`, `credits.low_balance`, `credits.plan_changed`. Event timestamps are timezone-aware UTC.
 
 ## Expression Safety — Python
 
 1. Parse `ast.parse(expr, mode="eval")`
-2. Walk the AST — every node type must be in an allowlist (~25 types)
+2. Walk the AST — every node type must be in a strict allowlist; `ast.Pow` (`**`) is intentionally excluded, so exponentiation is rejected
 3. Function calls whitelisted: `ceil`, `floor`, `min`, `max`, `round`, `if`, `tier`, `clamp`, `percentile`
-4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas, comprehensions, imports
-5. Evaluation namespace has `__builtins__` emptied
-6. All expression strings validated at config load time
+4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas, comprehensions, f-strings, imports
+5. Numeric literals are rewritten to exact `Decimal` from their source text; division/modulo by zero raise; the result is asserted finite
+6. Evaluation namespace has `__builtins__` emptied
+7. All expression strings (and variable names) validated at config-load time
 
 ## Expression Safety — JavaScript
 
-1. Recursive descent parser with strict token allowlist
-2. No `eval()`, no `Function()` constructor
-3. Same safety guarantees as Python engine
-4. All expressions validated at config load time
+1. Recursive-descent parser with a strict token allowlist
+2. No `eval()`, no `Function()` constructor; `**` is rejected
+3. Variable lookup uses own-property checks (not the `in` operator), so prototype-chain identifiers (`__proto__`, `constructor`, `prototype`, `toString`, `hasOwnProperty`) are rejected as undefined variables
+4. All math is `decimal.js` `Decimal`; division/modulo by zero throw; non-finite results throw — output is byte-identical to the Python engine
+5. All expressions validated at config-load time

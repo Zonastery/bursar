@@ -14,18 +14,27 @@ END;
 $$;
 
 -- Enum type for transaction categories. Extensible via ALTER TYPE ... ADD VALUE.
+-- 'team_usage' is included here (not in 008) so it is committed long before any
+-- later migration references it: Postgres forbids using a freshly-added enum
+-- value in the same transaction that adds it (H5).
 DO $$ BEGIN
     CREATE TYPE public.credit_tx_type AS ENUM (
-        'purchase', 'subscription', 'signup_bonus', 'usage', 'refund', 'adjustment'
+        'purchase', 'subscription', 'signup_bonus', 'usage', 'refund', 'adjustment', 'team_usage'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- For installs created before 'team_usage' existed: add it idempotently.
+-- This runs (and commits) in 001's own migration transaction, before 008/009
+-- ever reference the value at runtime.
+ALTER TYPE public.credit_tx_type ADD VALUE IF NOT EXISTS 'team_usage';
+
 -- user_credits: current balance per user (non-negative enforced at DB level)
+-- Money columns are NUMERIC(18,4): fractional credits, no integer truncation.
 CREATE TABLE IF NOT EXISTS public.user_credits (
     user_id UUID PRIMARY KEY,
-    balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0),
-    lifetime_purchased INTEGER NOT NULL DEFAULT 0,
+    balance NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    lifetime_purchased NUMERIC(18,4) NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -46,10 +55,11 @@ END;
 $$;
 
 -- credit_transactions: immutable ledger (append-only by convention)
+-- amount is NUMERIC(18,4): fractional, signed (negative = debit).
 CREATE TABLE IF NOT EXISTS public.credit_transactions (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.user_credits(user_id),
-    amount INTEGER NOT NULL,
+    amount NUMERIC(18,4) NOT NULL,
     type public.credit_tx_type NOT NULL,
     reference_type TEXT,
     reference_id UUID,
@@ -57,9 +67,12 @@ CREATE TABLE IF NOT EXISTS public.credit_transactions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Idempotency guarantee: unique on idempotency_key inside metadata JSONB
-CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency
-    ON public.credit_transactions ((metadata ->> 'idempotency_key'))
+-- Idempotency guarantee: unique on (user_id, idempotency_key) inside metadata JSONB.
+-- User-scoped so the same key from two different users never collides (H16).
+-- NOTE: a legacy non-user-scoped index (idx_credit_transactions_idempotency) may
+-- exist from older installs; 014_numeric_money.sql drops it in favour of this one.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency_user
+    ON public.credit_transactions (user_id, (metadata ->> 'idempotency_key'))
     WHERE metadata ->> 'idempotency_key' IS NOT NULL;
 
 -- Index for user lookups (most recent first)
@@ -84,7 +97,7 @@ $$;
 CREATE TABLE IF NOT EXISTS public.credit_reservations (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.user_credits(user_id),
-    amount INTEGER NOT NULL CHECK (amount > 0),
+    amount NUMERIC(18,4) NOT NULL CHECK (amount > 0),
     operation_type TEXT NOT NULL,
     metadata JSONB DEFAULT '{}'::jsonb,
     expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '10 minutes'),

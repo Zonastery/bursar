@@ -39,8 +39,8 @@ BEGIN
                 v_plan_key,
                 v_plan_def->>'name',
                 COALESCE(
-                    (v_plan_def->>'free_allowance')::INTEGER,
-                    (v_plan_def->>'freeAllowance')::INTEGER,
+                    (v_plan_def->>'free_allowance')::NUMERIC,
+                    (v_plan_def->>'freeAllowance')::NUMERIC,
                     0
                 ),
                 COALESCE(
@@ -83,6 +83,9 @@ BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
+
+    -- Serialize concurrent publishers so version assignment can't race (M14).
+    PERFORM pg_advisory_xact_lock(hashtext('ducto_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
     FROM public.credit_pricing_config;
@@ -168,7 +171,7 @@ AS $$
 DECLARE
     v_plan_id UUID;
     v_plan_name TEXT;
-    v_free_allowance INTEGER;
+    v_free_allowance NUMERIC;
     v_features JSONB;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN

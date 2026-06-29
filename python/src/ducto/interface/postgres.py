@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 import psycopg2
 
@@ -41,6 +43,22 @@ from ducto.interface.models import (
     TransactionRow,
 )
 from ducto.sql import _get_sql_files
+
+
+def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
+    """Coerce a NUMERIC/JSON value to ``Decimal`` (contract §1).
+
+    psycopg2 already returns NUMERIC columns as ``Decimal``; this guards the
+    ``None``/``int``/``str`` cases (and a stray ``float``, routed through ``str``
+    to avoid binary-float error) so no money value is ever truncated via ``int``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return Decimal(value)
 
 
 class PostgresStore(CreditStore):
@@ -116,23 +134,24 @@ class PostgresStore(CreditStore):
             conn.close()
 
         if not row:
-            return BalanceResult(user_id=user_id, balance=0)
+            return BalanceResult(user_id=user_id, balance=Decimal(0))
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
         return BalanceResult(
             user_id=str(result_dict.get("user_id", user_id)),
-            balance=int(result_dict.get("balance", 0)),
-            lifetime_purchased=int(result_dict.get("lifetime_purchased", 0)),
+            balance=_dec(result_dict.get("balance")),
+            lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
         )
 
     def add_credits(
         self,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
     ) -> AddCreditsResult:
+        amount = _dec(amount)
         conn = self._conn()
         try:
             meta = metadata.model_dump(mode="json") if metadata else {}
@@ -149,22 +168,26 @@ class PostgresStore(CreditStore):
             conn.close()
 
         result_dict = row[0] if row else {}
+        if "error" in result_dict and result_dict["error"]:
+            raise StoreError(f"credits_add failed: {result_dict['error']}")
         return AddCreditsResult(
             transaction_id=str(result_dict.get("id", "")),
             user_id=str(result_dict.get("user_id", user_id)),
-            amount=int(result_dict.get("amount", amount)),
-            new_balance=int(result_dict.get("new_balance", 0)),
-            lifetime_purchased=int(result_dict.get("lifetime_purchased", 0)),
+            amount=_dec(result_dict.get("amount"), amount),
+            new_balance=_dec(result_dict.get("new_balance")),
+            lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
         )
 
     def reserve_credits(
         self,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         operation_type: str,
         metadata: CreditMetadata | None = None,
-        min_balance: int = 5,
+        min_balance: Decimal = Decimal(5),
     ) -> ReserveResult:
+        amount = _dec(amount)
+        min_balance = _dec(min_balance)
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -184,33 +207,94 @@ class PostgresStore(CreditStore):
             conn.close()
 
         if not row:
-            return ReserveResult(reservation_id="", user_id=user_id, amount=0, error="no result")
+            return ReserveResult(reservation_id="", user_id=user_id, amount=Decimal(0), error="no result")
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
         if "error" in result_dict:
             return ReserveResult(
                 reservation_id="",
                 user_id=user_id,
-                amount=0,
+                amount=Decimal(0),
                 error=str(result_dict["error"]),
             )
 
         return ReserveResult(
             reservation_id=str(result_dict.get("reservation_id", "")),
             user_id=str(result_dict.get("user_id", user_id)),
-            amount=int(result_dict.get("amount", 0)),
-            balance=int(result_dict.get("balance", 0)),
-            reserved_total=int(result_dict.get("reserved", 0)),
+            amount=_dec(result_dict.get("amount")),
+            balance=_dec(result_dict.get("balance")),
+            reserved_total=_dec(result_dict.get("reserved")),
+        )
+
+    def deduct_with_allowance(
+        self,
+        user_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
+
+        The whole calculate-then-charge pipeline runs in one server-side
+        transaction; this wrapper only marshals params and maps the JSON envelope
+        (success or business-error code) onto ``DeductionResult``.
+        """
+        amount = _dec(amount)
+        min_balance = _dec(min_balance)
+        meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "deduct_with_allowance",
+                    [user_id, amount, idempotency_key, min_balance, model, json.dumps(meta)],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        if not result_dict:
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                balance_after=Decimal(0),
+                error="no result",
+            )
+        if "error" in result_dict:
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                balance_after=_dec(result_dict.get("balance_after")),
+                error=str(result_dict["error"]),
+            )
+
+        return DeductionResult(
+            transaction_id=str(result_dict.get("transaction_id", "")),
+            user_id=user_id,
+            amount=_dec(result_dict.get("amount")),
+            allowance_consumed=_dec(result_dict.get("allowance_consumed")),
+            balance_after=_dec(result_dict.get("balance_after")),
+            idempotent=bool(result_dict.get("idempotent", False)),
+            cap_warning=result_dict.get("cap_warning") or None,
         )
 
     def deduct_credits(
         self,
         user_id: str,
         reservation_id: str,
-        amount: int,
+        amount: Decimal,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
+        amount = _dec(amount)
         meta = metadata.model_dump(mode="json") if metadata else {}
         if idempotency_key:
             meta["idempotency_key"] = idempotency_key
@@ -232,7 +316,7 @@ class PostgresStore(CreditStore):
                 transaction_id="",
                 user_id=user_id,
                 amount=-amount,
-                balance_after=0,
+                balance_after=Decimal(0),
                 error="no result",
             )
 
@@ -242,15 +326,15 @@ class PostgresStore(CreditStore):
                 transaction_id="",
                 user_id=user_id,
                 amount=-amount,
-                balance_after=0,
+                balance_after=Decimal(0),
                 error=str(result_dict["error"]),
             )
 
         return DeductionResult(
             transaction_id=str(result_dict.get("id", "")),
             user_id=str(result_dict.get("user_id", user_id)),
-            amount=int(result_dict.get("amount", -amount)),
-            balance_after=int(result_dict.get("new_balance", 0)),
+            amount=_dec(result_dict.get("amount"), -amount),
+            balance_after=_dec(result_dict.get("new_balance")),
             idempotent=bool(result_dict.get("idempotent", False)),
         )
 
@@ -347,14 +431,14 @@ class PostgresStore(CreditStore):
             conn.close()
 
         if not row:
-            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=0)
+            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=Decimal(0))
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
         return GetUserPlanResult(
             user_id=str(result_dict.get("user_id", user_id)),
             plan_id=result_dict.get("plan_id") or None,
             plan_name=result_dict.get("plan_name") or None,
-            free_allowance=int(result_dict.get("free_allowance", 0)),
+            free_allowance=_dec(result_dict.get("free_allowance")),
             features=result_dict.get("features") or {},
         )
 
@@ -384,21 +468,21 @@ class PostgresStore(CreditStore):
             conn.close()
 
         if not row:
-            return AllowanceResult(plan_id="", allowance_remaining=0, period_start="", period_end="")
+            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
         return AllowanceResult(
             plan_id=str(result_dict.get("plan_id", "")),
-            allowance_remaining=int(result_dict.get("allowance_remaining", 0)),
+            allowance_remaining=_dec(result_dict.get("allowance_remaining")),
             period_start=str(result_dict.get("period_start", "")),
             period_end=str(result_dict.get("period_end", "")),
         )
 
-    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("increment_usage_window", [user_id, plan_id, amount])
+                cur.callproc("increment_usage_window", [user_id, plan_id, _dec(amount)])
             conn.commit()
         finally:
             conn.close()
@@ -409,26 +493,27 @@ class PostgresStore(CreditStore):
         self,
         user_id: str,
         model: str | None = None,
-        amount: int | None = None,
+        amount: Decimal | None = None,
     ) -> CapCheckResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("check_spend_cap", [user_id, model, amount or 0])
+                cur.callproc("check_spend_cap", [user_id, model, _dec(amount)])
                 row = cur.fetchone()
             conn.commit()
         finally:
             conn.close()
 
         if not row:
-            return CapCheckResult(capped=False, current_spend=0, cap_limit=0, action=None)
+            return CapCheckResult(capped=False, current_spend=Decimal(0), cap_limit=Decimal(0), action=None)
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
+        action = result_dict.get("action")
         return CapCheckResult(
             capped=bool(result_dict.get("capped", False)),
-            current_spend=int(result_dict.get("current_spend", 0)),
-            cap_limit=int(result_dict.get("cap_limit", 0)),
-            action=str(result_dict.get("action")) if result_dict.get("action") else None,
+            current_spend=_dec(result_dict.get("current_spend")),
+            cap_limit=_dec(result_dict.get("cap_limit")),
+            action=action if action in ("deny", "warn", "notify") else None,
             model=str(result_dict.get("model")) if result_dict.get("model") else None,
         )
 
@@ -437,7 +522,7 @@ class PostgresStore(CreditStore):
     def refund_credits(
         self,
         transaction_id: str,
-        amount: int | None = None,
+        amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:
@@ -448,7 +533,7 @@ class PostgresStore(CreditStore):
                     "refund_credits",
                     [
                         transaction_id,
-                        amount,
+                        _dec(amount) if amount is not None else None,
                         reason,
                         json.dumps(metadata.model_dump(mode="json") if metadata else {}),
                     ],
@@ -464,8 +549,8 @@ class PostgresStore(CreditStore):
                 refund_transaction_id="",
                 original_transaction_id=transaction_id,
                 user_id=str(result_dict.get("user_id", "")),
-                amount=0,
-                new_balance=int(result_dict.get("new_balance", 0)),
+                amount=Decimal(0),
+                new_balance=_dec(result_dict.get("new_balance")),
                 error=str(result_dict["error"]),
             )
 
@@ -473,8 +558,8 @@ class PostgresStore(CreditStore):
             refund_transaction_id=str(result_dict.get("refund_transaction_id", "")),
             original_transaction_id=transaction_id,
             user_id=str(result_dict.get("user_id", "")),
-            amount=int(result_dict.get("amount", 0)),
-            new_balance=int(result_dict.get("new_balance", 0)),
+            amount=_dec(result_dict.get("amount")),
+            new_balance=_dec(result_dict.get("new_balance")),
         )
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -491,7 +576,7 @@ class PostgresStore(CreditStore):
         return [
             SpendByUserRow(
                 user_id=str(r[0].get("user_id", "")),
-                total_spend=int(r[0].get("total_spend", 0)),
+                total_spend=_dec(r[0].get("total_spend")),
                 transaction_count=int(r[0].get("transaction_count", 0)),
             )
             for r in (rows or [])
@@ -510,7 +595,7 @@ class PostgresStore(CreditStore):
         return [
             SpendByModelRow(
                 model=str(r[0].get("model", "")),
-                total_spend=int(r[0].get("total_spend", 0)),
+                total_spend=_dec(r[0].get("total_spend")),
                 transaction_count=int(r[0].get("transaction_count", 0)),
             )
             for r in (rows or [])
@@ -529,7 +614,7 @@ class PostgresStore(CreditStore):
         return [
             TopUserRow(
                 user_id=str(r[0].get("user_id", "")),
-                total_spend=int(r[0].get("total_spend", 0)),
+                total_spend=_dec(r[0].get("total_spend")),
             )
             for r in (rows or [])
             if r and isinstance(r[0], dict)
@@ -547,7 +632,7 @@ class PostgresStore(CreditStore):
         return [
             DailySpendRow(
                 date=str(r[0].get("date", "")),
-                total_spend=int(r[0].get("total_spend", 0)),
+                total_spend=_dec(r[0].get("total_spend")),
                 transaction_count=int(r[0].get("transaction_count", 0)),
             )
             for r in (rows or [])
@@ -567,9 +652,9 @@ class PostgresStore(CreditStore):
             return AggregateStatsRow()
         d = row[0]
         return AggregateStatsRow(
-            total_credits_consumed=int(d.get("total_credits_consumed", 0)),
+            total_credits_consumed=_dec(d.get("total_credits_consumed")),
             active_users=int(d.get("active_users", 0)),
-            avg_daily_spend=int(d.get("avg_daily_spend", 0)),
+            avg_daily_spend=_dec(d.get("avg_daily_spend")),
             top_model=str(d.get("top_model", "")),
             top_user=str(d.get("top_user", "")),
         )
@@ -607,7 +692,7 @@ class PostgresStore(CreditStore):
             TransactionRow(
                 id=str(r[0]),
                 user_id=str(r[1]),
-                amount=int(r[2]),
+                amount=_dec(r[2]),
                 type=str(r[3]),
                 reference_type=str(r[4]) if r[4] else None,
                 reference_id=str(r[5]) if r[5] else None,
@@ -620,11 +705,11 @@ class PostgresStore(CreditStore):
 
     # ── Team/shared balance pools ─────────────────────────────────────────
 
-    def create_team(self, name: str, initial_balance: int = 0) -> CreateTeamResult:
+    def create_team(self, name: str, initial_balance: Decimal = Decimal(0)) -> CreateTeamResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("create_team", [name, initial_balance])
+                cur.callproc("create_team", [name, _dec(initial_balance)])
                 row = cur.fetchone()
             conn.commit()
         finally:
@@ -655,7 +740,7 @@ class PostgresStore(CreditStore):
         return TeamBalanceResult(
             team_id=str(result_dict.get("team_id", team_id)),
             name=str(result_dict.get("name", "")),
-            balance=int(result_dict.get("balance", 0)),
+            balance=_dec(result_dict.get("balance")),
             member_count=int(result_dict.get("member_count", 0)),
         )
 
@@ -664,12 +749,15 @@ class PostgresStore(CreditStore):
         team_id: str,
         user_id: str,
         role: str = "member",
-        spend_cap: int | None = None,
+        spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("add_team_member", [team_id, user_id, role, spend_cap])
+                cur.callproc(
+                    "add_team_member",
+                    [team_id, user_id, role, _dec(spend_cap) if spend_cap is not None else None],
+                )
                 row = cur.fetchone()
             conn.commit()
         finally:
@@ -696,8 +784,8 @@ class PostgresStore(CreditStore):
             TeamMember(
                 user_id=str(r[0].get("user_id", "")),
                 role=str(r[0].get("role", "member")),
-                spend_cap=r[0].get("spend_cap"),
-                total_spent=int(r[0].get("total_spent", 0)),
+                spend_cap=_dec(r[0]["spend_cap"]) if r[0].get("spend_cap") is not None else None,
+                total_spent=_dec(r[0].get("total_spent")),
             )
             for r in (rows or [])
             if r and isinstance(r[0], dict)
@@ -707,15 +795,22 @@ class PostgresStore(CreditStore):
         self,
         team_id: str,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> TeamDeductionResult:
+        amount = _dec(amount)
+        meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        # Thread the idempotency key through metadata (the RPC reads it from
+        # metadata->>'idempotency_key'), matching deduct_credits (H12).
+        if idempotency_key:
+            meta["idempotency_key"] = idempotency_key
         conn = self._conn()
         try:
             with conn.cursor() as cur:
                 cur.callproc(
                     "deduct_team",
-                    [team_id, user_id, amount, json.dumps(metadata.model_dump(mode="json") if metadata else {})],
+                    [team_id, user_id, amount, json.dumps(meta)],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -728,8 +823,8 @@ class PostgresStore(CreditStore):
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
-                amount=0,
-                team_balance_after=int(result_dict.get("team_balance_after", 0)),
+                amount=Decimal(0),
+                team_balance_after=_dec(result_dict.get("team_balance_after")),
                 error=str(result_dict["error"]),
             )
 
@@ -737,8 +832,8 @@ class PostgresStore(CreditStore):
             transaction_id=str(result_dict.get("transaction_id", "")),
             team_id=str(result_dict.get("team_id", team_id)),
             user_id=str(result_dict.get("user_id", user_id)),
-            amount=int(result_dict.get("amount", -amount)),
-            team_balance_after=int(result_dict.get("team_balance_after", 0)),
+            amount=_dec(result_dict.get("amount"), -amount),
+            team_balance_after=_dec(result_dict.get("team_balance_after")),
         )
 
     # ── Credit expiry ───────────────────────────────────────────────────
@@ -756,6 +851,6 @@ class PostgresStore(CreditStore):
         result_dict = row[0] if row and isinstance(row[0], dict) else {}
         return SweepResult(
             expired_count=int(result_dict.get("expired_count", 0)),
-            expired_amount=int(result_dict.get("expired_amount", 0)),
+            expired_amount=_dec(result_dict.get("expired_amount")),
             dry_run=dry_run,
         )

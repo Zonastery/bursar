@@ -15,18 +15,34 @@
  * ```
  */
 
-/** All credit lifecycle event types. */
+/**
+ * All credit lifecycle event types.
+ *
+ * Success events (``credits.deducted``/``credits.refunded``/…) are emitted by
+ * ``CreditManager`` only after the underlying store operation committed without
+ * an ``error`` (contract §6). Failure events (``credits.deduct_failed`` /
+ * ``credits.refund_failed``) carry the store's business-error code in
+ * ``data.error`` for observability/fraud monitoring.
+ */
 export type CreditEventType =
   | "credits.deducted"
+  | "credits.deduct_failed"
   | "credits.added"
   | "credits.refunded"
+  | "credits.refund_failed"
   | "credits.expired"
   | "credits.cap_reached"
   | "credits.cap_warning"
   | "credits.low_balance"
   | "credits.plan_changed";
 
-/** A typed credit lifecycle event. */
+/**
+ * A typed credit lifecycle event.
+ *
+ * Money values inside ``data`` (``amount``, ``balanceAfter``,
+ * ``allowanceConsumed``, ``threshold``, …) are exact `Decimal` instances
+ * (contract §1/§6), never binary `number`.
+ */
 export interface CreditEvent {
   type: CreditEventType;
   timestamp: Date;
@@ -53,16 +69,32 @@ export class CreditEventEmitter {
     this.listeners.get(type)?.delete(handler);
   }
 
-  /** Emit an event to all registered handlers. No-op if no handlers exist. */
+  /**
+   * Emit an event to all registered handlers. No-op if no handlers exist.
+   *
+   * Each handler is isolated: a synchronous throw (or a rejected promise from an
+   * async handler) is caught and logged, never propagated. This guarantees a
+   * misbehaving listener can never break the manager's main flow and never
+   * produces an unhandled promise rejection (contract §6).
+   */
   emit(event: CreditEvent): void {
     const handlers = this.listeners.get(event.type);
-    if (handlers) {
-      for (const handler of handlers) {
-        try {
-          handler(event);
-        } catch (err) {
-          console.error(`[CreditEventEmitter] handler error for event ${event.type}:`, err);
+    if (!handlers) return;
+    // Iterate a snapshot so a handler that mutates the set during emit is safe.
+    for (const handler of [...handlers]) {
+      try {
+        const out = handler(event) as unknown;
+        // Swallow rejections from async handlers so they never become unhandled.
+        if (out instanceof Promise) {
+          out.catch((err: unknown) => {
+            console.error(
+              `[CreditEventEmitter] async handler error for event ${event.type}:`,
+              err,
+            );
+          });
         }
+      } catch (err) {
+        console.error(`[CreditEventEmitter] handler error for event ${event.type}:`, err);
       }
     }
   }

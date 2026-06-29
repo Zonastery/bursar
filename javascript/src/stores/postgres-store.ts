@@ -1,3 +1,5 @@
+import Decimal from "decimal.js";
+import { StoreError } from "../errors.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -10,6 +12,7 @@ import type {
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
+  DeductWithAllowanceOptions,
   GetUserPlanResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
@@ -29,6 +32,28 @@ import type {
   TopUserRow,
 } from "../types.js";
 import type { CreditStore } from "./credit-store.js";
+
+const ZERO = new Decimal(0);
+
+/**
+ * Parse a Postgres NUMERIC column into an exact `Decimal`. Postgres returns
+ * NUMERIC as a *string* via `pg`, so this preserves full precision (contract
+ * §1). `null`/`undefined` become the supplied fallback.
+ */
+function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
+  if (value === null || value === undefined) return fallback;
+  if (value instanceof Decimal) return value;
+  try {
+    return new Decimal(typeof value === "string" ? value : String(value));
+  } catch {
+    return fallback;
+  }
+}
+
+/** A money serialized for an SQL parameter: send as a decimal string. */
+function decParam(value: Decimal): string {
+  return value.toString();
+}
 
 /**
  * Minimal interface for a PG pool (real or mock).
@@ -90,47 +115,67 @@ export class PostgresStore implements CreditStore {
     }
   }
 
+  /**
+   * Call a SQL function and return its result rows.
+   *
+   * ducto's RPCs come in two shapes:
+   *   1. **Scalar JSONB** (`RETURNS JSONB`) — `pg` returns one row whose single
+   *      column holds the parsed object. We unwrap that to `[object]`.
+   *   2. **Set-returning** (`RETURNS TABLE/SETOF`) — many rows of named columns.
+   *      We return them as-is.
+   *
+   * The previous `rows[0]` heuristic was fragile: a single-row set-returning
+   * function whose first column happened to be an object would be misread. We
+   * instead detect the JSONB-scalar case precisely: exactly one row with exactly
+   * one column whose value is a non-array object. Lists therefore always return
+   * all their rows.
+   */
   private async callproc(name: string, params: unknown[]): Promise<unknown[]> {
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
     const rows = await this.query(`SELECT * FROM ${name}(${placeholders})`, params);
-    // Functions return JSONB — PG wraps result as {funcname: jsonb_string}
-    // Unwrap by parsing the first column of each row
-    // Functions return JSONB — PG wraps result as {funcname: parsed_object}.
-    // Unwrap by extracting the first column value (the actual result object).
-    if (rows.length > 0) {
+    if (rows.length === 1) {
       const row = rows[0] as Record<string, unknown>;
-      const firstCol = Object.keys(row)[0];
-      // For JSONB results, pg returns a single object-valued column
-      if (typeof row[firstCol] === "object" && row[firstCol] !== null) {
-        return [row[firstCol]];
+      const keys = Object.keys(row);
+      if (keys.length === 1) {
+        const v = row[keys[0]];
+        if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+          // Scalar JSONB result: unwrap to the parsed object.
+          return [v];
+        }
       }
     }
     return rows;
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    const result: SetupResult = { tablesCreated: [], rpcsCreated: [], errors: [], success: true };
-    // Run bundled SQL migrations — in a real package these would be embedded files
-    // Here we expose the setup API; actual migration files belong in the consuming project
-    return result;
+    // H17: do NOT silently report success for a no-op. ducto's schema is managed
+    // as a set of ordered SQL migrations bundled with the Python package; this
+    // store does not embed them. Surface that clearly instead of green-lighting
+    // a missing schema (which would only fail later as missing-RPC errors).
+    throw new StoreError(
+      "PostgresStore.setup() does not run migrations. Apply the bundled SQL " +
+        "migrations first — run `ducto migrate` via the Python CLI, or execute the " +
+        "files in `python/src/ducto/sql/*.sql` (in filename order) against your " +
+        "database. This store assumes the schema already exists.",
+    );
   }
 
   async getBalance(userId: string): Promise<BalanceResult> {
     const rows = await this.callproc("get_credits_balance", [userId]);
     if (!rows || rows.length === 0) {
-      return { userId, balance: 0, lifetimePurchased: 0 };
+      return { userId, balance: ZERO, lifetimePurchased: ZERO };
     }
     const row = rows[0] as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
-      balance: Number(row.balance ?? 0),
-      lifetimePurchased: Number(row.lifetime_purchased ?? 0),
+      balance: dec(row.balance),
+      lifetimePurchased: dec(row.lifetime_purchased),
     };
   }
 
   async addCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     type = "adjustment",
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
@@ -139,39 +184,44 @@ export class PostgresStore implements CreditStore {
     if (expiresAt) {
       meta.expires_at = expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt);
     }
-    const rows = await this.callproc("credits_add", [userId, amount, type, JSON.stringify(meta)]);
+    const rows = await this.callproc("credits_add", [
+      userId,
+      decParam(amount),
+      type,
+      JSON.stringify(meta),
+    ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       transactionId: String(row.id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? amount),
-      newBalance: Number(row.new_balance ?? 0),
-      lifetimePurchased: Number(row.lifetime_purchased ?? 0),
+      amount: dec(row.amount, amount),
+      newBalance: dec(row.new_balance),
+      lifetimePurchased: dec(row.lifetime_purchased),
     };
   }
 
   async reserveCredits(
     userId: string,
-    amount: number,
+    amount: Decimal,
     operationType: string,
     metadata?: CreditMetadata | null,
-    minBalance = 5,
+    minBalance: Decimal = new Decimal(5),
   ): Promise<ReserveResult> {
     const rows = await this.callproc("reserve_credits", [
       userId,
-      amount,
+      decParam(amount),
       operationType,
       JSON.stringify(metadata ?? {}),
-      minBalance,
+      decParam(minBalance),
     ]);
 
     if (!rows || rows.length === 0) {
       return {
         reservationId: "",
         userId,
-        amount: 0,
-        balance: 0,
-        reservedTotal: 0,
+        amount: ZERO,
+        balance: ZERO,
+        reservedTotal: ZERO,
         error: "no result",
       };
     }
@@ -181,9 +231,9 @@ export class PostgresStore implements CreditStore {
       return {
         reservationId: "",
         userId,
-        amount: 0,
-        balance: 0,
-        reservedTotal: 0,
+        amount: ZERO,
+        balance: dec(row.balance),
+        reservedTotal: dec(row.reserved),
         error: String(row.error),
       };
     }
@@ -191,16 +241,16 @@ export class PostgresStore implements CreditStore {
     return {
       reservationId: String(row.reservation_id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? 0),
-      balance: Number(row.balance ?? 0),
-      reservedTotal: Number(row.reserved ?? 0),
+      amount: dec(row.amount),
+      balance: dec(row.balance),
+      reservedTotal: dec(row.reserved),
     };
   }
 
   async deductCredits(
     userId: string,
     reservationId: string,
-    amount: number,
+    amount: Decimal,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
@@ -210,7 +260,7 @@ export class PostgresStore implements CreditStore {
     const rows = await this.callproc("deduct_credits", [
       userId,
       reservationId,
-      amount,
+      decParam(amount),
       JSON.stringify(meta),
     ]);
 
@@ -218,9 +268,11 @@ export class PostgresStore implements CreditStore {
       return {
         transactionId: "",
         userId,
-        amount: -amount,
-        balanceAfter: 0,
+        amount: amount.negated(),
+        allowanceConsumed: ZERO,
+        balanceAfter: ZERO,
         idempotent: false,
+        capWarning: null,
         error: "no result",
       };
     }
@@ -230,9 +282,11 @@ export class PostgresStore implements CreditStore {
       return {
         transactionId: "",
         userId,
-        amount: -amount,
-        balanceAfter: 0,
+        amount: amount.negated(),
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.new_balance),
         idempotent: false,
+        capWarning: null,
         error: String(row.error),
       };
     }
@@ -240,9 +294,58 @@ export class PostgresStore implements CreditStore {
     return {
       transactionId: String(row.id ?? ""),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? -amount),
-      balanceAfter: Number(row.new_balance ?? 0),
+      amount: dec(row.amount, amount.negated()),
+      allowanceConsumed: ZERO,
+      balanceAfter: dec(row.new_balance),
       idempotent: Boolean(row.idempotent),
+      capWarning: null,
+    };
+  }
+
+  async deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<DeductionResult> {
+    const idempotencyKey = options?.idempotencyKey ?? null;
+    const minBalance = options?.minBalance ?? ZERO;
+    const model = options?.model ?? null;
+    const metadata = options?.metadata ?? {};
+
+    const rows = await this.callproc("deduct_with_allowance", [
+      userId,
+      decParam(amount),
+      idempotencyKey,
+      decParam(minBalance),
+      model,
+      JSON.stringify(metadata ?? {}),
+    ]);
+
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if ("error" in row && row.error) {
+      // Map the SQL error envelope to DeductionResult.error (the manager maps
+      // codes to typed exceptions). cap_reached / insufficient_credits /
+      // invalid_amount all flow through here without throwing.
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.balance_after),
+        idempotent: false,
+        capWarning: null,
+        error: String(row.error),
+      };
+    }
+
+    return {
+      transactionId: String(row.transaction_id ?? ""),
+      userId,
+      amount: dec(row.amount),
+      allowanceConsumed: dec(row.allowance_consumed),
+      balanceAfter: dec(row.balance_after),
+      idempotent: Boolean(row.idempotent),
+      capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
     };
   }
 
@@ -268,26 +371,28 @@ export class PostgresStore implements CreditStore {
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const rows = await this.callproc("get_user_plan", [userId]);
     if (!rows || rows.length === 0) {
-      return { userId, planId: null, planName: null, freeAllowance: 0, features: {} };
+      return { userId, planId: null, planName: null, freeAllowance: ZERO, features: {} };
     }
     const row = rows[0] as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
       planName: (row.plan_name as string) ?? null,
-      freeAllowance: Number(row.free_allowance ?? 0),
+      freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
     };
   }
 
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
-    const value = plan.features[feature] ?? null;
+    const present = Object.prototype.hasOwnProperty.call(plan.features, feature);
+    const value = present ? plan.features[feature] : null;
     return {
       userId,
       feature,
       value,
-      hasFeature: value != null && Boolean(value),
+      // M6: presence-vs-truthiness — numeric 0 / "" count as present.
+      hasFeature: present && value !== null && value !== undefined && value !== false,
     };
   }
 
@@ -303,19 +408,19 @@ export class PostgresStore implements CreditStore {
   async checkAllowance(userId: string): Promise<AllowanceResult> {
     const rows = await this.callproc("check_plan_allowance", [userId]);
     if (!rows || rows.length === 0) {
-      return { planId: "", allowanceRemaining: 0, periodStart: "", periodEnd: "" };
+      return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
     const row = rows[0] as Record<string, unknown>;
     return {
       planId: String(row.plan_id ?? ""),
-      allowanceRemaining: Number(row.allowance_remaining ?? 0),
+      allowanceRemaining: dec(row.allowance_remaining),
       periodStart: String(row.period_start ?? ""),
       periodEnd: String(row.period_end ?? ""),
     };
   }
 
-  async incrementUsageWindow(userId: string, planId: string, amount: number): Promise<void> {
-    await this.callproc("increment_usage_window", [userId, planId, amount]);
+  async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
+    await this.callproc("increment_usage_window", [userId, planId, decParam(amount)]);
   }
 
   // ── Spend caps and rate limiting ──────────────────────────────────────
@@ -323,17 +428,21 @@ export class PostgresStore implements CreditStore {
   async checkSpendCap(
     userId: string,
     model?: string | null,
-    amount?: number,
+    amount?: Decimal,
   ): Promise<CapCheckResult> {
-    const rows = await this.callproc("check_spend_cap", [userId, model ?? null, amount ?? 0]);
+    const rows = await this.callproc("check_spend_cap", [
+      userId,
+      model ?? null,
+      decParam(amount ?? ZERO),
+    ]);
     if (!rows || rows.length === 0) {
-      return { capped: false, currentSpend: 0, limit: 0, action: null };
+      return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
     }
     const row = rows[0] as Record<string, unknown>;
     return {
       capped: Boolean(row.capped),
-      currentSpend: Number(row.current_spend ?? 0),
-      limit: Number(row.cap_limit ?? 0),
+      currentSpend: dec(row.current_spend),
+      limit: dec(row.cap_limit),
       action: (row.action as CapCheckResult["action"]) ?? null,
       model: row.model ? String(row.model) : undefined,
     };
@@ -343,13 +452,13 @@ export class PostgresStore implements CreditStore {
 
   async refundCredits(
     transactionId: string,
-    amount?: number,
+    amount?: Decimal,
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
     const rows = await this.callproc("refund_credits", [
       transactionId,
-      amount ?? null,
+      amount != null ? decParam(amount) : null,
       reason ?? null,
       JSON.stringify(metadata ?? {}),
     ]);
@@ -359,8 +468,8 @@ export class PostgresStore implements CreditStore {
         refundTransactionId: "",
         originalTransactionId: transactionId,
         userId: String(row.user_id ?? ""),
-        amount: 0,
-        newBalance: Number(row.new_balance ?? 0),
+        amount: ZERO,
+        newBalance: dec(row.new_balance),
         error: String(row.error),
       };
     }
@@ -368,8 +477,8 @@ export class PostgresStore implements CreditStore {
       refundTransactionId: String(row.refund_transaction_id ?? ""),
       originalTransactionId: transactionId,
       userId: String(row.user_id ?? ""),
-      amount: Number(row.amount ?? 0),
-      newBalance: Number(row.new_balance ?? 0),
+      amount: dec(row.amount),
+      newBalance: dec(row.new_balance),
     };
   }
 
@@ -381,7 +490,7 @@ export class PostgresStore implements CreditStore {
       const row = r as Record<string, unknown>;
       return {
         userId: String(row.user_id ?? ""),
-        totalSpend: Number(row.total_spend ?? 0),
+        totalSpend: dec(row.total_spend),
         transactionCount: Number(row.transaction_count ?? 0),
       };
     });
@@ -393,7 +502,7 @@ export class PostgresStore implements CreditStore {
       const row = r as Record<string, unknown>;
       return {
         model: String(row.model ?? ""),
-        totalSpend: Number(row.total_spend ?? 0),
+        totalSpend: dec(row.total_spend),
         transactionCount: Number(row.transaction_count ?? 0),
       };
     });
@@ -405,7 +514,7 @@ export class PostgresStore implements CreditStore {
       const row = r as Record<string, unknown>;
       return {
         userId: String(row.user_id ?? ""),
-        totalSpend: Number(row.total_spend ?? 0),
+        totalSpend: dec(row.total_spend),
       };
     });
   }
@@ -416,7 +525,7 @@ export class PostgresStore implements CreditStore {
       const row = r as Record<string, unknown>;
       return {
         date: String(row.date ?? ""),
-        totalSpend: Number(row.total_spend ?? 0),
+        totalSpend: dec(row.total_spend),
         transactionCount: Number(row.transaction_count ?? 0),
       };
     });
@@ -441,7 +550,7 @@ export class PostgresStore implements CreditStore {
       return {
         id: String(row.id ?? ""),
         userId: String(row.user_id ?? ""),
-        amount: Number(row.amount ?? 0),
+        amount: dec(row.amount),
         type: String(row.type ?? ""),
         referenceType: row.reference_type != null ? String(row.reference_type) : null,
         referenceId: row.reference_id != null ? String(row.reference_id) : null,
@@ -470,7 +579,7 @@ export class PostgresStore implements CreditStore {
       return {
         id: String(row.id ?? ""),
         userId: String(row.user_id ?? ""),
-        amount: Number(row.amount ?? 0),
+        amount: dec(row.amount),
         type: String(row.type ?? ""),
         referenceType: row.reference_type != null ? String(row.reference_type) : null,
         referenceId: row.reference_id != null ? String(row.reference_id) : null,
@@ -489,9 +598,9 @@ export class PostgresStore implements CreditStore {
     const rows = await this.callproc("aggregate_stats", [start.toISOString(), end.toISOString()]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
-      totalCreditsConsumed: Number(row.total_credits_consumed ?? 0),
+      totalCreditsConsumed: dec(row.total_credits_consumed),
       activeUsers: Number(row.active_users ?? 0),
-      avgDailySpend: Number(row.avg_daily_spend ?? 0),
+      avgDailySpend: dec(row.avg_daily_spend),
       topModel: String(row.top_model ?? ""),
       topUser: String(row.top_user ?? ""),
     };
@@ -499,8 +608,8 @@ export class PostgresStore implements CreditStore {
 
   // ── Team/shared balance pools ────────────────────────────────────────
 
-  async createTeam(name: string, initialBalance = 0): Promise<CreateTeamResult> {
-    const rows = await this.callproc("create_team", [name, initialBalance]);
+  async createTeam(name: string, initialBalance: Decimal = ZERO): Promise<CreateTeamResult> {
+    const rows = await this.callproc("create_team", [name, decParam(initialBalance)]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       teamId: String(row.team_id ?? ""),
@@ -511,16 +620,16 @@ export class PostgresStore implements CreditStore {
   async getTeamBalance(teamId: string): Promise<TeamBalanceResult> {
     const rows = await this.callproc("get_team_balance", [teamId]);
     if (!rows || rows.length === 0) {
-      return { teamId, name: "", balance: 0, memberCount: 0 };
+      return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
     const row = rows[0] as Record<string, unknown>;
     if ("error" in row && row.error) {
-      return { teamId, name: "", balance: 0, memberCount: 0 };
+      return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
     return {
       teamId: String(row.team_id ?? teamId),
       name: String(row.name ?? ""),
-      balance: Number(row.balance ?? 0),
+      balance: dec(row.balance),
       memberCount: Number(row.member_count ?? 0),
     };
   }
@@ -529,9 +638,14 @@ export class PostgresStore implements CreditStore {
     teamId: string,
     userId: string,
     role = "member",
-    spendCap?: number | null,
+    spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
-    const rows = await this.callproc("add_team_member", [teamId, userId, role, spendCap ?? null]);
+    const rows = await this.callproc("add_team_member", [
+      teamId,
+      userId,
+      role,
+      spendCap != null ? decParam(spendCap) : null,
+    ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       teamId: String(row.team_id ?? teamId),
@@ -547,8 +661,8 @@ export class PostgresStore implements CreditStore {
       return {
         userId: String(row.user_id ?? ""),
         role: String(row.role ?? "member"),
-        spendCap: (row.spend_cap as number | null) ?? null,
-        totalSpent: Number(row.total_spent ?? 0),
+        spendCap: row.spend_cap != null ? dec(row.spend_cap) : null,
+        totalSpent: dec(row.total_spent),
       };
     });
   }
@@ -556,14 +670,17 @@ export class PostgresStore implements CreditStore {
   async deductTeam(
     teamId: string,
     userId: string,
-    amount: number,
+    amount: Decimal,
     metadata?: CreditMetadata | null,
+    idempotencyKey?: string | null,
   ): Promise<TeamDeductionResult> {
+    const meta: Record<string, unknown> = { ...(metadata ?? {}) };
+    if (idempotencyKey) meta.idempotency_key = idempotencyKey;
     const rows = await this.callproc("deduct_team", [
       teamId,
       userId,
-      amount,
-      JSON.stringify(metadata ?? {}),
+      decParam(amount),
+      JSON.stringify(meta),
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if ("error" in row && row.error) {
@@ -571,8 +688,8 @@ export class PostgresStore implements CreditStore {
         transactionId: "",
         teamId,
         userId,
-        amount: 0,
-        teamBalanceAfter: Number(row.team_balance_after ?? 0),
+        amount: ZERO,
+        teamBalanceAfter: dec(row.team_balance_after),
         error: String(row.error),
       };
     }
@@ -580,8 +697,8 @@ export class PostgresStore implements CreditStore {
       transactionId: String(row.transaction_id ?? ""),
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
-      amount: Number(row.amount ?? -amount),
-      teamBalanceAfter: Number(row.team_balance_after ?? 0),
+      amount: dec(row.amount, amount.negated()),
+      teamBalanceAfter: dec(row.team_balance_after),
     };
   }
 
@@ -592,7 +709,7 @@ export class PostgresStore implements CreditStore {
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       expiredCount: Number(row.expired_count ?? 0),
-      expiredAmount: Number(row.expired_amount ?? 0),
+      expiredAmount: dec(row.expired_amount),
       dryRun,
     };
   }

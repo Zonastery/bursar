@@ -15,19 +15,21 @@ manager = CreditManager(store=store)
 
 No dependencies beyond `ducto`.
 
-Full `CreditStore` interface (18 methods):
+Full `CreditStore` interface (29 abstract methods + the concrete `check_feature`). All money arguments and result fields are `Decimal`:
 
 | Category | Methods |
 |----------|---------|
 | Setup | `setup(database_url?)` |
-| Balances | `get_balance(user_id)`, `add_credits(user_id, amount, type?, metadata?, expires_at?)`, `reserve_credits(user_id, amount, op_type?, metadata?, min_balance?)`, `deduct_credits(user_id, reservation_id, amount, idempotency_key?, metadata?)` |
-| Pricing | `get_active_pricing()`, `set_active_pricing(config, label?)` |
-| Plans | `get_user_plan(user_id)`, `set_user_plan(user_id, plan_id)`, `check_allowance(user_id)`, `increment_usage_window(user_id, plan_id, amount)` |
+| Balances | `get_balance(user_id)`, `add_credits(user_id, amount, type?, metadata?, expires_at?)`, `deduct_with_allowance(user_id, amount, *, idempotency_key?, min_balance?, model?, metadata?)`, `reserve_credits(user_id, amount, op_type?, metadata?, min_balance?)`, `deduct_credits(user_id, reservation_id, amount, idempotency_key?, metadata?)` |
+| Pricing | `get_active_pricing()`, `set_active_pricing(config, label?)`, `get_pricing_history()`, `get_pricing_config(version)`, `activate_pricing(version)` |
+| Plans | `get_user_plan(user_id)`, `check_feature(user_id, feature)`, `set_user_plan(user_id, plan_id)`, `check_allowance(user_id)`, `increment_usage_window(user_id, plan_id, amount)` |
 | Spend caps | `check_spend_cap(user_id, model?, amount?)` |
 | Refunds | `refund_credits(transaction_id, amount?, reason?, metadata?)` |
 | Expiry | `sweep_expired_credits(dry_run?)` |
-| Analytics | `spend_by_user(start, end)`, `spend_by_model(start, end)`, `top_users(limit, start, end)`, `daily_spend(start, end)`, `aggregate_stats(start, end)` |
-| Teams | `create_team(name, initial_balance?)`, `get_team_balance(team_id)`, `add_team_member(team_id, user_id, role?, spend_cap?)`, `get_team_members(team_id)`, `deduct_team(team_id, user_id, amount, metadata?)` |
+| Analytics | `spend_by_user(start, end)`, `spend_by_model(start, end)`, `top_users(limit, start, end)`, `daily_spend(start, end)`, `aggregate_stats(start, end)`, `list_user_transactions(user_id, types?, from_date?, to_date?, limit?, offset?)` |
+| Teams | `create_team(name, initial_balance?)`, `get_team_balance(team_id)`, `add_team_member(team_id, user_id, role?, spend_cap?)`, `get_team_members(team_id)`, `deduct_team(team_id, user_id, amount, metadata?, idempotency_key?)` |
+
+`deduct_with_allowance` is the atomic deduction path used by `CreditManager.deduct()`: it consumes free allowance, enforces spend caps and the balance floor, and debits the net — all in one transaction, idempotency-keyed. The `MemoryStore` guards every method with a re-entrant lock so this is atomic in-process too.
 
 ## HttpxSupabaseStore
 
@@ -46,12 +48,13 @@ Requires `pip install ducto[supabase]` (installs `httpx`).
 
 ### `run_migrations(database_url: str) -> SetupResult`
 
-Run all 10 bundled SQL migrations (idempotent).
+Run all 15 bundled SQL migrations (idempotent). Pass the connection string from the environment rather than hard-coding it.
 
 ```python
+import os
 from ducto.interface.supabase import run_migrations
 
-result = run_migrations("postgresql://user:pass@host:5432/db")
+result = run_migrations(os.environ["DATABASE_URL"])
 assert result.success, result.errors
 ```
 
@@ -71,12 +74,17 @@ Requires `pip install ducto[postgres]`.
 
 Implement `ducto.interface.base.CreditStore`:
 
+Store methods are synchronous and money is `Decimal`:
+
 ```python
+from decimal import Decimal
 from ducto.interface.base import CreditStore
-from ducto.interface.models import ReserveResult, DeductionResult, BalanceResult, AddCreditsResult
+from ducto.interface.models import DeductionResult, BalanceResult, AddCreditsResult
 
 class MyStore(CreditStore):
-    async def get_balance(self, user_id: str) -> BalanceResult: ...
-    async def add_credits(self, user_id: str, amount: int, **kwargs) -> AddCreditsResult: ...
-    # ... 16 more required methods (see CreditStore base class)
+    def get_balance(self, user_id: str) -> BalanceResult: ...
+    def add_credits(self, user_id: str, amount: Decimal, **kwargs) -> AddCreditsResult: ...
+    def deduct_with_allowance(self, user_id: str, amount: Decimal, **kwargs) -> DeductionResult: ...
+    # ... the remaining required methods (see the CreditStore base class)
+    # `check_feature` has a default implementation, so it is optional to override.
 ```

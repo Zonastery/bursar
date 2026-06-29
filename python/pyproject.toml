@@ -3,7 +3,9 @@ name = "ducto"
 version = "1.0.3"
 description = "Declarative credit calculation engine for AI SaaS platforms"
 readme = "README.md"
-requires-python = ">=3.11"
+# Bounded to the advertised 3.11–3.13 range (M13). decimal-based money math is
+# stdlib, so no new runtime dependency is needed.
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
@@ -38,19 +40,25 @@ ducto = "ducto.__main__:main"
 where = ["src"]
 
 [project.optional-dependencies]
+# Supabase store talks to the REST API over httpx only — it does NOT need a
+# direct Postgres driver (M13). psycopg2 belongs to the `postgres` extra.
 supabase = [
-    "httpx>=0.27",
-    "psycopg2-binary>=2.9",
+    "httpx>=0.28.1",
 ]
 postgres = [
-    "psycopg2-binary>=2.9",
+    "psycopg2-binary>=2.9.12",
 ]
+# Single source of truth for dev/test dependencies (M13). The duplicate
+# `[dependency-groups].dev` block was removed to end the version skew.
 test = [
     "pytest>=8.0",
     "ruff>=0.15.0",
-    "pyright",
-    "pytest-testmon>=2.0.0",
+    "pyright>=1.1.390",
+    "pytest-testmon>=2.2.0",
     "pytest-postgresql>=7.0",
+    "httpx>=0.28.1",
+    "psycopg2-binary>=2.9.12",
+    "pyyaml>=6.0.3",
 ]
 
 [tool.setuptools.package-data]
@@ -76,6 +84,9 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pyright]
+# Pin the analysis target so pyright does not false-flag `X | Y` union syntax
+# (Phase-1 agents hit this without it). Matches the floor of requires-python.
+pythonVersion = "3.11"
 typeCheckingMode = "standard"
 useLibraryCodeForTypes = false
 venvPath = "."
@@ -92,13 +103,26 @@ branch = true
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "def __repr__", "raise NotImplementedError"]
 
+# Dev group: the editable workflow installs the `test` extra plus the
+# notebook/docs tooling below. Test/runtime deps (httpx, psycopg2, testmon) are
+# declared ONCE in the `test` extra to avoid the prior version skew (M13).
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
+    {include-group = "test-deps"},
     "ipykernel>=7.3.0",
     "nbconvert>=7.17.1",
     "nbformat>=5.10.4",
     "pglite>=1.0.14",
-    "psycopg2-binary>=2.9.12",
+]
+# Mirror of the `test` optional-dependency extra for `uv`'s dependency-group
+# resolver (extras and groups are separate namespaces in uv).
+test-deps = [
+    "pytest>=8.0",
+    "ruff>=0.15.0",
+    "pyright>=1.1.390",
     "pytest-testmon>=2.2.0",
+    "pytest-postgresql>=7.0",
+    "httpx>=0.28.1",
+    "psycopg2-binary>=2.9.12",
+    "pyyaml>=6.0.3",
 ]

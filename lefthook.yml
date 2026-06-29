@@ -1,17 +1,38 @@
-# ── Pre-Commit Hooks ────────────────────────────────────────────────
+# Local git hooks. CI is the real gate (M15) — these hooks are a fast local
+# convenience and are intentionally bypassable (`git commit --no-verify`).
+#
+# Pre-commit runs in CHECK mode only: it never rewrites and silently stages your
+# files (the old `--fix` + `stage_fixed: true` could sneak unreviewed edits into
+# a commit). When a check fails it prints the one-line fix command so you apply
+# and review the change yourself.
 
+# ── Pre-Commit Hooks ────────────────────────────────────────────────
 pre-commit:
   commands:
-    python-fix:
+    python-format:
       root: "python/"
       glob: "*.py"
-      run: uvx ruff format --quiet {staged_files} && uvx ruff check --fix {staged_files}
-      stage_fixed: true
-    js-fix:
+      run: |
+        uvx ruff format --check {staged_files} \
+          || { echo "↳ run: uvx ruff format <files>  (then review & re-stage)" >&2; exit 1; }
+    python-lint:
+      root: "python/"
+      glob: "*.py"
+      run: |
+        uvx ruff check {staged_files} \
+          || { echo "↳ run: uvx ruff check --fix <files>  (then review & re-stage)" >&2; exit 1; }
+    js-format:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
-      run: npx prettier --write {staged_files} && npx eslint --fix {staged_files}
-      stage_fixed: true
+      run: |
+        npx prettier --check {staged_files} \
+          || { echo "↳ run: npx prettier --write <files>  (then review & re-stage)" >&2; exit 1; }
+    js-lint:
+      root: "javascript/"
+      glob: "*.{ts,js,mjs,cjs}"
+      run: |
+        npx eslint {staged_files} \
+          || { echo "↳ run: npx eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
     trailing-whitespace:
       run: git diff --cached --name-only --diff-filter=ACM | xargs -r git diff --check --cached --
     merge-conflicts:
@@ -24,7 +45,6 @@ pre-commit:
         fi
 
 # ── Pre-Push Hooks ──────────────────────────────────────────────────
-
 pre-push:
   parallel: true
   commands:

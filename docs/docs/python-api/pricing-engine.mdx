@@ -13,8 +13,10 @@ engine = PricingEngine.from_dict({
     "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
 })
 
-# From a config file
-engine = PricingEngine.from_yaml("pricing.yaml")
+# From a config file — load it yourself, then pass the dict in
+import yaml
+with open("pricing.yaml") as f:
+    engine = PricingEngine.from_dict(yaml.safe_load(f))
 ```
 
 ## Methods
@@ -43,27 +45,31 @@ Resolve a model version string against configured model names.
 
 Check if a specific model is configured.
 
-### `get_fixed_cost(job_name: str) -> int | None`
+### `get_fixed_cost(job_name: str) -> Decimal | None`
 
-Get the fixed cost for a named job.
+Get the fixed cost for a named job. Returns `None` for an unknown/unconfigured job (so callers can reject it rather than charge 0).
 
 ### `pricing_schema() -> PricingConfigData`
 
 Get the raw pricing config dict that the engine was initialized with.
 
+### `min_balance: Decimal`
+
+Property — the configured minimum balance floor.
+
 ## CostBreakdown
 
-Returned by `calculate()`:
+Returned by `calculate()`. **All monetary fields are `Decimal`**, quantized to 4 dp `ROUND_HALF_UP`; `total` is computed once by the engine, clamped to `>= 0`, and never re-derived (and never truncated to an integer):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `total` | `float` | Total credits |
-| `model_credits` | `float` | Credits from model expression |
-| `tool_credits` | `float` | Credits from tool expressions |
-| `search_credits` | `float` | Credits from search expressions |
-| `cache_credits` | `float` | Credits from cache expression (negative = savings) |
-| `fixed_credits` | `int` `|` `None` | Fixed job cost if applicable |
-| `metadata` | `dict` | Debug info: expressions evaluated, values |
+| `total` | `Decimal` | Total credits |
+| `model_credits` | `Decimal` | Credits from model expression |
+| `tool_credits` | `Decimal` | Credits from tool expressions |
+| `search_credits` | `Decimal` | Credits from search expressions |
+| `cache_savings` | `Decimal` | Cache expression result (negative = savings) |
+| `fixed_credits` | `Decimal` | Fixed job cost (`0` when not applicable) |
+| `breakdown` | `dict` | Debug info: model, token counts, tool count |
 
 ## UsageMetrics
 
@@ -88,8 +94,11 @@ Input to `calculate()`:
 The engine uses Python's `ast` module with a strict allowlist:
 
 1. Parses `ast.parse(expr, mode="eval")`
-2. Walks the AST — only ~25 node types allowed (binary ops, comparisons, conditionals, etc.)
+2. Walks the AST against a strict node allowlist; `**` (`ast.Pow`) is excluded, so exponentiation is rejected
 3. Function calls whitelisted: `ceil`, `floor`, `min`, `max`, `round`, `if`, `tier`, `clamp`, `percentile`
-4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas, comprehensions, imports
-5. Evaluation namespace has `__builtins__` emptied
-6. All expressions validated at config load time
+4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas, comprehensions, f-strings, imports
+5. All math is exact `Decimal`; division/modulo by zero raise `ExpressionError`; the result is asserted finite
+6. Evaluation namespace has `__builtins__` emptied
+7. All expressions (and variable names) validated at config-load time
+
+See the [Expression Reference](/docs/expressions) for the full operator/function table.

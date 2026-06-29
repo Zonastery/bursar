@@ -1,4 +1,15 @@
+import Decimal from "decimal.js";
 import { ExpressionError } from "./errors.js";
+
+// Quantization: all credit amounts round to 4 decimal places, ROUND_HALF_UP.
+// This must match the Python SDK's Decimal quantize(0.0001, ROUND_HALF_UP).
+export const MONEY_DP = 4;
+export const MONEY_ROUNDING = Decimal.ROUND_HALF_UP;
+
+/** Quantize a Decimal credit amount to 4dp, ROUND_HALF_UP. */
+export function quantizeMoney(value: Decimal): Decimal {
+  return value.toDecimalPlaces(MONEY_DP, MONEY_ROUNDING);
+}
 
 const ALLOWED_FUNCTIONS = new Set([
   "ceil",
@@ -142,12 +153,25 @@ function tokenize(src: string): Token[] {
       continue;
     }
 
-    // Numbers
-    if (/[0-9]/.test(src[i])) {
+    // Numbers — strict literal: digits with at most one '.'.
+    // Reject malformed literals like "1.2.3" (H11 parity fix); Python's
+    // ast.parse rejects these, so JS must too rather than silently
+    // truncating via parseFloat.
+    if (/[0-9.]/.test(src[i])) {
       let num = "";
+      let dotSeen = false;
       while (i < src.length && /[0-9.]/.test(src[i])) {
+        if (src[i] === ".") {
+          if (dotSeen) {
+            throw new ExpressionError(`invalid number literal: '${num}.'`);
+          }
+          dotSeen = true;
+        }
         num += src[i];
         i++;
+      }
+      if (num === "." || !/^[0-9]*\.?[0-9]*$/.test(num) || !/[0-9]/.test(num)) {
+        throw new ExpressionError(`invalid number literal: '${num}'`);
       }
       tokens.push({ type: "number", value: num });
       continue;
@@ -194,7 +218,9 @@ function tokenize(src: string): Token[] {
 
 export interface NumNode {
   type: "number";
-  value: number;
+  // Exact string form of the literal; parsed via new Decimal(value) so we never
+  // round-trip through binary float.
+  value: string;
 }
 export interface IdentNode {
   type: "identifier";
@@ -326,10 +352,19 @@ class Parser {
 
   private multiplication(): Node {
     let left = this.unary();
-    while (this.match("*", "/", "//", "%", "**")) {
+    // NOTE: "**" is intentionally NOT accepted here. Exponentiation is rejected
+    // entirely (sandbox decision C5/C7, matching the Python SDK) — a "**" token
+    // surfaces as a leftover token and fails validation/evaluation. We also
+    // raise an explicit error if one is seen mid-expression.
+    while (this.match("*", "/", "//", "%")) {
       const op = this.previous().value;
       const right = this.unary();
       left = { type: "binary", op, left, right } as BinOpNode;
+    }
+    if (this.check("**")) {
+      throw new ExpressionError(
+        "exponentiation operator '**' is not allowed in pricing expressions",
+      );
     }
     return left;
   }
@@ -365,8 +400,13 @@ class Parser {
   }
 
   private primary(): Node {
+    if (this.check("**")) {
+      throw new ExpressionError(
+        "exponentiation operator '**' is not allowed in pricing expressions",
+      );
+    }
     if (this.match("number")) {
-      return { type: "number", value: parseFloat(this.previous().value) } as NumNode;
+      return { type: "number", value: this.previous().value } as NumNode;
     }
     if (this.match("identifier")) {
       const name = this.previous().value;
@@ -406,10 +446,68 @@ class Parser {
   }
 }
 
+// ── Helper arity / range validation (H6) ─────────────────────────────────────
+// Static checks applied at parse/validate time so config-load (and the parity
+// fixture's expect_error cases) reject malformed helper calls. Semantics must
+// match the Python SDK exactly.
+
+function checkCallArity(name: string, argc: number): void {
+  switch (name) {
+    case "if":
+      if (argc !== 3)
+        throw new ExpressionError("if() requires exactly 3 arguments: if(condition, then, else)");
+      break;
+    case "clamp":
+      if (argc !== 3)
+        throw new ExpressionError("clamp() requires exactly 3 arguments: clamp(x, min, max)");
+      break;
+    case "tier":
+      // tier(value, t1, r1, [t2, r2, ...], default) — the value, then N>=1
+      // (threshold, rate) pairs, then a trailing default. Arg count must be
+      // EVEN and >= 4 (REFACTOR_CONTRACT.md §1): 4 args = 1 pair + default,
+      // 6 args = 2 pairs + default, etc. Odd arg counts (3/5/7) and < 4 are
+      // rejected. Semantics: return r_i for the first value < t_i, else default.
+      if (argc < 4 || argc % 2 !== 0)
+        throw new ExpressionError(
+          "tier() requires an even number of arguments >= 4 (value, threshold, rate, ..., default)",
+        );
+      break;
+    case "percentile":
+      if (argc < 2)
+        throw new ExpressionError(
+          "percentile() requires at least 2 arguments (p, v1, [v2, ...])",
+        );
+      break;
+    case "min":
+      if (argc < 1) throw new ExpressionError("min() requires at least 1 argument");
+      break;
+    case "max":
+      if (argc < 1) throw new ExpressionError("max() requires at least 1 argument");
+      break;
+    case "ceil":
+    case "floor":
+      if (argc !== 1) throw new ExpressionError(`${name}() requires exactly 1 argument`);
+      break;
+    case "round":
+      if (argc !== 1 && argc !== 2)
+        throw new ExpressionError("round() requires 1 or 2 arguments: round(x[, ndigits])");
+      break;
+    default:
+      break;
+  }
+}
+
+function validateCalls(node: Node): void {
+  if (node.type === "call") {
+    checkCallArity(node.name, node.args.length);
+  }
+  for (const child of children(node)) validateCalls(child);
+}
+
 // ── Validation ─────────────────────────────────────────────────────────────
 
-function validateVariables(node: Node): void {
-  const seen: Set<string> = new Set();
+function collectVariables(node: Node): Set<string> {
+  const seen = new Set<string>();
   function walk(n: Node): void {
     if (n.type === "identifier" && !ALLOWED_FUNCTIONS.has(n.name)) {
       seen.add(n.name);
@@ -417,9 +515,7 @@ function validateVariables(node: Node): void {
     for (const child of children(n)) walk(child);
   }
   walk(node);
-  if (seen.size === 0) {
-    throw new ExpressionError("expression references no variables -- must use at least one metric");
-  }
+  return seen;
 }
 
 function children(n: Node): Node[] {
@@ -444,8 +540,16 @@ function children(n: Node): Node[] {
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
-/** Validate that an expression string is safe and syntactically valid. */
-export function validateExpression(expr: string): void {
+/**
+ * Validate that an expression string is safe and syntactically valid.
+ *
+ * @param expr The expression source.
+ * @param knownVariables Optional set of metric variable names allowed in the
+ *   expression. When provided (config-load passes the metric set from
+ *   `PricingEngine.buildVariables`), any identifier not in this set and not an
+ *   allowed function is rejected (M5) — typos fail at load, not at runtime.
+ */
+export function validateExpression(expr: string, knownVariables?: Iterable<string>): void {
   try {
     const tokens = tokenize(expr);
     const parser = new Parser(tokens);
@@ -453,15 +557,36 @@ export function validateExpression(expr: string): void {
     if (!parser.isAtEnd()) {
       throw new ExpressionError(`unexpected token after expression: '${parser.peek()?.value}'`);
     }
-    validateVariables(node);
+    validateCalls(node);
+    const vars = collectVariables(node);
+    if (vars.size === 0) {
+      throw new ExpressionError(
+        "expression references no variables -- must use at least one metric",
+      );
+    }
+    if (knownVariables !== undefined) {
+      const known = knownVariables instanceof Set ? knownVariables : new Set(knownVariables);
+      for (const name of vars) {
+        if (!known.has(name)) {
+          throw new ExpressionError(`unknown variable: '${name}'`);
+        }
+      }
+    }
   } catch (e) {
     if (e instanceof ExpressionError) throw e;
     throw new ExpressionError(`invalid expression: ${(e as Error).message}`);
   }
 }
 
-/** Safely evaluate a validated expression. */
-export function evaluateExpression(expr: string, variables: Record<string, number>): number {
+/**
+ * Safely evaluate a validated expression. Returns an exact `Decimal` — never a
+ * binary-float `number` — so credit math is precise and parity-stable with the
+ * Python `decimal.Decimal` engine.
+ */
+export function evaluateExpression(
+  expr: string,
+  variables: Record<string, number | Decimal>,
+): Decimal {
   if (!variables || typeof variables !== "object") {
     throw new ExpressionError("variables must be a dict");
   }
@@ -473,6 +598,7 @@ export function evaluateExpression(expr: string, variables: Record<string, numbe
   try {
     tokens = tokenize(expr);
   } catch (e) {
+    if (e instanceof ExpressionError) throw e;
     throw new ExpressionError(`syntax error: ${(e as Error).message}`);
   }
 
@@ -482,30 +608,64 @@ export function evaluateExpression(expr: string, variables: Record<string, numbe
     throw new ExpressionError(`unexpected token: '${parser.peek()?.value}'`);
   }
 
-  // Validate undefined variables
+  // Arity/range validation (parity with Python, which validates on every eval).
+  validateCalls(node);
+
+  // Validate undefined variables using OWN-property checks only (C6). The `in`
+  // operator walks the prototype chain, so identifiers like __proto__,
+  // constructor, prototype, toString, hasOwnProperty would otherwise resolve to
+  // inherited members. Object.prototype.hasOwnProperty.call rejects all of them.
   function checkVars(n: Node): void {
-    if (n.type === "identifier" && !ALLOWED_FUNCTIONS.has(n.name) && !(n.name in variables)) {
+    if (
+      n.type === "identifier" &&
+      !ALLOWED_FUNCTIONS.has(n.name) &&
+      !Object.prototype.hasOwnProperty.call(variables, n.name)
+    ) {
       throw new ExpressionError(`undefined variable: '${n.name}'`);
     }
     for (const child of children(n)) checkVars(child);
   }
   checkVars(node);
 
-  return evaluateNode(node, variables);
+  const result = evaluateNode(node, variables);
+
+  // Guard non-finite results (C7): NaN/Infinity must never become a charge.
+  if (!result.isFinite()) {
+    throw new ExpressionError(`expression evaluated to a non-finite value: ${result.toString()}`);
+  }
+  return result;
 }
 
-function evaluateNode(node: Node, vars: Record<string, number>): number {
+const ZERO = new Decimal(0);
+const ONE = new Decimal(1);
+
+function toDecimal(v: number | Decimal): Decimal {
+  return v instanceof Decimal ? v : new Decimal(v);
+}
+
+function truthy(d: Decimal): boolean {
+  return !d.isZero();
+}
+
+function evaluateNode(node: Node, vars: Record<string, number | Decimal>): Decimal {
   switch (node.type) {
     case "number":
-      return node.value;
+      // Parse from the exact literal string (never via binary float).
+      return new Decimal(node.value);
 
-    case "identifier":
-      return vars[node.name] ?? 0;
+    case "identifier": {
+      // Own-property lookup only (C6); undefined identifiers were already
+      // rejected by checkVars, but guard defensively here too.
+      if (!Object.prototype.hasOwnProperty.call(vars, node.name)) {
+        return ZERO;
+      }
+      return toDecimal(vars[node.name]);
+    }
 
     case "unary": {
       const v = evaluateNode(node.operand, vars);
-      if (node.op === "not") return v ? 0 : 1;
-      return node.op === "-" ? -v : v;
+      if (node.op === "not") return truthy(v) ? ZERO : ONE;
+      return node.op === "-" ? v.negated() : v;
     }
 
     case "binary": {
@@ -513,19 +673,21 @@ function evaluateNode(node: Node, vars: Record<string, number>): number {
       const r = evaluateNode(node.right, vars);
       switch (node.op) {
         case "+":
-          return l + r;
+          return l.plus(r);
         case "-":
-          return l - r;
+          return l.minus(r);
         case "*":
-          return l * r;
+          return l.times(r);
         case "/":
-          return r === 0 ? Infinity : l / r;
+          if (r.isZero()) throw new ExpressionError("division by zero");
+          return l.dividedBy(r);
         case "//":
-          return r === 0 ? Infinity : Math.floor(l / r);
+          if (r.isZero()) throw new ExpressionError("division by zero");
+          // Floor division — matches Python's // and JS Math.floor(l / r).
+          return l.dividedBy(r).floor();
         case "%":
-          return r === 0 ? NaN : l % r;
-        case "**":
-          return Math.pow(l, r);
+          if (r.isZero()) throw new ExpressionError("modulo by zero");
+          return l.modulo(r);
         default:
           throw new ExpressionError(`unknown operator: ${node.op}`);
       }
@@ -535,39 +697,58 @@ function evaluateNode(node: Node, vars: Record<string, number>): number {
       const args = node.args.map((a) => evaluateNode(a, vars));
       switch (node.name) {
         case "ceil":
-          return Math.ceil(args[0]);
+          return args[0].ceil();
         case "floor":
-          return Math.floor(args[0]);
+          return args[0].floor();
         case "min":
-          return Math.min(...args);
+          if (args.length < 1) throw new ExpressionError("min() requires at least 1 argument");
+          return Decimal.min(...args);
         case "max":
-          return Math.max(...args);
-        case "round":
-          return Math.round(args[0]);
+          if (args.length < 1) throw new ExpressionError("max() requires at least 1 argument");
+          return Decimal.max(...args);
+        case "round": {
+          if (args.length !== 1 && args.length !== 2)
+            throw new ExpressionError("round() requires 1 or 2 arguments: round(x[, ndigits])");
+          const ndigits = args.length === 2 ? args[1].toNumber() : 0;
+          return args[0].toDecimalPlaces(ndigits, Decimal.ROUND_HALF_UP);
+        }
         case "if":
-          return args[0] ? args[1] : args[2];
+          if (args.length !== 3)
+            throw new ExpressionError("if() requires exactly 3 arguments: if(condition, then, else)");
+          return truthy(args[0]) ? args[1] : args[2];
         case "tier": {
+          if (args.length < 4 || args.length % 2 !== 0)
+            throw new ExpressionError(
+              "tier() requires an even number of arguments >= 4 (value, threshold, rate, ..., default)",
+            );
           const val = args[0];
           for (let i = 1; i < args.length - 1; i += 2) {
-            if (val < args[i]) return args[i + 1];
+            if (val.lessThan(args[i])) return args[i + 1];
           }
           return args[args.length - 1]; // default
         }
         case "clamp":
-          return Math.max(args[1], Math.min(args[0], args[2]));
+          if (args.length !== 3)
+            throw new ExpressionError("clamp() requires exactly 3 arguments: clamp(x, min, max)");
+          return Decimal.max(args[1], Decimal.min(args[0], args[2]));
         case "percentile": {
           if (args.length < 2)
             throw new ExpressionError(
               "percentile() requires at least 2 arguments (p, v1, [v2, ...])",
             );
           const p = args[0];
-          const sorted = args.slice(1).sort((a, b) => a - b);
-          if (sorted.length === 1) return sorted[0];
-          const rank = (p / 100) * (sorted.length - 1);
-          const lower = Math.floor(rank);
-          const upper = Math.min(lower + 1, sorted.length - 1);
-          const frac = rank - lower;
-          return sorted[lower] * (1 - frac) + sorted[upper] * frac;
+          if (p.lessThan(0) || p.greaterThan(100))
+            throw new ExpressionError("percentile() p must be between 0 and 100");
+          const sorted = args.slice(1).sort((a, b) => a.comparedTo(b));
+          const n = sorted.length;
+          if (n === 1) return sorted[0];
+          // rank = p/100 * (n - 1); linear interpolation between neighbours.
+          const rank = p.dividedBy(100).times(n - 1);
+          const lower = rank.floor();
+          const lowerIdx = lower.toNumber();
+          const upperIdx = Math.min(lowerIdx + 1, n - 1);
+          const frac = rank.minus(lower);
+          return sorted[lowerIdx].times(ONE.minus(frac)).plus(sorted[upperIdx].times(frac));
         }
         default:
           throw new ExpressionError(`disallowed function: ${node.name}`);
@@ -575,7 +756,7 @@ function evaluateNode(node: Node, vars: Record<string, number>): number {
     }
 
     case "ternary":
-      return evaluateNode(node.cond, vars)
+      return truthy(evaluateNode(node.cond, vars))
         ? evaluateNode(node.then, vars)
         : evaluateNode(node.else, vars);
 
@@ -584,21 +765,21 @@ function evaluateNode(node: Node, vars: Record<string, number>): number {
       const r = evaluateNode(node.right, vars);
       switch (node.op) {
         case "==":
-          return l === r ? 1 : 0;
+          return l.equals(r) ? ONE : ZERO;
         case "!=":
-          return l !== r ? 1 : 0;
+          return l.equals(r) ? ZERO : ONE;
         case "<":
-          return l < r ? 1 : 0;
+          return l.lessThan(r) ? ONE : ZERO;
         case "<=":
-          return l <= r ? 1 : 0;
+          return l.lessThanOrEqualTo(r) ? ONE : ZERO;
         case ">":
-          return l > r ? 1 : 0;
+          return l.greaterThan(r) ? ONE : ZERO;
         case ">=":
-          return l >= r ? 1 : 0;
+          return l.greaterThanOrEqualTo(r) ? ONE : ZERO;
         case "in":
-          return String(l).includes(String(r)) ? 1 : 0;
+          return l.toString().includes(r.toString()) ? ONE : ZERO;
         case "not in":
-          return String(l).includes(String(r)) ? 0 : 1;
+          return l.toString().includes(r.toString()) ? ZERO : ONE;
         default:
           throw new ExpressionError(`unknown comparison: ${node.op}`);
       }
@@ -609,9 +790,9 @@ function evaluateNode(node: Node, vars: Record<string, number>): number {
       const r = evaluateNode(node.right, vars);
       switch (node.op) {
         case "and":
-          return l && r ? 1 : 0;
+          return truthy(l) && truthy(r) ? ONE : ZERO;
         case "or":
-          return l || r ? 1 : 0;
+          return truthy(l) || truthy(r) ? ONE : ZERO;
         default:
           throw new ExpressionError(`unknown boolean op: ${node.op}`);
       }

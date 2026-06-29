@@ -1,9 +1,22 @@
 -- ducto: usage analytics queries.
--- Idempotent — safe to run multiple times (CREATE OR REPLACE).
+-- Idempotent — safe to run multiple times (CREATE OR REPLACE + guarded DROPs).
+--
+-- Money is NUMERIC(18,4): spend totals are summed and returned as NUMERIC
+-- (not BIGINT) so fractional credit usage is reported without truncation (M11).
+-- Day buckets are pinned to UTC so they are deterministic regardless of the
+-- session time zone (M16).
+
+-- The spend total columns moved BIGINT -> NUMERIC. A function's return type
+-- (incl. TABLE column types) cannot be changed by CREATE OR REPLACE, so drop
+-- the old definitions first. No-ops on a fresh install.
+DROP FUNCTION IF EXISTS public.spend_by_user(TIMESTAMPTZ, TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS public.spend_by_model(TIMESTAMPTZ, TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS public.top_users(INTEGER, TIMESTAMPTZ, TIMESTAMPTZ);
+DROP FUNCTION IF EXISTS public.daily_spend(TIMESTAMPTZ, TIMESTAMPTZ);
 
 -- spend_by_user: aggregate spend by user in a time window.
 CREATE OR REPLACE FUNCTION public.spend_by_user(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
-RETURNS TABLE(user_id TEXT, total_spend BIGINT, transaction_count BIGINT)
+RETURNS TABLE(user_id TEXT, total_spend NUMERIC, transaction_count BIGINT)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -12,7 +25,7 @@ BEGIN
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
-        COALESCE(SUM(ABS(ct.amount)), 0)::BIGINT AS total_spend,
+        COALESCE(SUM(ABS(ct.amount)), 0)::NUMERIC AS total_spend,
         COUNT(*)::BIGINT AS transaction_count
     FROM public.credit_transactions ct
     WHERE ct.type = 'usage'
@@ -28,7 +41,7 @@ REVOKE EXECUTE ON FUNCTION public.spend_by_user FROM anon, authenticated;
 
 -- spend_by_model: aggregate spend by model in a time window.
 CREATE OR REPLACE FUNCTION public.spend_by_model(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
-RETURNS TABLE(model TEXT, total_spend BIGINT, transaction_count BIGINT)
+RETURNS TABLE(model TEXT, total_spend NUMERIC, transaction_count BIGINT)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -37,7 +50,7 @@ BEGIN
     RETURN QUERY
     SELECT
         COALESCE(ct.metadata->>'model', 'unknown')::TEXT AS model,
-        COALESCE(SUM(ABS(ct.amount)), 0)::BIGINT AS total_spend,
+        COALESCE(SUM(ABS(ct.amount)), 0)::NUMERIC AS total_spend,
         COUNT(*)::BIGINT AS transaction_count
     FROM public.credit_transactions ct
     WHERE ct.type = 'usage'
@@ -53,7 +66,7 @@ REVOKE EXECUTE ON FUNCTION public.spend_by_model FROM anon, authenticated;
 
 -- top_users: top users by spend in a time window.
 CREATE OR REPLACE FUNCTION public.top_users(p_limit INTEGER, p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
-RETURNS TABLE(user_id TEXT, total_spend BIGINT)
+RETURNS TABLE(user_id TEXT, total_spend NUMERIC)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -62,7 +75,7 @@ BEGIN
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
-        COALESCE(SUM(ABS(ct.amount)), 0)::BIGINT AS total_spend
+        COALESCE(SUM(ABS(ct.amount)), 0)::NUMERIC AS total_spend
     FROM public.credit_transactions ct
     WHERE ct.type = 'usage'
       AND ct.amount < 0
@@ -77,8 +90,9 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.top_users FROM anon, authenticated;
 
 -- daily_spend: daily spend aggregation in a time window.
+-- Day buckets are computed in UTC for deterministic results (M16).
 CREATE OR REPLACE FUNCTION public.daily_spend(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
-RETURNS TABLE(date TEXT, total_spend BIGINT, transaction_count BIGINT)
+RETURNS TABLE(date TEXT, total_spend NUMERIC, transaction_count BIGINT)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -86,16 +100,16 @@ AS $$
 BEGIN
     RETURN QUERY
     SELECT
-        ct.created_at::DATE::TEXT AS date,
-        COALESCE(SUM(ABS(ct.amount)), 0)::BIGINT AS total_spend,
+        (ct.created_at AT TIME ZONE 'UTC')::DATE::TEXT AS date,
+        COALESCE(SUM(ABS(ct.amount)), 0)::NUMERIC AS total_spend,
         COUNT(*)::BIGINT AS transaction_count
     FROM public.credit_transactions ct
     WHERE ct.type = 'usage'
       AND ct.amount < 0
       AND ct.created_at >= p_start
       AND ct.created_at <= p_end
-    GROUP BY ct.created_at::DATE
-    ORDER BY ct.created_at::DATE;
+    GROUP BY (ct.created_at AT TIME ZONE 'UTC')::DATE
+    ORDER BY (ct.created_at AT TIME ZONE 'UTC')::DATE;
 END;
 $$;
 

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in ductor's credit calculation or CLI
+about: Report a bug in ducto's credit calculation or CLI
 title: ''
 labels: bug
 assignees: ''

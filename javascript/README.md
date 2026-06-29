@@ -11,12 +11,13 @@ ducto is a drop-in credit calculation engine. Define pricing as math expressions
 start deducting credits. Pricing lives in your DB — update it live without redeploys.
 
 ```typescript
-import { CreditManager, MemoryStore } from "@apoorwv/ducto";
+import { CreditManager } from "@apoorwv/ducto";
+import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
 
-manager.publishPricingFromDict({
+await manager.publishPricingFromDict({
   version: 1,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
@@ -25,10 +26,10 @@ manager.publishPricingFromDict({
   },
 });
 
-await manager.addCredits("user_abc", 1000);
+await manager.addCredits("user_abc", 1000); // number or decimal.js Decimal
 ```
 
-Works in Node.js 18+, Bun, and Deno.
+Works in Node.js 18+, Bun, and Deno. ESM-only.
 
 ## Features
 
@@ -42,8 +43,9 @@ Works in Node.js 18+, Bun, and Deno.
 - **Event hooks** — Typed pub/sub for `credits.deducted`, `credits.added`, `credits.refunded`, `credits.expired`, `credits.cap_reached`, `credits.cap_warning`, `credits.low_balance`.
 - **Database-backed pricing** — Live updates without redeploys. Dict loading for testing.
 - **Multi-dimensional** — Per-model (with `_default` fallback), per-tool overrides, search/RAG, cache discounts, fixed-cost jobs.
-- **Pluggable storage** — Reserve-then-deduct via `CreditStore`: Supabase (native fetch, zero deps), PostgreSQL (`pg`), or in-memory.
-- **Safe defaults** — `minBalance` floor, idempotent deductions, concurrent reservation protection.
+- **Pluggable storage** — One atomic, idempotency-keyed `deductWithAllowance` per `CreditStore`: Supabase (native fetch, zero deps), PostgreSQL (`pg`), or in-memory. The two-phase reserve-then-deduct API is also available.
+- **Safe defaults** — `minBalance` floor, idempotent deductions, concurrent-deduction protection.
+- **Exact decimal money** — All credit amounts are [`decimal.js`](https://github.com/MikeMcl/decimal.js) `Decimal` values, quantized to 4 dp (`ROUND_HALF_UP`). No binary-float rounding or truncation of sub-credit costs.
 - **Auditable** — Structured `CostBreakdown` with per-dimension costs.
 
 ## Installation
@@ -84,18 +86,22 @@ const cost = engine.calculate({
   inputTokens: 500,
   outputTokens: 200,
 });
-console.log(`Total: ${cost.total}`); // 0.011
+// cost.total is a decimal.js `Decimal` (quantized to 4 dp, ROUND_HALF_UP)
+console.log(`Total: ${cost.total.toString()}`); // 0.0110
 ```
 
 ### Full credit lifecycle (in-memory)
 
 ```typescript
-import { CreditManager, MemoryStore } from "@apoorwv/ducto";
+import { CreditManager } from "@apoorwv/ducto";
+import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
+import Decimal from "decimal.js";
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
 
-manager.publishPricingFromDict({
+// publishPricingFromDict is async — it syncs the config to the store.
+await manager.publishPricingFromDict({
   version: 1,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
@@ -104,13 +110,15 @@ manager.publishPricingFromDict({
   },
 });
 
-await manager.addCredits("user_abc", 1000);
+// Money amounts accept a plain `number` or a `decimal.js` Decimal.
+await manager.addCredits("user_abc", new Decimal(1000));
 const result = await manager.deduct(
   "user_abc",
   { model: "gpt-4", inputTokens: 500, outputTokens: 200 },
   "idempotency-key-123",
 );
-console.log(`Remaining balance: ${(await manager.getBalance("user_abc")).balance}`);
+console.log(`Charged: ${result.amount.toString()}`); // Decimal
+console.log(`Remaining balance: ${(await manager.getBalance("user_abc")).balance.toString()}`);
 ```
 
 ### Production with Supabase
@@ -131,12 +139,13 @@ await manager.addCredits("user_abc", 5000);
 ### Plan-based pricing
 
 ```typescript
-import { CreditManager, MemoryStore } from "@apoorwv/ducto";
+import { CreditManager } from "@apoorwv/ducto";
+import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
 
-manager.publishPricingFromDict({
+await manager.publishPricingFromDict({
   version: 1,
   models: { "_default": "input_tokens * 1" },
   plans: {
@@ -148,7 +157,7 @@ await manager.addCredits("user-1", 10);
 
 // First 50000 credits are free — no balance deduction
 const result = await manager.deduct("user-1", { inputTokens: 5 });
-console.log(result.amount); // 0 — covered by allowance
+console.log(result.amount.toString()); // "0" — covered by allowance
 ```
 
 ## Feature Examples
@@ -228,16 +237,25 @@ Basic example:
 
 | Feature | Example |
 |---------|---------|
-| Arithmetic | `+`, `-`, `*`, `/`, `//`, `%`, `**` |
+| Arithmetic | `+`, `-`, `*`, `/`, `//`, `%` |
 | Comparisons | `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in` |
 | Boolean | `and`, `or`, `not` |
 | Ternary | `X if cond else Y` |
 | Functions | `ceil`, `floor`, `round`, `min`, `max`, `if(cond,t,f)`, `tier(v,t1,r1,t2,r2,...)`, `clamp(x,lo,hi)`, `percentile(p,v1,v2,...)` |
 
+> Exponentiation (`**`) is **not allowed** in pricing expressions — it is rejected
+> at config-load time (`ExpressionError`) as a sandbox-safety measure. Division and
+> modulo by zero, and any non-finite result, are rejected the same way.
+
 ### Loading from file
 
+`loadPricingFile` reads Node's filesystem, so it ships from the `@apoorwv/ducto/node`
+subpath (not the root entry point). YAML files require the optional `js-yaml` peer
+dependency; if it is missing, an `ImportError` is thrown.
+
 ```typescript
-import { loadPricingFile, PricingEngine } from "@apoorwv/ducto";
+import { PricingEngine } from "@apoorwv/ducto";
+import { loadPricingFile } from "@apoorwv/ducto/node";
 
 const data = await loadPricingFile("./pricing.yaml");
 const engine = PricingEngine.fromDict(data);
@@ -261,9 +279,12 @@ const engine = PricingEngine.fromDict(data);
 
 | Store | Import | Deps | Use case |
 |-------|--------|------|----------|
-| `MemoryStore` | `@apoorwv/ducto` | None | Testing, development |
+| `MemoryStore` | `@apoorwv/ducto/node` | None (uses Node `crypto`) | Testing, development |
 | `HttpxSupabaseStore` | `@apoorwv/ducto` | Node 18+ (`fetch`) | Supabase production |
-| `PostgresStore` | `@apoorwv/ducto` | `pg` | Direct PostgreSQL |
+| `PostgresStore` | `@apoorwv/ducto` | `pg` (optional peer) | Direct PostgreSQL |
+
+`PostgresStore` requires the optional `pg` peer dependency (`npm install pg`); it
+is dynamically imported and throws if missing.
 
 ## API
 
@@ -271,40 +292,50 @@ const engine = PricingEngine.fromDict(data);
 
 ```typescript
 PricingEngine.fromDict(data): PricingEngine
-engine.calculate(metrics: UsageMetrics): CostBreakdown
-engine.calculateBatch(metrics: UsageMetrices[]): CostBreakdown[]
+engine.calculate(metrics: UsageMetrics): CostBreakdown          // CostBreakdown.total is a Decimal
+engine.calculateBatch(metrics: UsageMetrics[]): CostBreakdown[]
 engine.resolveModel(modelVersion: string): string | null
 engine.hasModel(modelName: string): boolean
-engine.getFixedCost(jobName: string): number | null
+engine.getFixedCost(jobName: string): Decimal | null
 engine.pricingSchema(): PricingConfigData
+engine.knownVariables: Set<string>
 engine.minBalance: number
 ```
 
 ### `CreditManager`
 
-```typescript
-new CreditManager(store: CreditStore, engine?, emitter?)
+All money parameters (`amount`, `minBalance`) accept a plain `number` or a
+`decimal.js` `Decimal`. All money fields on returned results (`amount`,
+`balance`, `balanceAfter`, `newBalance`, `allowanceConsumed`, …) are `Decimal`.
 
-// Pricing
-manager.publishPricingFromDict(data): void
+```typescript
+new CreditManager(store: CreditStore, engine?, emitter?, options?: CreditManagerOptions)
+
+// Setup / pricing
+manager.setup(): Promise<SetupResult>
+manager.publishPricingFromDict(data): Promise<void>
 manager.loadPricingFromStore(): Promise<void>
-manager.publishPricing(config, label?): void
+manager.publishPricing(config, label?): Promise<void>
 
 // Balance ops
 manager.getBalance(userId): Promise<BalanceResult>
-manager.addCredits(userId, amount, type?, metadata?, expiresAt?): Promise<AddCreditsResult>
-manager.reserveCredits(userId, amount, opType?, metadata?, minBalance?): Promise<ReserveResult>
+manager.addCredits(userId, amount: Decimal | number, type?, metadata?, expiresAt?): Promise<AddCreditsResult>
+manager.reserveCredits(userId, amount: Decimal | number, opType?, metadata?, minBalance?): Promise<ReserveResult>
 manager.deduct(userId, metrics, idempotencyKey?, metadata?): Promise<DeductionResult>
-manager.deductFixed(userId, jobName, idempotencyKey?, metadata?): Promise<DeductionResult>
+manager.deductFixed(userId, jobName, idempotencyKey?, metadata?): Promise<DeductionResult>  // throws ConfigError on unknown job
+
+// Plans
+manager.getUserPlan(userId): Promise<GetUserPlanResult>
+manager.checkFeature(userId, feature): Promise<CheckFeatureResult>
 
 // Refunds
-manager.refundCredits(transactionId, amount?, reason?, metadata?): Promise<RefundResult>
+manager.refundCredits(transactionId, amount?: Decimal | number, reason?, metadata?): Promise<RefundResult>
 
 // Expiry
 manager.sweepExpiredCredits(dryRun?): Promise<SweepResult>
 
 // Teams
-manager.deductTeam(teamId, userId, metrics, metadata?): Promise<TeamDeductionResult>
+manager.deductTeam(teamId, userId, metrics, idempotencyKey?, metadata?): Promise<TeamDeductionResult>
 
 // Analytics
 manager.spendByUser(start, end): Promise<SpendByUserRow[]>
@@ -312,13 +343,15 @@ manager.spendByModel(start, end): Promise<SpendByModelRow[]>
 manager.topUsers(limit, start, end): Promise<TopUserRow[]>
 manager.dailySpend(start, end): Promise<DailySpendRow[]>
 manager.aggregateStats(start, end): Promise<AggregateStats>
+manager.listUserTransactions(userId, options?): Promise<PaginatedTransactions>
+manager.listUsageEvents(userId, options?): Promise<PaginatedTransactions>
 
 // Events
 const emitter = new CreditEventEmitter();
 emitter.on("credits.deducted", handler);
 emitter.on("credits.low_balance", handler);
-// ... credits.added, credits.refunded, credits.expired,
-//     credits.cap_reached, credits.cap_warning
+// ... credits.added, credits.refunded, credits.expired, credits.cap_reached,
+//     credits.cap_warning, credits.deduct_failed, credits.refund_failed
 
 // Properties
 manager.pricingEngine: PricingEngine | null

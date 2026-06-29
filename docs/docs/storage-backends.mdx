@@ -16,44 +16,52 @@ The `CreditStore` ABC/interface defines all operations. Implementations exist fo
 
 | Category | Methods |
 |----------|---------|
-| Balances | `get_balance`, `add_credits`, `reserve_credits`, `deduct_credits` |
-| Pricing | `get_active_pricing`, `set_active_pricing` |
-| Plans | `get_user_plan`, `set_user_plan`, `check_allowance`, `increment_usage_window` |
+| Balances | `get_balance`, `add_credits`, `deduct_with_allowance`, `reserve_credits`, `deduct_credits` |
+| Pricing | `get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing` |
+| Plans | `get_user_plan`, `check_feature`, `set_user_plan`, `check_allowance`, `increment_usage_window` |
 | Spend caps | `check_spend_cap` |
 | Refunds | `refund_credits` |
 | Expiry | `sweep_expired_credits` |
-| Analytics | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats` |
+| Analytics | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions` |
 | Teams | `create_team`, `get_team_balance`, `add_team_member`, `get_team_members`, `deduct_team` |
 | Setup | `setup` |
 
+`deduct_with_allowance` is the canonical atomic "calculate-then-charge" entry point (allowance + cap + floor + debit in one transaction). All money arguments and return fields are decimals (`Decimal` / `NUMERIC(18,4)`). The JavaScript interface mirrors these in camelCase and adds `listUsageEvents` alongside `listUserTransactions`. `check_feature` has a default implementation on the ABC; the other 29 methods are abstract.
+
 ## SQL Migrations
 
-Ten bundled SQL files create the required schema:
+Fifteen bundled SQL files create the required schema:
 
 | File | Creates |
 |------|---------|
 | `001_credit_tables.sql` | `user_credits`, `credit_transactions`, `credit_reservations` tables, RLS policies, signup bonus trigger |
-| `002_credit_rpcs.sql` | Core RPCs: `credits_add`, `reserve_credits`, `deduct_credits`, `get_credits_balance` |
+| `002_credit_rpcs.sql` | Core RPCs: `credits_add`, `reserve_credits`, `deduct_credits`, `get_credits_balance` (user-scoped, atomic idempotency) |
 | `003_pricing_config.sql` | `credit_pricing_config` table, get/set RPCs |
 | `004_user_plans.sql` | `credit_plans`, `credit_usage_window` tables, plan RPCs |
 | `005_credit_refunds.sql` | `refund_credits` RPC with duplicate detection and partial refunds |
-| `006_credit_expiry.sql` | `expire_credits` RPC with dry-run support |
+| `006_credit_expiry.sql` | `expire_credits` RPC with dry-run support; marks swept grants (no double-sweep) |
 | `007_usage_analytics.sql` | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend` RPCs |
 | `008_team_balances.sql` | `credit_teams`, `credit_team_members` tables, team RPCs |
 | `009_spend_caps.sql` | `credit_spend_caps` table, `check_spend_cap` RPC |
 | `010_aggregate_stats.sql` | `aggregate_stats` RPC returning JSON |
+| `011_feature_entitlements.sql` | Feature-entitlement helpers/columns |
+| `012_list_transactions.sql` | `list_user_transactions` RPC (REVOKE'd from `anon`/`authenticated`) |
+| `013_list_usage_events.sql` | `list_usage_events` RPC (REVOKE'd from `anon`/`authenticated`) |
+| `014_numeric_money.sql` | Widens money columns to `NUMERIC(18,4)` (idempotent, no-op on fresh installs) |
+| `015_atomic_deduct.sql` | `deduct_with_allowance` — the atomic allowance + cap + floor + debit RPC |
 
 All DDL is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE`).
 
-Run via CLI:
+Run via CLI (the connection string is read from `DATABASE_URL`, not passed on the command line):
 
 ```bash
-ducto migrate "postgresql://user:pass@host:5432/db"
+DATABASE_URL="postgresql://user:pass@host:5432/db" ducto migrate
 ```
 
 Or from code:
 
 ```python
+import os
 from ducto.interface.supabase import run_migrations
-result = run_migrations("postgresql://user:pass@host:5432/db")
+result = run_migrations(os.environ["DATABASE_URL"])
 ```

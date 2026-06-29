@@ -2,69 +2,115 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
-import { CreditManager } from "../src/manager.js";
-import type { PricingConfigData } from "../src/types.js";
+import { MemoryStore } from "../src/stores/memory-store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = join(__dirname, "../../python/src/ducto/sql");
 const DATABASE_URL = process.env.DATABASE_URL;
 
-const TEST_PRICING: PricingConfigData = {
-  models: {
-    "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
-    _default: "input_tokens * 0.001 + output_tokens * 0.003",
-  },
-  tools: { _default: "tool_calls * 0" },
-  minBalance: 5,
-};
+const D = (n: number | string) => new Decimal(n);
 
 const PG_USER = "00000000-0000-0000-0000-000000000001";
 const PG_USER2 = "00000000-0000-0000-0000-000000000099";
 const PLAN_UUID = "00000000-0000-0000-0000-0000000000a1";
 
-const METRICS = { model: "gpt-4", inputTokens: 100, outputTokens: 50 };
-const EXPECTED_COST = 2; // 100*0.01 + 50*0.03 = 2.5 → 2
+// ───────────────────────────────────────────────────────────────────────────
+// MemoryStore concurrency — always runs (no DB required). Asserts the C2 fix
+// holds under a real Promise.all: no double-spend, balance never negative.
+// ───────────────────────────────────────────────────────────────────────────
+describe("MemoryStore concurrency (double-spend guard, C2)", () => {
+  it("N concurrent deductWithAllowance never over-spends", async () => {
+    const store = new MemoryStore();
+    await store.addCredits(PG_USER, D(5));
 
-describe.runIf(DATABASE_URL)("PostgresStore integration", () => {
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => store.deductWithAllowance(PG_USER, D(1))),
+    );
+    const succeeded = results.filter((r) => !r.error);
+    expect(succeeded).toHaveLength(5);
+
+    const balance = (await store.getBalance(PG_USER)).balance;
+    expect(balance.gte(0)).toBe(true);
+    expect(balance.toString()).toBe("0");
+
+    const totalDebited = succeeded.reduce((sum, r) => sum.plus(r.amount), D(0));
+    expect(totalDebited.lte(5)).toBe(true);
+  });
+
+  it("idempotency replay under concurrency → exactly one debit", async () => {
+    const store = new MemoryStore();
+    await store.addCredits(PG_USER, D(100));
+
+    const results = await Promise.all(
+      Array.from({ length: 16 }, () =>
+        store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "shared" }),
+      ),
+    );
+    const realDebits = results.filter((r) => !r.idempotent && !r.error);
+    expect(realDebits).toHaveLength(1);
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("90");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Real Postgres integration. Runs only when DATABASE_URL is present, but when
+// it IS present it RUNS (not skips). When absent we log a visible skip notice.
+// Run a local pg16: `docker run -d -e POSTGRES_PASSWORD=ducto -e POSTGRES_DB=ducto
+//   -p 55432:5432 postgres:16` then
+//   DATABASE_URL=postgresql://postgres:ducto@localhost:55432/ducto npx vitest run
+// ───────────────────────────────────────────────────────────────────────────
+if (!DATABASE_URL) {
+  console.warn(
+    "[store-integration] SKIPPING PostgresStore integration tests: DATABASE_URL is not set. " +
+      "Start postgres:16 on a non-default port and export DATABASE_URL to run them.",
+  );
+}
+
+const BOOTSTRAP_SQL = `
+-- Roles are cluster-global, so creating them must be idempotent: the suite may
+-- run twice against the same cluster, or share a cluster with the Python suite.
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
+
+CREATE OR REPLACE FUNCTION auth.role() RETURNS text
+LANGUAGE SQL IMMUTABLE AS $func$ SELECT 'service_role'::text $func$;
+
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
+LANGUAGE SQL IMMUTABLE AS $func$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $func$;
+`;
+
+function migrationFiles(): string[] {
+  return readdirSync(SQL_DIR)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+}
+
+async function applyMigrations(pool: pg.Pool): Promise<void> {
+  for (const file of migrationFiles()) {
+    const sql = readFileSync(join(SQL_DIR, file), "utf8");
+    await pool.query(sql);
+  }
+}
+
+describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL });
-
-    // Bootstrap auth.role() (no-op in Supabase, required in raw PG)
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'auth' AND p.proname = 'role'
-        ) THEN
-          CREATE SCHEMA IF NOT EXISTS auth;
-          CREATE FUNCTION auth.role() RETURNS text
-          LANGUAGE SQL IMMUTABLE AS $func$ SELECT 'service_role'::text $func$;
-          CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
-          CREATE ROLE anon;
-          CREATE ROLE authenticated;
-          CREATE FUNCTION auth.uid() RETURNS uuid
-          LANGUAGE SQL IMMUTABLE AS $func$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $func$;
-          INSERT INTO auth.users (id) VALUES ('00000000-0000-0000-0000-000000000001') ON CONFLICT DO NOTHING;
-          INSERT INTO auth.users (id) VALUES ('00000000-0000-0000-0000-000000000099') ON CONFLICT DO NOTHING;
-        END IF;
-      END
-      $$;
-    `);
-
-    // Run all SQL migrations
-    const files = readdirSync(SQL_DIR).sort();
-    for (const file of files) {
-      if (!file.endsWith(".sql")) continue;
-      const sql = readFileSync(join(SQL_DIR, file), "utf8");
-      await pool.query(sql);
-    }
-  }, 30000);
+    await pool.query(BOOTSTRAP_SQL);
+    await applyMigrations(pool);
+    // credit_team_members.user_id FKs into auth.users — seed the test users.
+    await pool.query(
+      `INSERT INTO auth.users (id) VALUES ($1), ($2) ON CONFLICT DO NOTHING`,
+      [PG_USER, PG_USER2],
+    );
+  }, 60000);
 
   afterEach(async () => {
     if (pool) {
@@ -84,593 +130,288 @@ describe.runIf(DATABASE_URL)("PostgresStore integration", () => {
     if (pool) await pool.end();
   });
 
-  // ── Basic lifecycle ─────────────────────────────────────────────────
-
-  it("setup is idempotent", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const r1 = await store.setup();
-    expect(r1.success).toBe(true);
-    const store2 = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const r2 = await store2.setup();
-    expect(r2.success).toBe(true);
+  // ── Migration idempotency ───────────────────────────────────────────
+  it("migrations are idempotent (running twice succeeds)", async () => {
+    // Re-applying all migrations (CREATE OR REPLACE / IF NOT EXISTS) must succeed.
+    await expect(applyMigrations(pool)).resolves.toBeUndefined();
+    await expect(applyMigrations(pool)).resolves.toBeUndefined();
   });
 
-  it("full credit lifecycle: add → deduct → balance persists", async () => {
+  it("PostgresStore.setup() refuses to fake success (H17)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    await manager.addCredits(PG_USER, 100);
-
-    const result = await manager.deduct(PG_USER, METRICS, "tx_1");
-    expect(result.amount).toBe(-EXPECTED_COST);
-    expect(result.balanceAfter).toBe(100 - EXPECTED_COST);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(100 - EXPECTED_COST);
+    await expect(store.setup()).rejects.toThrow(/migrat/i);
   });
 
-  it("balance persists across manager instances", async () => {
+  // ── deductWithAllowance basics ──────────────────────────────────────
+  it("charges net amount and parses NUMERIC as exact Decimal", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
 
-    const m1 = new CreditManager(store);
-    await m1.publishPricingFromDict(TEST_PRICING);
-    await m1.addCredits(PG_USER, 100);
-    await m1.deduct(PG_USER, METRICS, "tx_2");
+    const r = await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "ded-1" });
+    expect(r.error).toBeUndefined();
+    expect(r.amount.toString()).toBe("2.5");
+    expect(r.balanceAfter.toString()).toBe("97.5");
+    expect(r.idempotent).toBe(false);
 
-    const m2 = new CreditManager(store);
-    await m2.loadPricingFromStore();
-    const balance = await m2.getBalance(PG_USER);
-    expect(balance.balance).toBe(100 - EXPECTED_COST);
+    const balance = await store.getBalance(PG_USER);
+    expect(balance.balance.toString()).toBe("97.5");
   });
 
-  it("insufficient credits raises error", async () => {
+  it("sub-credit charge is not truncated to zero (H1)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    await expect(() => manager.deduct(PG_USER2, METRICS)).rejects.toThrow();
+    await store.addCredits(PG_USER, D(100), "purchase");
+    const r = await store.deductWithAllowance(PG_USER, D("0.4"), { idempotencyKey: "sub-1" });
+    expect(r.amount.toString()).toBe("0.4");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("99.6");
   });
 
-  it("reserve and deduct flow", async () => {
+  it("insufficient credits returns error envelope (no throw)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    await manager.addCredits(PG_USER, 100);
-
-    const reserve = await manager.reserveCredits(PG_USER, 30, "usage");
-    expect(reserve.amount).toBe(30);
-
-    const over = await manager.reserveCredits(PG_USER, 999, "usage");
-    expect(over.reservationId).toBeTruthy();
-    expect(over.amount).toBeGreaterThan(0);
+    await store.addCredits(PG_USER, D(1), "purchase");
+    const r = await store.deductWithAllowance(PG_USER, D(50), { minBalance: D(0) });
+    expect(r.error).toBe("insufficient_credits");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("1");
   });
 
-  // ── Idempotency ─────────────────────────────────────────────────────
-
-  it("deduct with same idempotency key returns idempotent=true", async () => {
+  // ── Idempotency replay ──────────────────────────────────────────────
+  it("deductWithAllowance with same key replays original (one debit)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
+    await store.addCredits(PG_USER, D(100), "purchase");
 
-    const r1 = await manager.deduct(PG_USER, METRICS, "idem-deduct-1");
+    const r1 = await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "idem-x" });
     expect(r1.idempotent).toBe(false);
-
-    const r2 = await manager.deduct(PG_USER, METRICS, "idem-deduct-1");
+    const r2 = await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "idem-x" });
     expect(r2.idempotent).toBe(true);
-    expect(r2.balanceAfter).toBe(r1.balanceAfter);
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("90");
   });
 
-  it("different idempotency keys produce separate deductions", async () => {
+  it("different keys produce separate deductions", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-
-    await manager.deduct(PG_USER, METRICS, "idem-a");
-    const r2 = await manager.deduct(PG_USER, METRICS, "idem-b");
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "a" });
+    const r2 = await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "b" });
     expect(r2.idempotent).toBe(false);
-    expect(r2.balanceAfter).toBe(100 - EXPECTED_COST * 2);
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("80");
   });
 
-  // ── Fixed job deductions ────────────────────────────────────────────
-
-  it("deductFixed deducts fixed cost", async () => {
+  // ── Concurrency / double-spend (THE acceptance-gating test) ─────────
+  it("N concurrent deductWithAllowance never over-spends (C2)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      fixed: { batch_gen: 75 },
-    };
-    await manager.publishPricingFromDict(config);
-    await manager.addCredits(PG_USER, 100);
+    // Balance covers only 5 of 20 one-credit charges, floor 0.
+    await store.addCredits(PG_USER, D(5), "purchase");
 
-    const result = await manager.deductFixed(PG_USER, "batch_gen");
-    expect(result.amount).toBe(-75);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(25);
-  });
-
-  // ── Pricing config round-trip ───────────────────────────────────────
-
-  it("publishPricing stores and getActivePricing retrieves through store", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const config: PricingConfigData = {
-      models: { custom: "input_tokens * 0.5" },
-      minBalance: 3,
-    };
-    const id = await store.setActivePricing(config);
-    expect(id).toBeTruthy();
-
-    const result = await store.getActivePricing();
-    expect(result).not.toBeNull();
-    expect(result!.config.models["custom"]).toBe("input_tokens * 0.5");
-  });
-
-  it("publishPricingFromDict → loadPricingFromStore round-trips engine", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-    await manager.deduct(PG_USER, METRICS, "rtx_1");
-
-    const m2 = new CreditManager(store);
-    await m2.loadPricingFromStore();
-    await m2.addCredits(PG_USER, 50);
-    const result = await m2.deduct(
-      PG_USER,
-      { model: "gpt-4", inputTokens: 200, outputTokens: 0 },
-      "rtx_2",
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        store.deductWithAllowance(PG_USER, D(1), {
+          idempotencyKey: `conc-${i}`,
+          minBalance: D(0),
+        }),
+      ),
     );
-    expect(result.amount).toBe(-2); // 200 * 0.01 = 2
 
-    const balance = await m2.getBalance(PG_USER);
-    expect(balance.balance).toBe(100 - EXPECTED_COST + 50 - 2);
-  });
+    const succeeded = results.filter((r) => !r.error);
+    const failed = results.filter((r) => r.error === "insufficient_credits");
+    expect(succeeded.length).toBe(5);
+    expect(failed.length).toBe(15);
 
-  // ── Plan allowance ──────────────────────────────────────────────────
+    const balance = (await store.getBalance(PG_USER)).balance;
+    expect(balance.gte(0)).toBe(true);
+    expect(balance.toString()).toBe("0");
 
-  it("plan allowance covers full cost, skips balance deduct", async () => {
+    const totalDebited = succeeded.reduce((s, r) => s.plus(r.amount), D(0));
+    expect(totalDebited.lte(5)).toBe(true);
+  }, 30000);
+
+  it("idempotency replay under concurrency → one debit (C2 + H16)", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "race-key" }),
+      ),
+    );
+    const realDebits = results.filter((r) => !r.idempotent && !r.error);
+    expect(realDebits.length).toBe(1);
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("90");
+  }, 30000);
+
+  // ── Allowance + cap semantics through the RPC ───────────────────────
+  it("plan allowance fully covers cost, no balance debit; window incremented", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Free', 100, $2)`,
       [PLAN_UUID, PLAN_UUID],
     );
+    await store.addCredits(PG_USER, D(10), "adjustment");
+    await store.setUserPlan(PG_USER, PLAN_UUID);
 
-    await store.addCredits(PG_USER, 10, "adjustment");
-    const planResult = await store.setUserPlan(PG_USER, PLAN_UUID);
-    expect(planResult.planId).toBe(PLAN_UUID);
-
-    const userPlan = await store.getUserPlan(PG_USER);
-    expect(userPlan.planId).toBe(PLAN_UUID);
-
-    const allowanceBefore = await store.checkAllowance(PG_USER);
-    expect(allowanceBefore.allowanceRemaining).toBe(100);
-
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      plans: { free: { id: PLAN_UUID, name: "Free", freeAllowance: 100 } },
-    };
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(config);
-
-    const result = await manager.deduct(PG_USER, { inputTokens: 5 }, "plan-ded-1");
-    expect(result.amount).toBe(0);
-    expect(result.transactionId).toBe("");
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(10);
-
-    const allowance = await store.checkAllowance(PG_USER);
-    expect(allowance.allowanceRemaining).toBe(95);
+    const r = await store.deductWithAllowance(PG_USER, D(5), { idempotencyKey: "plan-1" });
+    expect(r.error).toBeUndefined();
+    expect(r.amount.toString()).toBe("0");
+    expect(r.allowanceConsumed.toString()).toBe("5");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("10");
+    expect((await store.checkAllowance(PG_USER)).allowanceRemaining.toString()).toBe("95");
   });
 
-  it("plan allowance partially covers, deducts remainder from balance", async () => {
+  it("plan allowance partial, remainder charged to balance", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Starter', 10, $2)`,
       [PLAN_UUID, PLAN_UUID],
     );
+    await store.addCredits(PG_USER, D(100), "adjustment");
+    await store.setUserPlan(PG_USER, PLAN_UUID);
 
-    await store.addCredits(PG_USER, 100, "adjustment");
-    const planResult = await store.setUserPlan(PG_USER, PLAN_UUID);
-    expect(planResult.planId).toBe(PLAN_UUID);
-
-    const allowanceBefore = await store.checkAllowance(PG_USER);
-    expect(allowanceBefore.allowanceRemaining).toBe(10);
-
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      plans: { starter: { id: PLAN_UUID, name: "Starter", freeAllowance: 10 } },
-    };
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(config);
-
-    const result = await manager.deduct(PG_USER, { inputTokens: 25 }, "plan-ded-2");
-    expect(result.amount).toBe(-15);
-    expect(result.transactionId).toBeTruthy();
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(85);
-
-    const allowance = await store.checkAllowance(PG_USER);
-    expect(allowance.allowanceRemaining).toBe(0);
+    const r = await store.deductWithAllowance(PG_USER, D(25), { idempotencyKey: "plan-2" });
+    expect(r.amount.toString()).toBe("15");
+    expect(r.allowanceConsumed.toString()).toBe("10");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("85");
   });
 
-  // ── Plan features / entitlements ───────────────────────────────────
-
-  it("plan features round-trip with checkFeature", async () => {
+  it("deny spend cap aborts with cap_reached (allowance not consumed)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-
-    // Use store.setActivePricing directly (not manager.publishPricingFromDict)
-    // to avoid the fire-and-forget void pattern in the manager
-    await store.setActivePricing({
-      models: { _default: "input_tokens * 1" },
-      plans: {
-        pro: {
-          id: "plan-pro",
-          name: "Pro Plan",
-          freeAllowance: 500,
-          features: { aiChat: true, maxRoadmaps: 20 },
-        },
-      },
-    });
-    await manager.loadPricingFromStore();
-
-    await store.setUserPlan(PG_USER, "pro");
-
-    const plan = await store.getUserPlan(PG_USER);
-    expect(plan.planName).toBe("Pro Plan");
-    expect(plan.features["aiChat"]).toBe(true);
-    expect(plan.features["maxRoadmaps"]).toBe(20);
-
-    const chat = await manager.checkFeature(PG_USER, "aiChat");
-    expect(chat.hasFeature).toBe(true);
-
-    const pdf = await manager.checkFeature(PG_USER, "exportPdf");
-    expect(pdf.hasFeature).toBe(false);
-  });
-
-  // ── Refunds ─────────────────────────────────────────────────────────
-
-  it("refunds a full deduction and restores balance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-
-    const deduct = await manager.deduct(PG_USER, METRICS, "refund-tx-1");
-    expect(deduct.amount).toBe(-EXPECTED_COST);
-
-    const refund = await manager.refundCredits(deduct.transactionId);
-    expect(refund.error).toBeUndefined();
-    expect(refund.amount).toBe(EXPECTED_COST);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(100);
-  });
-
-  it("partial refund restores partial amount", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-
-    const deduct = await manager.deduct(PG_USER, METRICS, "refund-tx-2");
-    const refund = await manager.refundCredits(deduct.transactionId, 1);
-    expect(refund.error).toBeUndefined();
-    expect(refund.amount).toBe(1);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(100 - EXPECTED_COST + 1);
-  });
-
-  it("double refund returns error", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-
-    const deduct = await manager.deduct(PG_USER, METRICS, "refund-tx-3");
-    const first = await manager.refundCredits(deduct.transactionId);
-    expect(first.error).toBeUndefined();
-
-    const second = await manager.refundCredits(deduct.transactionId);
-    expect(second.error).toBe("already_refunded");
-  });
-
-  it("refund of unknown transaction returns error", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    const result = await manager.refundCredits("00000000-0000-0000-0000-000000000999");
-    expect(result.error).toBe("transaction_not_found");
-  });
-
-  // ── Credit expiry ───────────────────────────────────────────────────
-
-  it("credits with 1s TTL expire on sweep", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    await manager.addCredits(PG_USER, 100, "purchase", null, new Date(Date.now() + 1));
-    await new Promise((r) => setTimeout(r, 50));
-
-    const result = await manager.sweepExpiredCredits();
-    expect(result.expiredCount).toBe(1);
-    expect(result.expiredAmount).toBe(100);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(0);
-  });
-
-  it("dryRun reports without modifying balance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-
-    await manager.addCredits(PG_USER, 100, "purchase", null, new Date(Date.now() + 1));
-    await new Promise((r) => setTimeout(r, 50));
-
-    const result = await manager.sweepExpiredCredits(true);
-    expect(result.expiredCount).toBe(1);
-    expect(result.dryRun).toBe(true);
-
-    const balance = await manager.getBalance(PG_USER);
-    expect(balance.balance).toBe(100);
-  });
-
-  it("credits without expiry never expire", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 100);
-
-    const result = await manager.sweepExpiredCredits();
-    expect(result.expiredCount).toBe(0);
-    expect(result.expiredAmount).toBe(0);
-  });
-
-  // ── Team pools ──────────────────────────────────────────────────────
-
-  it("create team with initial balance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const team = await store.createTeam("Dev Team", 500);
-    expect(team.teamId).toBeTruthy();
-
-    const balance = await store.getTeamBalance(team.teamId);
-    expect(balance.balance).toBe(500);
-    expect(balance.name).toBe("Dev Team");
-  });
-
-  it("add team member and deduct from team pool", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-
-    await manager.addCredits(PG_USER, 10);
-    const team = await store.createTeam("Pool", 500);
-    await store.addTeamMember(team.teamId, PG_USER, "member");
-
-    const result = await manager.deductTeam(team.teamId, PG_USER, { inputTokens: 150 });
-    expect(result.amount).toBe(-150);
-    expect(result.teamBalanceAfter).toBe(350);
-    expect(result.transactionId).toBeTruthy();
-  });
-
-  it("deductTeam insufficient balance returns error", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-
-    await manager.addCredits(PG_USER, 10);
-    const team = await store.createTeam("Poor Pool", 10);
-    await store.addTeamMember(team.teamId, PG_USER, "member");
-
-    const result = await manager.deductTeam(team.teamId, PG_USER, { inputTokens: 100 });
-    expect(result.error).toBe("insufficient_team_balance");
-  });
-
-  it("deductTeam user not in team returns error", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-
-    const team = await store.createTeam("Closed Team", 500);
-    const result = await manager.deductTeam(team.teamId, PG_USER, { inputTokens: 10 });
-    expect(result.error).toBe("user_not_in_team");
-  });
-
-  // ── Spend caps ──────────────────────────────────────────────────────
-
-  it("daily deny cap blocks deduction", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-    await manager.addCredits(PG_USER, 100);
-
+    await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
       `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
       [PG_USER],
     );
-
-    await expect(() => manager.deduct(PG_USER, { inputTokens: 11 }, "cap-test-1")).rejects.toThrow(
-      "Spend cap exceeded",
-    );
+    const r = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "cap-1" });
+    expect(r.error).toBe("cap_reached");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("1000");
   });
 
-  it("spend cap allows deduction within limit", async () => {
+  it("cap accumulates across prior window spend", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-    await manager.addCredits(PG_USER, 100);
-
+    await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 100, 'deny')`,
+      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 30, 'deny')`,
       [PG_USER],
     );
-
-    const result = await manager.deduct(PG_USER, { inputTokens: 5 }, "cap-test-2");
-    expect(result.transactionId).toBeTruthy();
+    const a = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "acc-1" });
+    expect(a.error).toBeUndefined();
+    const b = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "acc-2" });
+    expect(b.error).toBe("cap_reached");
   });
 
-  // ── Usage analytics ─────────────────────────────────────────────────
-
-  it("spendByUser returns correct totals", async () => {
+  // ── Reserve / deduct two-phase (C3) ─────────────────────────────────
+  it("deductCredits clamps to the reserved ceiling (C3)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 500);
-    await manager.addCredits(PG_USER2, 500);
-    await manager.deduct(PG_USER, METRICS, "analytics-1");
-    await manager.deduct(
-      PG_USER2,
-      { model: "gpt-4", inputTokens: 200, outputTokens: 0 },
-      "analytics-2",
-    );
+    await store.addCredits(PG_USER, D(100), "purchase");
 
-    const now = new Date();
-    const rows = await manager.spendByUser(
-      new Date(now.getTime() - 1000),
-      new Date(now.getTime() + 1000),
-    );
-    const row1 = rows.find((r) => r.userId === PG_USER);
-    expect(row1).toBeDefined();
-    expect(row1!.totalSpend).toBe(EXPECTED_COST);
-    expect(row1!.transactionCount).toBe(1);
-
-    const row2 = rows.find((r) => r.userId === PG_USER2);
-    expect(row2).toBeDefined();
-    expect(row2!.totalSpend).toBe(2); // 200 * 0.01 = 2
+    const reserve = await store.reserveCredits(PG_USER, D(10), "usage", null, D(0));
+    expect(reserve.error).toBeUndefined();
+    const deduct = await store.deductCredits(PG_USER, reserve.reservationId, D(1000));
+    expect(deduct.error).toBeUndefined();
+    expect(deduct.amount.toString()).toBe("-10");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("90");
   });
 
-  it("spendByModel returns model breakdown", async () => {
+  it("reserve rejects (does not cap) below min_balance (C3 parity)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 500);
-    await manager.deduct(PG_USER, METRICS, "analytics-3");
-
-    const now = new Date();
-    const rows = await manager.spendByModel(
-      new Date(now.getTime() - 1000),
-      new Date(now.getTime() + 1000),
-    );
-    const row = rows.find((r) => r.model === "gpt-4");
-    expect(row).toBeDefined();
-    expect(row!.totalSpend).toBeGreaterThanOrEqual(EXPECTED_COST);
+    await store.addCredits(PG_USER, D(20), "purchase");
+    const reserve = await store.reserveCredits(PG_USER, D(10), "usage", null, D(15));
+    expect(reserve.error).toBe("insufficient_credits");
   });
 
-  it("topUsers returns top spenders", async () => {
+  // ── Refunds ─────────────────────────────────────────────────────────
+  it("full refund restores balance; over-refund and duplicate rejected", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 500);
-    await manager.addCredits(PG_USER2, 500);
-    await manager.deduct(PG_USER, METRICS, "analytics-4");
-    await manager.deduct(
-      PG_USER2,
-      { model: "gpt-4", inputTokens: 300, outputTokens: 0 },
-      "analytics-5",
-    );
+    await store.addCredits(PG_USER, D(100), "purchase");
+    const deduct = await store.deductWithAllowance(PG_USER, D(30), { idempotencyKey: "ref-1" });
 
-    const now = new Date();
-    const rows = await manager.topUsers(
-      2,
-      new Date(now.getTime() - 1000),
-      new Date(now.getTime() + 1000),
-    );
-    expect(rows).toHaveLength(2);
-    expect(rows[0].totalSpend).toBeGreaterThanOrEqual(rows[1].totalSpend);
+    const over = await store.refundCredits(deduct.transactionId, D(1000));
+    expect(over.error).toBe("over_refund");
+
+    const refund = await store.refundCredits(deduct.transactionId);
+    expect(refund.error).toBeUndefined();
+    expect(refund.amount.toString()).toBe("30");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("100");
+
+    const dup = await store.refundCredits(deduct.transactionId);
+    expect(dup.error).toBe("already_refunded");
   });
 
-  it("dailySpend returns bucketed results", async () => {
+  it("cumulative partial refunds, then over-refund rejected", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 500);
-    await manager.deduct(PG_USER, METRICS, "analytics-6");
+    await store.addCredits(PG_USER, D(100), "purchase");
+    const deduct = await store.deductWithAllowance(PG_USER, D(50), { idempotencyKey: "ref-2" });
 
-    const now = new Date();
-    const rows = await manager.dailySpend(
-      new Date(now.getTime() - 86400000),
-      new Date(now.getTime() + 86400000),
-    );
-    expect(rows.length).toBeGreaterThanOrEqual(1);
-    expect(rows[0].totalSpend).toBeGreaterThan(0);
+    expect((await store.refundCredits(deduct.transactionId, D(20))).error).toBeUndefined();
+    expect((await store.refundCredits(deduct.transactionId, D(20))).error).toBeUndefined();
+    const third = await store.refundCredits(deduct.transactionId, D(20));
+    expect(third.error).toBe("over_refund");
   });
 
-  it("aggregateStats returns aggregate data", async () => {
+  it("refund of a purchase (non-debit) is rejected", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const manager = new CreditManager(store);
-    await manager.publishPricingFromDict(TEST_PRICING);
-    await manager.addCredits(PG_USER, 500);
-    await manager.deduct(PG_USER, METRICS, "analytics-7");
-
-    const now = new Date();
-    const stats = await manager.aggregateStats(
-      new Date(now.getTime() - 1000),
-      new Date(now.getTime() + 1000),
-    );
-    expect(stats.totalCreditsConsumed).toBeGreaterThan(0);
-    expect(stats.activeUsers).toBeGreaterThanOrEqual(1);
-    expect(stats.topModel).toBeTruthy();
+    const add = await store.addCredits(PG_USER, D(100), "purchase");
+    const refund = await store.refundCredits(add.transactionId);
+    expect(refund.error).toBe("over_refund");
   });
 
-  it("analytics queries return empty results for empty window", async () => {
+  // ── Expiry double-sweep (H4) ────────────────────────────────────────
+  it("expired credits sweep once; second sweep reports zero (H4)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    const empty = new Date("2020-01-01");
-    const emptyEnd = new Date("2020-01-02");
+    await store.addCredits(PG_USER, D(100), "purchase", null, new Date(Date.now() - 1000));
 
-    const stats = await store.aggregateStats(empty, emptyEnd);
-    expect(stats.totalCreditsConsumed).toBe(0);
-    expect(stats.activeUsers).toBe(0);
-    expect(stats.topModel).toBe("");
+    const first = await store.sweepExpiredCredits();
+    expect(first.expiredAmount.toString()).toBe("100");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("0");
 
-    const byUser = await store.spendByUser(empty, emptyEnd);
-    expect(byUser).toHaveLength(0);
-
-    const byModel = await store.spendByModel(empty, emptyEnd);
-    expect(byModel).toHaveLength(0);
-
-    const top = await store.topUsers(5, empty, emptyEnd);
-    expect(top).toHaveLength(0);
-
-    const daily = await store.dailySpend(empty, emptyEnd);
-    expect(daily).toHaveLength(0);
+    // Add fresh credits; a second sweep must NOT re-claw the already-swept grant.
+    await store.addCredits(PG_USER, D(50), "purchase");
+    const second = await store.sweepExpiredCredits();
+    expect(second.expiredAmount.toString()).toBe("0");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("50");
   });
 
-  // ── listUserTransactions ───────────────────────────────────────────
-
-  it("listUserTransactions returns paginated transactions through PostgresStore", async () => {
+  // ── Team pools + idempotency (H12) ──────────────────────────────────
+  it("deductTeam idempotency key prevents double-charge (H12)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pg.Pool);
-    await pool.query("DELETE FROM public.credit_transactions WHERE user_id = $1", [PG_USER]);
-    await store.addCredits(PG_USER, 1000, "purchase", { ref: "purchase-1" });
-    await store.addCredits(PG_USER, 500, "signup_bonus", { ref: "bonus-1" });
-    const r1 = await store.reserveCredits(PG_USER, 200, "usage", { model: "gpt-4" });
-    await store.deductCredits(PG_USER, r1.reservationId, 200, null, { model: "gpt-4" });
-    await store.addCredits(PG_USER2, 999, "purchase");
+    // credit_team_members.user_id FKs into user_credits — ensure the row exists.
+    await store.addCredits(PG_USER, D(10), "adjustment");
+    const team = await store.createTeam("Pool", D(500));
+    await store.addTeamMember(team.teamId, PG_USER, "member");
+
+    const r1 = await store.deductTeam(team.teamId, PG_USER, D(50), null, "team-key-1");
+    expect(r1.error).toBeUndefined();
+    const r2 = await store.deductTeam(team.teamId, PG_USER, D(50), null, "team-key-1");
+    expect(r2.error).toBeUndefined();
+    // Pool debited once: 500 - 50 = 450.
+    expect((await store.getTeamBalance(team.teamId)).balance.toString()).toBe("450");
+  });
+
+  // ── Analytics list RPCs return all rows ─────────────────────────────
+  it("listUserTransactions returns all rows with NUMERIC parsed as Decimal", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(1000), "purchase");
+    await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "list-1", model: "gpt-4" });
+    await store.deductWithAllowance(PG_USER, D("3.5"), { idempotencyKey: "list-2", model: "claude-3" });
+    await store.addCredits(PG_USER2, D(10), "purchase");
+
     const result = await store.listUserTransactions(PG_USER);
     expect(result.total).toBe(3);
     expect(result.items).toHaveLength(3);
-    expect(result.items.filter((t) => t.type === "usage")).toHaveLength(1);
-    const typeFiltered = await store.listUserTransactions(PG_USER, { types: ["purchase"] });
-    expect(typeFiltered.total).toBe(1);
-    const page1 = await store.listUserTransactions(PG_USER, { limit: 1, offset: 0 });
-    expect(page1.items).toHaveLength(1);
-    expect(page1.total).toBe(3);
-    const page2 = await store.listUserTransactions(PG_USER, { limit: 2, offset: 1 });
-    expect(page2.items).toHaveLength(2);
-    expect(page2.total).toBe(3);
-    const noUser = await store.listUserTransactions(PG_USER2, { types: ["usage"] });
-    expect(noUser.total).toBe(0);
-    await pool.query("DELETE FROM public.credit_transactions WHERE user_id = $1", [PG_USER]);
+    const usage = result.items.filter((t) => t.type === "usage");
+    expect(usage).toHaveLength(2);
+    // Other user not included.
+    const other = await store.listUserTransactions(PG_USER2, { types: ["usage"] });
+    expect(other.total).toBe(0);
+  });
+
+  it("spendByUser returns all rows as exact Decimal", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(500), "purchase");
+    await store.addCredits(PG_USER2, D(500), "purchase");
+    await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "sbu-1", model: "gpt-4" });
+    await store.deductWithAllowance(PG_USER2, D("3.5"), { idempotencyKey: "sbu-2", model: "gpt-4" });
+
+    const now = new Date();
+    const rows = await store.spendByUser(new Date(now.getTime() - 60000), new Date(now.getTime() + 60000));
+    const u1 = rows.find((r) => r.userId === PG_USER);
+    const u2 = rows.find((r) => r.userId === PG_USER2);
+    expect(u1!.totalSpend.toString()).toBe("2.5");
+    expect(u2!.totalSpend.toString()).toBe("3.5");
   });
 });

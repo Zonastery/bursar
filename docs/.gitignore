@@ -12,6 +12,12 @@
 /docs/python-api/reference/
 /docs/javascript-api/reference/
 
+# Auto-generated notebook docs (produced by scripts/gen-notebook-docs.sh on
+# prebuild/prestart from samples/python/notebooks/*.ipynb). The .mdx.tmp files
+# are intermediate nbconvert output and must never be committed.
+/docs/notebooks/*.mdx
+*.mdx.tmp
+
 # Misc
 .DS_Store
 .env.local

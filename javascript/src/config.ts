@@ -1,6 +1,25 @@
+import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { PlanDefinition } from "./types.js";
+
+/**
+ * Canonical metric-variable set — MUST mirror `PricingEngine.buildVariables`
+ * exactly. Expressions may only reference these names (or allowed functions).
+ * Passed into `validateExpression` so typos like `inputtokens` fail at
+ * config-load, not at first runtime use (M5).
+ */
+export const KNOWN_VARIABLES: ReadonlySet<string> = new Set([
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+  "tool_calls",
+  "search_queries",
+  "search_results",
+  "web_search_calls",
+  "code_exec_calls",
+]);
 
 /** Internal validated pricing configuration. */
 export interface PricingConfig {
@@ -16,28 +35,28 @@ export interface PricingConfig {
 function validateExpressions(raw: PricingConfig): void {
   for (const [key, expr] of Object.entries(raw.models)) {
     try {
-      validateExpression(expr);
+      validateExpression(expr, KNOWN_VARIABLES);
     } catch (e) {
       throw new ConfigError(`invalid expression in models.${key}: ${(e as Error).message}`);
     }
   }
   for (const [key, expr] of Object.entries(raw.tools)) {
     try {
-      validateExpression(expr);
+      validateExpression(expr, KNOWN_VARIABLES);
     } catch (e) {
       throw new ConfigError(`invalid expression in tools.${key}: ${(e as Error).message}`);
     }
   }
   for (const [key, expr] of Object.entries(raw.search)) {
     try {
-      validateExpression(expr);
+      validateExpression(expr, KNOWN_VARIABLES);
     } catch (e) {
       throw new ConfigError(`invalid expression in search.${key}: ${(e as Error).message}`);
     }
   }
   for (const [key, expr] of Object.entries(raw.cache)) {
     try {
-      validateExpression(expr);
+      validateExpression(expr, KNOWN_VARIABLES);
     } catch (e) {
       throw new ConfigError(`invalid expression in cache.${key}: ${(e as Error).message}`);
     }
@@ -59,7 +78,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       if (overrides) {
         for (const [modelKey, expr] of Object.entries(overrides)) {
           try {
-            validateExpression(expr);
+            validateExpression(expr, KNOWN_VARIABLES);
           } catch (e) {
             throw new ConfigError(
               `invalid expression in plans.${planKey}.rateOverrides.${modelKey}: ${(e as Error).message}`,
@@ -90,7 +109,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       planDefs[key] = {
         id: p.id as string,
         name: p.name as string,
-        freeAllowance: (p.freeAllowance as number) ?? 0,
+        freeAllowance: new Decimal((p.freeAllowance as number | string | undefined) ?? 0),
         rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
         features: (p.features as Record<string, unknown>) ?? null,
       };

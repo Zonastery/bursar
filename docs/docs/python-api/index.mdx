@@ -22,7 +22,7 @@ pip install "ducto[test]"     # dev + testing
 | Class | Description |
 |-------|-------------|
 | [`PricingEngine`](/docs/python-api/pricing-engine) | Pure calculation layer — evaluates expressions against usage metrics |
-| [`CreditManager`](/docs/python-api/credit-manager) | Orchestrates calculate → reserve → deduct lifecycle |
+| [`CreditManager`](/docs/python-api/credit-manager) | Orchestrates the credit lifecycle (atomic calculate-then-charge) |
 | [`MemoryStore`](/docs/python-api/stores) | In-memory store for testing |
 | [`HttpxSupabaseStore`](/docs/python-api/stores) | Supabase-backed store (fetch-based) |
 | [`PostgresStore`](/docs/python-api/stores) | Direct PostgreSQL store |

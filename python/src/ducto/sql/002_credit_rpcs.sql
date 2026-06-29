@@ -2,10 +2,20 @@
 -- All functions use OR REPLACE for idempotent setup.
 -- All mutation functions require service_role (backend-only).
 
+-- Money columns moved from INTEGER to NUMERIC(18,4) (M11). Because CREATE OR
+-- REPLACE FUNCTION cannot change a parameter's type (it would create a second
+-- overload instead), drop any pre-existing INTEGER-signature versions so the
+-- NUMERIC definitions below fully replace them. Safe no-ops on a fresh install.
+DROP FUNCTION IF EXISTS public.credits_add(UUID, INTEGER, public.credit_tx_type, JSONB);
+DROP FUNCTION IF EXISTS public.reserve_credits(UUID, INTEGER, TEXT, JSONB, INTEGER);
+DROP FUNCTION IF EXISTS public.deduct_credits(UUID, UUID, INTEGER, JSONB);
+
 -- credits_add: Atomically add credits to user's balance and log transaction.
+-- Money is NUMERIC(18,4). Purchases must be a positive, finite amount;
+-- only the explicit 'adjustment' type may carry a negative/zero amount.
 CREATE OR REPLACE FUNCTION public.credits_add(
     p_user_id UUID,
-    p_amount INTEGER,
+    p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
     p_metadata JSONB DEFAULT NULL
 )
@@ -15,12 +25,23 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_new_balance INTEGER;
-    v_lifetime INTEGER;
+    v_new_balance NUMERIC;
+    v_lifetime NUMERIC;
     v_transaction_id UUID;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    -- Reject non-finite amounts (NaN / +-Infinity) outright.
+    IF p_amount IS NULL OR NOT (p_amount = p_amount) OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
+    END IF;
+
+    -- Purchases (and other credit grants) must be strictly positive.
+    -- Negative/zero amounts are only allowed via an explicit 'adjustment'.
+    IF p_type <> 'adjustment' AND p_amount <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
     INSERT INTO public.user_credits (user_id, balance, lifetime_purchased)
@@ -52,12 +73,17 @@ $$;
 -- reserve_credits: Optimistic concurrency guard.
 -- Locks user row, checks available balance (including min_balance floor),
 -- creates a time-bounded reservation. Prevents double-spending.
+--
+-- Canonical semantics (contract §3): the reservation is REJECTED if reserving
+-- the full requested amount would push available balance below p_min_balance,
+-- i.e. (available - p_amount) < p_min_balance. The amount is NEVER silently
+-- capped — both SQL and MemoryStore reject identically. Money is NUMERIC(18,4).
 CREATE OR REPLACE FUNCTION public.reserve_credits(
     p_user_id UUID,
-    p_amount INTEGER,
+    p_amount NUMERIC,
     p_operation_type TEXT,
     p_metadata JSONB DEFAULT NULL,
-    p_min_balance INTEGER DEFAULT 5
+    p_min_balance NUMERIC DEFAULT 5
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -65,13 +91,17 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_balance INTEGER;
-    v_reserved INTEGER;
-    v_available INTEGER;
+    v_balance NUMERIC;
+    v_reserved NUMERIC;
+    v_available NUMERIC;
     v_reservation_id UUID;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    IF p_amount IS NULL OR p_amount <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
     -- Lock row so concurrent calls see an accurate (not stale) balance
@@ -95,7 +125,8 @@ BEGIN
 
     v_available := v_balance - v_reserved;
 
-    IF v_available < p_min_balance THEN
+    -- Reject (do NOT cap) if reserving the full amount would breach the floor.
+    IF v_available - p_amount < p_min_balance THEN
         RETURN jsonb_build_object(
             'error', 'insufficient_credits',
             'available', v_available,
@@ -104,9 +135,6 @@ BEGIN
             'min_balance', p_min_balance
         );
     END IF;
-
-    -- Cap requested amount to what's actually available
-    p_amount := LEAST(p_amount, v_available);
 
     INSERT INTO public.credit_reservations (user_id, amount, operation_type, metadata)
     VALUES (p_user_id, p_amount, p_operation_type, COALESCE(p_metadata, '{}'::jsonb))
@@ -123,12 +151,20 @@ END;
 $$;
 
 
--- deduct_credits: Finalize a deduction, release the reservation.
--- Idempotency supported via metadata->>'idempotency_key'.
+-- deduct_credits: Finalize a deduction against an existing reservation,
+-- then release the reservation. Money is NUMERIC(18,4).
+--
+-- The reservation is the authority on the maximum deductible amount (C3):
+--   * lock the reservation row FOR UPDATE,
+--   * require it to exist, belong to this user, and be unexpired,
+--   * clamp p_amount <= reservation.amount.
+-- Idempotency (H16) is user-scoped: the lookup AND the unique index are keyed
+-- on (user_id, idempotency_key); the insert is wrapped so a concurrent
+-- duplicate (unique_violation) re-selects and returns the original result.
 CREATE OR REPLACE FUNCTION public.deduct_credits(
     p_user_id UUID,
     p_reservation_id UUID,
-    p_amount INTEGER,
+    p_amount NUMERIC,
     p_metadata JSONB DEFAULT NULL
 )
 RETURNS JSONB
@@ -137,37 +173,44 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_current_balance INTEGER;
-    v_new_balance INTEGER;
+    v_current_balance NUMERIC;
+    v_new_balance NUMERIC;
     v_transaction_id UUID;
     v_ref_id UUID;
     v_idempotency_key TEXT;
     v_operation_type TEXT;
+    v_reservation_amount NUMERIC;
+    v_amount NUMERIC := p_amount;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    v_idempotency_key := COALESCE(p_metadata->>'idempotency_key', NULL);
+    IF v_amount IS NULL OR v_amount <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
+    END IF;
 
-    -- Idempotency check: return existing transaction if this key was already processed
+    v_idempotency_key := p_metadata->>'idempotency_key';
+
+    -- Idempotency check (user-scoped): return existing tx if key already used.
     IF v_idempotency_key IS NOT NULL THEN
         SELECT id INTO v_transaction_id
         FROM public.credit_transactions
-        WHERE metadata->>'idempotency_key' = v_idempotency_key;
+        WHERE user_id = p_user_id
+          AND metadata->>'idempotency_key' = v_idempotency_key;
 
         IF FOUND THEN
             RETURN jsonb_build_object(
                 'id', v_transaction_id,
                 'user_id', p_user_id,
-                'amount', -p_amount,
+                'amount', -v_amount,
                 'new_balance', (SELECT balance FROM public.user_credits WHERE user_id = p_user_id),
                 'idempotent', true
             );
         END IF;
     END IF;
 
-    -- Lock row and check balance BEFORE any mutation
+    -- Lock the balance row BEFORE any mutation
     SELECT balance INTO v_current_balance
     FROM public.user_credits
     WHERE user_id = p_user_id
@@ -177,13 +220,29 @@ BEGIN
         RETURN jsonb_build_object('error', 'no_balance_record');
     END IF;
 
-    IF v_current_balance < p_amount THEN
+    -- Lock and validate the reservation: it is the spend ceiling (C3).
+    SELECT amount, operation_type
+    INTO v_reservation_amount, v_operation_type
+    FROM public.credit_reservations
+    WHERE id = p_reservation_id
+      AND user_id = p_user_id
+      AND expires_at > now()
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error', 'not_found', 'reservation_id', p_reservation_id);
+    END IF;
+
+    -- Clamp the deducted amount to the reserved ceiling.
+    v_amount := LEAST(v_amount, v_reservation_amount);
+
+    IF v_current_balance < v_amount THEN
         RETURN jsonb_build_object('error', 'insufficient_credits', 'available', v_current_balance);
     END IF;
 
     -- Deduct atomically
     UPDATE public.user_credits
-    SET balance = balance - p_amount,
+    SET balance = balance - v_amount,
         updated_at = now()
     WHERE user_id = p_user_id
     RETURNING balance INTO v_new_balance;
@@ -195,19 +254,30 @@ BEGIN
         v_ref_id := NULL;
     END;
 
-    -- Read reservation's operation_type before releasing
-    SELECT operation_type INTO v_operation_type
-    FROM public.credit_reservations
-    WHERE id = p_reservation_id AND user_id = p_user_id;
-
-    INSERT INTO public.credit_transactions
-        (user_id, amount, type, reference_type, reference_id, metadata)
-    VALUES
-        (p_user_id, -p_amount, 'usage',
-         COALESCE(p_metadata->>'reference_type', v_operation_type),
-         v_ref_id,
-         p_metadata)
-    RETURNING id INTO v_transaction_id;
+    -- Insert ledger row; concurrent duplicate idempotency key -> re-select original.
+    BEGIN
+        INSERT INTO public.credit_transactions
+            (user_id, amount, type, reference_type, reference_id, metadata)
+        VALUES
+            (p_user_id, -v_amount, 'usage',
+             COALESCE(p_metadata->>'reference_type', v_operation_type),
+             v_ref_id,
+             p_metadata)
+        RETURNING id INTO v_transaction_id;
+    EXCEPTION WHEN unique_violation THEN
+        -- A concurrent call with the same (user_id, idempotency_key) won the race.
+        SELECT id INTO v_transaction_id
+        FROM public.credit_transactions
+        WHERE user_id = p_user_id
+          AND metadata->>'idempotency_key' = v_idempotency_key;
+        RETURN jsonb_build_object(
+            'id', v_transaction_id,
+            'user_id', p_user_id,
+            'amount', -v_amount,
+            'new_balance', (SELECT balance FROM public.user_credits WHERE user_id = p_user_id),
+            'idempotent', true
+        );
+    END;
 
     -- Release reservation
     DELETE FROM public.credit_reservations WHERE id = p_reservation_id AND user_id = p_user_id;
@@ -215,7 +285,7 @@ BEGIN
     RETURN jsonb_build_object(
         'id', v_transaction_id,
         'user_id', p_user_id,
-        'amount', -p_amount,
+        'amount', -v_amount,
         'new_balance', v_new_balance,
         'idempotent', false
     );
@@ -231,8 +301,8 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_balance INTEGER;
-    v_lifetime INTEGER;
+    v_balance NUMERIC;
+    v_lifetime NUMERIC;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');

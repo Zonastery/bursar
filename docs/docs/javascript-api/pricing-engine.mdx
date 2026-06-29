@@ -27,9 +27,10 @@ const cost = engine.calculate({
   inputTokens: 500,
   outputTokens: 200,
 });
-console.log(`Total: ${cost.total}`); // 0.011
-console.log(`Model credits: ${cost.modelCredits}`);
-console.log(`Tool credits: ${cost.toolCredits}`);
+// cost.total is a decimal.js Decimal (quantized to 4dp), e.g. "0.0110"
+console.log(`Total: ${cost.total.toString()}`);
+console.log(`Model credits: ${cost.modelCredits.toString()}`);
+console.log(`Tool credits: ${cost.toolCredits.toString()}`);
 ```
 
 ### `calculateBatch(metrics: UsageMetricsLike[]): CostBreakdown[]`
@@ -44,29 +45,31 @@ Resolve a model version string against configured model names.
 
 Check if a specific model is configured.
 
-### `getFixedCost(jobName: string): number | null`
+### `getFixedCost(jobName: string): Decimal | null`
 
-Get the fixed cost for a named job.
+Get the fixed cost for a named job. Returns `null` for an unknown/unconfigured job.
 
 ### `pricingSchema(): PricingConfigData`
 
 Get the raw pricing config dict.
 
-### `minBalance: number`
+### `minBalance: Decimal`
 
 The configured minimum balance floor.
 
 ## CostBreakdown
 
+**All monetary fields are `Decimal`** (from `decimal.js`), quantized to 4 dp `ROUND_HALF_UP`. `total` is the single source of truth: recomputed from the components, clamped at `0`, quantized — never truncated to an integer:
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `total` | `number` | Total credits |
-| `modelCredits` | `number` | Credits from model expression |
-| `toolCredits` | `number` | Credits from tool expressions |
-| `searchCredits` | `number` | Credits from search expressions |
-| `cacheCredits` | `number` | Credits from cache (negative = savings) |
-| `fixedCredits` | `number` `|` `null` | Fixed job cost if applicable |
-| `metadata` | `Record<string, unknown>` | Debug info |
+| `total` | `Decimal` | Total credits |
+| `modelCredits` | `Decimal` | Credits from model expression |
+| `toolCredits` | `Decimal` | Credits from tool expressions |
+| `searchCredits` | `Decimal` | Credits from search expressions |
+| `cacheSavings` | `Decimal` | Cache result (negative = savings) |
+| `fixedCredits` | `Decimal` | Fixed job cost (`0` when not applicable) |
+| `breakdown` | `Record<string, unknown>` | Debug info |
 
 ## UsageMetricsLike
 
@@ -79,7 +82,7 @@ Input to `calculate()`:
 | `outputTokens` | `number` | `0` |
 | `cacheReadTokens` | `number` | `0` |
 | `cacheWriteTokens` | `number` | `0` |
-| `toolCalls` | `string[]` | `[]` |
+| `toolCalls` | `ToolCall[]` (`{ name: string }[]`) | `[]` |
 | `searchQueries` | `number` | `0` |
 | `searchResults` | `number` | `0` |
 | `webSearchCalls` | `number` | `0` |

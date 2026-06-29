@@ -1,6 +1,6 @@
 # CreditManager — Python
 
-Orchestrates the full credit lifecycle: calculate → reserve → deduct.
+Orchestrates the credit lifecycle. The hot path (`deduct()`) calculates the cost and charges it in **one atomic store transaction** (`deduct_with_allowance`): allowance, spend cap, balance floor and debit all commit or roll back together. All money is `Decimal`.
 
 ## Constructor
 
@@ -12,14 +12,22 @@ store = MemoryStore()
 manager = CreditManager(store=store)
 ```
 
-Optionally pass a pre-configured `PricingEngine` and/or `CreditEventEmitter`:
+Optionally pass a pre-configured `PricingEngine`, a `CreditEventEmitter`, and/or a `low_balance_threshold`:
 
 ```python
+from decimal import Decimal
 from ducto.events import CreditEventEmitter
 
 emitter = CreditEventEmitter()
-manager = CreditManager(store=store, engine=engine, emitter=emitter)
+manager = CreditManager(
+    store=store,
+    engine=engine,
+    emitter=emitter,
+    low_balance_threshold=Decimal("25"),  # absolute floor for the edge-triggered alert
+)
 ```
+
+`low_balance_threshold` is the absolute balance at or below which a deduction that *crosses* it emits `credits.low_balance` (edge-triggered). When omitted it defaults to `min_balance * 2`.
 
 ## Pricing
 
@@ -52,11 +60,11 @@ Add credits. Optional `expires_at` for time-bound credits.
 
 ### `deduct(user_id, metrics, idempotency_key=None, metadata=None)`
 
-Full lifecycle: calculate cost → consume plan allowance → check spend caps → reserve → deduct.
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deduct_with_allowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Returns a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowance_consumed`, `balance_after`, `idempotent` and `cap_warning`. Raises `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap) on failure. A zero/negative cost short-circuits to a zero-amount result.
 
 ### `deduct_fixed(user_id, job_name, idempotency_key=None, metadata=None)`
 
-Deduct a fixed cost (configured in pricing `fixed` section).
+Deduct a fixed cost (configured in pricing `fixed` section). Raises `ValueError` for an unknown/unconfigured `job_name` instead of charging 0.
 
 ## Plan Management
 
@@ -94,12 +102,13 @@ assert result.balance_after == 10  # balance unchanged
 
 ### `refund_credits(transaction_id, amount=None, reason=None, metadata=None)`
 
-Refund a previous deduction. Supports partial refunds. Returns error for duplicates.
+Refund a previous deduction. Supports partial refunds. On a business failure (over-refund, duplicate, refunding a refund/purchase, not found) `result.error` is set (`over_refund` / `already_refunded` / `not_found`), `credits.refund_failed` is emitted, and **no** `credits.refunded` event fires. Inspect `result.error` before treating it as success.
 
 ```python
 result = manager.refund_credits(tx_id)
-assert result.amount == 1
-assert result.new_balance == 100
+assert result.error is None
+assert result.amount == Decimal("1")
+assert result.new_balance == Decimal("100")
 ```
 
 ## Usage Analytics
@@ -113,6 +122,7 @@ Time-windowed aggregation queries. All accept `start` / `end` `datetime` range.
 | `top_users(limit, start, end)` | `list[TopUserRow]` — sorted by spend desc |
 | `daily_spend(start, end)` | `list[DailySpendRow]` — bucketed by day |
 | `aggregate_stats(start, end)` | `AggregateStatsRow` — total, active users, avg daily, top model, top user |
+| `list_user_transactions(user_id, types=None, from_date=None, to_date=None, limit=50, offset=0)` | `list[TransactionRow]` — paginated transaction history (each row carries `total_count`) |
 
 ## Credit Expiry
 
@@ -146,9 +156,11 @@ store.set_spend_cap(SpendCap(
 ))
 ```
 
-- **deny** — raises `InsufficientCreditsError` when exceeded
-- **warn** — emits `credits.cap_warning` event but allows deduction
-- **notify** — emits `credits.cap_warning` event
+- **deny** — raises `CapReachedError` when exceeded (the deduction aborts atomically; no allowance is consumed)
+- **warn** — allows the deduction; the store returns `cap_warning="warn"` and the manager emits `credits.cap_warning`
+- **notify** — allows the deduction; emits `credits.cap_warning` with `action="notify"`
+
+The cap is enforced **inside** the atomic `deduct_with_allowance` transaction (accumulating prior spend in the same window), not as a separate racy pre-check.
 
 ## Team / Shared Balances
 
@@ -160,15 +172,17 @@ Teams have their own credit pool separate from individual user balances.
 | `store.get_team_balance(team_id)` | Fetch team balance + member count |
 | `store.add_team_member(team_id, user_id, role="member", spend_cap=None)` | Add member with optional per-user cap |
 | `store.get_team_members(team_id)` | List team members with spend + caps |
-| `store.deduct_team(team_id, user_id, amount, metadata=None)` | Deduct from team pool |
-| `manager.deduct_team(team_id, user_id, metrics, metadata=None)` | Pricing-engine cost + team deduction |
+| `store.deduct_team(team_id, user_id, amount, metadata=None, idempotency_key=None)` | Deduct from team pool |
+| `manager.deduct_team(team_id, user_id, metrics, idempotency_key=None, metadata=None)` | Pricing-engine cost + team deduction |
+
+`deduct_team` threads an `idempotency_key` so a retried team deduction returns the original result instead of double-charging the shared pool.
 
 ```python
-team = store.create_team("Engineering", 1000)
-store.add_team_member(team.team_id, "user-1", role="admin", spend_cap=500)
+team = store.create_team("Engineering", Decimal("1000"))
+store.add_team_member(team.team_id, "user-1", role="admin", spend_cap=Decimal("500"))
 result = manager.deduct_team(team.team_id, "user-1", UsageMetrics(input_tokens=100))
-assert result.amount == -100
-assert result.team_balance_after == 900
+assert result.amount == Decimal("-100")
+assert result.team_balance_after == Decimal("900")
 ```
 
 ## Events
@@ -186,10 +200,13 @@ def handle_deduct(event: CreditEvent):
     print(f"{event.user_id} spent {event.data['amount']} credits")
 
 # Available event types:
-# "credits.deducted" | "credits.added" | "credits.refunded"
-# | "credits.expired" | "credits.cap_reached"
-# | "credits.cap_warning" | "credits.low_balance" | "credits.plan_changed"
+# "credits.deducted" | "credits.deduct_failed" | "credits.added"
+# | "credits.refunded" | "credits.refund_failed" | "credits.expired"
+# | "credits.cap_reached" | "credits.cap_warning"
+# | "credits.low_balance" | "credits.plan_changed"
 ```
+
+Success events fire only after the operation commits; failures fire dedicated `*_failed` events. Handler exceptions are isolated and never break the deduction. Event timestamps are timezone-aware UTC.
 
 ## Properties
 

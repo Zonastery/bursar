@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal
 
 from ducto.interface.models import (
     AddCreditsResult,
@@ -45,6 +46,23 @@ class StoreError(Exception):
     """Base exception for store-level errors (connection, timeout, etc.)."""
 
 
+class CapReachedError(StoreError):
+    """Raised when a deduction would exceed a configured ``deny`` spend cap.
+
+    Stores return ``error="cap_reached"`` on the result model rather than
+    raising; the manager maps that code to this exception (contract §4).
+    """
+
+
+class RefundError(StoreError):
+    """Raised when a refund is invalid (over-refund, duplicate, wrong type).
+
+    Stores return a business code (``already_refunded``/``over_refund``/
+    ``not_found``) on ``RefundResult.error``; the manager maps it to this
+    exception (contract §4).
+    """
+
+
 class CreditStore(ABC):
     """Interface for credit storage backends.
 
@@ -78,7 +96,7 @@ class CreditStore(ABC):
     def add_credits(
         self,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
@@ -86,7 +104,55 @@ class CreditStore(ABC):
         """Atomically add credits and log a transaction.
 
         Args:
+            amount: Fractional credit amount (``Decimal``).
             expires_at: Optional datetime after which the credits expire.
+        """
+        ...
+
+    @abstractmethod
+    def deduct_with_allowance(
+        self,
+        user_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        """Atomically charge a gross cost in a single server-side transaction.
+
+        This is the canonical "calculate cost then charge now" path (contract
+        §2). Within one transaction the store:
+
+        1. Locks the user's credit row.
+        2. Honors ``idempotency_key`` (user-scoped) — a replay returns the
+           original result with ``idempotent=True``.
+        3. Consumes free allowance first (``allowance_consumed`` on the result),
+           charging only the net remainder to the balance.
+        4. Enforces spend caps on the net: a ``deny`` cap aborts with
+           ``error="cap_reached"`` (no allowance consumed); ``warn``/``notify``
+           set ``cap_warning`` and continue.
+        5. Enforces the balance floor: ``balance - net < min_balance`` aborts
+           with ``error="insufficient_credits"`` (no allowance consumed).
+        6. Debits the balance and inserts one ``usage`` transaction.
+
+        All-or-nothing: any failure rolls back allowance consumption and the
+        balance change. Business failures are returned via
+        ``DeductionResult.error`` (the manager maps codes to exceptions); the
+        store does not import manager-level exceptions.
+
+        Args:
+            user_id: The user to charge.
+            amount: Gross cost (``Decimal``, ``>= 0``, fractional 4dp).
+            idempotency_key: Optional user-scoped replay key.
+            min_balance: Minimum balance floor (default ``Decimal(0)``).
+            model: Optional model name recorded on the transaction.
+            metadata: Extra metadata merged onto the transaction.
+
+        Returns:
+            ``DeductionResult`` with net ``amount``, ``allowance_consumed``,
+            ``balance_after``, ``idempotent``, ``cap_warning``, and ``error``.
         """
         ...
 
@@ -94,10 +160,10 @@ class CreditStore(ABC):
     def reserve_credits(
         self,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         operation_type: str,
         metadata: CreditMetadata | None = None,
-        min_balance: int = 5,
+        min_balance: Decimal = Decimal(5),
     ) -> ReserveResult:
         """Reserve credits for an upcoming operation.
 
@@ -111,7 +177,7 @@ class CreditStore(ABC):
         self,
         user_id: str,
         reservation_id: str,
-        amount: int,
+        amount: Decimal,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
@@ -178,17 +244,26 @@ class CreditStore(ABC):
         and inspects the ``features`` dict. Override in custom stores for
         optimized queries.
 
-        Feature values follow a truthy convention:
-        - ``False`` / ``None`` / absent → ``has_feature=False``
-        - ``True`` / numeric / string   → ``has_feature=True``
+        Feature presence is distinguished from truthiness (contract §5, M6):
+        the feature is considered present when the key exists and its value is
+        not ``None``/``False``. Numeric ``0`` and empty string ``""`` are
+        therefore *present* (``has_feature=True``).
+        - absent / ``None`` / ``False`` → ``has_feature=False``
+        - ``True`` / numeric (incl. ``0``) / string (incl. ``""``) → ``has_feature=True``
+
+        Note: identity checks (``is None``/``is False``) are used rather than the
+        contract's literal ``not in (None, False)``, because ``0 == False`` /
+        ``0.0 == False`` in Python would otherwise mis-classify numeric ``0`` as
+        absent — defeating the very M6 intent ("numeric ``0``/``""`` ⇒ present").
         """
         plan = self.get_user_plan(user_id)
         value = plan.features.get(feature)
+        has_feature = feature in plan.features and value is not None and value is not False
         return CheckFeatureResult(
             user_id=user_id,
             feature=feature,
             value=value,
-            has_feature=bool(value),
+            has_feature=has_feature,
         )
 
     @abstractmethod
@@ -202,7 +277,7 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def increment_usage_window(self, user_id: str, plan_id: str, amount: int) -> None:
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
         """Record allowance consumption for current billing period."""
         ...
 
@@ -213,7 +288,7 @@ class CreditStore(ABC):
         self,
         user_id: str,
         model: str | None = None,
-        amount: int | None = None,
+        amount: Decimal | None = None,
     ) -> CapCheckResult:
         """Check whether a pending deduction would exceed any configured cap.
 
@@ -233,7 +308,7 @@ class CreditStore(ABC):
     def refund_credits(
         self,
         transaction_id: str,
-        amount: int | None = None,
+        amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:
@@ -371,7 +446,7 @@ class CreditStore(ABC):
     def create_team(
         self,
         name: str,
-        initial_balance: int = 0,
+        initial_balance: Decimal = Decimal(0),
     ) -> CreateTeamResult:
         """Create a team with a shared credit balance pool.
 
@@ -402,7 +477,7 @@ class CreditStore(ABC):
         team_id: str,
         user_id: str,
         role: str = "member",
-        spend_cap: int | None = None,
+        spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
         """Add a user to a team.
 
@@ -434,16 +509,20 @@ class CreditStore(ABC):
         self,
         team_id: str,
         user_id: str,
-        amount: int,
+        amount: Decimal,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> TeamDeductionResult:
         """Deduct credits from a team pool, attributed to a user.
 
         Args:
             team_id: The team's UUID.
             user_id: The user to attribute the deduction to.
-            amount: Credits to deduct.
+            amount: Credits to deduct (``Decimal``).
             metadata: Extra metadata.
+            idempotency_key: Optional replay key. A retried team deduction with
+                the same key returns the original result rather than charging
+                the shared pool again (contract §2/H12).
 
         Returns:
             ``TeamDeductionResult`` with transaction details.

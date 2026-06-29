@@ -21,7 +21,7 @@ describe("loadConfigFromDict", () => {
   });
 
   it("rejects missing models", () => {
-    expect(() => loadConfigFromDict({} as any)).toThrow(ConfigError);
+    expect(() => loadConfigFromDict({})).toThrow(ConfigError);
   });
 
   it("rejects empty models", () => {
@@ -61,8 +61,53 @@ describe("loadConfigFromDict", () => {
   it("rejects negative minBalance", () => {
     expect(() =>
       loadConfigFromDict({
-        models: { a: "1" },
+        models: { a: "input_tokens * 1" },
         minBalance: -1,
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  // ── M5: variable-name validation against the known metric set ──
+  it("rejects an unknown variable name at config load (typo)", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "inputtokens * 0.001" },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an unknown variable in a tool expression", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        tools: { _default: "toolcalls * 5" },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an unknown variable in a plan rate override", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          pro: { id: "p1", name: "Pro", rateOverrides: { "gpt-4": "inputtokens * 0.002" } },
+        },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts all canonical metric variables", () => {
+    const expr =
+      "input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + " +
+      "tool_calls + search_queries + search_results + web_search_calls + code_exec_calls";
+    expect(() => loadConfigFromDict({ models: { _default: expr } })).not.toThrow();
+  });
+
+  // ── C5/C7: config-load rejects ** and div-by-zero-prone forms via validation ──
+  it("rejects exponentiation in a model expression", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens ** 2" },
       }),
     ).toThrow(ConfigError);
   });

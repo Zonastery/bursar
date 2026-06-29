@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import { evaluateExpression } from "./expr.js";
 import type { PricingConfig } from "./config.js";
 import { loadConfigFromDict } from "./config.js";
@@ -7,14 +8,11 @@ import type { UsageMetrics } from "./metrics.js";
 import type { PricingConfigData } from "./types.js";
 import { ConfigError } from "./errors.js";
 
-function safeTotal(value: number): number {
-  return Math.max(0, Math.round(value * 100) / 100);
-}
-
 /**
  * Credit calculation engine.
  *
- * Evaluates pricing expressions against usage metrics to produce cost breakdowns.
+ * Evaluates pricing expressions against usage metrics to produce cost
+ * breakdowns. All money values are exact `Decimal`s — never binary `number`.
  */
 export class PricingEngine {
   private config: PricingConfig;
@@ -37,12 +35,14 @@ export class PricingEngine {
     const cacheSavings = this.calcCache(variables);
     const fixedCredits = this.calcFixed(metrics);
 
+    // makeCostBreakdown quantizes every component to 4dp HALF_UP and computes
+    // the single-source-of-truth total (clamped at 0). No truncation.
     return makeCostBreakdown({
-      modelCredits: safeTotal(modelCredits),
-      toolCredits: safeTotal(toolCredits),
-      searchCredits: safeTotal(searchCredits),
-      cacheSavings: Math.round(cacheSavings * 100) / 100,
-      fixedCredits: safeTotal(fixedCredits),
+      modelCredits,
+      toolCredits,
+      searchCredits,
+      cacheSavings,
+      fixedCredits,
       breakdown: {
         model: metrics.model ?? "unknown",
         inputTokens: metrics.inputTokens ?? 0,
@@ -75,24 +75,35 @@ export class PricingEngine {
     return this.config.minBalance;
   }
 
+  /** The canonical set of metric variable names usable in expressions. */
+  get knownVariables(): Set<string> {
+    return new Set(Object.keys(this.buildVariables({})));
+  }
+
   /** Check if a model name exists in the pricing config. */
   hasModel(modelName: string): boolean {
-    return modelName in this.config.models;
+    return Object.prototype.hasOwnProperty.call(this.config.models, modelName);
   }
 
   /** Resolve a model version string to a pricing config key. */
   resolveModel(modelVersion: string): string | null {
-    if (modelVersion in this.config.models) return modelVersion;
+    if (Object.prototype.hasOwnProperty.call(this.config.models, modelVersion)) return modelVersion;
     for (const key of Object.keys(this.config.models)) {
       if (key !== "_default" && modelVersion.startsWith(key)) return key;
     }
-    if ("_default" in this.config.models) return "_default";
+    if (Object.prototype.hasOwnProperty.call(this.config.models, "_default")) return "_default";
     return null;
   }
 
-  /** Get the fixed credit cost for a named batch job. */
-  getFixedCost(jobName: string): number | null {
-    if (jobName in this.config.fixed) return this.config.fixed[jobName];
+  /**
+   * Get the fixed credit cost for a named batch job, as a `Decimal`.
+   * Returns `null` for an unknown job (L3 parity with Python). The amount is
+   * NOT truncated to an integer.
+   */
+  getFixedCost(jobName: string): Decimal | null {
+    if (Object.prototype.hasOwnProperty.call(this.config.fixed, jobName)) {
+      return new Decimal(this.config.fixed[jobName]);
+    }
     return null;
   }
 
@@ -112,13 +123,13 @@ export class PricingEngine {
     };
   }
 
-  private calcModel(modelName: string | null, variables: Record<string, number>): number {
+  private calcModel(modelName: string | null, variables: Record<string, number>): Decimal {
     const name = modelName === null || modelName === "none" ? "_default" : modelName;
     let expr: string | undefined;
 
-    if (name in this.config.models) {
+    if (Object.prototype.hasOwnProperty.call(this.config.models, name)) {
       expr = this.config.models[name];
-    } else if ("_default" in this.config.models) {
+    } else if (Object.prototype.hasOwnProperty.call(this.config.models, "_default")) {
       expr = this.config.models["_default"];
     }
 
@@ -129,48 +140,55 @@ export class PricingEngine {
     return evaluateExpression(expr, variables);
   }
 
-  private calcTools(metrics: UsageMetrics, variables: Record<string, number>): number {
+  private calcTools(metrics: UsageMetrics, variables: Record<string, number>): Decimal {
     const defaultExpr = this.config.tools["_default"] ?? "tool_calls * 0";
-    let total = 0;
+    let total = new Decimal(0);
     const seenSpecific = new Set<string>();
 
-    const callNames = (metrics.toolCalls ?? []).map((t) => t.name);
-    const uniqueNames = [...new Set(callNames)];
+    const calls = metrics.toolCalls ?? [];
+    const uniqueNames = [...new Set(calls.map((t) => t.name))];
 
     for (const toolName of uniqueNames) {
-      if (toolName in this.config.tools) {
-        total += evaluateExpression(this.config.tools[toolName], variables);
+      if (Object.prototype.hasOwnProperty.call(this.config.tools, toolName)) {
+        total = total.plus(evaluateExpression(this.config.tools[toolName], variables));
         seenSpecific.add(toolName);
       }
     }
 
-    const unknownCount = uniqueNames.filter((n) => !seenSpecific.has(n)).length;
+    // Count unknown *calls* (not unique names) for the default expression, to
+    // match the Python engine's `sum(1 for t in tool_calls if t.name not in
+    // seen_specific)`. Previously this counted unique names, diverging from
+    // Python and (masked by 2dp rounding) under-charging on repeated unknowns.
+    const unknownCount = calls.filter((t) => !seenSpecific.has(t.name)).length;
     if (unknownCount > 0) {
       const local = { ...variables, tool_calls: unknownCount };
-      total += evaluateExpression(defaultExpr, local);
+      total = total.plus(evaluateExpression(defaultExpr, local));
     }
 
     return total;
   }
 
-  private calcSearch(variables: Record<string, number>): number {
+  private calcSearch(variables: Record<string, number>): Decimal {
     if (this.config.search && "costs" in this.config.search) {
       return evaluateExpression(this.config.search["costs"], variables);
     }
-    return 0;
+    return new Decimal(0);
   }
 
-  private calcCache(variables: Record<string, number>): number {
+  private calcCache(variables: Record<string, number>): Decimal {
     if (this.config.cache && "discount" in this.config.cache) {
       return evaluateExpression(this.config.cache["discount"], variables);
     }
-    return 0;
+    return new Decimal(0);
   }
 
-  private calcFixed(metrics: UsageMetrics): number {
-    if (metrics.fixedJob && metrics.fixedJob in this.config.fixed) {
-      return this.config.fixed[metrics.fixedJob];
+  private calcFixed(metrics: UsageMetrics): Decimal {
+    if (
+      metrics.fixedJob &&
+      Object.prototype.hasOwnProperty.call(this.config.fixed, metrics.fixedJob)
+    ) {
+      return new Decimal(this.config.fixed[metrics.fixedJob]);
     }
-    return 0;
+    return new Decimal(0);
   }
 }

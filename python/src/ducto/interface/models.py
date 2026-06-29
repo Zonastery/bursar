@@ -2,13 +2,19 @@
 
 All store methods accept and return typed Pydantic models rather than
 raw dicts — validation at the boundary, clarity in the call sites.
+
+Money is represented as :class:`decimal.Decimal` everywhere (contract §1):
+credits are fractional and must never be computed in binary float. Quantization
+to 4 dp with ``ROUND_HALF_UP`` happens at the money boundary (manager/engine and
+on persistence), not inside these models.
 """
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ── Metadata ──────────────────────────────────────────────────────────
 
@@ -17,6 +23,13 @@ class CreditMetadata(BaseModel, extra="allow"):
     """Flexible metadata attached to credit transactions.
 
     Known fields are typed; arbitrary extras pass through to JSONB.
+
+    Merge order (contract §5, M7): the MANAGER merges caller metadata **first**
+    and system-seeded fields **last**, so the system-owned reserved keys
+    (``idempotency_key``, ``model``, ``breakdown_total``) always win over
+    caller-supplied values. This model keeps ``extra="allow"`` so callers can
+    attach arbitrary keys; it does not block that merge order (the manager owns
+    the merge). Reserved system keys must not be overwritten by caller metadata.
     """
 
     input_tokens: int | None = None
@@ -44,7 +57,7 @@ class PricingConfigData(BaseModel):
     search: dict[str, str] = Field(default_factory=dict)
     cache: dict[str, str] = Field(default_factory=dict)
     fixed: dict[str, int] = Field(default_factory=dict)
-    min_balance: int = 5
+    min_balance: Decimal = Field(default=Decimal(5), ge=0)
     plans: dict[str, PlanDefinition] | None = None
 
 
@@ -55,8 +68,8 @@ class BalanceResult(BaseModel):
     """Current credit balance for a user."""
 
     user_id: str
-    balance: int = 0
-    lifetime_purchased: int = 0
+    balance: Decimal = Decimal(0)
+    lifetime_purchased: Decimal = Decimal(0)
 
 
 class AddCreditsResult(BaseModel):
@@ -64,9 +77,9 @@ class AddCreditsResult(BaseModel):
 
     transaction_id: str
     user_id: str
-    amount: int
-    new_balance: int
-    lifetime_purchased: int = 0
+    amount: Decimal
+    new_balance: Decimal
+    lifetime_purchased: Decimal = Decimal(0)
 
 
 class ReserveResult(BaseModel):
@@ -74,23 +87,30 @@ class ReserveResult(BaseModel):
 
     reservation_id: str
     user_id: str
-    amount: int
-    balance: int = 0
-    reserved_total: int = 0
+    amount: Decimal
+    balance: Decimal = Decimal(0)
+    reserved_total: Decimal = Decimal(0)
     error: str | None = None
 
 
 class DeductionResult(BaseModel):
     """Result of deducting credits after an operation completes.
 
-    ``amount`` is negative for deductions, positive for refunds.
+    ``amount`` is the net amount charged to the balance (gross cost minus any
+    free allowance consumed). ``allowance_consumed`` is the portion covered by
+    free allowance, and ``cap_warning`` carries a non-blocking ``warn``/``notify``
+    spend-cap signal (``None`` when no cap fired). On failure, ``error`` carries
+    a business code (e.g. ``insufficient_credits``, ``cap_reached``) for the
+    manager to map to a typed exception.
     """
 
     transaction_id: str
     user_id: str
-    amount: int
-    balance_after: int
+    amount: Decimal
+    balance_after: Decimal
+    allowance_consumed: Decimal = Decimal(0)
     idempotent: bool = False
+    cap_warning: str | None = None
     error: str | None = None
 
 
@@ -133,7 +153,7 @@ class PlanDefinition(BaseModel):
 
     id: str
     name: str
-    free_allowance: int = Field(default=0, ge=0)
+    free_allowance: Decimal = Field(default=Decimal(0), ge=0)
     rate_overrides: dict[str, str] | None = None
     features: dict[str, Any] | None = None
 
@@ -142,7 +162,7 @@ class AllowanceResult(BaseModel):
     """Result of checking plan allowance."""
 
     plan_id: str
-    allowance_remaining: int
+    allowance_remaining: Decimal
     period_start: str
     period_end: str
 
@@ -153,7 +173,7 @@ class GetUserPlanResult(BaseModel):
     user_id: str
     plan_id: str | None = None
     plan_name: str | None = None
-    free_allowance: int = 0
+    free_allowance: Decimal = Decimal(0)
     features: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -174,13 +194,18 @@ class SetUserPlanResult(BaseModel):
 
 
 class RefundResult(BaseModel):
-    """Result of refunding a credit deduction."""
+    """Result of refunding a credit deduction.
+
+    On failure, ``error`` carries a business code (e.g. ``already_refunded``,
+    ``over_refund``, ``not_found``) so the manager can reject over-refunds and
+    duplicates before emitting a success event (contract §4).
+    """
 
     refund_transaction_id: str
     original_transaction_id: str
     user_id: str
-    amount: int = 0
-    new_balance: int = 0
+    amount: Decimal = Decimal(0)
+    new_balance: Decimal = Decimal(0)
     error: str | None = None
 
 
@@ -188,7 +213,7 @@ class SweepResult(BaseModel):
     """Result of sweeping expired credits."""
 
     expired_count: int = 0
-    expired_amount: int = 0
+    expired_amount: Decimal = Decimal(0)
     dry_run: bool = False
 
 
@@ -199,7 +224,7 @@ class SpendByUserRow(BaseModel):
     """Aggregated spend for a single user in a time window."""
 
     user_id: str = ""
-    total_spend: int = 0
+    total_spend: Decimal = Decimal(0)
     transaction_count: int = 0
 
 
@@ -207,7 +232,7 @@ class SpendByModelRow(BaseModel):
     """Aggregated spend for a single model in a time window."""
 
     model: str = ""
-    total_spend: int = 0
+    total_spend: Decimal = Decimal(0)
     transaction_count: int = 0
 
 
@@ -215,23 +240,23 @@ class TopUserRow(BaseModel):
     """Top-spending user in a time window."""
 
     user_id: str = ""
-    total_spend: int = 0
+    total_spend: Decimal = Decimal(0)
 
 
 class DailySpendRow(BaseModel):
     """Daily spend aggregation in a time window."""
 
     date: str = ""
-    total_spend: int = 0
+    total_spend: Decimal = Decimal(0)
     transaction_count: int = 0
 
 
 class AggregateStatsRow(BaseModel):
     """Aggregate statistics across all users in a time window."""
 
-    total_credits_consumed: int = 0
+    total_credits_consumed: Decimal = Decimal(0)
     active_users: int = 0
-    avg_daily_spend: int = 0
+    avg_daily_spend: Decimal = Decimal(0)
     top_model: str = ""
     top_user: str = ""
 
@@ -244,7 +269,7 @@ class TransactionRow(BaseModel):
 
     id: str = ""
     user_id: str = ""
-    amount: int = 0
+    amount: Decimal = Decimal(0)
     type: str = ""
     reference_type: str | None = None
     reference_id: str | None = None
@@ -257,22 +282,33 @@ class TransactionRow(BaseModel):
 
 
 class SpendCap(BaseModel):
-    """Configuration for a per-user spend cap."""
+    """Configuration for a per-user spend cap.
+
+    ``populate_by_name=True`` so the field accepts both its name (``cap_type``)
+    and its alias (``type``) on input, standardizing (de)serialization across
+    the camelCase/snake_case boundary (contract §5, M14-models).
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     user_id: str = ""
     cap_type: Literal["daily", "monthly"] = Field(default="daily", alias="type")
     model: str | None = None
-    limit: int = Field(default=0, ge=0)
+    limit: Decimal = Field(default=Decimal(0), ge=0)
     action: Literal["deny", "warn", "notify"] = "deny"
 
 
 class CapCheckResult(BaseModel):
-    """Result of checking a spend cap."""
+    """Result of checking a spend cap.
+
+    ``action`` is ``None`` when no cap applies; consumers default-**deny** on an
+    unknown/None action (contract §5, M8).
+    """
 
     capped: bool = False
-    current_spend: int = 0
-    cap_limit: int = 0
-    action: str | None = None
+    current_spend: Decimal = Decimal(0)
+    cap_limit: Decimal = Decimal(0)
+    action: Literal["deny", "warn", "notify"] | None = None
     model: str | None = None
 
 
@@ -284,7 +320,7 @@ class Team(BaseModel):
 
     team_id: str = ""
     name: str = ""
-    balance: int = 0
+    balance: Decimal = Decimal(0)
     member_count: int = 0
     created_at: str = ""
 
@@ -294,7 +330,7 @@ class TeamBalanceResult(BaseModel):
 
     team_id: str = ""
     name: str = ""
-    balance: int = 0
+    balance: Decimal = Decimal(0)
     member_count: int = 0
 
 
@@ -303,8 +339,8 @@ class TeamMember(BaseModel):
 
     user_id: str = ""
     role: str = ""
-    spend_cap: int | None = None
-    total_spent: int = 0
+    spend_cap: Decimal | None = None
+    total_spent: Decimal = Decimal(0)
 
 
 class CreateTeamResult(BaseModel):
@@ -328,6 +364,6 @@ class TeamDeductionResult(BaseModel):
     transaction_id: str = ""
     team_id: str = ""
     user_id: str = ""
-    amount: int = 0
-    team_balance_after: int = 0
+    amount: Decimal = Decimal(0)
+    team_balance_after: Decimal = Decimal(0)
     error: str | None = None

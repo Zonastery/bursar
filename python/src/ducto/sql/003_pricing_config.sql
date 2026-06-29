@@ -15,6 +15,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_pricing_config_active_unique
     ON public.credit_pricing_config (active)
     WHERE active = true;
 
+-- Serialize version assignment (M14): a unique constraint on version turns a
+-- lost-update race into a hard failure instead of two configs sharing a version.
+-- Publishers additionally take an advisory lock (see set_active_pricing_config).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_pricing_config_version_unique
+    ON public.credit_pricing_config (version);
+
 -- Block direct table access — all reads/writes go through RPCs.
 ALTER TABLE public.credit_pricing_config ENABLE ROW LEVEL SECURITY;
 DO $$
@@ -84,6 +90,9 @@ BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
+
+    -- Serialize concurrent publishers so version assignment can't race (M14).
+    PERFORM pg_advisory_xact_lock(hashtext('ducto_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
     FROM public.credit_pricing_config;

@@ -2,6 +2,10 @@
 
 The pricing config is stored in the `credit_pricing_config` table or loaded from a dict.
 
+:::info Credits are fractional decimals
+Every credit amount — balances, costs, allowances, caps — is a **fractional decimal**, stored as `NUMERIC(18,4)` in Postgres and as `decimal.Decimal` (Python) / `Decimal` from `decimal.js` (JavaScript) in code. Costs are quantized to 4 decimal places with `ROUND_HALF_UP` at the cost boundary and when persisting. There is **no** integer truncation: an operation that costs `0.4` credits charges `0.4`, not `0`. Both SDKs round identically, so the same config bills the same amount regardless of language.
+:::
+
 ## Flat Pricing
 
 ```json
@@ -60,15 +64,17 @@ Extends flat pricing with subscription plan definitions. Plans give users free m
 |-------|------|----------|-------------|
 | `id` | string | yes | Unique plan identifier |
 | `name` | string | yes | Human-readable name |
-| `free_allowance` | int | yes | Monthly free credits (0 = none) |
+| `free_allowance` | number | yes | Monthly free credits, fractional (`NUMERIC(18,4)`; 0 = none) |
 | `rate_overrides` | object | no | Per-model expression overrides for this plan |
-| `features` | object | no | Arbitrary feature flags (not enforced by ducto) |
+| `features` | object | no | Arbitrary feature entitlements. Presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
 
 ### How plans work
 
-1. **Assign a plan:** `store.set_user_plan(user_id, "pro")`
-2. **Deduct flow:** `CreditManager.deduct()` checks plan allowance first. If allowance covers the cost, no balance deduction. Partial coverage deducts remainder from balance.
-3. **No plan:** Existing balance-only deduct flow unchanged.
+1. **Assign a plan:** `store.set_user_plan(user_id, "pro")` (resolved by `plan_key`, consistently across all stores)
+2. **Deduct flow:** `CreditManager.deduct()` calculates the cost, then charges it in one atomic `deduct_with_allowance` transaction. Free allowance is consumed first; only the remaining **net** is debited from the balance. If allowance fully covers the cost, the balance is untouched. Allowance, spend cap, balance floor and debit all commit (or roll back) together — see [Architecture](/docs/architecture).
+3. **No plan:** With no plan assigned, allowance is `0` and the full cost is charged to the balance.
+
+The `free_allowance` is a monthly window: consumption resets at the start of each calendar month (UTC).
 
 ## Sections
 
@@ -99,11 +105,11 @@ Cache read discounts (typically negative — savings rebate).
 
 ### `fixed` (optional)
 
-Fixed-cost jobs. Keys match `UsageMetrics.fixed_job`. Values are non-negative integers.
+Fixed-cost jobs. Keys match `UsageMetrics.fixed_job`. Values are non-negative numbers (fractional amounts are allowed — they are charged exactly, like any other cost). An unknown/unconfigured job name is rejected by `deduct_fixed()` rather than charged as a free 0-credit deduction.
 
 ### `min_balance` (optional)
 
-Minimum balance floor (default 5).
+The **balance floor** — the minimum balance a user must keep. Default `5`. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below `min_balance`; concretely, `deduct_with_allowance` aborts when `balance - net < min_balance` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`min_balance * 2`, configurable — see [Architecture](/docs/architecture)). Stored as a fractional decimal like all money.
 
 ## Loading
 
@@ -120,7 +126,9 @@ with open("pricing.yaml") as f:
 ```
 
 ```typescript
-import { PricingEngine, loadPricingFile } from "@apoorwv/ducto";
+import { PricingEngine } from "@apoorwv/ducto";
+// loadPricingFile reads from disk, so it lives in the Node-only subpath:
+import { loadPricingFile } from "@apoorwv/ducto/node";
 
 const engine = PricingEngine.fromDict({ models: { _default: "input_tokens * 1" } });
 

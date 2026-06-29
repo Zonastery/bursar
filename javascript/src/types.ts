@@ -1,3 +1,5 @@
+import type { Decimal } from "decimal.js";
+
 /** Flexible metadata attached to credit transactions. */
 export interface CreditMetadata {
   inputTokens?: number | null;
@@ -24,26 +26,26 @@ export interface PricingConfigData {
 /** Current credit balance for a user. */
 export interface BalanceResult {
   userId: string;
-  balance: number;
-  lifetimePurchased: number;
+  balance: Decimal;
+  lifetimePurchased: Decimal;
 }
 
 /** Result of adding credits to a user's account. */
 export interface AddCreditsResult {
   transactionId: string;
   userId: string;
-  amount: number;
-  newBalance: number;
-  lifetimePurchased: number;
+  amount: Decimal;
+  newBalance: Decimal;
+  lifetimePurchased: Decimal;
 }
 
 /** Result of reserving credits for an operation. */
 export interface ReserveResult {
   reservationId: string;
   userId: string;
-  amount: number;
-  balance: number;
-  reservedTotal: number;
+  amount: Decimal;
+  balance: Decimal;
+  reservedTotal: Decimal;
   error?: string | null;
 }
 
@@ -51,10 +53,20 @@ export interface ReserveResult {
 export interface DeductionResult {
   transactionId: string;
   userId: string;
-  amount: number;
-  balanceAfter: number;
+  amount: Decimal;
+  allowanceConsumed: Decimal;
+  balanceAfter: Decimal;
   idempotent: boolean;
+  capWarning: string | null;
   error?: string | null;
+}
+
+/** Options for an atomic allowance-aware deduction. */
+export interface DeductWithAllowanceOptions {
+  idempotencyKey?: string | null;
+  minBalance?: Decimal;
+  model?: string | null;
+  metadata?: CreditMetadata | null;
 }
 
 /** Pricing config fetched from store. */
@@ -76,7 +88,7 @@ export interface SetupResult {
 export interface PlanDefinition {
   id: string;
   name: string;
-  freeAllowance: number;
+  freeAllowance: Decimal;
   rateOverrides?: Record<string, string> | null;
   features?: Record<string, unknown> | null;
 }
@@ -84,7 +96,7 @@ export interface PlanDefinition {
 /** Result of checking plan allowance. */
 export interface AllowanceResult {
   planId: string;
-  allowanceRemaining: number;
+  allowanceRemaining: Decimal;
   periodStart: string;
   periodEnd: string;
 }
@@ -94,7 +106,7 @@ export interface GetUserPlanResult {
   userId: string;
   planId: string | null;
   planName: string | null;
-  freeAllowance: number;
+  freeAllowance: Decimal;
   features: Record<string, unknown>;
 }
 
@@ -115,15 +127,15 @@ export interface RefundResult {
   refundTransactionId: string;
   originalTransactionId: string;
   userId: string;
-  amount: number;
-  newBalance: number;
+  amount: Decimal;
+  newBalance: Decimal;
   error?: string | null;
 }
 
 /** Result of sweeping expired credits. */
 export interface SweepResult {
   expiredCount: number;
-  expiredAmount: number;
+  expiredAmount: Decimal;
   dryRun: boolean;
 }
 
@@ -132,7 +144,7 @@ export interface SweepResult {
 export interface UserTransactionRow {
   id: string;
   userId: string;
-  amount: number;
+  amount: Decimal;
   type: string;
   referenceType: string | null;
   referenceId: string | null;
@@ -167,35 +179,35 @@ export interface ListUsageEventsOptions {
 /** Aggregated spend for a single user in a time window. */
 export interface SpendByUserRow {
   userId: string;
-  totalSpend: number;
+  totalSpend: Decimal;
   transactionCount: number;
 }
 
 /** Aggregated spend for a single model in a time window. */
 export interface SpendByModelRow {
   model: string;
-  totalSpend: number;
+  totalSpend: Decimal;
   transactionCount: number;
 }
 
 /** Top-spending user in a time window. */
 export interface TopUserRow {
   userId: string;
-  totalSpend: number;
+  totalSpend: Decimal;
 }
 
 /** Daily spend aggregation in a time window. */
 export interface DailySpendRow {
   date: string;
-  totalSpend: number;
+  totalSpend: Decimal;
   transactionCount: number;
 }
 
 /** Aggregate statistics across all users in a time window. */
 export interface AggregateStats {
-  totalCreditsConsumed: number;
+  totalCreditsConsumed: Decimal;
   activeUsers: number;
-  avgDailySpend: number;
+  avgDailySpend: Decimal;
   topModel: string;
   topUser: string;
 }
@@ -206,15 +218,15 @@ export interface SpendCap {
   userId: string;
   type: "daily" | "monthly";
   model?: string | null;
-  limit: number;
+  limit: Decimal;
   action: "deny" | "warn" | "notify";
 }
 
 /** Result of checking a spend cap. */
 export interface CapCheckResult {
   capped: boolean;
-  currentSpend: number;
-  limit: number;
+  currentSpend: Decimal;
+  limit: Decimal;
   action: "deny" | "warn" | "notify" | null;
   model?: string | null;
 }
@@ -224,7 +236,7 @@ export interface CapCheckResult {
 export interface Team {
   id: string;
   name: string;
-  balance: number;
+  balance: Decimal;
   memberCount: number;
   createdAt: string;
 }
@@ -233,15 +245,15 @@ export interface Team {
 export interface TeamMember {
   userId: string;
   role: string;
-  spendCap?: number | null;
-  totalSpent: number;
+  spendCap?: Decimal | null;
+  totalSpent: Decimal;
 }
 
 /** Result of fetching team balance. */
 export interface TeamBalanceResult {
   teamId: string;
   name: string;
-  balance: number;
+  balance: Decimal;
   memberCount: number;
 }
 
@@ -263,7 +275,7 @@ export interface TeamDeductionResult {
   transactionId: string;
   teamId: string;
   userId: string;
-  amount: number;
-  teamBalanceAfter: number;
+  amount: Decimal;
+  teamBalanceAfter: Decimal;
   error?: string | null;
 }

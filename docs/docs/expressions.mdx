@@ -2,6 +2,8 @@
 
 ducto uses a safe expression language for pricing formulas. Same syntax works identically in Python and JavaScript.
 
+All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 4 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
+
 ## Arithmetic
 
 | Operator | Example | Description |
@@ -12,7 +14,14 @@ ducto uses a safe expression language for pricing formulas. Same syntax works id
 | `/` | `output_tokens * (0.03 / 1000)` | Division |
 | `//` | `input_tokens // 1000` | Floor division |
 | `%` | `input_tokens % 1000` | Modulo |
-| `**` | `input_tokens ** 2` | Exponentiation |
+
+:::warning Exponentiation (`**`) is not allowed
+The `**` / exponentiation operator is **rejected at config-load time** in both SDKs (it raises `ExpressionError`). This is a deliberate DoS hardening: an unbounded exponent such as `9 ** 9 ** 9` could allocate gigabytes and hang the process. There is no constant-exponent carve-out — use repeated multiplication (`x * x`) if you need a power.
+:::
+
+:::warning Division / modulo by zero raises
+`x / 0`, `x // 0` and `x % 0` raise `ExpressionError` in both SDKs. They do **not** silently produce `inf`/`NaN` and never flow into a charge. Any expression that evaluates to a non-finite result (`inf`/`NaN`) is also rejected as an `ExpressionError`.
+:::
 
 ## Comparisons
 
@@ -45,30 +54,38 @@ output_tokens * 0.5 if output_tokens > 1000 else output_tokens * 0.3
 
 ## Functions
 
-| Function | Description | Example |
-|----------|-------------|---------|
-| `ceil(x)` | Round up | `ceil(input_tokens * 0.001)` |
-| `floor(x)` | Round down | `floor(output_tokens / 1000)` |
-| `round(x)` | Nearest integer | `round(input_tokens * 0.001)` |
-| `min(a, b, ...)` | Minimum of values | `min(cost_a, cost_b)` |
-| `max(a, b, ...)` | Maximum of values | `max(0, model_cost - allowance)` |
-| `if(cond, then, else)` | Conditional | `if(input_tokens > 1000, cost_a, cost_b)` |
-| `tier(val, t1, r1, t2, r2, ..., default)` | Tiered pricing | `tier(input_tokens, 0, 0, 10000, 5, 100000, 10)` |
-| `clamp(x, lo, hi)` | Range clamp | `clamp(tool_calls, 0, 100)` |
-| `percentile(p, v1, v2, ...)` | Percentile of values | `percentile(95, model_cost_1, model_cost_2)` |
+| Function | Arity | Description | Example |
+|----------|-------|-------------|---------|
+| `ceil(x)` | 1 | Round up | `ceil(input_tokens * 0.001)` |
+| `floor(x)` | 1 | Round down | `floor(output_tokens / 1000)` |
+| `round(x)` / `round(x, n)` | 1–2 | Round **half-up** to nearest integer (or `n` decimals) | `round(input_tokens * 0.001)` |
+| `min(a, b, ...)` | ≥ 1 | Minimum of values | `min(cost_a, cost_b)` |
+| `max(a, b, ...)` | ≥ 1 | Maximum of values | `max(0, model_cost - allowance)` |
+| `if(cond, then, else)` | exactly 3 | Conditional | `if(input_tokens > 1000, cost_a, cost_b)` |
+| `tier(val, t1, r1, [t2, r2, ...], default)` | even, ≥ 4 | Tiered pricing | `tier(input_tokens, 10000, 5, 100000, 10, 20)` |
+| `clamp(x, lo, hi)` | exactly 3 | Range clamp | `clamp(tool_calls, 0, 100)` |
+| `percentile(p, v1, v2, ...)` | ≥ 2, `0 ≤ p ≤ 100` | Percentile of values | `percentile(95, model_cost_1, model_cost_2)` |
+
+Every function validates its argument count (and `percentile`'s range) at config-load time. A wrong arity raises `ExpressionError` so a typo'd config fails fast rather than silently mispricing.
+
+`round()` uses `ROUND_HALF_UP` in both SDKs (it deliberately diverges from Python's built-in banker's rounding) so the two engines agree to the last digit. Note that these are *expression-level* helpers a config author can call — the engine itself never implicitly truncates or rounds the total beyond the final 4dp quantization.
 
 ### `tier()` details
 
-Evaluates thresholds sequentially: returns `r1` if `val < t1`, `r2` if `val < t2`, ..., else `default`.
+Form: `tier(value, t1, r1, [t2, r2, ...], default)` — a `value`, one or more `(threshold, rate)` pairs, and a trailing `default`. The argument count must therefore be **even and at least 4** (value + N≥1 pairs + default). Odd counts (3, 5, 7, …) and fewer than 4 arguments raise `ExpressionError`.
+
+Returns `r_i` for the **first** threshold where `value < t_i`, else `default`:
 
 ```
-tier(input_tokens, 0, 0, 10000, 5, 100000, 10)
-# 0-9999 → 0, 10000-99999 → 5, 100000+ → 10
+tier(input_tokens, 10000, 5, 100000, 10, 20)
+# value < 10000   → 5
+# value < 100000  → 10
+# otherwise       → 20 (default)
 ```
 
 ### `percentile()` details
 
-Sorts values, computes p-th percentile (0–100) via linear interpolation.
+Sorts values, computes p-th percentile (`0 ≤ p ≤ 100`) via linear interpolation. Requires at least 2 arguments; a `p` outside `0..100` raises `ExpressionError`.
 
 ```
 percentile(50, input_tokens, output_tokens, tool_calls)  # median of 3 values
@@ -92,6 +109,8 @@ percentile(100, a, b, c)                                  # max
 
 ## Safety
 
-- **Python:** AST-based validator with strict node allowlist. No `eval()`, no attribute access, no imports.
-- **JavaScript:** Recursive descent parser with strict allowlist. No `eval()`, no `Function()` constructor.
-- All expressions validated at config load time. Invalid configs never reach the engine.
+- **Python:** AST-based validator with a strict node allowlist. No `eval()`/`exec()`, no attribute access (`x.__class__`), no subscripts (`x[0]`), no lambdas, comprehensions, f-strings or imports. The `**` (`ast.Pow`) node is intentionally excluded from the allowlist.
+- **JavaScript:** Recursive-descent parser with a strict allowlist. No `eval()`, no `Function()` constructor. Variable lookup uses own-property checks (not the `in` operator), so prototype-chain identifiers (`__proto__`, `constructor`, `prototype`, `toString`, `hasOwnProperty`) are rejected as undefined variables rather than resolving to inherited members.
+- **Variable-name validation:** at config-load time every identifier must be a known metric variable (see the table above) or an allowed function; an unknown name (e.g. a typo like `inputtokens`) raises `ExpressionError` then, not at first runtime use.
+- **Exact decimal, finite results:** all math runs in `Decimal`; `**` is rejected; division/modulo by zero raises; the final result is asserted finite. Non-finite results raise `ExpressionError` and never reach a charge.
+- All expressions are validated at config-load time. Invalid configs never reach the engine.
