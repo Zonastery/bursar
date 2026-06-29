@@ -470,6 +470,94 @@ describe("helper arity & range validation", () => {
   });
 });
 
+// ── E1: tier() exact boundary semantics ──
+describe("tier() exact boundary", () => {
+  // tier uses val.lessThan(threshold): value equal to threshold does NOT hit that tier.
+  it("tier(input_tokens, 100, 1, 500, 2, 3) with input_tokens=100 falls through to second tier (not < 100)", () => {
+    // 100 is NOT < 100, check 100 < 500 → true → result = 2
+    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 100 })).toBe("2.0000");
+  });
+
+  it("tier(input_tokens, 100, 1, 500, 2, 3) with input_tokens=500 returns default (not < 500)", () => {
+    // 500 is NOT < 100, NOT < 500 → falls through to default = 3
+    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 500 })).toBe("3.0000");
+  });
+});
+
+// ── E2: percentile() edge cases ──
+describe("percentile() edge cases", () => {
+  it("single value returns that value", () => {
+    // n=1, returns sorted[0] directly
+    expect(evalStr("percentile(50, input_tokens)", { input_tokens: 7 })).toBe("7.0000");
+  });
+
+  it("two values p=50 returns midpoint", () => {
+    // sorted=[3,7], rank=0.5, lower=0, frac=0.5 → 3*0.5 + 7*0.5 = 5
+    expect(evalStr("percentile(50, input_tokens, output_tokens)", { input_tokens: 3, output_tokens: 7 })).toBe("5.0000");
+  });
+
+  it("all same values returns that value", () => {
+    expect(evalStr("percentile(50, input_tokens, output_tokens, tool_calls)", { input_tokens: 5, output_tokens: 5, tool_calls: 5 })).toBe("5.0000");
+  });
+
+  it("p=0 returns the minimum", () => {
+    expect(evalStr("percentile(0, input_tokens, output_tokens, tool_calls)", { input_tokens: 10, output_tokens: 30, tool_calls: 20 })).toBe("10.0000");
+  });
+
+  it("p=100 returns the maximum", () => {
+    expect(evalStr("percentile(100, input_tokens, output_tokens, tool_calls)", { input_tokens: 10, output_tokens: 30, tool_calls: 20 })).toBe("30.0000");
+  });
+});
+
+// ── E3: clamp(x, min, max) when min > max ──
+describe("clamp() with min > max", () => {
+  it("clamp(5, 10, 3) returns min (10) when min > max", () => {
+    // Decimal.max(min=10, Decimal.min(x=5, max=3)) = Decimal.max(10, 3) = 10
+    expect(evalStr("clamp(input_tokens, 10, 3)", { input_tokens: 5 })).toBe("10.0000");
+  });
+});
+
+// ── E4: Negative operands in complex expressions ──
+describe("negative operands in complex expressions", () => {
+  it("(-input_tokens) * 0.001 with input_tokens=1000 produces -1.0000", () => {
+    expect(evalStr("-input_tokens * 0.001", { input_tokens: 1000 })).toBe("-1.0000");
+  });
+
+  it("max(-5, 0) via variables returns 0.0000", () => {
+    expect(evalStr("max(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: 0 })).toBe("0.0000");
+  });
+
+  it("min(-5, -3) returns -5.0000", () => {
+    expect(evalStr("min(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: -3 })).toBe("-5.0000");
+  });
+});
+
+// ── E5: Floor division by zero ──
+describe("floor division by zero", () => {
+  it("10 // 0 throws ExpressionError", () => {
+    expect(() => evaluateExpression("input_tokens // 0", { input_tokens: 10 })).toThrow(ExpressionError);
+  });
+});
+
+// ── E6: Large numeric literal stays exact ──
+describe("large numeric literal precision", () => {
+  it("999999999999.9999 * 1 preserves all digits", () => {
+    expect(evalStr("input_tokens * 999999999999.9999", { input_tokens: 1 })).toBe("999999999999.9999");
+  });
+});
+
+// ── E7: round(x, n) with ndigits ──
+describe("round(x, n) with ndigits argument", () => {
+  it("round(1.23456, 2) returns 1.23 (ROUND_HALF_UP)", () => {
+    // round is supported with 2 args: toDecimalPlaces(2, ROUND_HALF_UP)
+    expect(evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.23456, output_tokens: 2 })).toBe("1.2300");
+  });
+
+  it("round(1.235, 2) rounds half-up to 1.24", () => {
+    expect(evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.235, output_tokens: 2 })).toBe("1.2400");
+  });
+});
+
 // ── Cross-SDK parity fixture (contract §7) ──
 // Loaded from the repo-root canonical fixture; Python and JS MUST produce
 // byte-identical 4dp decimal strings or both raise for expect_error.

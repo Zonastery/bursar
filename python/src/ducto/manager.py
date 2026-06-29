@@ -50,6 +50,7 @@ from ducto.interface.models import (
     RefundResult,
     ReserveResult,
     SetupResult,
+    SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
     SweepResult,
@@ -200,6 +201,28 @@ class CreditManager:
         return result
 
     # -- Plan management ------------------------------------------------
+
+    def set_user_plan(self, user_id: str, plan_key: str) -> SetUserPlanResult:
+        """Assign a plan to a user and emit a ``credits.plan_changed`` event.
+
+        Args:
+            user_id: The user to assign the plan to.
+            plan_key: The plan key to assign (e.g. ``"pro"``).
+
+        Returns:
+            ``SetUserPlanResult`` confirming the assignment.
+        """
+        result = self._store.set_user_plan(user_id, plan_key)
+        self._emit(
+            "credits.plan_changed",
+            user_id,
+            {
+                "user_id": user_id,
+                "plan_key": plan_key,
+                "timestamp": datetime.now(UTC),
+            },
+        )
+        return result
 
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         """Fetch user's current plan (including feature entitlements)."""

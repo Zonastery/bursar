@@ -152,3 +152,122 @@ class TestConfigValidation:
             f"Field drift: PricingConfig has {config_fields - data_fields}, "
             f"PricingConfigData has {data_fields - config_fields}"
         )
+
+    # ── CF1: Plan rate_overrides accepted ──────────────────────────────────
+
+    def test_plan_rate_overrides_accepted(self) -> None:
+        """CF1 — A plan with rate_overrides is loaded without error."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "pro": {
+                        "id": "pro",
+                        "name": "Pro",
+                        "rate_overrides": {"gpt-4": "input_tokens * 0.003"},
+                    }
+                },
+            }
+        )
+        assert config.plans is not None
+        plan = config.plans["pro"]
+        assert plan.rate_overrides == {"gpt-4": "input_tokens * 0.003"}
+
+    # ── CF2: Plan free_allowance negative is rejected ──────────────────────
+
+    def test_plan_negative_free_allowance_rejected(self) -> None:
+        """CF2 — free_allowance: -10 in a plan raises a validation error."""
+        with pytest.raises((ConfigError, ValidationError)):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "plans": {
+                        "cheap": {
+                            "id": "cheap",
+                            "name": "Cheap",
+                            "free_allowance": -10,
+                        }
+                    },
+                }
+            )
+
+    # ── CF3: Version field — only 1 is valid ──────────────────────────────
+
+    def test_version_2_rejected(self) -> None:
+        """CF3 — config with version: 2 raises a validation error (Literal[1])."""
+        with pytest.raises(ValidationError):
+            load_config_from_dict(
+                {
+                    "version": 2,
+                    "models": {"_default": "input_tokens * 1"},
+                }
+            )
+
+    # ── CF4: Empty sections are allowed ────────────────────────────────────
+
+    def test_empty_sections_allowed(self) -> None:
+        """CF4 — Empty tools/search/cache/fixed sections are valid when models is present."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tools": {},
+                "search": {},
+                "cache": {},
+                "fixed": {},
+            }
+        )
+        assert config.tools == {}
+        assert config.search == {}
+        assert config.cache == {}
+        assert config.fixed == {}
+
+    # ── CF5: Plan with features: null ──────────────────────────────────────
+
+    def test_plan_features_null_is_valid(self) -> None:
+        """CF5 — A plan with features: null is valid and returns empty features dict."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "basic": {
+                        "id": "basic",
+                        "name": "Basic",
+                        "features": None,
+                    }
+                },
+            }
+        )
+        assert config.plans is not None
+        plan = config.plans["basic"]
+        assert plan.features is None
+
+        # Verify that get_user_plan returns empty features (not None) for such a plan.
+        from ducto import MemoryStore
+        from ducto.interface.models import PlanDefinition, PricingConfigData
+
+        store = MemoryStore()
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"basic": PlanDefinition(id="basic", name="Basic", features=None)},
+            )
+        )
+        store.set_user_plan("user-1", "basic")
+        result = store.get_user_plan("user-1")
+        assert result.features == {}
+
+    # ── CF6: Duplicate plan names rejected ─────────────────────────────────
+    # (already covered by test_duplicate_plan_names_raises above)
+
+    # ── CF7: min_balance string coerces to Decimal ─────────────────────────
+
+    def test_min_balance_string_coerces_to_decimal(self) -> None:
+        """CF7 — min_balance: '10' (string) is coerced to Decimal('10') without error."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "min_balance": "10",
+            }
+        )
+        assert config.min_balance == Decimal("10")
+        assert isinstance(config.min_balance, Decimal)

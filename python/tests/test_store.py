@@ -667,3 +667,224 @@ class TestSpendCaps:
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal("100"), action="deny"))
         result = store.check_spend_cap("user-2", amount=Decimal("200"))
         assert not result.capped
+
+
+# ── ST1: Expired reservation + deductCredits ──────────────────────────────────
+
+
+class TestExpiredReservation:
+    def test_deduct_after_reservation_expired_returns_not_found(self) -> None:
+        """ST1 — deduct_credits against an expired reservation returns error='not_found'."""
+        store = MemoryStore()
+        store.add_credits("user-1", Decimal("100"), "purchase")
+
+        # Reserve credits normally
+        reserve = store.reserve_credits("user-1", Decimal("30"), "usage")
+        assert reserve.error is None
+        rid = reserve.reservation_id
+
+        # Expire the reservation by backdating its expires_at
+        from datetime import UTC, timedelta
+
+        with store._lock:
+            store._reservations[rid].expires_at = datetime.now(UTC) - timedelta(minutes=11)
+
+        # Now deduct — the purge step in deduct_credits will remove the expired reservation
+        result = store.deduct_credits("user-1", rid, Decimal("30"))
+        assert result.error == "not_found"
+        # Balance is unchanged since deduction failed
+        assert store.get_balance("user-1").balance == Decimal("100")
+
+
+# ── ST2: Concurrent refund race on same transaction ────────────────────────────
+
+
+class TestConcurrentRefund:
+    def test_concurrent_partial_refunds_never_exceed_original(self) -> None:
+        """ST2 — Two concurrent partial refunds on the same transaction: combined refund never exceeds original."""
+        import concurrent.futures
+
+        store = MemoryStore()
+        store.add_credits("user-1", Decimal("100"), "purchase")
+
+        reserve = store.reserve_credits("user-1", Decimal("40"), "usage")
+        deduct = store.deduct_credits("user-1", reserve.reservation_id, Decimal("40"))
+        tx_id = deduct.transaction_id
+
+        results = []
+
+        def do_refund() -> None:
+            r = store.refund_credits(tx_id, amount=Decimal("30"))
+            results.append(r)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            futures = [ex.submit(do_refund), ex.submit(do_refund)]
+            concurrent.futures.wait(futures)
+
+        successes = [r for r in results if r.error is None]
+        errors = [r for r in results if r.error is not None]
+
+        # Exactly one should succeed; the other should fail
+        assert len(successes) == 1
+        assert len(errors) == 1
+        assert errors[0].error in ("over_refund", "already_refunded")
+
+        # Final balance must not exceed original 100
+        final_balance = store.get_balance("user-1").balance
+        # After 40 deducted and 30 refunded: 60 + 30 = 90
+        assert final_balance == Decimal("90")
+
+
+# ── ST3: Sweep when balance < total expired amount ──────────────────────────────
+
+
+class TestSweepBalanceCap:
+    def test_sweep_caps_at_actual_balance(self) -> None:
+        """ST3 — Sweep debits at most the actual balance, not the full expired amount."""
+        store = MemoryStore()
+
+        # Add 100 expiring credits and 50 non-expiring credits
+        expires_at = datetime.now(UTC) - timedelta(hours=1)
+        store.add_credits("user-1", Decimal("100"), "purchase", expires_at=expires_at)
+        store.add_credits("user-1", Decimal("50"), "purchase")
+
+        # Deduct 80 so balance = 70 (100 + 50 - 80)
+        reserve = store.reserve_credits("user-1", Decimal("80"), "usage", min_balance=Decimal("0"))
+        store.deduct_credits("user-1", reserve.reservation_id, Decimal("80"))
+        assert store.get_balance("user-1").balance == Decimal("70")
+
+        # Sweep: expired amount is 100 but balance is only 70 — should debit 70
+        result = store.sweep_expired_credits()
+        assert result.expired_amount == Decimal("70")
+        assert store.get_balance("user-1").balance == Decimal("0")
+
+
+# ── ST4: Team member per-user spend cap accumulation ──────────────────────────
+
+
+class TestTeamMemberSpendCap:
+    def test_per_user_spend_cap_accumulates(self) -> None:
+        """ST4 — Per-user team spend cap blocks cumulative overspend."""
+        store = MemoryStore()
+        team = store.create_team("Alpha", initial_balance=Decimal("1000"))
+
+        store.add_team_member(team.team_id, "u1", spend_cap=Decimal("200"))
+        store.add_team_member(team.team_id, "u2", spend_cap=Decimal("150"))
+
+        # u1: 150 deduction — under 200 cap
+        r1 = store.deduct_team(team.team_id, "u1", Decimal("150"))
+        assert r1.error is None
+
+        # u1: 100 more deduction — 150+100=250 > 200 cap
+        r2 = store.deduct_team(team.team_id, "u1", Decimal("100"))
+        assert r2.error == "spend_cap_exceeded"
+
+        # u2: 149 deduction — under 150 cap
+        r3 = store.deduct_team(team.team_id, "u2", Decimal("149"))
+        assert r3.error is None
+
+        # u2: 10 more deduction — 149+10=159 > 150 cap
+        r4 = store.deduct_team(team.team_id, "u2", Decimal("10"))
+        assert r4.error == "spend_cap_exceeded"
+
+
+# ── ST5: listUserTransactions type filter ──────────────────────────────────────
+
+
+class TestListUserTransactionsTypeFilter:
+    def test_type_filter_usage_only(self) -> None:
+        """ST5 — list_user_transactions with types=['usage'] returns only usage transactions."""
+        store = MemoryStore()
+        # Add a purchase transaction
+        store.add_credits("user-1", Decimal("100"), "purchase")
+        # Add a usage (debit) transaction
+        reserve = store.reserve_credits("user-1", Decimal("20"), "usage")
+        store.deduct_credits("user-1", reserve.reservation_id, Decimal("20"))
+
+        result = store.list_user_transactions("user-1", types=["usage"])
+        assert len(result) == 1
+        assert result[0].type == "usage"
+
+    def test_type_filter_purchase_only(self) -> None:
+        """ST5 — list_user_transactions with types=['purchase'] returns only purchase transactions."""
+        store = MemoryStore()
+        store.add_credits("user-1", Decimal("100"), "purchase")
+        reserve = store.reserve_credits("user-1", Decimal("20"), "usage")
+        store.deduct_credits("user-1", reserve.reservation_id, Decimal("20"))
+
+        result = store.list_user_transactions("user-1", types=["purchase"])
+        assert len(result) == 1
+        assert result[0].type == "purchase"
+
+
+# ── ST6: listUserTransactions pagination ──────────────────────────────────────
+
+
+class TestListUserTransactionsPagination:
+    def test_pagination_first_page(self) -> None:
+        """ST6 — limit=2 offset=0 returns 2 results from 5 transactions."""
+        store = MemoryStore()
+        for _ in range(5):
+            store.add_credits("user-1", Decimal("10"), "purchase")
+
+        page = store.list_user_transactions("user-1", limit=2, offset=0)
+        assert len(page) == 2
+        assert page[0].total_count == 5
+
+    def test_pagination_last_page(self) -> None:
+        """ST6 — limit=2 offset=4 returns 1 result (last item of 5)."""
+        store = MemoryStore()
+        for _ in range(5):
+            store.add_credits("user-1", Decimal("10"), "purchase")
+
+        page = store.list_user_transactions("user-1", limit=2, offset=4)
+        assert len(page) == 1
+        assert page[0].total_count == 5
+
+    def test_pagination_beyond_end(self) -> None:
+        """ST6 — limit=2 offset=5 returns 0 results (no error)."""
+        store = MemoryStore()
+        for _ in range(5):
+            store.add_credits("user-1", Decimal("10"), "purchase")
+
+        page = store.list_user_transactions("user-1", limit=2, offset=5)
+        assert len(page) == 0
+
+
+# ── ST7: check_feature with numeric 0, Decimal("0"), and False ─────────────────
+
+
+class TestCheckFeatureZeroValues:
+    def _make_store_with_features(self, features: dict) -> "MemoryStore":
+        from ducto.interface.models import PlanDefinition, PricingConfigData
+
+        store = MemoryStore()
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"p": PlanDefinition(id="p", name="P", features=features)},
+            )
+        )
+        store.set_user_plan("user-1", "p")
+        return store
+
+    def test_float_zero_is_present(self) -> None:
+        """ST7 — feature value float(0.0) is treated as present (has_feature=True)."""
+        store = self._make_store_with_features({"quota": 0.0})
+        result = store.check_feature("user-1", "quota")
+        assert result.has_feature is True
+        assert result.value == 0.0
+
+    def test_decimal_zero_is_present(self) -> None:
+        """ST7 — feature value Decimal('0') is treated as present (has_feature=True)."""
+        from decimal import Decimal as D
+
+        store = self._make_store_with_features({"quota": D("0")})
+        result = store.check_feature("user-1", "quota")
+        assert result.has_feature is True
+
+    def test_false_is_absent(self) -> None:
+        """ST7 — feature value False is treated as absent (has_feature=False)."""
+        store = self._make_store_with_features({"disabled_feature": False})
+        result = store.check_feature("user-1", "disabled_feature")
+        assert result.has_feature is False

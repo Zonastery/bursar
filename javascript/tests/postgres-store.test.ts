@@ -280,4 +280,66 @@ describe("PostgresStore", () => {
     const result = await store.checkFeature("u1", "flag");
     expect(result.hasFeature).toBe(false);
   });
+
+  // PG2 — NULL value in NUMERIC column → converted to Decimal("0") (not NaN)
+  it("NULL amount in RPC row is converted to Decimal zero, not NaN (PG2)", async () => {
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([{ id: "tx-1", user_id: "user-1", amount: null, new_balance: "100", lifetime_purchased: "100" }]),
+    );
+    const result = await store.addCredits("user-1", D(50));
+    // `dec(null)` returns ZERO — never NaN.
+    expect(result.amount.isNaN()).toBe(false);
+    expect(result.amount.toString()).toBe("50"); // falls back to the supplied `amount`
+  });
+
+  // PG3 — Decimal value sent as string for non-round amounts
+  it("addCredits sends non-round amount as exact decimal string (PG3)", async () => {
+    const { ctor, calls } = makeRecordingPool([
+      { id: "tx-2", user_id: "user-1", amount: "0.0001", new_balance: "0.0001", lifetime_purchased: "0.0001" },
+    ]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+    await store.addCredits("user-1", D("0.0001"), "purchase");
+    expect(calls[0].text).toContain("credits_add");
+    // Must arrive as the string "0.0001", not a binary float like 0.00010000000000000002.
+    expect(calls[0].params[1]).toBe("0.0001");
+  });
+
+  // PG4 — expiresAt serialized as ISO string, not a Date object
+  it("addCredits serializes expiresAt as ISO string (PG4)", async () => {
+    const { ctor, calls } = makeRecordingPool([
+      { id: "tx-3", user_id: "user-1", amount: "50", new_balance: "150", lifetime_purchased: "150" },
+    ]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+    const expiresAt = new Date("2024-01-15T00:00:00.000Z");
+    await store.addCredits("user-1", D(50), "purchase", null, expiresAt);
+    // params[3] is JSON.stringify(meta) — parse it and check expires_at.
+    const meta = JSON.parse(calls[0].params[3] as string) as Record<string, unknown>;
+    expect(typeof meta.expires_at).toBe("string");
+    expect(meta.expires_at).toBe("2024-01-15T00:00:00.000Z");
+  });
+
+  // PG5 — Unknown RPC error code → surfaces as result.error (not thrown, not silent ok)
+  it("unknown RPC error code is surfaced as result.error without throwing (PG5)", async () => {
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([{ error: "some_unknown_code_xyz" }]),
+    );
+    // deductWithAllowance maps ALL error envelopes to result.error — unknown codes included.
+    const result = await store.deductWithAllowance("user-1", D(20));
+    expect(result.error).toBe("some_unknown_code_xyz");
+    expect(result.transactionId).toBe("");
+  });
+
+  // PG6 — Network/transport error bubbles as the underlying error (postgres store does not wrap)
+  it("pool query error propagates out of getBalance (PG6)", async () => {
+    const networkError = new Error("Connection refused");
+    const query = vi.fn(() => Promise.reject(networkError));
+    const ctor = vi.fn(
+      () => ({ query, end: vi.fn().mockResolvedValue(undefined) }) as unknown as import("../src/stores/postgres-store.js").PgPool,
+    ) as unknown as import("../src/stores/postgres-store.js").PgPoolConstructor;
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+    // The postgres store propagates the raw error from the pool — callers should handle it.
+    await expect(store.getBalance("user-1")).rejects.toThrow("Connection refused");
+  });
 });

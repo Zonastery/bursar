@@ -234,3 +234,191 @@ class TestEngineFixedJob:
     def test_get_fixed_cost_no_fixed_section(self) -> None:
         engine = PricingEngine.from_dict(MINIMAL_PRICING)
         assert engine.get_fixed_cost("anything") is None
+
+
+# ── EN1: Tool calls with duplicate names ─────────────────────────────────────
+
+
+class TestDuplicateToolCalls:
+    """EN1 — duplicate ToolCall names are deduplicated by name-set logic."""
+
+    def test_duplicate_web_search_tool_calls(self) -> None:
+        # Two ToolCall(name="web_search") — the tool-set is {web_search}, so the
+        # formula runs once with the variables dict.  web_search_calls=2 drives
+        # the formula result: 2 * 0.5 = 1.0.
+        engine = PricingEngine.from_dict(FULL_PRICING)
+        result = engine.calculate(
+            UsageMetrics(
+                model="claude-opus-4",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=[ToolCall(name="web_search"), ToolCall(name="web_search")],
+                web_search_calls=2,
+            )
+        )
+        assert result.tool_credits == Decimal("1.0000")
+
+    def test_single_web_search_tool_call(self) -> None:
+        # Baseline: one ToolCall, web_search_calls=1 -> 1 * 0.5 = 0.5
+        engine = PricingEngine.from_dict(FULL_PRICING)
+        result = engine.calculate(
+            UsageMetrics(
+                model="claude-opus-4",
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls=[ToolCall(name="web_search")],
+                web_search_calls=1,
+            )
+        )
+        assert result.tool_credits == Decimal("0.5000")
+
+
+# ── EN2: Empty tool_calls with no tools config ───────────────────────────────
+
+
+class TestEmptyToolCallsNoToolsConfig:
+    """EN2 — empty tool_calls=[] with a config that has no 'tools' section."""
+
+    def test_empty_tool_calls_zero_cost(self) -> None:
+        # Config has no 'tools' key; PricingConfig defaults to {"_default": "tool_calls * 0"}.
+        # tool_calls=[] -> tool_count=0, formula=0*0=0 -> tool_credits=0.
+        engine = PricingEngine.from_dict(MINIMAL_PRICING)
+        result = engine.calculate(UsageMetrics(model="_default", tool_calls=[]))
+        assert result.tool_credits == Decimal("0.0000")
+        assert result.total == Decimal("0.0000")
+
+
+# ── EN3: Search section absent ───────────────────────────────────────────────
+
+
+class TestSearchSectionAbsent:
+    """EN3 — config with no 'search' key -> search cost = 0."""
+
+    def test_no_search_section_returns_zero(self) -> None:
+        engine = PricingEngine.from_dict(MINIMAL_PRICING)
+        result = engine.calculate(
+            UsageMetrics(model="_default", search_queries=10, search_results=5)
+        )
+        assert result.search_credits == Decimal("0.0000")
+
+
+# ── EN4: Cache section absent ────────────────────────────────────────────────
+
+
+class TestCacheSectionAbsent:
+    """EN4 — config with no 'cache' key -> cache cost = 0."""
+
+    def test_no_cache_section_returns_zero(self) -> None:
+        engine = PricingEngine.from_dict(MINIMAL_PRICING)
+        result = engine.calculate(
+            UsageMetrics(model="_default", cache_read_tokens=5000)
+        )
+        assert result.cache_savings == Decimal("0.0000")
+
+
+# ── EN5: Fixed cost for unknown job ──────────────────────────────────────────
+
+
+class TestFixedCostUnknownJob:
+    """EN5 — get_fixed_cost for a nonexistent job returns None."""
+
+    def test_nonexistent_job_returns_none(self) -> None:
+        engine = PricingEngine.from_dict(FULL_PRICING)
+        assert engine.get_fixed_cost("nonexistent_job") is None
+
+
+# ── EN6: Model resolution — exact takes priority over prefix ─────────────────
+
+
+class TestModelResolutionExactBeforePrefix:
+    """EN6 — exact match wins over prefix match in resolve_model."""
+
+    def test_exact_match_over_prefix(self) -> None:
+        config = {
+            "models": {
+                "gpt-4": "input_tokens * 1",
+                "gpt-4-turbo": "input_tokens * 2",
+            }
+        }
+        engine = PricingEngine.from_dict(config)
+        resolved = engine.resolve_model("gpt-4-turbo")
+        assert resolved == "gpt-4-turbo"
+
+    def test_prefix_match_used_when_no_exact(self) -> None:
+        config = {
+            "models": {
+                "gpt-4": "input_tokens * 1",
+            }
+        }
+        engine = PricingEngine.from_dict(config)
+        # "gpt-4-20240601" has no exact match; "gpt-4" is a prefix
+        resolved = engine.resolve_model("gpt-4-20240601")
+        assert resolved == "gpt-4"
+
+    def test_calculate_uses_exact_model_formula(self) -> None:
+        # Verify calculate() itself picks the right formula (exact match).
+        config = {
+            "models": {
+                "gpt-4": "input_tokens * 1",
+                "gpt-4-turbo": "input_tokens * 2",
+            }
+        }
+        engine = PricingEngine.from_dict(config)
+        result = engine.calculate(UsageMetrics(model="gpt-4-turbo", input_tokens=100))
+        # gpt-4-turbo formula: 100 * 2 = 200
+        assert result.model_credits == Decimal("200.0000")
+
+
+# ── EN7: Quantization of summed components ───────────────────────────────────
+
+
+class TestQuantizationSummedComponents:
+    """EN7 — total is quantized to 4dp ROUND_HALF_UP after summing."""
+
+    def test_repeating_decimal_quantized(self) -> None:
+        # input_tokens * (1/3) — but (1/3) is exact division in Decimal,
+        # producing a long repeating decimal. Quantized to 4dp.
+        # 1 * Decimal(1) / Decimal(3) = 0.3333... -> quantized = 0.3333
+        engine = PricingEngine.from_dict(
+            {"models": {"_default": "input_tokens * 1 / output_tokens"}}
+        )
+        # input_tokens=1, output_tokens=3 -> 1/3 -> 0.3333...
+        result = engine.calculate(UsageMetrics(model="_default", input_tokens=1, output_tokens=3))
+        assert result.total == Decimal("0.3333")
+        assert str(result.total) == "0.3333"
+
+
+# ── EN8: Total clamped at zero when cache savings exceed model cost ───────────
+
+
+class TestTotalClampedAtZero:
+    """EN8 — total is >= 0 even when cache discount exceeds model cost."""
+
+    def test_cache_discount_exceeds_model_cost(self) -> None:
+        config = {
+            "models": {"_default": "input_tokens * 0.001"},
+            "cache": {"discount": "-cache_read_tokens * 0.01"},
+        }
+        engine = PricingEngine.from_dict(config)
+        # model cost: 10 * 0.001 = 0.01
+        # cache discount: -1000 * 0.01 = -10.0
+        # raw_total = 0.01 - 10.0 = -9.99 -> clamped to 0
+        result = engine.calculate(
+            UsageMetrics(model="_default", input_tokens=10, cache_read_tokens=1000)
+        )
+        assert result.total == Decimal("0.0000")
+        assert result.cache_savings == Decimal("-10.0000")
+        assert result.model_credits == Decimal("0.0100")
+
+
+# ── EN9: calculateBatch with empty list ──────────────────────────────────────
+
+
+class TestCalculateBatchEmpty:
+    """EN9 — calculate_batch([]) returns an empty list without error."""
+
+    def test_empty_batch_returns_empty_list(self) -> None:
+        engine = PricingEngine.from_dict(FULL_PRICING)
+        results = engine.calculate_batch([])
+        assert results == []
+        assert isinstance(results, list)

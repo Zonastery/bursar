@@ -440,3 +440,55 @@ class TestPricingValidationSchemas:
 
         p.write_text(yaml.dump(config))
         assert _exit_code("pricing", "validate", str(p)) == 1
+
+
+class TestRetryBackoff:
+    """CLI1 — Retry backoff: transient vs non-transient error behaviour."""
+
+    def test_transient_connection_error_retried(
+        self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, sample_config: str
+    ) -> None:
+        """'connection refused' in the message is a transient marker → retried."""
+        monkeypatch.setattr("ducto.__main__._RETRY_INITIAL_DELAY", 0.0)
+        monkeypatch.setattr("ducto.__main__._RETRY_MAX_DELAY", 0.0)
+        calls = {"n": 0}
+
+        def _flaky(_version: int) -> str:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                from ducto.interface.base import StoreError
+
+                raise StoreError("connection refused")
+            return "ok-id"
+
+        monkeypatch.setattr(mem_store, "activate_pricing", _flaky)
+        _run("pricing", "set", sample_config)
+        _run("pricing", "activate", "1")
+        assert calls["n"] >= 2  # at least one retry before success
+
+    def test_non_transient_error_not_retried(
+        self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """'invalid config' is NOT a transient marker → exactly 1 attempt."""
+        calls = {"n": 0}
+
+        def _boom(_version: int) -> str:
+            calls["n"] += 1
+            from ducto.interface.base import StoreError
+
+            raise StoreError("invalid config for user")
+
+        monkeypatch.setattr(mem_store, "activate_pricing", _boom)
+        assert _exit_code("pricing", "activate", "1") == 1
+        assert calls["n"] == 1
+
+
+class TestMigrateNoUrl:
+    """CLI2 — migrate with no DATABASE_URL exits 1."""
+
+    def test_migrate_no_database_url_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Already covered by TestMigrate.test_migrate_no_url_anywhere_exits_1; skip duplicate."""
+        # This test is intentionally redundant — the existing test in TestMigrate
+        # covers this case. We verify the same behaviour here for CLI2 completeness.
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert _exit_code("migrate") == 1

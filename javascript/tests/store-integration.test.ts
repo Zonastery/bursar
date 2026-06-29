@@ -414,4 +414,221 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     expect(u1!.totalSpend.toString()).toBe("2.5");
     expect(u2!.totalSpend.toString()).toBe("3.5");
   });
+
+  // ── JI1: Analytics — spendByModel ──────────────────────────────────
+  it("JI1 — spendByModel returns both models with exact Decimal totals", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(500), "purchase");
+    await store.deductWithAllowance(PG_USER, D("1.5"), { idempotencyKey: "sbm-1", model: "gpt-4" });
+    await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "sbm-2", model: "claude-3" });
+
+    const now = new Date();
+    const rows = await store.spendByModel(
+      new Date(now.getTime() - 60000),
+      new Date(now.getTime() + 60000),
+    );
+    const gpt4 = rows.find((r) => r.model === "gpt-4");
+    const claude3 = rows.find((r) => r.model === "claude-3");
+    expect(gpt4).toBeDefined();
+    expect(claude3).toBeDefined();
+    expect(gpt4!.totalSpend.toString()).toBe("1.5");
+    expect(claude3!.totalSpend.toString()).toBe("2.5");
+  });
+
+  // ── JI2: Analytics — topUsers ───────────────────────────────────────
+  it("JI2 — topUsers returns limit=2 ordered by descending spend", async () => {
+    // Need 3 users — seed PG_USER3 into auth.users first
+    const PG_USER3 = "00000000-0000-0000-0000-000000000003";
+    await pool.query(
+      `INSERT INTO auth.users (id) VALUES ($1) ON CONFLICT DO NOTHING`,
+      [PG_USER3],
+    );
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(500), "purchase");
+    await store.addCredits(PG_USER2, D(500), "purchase");
+    await store.addCredits(PG_USER3, D(500), "purchase");
+
+    // PG_USER spends 30, PG_USER2 spends 10, PG_USER3 spends 20
+    await store.deductWithAllowance(PG_USER, D("30"), { idempotencyKey: "tu-1" });
+    await store.deductWithAllowance(PG_USER2, D("10"), { idempotencyKey: "tu-2" });
+    await store.deductWithAllowance(PG_USER3, D("20"), { idempotencyKey: "tu-3" });
+
+    const now = new Date();
+    const rows = await store.topUsers(
+      2,
+      new Date(now.getTime() - 60000),
+      new Date(now.getTime() + 60000),
+    );
+    expect(rows).toHaveLength(2);
+    // First row must be the biggest spender
+    expect(rows[0].totalSpend.gte(rows[1].totalSpend)).toBe(true);
+    expect(rows[0].userId).toBe(PG_USER);
+    expect(rows[1].userId).toBe(PG_USER3);
+  });
+
+  // ── JI3: Analytics — dailySpend ────────────────────────────────────
+  it("JI3 — dailySpend returns at least one entry with non-zero spend", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D("5"), { idempotencyKey: "ds-1" });
+
+    const now = new Date();
+    const rows = await store.dailySpend(
+      new Date(now.getTime() - 60000),
+      new Date(now.getTime() + 60000),
+    );
+    expect(rows.length).toBeGreaterThan(0);
+    const nonZero = rows.filter((r) => r.totalSpend.gt(0));
+    expect(nonZero.length).toBeGreaterThan(0);
+    // date key should be a non-empty string
+    expect(nonZero[0].date.length).toBeGreaterThan(0);
+  });
+
+  // ── JI4: Analytics — aggregateStats ────────────────────────────────
+  it("JI4 — aggregateStats returns non-zero totalCreditsConsumed and activeUsers", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D("7"), { idempotencyKey: "as-1" });
+
+    const now = new Date();
+    const stats = await store.aggregateStats(
+      new Date(now.getTime() - 60000),
+      new Date(now.getTime() + 60000),
+    );
+    expect(stats.totalCreditsConsumed.gt(0)).toBe(true);
+    expect(stats.activeUsers).toBeGreaterThan(0);
+  });
+
+  // ── JI5: Analytics — listUsageEvents ───────────────────────────────
+  it("JI5 — listUsageEvents returns events for the correct userId and amount", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D("3.5"), { idempotencyKey: "lue-1" });
+
+    const now = new Date();
+    const result = await store.listUsageEvents(PG_USER, {
+      fromDate: new Date(now.getTime() - 60000),
+      toDate: new Date(now.getTime() + 60000),
+    });
+    expect(result.items.length).toBeGreaterThan(0);
+    const evt = result.items[0];
+    expect(evt.userId).toBe(PG_USER);
+    // usage transactions are stored with a negative amount
+    expect(evt.amount.abs().toString()).toBe("3.5");
+  });
+
+  // ── JI6: Cap deny does NOT consume allowance ────────────────────────
+  it("JI6 — cap deny does not consume allowance window usage", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const PLAN_JI6 = "00000000-0000-0000-0000-0000000000b1";
+    // Plan allowance of 5: cost=20, so v_consume=5, v_net=15.
+    // Cap limit of 10: 0 (prior spend) + 15 (net) > 10 → cap fires.
+    // The SQL BEGIN block increments the usage window by 5, then the RAISE rolls
+    // it back — so allowanceRemaining stays at 5 (unchanged from the initial 5).
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'PlanJI6', 5, $2)`,
+      [PLAN_JI6, PLAN_JI6],
+    );
+    await store.addCredits(PG_USER, D(1000), "purchase");
+    await store.setUserPlan(PG_USER, PLAN_JI6);
+
+    await pool.query(
+      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
+      [PG_USER],
+    );
+
+    const r = await store.deductWithAllowance(PG_USER, D("20"), { idempotencyKey: "ji6-1" });
+    expect(r.error).toBe("cap_reached");
+
+    // Allowance window should NOT have been touched (rolled back on RAISE)
+    const plan = await store.checkAllowance(PG_USER);
+    expect(plan.allowanceRemaining.toString()).toBe("5");
+  });
+
+  // ── JI7: Refund does NOT restore allowance ──────────────────────────
+  it("JI7 — refund does not restore plan allowance", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const PLAN_JI7 = "00000000-0000-0000-0000-0000000000b2";
+    // Plan allowance of 5 — cost of 20 will consume the 5 from allowance then
+    // take 15 from balance. This ensures the transaction has a real balance debit
+    // (amount > 0) so the refund succeeds, while allowanceConsumed > 0.
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'PlanJI7', 5, $2)`,
+      [PLAN_JI7, PLAN_JI7],
+    );
+    await store.addCredits(PG_USER, D(500), "purchase");
+    await store.setUserPlan(PG_USER, PLAN_JI7);
+
+    // Check allowance before deduction
+    const before = await store.checkAllowance(PG_USER);
+
+    // Deduct 20: allowance(5) covers first 5, balance pays the remaining 15
+    const deduct = await store.deductWithAllowance(PG_USER, D("20"), { idempotencyKey: "ji7-1" });
+    expect(deduct.error).toBeUndefined();
+    expect(deduct.allowanceConsumed.gt(0)).toBe(true);
+    expect(deduct.amount.gt(0)).toBe(true); // some balance was actually deducted
+
+    // Note allowance state after deduction
+    const afterDeduct = await store.checkAllowance(PG_USER);
+
+    // Refund the balance portion
+    const refund = await store.refundCredits(deduct.transactionId);
+    expect(refund.error).toBeUndefined();
+
+    // Allowance remaining should NOT be restored — should stay the same as afterDeduct
+    const afterRefund = await store.checkAllowance(PG_USER);
+    expect(afterRefund.allowanceRemaining.toString()).toBe(
+      afterDeduct.allowanceRemaining.toString(),
+    );
+    // And it should be less than the original before value
+    expect(afterRefund.allowanceRemaining.lt(before.allowanceRemaining)).toBe(true);
+  });
+
+  // ── JI8: Sweep when balance < total expired ─────────────────────────
+  it("JI8 — sweep with partially-used expired credits leaves non-negative balance", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    // 100 credits already expired
+    await store.addCredits(PG_USER, D(100), "purchase", null, new Date(Date.now() - 1000));
+    // 50 credits with no expiry
+    await store.addCredits(PG_USER, D(50), "purchase");
+    // Deduct 80 (comes from expired pool first)
+    await store.deductWithAllowance(PG_USER, D(80), { idempotencyKey: "ji8-1" });
+
+    await store.sweepExpiredCredits();
+
+    const bal = (await store.getBalance(PG_USER)).balance;
+    expect(bal.gte(0)).toBe(true);
+    expect(bal.lte(50)).toBe(true);
+  });
+
+  // ── JI9: listUserTransactions — type filter ─────────────────────────
+  it("JI9 — listUserTransactions type filter isolates usage vs purchase", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D("5"), { idempotencyKey: "ji9-usage" });
+
+    const usageOnly = await store.listUserTransactions(PG_USER, { types: ["usage"] });
+    expect(usageOnly.items.every((t) => t.type === "usage")).toBe(true);
+    expect(usageOnly.items.length).toBeGreaterThan(0);
+
+    const purchaseOnly = await store.listUserTransactions(PG_USER, { types: ["purchase"] });
+    expect(purchaseOnly.items.every((t) => t.type === "purchase")).toBe(true);
+    expect(purchaseOnly.items.length).toBeGreaterThan(0);
+  });
+
+  // ── JI10: aggregateStats Decimal precision ─────────────────────────
+  it("JI10 — aggregateStats totalCreditsConsumed exact Decimal precision", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER, D(100), "purchase");
+    await store.deductWithAllowance(PG_USER, D("0.1000"), { idempotencyKey: "ji10-a" });
+    await store.deductWithAllowance(PG_USER, D("0.2000"), { idempotencyKey: "ji10-b" });
+    await store.deductWithAllowance(PG_USER, D("0.1500"), { idempotencyKey: "ji10-c" });
+
+    const now = new Date();
+    const stats = await store.aggregateStats(
+      new Date(now.getTime() - 60000),
+      new Date(now.getTime() + 60000),
+    );
+    expect(stats.totalCreditsConsumed.equals(D("0.4500"))).toBe(true);
+  });
 });

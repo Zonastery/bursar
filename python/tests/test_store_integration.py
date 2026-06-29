@@ -21,7 +21,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import psycopg2
+try:
+    import psycopg2
+except ModuleNotFoundError:
+    psycopg2 = None  # type: ignore[assignment]
+
 import pytest
 
 from ducto import CreditManager, UsageMetrics
@@ -557,6 +561,311 @@ class TestPostgresStoreIntegration:
         page2 = store.list_user_transactions(_PG_USER, limit=2, offset=1)
         assert len(page2) == 2
         assert page2[0].total_count == 3
+
+    # ── INT1: spendByModel ────────────────────────────────────────────────
+
+    def test_spend_by_model_pg(self, store: PostgresStore) -> None:
+        """INT1: two deductions with distinct models appear as separate buckets."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        # deduct_with_allowance records model in metadata via p_model
+        store.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="sbm_gpt4", model="gpt-4")
+        store.deduct_with_allowance(_PG_USER, Decimal("5"), idempotency_key="sbm_claude", model="claude-3")
+
+        # The spend_by_model RPC returns TABLE rows (not JSON), so call directly.
+        conn = psycopg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM spend_by_model(%s, %s)",
+                    [from_date.isoformat(), to_date.isoformat()],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        # rows are (model TEXT, total_spend NUMERIC, transaction_count BIGINT)
+        by_model = {r[0]: r[1] for r in rows}
+
+        assert "gpt-4" in by_model, f"gpt-4 not in {list(by_model)}"
+        assert "claude-3" in by_model, f"claude-3 not in {list(by_model)}"
+        assert by_model["gpt-4"] == Decimal("10")
+        assert by_model["claude-3"] == Decimal("5")
+        assert isinstance(by_model["gpt-4"], Decimal)
+
+    # ── INT2: topUsers ────────────────────────────────────────────────────
+
+    def test_top_users_pg(self, store: PostgresStore) -> None:
+        """INT2: 3 users deducted, top_users(limit=2) returns top 2 descending."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        u1 = "00000000-0000-0000-0000-000000000101"
+        u2 = "00000000-0000-0000-0000-000000000102"
+        u3 = "00000000-0000-0000-0000-000000000103"
+
+        for uid, amount in [(u1, Decimal("50")), (u2, Decimal("30")), (u3, Decimal("80"))]:
+            store.add_credits(uid, Decimal("1000"), "purchase")
+            store.deduct_with_allowance(uid, amount, idempotency_key=f"tu_{uid}")
+
+        # The top_users RPC returns TABLE rows (not JSON), so call directly.
+        conn = psycopg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM top_users(%s, %s, %s)",
+                    [2, from_date.isoformat(), to_date.isoformat()],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        # rows are (user_id TEXT, total_spend NUMERIC)
+        assert len(rows) == 2
+        assert rows[0][0] == u3
+        assert rows[0][1] == Decimal("80")
+        assert rows[1][0] == u1
+        assert rows[1][1] == Decimal("50")
+
+    # ── INT3: dailySpend ──────────────────────────────────────────────────
+
+    def test_daily_spend_pg(self, store: PostgresStore) -> None:
+        """INT3: after a deduction, daily_spend has at least one non-zero bucket."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        store.deduct_with_allowance(_PG_USER, Decimal("7"), idempotency_key="ds_1")
+
+        # The daily_spend RPC returns TABLE rows (not JSON), so call directly.
+        conn = psycopg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM daily_spend(%s, %s)",
+                    [from_date.isoformat(), to_date.isoformat()],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        # rows are (date TEXT, total_spend NUMERIC, transaction_count BIGINT)
+        assert len(rows) >= 1
+        totals = [r[1] for r in rows]
+        assert any(t > 0 for t in totals), f"All totals zero: {totals}"
+        # date field is a string in YYYY-MM-DD format
+        for r in rows:
+            date_str = r[0]
+            assert isinstance(date_str, str), f"date is not str: {type(date_str)}"
+            assert len(date_str) == 10, f"date not YYYY-MM-DD: {date_str!r}"
+            assert date_str[4] == "-" and date_str[7] == "-"
+            assert isinstance(r[1], Decimal)
+
+    # ── INT4: aggregateStats ──────────────────────────────────────────────
+
+    def test_aggregate_stats_pg(self, store: PostgresStore) -> None:
+        """INT4: stats after a deduction + purchase reflect correct totals."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        store.deduct_with_allowance(_PG_USER, Decimal("15"), idempotency_key="as_1")
+
+        stats = store.aggregate_stats(from_date, to_date)
+
+        assert stats.total_credits_consumed is not None
+        assert stats.total_credits_consumed == Decimal("15")
+        assert isinstance(stats.total_credits_consumed, Decimal)
+        assert stats.active_users >= 1
+        assert stats.active_users is not None
+
+    # ── INT5: listUsageEvents ─────────────────────────────────────────────
+
+    def test_list_usage_events_pg(self, store: PostgresStore) -> None:
+        """INT5: after a deduction, list_usage_events returns the event."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        store.deduct_with_allowance(_PG_USER, Decimal("8"), idempotency_key="ue_1")
+
+        # list_usage_events is a SQL function; call it via psycopg2 directly
+        import psycopg2 as _pg2
+
+        conn = _pg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM list_usage_events(%s, %s, %s)",
+                    [_PG_USER, from_date.isoformat(), to_date.isoformat()],
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) >= 1
+        # columns: id, user_id, amount, type, reference_type, reference_id,
+        #          metadata, created_at, total_count
+        user_ids = [str(r[1]) for r in rows]
+        assert _PG_USER in user_ids
+        amounts = [abs(r[2]) for r in rows]
+        assert any(a > 0 for a in amounts), f"All amounts zero: {amounts}"
+
+    # ── INT6: cap deny does NOT consume allowance ─────────────────────────
+
+    def test_cap_deny_does_not_consume_allowance_pg(self, store: PostgresStore) -> None:
+        """INT6: a deny cap blocks the deduction AND leaves allowance untouched.
+
+        Setup: free_allowance=5, deny cap=10.  Deduct 20 → v_net=15 (after 5
+        allowance) → cap check: 0 + 15 > 10 → denied → allowance rolled back.
+        """
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "basic": PlanDefinition(
+                        id="basic",
+                        name="Basic",
+                        free_allowance=Decimal("5"),
+                    )
+                },
+            )
+        )
+        store.set_user_plan(_PG_USER, "basic")
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+
+        # Record allowance before we attempt the capped deduction
+        before = store.check_allowance(_PG_USER)
+
+        # Insert a deny cap of 10 — net 15 will exceed it
+        conn = psycopg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "VALUES (%s, 'monthly', 10, 'deny')",
+                    [_PG_USER],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Attempt a deduction: gross=20, allowance covers 5, net=15 > cap=10
+        result = store.deduct_with_allowance(_PG_USER, Decimal("20"))
+        assert result.error == "cap_reached"
+
+        # Allowance must NOT have been consumed (all-or-nothing rollback)
+        after = store.check_allowance(_PG_USER)
+        assert after.allowance_remaining == before.allowance_remaining
+
+    # ── INT7: refund does NOT restore allowance ───────────────────────────
+
+    def test_refund_does_not_restore_allowance_pg(self, store: PostgresStore) -> None:
+        """INT7: refunding a charge leaves the billing-window allowance intact.
+
+        Setup: free_allowance=5, deduct 10 → allowance covers 5, net=5
+        (transaction amount=-5, refundable).  Refund restores the 5 net balance
+        credits but the allowance window (5 consumed) must stay unchanged.
+        """
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "basic": PlanDefinition(
+                        id="basic",
+                        name="Basic",
+                        free_allowance=Decimal("5"),
+                    )
+                },
+            )
+        )
+        store.set_user_plan(_PG_USER, "basic")
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+
+        # Deduct 10: allowance covers 5, net=5 → transaction amount=-5 (refundable)
+        d = store.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="r7_1")
+        assert d.error is None
+        assert d.allowance_consumed == Decimal("5")
+        assert d.amount == Decimal("5")
+
+        before_refund = store.check_allowance(_PG_USER)
+        # Allowance window now shows 5 consumed (0 remaining of the 5 allowance)
+        assert before_refund.allowance_remaining == Decimal("0")
+
+        # Refund the net transaction
+        r = store.refund_credits(d.transaction_id)
+        assert r.error is None
+
+        # Allowance window must remain at 0 remaining (not restored to 5)
+        after_refund = store.check_allowance(_PG_USER)
+        assert after_refund.allowance_remaining == before_refund.allowance_remaining
+
+    # ── INT8: sweep when balance < total expired ──────────────────────────
+
+    def test_sweep_balance_not_negative_pg(self, store: PostgresStore) -> None:
+        """INT8: sweep of expired credits never drives balance below zero."""
+        # Add 100 credits that expire in the past
+        store.add_credits(
+            _PG_USER,
+            Decimal("100"),
+            "purchase",
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        # Add 50 credits with no expiry
+        store.add_credits(_PG_USER, Decimal("50"), "purchase")
+        # Deduct 80 (some come from the expiring batch, some from the non-expiring)
+        store.deduct_with_allowance(_PG_USER, Decimal("80"), idempotency_key="sw8_1")
+
+        # Run sweep — should expire the remaining 20 credits from the expired batch
+        sweep = store.sweep_expired_credits()
+        assert sweep.expired_amount >= Decimal("0")
+
+        # Balance must never go negative
+        balance = store.get_balance(_PG_USER).balance
+        assert balance >= Decimal("0"), f"Balance went negative: {balance}"
+
+    # ── INT9: listUserTransactions type filter ────────────────────────────
+
+    def test_list_user_transactions_type_filter_pg(self, store: PostgresStore) -> None:
+        """INT9: types filter returns only rows of the requested type(s)."""
+        # Seed a purchase and a usage transaction
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        store.deduct_with_allowance(_PG_USER, Decimal("5"), idempotency_key="tf9_1")
+
+        # usage only
+        usage_rows = store.list_user_transactions(_PG_USER, types=["usage"])
+        assert len(usage_rows) >= 1
+        assert all(r.type == "usage" for r in usage_rows)
+
+        # purchase only
+        purchase_rows = store.list_user_transactions(_PG_USER, types=["purchase"])
+        assert len(purchase_rows) >= 1
+        assert all(r.type == "purchase" for r in purchase_rows)
+
+        # both types
+        both_rows = store.list_user_transactions(_PG_USER, types=["usage", "purchase"])
+        types_present = {r.type for r in both_rows}
+        assert "usage" in types_present
+        assert "purchase" in types_present
+
+    # ── INT10: aggregateStats Decimal precision ───────────────────────────
+
+    def test_aggregate_stats_decimal_precision_pg(self, store: PostgresStore) -> None:
+        """INT10: three fractional deductions sum to exact Decimal, not float."""
+        from_date = datetime.now(UTC) - timedelta(hours=1)
+        to_date = datetime.now(UTC) + timedelta(hours=1)
+
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        store.deduct_with_allowance(_PG_USER, Decimal("0.1"), idempotency_key="prec10_1")
+        store.deduct_with_allowance(_PG_USER, Decimal("0.2"), idempotency_key="prec10_2")
+        store.deduct_with_allowance(_PG_USER, Decimal("0.15"), idempotency_key="prec10_3")
+
+        stats = store.aggregate_stats(from_date, to_date)
+
+        assert isinstance(stats.total_credits_consumed, Decimal)
+        assert stats.total_credits_consumed == Decimal("0.45")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

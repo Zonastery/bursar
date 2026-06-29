@@ -111,4 +111,71 @@ describe("loadConfigFromDict", () => {
       }),
     ).toThrow(ConfigError);
   });
+
+  // ── CF1: Plan with rate_overrides loads without error ──
+  it("accepts a plan with valid rateOverrides", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          pro: {
+            id: "p1",
+            name: "Pro",
+            rateOverrides: { "gpt-4": "input_tokens * 0.003" },
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  // ── CF2: Plan freeAllowance negative — no validation, stored as-is ──
+  it("accepts plan with negative freeAllowance (no config-level validation)", () => {
+    // config.ts does not validate freeAllowance sign; it stores new Decimal(value).
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          basic: { id: "b1", name: "Basic", freeAllowance: -10 },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  // ── CF3: Empty sections are allowed ──
+  it("accepts empty tools, search, cache, fixed sections alongside valid models", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        tools: {},
+        search: {},
+        cache: {},
+        fixed: {},
+      }),
+    ).not.toThrow();
+  });
+
+  // ── CF4: minBalance as string "10" — coerced to number via JS loose comparison ──
+  it("accepts minBalance as string (coerced, not rejected)", () => {
+    // config.ts: config.minBalance = data.minBalance ?? 5 (no type coercion/rejection).
+    // "10" < 0 evaluates to false (JS coerces "10" → 10 for comparison), so no throw.
+    const config = loadConfigFromDict({
+      models: { "gpt-4": "input_tokens * 0.001" },
+      minBalance: "10" as unknown as number,
+    });
+    // The value is accepted; minBalance is stored as-is ("10").
+    expect(config.minBalance).toBe("10");
+  });
+
+  // ── CF5: Duplicate plan names rejected ──
+  it("rejects two plans with the same name field", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          plan_a: { id: "a1", name: "SameName" },
+          plan_b: { id: "b1", name: "SameName" },
+        },
+      }),
+    ).toThrow(ConfigError);
+  });
 });

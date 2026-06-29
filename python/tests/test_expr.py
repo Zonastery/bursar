@@ -412,3 +412,167 @@ def test_not_precedence() -> None:
     assert _eval("not 5 > 10")
     assert not _eval("not 10 > 5")
     assert _eval("not 5 > 10 and 3 > 1")
+
+
+# ── E1: tier() exact boundary semantics ─────────────────────────────────────
+
+
+class TestTierBoundarySemantics:
+    """E1 — tier() uses strict less-than: val < threshold returns that tier's rate."""
+
+    def test_at_first_threshold_falls_to_next_tier(self) -> None:
+        # val=100, threshold=100: 100 < 100 is False -> falls to second tier (threshold=500)
+        # 100 < 500 is True -> returns rate 2
+        result = evaluate_expression("tier(input_tokens, 100, 1, 500, 2, 3)", {"input_tokens": 100})
+        assert _q(result) == Decimal("2.0000")
+
+    def test_just_below_first_threshold(self) -> None:
+        # val=99, threshold=100: 99 < 100 is True -> returns rate 1
+        result = evaluate_expression("tier(input_tokens, 100, 1, 500, 2, 3)", {"input_tokens": 99})
+        assert _q(result) == Decimal("1.0000")
+
+    def test_at_second_threshold_falls_to_default(self) -> None:
+        # val=500, threshold=500: 500 < 500 is False -> falls to default 3
+        result = evaluate_expression("tier(input_tokens, 100, 1, 500, 2, 3)", {"input_tokens": 500})
+        assert _q(result) == Decimal("3.0000")
+
+
+# ── E2: percentile() edge cases ──────────────────────────────────────────────
+
+
+class TestPercentileEdgeCases:
+    """E2 — percentile() with single/two elements, uniform values, p=0/100."""
+
+    def test_single_element(self) -> None:
+        result = evaluate_expression("percentile(50, x)", {"x": 7})
+        assert _q(result) == Decimal("7.0000")
+
+    def test_two_elements_median(self) -> None:
+        # p=50 of [3, 7]: rank = 0.5 * (2-1) = 0.5 -> lower=0, frac=0.5
+        # 3*(1-0.5) + 7*0.5 = 1.5 + 3.5 = 5.0
+        result = evaluate_expression("percentile(50, x, y)", {"x": 3, "y": 7})
+        assert _q(result) == Decimal("5.0000")
+
+    def test_all_same_values(self) -> None:
+        result = evaluate_expression("percentile(50, x, y, z)", {"x": 5, "y": 5, "z": 5})
+        assert _q(result) == Decimal("5.0000")
+
+    def test_p_zero_returns_minimum(self) -> None:
+        result = evaluate_expression("percentile(0, x, y, z)", {"x": 1, "y": 2, "z": 3})
+        assert _q(result) == Decimal("1.0000")
+
+    def test_p_hundred_returns_maximum(self) -> None:
+        result = evaluate_expression("percentile(100, x, y, z)", {"x": 1, "y": 2, "z": 3})
+        assert _q(result) == Decimal("3.0000")
+
+    def test_out_of_range_p_raises(self) -> None:
+        # p=150 is already in the parity fixture, but verify it raises ExpressionError at eval
+        with pytest.raises(ExpressionError, match="0 <= p <= 100"):
+            evaluate_expression("percentile(150, x, y)", {"x": 1, "y": 2})
+
+
+# ── E3: clamp(min > max) ─────────────────────────────────────────────────────
+
+
+class TestClampMinGtMax:
+    """E3 — clamp() when lo > hi: max(lo, min(x, hi)) so lo always wins."""
+
+    def test_clamp_min_greater_than_max_returns_min(self) -> None:
+        # clamp(5, 10, 3): max(10, min(5, 3)) = max(10, 3) = 10
+        result = evaluate_expression("clamp(x, 10, 3)", {"x": 5})
+        assert result == Decimal(10)
+
+    def test_clamp_min_greater_than_max_with_value_above_min(self) -> None:
+        # clamp(20, 10, 3): max(10, min(20, 3)) = max(10, 3) = 10
+        result = evaluate_expression("clamp(x, 10, 3)", {"x": 20})
+        assert result == Decimal(10)
+
+    def test_clamp_min_greater_than_max_with_value_below_max(self) -> None:
+        # clamp(1, 10, 3): max(10, min(1, 3)) = max(10, 1) = 10
+        result = evaluate_expression("clamp(x, 10, 3)", {"x": 1})
+        assert result == Decimal(10)
+
+
+# ── E4: Negative operand edge cases ─────────────────────────────────────────
+
+
+class TestNegativeOperandEdgeCases:
+    """E4 — negation, double-negation, min/max with negatives."""
+
+    def test_unary_negate_then_multiply(self) -> None:
+        # (-input_tokens) * 0.001 with input_tokens=1000 -> -1.0
+        result = evaluate_expression("(-input_tokens) * 0.001", {"input_tokens": 1000})
+        assert _q(result) == Decimal("-1.0000")
+
+    def test_double_negate(self) -> None:
+        # -(-input_tokens) * 0.001 with input_tokens=1000 -> 1.0
+        result = evaluate_expression("-(-input_tokens) * 0.001", {"input_tokens": 1000})
+        assert _q(result) == Decimal("1.0000")
+
+    def test_max_with_negative_and_zero(self) -> None:
+        result = evaluate_expression("max(x, 0)", {"x": -5})
+        assert _q(result) == Decimal("0.0000")
+
+    def test_min_both_negative(self) -> None:
+        result = evaluate_expression("min(x, y)", {"x": -5, "y": -3})
+        assert _q(result) == Decimal("-5.0000")
+
+
+# ── E5: Division with negative operands ─────────────────────────────────────
+
+
+class TestDivisionNegativeOperands:
+    """E5 — division and modulo sign conventions with negative operands."""
+
+    def test_negative_dividend(self) -> None:
+        result = evaluate_expression("(-x) / 2", {"x": 10})
+        assert _q(result) == Decimal("-5.0000")
+
+    def test_negative_divisor(self) -> None:
+        result = evaluate_expression("x / (-y)", {"x": 10, "y": 2})
+        assert _q(result) == Decimal("-5.0000")
+
+    def test_modulo_negative_dividend_decimal_convention(self) -> None:
+        # Decimal modulo uses truncated (C-style) division, not Python's floor division.
+        # Decimal(-10) % Decimal(3) == -1  (sign of dividend, not divisor)
+        result = evaluate_expression("(-x) % 3", {"x": 10})
+        assert result == Decimal(-1)
+
+    def test_modulo_negative_divisor_decimal_convention(self) -> None:
+        # Decimal(10) % Decimal(-3) == 1  (sign of dividend, not divisor)
+        result = evaluate_expression("x % (-y)", {"x": 10, "y": 3})
+        assert result == Decimal(1)
+
+
+# ── E6: Floor division by zero ───────────────────────────────────────────────
+
+
+class TestFloorDivByZero:
+    """E6 — floor division by zero raises ExpressionError."""
+
+    def test_floor_div_by_zero_raises(self) -> None:
+        with pytest.raises(ExpressionError):
+            evaluate_expression("x // 0", {"x": 10})
+
+
+# ── E7: Large numeric literals ───────────────────────────────────────────────
+
+
+class TestLargeNumericLiterals:
+    """E7 — large literals stay exact, no overflow."""
+
+    def test_large_literal_exact(self) -> None:
+        result = evaluate_expression("x * 999999999999.9999", {"x": 1})
+        assert str(_q(result)) == "999999999999.9999"
+
+
+# ── E8: Expression with no variables ─────────────────────────────────────────
+
+
+class TestExpressionNoVariables:
+    """E8 — expression referencing no variables is rejected."""
+
+    def test_constant_expression_rejected(self) -> None:
+        # The engine requires at least one metric variable in every expression.
+        with pytest.raises(ExpressionError, match="no variables"):
+            evaluate_expression("1 + 2", {"x": 1})

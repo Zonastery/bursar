@@ -989,4 +989,264 @@ describe("MemoryStore", () => {
       expect(result.items[0].amount.toString()).toBe("-50");
     });
   });
+
+  // ── MS1: Expired reservation + deductCredits ──────────────────────────
+  describe("MS1 — expired reservation returns not_found", () => {
+    it("deductCredits returns not_found for an expired reservation", async () => {
+      const T0 = new Date("2026-01-01T00:00:00.000Z");
+      // TTL is 10 minutes; advance well past it
+      const AFTER_TTL = new Date("2026-01-01T00:11:00.000Z");
+
+      store.setClock(() => T0);
+      await store.addCredits("user-1", D(100));
+      const reserve = await store.reserveCredits("user-1", D(30), "usage");
+      expect(reserve.error).toBeUndefined();
+
+      // Advance clock past the reservation TTL
+      store.setClock(() => AFTER_TTL);
+
+      const result = await store.deductCredits("user-1", reserve.reservationId, D(30));
+      expect(result.error).toBe("not_found");
+      // Balance must be unchanged
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("100");
+    });
+  });
+
+  // ── MS2: Cap deny does NOT consume allowance ──────────────────────────
+  describe("MS2 — deny cap does not consume plan allowance", () => {
+    it("cap_reached error leaves allowanceRemaining unchanged", async () => {
+      // Plan covers first 5 credits free; charge 10 → net = 5 which is > cap limit 3
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: { p: { id: "plan-ms2", name: "Plan MS2", freeAllowance: D(5) } },
+      };
+      await store.setActivePricing(config);
+      await store.setUserPlan("user-1", "plan-ms2");
+      await store.addCredits("user-1", D(1000), "adjustment");
+
+      // Deny cap: limit=3 on the net amount (10-5=5 > 3 → deny)
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(3), action: "deny" });
+
+      const r = await store.deductWithAllowance("user-1", D(10));
+      expect(r.error).toBe("cap_reached");
+
+      // Allowance must NOT have been consumed
+      const allowance = await store.checkAllowance("user-1");
+      expect(allowance.allowanceRemaining.toString()).toBe("5");
+    });
+  });
+
+  // ── MS3: Refund does NOT restore allowance ────────────────────────────
+  describe("MS3 — refund does not restore plan allowance", () => {
+    it("allowanceRemaining stays reduced after refund", async () => {
+      // Plan has 30 free allowance. Charge 50 → allowance covers 30, net = 20 debited from balance.
+      // The transaction has amount = -20 (the net debit), so it is refundable.
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: { p: { id: "plan-ms3", name: "Plan MS3", freeAllowance: D(30) } },
+      };
+      await store.setActivePricing(config);
+      await store.setUserPlan("user-1", "plan-ms3");
+      await store.addCredits("user-1", D(500), "adjustment");
+
+      const initialAllowance = (await store.checkAllowance("user-1")).allowanceRemaining;
+      expect(initialAllowance.toString()).toBe("30");
+
+      // Charge 50: allowance=30 consumed, net=20 debited from balance
+      const deduct = await store.deductWithAllowance("user-1", D(50));
+      expect(deduct.error).toBeUndefined();
+      const allowanceConsumed = deduct.allowanceConsumed;
+      expect(allowanceConsumed.toString()).toBe("30");
+
+      // Refund the net-debit portion (20 credits)
+      const refund = await store.refundCredits(deduct.transactionId);
+      expect(refund.error).toBeUndefined();
+
+      // Allowance should still show 0 remaining (30 consumed, not restored)
+      const afterRefund = await store.checkAllowance("user-1");
+      const expected = initialAllowance.minus(allowanceConsumed);
+      expect(afterRefund.allowanceRemaining.toString()).toBe(expected.toString()); // "0"
+    });
+  });
+
+  // ── MS4: Concurrent refund race on same transaction ───────────────────
+  describe("MS4 — concurrent partial refunds are race-safe", () => {
+    it("two concurrent 30-credit refunds on a 40-credit deduction: only one succeeds", async () => {
+      await store.addCredits("user-1", D(1000), "purchase");
+      const reserve = await store.reserveCredits("user-1", D(40), "usage");
+      const deduct = await store.deductCredits("user-1", reserve.reservationId, D(40));
+      expect(deduct.error).toBeUndefined();
+
+      // Attempt two partial refunds of 30 concurrently
+      const [r1, r2] = await Promise.all([
+        store.refundCredits(deduct.transactionId, D(30)),
+        store.refundCredits(deduct.transactionId, D(30)),
+      ]);
+
+      const succeeded = [r1, r2].filter((r) => !r.error);
+      const failed = [r1, r2].filter(
+        (r) => r.error === "over_refund" || r.error === "already_refunded",
+      );
+
+      expect(succeeded).toHaveLength(1);
+      expect(failed).toHaveLength(1);
+
+      // Total refunded must not exceed original 40
+      const totalRefunded = succeeded.reduce((sum, r) => sum.plus(r.amount), D(0));
+      expect(totalRefunded.lte(40)).toBe(true);
+    });
+  });
+
+  // ── MS5: Sweep when balance < total expired ───────────────────────────
+  describe("MS5 — sweep clamps to current balance (never goes negative)", () => {
+    it("sweep result is clamped and balance stays non-negative", async () => {
+      const T0 = new Date("2026-06-01T00:00:00.000Z");
+      const AFTER = new Date("2026-06-01T00:00:01.000Z"); // past the 1ms expiry
+
+      store.setClock(() => T0);
+
+      // 100 credits expiring in 1ms from T0
+      const expiry = new Date(T0.getTime() + 1);
+      await store.addCredits("user-1", D(100), "purchase", null, expiry);
+      // 50 credits with no expiry
+      await store.addCredits("user-1", D(50), "purchase");
+      // Deduct 80: balance goes from 150 to 70
+      const r = await store.reserveCredits("user-1", D(80), "usage");
+      await store.deductCredits("user-1", r.reservationId, D(80));
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("70");
+
+      // Advance past expiry and sweep
+      store.setClock(() => AFTER);
+      const sweep = await store.sweepExpiredCredits();
+
+      const balance = (await store.getBalance("user-1")).balance;
+      expect(balance.gte(0)).toBe(true);
+      // min(100, 70) = 70 swept; balance = 70 - 70 = 0
+      expect(balance.toString()).toBe("0");
+      expect(sweep.expiredAmount.lte(D(100))).toBe(true);
+    });
+  });
+
+  // ── MS6: Team member per-user spend cap (independent caps) ────────────
+  describe("MS6 — team per-user spend caps are independent", () => {
+    it("each member's cap is enforced independently", async () => {
+      const team = await store.createTeam("TestTeam", D(1000));
+      await store.addTeamMember(team.teamId, "u1", "member", D(200));
+      await store.addTeamMember(team.teamId, "u2", "member", D(150));
+
+      // u1: first charge 150 → OK
+      const r1 = await store.deductTeam(team.teamId, "u1", D(150));
+      expect(r1.error).toBeUndefined();
+
+      // u1: second charge 80 → denied (150+80=230 > 200)
+      const r2 = await store.deductTeam(team.teamId, "u1", D(80));
+      expect(r2.error).toBe("spend_cap_exceeded");
+
+      // u2: charge 149 → OK (under 150)
+      const r3 = await store.deductTeam(team.teamId, "u2", D(149));
+      expect(r3.error).toBeUndefined();
+
+      // u2: charge 2 → denied (149+2=151 > 150)
+      const r4 = await store.deductTeam(team.teamId, "u2", D(2));
+      expect(r4.error).toBe("spend_cap_exceeded");
+
+      // Team balance reflects only two successful charges: 1000 - 150 - 149 = 701
+      const teamBalance = await store.getTeamBalance(team.teamId);
+      expect(teamBalance.balance.toString()).toBe("701");
+    });
+  });
+
+  // ── MS7: listUserTransactions type filter ─────────────────────────────
+  describe("MS7 — listUserTransactions type filter", () => {
+    it("filters by usage type and by purchase type independently", async () => {
+      await store.addCredits("user-1", D(500), "purchase");
+      const r = await store.reserveCredits("user-1", D(10), "usage");
+      await store.deductCredits("user-1", r.reservationId, D(10));
+
+      const usageOnly = await store.listUserTransactions("user-1", { types: ["usage"] });
+      expect(usageOnly.items.every((t) => t.type === "usage")).toBe(true);
+      expect(usageOnly.total).toBe(1);
+
+      const purchaseOnly = await store.listUserTransactions("user-1", { types: ["purchase"] });
+      expect(purchaseOnly.items.every((t) => t.type === "purchase")).toBe(true);
+      expect(purchaseOnly.total).toBe(1);
+    });
+  });
+
+  // ── MS8: listUserTransactions pagination boundary ─────────────────────
+  describe("MS8 — listUserTransactions pagination boundary", () => {
+    it("handles limit/offset at, near, and beyond the total count", async () => {
+      // Create 5 deductions
+      for (let i = 0; i < 5; i++) {
+        await store.addCredits("user-1", D(200), "purchase");
+        const r = await store.reserveCredits("user-1", D(10), "usage");
+        await store.deductCredits("user-1", r.reservationId, D(10));
+      }
+      // Seed some purchases too — filter to only usage for a clean count
+      const allUsage = await store.listUserTransactions("user-1", { types: ["usage"] });
+      expect(allUsage.total).toBe(5);
+
+      const page1 = await store.listUserTransactions("user-1", {
+        types: ["usage"],
+        limit: 2,
+        offset: 0,
+      });
+      expect(page1.items).toHaveLength(2);
+      expect(page1.total).toBe(5);
+
+      const page3 = await store.listUserTransactions("user-1", {
+        types: ["usage"],
+        limit: 2,
+        offset: 4,
+      });
+      expect(page3.items).toHaveLength(1);
+      expect(page3.total).toBe(5);
+
+      const beyond = await store.listUserTransactions("user-1", {
+        types: ["usage"],
+        limit: 2,
+        offset: 10,
+      });
+      expect(beyond.items).toHaveLength(0);
+      expect(beyond.total).toBe(5);
+    });
+  });
+
+  // ── MS9: checkFeature: float(0) and Decimal("0") are present ─────────
+  describe("MS9 — checkFeature treats numeric 0 and Decimal(0) as present, false as absent", () => {
+    it("numeric 0 is present, Decimal(0) is present, false is absent", async () => {
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          p: {
+            id: "plan-ms9",
+            name: "Plan MS9",
+            freeAllowance: D(0),
+            features: {
+              quota: 0,
+              rate: new Decimal("0"),
+              active: false,
+            },
+          },
+        },
+      };
+      await store.setActivePricing(config);
+      await store.setUserPlan("user-1", "plan-ms9");
+
+      // numeric 0 → present
+      const quota = await store.checkFeature("user-1", "quota");
+      expect(quota.hasFeature).toBe(true);
+      expect(quota.value).toBe(0);
+
+      // Decimal("0") → present (it is not null/undefined/false)
+      const rate = await store.checkFeature("user-1", "rate");
+      expect(rate.hasFeature).toBe(true);
+      expect(rate.value).toEqual(new Decimal("0"));
+
+      // false → absent
+      const active = await store.checkFeature("user-1", "active");
+      expect(active.hasFeature).toBe(false);
+      expect(active.value).toBe(false);
+    });
+  });
 });

@@ -893,5 +893,203 @@ describe("CreditManager", () => {
         emitter.emit({ type: "credits.deducted", timestamp: new Date(), userId: "u1" }),
       ).not.toThrow();
     });
+
+    // MG1 — credits.plan_changed fires on setUserPlan
+    it("MG1: credits.plan_changed fires on setUserPlan and plan is updated", async () => {
+      const emitter = new CreditEventEmitter();
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          pro: { id: "pro", name: "Pro", freeAllowance: new Decimal(100) },
+        },
+      };
+      await store.setActivePricing(config);
+      const mgr = new CreditManager(store, undefined, emitter);
+      await mgr.publishPricingFromDict(config);
+
+      const events = record(emitter, ["credits.plan_changed"]);
+
+      await mgr.setUserPlan("user-1", "pro");
+
+      // (a) getUserPlan returns the new plan
+      const plan = await mgr.getUserPlan("user-1");
+      expect(plan.planId).toBe("pro");
+
+      // (b) credits.plan_changed event was emitted with correct payload
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("credits.plan_changed");
+      expect(events[0].userId).toBe("user-1");
+      expect(events[0].data?.userId).toBe("user-1");
+      expect(events[0].data?.planKey).toBe("pro");
+      expect(typeof events[0].data?.timestamp).toBe("string");
+    });
+
+    // MG3 — cap_warning AND credits.deducted both fire
+    it("MG3: cap_warning and credits.deducted both fire on a warn-capped deduction", async () => {
+      const emitter = new CreditEventEmitter();
+      const mgr = new CreditManager(store, undefined, emitter);
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.addCredits("user-1", 1000);
+      store.setSpendCap({
+        userId: "user-1",
+        type: "daily",
+        limit: new Decimal(5),
+        action: "warn",
+      });
+
+      const events = record(emitter, ["credits.deducted", "credits.cap_warning"]);
+
+      // 10 > 5 → triggers the warn cap but deduction succeeds
+      await mgr.deduct("user-1", { inputTokens: 10 });
+
+      const types = events.map((e) => e.type).sort();
+      expect(types).toContain("credits.deducted");
+      expect(types).toContain("credits.cap_warning");
+    });
+
+    // MG4 — deductTeam with zero cost
+    it("MG4: deductTeam with zero cost succeeds without debiting the pool and does not emit credits.deducted", async () => {
+      const emitter = new CreditEventEmitter();
+      const mgr = new CreditManager(store, undefined, emitter);
+      // Zero-rate model: cost is always 0
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 0" } });
+
+      const team = await store.createTeam("ZeroTeam", new Decimal(500));
+      await store.addTeamMember(team.teamId, "user-1", "member");
+
+      const events = record(emitter, ["credits.deducted"]);
+
+      // Any non-zero inputTokens with zero rate produces cost=0
+      const result = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 100 });
+
+      // No debit from pool
+      expectDecimal(result.amount, "0");
+      expectDecimal((await store.getTeamBalance(team.teamId)).balance, "500");
+      expect(result.error).toBeFalsy();
+
+      // Implementation short-circuits on zero cost with no event emission
+      expect(events).toHaveLength(0);
+    });
+
+    // MG6 — Low balance edge-triggered: fires once, not on every deduct below threshold
+    it("MG6: credits.low_balance fires exactly once, not on subsequent deductions already below threshold", async () => {
+      const emitter = new CreditEventEmitter();
+      // Explicit threshold of 20 to make the test deterministic
+      const mgr = new CreditManager(store, undefined, emitter, {
+        lowBalanceThreshold: new Decimal(20),
+      });
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.addCredits("user-1", 25);
+
+      const events = record(emitter, ["credits.low_balance"]);
+
+      // 25 → 15: crosses threshold of 20 → fires
+      await mgr.deduct("user-1", { inputTokens: 10 });
+      expectDecimal((await mgr.getBalance("user-1")).balance, "15");
+      expect(events).toHaveLength(1);
+
+      // 15 → 10: already below threshold → does NOT fire again
+      await mgr.deduct("user-1", { inputTokens: 5 });
+      expectDecimal((await mgr.getBalance("user-1")).balance, "10");
+      expect(events).toHaveLength(1);
+    });
+
+    // MG7 — deductFixed with unknown job → ConfigError
+    it("MG7: deductFixed with unknown job throws ConfigError", async () => {
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        fixed: { known_job: 10 },
+      };
+      await manager.publishPricingFromDict(config);
+      await manager.addCredits("user-1", 100);
+
+      await expect(() =>
+        manager.deductFixed("user-1", "nonexistent_job_xyz"),
+      ).rejects.toThrow(ConfigError);
+
+      // Balance untouched
+      expectDecimal((await manager.getBalance("user-1")).balance, "100");
+    });
+  });
+
+  // MG2 — Team idempotency key is per-team, not per-user
+  describe("MG2: deductTeam idempotency key scope", () => {
+    it("same idempotency key for a different user on the same team is a replay (per-team scope)", async () => {
+      const mgr = new CreditManager(store);
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+
+      const team = await store.createTeam("Team", new Decimal(500));
+      await store.addTeamMember(team.teamId, "user-1", "member");
+      await store.addTeamMember(team.teamId, "user-2", "member");
+
+      // user-1 charges 50 with key "k1"
+      const r1 = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 50 }, "k1");
+      expectDecimal(r1.amount, "-50");
+      expectDecimal((await store.getTeamBalance(team.teamId)).balance, "450");
+
+      // user-2 uses the SAME key "k1" — the MemoryStore idempotency lookup is
+      // scoped to (teamId + idempotencyKey) without a userId check, so this is
+      // treated as a replay of user-1's transaction.
+      const r2 = await mgr.deductTeam(team.teamId, "user-2", { inputTokens: 50 }, "k1");
+      // replay: no new debit; team balance stays at 450
+      expect(r2.transactionId).toBe(r1.transactionId);
+      expectDecimal((await store.getTeamBalance(team.teamId)).balance, "450");
+    });
+  });
+
+  // MG5 — Full lifecycle test
+  describe("MG5: full lifecycle end-to-end with MemoryStore", () => {
+    it("add → deduct (allowance) → deduct (balance) → refund → sweep → aggregateStats", async () => {
+      const s = new MemoryStore();
+      s.setClock(() => FIXED_NOW);
+      const emitter = new CreditEventEmitter();
+      const mgr = new CreditManager(s, undefined, emitter);
+
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          starter: { id: "starter", name: "Starter", freeAllowance: new Decimal(10) },
+        },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "starter");
+      await mgr.publishPricingFromDict(config);
+
+      // 1. addCredits(100) → balance = 100
+      await mgr.addCredits("user-1", 100);
+      expectDecimal((await mgr.getBalance("user-1")).balance, "100");
+
+      // 2. deduct cost 30 with plan allowance of 10 → allowance 10 consumed, net 20 debited
+      const d1 = await mgr.deduct("user-1", { inputTokens: 30 });
+      expectDecimal(d1.allowanceConsumed, "10");
+      expectDecimal(d1.amount, "20");
+      expectDecimal((await mgr.getBalance("user-1")).balance, "80");
+
+      // 3. second deduct 15 — allowance exhausted, full 15 from balance
+      const d2 = await mgr.deduct("user-1", { inputTokens: 15 });
+      expectDecimal(d2.allowanceConsumed, "0");
+      expectDecimal(d2.amount, "15");
+      expectDecimal((await mgr.getBalance("user-1")).balance, "65");
+
+      // 4. refund first deduction → balance restored by 20 (the net charged amount)
+      const refund = await mgr.refundCredits(d1.transactionId);
+      expect(refund.error).toBeFalsy();
+      expectDecimal(refund.amount, "20");
+      expectDecimal((await mgr.getBalance("user-1")).balance, "85");
+
+      // 5. sweepExpiredCredits({ dryRun: true }) → count=0 (nothing expired)
+      const sweep = await mgr.sweepExpiredCredits(true);
+      expect(sweep.expiredCount).toBe(0);
+      expect(sweep.dryRun).toBe(true);
+
+      // 6. aggregateStats → totalTransactions > 0
+      const stats = await mgr.aggregateStats(
+        new Date(FIXED_NOW.getTime() - 1000),
+        new Date(FIXED_NOW.getTime() + 1000),
+      );
+      expect(stats.activeUsers).toBeGreaterThan(0);
+      // Two usage deductions occurred
+      expect(stats.totalCreditsConsumed.gt(0)).toBe(true);
+    });
   });
 });

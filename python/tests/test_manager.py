@@ -994,3 +994,212 @@ class TestMetadataMerge:
         )
         assert replay.idempotent
         assert replay.transaction_id == result.transaction_id
+
+
+# ── New tests ──────────────────────────────────────────────────────────────────
+
+
+class TestPlanChanged:
+    """MG1 — credits.plan_changed event fires on set_user_plan."""
+
+    def test_plan_changed_event_fires(self) -> None:
+        store = MemoryStore()
+        emitter = CreditEventEmitter()
+        mgr = CreditManager(store=store, emitter=emitter)
+        mgr.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                },
+            }
+        )
+
+        events: list[CreditEvent] = []
+        emitter.on("credits.plan_changed", events.append)
+
+        mgr.set_user_plan("user-1", "pro")
+
+        # (a) Store actually reflects the new plan.
+        result = mgr.get_user_plan("user-1")
+        assert result.plan_id == "pro"
+
+        # (b) Event was emitted with the right payload.
+        assert len(events) == 1
+        assert events[0].type == "credits.plan_changed"
+        assert events[0].user_id == "user-1"
+        assert events[0].data is not None
+        assert events[0].data["user_id"] == "user-1"
+        assert events[0].data["plan_key"] == "pro"
+        assert "timestamp" in events[0].data
+
+
+class TestTeamIdempotencyUserScoped:
+    """MG2 — team idempotency key is user-scoped, not team-scoped."""
+
+    def test_same_key_different_users_both_charged(self) -> None:
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        team = store.create_team("Team", Decimal(500))
+        store.add_team_member(team.team_id, "user-1")
+        store.add_team_member(team.team_id, "user-2")
+
+        metrics = UsageMetrics(input_tokens=50)
+
+        # user-1 charges 50 with key "k1"
+        r1 = mgr.deduct_team(team.team_id, "user-1", metrics, idempotency_key="k1")
+        # user-2 charges 50 with the same key "k1" — should be a NEW charge
+        r2 = mgr.deduct_team(team.team_id, "user-2", metrics, idempotency_key="k1")
+
+        # Both are non-idempotent (different users → independent charges)
+        assert r1.transaction_id != r2.transaction_id
+        # Team balance decreased by 100 total (both charged, not replayed)
+        assert store.get_team_balance(team.team_id).balance == Decimal("400")
+
+
+class TestCapWarningWithDeducted:
+    """MG3 — cap_warning event fires alongside credits.deducted."""
+
+    def test_both_cap_warning_and_deducted_emitted(self) -> None:
+        store = MemoryStore()
+        emitter = CreditEventEmitter()
+        mgr = CreditManager(store=store, emitter=emitter)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        store.add_credits("user-1", Decimal(1000))
+        store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(5), action="warn"))
+
+        emitted_types: list[str] = []
+        emitter.on("credits.cap_warning", lambda e: emitted_types.append(e.type))
+        emitter.on("credits.deducted", lambda e: emitted_types.append(e.type))
+
+        mgr.deduct("user-1", UsageMetrics(input_tokens=10))
+
+        assert "credits.cap_warning" in emitted_types
+        assert "credits.deducted" in emitted_types
+
+
+class TestLowBalanceEdgeTriggered:
+    """MG4 — low_balance event is edge-triggered (fires exactly once)."""
+
+    def test_fires_once_on_crossing_not_on_subsequent_below(self) -> None:
+        store = MemoryStore()
+        emitter = CreditEventEmitter()
+        mgr = CreditManager(store=store, emitter=emitter, low_balance_threshold=Decimal(20))
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 10})
+        mgr.add_credits("user-1", Decimal(25))
+
+        events: list[CreditEvent] = []
+        emitter.on("credits.low_balance", events.append)
+
+        # 25 → 15: crosses threshold 20 (balance_before=25 > 20 >= balance_after=15) → fires
+        mgr.deduct("user-1", UsageMetrics(input_tokens=10), idempotency_key="a")
+        assert len(events) == 1
+        assert events[0].data is not None
+        assert events[0].data["balance"] == Decimal("15")
+
+        # 15 → 10: stays below threshold (balance_before=15 is not > 20) → does NOT fire again
+        mgr.deduct("user-1", UsageMetrics(input_tokens=5), idempotency_key="b")
+        assert len(events) == 1  # still exactly 1
+
+
+class TestAllowanceWindowOnReset:
+    """MG5 — allowance window behavior when re-setting the same plan."""
+
+    def test_resetting_same_plan_behavior(self) -> None:
+        """Re-setting the same plan key: test matches actual implementation behavior."""
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                },
+                "min_balance": 0,
+            }
+        )
+        store.set_user_plan("user-1", "pro")
+        mgr.add_credits("user-1", Decimal(200))
+
+        # Deduct 30 — covered by allowance (free_allowance=100)
+        r = mgr.deduct("user-1", UsageMetrics(input_tokens=30), idempotency_key="first")
+        assert r.allowance_consumed == Decimal("30")
+
+        allowance_before = store.check_allowance("user-1")
+        assert allowance_before.allowance_remaining == Decimal("70")
+
+        # Re-set the SAME plan key ("pro")
+        mgr.set_user_plan("user-1", "pro")
+
+        # Check what the implementation does: allowance_remaining should be 70
+        # (usage windows are NOT reset on re-assignment of same plan).
+        allowance_after = store.check_allowance("user-1")
+        # The MemoryStore does not reset usage windows on set_user_plan, so usage persists.
+        assert allowance_after.allowance_remaining == Decimal("70")
+
+
+class TestDeductFixedUnknownJob:
+    """MG6 — deductFixed: unknown job raises ValueError."""
+
+    def test_unknown_job_raises_value_error(self, manager: CreditManager) -> None:
+        manager.add_credits("user-1", Decimal(100))
+        with pytest.raises(ValueError, match="Unknown fixed-cost job"):
+            manager.deduct_fixed("user-1", "nonexistent_job")
+        # Balance is untouched.
+        assert manager.get_balance("user-1").balance == Decimal("100")
+
+
+class TestFullUserLifecycle:
+    """MG7 — Full user lifecycle: add, deduct with allowance, deduct again, refund, sweep, stats."""
+
+    def test_full_lifecycle(self) -> None:
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(10)),
+                },
+                "min_balance": 0,
+            }
+        )
+
+        user = "lifecycle-user"
+
+        # Step 1: add_credits(100) → balance=100
+        add_result = mgr.add_credits(user, 100)
+        assert add_result.new_balance == Decimal("100")
+        assert mgr.get_balance(user).balance == Decimal("100")
+
+        # Assign plan with allowance=10
+        store.set_user_plan(user, "basic")
+
+        # Step 2: deduct(30 tokens); 10 covered by allowance, 20 from balance → balance=80
+        r1 = mgr.deduct(user, UsageMetrics(input_tokens=30), idempotency_key="d1")
+        assert r1.allowance_consumed == Decimal("10")
+        assert r1.amount == Decimal("20")
+        assert mgr.get_balance(user).balance == Decimal("80")
+
+        # Step 3: another deduct beyond remaining allowance (allowance exhausted) → uses balance
+        r2 = mgr.deduct(user, UsageMetrics(input_tokens=5), idempotency_key="d2")
+        assert r2.allowance_consumed == Decimal("0")  # no allowance left
+        assert r2.amount == Decimal("5")
+        assert mgr.get_balance(user).balance == Decimal("75")
+
+        # Step 4: refund_credits(first_deduction_id) → balance restored by 20
+        refund = mgr.refund_credits(r1.transaction_id)
+        assert refund.error is None
+        assert refund.amount == Decimal("20")
+        assert mgr.get_balance(user).balance == Decimal("95")
+
+        # Step 5: sweep_expired_credits(dry_run=True) → 0 expired (nothing has expiry)
+        sweep = mgr.sweep_expired_credits(dry_run=True)
+        assert sweep.expired_count == 0
+
+        # Step 6: aggregate_stats over a window that captures our transactions
+        now = _utcnow()
+        stats = mgr.aggregate_stats(now - timedelta(seconds=30), now + timedelta(seconds=10))
+        assert stats.active_users > 0
+        assert stats.total_credits_consumed > Decimal(0)

@@ -176,6 +176,21 @@ export class CreditManager {
   }
 
   /**
+   * Set a user's subscription plan and emit ``credits.plan_changed``.
+   *
+   * The store call is awaited so a persistence failure surfaces to the caller.
+   * The event is emitted only after the store write succeeds (contract §6).
+   */
+  async setUserPlan(userId: string, planKey: string): Promise<void> {
+    await this.store.setUserPlan(userId, planKey);
+    this.emit("credits.plan_changed", userId, {
+      userId,
+      planKey,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Check whether a user's plan has a specific feature entitlement.
    *
    * Passthrough to the store, which distinguishes *presence* from *truthiness*

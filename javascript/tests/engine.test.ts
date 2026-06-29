@@ -250,6 +250,119 @@ describe("PricingEngine", () => {
   });
 });
 
+// ── EN1: Tool calls with duplicate names ──
+describe("tool calls with duplicate names", () => {
+  it("duplicate tool names: specific tool charged once, unknown calls each charged via default", () => {
+    // web_search is not in TEST_CONFIG.tools, so both calls go to unknownCount
+    const engine = PricingEngine.fromDict(TEST_CONFIG);
+    const metrics: UsageMetrics = {
+      model: "gpt-4",
+      inputTokens: 0,
+      outputTokens: 0,
+      toolCalls: [{ name: "web_search" }, { name: "web_search" }],
+    };
+    const result = engine.calculate(metrics);
+    // unknownCount = 2, default = tool_calls * 5/1000 with tool_calls=2 → 0.01
+    expect(result.toolCredits.toFixed(4)).toBe("0.0100");
+  });
+
+  it("duplicate known tool names: specific tool expression charged once (unique set)", () => {
+    // code_exec is in TEST_CONFIG.tools. With two identical calls the specific expression
+    // is only evaluated once (per unique name), with tool_calls=2 in context.
+    const engine = PricingEngine.fromDict(TEST_CONFIG);
+    const metrics: UsageMetrics = {
+      model: "gpt-4",
+      inputTokens: 0,
+      outputTokens: 0,
+      toolCalls: [{ name: "code_exec" }, { name: "code_exec" }],
+    };
+    const result = engine.calculate(metrics);
+    // variables.tool_calls = 2 (total calls), expression = tool_calls * 10/1000
+    // evaluated once for the unique name "code_exec": 2 * 10/1000 = 0.02
+    expect(result.toolCredits.toFixed(4)).toBe("0.0200");
+  });
+});
+
+// ── EN2: No tools section in config ──
+describe("config with no tools section", () => {
+  it("tool calls default to zero cost when no tools section provided", () => {
+    const engine = PricingEngine.fromDict({
+      models: { _default: "input_tokens * 0.001" },
+    });
+    const result = engine.calculate({
+      model: "x",
+      inputTokens: 0,
+      toolCalls: [{ name: "web_search" }],
+    });
+    // _default tools is "tool_calls * 0", so tool cost = 0
+    expect(result.toolCredits.toFixed(4)).toBe("0.0000");
+  });
+});
+
+// ── EN3: Cache section absent ──
+describe("config with no cache section", () => {
+  it("cache cost is zero when cache section is missing", () => {
+    const engine = PricingEngine.fromDict({
+      models: { _default: "input_tokens * 0.001" },
+    });
+    const result = engine.calculate({
+      model: "x",
+      inputTokens: 1000,
+      cacheReadTokens: 99999,
+    });
+    expect(result.cacheSavings.toFixed(4)).toBe("0.0000");
+  });
+});
+
+// ── EN4: Fixed cost for unknown job ──
+describe("getFixedCost for nonexistent job", () => {
+  it("returns null for unknown job name", () => {
+    const engine = PricingEngine.fromDict(TEST_CONFIG);
+    expect(engine.getFixedCost("nonexistent_job")).toBeNull();
+  });
+});
+
+// ── EN5: calculateBatch with empty array ──
+describe("calculateBatch with empty array", () => {
+  it("returns empty array without error", () => {
+    const engine = PricingEngine.fromDict(TEST_CONFIG);
+    expect(engine.calculateBatch([])).toEqual([]);
+  });
+});
+
+// ── EN6: Total clamped at zero when cache discount > model cost ──
+describe("total clamped at zero when discount exceeds cost", () => {
+  it("large cache discount produces total = 0.0000 (not negative)", () => {
+    const engine = PricingEngine.fromDict({
+      models: { _default: "input_tokens * 0.000001" },
+      cache: { discount: "-cache_read_tokens * 1" },
+    });
+    const result = engine.calculate({
+      model: "x",
+      inputTokens: 1,       // model cost = 0.000001
+      cacheReadTokens: 100, // cache savings = -100 → cacheSavings = -100
+    });
+    // rawTotal = 0.000001 + (-100) < 0 → clamped to 0
+    expect(result.total.toFixed(4)).toBe("0.0000");
+    expect(result.total.isNegative()).toBe(false);
+  });
+});
+
+// ── EN7: Model resolution — exact match beats prefix ──
+describe("model resolution: exact match over prefix", () => {
+  it("gpt-4-turbo resolves to exact key, not gpt-4 prefix", () => {
+    const engine = PricingEngine.fromDict({
+      models: {
+        "gpt-4": "input_tokens * 1",
+        "gpt-4-turbo": "input_tokens * 2",
+      },
+    });
+    const result = engine.calculate({ model: "gpt-4-turbo", inputTokens: 1000 });
+    // exact match "gpt-4-turbo" → 1000 * 2 = 2000
+    expect(result.modelCredits.toFixed(4)).toBe("2000.0000");
+  });
+});
+
 // ── Cross-SDK parity fixture (contract §7) — pricing_cases ──
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(__dirname, "../../tests/parity/expression_cases.json");

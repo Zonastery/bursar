@@ -280,4 +280,45 @@ describe("HttpxSupabaseStore", () => {
       expect(result.hasFeature).toBe(false);
     });
   });
+
+  // SB2 — HTTP 404 → StoreError
+  describe("HTTP error codes → StoreError", () => {
+    it("HTTP 404 response throws StoreError (SB2)", async () => {
+      mockFetch("not found", 404);
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      await expect(store.getBalance("u1")).rejects.toThrow(StoreError);
+      await expect(store.getBalance("u1")).rejects.toThrow(/404/);
+    });
+
+    it("HTTP 503 response throws StoreError (SB3-extended)", async () => {
+      mockFetch("service unavailable", 503);
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      await expect(store.addCredits("u1", D(10))).rejects.toThrow(StoreError);
+      await expect(store.addCredits("u1", D(10))).rejects.toThrow(/503/);
+    });
+  });
+
+  // SB6 — metadata with undefined values: JSON.stringify drops them, so they
+  // must not appear in the serialized body sent to fetch.
+  describe("metadata serialization (SB6)", () => {
+    it("deductWithAllowance omits undefined metadata keys from the request body", async () => {
+      const captured = mockFetch({
+        transaction_id: "tx-1",
+        amount: "1",
+        allowance_consumed: "0",
+        balance_after: "99",
+        idempotent: false,
+        cap_warning: null,
+      });
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      await store.deductWithAllowance("u1", D("1"), {
+        metadata: { reason: undefined, model: "gpt-4" } as Record<string, unknown>,
+      });
+      const body = captured[0].body as Record<string, unknown>;
+      const meta = body.p_metadata as Record<string, unknown>;
+      // JSON.stringify drops `undefined` values — "reason" must not appear.
+      expect(Object.prototype.hasOwnProperty.call(meta, "reason")).toBe(false);
+      expect(meta.model).toBe("gpt-4");
+    });
+  });
 });
