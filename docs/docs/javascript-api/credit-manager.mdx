@@ -104,6 +104,70 @@ const result = await manager.refundCredits(txId);
 console.log(result.amount.toString(), result.newBalance.toString());
 ```
 
+## Lease Lifecycle / Financial Safety
+
+The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). All methods are `async` and per-call params are **options objects**. See the [Financial Safety](/docs/financial-safety) page for the full conceptual guide.
+
+### Constructor options
+
+```typescript
+import Decimal from "decimal.js";
+
+const manager = new CreditManager(store, null, emitter, {
+  policy: "strict_prepaid",                 // "strict_prepaid" (default) | "overdraft"
+  overdraftFloor: new Decimal(-50),         // negative floor (overdraft preset)
+  maxConcurrent: 4,                         // default max active leases per operation type
+  lowBalanceThresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
+  onLowBalance: (event) => triggerReload(event), // async-safe, non-blocking hook
+  defaultTtlSeconds: 600,                   // lease TTL
+});
+```
+
+- **`strict_prepaid`** (default) — floor `≥ 0`, structurally zero debt; size holds at the worst case.
+- **`overdraft`** — admits down to a negative `overdraftFloor`; `settle` bills the full actual cost even past it (reconcile with `addCredits`).
+
+### `reserve(userId, amountOrMetrics, { operationType?, billingMode?, requiredFeature?, ttl?, metadata? })`
+
+Atomically acquire a lease (the only admission control). Resolves to a `LeaseResult` with `leaseId`, `amount`, `available`, `reservedTotal`, `billingMode`, `expiresAt` (money as `Decimal`). Throws `InsufficientCreditsError`, `ConcurrencyLimitError`, `CapReachedError`, or `FeatureNotEntitledError`. Emits `credits.reserved`.
+
+### `settle(userId, leaseId, amountOrMetrics, { idempotencyKey?, metadata? })`
+
+Charge the **actual** cost against a lease and finalize it. **De-clamped**: bills the full actual cost even if it exceeds the hold (overdraft). Never blocks on floor/cap at settle. Resolves to a `DeductionResult`. Throws `LeaseExpiredError` / `LeaseNotFoundError`. Emits `credits.deducted`, then `credits.low_balance` / `credits.overdraft` as applicable. Idempotent on `idempotencyKey`.
+
+### `release(userId, leaseId)`
+
+Release a lease without charging (work failed/aborted). **Idempotent**: resolves to a `ReleaseResult` with `released` and `reason` (`released` / `already_released` / `already_settled` / `not_found`) — never throws on a missing/finalized lease.
+
+### `renew(userId, leaseId, ttl?)`
+
+Extend a lease's TTL for long batch/agentic jobs. Resolves to a `LeaseResult`; throws `LeaseExpiredError` if the lease already expired.
+
+### `canAfford(userId, amountOrMetrics, { requiredFeature?, billingMode?, operationType? })`
+
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. Resolves to a `CanAffordResult` with `affordable`, `available`, `worstCase`, `reason`.
+
+### `getAvailable(userId)`
+
+Advisory `available = balance − reserved` read (UI only). Resolves to an `AvailableResult` with `balance`, `reserved`, `available`.
+
+### `runBilled(userId, { estimate, doWork, operationType?, billingMode?, requiredFeature?, idempotencyKey?, ttl? })`
+
+One-call shortcut wiring `reserve → doWork → settle`. `doWork` returns a `Promise<{ result, actual }>`; **on any exception the lease is auto-released** and the error re-thrown. Resolves to `{ result, deduction }`.
+
+```typescript
+const lease = await manager.reserve("user-1", new Decimal(40), { operationType: "chat" }); // worst-case hold
+const deduction = await manager.settle("user-1", lease.leaseId, new Decimal(11));          // actual cost
+console.log(deduction.balanceAfter.toString());
+
+// Or in one call:
+const out = await manager.runBilled("user-1", {
+  estimate: new Decimal(40),
+  doWork: async () => ({ result: await runModel(), actual: new Decimal(11) }),
+});
+```
+
+New error classes exported from the package: `ConcurrencyLimitError`, `FeatureNotEntitledError`, `LeaseExpiredError`, `LeaseNotFoundError` (plus existing `InsufficientCreditsError`, `CapReachedError`). New events: `credits.reserved`, `credits.reservation_released`, `credits.lease_expired`, `credits.overdraft`. The plan definition gained `defaultBillingMode`, `perOperation`, `maxConcurrent`, `overdraftFloor`.
+
 ## Usage Analytics
 
 Time-windowed aggregation queries. All accept `start` / `end` `Date` range.

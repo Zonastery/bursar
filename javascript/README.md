@@ -192,6 +192,19 @@ const result = await manager.deductTeam(team.teamId, "user-1", { model: "gpt-4",
 store.setSpendCap({ userId: "user-1", type: "daily", limit: 100, action: "deny" });
 ```
 
+### Financial safety (leases)
+
+Because ducto charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload).
+
+```typescript
+import Decimal from "decimal.js";
+
+const manager = new CreditManager(store, null, null, { policy: "strict_prepaid" }); // or { policy: "overdraft", overdraftFloor: new Decimal(-50) }
+const lease = await manager.reserve("user-1", new Decimal(40));               // worst-case hold
+const deduction = await manager.settle("user-1", lease.leaseId, new Decimal(11)); // actual cost; de-clamped
+// on failure: await manager.release("user-1", lease.leaseId);                // idempotent
+```
+
 ### Usage analytics
 
 ```typescript

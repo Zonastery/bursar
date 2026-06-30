@@ -29,3 +29,19 @@ export class CapReachedError extends Error {
 export class RefundError extends Error {
   override readonly name = "RefundError";
 }
+
+export class ConcurrencyLimitError extends Error {
+  override readonly name = "ConcurrencyLimitError";
+}
+
+export class FeatureNotEntitledError extends Error {
+  override readonly name = "FeatureNotEntitledError";
+}
+
+export class LeaseExpiredError extends Error {
+  override readonly name = "LeaseExpiredError";
+}
+
+export class LeaseNotFoundError extends Error {
+  override readonly name = "LeaseNotFoundError";
+}

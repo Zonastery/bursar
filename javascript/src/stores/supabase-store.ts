@@ -5,7 +5,9 @@ import type {
   AddTeamMemberResult,
   AggregateStats,
   AllowanceResult,
+  AvailableResult,
   BalanceResult,
+  BillingMode,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -14,12 +16,15 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   GetUserPlanResult,
+  LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  OperationPolicy,
   PaginatedTransactions,
   PricingConfigData,
   PricingConfigResult,
   RefundResult,
+  ReleaseResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -31,7 +36,7 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -53,6 +58,32 @@ function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
 /** A money serialized for a JSON RPC parameter: send as a decimal string. */
 function decParam(value: Decimal): string {
   return value.toString();
+}
+
+/** Parse the ``per_operation`` JSONB map into typed `OperationPolicy` records. */
+function parsePerOperation(raw: unknown): Record<string, OperationPolicy> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, OperationPolicy> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const op = (v ?? {}) as Record<string, unknown>;
+    out[k] = {
+      billingMode:
+        (String(op.billing_mode ?? op.billingMode ?? "strict") as BillingMode) ?? "strict",
+      maxConcurrent:
+        op.max_concurrent != null
+          ? Number(op.max_concurrent)
+          : op.maxConcurrent != null
+            ? Number(op.maxConcurrent)
+            : null,
+      overdraftFloor:
+        op.overdraft_floor != null
+          ? dec(op.overdraft_floor)
+          : op.overdraftFloor != null
+            ? dec(op.overdraftFloor)
+            : null,
+    };
+  }
+  return out;
 }
 
 /**
@@ -324,6 +355,145 @@ export class HttpxSupabaseStore implements CreditStore {
     };
   }
 
+  // ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+  async createLease(
+    userId: string,
+    amount: Decimal,
+    operationType: string,
+    options?: CreateLeaseOptions,
+  ): Promise<LeaseResult> {
+    const billingMode = options?.billingMode ?? "strict";
+    const floor = options?.floor ?? ZERO;
+    const overdraftFloor = options?.overdraftFloor ?? null;
+    const row = await this.rpc("create_lease", {
+      p_user_id: userId,
+      p_amount: decParam(amount),
+      p_operation_type: operationType,
+      p_billing_mode: billingMode,
+      p_floor: decParam(floor),
+      p_max_concurrent: options?.maxConcurrent ?? null,
+      p_ttl_seconds: options?.ttlSeconds ?? 600,
+      p_model: options?.model ?? null,
+      p_overdraft_floor: overdraftFloor != null ? decParam(overdraftFloor) : null,
+      p_metadata: options?.metadata ?? {},
+    });
+
+    const code = this.errorCode(row);
+    if (code) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available: dec(row.available),
+        reservedTotal: dec(row.reserved),
+        billingMode,
+        expiresAt: "",
+        error: code,
+      };
+    }
+    return {
+      leaseId: String(row.lease_id ?? ""),
+      userId: String(row.user_id ?? userId),
+      amount: dec(row.amount),
+      available: dec(row.available),
+      reservedTotal: dec(row.reserved),
+      billingMode: (String(row.billing_mode ?? billingMode) as BillingMode) ?? billingMode,
+      expiresAt: String(row.expires_at ?? ""),
+    };
+  }
+
+  async settleLease(
+    userId: string,
+    leaseId: string,
+    amount: Decimal,
+    options?: SettleLeaseOptions,
+  ): Promise<DeductionResult> {
+    const minBalance = options?.minBalance ?? ZERO;
+    const row = await this.rpc("settle_lease", {
+      p_user_id: userId,
+      p_lease_id: leaseId,
+      p_amount: decParam(amount),
+      p_idempotency_key: options?.idempotencyKey ?? null,
+      p_min_balance: decParam(minBalance),
+      p_model: options?.model ?? null,
+      p_metadata: options?.metadata ?? {},
+    });
+
+    const code = this.errorCode(row);
+    if (code) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.balance_after),
+        idempotent: false,
+        capWarning: null,
+        error: code,
+      };
+    }
+    return {
+      transactionId: String(row.transaction_id ?? ""),
+      userId,
+      amount: dec(row.amount),
+      allowanceConsumed: dec(row.allowance_consumed),
+      balanceAfter: dec(row.balance_after),
+      idempotent: Boolean(row.idempotent),
+      capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+    };
+  }
+
+  async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
+    const row = await this.rpc("release_lease", { p_user_id: userId, p_lease_id: leaseId });
+    return {
+      leaseId,
+      userId,
+      released: Boolean(row.released),
+      reason: row.reason != null ? String(row.reason) : null,
+    };
+  }
+
+  async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult> {
+    const row = await this.rpc("renew_lease", {
+      p_user_id: userId,
+      p_lease_id: leaseId,
+      p_ttl_seconds: ttlSeconds,
+    });
+    const code = this.errorCode(row);
+    if (code) {
+      return {
+        leaseId,
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode: "strict",
+        expiresAt: "",
+        error: code,
+      };
+    }
+    return {
+      leaseId: String(row.lease_id ?? leaseId),
+      userId,
+      amount: dec(row.amount),
+      available: dec(row.available),
+      reservedTotal: dec(row.reserved),
+      billingMode: String(row.billing_mode ?? "strict") as BillingMode,
+      expiresAt: String(row.expires_at ?? ""),
+    };
+  }
+
+  async getAvailable(userId: string): Promise<AvailableResult> {
+    const row = await this.rpc("get_available_credits", { p_user_id: userId });
+    return {
+      userId,
+      balance: dec(row.balance),
+      reserved: dec(row.reserved),
+      available: dec(row.available),
+    };
+  }
+
   async getActivePricing(): Promise<PricingConfigResult | null> {
     const row = await this.rpc("get_active_pricing_config", {});
     if (!row || Object.keys(row).length === 0) return null;
@@ -357,6 +527,10 @@ export class HttpxSupabaseStore implements CreditStore {
       planName: (row.plan_name as string) ?? null,
       freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
+      defaultBillingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
+      perOperation: parsePerOperation(row.per_operation),
+      maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
+      overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
     };
   }
 

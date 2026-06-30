@@ -1,8 +1,12 @@
 import Decimal from "decimal.js";
 import {
   CapReachedError,
+  ConcurrencyLimitError,
   ConfigError,
+  FeatureNotEntitledError,
   InsufficientCreditsError,
+  LeaseExpiredError,
+  LeaseNotFoundError,
   PricingNotLoadedError,
   RefundError,
 } from "./errors.js";
@@ -11,15 +15,21 @@ import { PricingEngine as PricingEngineClass } from "./engine.js";
 import type {
   AddCreditsResult,
   AggregateStats,
+  AvailableResult,
   BalanceResult,
+  BillingMode,
+  CanAffordResult,
   CheckFeatureResult,
   CreditMetadata,
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
   GetUserPlanResult,
+  LeaseResult,
+  OperationPolicy,
   PricingConfigData,
   RefundResult,
+  ReleaseResult,
   ReserveResult,
   SetupResult,
   SpendByModelRow,
@@ -34,7 +44,7 @@ import type {
   PaginatedTransactions,
 } from "./types.js";
 import type { CreditStore } from "./stores/credit-store.js";
-import type { CreditEventEmitter, CreditEventType } from "./stores/events.js";
+import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
 
 /**
@@ -45,9 +55,33 @@ import type { UsageMetrics } from "./metrics.js";
  */
 const LOW_BALANCE_MULTIPLIER = 2;
 
+/**
+ * Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
+ * Long batch/agentic jobs call {@link CreditManager.renew} before this elapses.
+ */
+const DEFAULT_LEASE_TTL_SECONDS = 600;
+
+/**
+ * Built-in financial-safety presets (interface plan §2). ``strict_prepaid``
+ * keeps the floor ``>= 0`` (structural zero debt); ``overdraft`` permits a
+ * negative floor and bills the full actual cost at settle.
+ */
+const POLICY_PRESETS = new Set<PolicyPreset>(["strict_prepaid", "overdraft"]);
+
+/** A financial-safety constructor preset (interface plan §2). */
+export type PolicyPreset = "strict_prepaid" | "overdraft";
+
 /** Coerce a `Decimal | number` money input into a `Decimal`. */
 function toDecimal(value: Decimal | number): Decimal {
   return value instanceof Decimal ? value : new Decimal(value);
+}
+
+/** A cost input: either usage metrics (priced via the engine) or a raw amount. */
+type MetricsOrAmount = UsageMetrics | Decimal | number;
+
+/** True when `value` is a raw money amount rather than a `UsageMetrics` object. */
+function isAmount(value: MetricsOrAmount): value is Decimal | number {
+  return value instanceof Decimal || typeof value === "number";
 }
 
 /** Optional behavioural knobs for the manager. */
@@ -59,6 +93,58 @@ export interface CreditManagerOptions {
    * crosses the threshold from above, never repeatedly while already below it.
    */
   lowBalanceThreshold?: Decimal | number | null;
+  /**
+   * Financial-safety preset for planless users (interface plan §2). Defaults to
+   * ``"strict_prepaid"``. Per-plan / per-call policy layers on top of this.
+   */
+  policy?: PolicyPreset;
+  /** Negative balance floor for the ``overdraft`` preset (interface plan §1). */
+  overdraftFloor?: Decimal | number | null;
+  /** Default ``maxConcurrent`` lease bound applied by the preset. */
+  maxConcurrent?: number | null;
+  /**
+   * Multi-level ``credits.low_balance`` thresholds (interface plan §6). Each level
+   * is edge-triggered once per descent and re-arms after a top-up. When unset, the
+   * single-threshold ``lowBalanceThreshold`` behaviour applies.
+   */
+  lowBalanceThresholds?: (Decimal | number)[] | null;
+  /** Non-blocking handler invoked on each ``credits.low_balance`` (errors swallowed). */
+  onLowBalance?: ((event: CreditEvent) => void | Promise<void>) | null;
+  /** Default lease TTL (seconds) for ``reserve``/``runBilled`` (default 600). */
+  defaultTtlSeconds?: number;
+}
+
+/** Options for {@link CreditManager.reserve}. */
+export interface ReserveOptions {
+  operationType?: string;
+  billingMode?: BillingMode | null;
+  requiredFeature?: string | null;
+  ttl?: number | null;
+  metadata?: CreditMetadata | null;
+}
+
+/** Options for {@link CreditManager.settle}. */
+export interface SettleOptions {
+  idempotencyKey?: string | null;
+  metadata?: CreditMetadata | null;
+}
+
+/** Options for {@link CreditManager.canAfford}. */
+export interface CanAffordOptions {
+  requiredFeature?: string | null;
+  billingMode?: BillingMode | null;
+  operationType?: string;
+}
+
+/** Options for {@link CreditManager.runBilled}. */
+export interface RunBilledOptions<T> {
+  estimate: MetricsOrAmount;
+  doWork: () => Promise<{ result: T; actual: MetricsOrAmount }>;
+  operationType?: string;
+  billingMode?: BillingMode | null;
+  requiredFeature?: string | null;
+  idempotencyKey?: string | null;
+  ttl?: number | null;
 }
 
 /**
@@ -80,6 +166,19 @@ export class CreditManager {
   private engine: PricingEngine | null = null;
   private emitter: CreditEventEmitter | null = null;
   private lowBalanceThreshold: Decimal | null;
+  // Financial-safety policy (interface plan §1/§2): `policy` is the preset default
+  // used for planless users; per-plan / per-call policy layers on top.
+  private policy: PolicyPreset;
+  private overdraftFloor: Decimal | null;
+  private defaultMaxConcurrent: number | null;
+  private defaultTtl: number;
+  // Multi-level low_balance thresholds (interface plan §6), sorted high→low.
+  private lowBalanceThresholds: Decimal[] | null;
+  private onLowBalance: ((event: CreditEvent) => void | Promise<void>) | null;
+  // Edge-trigger state: per-user set of thresholds currently breached ("below"),
+  // keyed by `.toString()`. A level re-arms only after the balance climbs back
+  // above it (a top-up).
+  private lbBelow = new Map<string, Set<string>>();
 
   constructor(
     store: CreditStore,
@@ -87,11 +186,26 @@ export class CreditManager {
     emitter?: CreditEventEmitter | null,
     options?: CreditManagerOptions | null,
   ) {
+    const policy = options?.policy ?? "strict_prepaid";
+    if (!POLICY_PRESETS.has(policy)) {
+      throw new ConfigError(
+        `unknown policy preset '${policy}'; expected one of ${[...POLICY_PRESETS].sort().join(", ")}`,
+      );
+    }
     this.store = store;
     if (engine) this.engine = engine;
     if (emitter) this.emitter = emitter;
     this.lowBalanceThreshold =
       options?.lowBalanceThreshold != null ? toDecimal(options.lowBalanceThreshold) : null;
+    this.policy = policy;
+    this.overdraftFloor =
+      options?.overdraftFloor != null ? toDecimal(options.overdraftFloor) : null;
+    this.defaultMaxConcurrent = options?.maxConcurrent ?? null;
+    this.defaultTtl = options?.defaultTtlSeconds ?? DEFAULT_LEASE_TTL_SECONDS;
+    this.lowBalanceThresholds = options?.lowBalanceThresholds?.length
+      ? options.lowBalanceThresholds.map(toDecimal).sort((a, b) => b.comparedTo(a))
+      : null;
+    this.onLowBalance = options?.onLowBalance ?? null;
   }
 
   /** Emit a credit lifecycle event. No-op if no emitter is configured. */
@@ -214,13 +328,28 @@ export class CreditManager {
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
   ): Promise<AddCreditsResult> {
-    const result = await this.store.addCredits(userId, toDecimal(amount), type, metadata, expiresAt);
+    const result = await this.store.addCredits(
+      userId,
+      toDecimal(amount),
+      type,
+      metadata,
+      expiresAt,
+    );
     this.emit("credits.added", userId, {
       transactionId: result.transactionId,
       amount: result.amount,
       newBalance: result.newBalance,
       type,
     });
+    // Re-arm multi-level low_balance: any level the topped-up balance is now back
+    // above can fire again on the next descent (interface plan §6).
+    if (this.lowBalanceThresholds) {
+      const below = this.lbBelow.get(userId) ?? new Set<string>();
+      this.lbBelow.set(userId, below);
+      for (const t of this.lowBalanceThresholds) {
+        if (result.newBalance.gt(t)) below.delete(t.toString());
+      }
+    }
     return result;
   }
 
@@ -240,6 +369,448 @@ export class CreditManager {
       metadata,
       actual,
     );
+  }
+
+  // ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
+
+  /** The default {@link OperationPolicy} from the constructor preset (§2). */
+  private presetPolicy(): OperationPolicy {
+    if (this.policy === "overdraft") {
+      return {
+        billingMode: "overdraft",
+        maxConcurrent: this.defaultMaxConcurrent,
+        overdraftFloor: this.overdraftFloor ?? new Decimal(0),
+      };
+    }
+    return {
+      billingMode: "strict",
+      maxConcurrent: this.defaultMaxConcurrent,
+      overdraftFloor: null,
+    };
+  }
+
+  /**
+   * Resolve the effective policy: explicit arg → per-op → plan → preset (§1).
+   *
+   * A planless user (``planId`` is null) always gets the constructor preset, never
+   * silently unlimited (resolves M1). A user *with* a plan gets the plan default,
+   * then any ``perOperation`` override, then the explicit per-call ``billingMode``.
+   */
+  private async resolvePolicy(
+    userId: string,
+    operationType: string,
+    billingModeOverride?: BillingMode | null,
+  ): Promise<OperationPolicy> {
+    let policy = this.presetPolicy();
+
+    let plan: GetUserPlanResult | null;
+    try {
+      plan = await this.store.getUserPlan(userId);
+    } catch {
+      // A store outage shouldn't crash admission — fall back to the preset.
+      plan = null;
+    }
+
+    if (plan && plan.planId) {
+      policy = {
+        billingMode: plan.defaultBillingMode ?? "strict",
+        maxConcurrent: plan.maxConcurrent != null ? plan.maxConcurrent : policy.maxConcurrent,
+        overdraftFloor: plan.overdraftFloor != null ? plan.overdraftFloor : policy.overdraftFloor,
+      };
+      const op = plan.perOperation?.[operationType];
+      if (op) {
+        policy = {
+          billingMode: op.billingMode,
+          maxConcurrent: op.maxConcurrent != null ? op.maxConcurrent : policy.maxConcurrent,
+          overdraftFloor: op.overdraftFloor != null ? op.overdraftFloor : policy.overdraftFloor,
+        };
+      }
+    }
+
+    if (billingModeOverride != null) {
+      policy = { ...policy, billingMode: billingModeOverride };
+    }
+    return policy;
+  }
+
+  /** Admission floor for a policy: ``overdraftFloor`` (≤0) or ``minBalance`` (≥0). */
+  private resolveFloor(policy: OperationPolicy): Decimal {
+    if (policy.billingMode === "overdraft") {
+      return policy.overdraftFloor ?? new Decimal(0);
+    }
+    return this.minBalanceDecimal();
+  }
+
+  /**
+   * Compute the credit cost and model from metrics, or pass a raw amount through.
+   *
+   * For {@link UsageMetrics} the cost is ``engine.calculate(...).total`` (exact
+   * `Decimal`, no truncation); a raw amount is used as-is with no model.
+   */
+  private costOf(metricsOrAmount: MetricsOrAmount): { amount: Decimal; model: string | null } {
+    if (isAmount(metricsOrAmount)) {
+      return { amount: toDecimal(metricsOrAmount), model: null };
+    }
+    if (!this.engine) {
+      throw new PricingNotLoadedError(
+        "pricing not loaded: call loadPricingFromStore or publishPricing first",
+      );
+    }
+    const breakdown = this.engine.calculate(metricsOrAmount);
+    return { amount: breakdown.total, model: metricsOrAmount.model ?? null };
+  }
+
+  /** Map a store business code to the coherent typed exception (M2). */
+  private raiseLeaseError(error: string, userId: string, amount: Decimal): never {
+    switch (error) {
+      case "concurrency_limit":
+        throw new ConcurrencyLimitError(`Concurrency limit reached. user=${userId}`);
+      case "cap_reached":
+        throw new CapReachedError(`Spend cap exceeded. user=${userId}, requested=${amount}`);
+      case "feature_not_entitled":
+        throw new FeatureNotEntitledError(`Feature not entitled. user=${userId}`);
+      case "insufficient_credits":
+        throw new InsufficientCreditsError(
+          `Insufficient credits. user=${userId}, requested=${amount}`,
+        );
+      case "lease_expired":
+        throw new LeaseExpiredError(`Lease expired. user=${userId}`);
+      case "lease_not_found":
+      case "not_found":
+        throw new LeaseNotFoundError(`Lease not found. user=${userId}`);
+      case "invalid_amount":
+        throw new RangeError(`Invalid amount: ${amount}`);
+      default:
+        throw new InsufficientCreditsError(`Operation failed: ${error}. user=${userId}`);
+    }
+  }
+
+  /**
+   * Atomically acquire a lease — the only admission control (D4).
+   *
+   * Resolves the effective policy, enforces ``requiredFeature``, sizes the hold
+   * from ``metricsOrAmount`` (worst-case in strict, estimate in overdraft — the
+   * caller chooses what to pass), and calls the store's atomic ``createLease``. On
+   * any business failure throws the coherent typed exception; on success emits
+   * ``credits.reserved`` and returns the {@link LeaseResult}.
+   */
+  async reserve(
+    userId: string,
+    metricsOrAmount: MetricsOrAmount,
+    options?: ReserveOptions,
+  ): Promise<LeaseResult> {
+    const operationType = options?.operationType ?? "usage";
+    const requiredFeature = options?.requiredFeature ?? null;
+
+    if (requiredFeature != null) {
+      const check = await this.store.checkFeature(userId, requiredFeature);
+      if (!check.hasFeature) {
+        throw new FeatureNotEntitledError(
+          `Feature '${requiredFeature}' not entitled. user=${userId}`,
+        );
+      }
+    }
+
+    const policy = await this.resolvePolicy(userId, operationType, options?.billingMode);
+    const floor = this.resolveFloor(policy);
+    const { amount, model } = this.costOf(metricsOrAmount);
+    const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
+
+    const result = await this.store.createLease(userId, amount, operationType, {
+      billingMode: policy.billingMode,
+      floor,
+      maxConcurrent: policy.maxConcurrent,
+      ttlSeconds,
+      model,
+      overdraftFloor: policy.overdraftFloor,
+      metadata: options?.metadata,
+    });
+
+    if (result.error) {
+      this.emit("credits.deduct_failed", userId, {
+        error: result.error,
+        amount,
+        stage: "reserve",
+        operationType,
+      });
+      this.raiseLeaseError(result.error, userId, amount);
+    }
+
+    this.emit("credits.reserved", userId, {
+      leaseId: result.leaseId,
+      amount: result.amount,
+      available: result.available,
+      billingMode: result.billingMode,
+      operationType,
+      expiresAt: result.expiresAt,
+    });
+    return result;
+  }
+
+  /**
+   * Charge the ACTUAL cost against a lease and finalize it (D5).
+   *
+   * De-clamped: bills the full actual cost even if it exceeds the lease hold
+   * (overdraft). Never blocks on floor/cap at settle — a cap breach surfaces as a
+   * non-blocking ``credits.cap_warning``/``credits.cap_reached`` signal. Emits
+   * ``credits.deducted``, then multi-level ``credits.low_balance`` and a
+   * ``credits.overdraft`` signal if the balance went negative.
+   */
+  async settle(
+    userId: string,
+    leaseId: string,
+    metricsOrAmount: MetricsOrAmount,
+    options?: SettleOptions,
+  ): Promise<DeductionResult> {
+    const idempotencyKey = options?.idempotencyKey ?? null;
+    const { amount, model } = this.costOf(metricsOrAmount);
+
+    // Build transaction metadata: caller fields first, system fields last (M7).
+    const txMeta: Record<string, unknown> = {};
+    if (isAmount(metricsOrAmount)) {
+      if (options?.metadata) {
+        for (const [k, v] of Object.entries(options.metadata)) {
+          if (v != null) txMeta[k] = v;
+        }
+      }
+      if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
+    } else {
+      if (options?.metadata) {
+        for (const [k, v] of Object.entries(options.metadata)) {
+          if (v != null) txMeta[k] = v;
+        }
+      }
+      txMeta["inputTokens"] = metricsOrAmount.inputTokens ?? 0;
+      txMeta["outputTokens"] = metricsOrAmount.outputTokens ?? 0;
+      txMeta["model"] = metricsOrAmount.model ?? "unknown";
+      txMeta["breakdownTotal"] = amount.toString();
+      if (metricsOrAmount.fixedJob) txMeta["fixedJob"] = metricsOrAmount.fixedJob;
+      if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
+    }
+
+    const result = await this.store.settleLease(userId, leaseId, amount, {
+      idempotencyKey,
+      minBalance: this.engine ? new Decimal(this.engine.minBalance) : new Decimal(0),
+      model,
+      metadata: txMeta as CreditMetadata,
+    });
+
+    if (result.error) {
+      this.emit("credits.deduct_failed", userId, {
+        error: result.error,
+        amount,
+        stage: "settle",
+        leaseId,
+      });
+      if (result.error === "lease_expired") {
+        this.emit("credits.lease_expired", userId, { leaseId });
+      }
+      this.raiseLeaseError(result.error, userId, amount);
+    }
+
+    this.emit("credits.deducted", userId, {
+      transactionId: result.transactionId,
+      amount: result.amount,
+      allowanceConsumed: result.allowanceConsumed,
+      balanceAfter: result.balanceAfter,
+      model,
+      leaseId,
+      idempotent: result.idempotent,
+    });
+
+    // Cap signal: 'deny' breaching at settle is non-blocking (work is done) and
+    // re-emitted as cap_reached; warn/notify as cap_warning (interface plan §7).
+    if (result.capWarning === "deny") {
+      this.emit("credits.cap_reached", userId, {
+        amount: result.amount,
+        model,
+        blocking: false,
+      });
+    } else if (result.capWarning === "warn" || result.capWarning === "notify") {
+      this.emit("credits.cap_warning", userId, {
+        balanceAfter: result.balanceAfter,
+        amount: result.amount,
+        model,
+        action: result.capWarning,
+      });
+    }
+
+    await this.postChargeSignals(userId, result);
+    return result;
+  }
+
+  /** Release a lease without charging (work failed/aborted) — idempotent (H1). */
+  async release(userId: string, leaseId: string): Promise<ReleaseResult> {
+    const result = await this.store.releaseLease(userId, leaseId);
+    if (result.released) {
+      this.emit("credits.reservation_released", userId, {
+        leaseId,
+        reason: result.reason,
+      });
+    }
+    return result;
+  }
+
+  /** Extend a lease's TTL for long batch/agentic jobs (B4). */
+  async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseResult> {
+    const ttlSeconds = ttl != null ? ttl : this.defaultTtl;
+    const result = await this.store.renewLease(userId, leaseId, ttlSeconds);
+    if (result.error) {
+      if (result.error === "lease_expired") {
+        this.emit("credits.lease_expired", userId, { leaseId });
+      }
+      this.raiseLeaseError(result.error, userId, new Decimal(0));
+    }
+    return result;
+  }
+
+  /**
+   * Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+   *
+   * Never use this as an admission gate; only ``reserve`` is authoritative.
+   */
+  async canAfford(
+    userId: string,
+    metricsOrAmount: MetricsOrAmount,
+    options?: CanAffordOptions,
+  ): Promise<CanAffordResult> {
+    const operationType = options?.operationType ?? "usage";
+    const requiredFeature = options?.requiredFeature ?? null;
+    const { amount: worstCase } = this.costOf(metricsOrAmount);
+    const avail = await this.store.getAvailable(userId);
+    const policy = await this.resolvePolicy(userId, operationType, options?.billingMode);
+    const floor = this.resolveFloor(policy);
+
+    let affordable = true;
+    let reason: string | null = null;
+    if (requiredFeature != null) {
+      const check = await this.store.checkFeature(userId, requiredFeature);
+      if (!check.hasFeature) {
+        affordable = false;
+        reason = "feature_not_entitled";
+      }
+    }
+    if (affordable && avail.available.minus(worstCase).lt(floor)) {
+      affordable = false;
+      reason = "insufficient_credits";
+    }
+
+    return { affordable, available: avail.available, worstCase, reason };
+  }
+
+  /** Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3). */
+  async getAvailable(userId: string): Promise<AvailableResult> {
+    return await this.store.getAvailable(userId);
+  }
+
+  /**
+   * One-call shortcut wiring reserve → doWork → settle (interface plan §4).
+   *
+   * ``doWork`` runs the operation and returns ``{ result, actual }`` where
+   * ``actual`` is the real usage metrics (or amount) to settle. On any exception
+   * from ``doWork`` the lease is released and the error re-raised. For long jobs
+   * ``doWork`` may call {@link renew}. A crash between reserve and settle is
+   * covered by the lease TTL (and the store's reaper).
+   */
+  async runBilled<T>(
+    userId: string,
+    options: RunBilledOptions<T>,
+  ): Promise<{ result: T; deduction: DeductionResult }> {
+    const lease = await this.reserve(userId, options.estimate, {
+      operationType: options.operationType,
+      billingMode: options.billingMode,
+      requiredFeature: options.requiredFeature,
+      ttl: options.ttl,
+    });
+
+    let workResult: T;
+    let actual: MetricsOrAmount;
+    try {
+      ({ result: workResult, actual } = await options.doWork());
+    } catch (err) {
+      await this.release(userId, lease.leaseId);
+      throw err;
+    }
+
+    const deduction = await this.settle(userId, lease.leaseId, actual, {
+      idempotencyKey: options.idempotencyKey,
+    });
+    return { result: workResult, deduction };
+  }
+
+  // ── Low-balance / overdraft signals (interface plan §6) ─────────────
+
+  /** Emit overdraft + multi-level low_balance after a balance-decreasing op. */
+  private async postChargeSignals(userId: string, result: DeductionResult): Promise<void> {
+    if (result.balanceAfter.lt(0)) {
+      this.emit("credits.overdraft", userId, {
+        balance: result.balanceAfter,
+        amount: result.amount,
+      });
+    }
+    if (result.idempotent) return;
+    const balanceAfter = result.balanceAfter;
+    const balanceBefore = balanceAfter.plus(result.amount);
+    await this.emitLowBalance(userId, balanceBefore, balanceAfter);
+  }
+
+  /** Edge-triggered low_balance: multi-level if configured, else single (§6). */
+  private async emitLowBalance(
+    userId: string,
+    balanceBefore: Decimal,
+    balanceAfter: Decimal,
+  ): Promise<void> {
+    if (this.lowBalanceThresholds) {
+      const below = this.lbBelow.get(userId) ?? new Set<string>();
+      this.lbBelow.set(userId, below);
+      const newlyCrossed: Decimal[] = [];
+      for (const t of this.lowBalanceThresholds) {
+        // high → low
+        if (balanceAfter.lte(t)) {
+          if (!below.has(t.toString())) {
+            below.add(t.toString());
+            newlyCrossed.push(t);
+          }
+        } else {
+          below.delete(t.toString());
+        }
+      }
+      const fireLevel =
+        newlyCrossed.length > 0 ? newlyCrossed.reduce((min, t) => (t.lt(min) ? t : min)) : null;
+      if (fireLevel !== null) {
+        await this.fireLowBalance(userId, balanceAfter, fireLevel);
+      }
+      return;
+    }
+
+    const threshold = this.resolveLowBalanceThreshold();
+    if (balanceBefore.gt(threshold) && balanceAfter.lte(threshold)) {
+      await this.fireLowBalance(userId, balanceAfter, threshold);
+    }
+  }
+
+  /** Emit ``credits.low_balance`` and invoke the non-blocking ``onLowBalance``. */
+  private async fireLowBalance(
+    userId: string,
+    balance: Decimal,
+    threshold: Decimal,
+  ): Promise<void> {
+    const data = { balance, threshold };
+    this.emit("credits.low_balance", userId, data);
+    if (this.onLowBalance != null) {
+      const event: CreditEvent = {
+        type: "credits.low_balance",
+        timestamp: new Date(),
+        userId,
+        data,
+      };
+      try {
+        // Never block/break the op on a handler failure (§6/H4).
+        await this.onLowBalance(event);
+      } catch (err) {
+        console.error(`[CreditManager] onLowBalance handler failed for user ${userId}:`, err);
+      }
+    }
   }
 
   /**
@@ -389,9 +960,7 @@ export class CreditManager {
         error: result.error,
         reason: reason ?? null,
       });
-      throw new RefundError(
-        `Refund failed: ${result.error}. transaction=${transactionId}`,
-      );
+      throw new RefundError(`Refund failed: ${result.error}. transaction=${transactionId}`);
     }
 
     this.emit("credits.refunded", result.userId, {

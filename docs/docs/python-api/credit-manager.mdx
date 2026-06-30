@@ -111,6 +111,63 @@ assert result.amount == Decimal("1")
 assert result.new_balance == Decimal("100")
 ```
 
+## Lease Lifecycle / Financial Safety
+
+The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the full conceptual guide.
+
+### Constructor options
+
+```python
+manager = CreditManager(
+    store,
+    policy="strict_prepaid",            # "strict_prepaid" (default) | "overdraft"
+    overdraft_floor=Decimal("-50"),     # negative floor (overdraft preset)
+    max_concurrent=4,                   # default max active leases per operation type
+    low_balance_thresholds=[Decimal("50"), Decimal("20"), Decimal("10")],
+    on_low_balance=reload_hook,         # async-safe, non-blocking reload/notify hook
+    default_ttl_seconds=600,            # lease TTL
+)
+```
+
+- **`strict_prepaid`** (default) — floor `≥ 0`, structurally zero debt; size holds at the worst case.
+- **`overdraft`** — admits down to a negative `overdraft_floor`; `settle` bills the full actual cost even past it (reconcile with `add_credits`).
+
+### `reserve(user_id, metrics_or_amount, *, operation_type="usage", billing_mode=None, required_feature=None, ttl=None, metadata=None)`
+
+Atomically acquire a lease (the only admission control). Sizes the hold from `metrics_or_amount` (worst-case in strict, estimate in overdraft). Returns a `LeaseResult` with `.lease_id`, `.amount`, `.available`, `.reserved_total`, `.billing_mode`, `.expires_at`. Raises `InsufficientCreditsError`, `ConcurrencyLimitError`, `CapReachedError`, or `FeatureNotEntitledError`. Emits `credits.reserved`.
+
+### `settle(user_id, lease_id, metrics_or_amount, *, idempotency_key=None, metadata=None)`
+
+Charge the **actual** cost against a lease and finalize it. **De-clamped**: bills the full actual cost even if it exceeds the hold (overdraft). Never blocks on floor/cap at settle. Returns a `DeductionResult`. Raises `LeaseExpiredError` / `LeaseNotFoundError`. Emits `credits.deducted`, then `credits.low_balance` / `credits.overdraft` as applicable. Idempotent on `idempotency_key`.
+
+### `release(user_id, lease_id)`
+
+Release a lease without charging (work failed/aborted). **Idempotent**: returns a `ReleaseResult` with `.released` and `.reason` (`released` / `already_released` / `already_settled` / `not_found`) — never raises on a missing/finalized lease.
+
+### `renew(user_id, lease_id, ttl=None)`
+
+Extend a lease's TTL for long batch/agentic jobs. Returns a `LeaseResult`; raises `LeaseExpiredError` if the lease already expired.
+
+### `can_afford(user_id, metrics_or_amount, *, required_feature=None, billing_mode=None, operation_type="usage")`
+
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. Returns a `CanAffordResult` with `.affordable`, `.available`, `.worst_case`, `.reason`.
+
+### `get_available(user_id)`
+
+Advisory `available = balance − reserved` read (UI only). Returns an `AvailableResult` with `.balance`, `.reserved`, `.available`.
+
+### `run_billed(user_id, *, estimate, do_work, operation_type="usage", billing_mode=None, required_feature=None, idempotency_key=None, ttl=None)`
+
+One-call shortcut wiring `reserve → do_work → settle`. `do_work` is a zero-arg callable returning `(result, actual_metrics_or_amount)`; **on any exception the lease is auto-released** and the error re-raised. Returns `{"result": ..., "deduction": DeductionResult}`.
+
+```python
+lease = manager.reserve("user_1", Decimal("40"), operation_type="chat")  # worst-case hold
+deduction = manager.settle("user_1", lease.lease_id, Decimal("11"))      # actual cost
+assert deduction.balance_after == manager.get_balance("user_1").balance
+```
+
+New errors importable from `ducto`: `CreditError` (base), `ConcurrencyLimitError`, `FeatureNotEntitledError`, `LeaseExpiredError`, `LeaseNotFoundError` (plus existing `InsufficientCreditsError`, `CapReachedError`). New events: `credits.reserved`, `credits.reservation_released`, `credits.lease_expired`, `credits.overdraft`. `PlanDefinition` gained `default_billing_mode`, `per_operation: dict[str, OperationPolicy]`, `max_concurrent`, `overdraft_floor`.
+
 ## Usage Analytics
 
 Time-windowed aggregation queries. All accept `start` / `end` `datetime` range.

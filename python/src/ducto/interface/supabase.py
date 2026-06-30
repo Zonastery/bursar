@@ -20,6 +20,7 @@ from ducto.interface.models import (
     AddTeamMemberResult,
     AggregateStatsRow,
     AllowanceResult,
+    AvailableResult,
     BalanceResult,
     CapCheckResult,
     CreateTeamResult,
@@ -27,10 +28,13 @@ from ducto.interface.models import (
     DailySpendRow,
     DeductionResult,
     GetUserPlanResult,
+    LeaseResult,
+    OperationPolicy,
     PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
+    ReleaseResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -60,6 +64,12 @@ _BUSINESS_ERROR_CODES = frozenset(
         "no_balance_record",
         "team_not_found",
         "user_not_in_team",
+        # Lease lifecycle business codes (interface plan §3 / M2).
+        "concurrency_limit",
+        "feature_not_entitled",
+        "lease_not_found",
+        "lease_expired",
+        "lease_released",
     }
 )
 
@@ -420,6 +430,137 @@ class HttpxSupabaseStore(CreditStore):
             idempotent=bool(row.get("idempotent", False)),
         )
 
+    # ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+    def create_lease(
+        self,
+        user_id: str,
+        amount: Decimal,
+        operation_type: str,
+        *,
+        billing_mode: str = "strict",
+        floor: Decimal = Decimal(0),
+        max_concurrent: int | None = None,
+        ttl_seconds: int = 600,
+        model: str | None = None,
+        overdraft_floor: Decimal | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> LeaseResult:
+        amount = _dec(amount)
+        floor = _dec(floor)
+        row = self._rpc(
+            "create_lease",
+            {
+                "p_user_id": user_id,
+                "p_amount": str(amount),
+                "p_operation_type": operation_type,
+                "p_billing_mode": billing_mode,
+                "p_floor": str(floor),
+                "p_max_concurrent": max_concurrent,
+                "p_ttl_seconds": ttl_seconds,
+                "p_model": model,
+                "p_overdraft_floor": str(overdraft_floor) if overdraft_floor is not None else None,
+                "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
+            },
+        )
+        if "error" in row:
+            return LeaseResult(
+                lease_id="",
+                user_id=user_id,
+                available=_dec(row.get("available")),
+                reserved_total=_dec(row.get("reserved")),
+                billing_mode=billing_mode,  # type: ignore[arg-type]
+                error=str(row["error"]),
+            )
+        return LeaseResult(
+            lease_id=str(row.get("lease_id", "")),
+            user_id=str(row.get("user_id", user_id)),
+            amount=_dec(row.get("amount")),
+            available=_dec(row.get("available")),
+            reserved_total=_dec(row.get("reserved")),
+            billing_mode=str(row.get("billing_mode", billing_mode)),  # type: ignore[arg-type]
+            expires_at=str(row.get("expires_at", "")),
+        )
+
+    def settle_lease(
+        self,
+        user_id: str,
+        lease_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        amount = _dec(amount)
+        min_balance = _dec(min_balance)
+        meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        row = self._rpc(
+            "settle_lease",
+            {
+                "p_user_id": user_id,
+                "p_lease_id": lease_id,
+                "p_amount": str(amount),
+                "p_idempotency_key": idempotency_key,
+                "p_min_balance": str(min_balance),
+                "p_model": model,
+                "p_metadata": meta,
+            },
+        )
+        if "error" in row:
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                balance_after=_dec(row.get("balance_after")),
+                error=str(row["error"]),
+            )
+        return DeductionResult(
+            transaction_id=str(row.get("transaction_id", "")),
+            user_id=user_id,
+            amount=_dec(row.get("amount")),
+            allowance_consumed=_dec(row.get("allowance_consumed")),
+            balance_after=_dec(row.get("balance_after")),
+            idempotent=bool(row.get("idempotent", False)),
+            cap_warning=row.get("cap_warning") or None,
+        )
+
+    def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
+        row = self._rpc("release_lease", {"p_user_id": user_id, "p_lease_id": lease_id})
+        return ReleaseResult(
+            lease_id=lease_id,
+            user_id=user_id,
+            released=bool(row.get("released", False)),
+            reason=row.get("reason"),
+        )
+
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        row = self._rpc(
+            "renew_lease",
+            {"p_user_id": user_id, "p_lease_id": lease_id, "p_ttl_seconds": ttl_seconds},
+        )
+        if "error" in row:
+            return LeaseResult(lease_id=lease_id, user_id=user_id, error=str(row["error"]))
+        return LeaseResult(
+            lease_id=str(row.get("lease_id", lease_id)),
+            user_id=user_id,
+            amount=_dec(row.get("amount")),
+            available=_dec(row.get("available")),
+            reserved_total=_dec(row.get("reserved")),
+            billing_mode=str(row.get("billing_mode", "strict")),  # type: ignore[arg-type]
+            expires_at=str(row.get("expires_at", "")),
+        )
+
+    def get_available(self, user_id: str) -> AvailableResult:
+        row = self._rpc("get_available_credits", {"p_user_id": user_id})
+        return AvailableResult(
+            user_id=user_id,
+            balance=_dec(row.get("balance")),
+            reserved=_dec(row.get("reserved")),
+            available=_dec(row.get("available")),
+        )
+
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
@@ -471,6 +612,10 @@ class HttpxSupabaseStore(CreditStore):
             plan_name=row.get("plan_name") or None,
             free_allowance=_dec(row.get("free_allowance")),
             features=row.get("features") or {},
+            default_billing_mode=str(row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
+            max_concurrent=row.get("max_concurrent"),
+            overdraft_floor=_dec(row["overdraft_floor"]) if row.get("overdraft_floor") is not None else None,
         )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:

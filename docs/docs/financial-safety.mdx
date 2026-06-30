@@ -1,0 +1,278 @@
+---
+sidebar_position: 4
+---
+
+# Financial Safety (Leases)
+
+ducto charges **after** an AI operation completes. That is the natural shape — you don't know the real token count until the model returns — but it is also where money leaks. A naive "check balance, do work, debit" flow has two failure modes:
+
+1. **Races.** Between the balance check and the debit, other concurrent operations also pass the check. Several expensive calls commit against the same headroom and the balance goes negative.
+2. **Runaway cost.** A single agentic or long-context call can finish costing far more than you estimated, debiting into **unrecoverable debt** for work that is already done.
+
+The fix is an atomic **lease** taken *before* the work, against
+
+```
+available = balance − Σ(active holds)
+```
+
+Every operation follows the same shape:
+
+```
+reserve (hold) → do the work → settle (charge actual)  |  release (cancel)
+```
+
+Admission — `reserve` — is the **only** place limits are enforced. `settle` is **de-clamped**: it always bills the actual cost, even if that exceeds the hold. A lease holds against `available` under one lock, so concurrent operations genuinely see each other and `maxConcurrent` is real.
+
+## Reserve → settle → release
+
+Size the hold at the **worst case** you might bill, do the work, then settle the **actual** cost. The unused portion of the hold is freed automatically. If the work fails, `release` cancels the hold and charges nothing.
+
+```python
+from decimal import Decimal
+from ducto import CreditManager, UsageMetrics
+
+manager = CreditManager(store=store, policy="strict_prepaid")  # default
+manager.load_pricing_from_store()
+
+# 1. Hold the worst-case cost (the only admission gate).
+lease = manager.reserve(
+    "user_abc",
+    UsageMetrics(model="gpt-4", input_tokens=1000, output_tokens=1000),  # worst case
+    operation_type="chat",
+)
+print(lease.lease_id, lease.amount, lease.available)
+
+# 2. ... run the AI operation ...
+
+# 3. Settle the ACTUAL cost (de-clamped — bills the real amount).
+deduction = manager.settle(
+    "user_abc",
+    lease.lease_id,
+    UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200),  # actual
+)
+print(deduction.amount, deduction.balance_after)
+
+# On failure instead:  manager.release("user_abc", lease.lease_id)  # idempotent
+```
+
+```typescript
+import Decimal from "decimal.js";
+import { CreditManager } from "@apoorwv/ducto";
+
+const manager = new CreditManager(store, null, null, { policy: "strict_prepaid" });
+await manager.loadPricingFromStore();
+
+// 1. Hold the worst-case cost (the only admission gate).
+const lease = await manager.reserve(
+  "user_abc",
+  { model: "gpt-4", inputTokens: 1000, outputTokens: 1000 }, // worst case
+  { operationType: "chat" },
+);
+console.log(lease.leaseId, lease.amount.toString(), lease.available.toString());
+
+// 2. ... run the AI operation ...
+
+// 3. Settle the ACTUAL cost (de-clamped — bills the real amount).
+const deduction = await manager.settle(
+  "user_abc",
+  lease.leaseId,
+  { model: "gpt-4", inputTokens: 500, outputTokens: 200 }, // actual
+);
+console.log(deduction.amount.toString(), deduction.balanceAfter.toString());
+
+// On failure instead:  await manager.release("user_abc", lease.leaseId);  // idempotent
+```
+
+`reserve` raises/throws `InsufficientCreditsError`, `ConcurrencyLimitError`, `CapReachedError`, or `FeatureNotEntitledError` on admission failure. `settle` raises/throws `LeaseExpiredError` or `LeaseNotFoundError`. `release` is idempotent and returns a `ReleaseResult` with `released` and `reason` (`released` / `already_released` / `already_settled` / `not_found`) — it never raises on a missing or already-finalized lease.
+
+### Renewing long jobs
+
+Leases have a TTL (`defaultTtlSeconds`, 600s by default; override per call with `ttl`). For long batch or agentic jobs, extend the hold with `renew` so it does not expire mid-work. A crash between reserve and settle is covered by the TTL (and the store's reaper), so a dropped lease never permanently strands credits.
+
+```python
+manager.renew("user_abc", lease.lease_id, ttl=1800)  # extend to 30 minutes
+```
+
+```typescript
+await manager.renew("user_abc", lease.leaseId, 1800); // extend to 30 minutes
+```
+
+## Presets: strict vs overdraft
+
+Two presets cover the common cases. The preset is the manager-wide default for **planless** users (a planless user is never silently unlimited); a plan or a per-call `billingMode` can layer on top.
+
+```python
+strict = CreditManager(store, policy="strict_prepaid")                 # floor ≥ 0
+paid   = CreditManager(store, policy="overdraft", overdraft_floor=Decimal("-50"))
+```
+
+```typescript
+const strict = new CreditManager(store, null, null, { policy: "strict_prepaid" });
+const paid   = new CreditManager(store, null, null, { policy: "overdraft", overdraftFloor: new Decimal(-50) });
+```
+
+| | `strict_prepaid` (default) | `overdraft` |
+|---|---|---|
+| Floor | `≥ 0` (`minBalance`) | negative (`overdraftFloor`) |
+| Admission | rejects if `available − hold < floor` | rejects only past the negative floor |
+| Settle | bills actual (always ≤ the worst-case hold) | bills **full** actual, even past the floor |
+| Debt | **structurally zero** — size holds at worst case | bounded admission, reconcile with `addCredits` |
+| For | everyone; the safe default | trusted/paid users with auto-reload |
+
+Under `overdraft`, a de-clamped `settle` can push the balance below the floor (the work is already done — you never silently under-bill). A **new** admission is then rejected until you top up:
+
+```python
+m = CreditManager(store, policy="overdraft", overdraft_floor=Decimal("-50"))
+lease = m.reserve("user_abc", Decimal("10"))         # small estimate, within the floor
+ded = m.settle("user_abc", lease.lease_id, Decimal("60"))  # actual 60 > hold → balance -60
+# A new reserve now raises InsufficientCreditsError until reconciled:
+m.add_credits("user_abc", Decimal("200"))            # -60 + 200 = 140
+```
+
+```typescript
+const m = new CreditManager(store, null, null, { policy: "overdraft", overdraftFloor: new Decimal(-50) });
+const lease = await m.reserve("user_abc", new Decimal(10));          // within the floor
+const ded = await m.settle("user_abc", lease.leaseId, new Decimal(60)); // balance -60
+// A new reserve now throws InsufficientCreditsError until reconciled:
+await m.addCredits("user_abc", new Decimal(200));                   // -60 + 200 = 140
+```
+
+## Per-operation policy and `maxConcurrent`
+
+A plan carries a `default_billing_mode`, plan-wide `max_concurrent` / `overdraft_floor`, and `per_operation` overrides keyed by operation type. Policy resolves: explicit per-call `billingMode` → `per_operation[type]` → plan default → constructor preset.
+
+`maxConcurrent` bounds the number of **simultaneously-active leases per operation type** — the durable defense against a double-submit (impatient user, client retry). The second admission of the same type is rejected with `ConcurrencyLimitError`; releasing or settling the first frees the slot.
+
+```python
+from ducto.interface.models import PlanDefinition, OperationPolicy
+
+PlanDefinition(
+    id="pro", name="Pro",
+    default_billing_mode="strict",
+    max_concurrent=4,
+    per_operation={
+        "agent": OperationPolicy(billing_mode="overdraft", overdraft_floor=Decimal("-30"), max_concurrent=1),
+    },
+)
+
+# Block a double-submit:
+m = CreditManager(store, policy="strict_prepaid", max_concurrent=1)
+first = m.reserve("user_abc", Decimal("10"), operation_type="chat")
+m.reserve("user_abc", Decimal("10"), operation_type="chat")  # raises ConcurrencyLimitError
+```
+
+```typescript
+const plan = {
+  id: "pro", name: "Pro",
+  defaultBillingMode: "strict",
+  maxConcurrent: 4,
+  perOperation: {
+    agent: { billingMode: "overdraft", overdraftFloor: new Decimal(-30), maxConcurrent: 1 },
+  },
+};
+
+// Block a double-submit:
+const m = new CreditManager(store, null, null, { policy: "strict_prepaid", maxConcurrent: 1 });
+const first = await m.reserve("user_abc", new Decimal(10), { operationType: "chat" });
+await m.reserve("user_abc", new Decimal(10), { operationType: "chat" }); // throws ConcurrencyLimitError
+```
+
+## Feature gating
+
+Gate Pro-only operations (e.g. autonomous agentic runs) with `requiredFeature`. Define `features` on the plan; a user whose plan lacks the feature is rejected at admission with `FeatureNotEntitledError` — before any work or hold happens.
+
+```python
+PlanDefinition(id="pro", name="Pro", features={"chat": True, "agentic": True})
+manager.reserve("user_abc", Decimal("10"), required_feature="agentic")  # FeatureNotEntitledError if not entitled
+```
+
+```typescript
+// plan: { id: "pro", name: "Pro", features: { chat: true, agentic: true } }
+await manager.reserve("user_abc", new Decimal(10), { requiredFeature: "agentic" }); // throws if not entitled
+```
+
+## One call: `runBilled`
+
+`runBilled` wires reserve → work → settle for you, and **auto-releases the lease on any exception**. Pass an `estimate` (the worst-case hold) and a `doWork` callable that returns `(result, actual)`.
+
+```python
+def do_work():
+    answer = run_model()                                   # your operation
+    actual = UsageMetrics(model="gpt-4", input_tokens=300, output_tokens=100)
+    return answer, actual
+
+out = manager.run_billed(
+    "user_abc",
+    estimate=UsageMetrics(model="gpt-4", input_tokens=1000, output_tokens=1000),
+    do_work=do_work,
+    operation_type="chat",
+)
+out["result"]               # the work result
+out["deduction"].amount     # the actual cost billed
+```
+
+```typescript
+const out = await manager.runBilled("user_abc", {
+  estimate: { model: "gpt-4", inputTokens: 1000, outputTokens: 1000 },
+  operationType: "chat",
+  doWork: async () => {
+    const result = await runModel();                       // your operation
+    const actual = { model: "gpt-4", inputTokens: 300, outputTokens: 100 };
+    return { result, actual };
+  },
+});
+out.result;                  // the work result
+out.deduction.amount;        // the actual cost billed
+```
+
+## Advisory reads: `canAfford` / `getAvailable`
+
+For **UI only** — disabling a button, showing a balance bar — use the non-locking advisory reads. They are fast and may be slightly stale, and are **never** an admission gate. Only `reserve` is authoritative.
+
+```python
+avail = manager.get_available("user_abc")        # .balance, .reserved, .available
+ok = manager.can_afford("user_abc", Decimal("50"))  # .affordable, .available, .worst_case, .reason
+```
+
+```typescript
+const avail = await manager.getAvailable("user_abc");          // .balance, .reserved, .available
+const ok = await manager.canAfford("user_abc", new Decimal(50)); // .affordable, .available, .worstCase, .reason
+```
+
+## Multi-level low-balance + reload hook
+
+Pass `lowBalanceThresholds` (sorted internally high → low) for **edge-triggered** alerts: each level fires once on the descent that crosses it, and re-arms only after a top-up climbs back above it. `onLowBalance` is an async-safe, **non-blocking** callable — a payment-provider-agnostic place to enqueue a reload or notify. A handler that raises never breaks the operation.
+
+```python
+def reload_hook(event):
+    # provider-agnostic: charge a saved card, enqueue a job, send an email, page on-call …
+    trigger_reload(event.user_id, event.data["balance"], event.data["threshold"])
+
+manager = CreditManager(
+    store=store,
+    low_balance_thresholds=[Decimal("50"), Decimal("20"), Decimal("10")],
+    on_low_balance=reload_hook,
+)
+```
+
+```typescript
+const manager = new CreditManager(store, null, emitter, {
+  lowBalanceThresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
+  onLowBalance: (event) => {
+    // provider-agnostic reload / notify
+    triggerReload(event.userId, event.data?.balance, event.data?.threshold);
+  },
+});
+```
+
+New lifecycle events join the existing ones: `credits.reserved`, `credits.reservation_released`, `credits.lease_expired`, `credits.overdraft`, plus `credits.low_balance`.
+
+## Guarantees
+
+- **`strict_prepaid` ⇒ structural zero debt.** Admission is the only gate and rejects any hold that would take `available` below the floor (`≥ 0`). If you size each hold at its worst case, no settle can drive the balance negative — the debt is structurally impossible, not merely unlikely.
+- **`overdraft` ⇒ bounded admission + full billing + reload.** New work is admitted only down to the negative `overdraftFloor`, so exposure is bounded. `settle` is de-clamped and bills the full actual cost (you never silently under-bill), and `onLowBalance` drives the reload that reconciles the balance back above the floor.
+
+## See also
+
+- Notebook: **Financial Safety** (runnable, PostgreSQL-backed) — [/docs/notebooks/financial_safety](/docs/notebooks/financial_safety)
+- [CreditManager — Python](/docs/python-api/credit-manager) · [CreditManager — JavaScript](/docs/javascript-api/credit-manager)

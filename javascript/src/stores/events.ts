@@ -34,7 +34,11 @@ export type CreditEventType =
   | "credits.cap_reached"
   | "credits.cap_warning"
   | "credits.low_balance"
-  | "credits.plan_changed";
+  | "credits.plan_changed"
+  | "credits.reserved"
+  | "credits.reservation_released"
+  | "credits.lease_expired"
+  | "credits.overdraft";
 
 /**
  * A typed credit lifecycle event.
@@ -87,10 +91,7 @@ export class CreditEventEmitter {
         // Swallow rejections from async handlers so they never become unhandled.
         if (out instanceof Promise) {
           out.catch((err: unknown) => {
-            console.error(
-              `[CreditEventEmitter] async handler error for event ${event.type}:`,
-              err,
-            );
+            console.error(`[CreditEventEmitter] async handler error for event ${event.type}:`, err);
           });
         }
       } catch (err) {

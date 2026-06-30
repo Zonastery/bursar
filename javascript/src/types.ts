@@ -1,5 +1,13 @@
 import type { Decimal } from "decimal.js";
 
+/**
+ * Billing mode for an operation. ``strict`` never lets the balance fall below
+ * the floor at admission (lease worst-case ⇒ zero debt); ``overdraft`` permits
+ * the balance to go negative down to a configured floor and always bills the
+ * full actual cost at settle (interface plan §1/D3/D5).
+ */
+export type BillingMode = "strict" | "overdraft";
+
 /** Flexible metadata attached to credit transactions. */
 export interface CreditMetadata {
   inputTokens?: number | null;
@@ -84,13 +92,39 @@ export interface SetupResult {
   readonly success: boolean;
 }
 
-/** Definition of a subscription plan with free allowance and rate overrides. */
+/**
+ * Per-operation financial-safety policy (interface plan §1).
+ *
+ * Resolved per call as: explicit arg → ``PlanDefinition.perOperation[type]`` →
+ * plan default → the manager's constructor preset. ``maxConcurrent`` bounds the
+ * number of simultaneously-active leases for an operation type; ``overdraftFloor``
+ * (only meaningful when ``billingMode === "overdraft"``) is the negative balance
+ * floor admission is allowed down to.
+ */
+export interface OperationPolicy {
+  billingMode: BillingMode;
+  maxConcurrent?: number | null;
+  overdraftFloor?: Decimal | null;
+}
+
+/**
+ * Definition of a subscription plan with free allowance and rate overrides.
+ *
+ * Beyond allowance/rates/features, a plan carries the financial-safety policy
+ * (interface plan §1): a ``defaultBillingMode`` for the whole plan, optional
+ * ``perOperation`` overrides keyed by operation type, and plan-wide
+ * ``maxConcurrent`` / ``overdraftFloor`` defaults.
+ */
 export interface PlanDefinition {
   id: string;
   name: string;
   freeAllowance: Decimal;
   rateOverrides?: Record<string, string> | null;
   features?: Record<string, unknown> | null;
+  defaultBillingMode?: BillingMode;
+  perOperation?: Record<string, OperationPolicy>;
+  maxConcurrent?: number | null;
+  overdraftFloor?: Decimal | null;
 }
 
 /** Result of checking plan allowance. */
@@ -101,13 +135,79 @@ export interface AllowanceResult {
   periodEnd: string;
 }
 
-/** Result of fetching a user's current plan. */
+/**
+ * Result of fetching a user's current plan.
+ *
+ * Carries the plan's financial-safety policy (``defaultBillingMode``,
+ * ``perOperation``, ``maxConcurrent``, ``overdraftFloor``) so the manager can
+ * resolve admission policy without a second round-trip (interface plan §1).
+ */
 export interface GetUserPlanResult {
   userId: string;
   planId: string | null;
   planName: string | null;
   freeAllowance: Decimal;
   features: Record<string, unknown>;
+  defaultBillingMode?: BillingMode;
+  perOperation?: Record<string, OperationPolicy>;
+  maxConcurrent?: number | null;
+  overdraftFloor?: Decimal | null;
+}
+
+/**
+ * Result of acquiring (or renewing) a lease — the atomic admission hold.
+ *
+ * A lease is the *only* admission control (interface plan §3/D4): it holds
+ * ``amount`` against ``available = balance − Σ(active holds)`` under one lock so
+ * concurrent operations see each other and ``maxConcurrent`` is real. On failure
+ * ``error`` carries a business code (``insufficient_credits``, ``concurrency_limit``,
+ * ``cap_reached``, ``feature_not_entitled``, ``invalid_amount``, ``lease_not_found``,
+ * ``lease_expired``, ``lease_released``) for the manager to map to a typed exception.
+ */
+export interface LeaseResult {
+  leaseId: string;
+  userId: string;
+  amount: Decimal;
+  available: Decimal;
+  reservedTotal: Decimal;
+  billingMode: BillingMode;
+  expiresAt: string;
+  error?: string | null;
+}
+
+/**
+ * Result of releasing a lease without charging (interface plan §3).
+ *
+ * Idempotent and safe on missing/already-finalized leases: ``released`` is
+ * ``true`` only when this call transitioned an active/expired lease to released.
+ * ``reason`` is one of ``released``, ``already_released``, ``already_settled``,
+ * ``not_found`` — never a bare void (resolves H1).
+ */
+export interface ReleaseResult {
+  leaseId: string;
+  userId: string;
+  released: boolean;
+  reason?: string | null;
+}
+
+/**
+ * Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+ *
+ * Never used for admission control; that is exclusively the lease (``reserve``).
+ */
+export interface CanAffordResult {
+  affordable: boolean;
+  available: Decimal;
+  worstCase: Decimal;
+  reason?: string | null;
+}
+
+/** Advisory available-balance read: ``available = balance − reserved`` (D4/H3). */
+export interface AvailableResult {
+  userId: string;
+  balance: Decimal;
+  reserved: Decimal;
+  available: Decimal;
 }
 
 /** Result of checking a user's feature entitlement. */

@@ -30,6 +30,9 @@ Example::
 
 from __future__ import annotations
 
+import logging
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -40,14 +43,20 @@ from ducto.interface.base import CapReachedError, CreditStore
 from ducto.interface.models import (
     AddCreditsResult,
     AggregateStatsRow,
+    AvailableResult,
     BalanceResult,
+    BillingMode,
+    CanAffordResult,
     CheckFeatureResult,
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
     GetUserPlanResult,
+    LeaseResult,
+    OperationPolicy,
     PricingConfigData,
     RefundResult,
+    ReleaseResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -61,18 +70,53 @@ from ducto.interface.models import (
 from ducto.metrics import UsageMetrics
 
 
-class InsufficientCreditsError(Exception):
+class CreditError(Exception):
+    """Coherent base for ducto credit-domain errors raised by the manager.
+
+    Lets callers ``except CreditError`` to catch any admission/settle failure
+    (interface plan §3 / M2), while still distinguishing specific subclasses.
+    """
+
+
+class InsufficientCreditsError(CreditError):
     """Raised when a user does not have enough credits for an operation."""
 
 
-class PricingNotLoadedError(Exception):
+class PricingNotLoadedError(CreditError):
     """Raised when ``deduct()`` is called before pricing is loaded."""
 
+
+class ConcurrencyLimitError(CreditError):
+    """Raised when a ``reserve`` would exceed an operation's ``max_concurrent`` leases."""
+
+
+class FeatureNotEntitledError(CreditError):
+    """Raised when an operation requires a plan feature the user does not have."""
+
+
+class LeaseExpiredError(CreditError):
+    """Raised when settling/renewing a lease whose TTL has already elapsed."""
+
+
+class LeaseNotFoundError(CreditError):
+    """Raised when a lease id does not exist, belongs to another user, or was released."""
+
+
+logger = logging.getLogger(__name__)
 
 #: Default ``low_balance`` threshold = this multiple of the engine's
 #: ``min_balance`` (contract §6 / M18). Override via the ``CreditManager``
 #: ``low_balance_threshold`` constructor argument.
 DEFAULT_LOW_BALANCE_MULTIPLIER = Decimal(2)
+
+#: Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
+#: Long batch/agentic jobs call :meth:`CreditManager.renew` before this elapses.
+DEFAULT_LEASE_TTL_SECONDS = 600
+
+#: Built-in financial-safety presets (interface plan §2). ``strict_prepaid`` keeps
+#: the floor ``>= 0`` (structural zero debt); ``overdraft`` permits a negative floor
+#: and bills the full actual cost at settle.
+POLICY_PRESETS = frozenset({"strict_prepaid", "overdraft"})
 
 
 class CreditManager:
@@ -100,11 +144,35 @@ class CreditManager:
         engine: PricingEngine | None = None,
         emitter: CreditEventEmitter | None = None,
         low_balance_threshold: Decimal | None = None,
+        *,
+        policy: str = "strict_prepaid",
+        overdraft_floor: Decimal | None = None,
+        max_concurrent: int | None = None,
+        low_balance_thresholds: list[Decimal] | None = None,
+        on_low_balance: Callable[[CreditEvent], None] | None = None,
+        default_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     ) -> None:
+        if policy not in POLICY_PRESETS:
+            raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
         self._store = store
         self._engine = engine
         self._emitter = emitter
         self._low_balance_threshold = low_balance_threshold
+        # Financial-safety policy (interface plan §1/§2). ``policy`` is the preset
+        # default used for planless users; per-plan / per-call policy layers on top.
+        self._policy = policy
+        self._overdraft_floor = Decimal(overdraft_floor) if overdraft_floor is not None else None
+        self._default_max_concurrent = max_concurrent
+        self._default_ttl = default_ttl_seconds
+        # Multi-level low_balance thresholds (interface plan §6), sorted high→low.
+        self._low_balance_thresholds = (
+            sorted((Decimal(t) for t in low_balance_thresholds), reverse=True) if low_balance_thresholds else None
+        )
+        self._on_low_balance = on_low_balance
+        # Edge-trigger state: per-user set of thresholds currently breached ("below").
+        # A level re-arms only after the balance climbs back above it (a top-up).
+        self._lb_below: dict[str, set[Decimal]] = {}
+        self._lb_lock = threading.RLock()
 
     def _emit(self, type_: str, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
@@ -198,6 +266,14 @@ class CreditManager:
                 "type": tx_type,
             },
         )
+        # Re-arm multi-level low_balance: any level the topped-up balance is now back
+        # above can fire again on the next descent (interface plan §6).
+        if self._low_balance_thresholds:
+            with self._lb_lock:
+                below = self._lb_below.setdefault(user_id, set())
+                for t in self._low_balance_thresholds:
+                    if result.new_balance > t:
+                        below.discard(t)
         return result
 
     # -- Plan management ------------------------------------------------
@@ -260,6 +336,387 @@ class CreditManager:
         else:
             actual = self._engine.min_balance if self._engine else Decimal(5)
         return self._store.reserve_credits(user_id, Decimal(amount), operation_type, metadata, actual)
+
+    # ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
+
+    def _preset_policy(self) -> OperationPolicy:
+        """The default :class:`OperationPolicy` from the constructor preset (§2)."""
+        if self._policy == "overdraft":
+            return OperationPolicy(
+                billing_mode="overdraft",
+                max_concurrent=self._default_max_concurrent,
+                overdraft_floor=self._overdraft_floor if self._overdraft_floor is not None else Decimal(0),
+            )
+        return OperationPolicy(
+            billing_mode="strict",
+            max_concurrent=self._default_max_concurrent,
+            overdraft_floor=None,
+        )
+
+    def _resolve_policy(
+        self,
+        user_id: str,
+        operation_type: str,
+        billing_mode_override: BillingMode | None = None,
+    ) -> OperationPolicy:
+        """Resolve the effective policy: explicit arg → per-op → plan → preset (§1).
+
+        A **planless** user (``plan_id`` is ``None``) always gets the constructor
+        preset, never silently unlimited (resolves M1). A user *with* a plan gets
+        the plan default, then any ``per_operation`` override, then the explicit
+        per-call ``billing_mode``.
+        """
+        policy = self._preset_policy()
+
+        plan: GetUserPlanResult | None
+        try:
+            plan = self._store.get_user_plan(user_id)
+        except Exception:  # pragma: no cover - store outage shouldn't crash admission
+            plan = None
+
+        if plan is not None and plan.plan_id:
+            policy = OperationPolicy(
+                billing_mode=plan.default_billing_mode,
+                max_concurrent=plan.max_concurrent if plan.max_concurrent is not None else policy.max_concurrent,
+                overdraft_floor=plan.overdraft_floor if plan.overdraft_floor is not None else policy.overdraft_floor,
+            )
+            op = (plan.per_operation or {}).get(operation_type)
+            if op is not None:
+                policy = OperationPolicy(
+                    billing_mode=op.billing_mode,
+                    max_concurrent=op.max_concurrent if op.max_concurrent is not None else policy.max_concurrent,
+                    overdraft_floor=op.overdraft_floor if op.overdraft_floor is not None else policy.overdraft_floor,
+                )
+
+        if billing_mode_override is not None:
+            policy = policy.model_copy(update={"billing_mode": billing_mode_override})
+        return policy
+
+    def _resolve_floor(self, policy: OperationPolicy) -> Decimal:
+        """Admission floor for a policy: ``overdraft_floor`` (≤0) or ``min_balance`` (≥0)."""
+        if policy.billing_mode == "overdraft":
+            return policy.overdraft_floor if policy.overdraft_floor is not None else Decimal(0)
+        return self._engine.min_balance if self._engine else Decimal(5)
+
+    def _cost_of(self, metrics_or_amount: UsageMetrics | Decimal | int) -> tuple[Decimal, str | None]:
+        """Compute the credit cost and model from metrics, or pass a raw amount.
+
+        For :class:`UsageMetrics` the cost is ``engine.calculate(...).total`` (exact
+        ``Decimal``, no truncation); a raw amount is used as-is with no model.
+        """
+        if isinstance(metrics_or_amount, UsageMetrics):
+            if not self._engine:
+                raise PricingNotLoadedError(
+                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
+                )
+            breakdown = self._engine.calculate(metrics_or_amount)
+            return breakdown.total, metrics_or_amount.model
+        return Decimal(metrics_or_amount), None
+
+    def _raise_lease_error(self, error: str, user_id: str, amount: Decimal) -> None:
+        """Map a store business code to the coherent typed exception (M2)."""
+        if error == "concurrency_limit":
+            raise ConcurrencyLimitError(f"Concurrency limit reached. User={user_id}")
+        if error == "cap_reached":
+            raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={amount}")
+        if error == "feature_not_entitled":
+            raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
+        if error == "insufficient_credits":
+            raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={amount}")
+        if error == "lease_expired":
+            raise LeaseExpiredError(f"Lease expired. User={user_id}")
+        if error in ("lease_not_found", "not_found"):
+            raise LeaseNotFoundError(f"Lease not found. User={user_id}")
+        if error == "invalid_amount":
+            raise ValueError(f"Invalid amount: {amount}")
+        raise CreditError(f"Operation failed: {error}. User={user_id}")
+
+    def reserve(
+        self,
+        user_id: str,
+        metrics_or_amount: UsageMetrics | Decimal | int,
+        *,
+        operation_type: str = "usage",
+        billing_mode: BillingMode | None = None,
+        required_feature: str | None = None,
+        ttl: int | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> LeaseResult:
+        """Atomically acquire a lease — the only admission control (D4).
+
+        Resolves the effective policy, enforces ``required_feature``, sizes the hold
+        from ``metrics_or_amount`` (worst-case in strict, estimate in overdraft — the
+        caller chooses what to pass), and calls the store's atomic ``create_lease``.
+        On any business failure raises the coherent typed exception; on success emits
+        ``credits.reserved`` and returns the :class:`LeaseResult`.
+        """
+        if required_feature is not None:
+            check = self._store.check_feature(user_id, required_feature)
+            if not check.has_feature:
+                raise FeatureNotEntitledError(f"Feature {required_feature!r} not entitled. User={user_id}")
+
+        policy = self._resolve_policy(user_id, operation_type, billing_mode)
+        floor = self._resolve_floor(policy)
+        amount, model = self._cost_of(metrics_or_amount)
+        ttl_seconds = ttl if ttl is not None else self._default_ttl
+
+        result = self._store.create_lease(
+            user_id,
+            amount,
+            operation_type,
+            billing_mode=policy.billing_mode,
+            floor=floor,
+            max_concurrent=policy.max_concurrent,
+            ttl_seconds=ttl_seconds,
+            model=model,
+            overdraft_floor=policy.overdraft_floor,
+            metadata=metadata,
+        )
+
+        if result.error:
+            self._emit(
+                "credits.deduct_failed",
+                user_id,
+                {"error": result.error, "amount": amount, "stage": "reserve", "operation_type": operation_type},
+            )
+            self._raise_lease_error(result.error, user_id, amount)
+
+        self._emit(
+            "credits.reserved",
+            user_id,
+            {
+                "lease_id": result.lease_id,
+                "amount": result.amount,
+                "available": result.available,
+                "billing_mode": result.billing_mode,
+                "operation_type": operation_type,
+                "expires_at": result.expires_at,
+            },
+        )
+        return result
+
+    def settle(
+        self,
+        user_id: str,
+        lease_id: str,
+        metrics_or_amount: UsageMetrics | Decimal | int,
+        *,
+        idempotency_key: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        """Charge the ACTUAL cost against a lease and finalize it (D5).
+
+        De-clamped: bills the full actual cost even if it exceeds the lease hold
+        (overdraft). Never blocks on floor/cap at settle — a cap breach surfaces as a
+        non-blocking ``credits.cap_warning``/``credits.cap_reached`` signal. Emits
+        ``credits.deducted``, then multi-level ``credits.low_balance`` and a
+        ``credits.overdraft`` signal if the balance went negative.
+        """
+        amount, model = self._cost_of(metrics_or_amount)
+
+        if isinstance(metrics_or_amount, UsageMetrics):
+            tx_meta = self._build_tx_metadata(metrics_or_amount, amount, idempotency_key, metadata)
+        else:
+            base: dict[str, Any] = metadata.model_dump(exclude_none=True) if metadata else {}
+            if idempotency_key:
+                base["idempotency_key"] = idempotency_key
+            tx_meta = CreditMetadata(**base)
+
+        result = self._store.settle_lease(
+            user_id,
+            lease_id,
+            amount,
+            idempotency_key=idempotency_key,
+            min_balance=self._engine.min_balance if self._engine else Decimal(0),
+            model=model,
+            metadata=tx_meta,
+        )
+
+        if result.error:
+            self._emit(
+                "credits.deduct_failed",
+                user_id,
+                {"error": result.error, "amount": amount, "stage": "settle", "lease_id": lease_id},
+            )
+            if result.error == "lease_expired":
+                self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
+            self._raise_lease_error(result.error, user_id, amount)
+
+        self._emit(
+            "credits.deducted",
+            user_id,
+            {
+                "transaction_id": result.transaction_id,
+                "amount": result.amount,
+                "allowance_consumed": result.allowance_consumed,
+                "balance_after": result.balance_after,
+                "model": model,
+                "lease_id": lease_id,
+                "idempotent": result.idempotent,
+            },
+        )
+
+        # Cap signal: 'deny' breaching at settle is non-blocking (work is done) and
+        # re-emitted as cap_reached; warn/notify as cap_warning (interface plan §7).
+        if result.cap_warning == "deny":
+            self._emit("credits.cap_reached", user_id, {"amount": result.amount, "model": model, "blocking": False})
+        elif result.cap_warning in ("warn", "notify"):
+            self._emit(
+                "credits.cap_warning",
+                user_id,
+                {
+                    "balance_after": result.balance_after,
+                    "amount": result.amount,
+                    "model": model,
+                    "action": result.cap_warning,
+                },
+            )
+
+        self._post_charge_signals(user_id, result)
+        return result
+
+    def release(self, user_id: str, lease_id: str) -> ReleaseResult:
+        """Release a lease without charging (work failed/aborted) — idempotent (H1)."""
+        result = self._store.release_lease(user_id, lease_id)
+        if result.released:
+            self._emit(
+                "credits.reservation_released",
+                user_id,
+                {"lease_id": lease_id, "reason": result.reason},
+            )
+        return result
+
+    def renew(self, user_id: str, lease_id: str, ttl: int | None = None) -> LeaseResult:
+        """Extend a lease's TTL for long batch/agentic jobs (B4)."""
+        ttl_seconds = ttl if ttl is not None else self._default_ttl
+        result = self._store.renew_lease(user_id, lease_id, ttl_seconds)
+        if result.error:
+            if result.error == "lease_expired":
+                self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
+            self._raise_lease_error(result.error, user_id, Decimal(0))
+        return result
+
+    def can_afford(
+        self,
+        user_id: str,
+        metrics_or_amount: UsageMetrics | Decimal | int,
+        *,
+        required_feature: str | None = None,
+        billing_mode: BillingMode | None = None,
+        operation_type: str = "usage",
+    ) -> CanAffordResult:
+        """Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+
+        Never use this as an admission gate; only ``reserve`` is authoritative.
+        """
+        worst_case, _ = self._cost_of(metrics_or_amount)
+        avail = self._store.get_available(user_id)
+        policy = self._resolve_policy(user_id, operation_type, billing_mode)
+        floor = self._resolve_floor(policy)
+
+        affordable = True
+        reason: str | None = None
+        if required_feature is not None:
+            check = self._store.check_feature(user_id, required_feature)
+            if not check.has_feature:
+                affordable = False
+                reason = "feature_not_entitled"
+        if affordable and (avail.available - worst_case) < floor:
+            affordable = False
+            reason = "insufficient_credits"
+
+        return CanAffordResult(
+            affordable=affordable,
+            available=avail.available,
+            worst_case=worst_case,
+            reason=reason,
+        )
+
+    def get_available(self, user_id: str) -> AvailableResult:
+        """Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3)."""
+        return self._store.get_available(user_id)
+
+    def run_billed(
+        self,
+        user_id: str,
+        *,
+        estimate: UsageMetrics | Decimal | int,
+        do_work: Callable[[], tuple[Any, UsageMetrics | Decimal | int]],
+        operation_type: str = "usage",
+        billing_mode: BillingMode | None = None,
+        required_feature: str | None = None,
+        idempotency_key: str | None = None,
+        ttl: int | None = None,
+    ) -> dict[str, Any]:
+        """One-call shortcut wiring reserve → do_work → settle (interface plan §4).
+
+        ``do_work`` runs the operation and returns ``(result, actual)`` where
+        ``actual`` is the real usage metrics (or amount) to settle. On any exception
+        from ``do_work`` the lease is released and the error re-raised. For long jobs
+        ``do_work`` may call :meth:`renew`. A crash between reserve and settle is
+        covered by the lease TTL (and the store's reaper).
+        """
+        lease = self.reserve(
+            user_id,
+            estimate,
+            operation_type=operation_type,
+            billing_mode=billing_mode,
+            required_feature=required_feature,
+            ttl=ttl,
+        )
+        try:
+            work_result, actual = do_work()
+        except Exception:
+            self.release(user_id, lease.lease_id)
+            raise
+
+        deduction = self.settle(user_id, lease.lease_id, actual, idempotency_key=idempotency_key)
+        return {"result": work_result, "deduction": deduction}
+
+    # ── Low-balance / overdraft signals (interface plan §6) ─────────────
+
+    def _post_charge_signals(self, user_id: str, result: DeductionResult) -> None:
+        """Emit overdraft + multi-level low_balance after a balance-decreasing op."""
+        if result.balance_after < 0:
+            self._emit("credits.overdraft", user_id, {"balance": result.balance_after, "amount": result.amount})
+        if result.idempotent:
+            return
+        balance_after = result.balance_after
+        balance_before = balance_after + result.amount
+        self._emit_low_balance(user_id, balance_before, balance_after)
+
+    def _emit_low_balance(self, user_id: str, balance_before: Decimal, balance_after: Decimal) -> None:
+        """Edge-triggered low_balance: multi-level if configured, else single (§6)."""
+        if self._low_balance_thresholds:
+            with self._lb_lock:
+                below = self._lb_below.setdefault(user_id, set())
+                newly_crossed: list[Decimal] = []
+                for t in self._low_balance_thresholds:  # high → low
+                    if balance_after <= t:
+                        if t not in below:
+                            below.add(t)
+                            newly_crossed.append(t)
+                    else:
+                        below.discard(t)
+                fire_level = min(newly_crossed) if newly_crossed else None
+            if fire_level is not None:
+                self._fire_low_balance(user_id, balance_after, fire_level)
+            return
+
+        threshold = self._resolve_low_balance_threshold()
+        if balance_before > threshold >= balance_after:
+            self._fire_low_balance(user_id, balance_after, threshold)
+
+    def _fire_low_balance(self, user_id: str, balance: Decimal, threshold: Decimal) -> None:
+        """Emit ``credits.low_balance`` and invoke the non-blocking ``on_low_balance``."""
+        data = {"balance": balance, "threshold": threshold}
+        self._emit("credits.low_balance", user_id, data)
+        if self._on_low_balance is not None:
+            event = CreditEvent(type="credits.low_balance", timestamp=datetime.now(UTC), user_id=user_id, data=data)
+            try:
+                self._on_low_balance(event)
+            except Exception:  # never block/break the op on a handler failure (§6/H4)
+                logger.exception("on_low_balance handler failed for user %s", user_id)
 
     def _build_tx_metadata(
         self,

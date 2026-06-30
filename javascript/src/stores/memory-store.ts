@@ -7,7 +7,9 @@ import type {
   AddTeamMemberResult,
   AggregateStats,
   AllowanceResult,
+  AvailableResult,
   BalanceResult,
+  BillingMode,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -16,6 +18,7 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   GetUserPlanResult,
+  LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
   PaginatedTransactions,
@@ -23,6 +26,7 @@ import type {
   PricingConfigData,
   PricingConfigResult,
   RefundResult,
+  ReleaseResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -35,7 +39,7 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -60,6 +64,15 @@ interface TransactionRecord {
   createdAt: Date;
 }
 
+/**
+ * Internal reservation/lease record.
+ *
+ * The legacy ``reserveCredits``/``deductCredits`` path uses the base fields and
+ * keeps ``status='active'``. The lease lifecycle (``createLease``/``settleLease``/
+ * ``releaseLease``/``renewLease``) additionally drives ``status`` through
+ * ``active → settled | released | expired`` and records the resolved
+ * ``billingMode``/``overdraftFloor`` plus the settling transaction id.
+ */
 interface ReservationRecord {
   id: string;
   userId: string;
@@ -67,10 +80,17 @@ interface ReservationRecord {
   operationType: string;
   metadata?: Record<string, unknown>;
   expiresAt: Date;
+  status: string;
+  billingMode: BillingMode;
+  overdraftFloor: Decimal | null;
+  settleTxId: string | null;
 }
 
 /** Default reservation TTL (seconds) — matches the SQL `credit_reservations` default. */
 const RESERVATION_TTL_MS = 10 * 60 * 1000;
+
+/** Default lease TTL (seconds) for the lease lifecycle (interface plan §3). */
+const DEFAULT_LEASE_TTL_SECONDS = 600;
 
 /**
  * Credit store backed by in-memory maps.
@@ -130,7 +150,9 @@ export class MemoryStore implements CreditStore {
   /** Billing-period key (UTC month start, YYYY-MM-DD) for the current clock. */
   private billingPeriod(): string {
     const now = this.now();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
+      .toISOString()
+      .slice(0, 10);
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
@@ -274,6 +296,10 @@ export class MemoryStore implements CreditStore {
       operationType,
       metadata: metadata ? this.cleanMetadata(metadata) : undefined,
       expiresAt: new Date(this.now().getTime() + RESERVATION_TTL_MS),
+      status: "active",
+      billingMode: "strict",
+      overdraftFloor: null,
+      settleTxId: null,
     });
     return {
       reservationId: rid,
@@ -425,7 +451,8 @@ export class MemoryStore implements CreditStore {
           transactionId: existing.id,
           userId,
           amount: existing.amount.abs(),
-          allowanceConsumed: consumed instanceof Decimal ? consumed : new Decimal(String(consumed ?? 0)),
+          allowanceConsumed:
+            consumed instanceof Decimal ? consumed : new Decimal(String(consumed ?? 0)),
           balanceAfter: this.balance(userId),
           idempotent: true,
           capWarning: null,
@@ -531,6 +558,413 @@ export class MemoryStore implements CreditStore {
     };
   }
 
+  // ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+  /** Active, unexpired holds for a user (synchronous — no awaits in callers). */
+  private activeLeases(userId: string, operationType?: string): ReservationRecord[] {
+    const now = this.now();
+    const out: ReservationRecord[] = [];
+    for (const r of this.reservations.values()) {
+      if (
+        r.userId === userId &&
+        r.status === "active" &&
+        r.expiresAt > now &&
+        (operationType === undefined || r.operationType === operationType)
+      ) {
+        out.push(r);
+      }
+    }
+    return out;
+  }
+
+  async createLease(
+    userId: string,
+    amount: Decimal,
+    operationType: string,
+    options?: CreateLeaseOptions,
+  ): Promise<LeaseResult> {
+    const billingMode = options?.billingMode ?? "strict";
+    const floor = options?.floor ?? ZERO;
+    const maxConcurrent = options?.maxConcurrent ?? null;
+    const ttlSeconds = options?.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS;
+    const model = options?.model ?? null;
+    const overdraftFloor = options?.overdraftFloor ?? null;
+    const metadata = options?.metadata ?? null;
+
+    // ── critical section (synchronous; no awaits) ──
+    if (!amount.isFinite() || amount.lte(0)) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode,
+        expiresAt: "",
+        error: "invalid_amount",
+      };
+    }
+
+    // Ensure a balance row exists (overdraft admits brand-new users at 0).
+    const balance = this.balance(userId);
+    if (!this.balances.has(userId)) this.balances.set(userId, balance);
+
+    // (2) Concurrency: count active leases for this operation type.
+    if (
+      maxConcurrent !== null &&
+      this.activeLeases(userId, operationType).length >= maxConcurrent
+    ) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode,
+        expiresAt: "",
+        error: "concurrency_limit",
+      };
+    }
+
+    // (3) Deny spend cap at admission: a blocked user can't even start.
+    const userCaps = this.spendCaps.filter(
+      (c) => c.userId === userId && (c.model == null || c.model === model),
+    );
+    for (const cap of userCaps) {
+      if (cap.action !== "deny") continue;
+      const windowStart = this.capWindowStart(cap.type);
+      const spend = this.spendInWindow(userId, windowStart, cap.model);
+      if (spend.plus(amount).gt(cap.limit)) {
+        return {
+          leaseId: "",
+          userId,
+          amount: ZERO,
+          available: ZERO,
+          reservedTotal: ZERO,
+          billingMode,
+          expiresAt: "",
+          error: "cap_reached",
+        };
+      }
+    }
+
+    // (4) available = balance − Σ active holds; reject if floor breached.
+    let reservedTotal = ZERO;
+    for (const r of this.activeLeases(userId)) reservedTotal = reservedTotal.plus(r.amount);
+    const available = balance.minus(reservedTotal);
+    if (available.minus(amount).lt(floor)) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available,
+        reservedTotal,
+        billingMode,
+        expiresAt: "",
+        error: "insufficient_credits",
+      };
+    }
+
+    // (5) Insert the active lease.
+    const lid = randomUUID();
+    const expiresAt = new Date(this.now().getTime() + ttlSeconds * 1000);
+    this.reservations.set(lid, {
+      id: lid,
+      userId,
+      amount,
+      operationType,
+      metadata: metadata ? this.cleanMetadata(metadata) : undefined,
+      expiresAt,
+      status: "active",
+      billingMode,
+      overdraftFloor,
+      settleTxId: null,
+    });
+
+    return {
+      leaseId: lid,
+      userId,
+      amount,
+      available: available.minus(amount),
+      reservedTotal: reservedTotal.plus(amount),
+      billingMode,
+      expiresAt: expiresAt.toISOString(),
+    };
+  }
+
+  /** Build an idempotent-replay `DeductionResult` from a ledger row (synchronous). */
+  private replayDeduction(
+    tx: TransactionRecord,
+    userId: string,
+    balance: Decimal,
+  ): DeductionResult {
+    const consumed = tx.metadata?.["allowanceConsumed"];
+    return {
+      transactionId: tx.id,
+      userId,
+      amount: tx.amount.abs(),
+      allowanceConsumed:
+        consumed instanceof Decimal ? consumed : new Decimal(String(consumed ?? 0)),
+      balanceAfter: balance,
+      idempotent: true,
+      capWarning: null,
+    };
+  }
+
+  /**
+   * Validate a lease for settle. Returns a short-circuit result, or `null` to
+   * proceed (synchronous):
+   * - missing / other-user / released → ``lease_not_found``
+   * - already settled → idempotent replay of the original charge
+   * - TTL elapsed → mark ``expired`` and return ``lease_expired``
+   */
+  private settleLeaseState(
+    lease: ReservationRecord | undefined,
+    userId: string,
+    balance: Decimal,
+  ): DeductionResult | null {
+    const now = this.now();
+    if (!lease || lease.userId !== userId || lease.status === "released") {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: balance,
+        idempotent: false,
+        capWarning: null,
+        error: "lease_not_found",
+      };
+    }
+    if (lease.status === "settled") {
+      if (lease.settleTxId) {
+        const tx = this.transactions.find((t) => t.id === lease.settleTxId);
+        if (tx) return this.replayDeduction(tx, userId, balance);
+      }
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: balance,
+        idempotent: true,
+        capWarning: null,
+      };
+    }
+    if (lease.status === "expired" || lease.expiresAt <= now) {
+      lease.status = "expired";
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: balance,
+        idempotent: false,
+        capWarning: null,
+        error: "lease_expired",
+      };
+    }
+    return null;
+  }
+
+  async settleLease(
+    userId: string,
+    leaseId: string,
+    amount: Decimal,
+    options?: SettleLeaseOptions,
+  ): Promise<DeductionResult> {
+    const idempotencyKey = options?.idempotencyKey ?? null;
+    const model = options?.model ?? null;
+    const metadata = options?.metadata ?? null;
+
+    // ── critical section (synchronous; no awaits) ──
+    if (!amount.isFinite() || amount.lt(0)) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: this.balance(userId),
+        idempotent: false,
+        capWarning: null,
+        error: "invalid_amount",
+      };
+    }
+
+    const balance = this.balance(userId);
+
+    // Idempotency replay (user-scoped).
+    if (idempotencyKey) {
+      const existing = this.transactions.find(
+        (t) => t.userId === userId && t.metadata?.["idempotencyKey"] === idempotencyKey,
+      );
+      if (existing) return this.replayDeduction(existing, userId, balance);
+    }
+
+    const lease = this.reservations.get(leaseId);
+    const precheck = this.settleLeaseState(lease, userId, balance);
+    if (precheck !== null) return precheck;
+    // settleLeaseState returns early on a missing lease, so `lease` is defined.
+    const activeLease = lease as ReservationRecord;
+
+    // Active & unexpired → settle. De-clamped: charge the ACTUAL cost (D5), never
+    // clamp to the lease hold.
+
+    // Zero-cost: release the lease without charging (resolves M3).
+    if (amount.eq(0)) {
+      activeLease.status = "settled";
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: balance,
+        idempotent: false,
+        capWarning: null,
+      };
+    }
+
+    // Allowance consume on the actual cost.
+    let consume = ZERO;
+    const planId = this.userPlanMap.get(userId);
+    const planDef = planId ? this.planDefinitions.get(planId) : undefined;
+    if (planId && planDef) {
+      const billingPeriod = this.billingPeriod();
+      let used = ZERO;
+      for (const w of this.usageWindows) {
+        if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
+          used = used.plus(w.usage);
+        }
+      }
+      const remaining = Decimal.max(ZERO, planDef.freeAllowance.minus(used));
+      consume = Decimal.min(remaining, amount);
+    }
+    const net = amount.minus(consume);
+
+    // Spend cap is ADVISORY at settle (work is done): record the strongest
+    // breaching action, never block (interface plan §7). 'deny' surfaces as a
+    // non-blocking signal the manager re-emits as credits.cap_reached.
+    let capWarning: string | null = null;
+    const userCaps = this.spendCaps
+      .filter((c) => c.userId === userId && (c.model == null || c.model === model))
+      .sort((a, b) => (a.action === "deny" ? 0 : 1) - (b.action === "deny" ? 0 : 1));
+    for (const cap of userCaps) {
+      const windowStart = this.capWindowStart(cap.type);
+      const spend = this.spendInWindow(userId, windowStart, cap.model);
+      if (
+        spend.plus(net).gt(cap.limit) &&
+        (capWarning === null || (capWarning !== "deny" && cap.action === "deny"))
+      ) {
+        capWarning = cap.action;
+      }
+    }
+
+    if (consume.gt(0) && planId) {
+      this.incrementUsageWindowSync(userId, planId, consume);
+    }
+
+    this.balances.set(userId, balance.minus(net));
+
+    const txMeta = metadata ? this.cleanMetadata(metadata) : {};
+    if (model != null) txMeta["model"] = model;
+    if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
+    txMeta["allowanceConsumed"] = consume;
+
+    const txId = randomUUID();
+    this.transactions.push({
+      id: txId,
+      userId,
+      amount: net.negated(),
+      type: "usage",
+      metadata: txMeta,
+      createdAt: this.now(),
+    });
+
+    activeLease.status = "settled";
+    activeLease.settleTxId = txId;
+
+    return {
+      transactionId: txId,
+      userId,
+      amount: net,
+      allowanceConsumed: consume,
+      balanceAfter: balance.minus(net),
+      idempotent: false,
+      capWarning,
+    };
+  }
+
+  async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
+    const lease = this.reservations.get(leaseId);
+    if (!lease || lease.userId !== userId) {
+      return { leaseId, userId, released: false, reason: "not_found" };
+    }
+    if (lease.status === "settled") {
+      return { leaseId, userId, released: false, reason: "already_settled" };
+    }
+    if (lease.status === "released") {
+      return { leaseId, userId, released: false, reason: "already_released" };
+    }
+    lease.status = "released";
+    return { leaseId, userId, released: true, reason: "released" };
+  }
+
+  async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult> {
+    const now = this.now();
+    const lease = this.reservations.get(leaseId);
+    if (
+      !lease ||
+      lease.userId !== userId ||
+      lease.status === "released" ||
+      lease.status === "settled"
+    ) {
+      return {
+        leaseId,
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode: "strict",
+        expiresAt: "",
+        error: "lease_not_found",
+      };
+    }
+    if (lease.status === "expired" || lease.expiresAt <= now) {
+      lease.status = "expired";
+      return {
+        leaseId,
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode: lease.billingMode,
+        expiresAt: "",
+        error: "lease_expired",
+      };
+    }
+
+    lease.expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
+    let reservedTotal = ZERO;
+    for (const r of this.activeLeases(userId)) reservedTotal = reservedTotal.plus(r.amount);
+    const balance = this.balance(userId);
+    return {
+      leaseId,
+      userId,
+      amount: lease.amount,
+      available: balance.minus(reservedTotal),
+      reservedTotal,
+      billingMode: lease.billingMode,
+      expiresAt: lease.expiresAt.toISOString(),
+    };
+  }
+
+  async getAvailable(userId: string): Promise<AvailableResult> {
+    const balance = this.balance(userId);
+    let reserved = ZERO;
+    for (const r of this.activeLeases(userId)) reserved = reserved.plus(r.amount);
+    return { userId, balance, reserved, available: balance.minus(reserved) };
+  }
+
   async getActivePricing(): Promise<PricingConfigResult | null> {
     if (!this.pricingConfig) return null;
     return {
@@ -564,6 +998,10 @@ export class MemoryStore implements CreditStore {
       planName: planDef?.name ?? null,
       freeAllowance: planDef?.freeAllowance ?? ZERO,
       features: (planDef?.features as Record<string, unknown>) ?? {},
+      defaultBillingMode: planDef?.defaultBillingMode ?? "strict",
+      perOperation: (planDef?.perOperation as GetUserPlanResult["perOperation"]) ?? {},
+      maxConcurrent: planDef?.maxConcurrent ?? null,
+      overdraftFloor: planDef?.overdraftFloor ?? null,
     };
   }
 
@@ -652,10 +1090,7 @@ export class MemoryStore implements CreditStore {
     // Only a usage/team_usage debit (negative amount) is refundable. Anything
     // else (purchase/refund/adjustment/bonus) has zero refundable amount, so any
     // refund over-refunds (parity with SQL refund RPC).
-    if (
-      (origTx.type !== "usage" && origTx.type !== "team_usage") ||
-      origTx.amount.gte(0)
-    ) {
+    if ((origTx.type !== "usage" && origTx.type !== "team_usage") || origTx.amount.gte(0)) {
       return {
         refundTransactionId: "",
         originalTransactionId: transactionId,

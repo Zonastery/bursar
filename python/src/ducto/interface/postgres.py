@@ -19,6 +19,7 @@ from ducto.interface.models import (
     AddTeamMemberResult,
     AggregateStatsRow,
     AllowanceResult,
+    AvailableResult,
     BalanceResult,
     CapCheckResult,
     CreateTeamResult,
@@ -26,10 +27,13 @@ from ducto.interface.models import (
     DailySpendRow,
     DeductionResult,
     GetUserPlanResult,
+    LeaseResult,
+    OperationPolicy,
     PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
+    ReleaseResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -338,6 +342,176 @@ class PostgresStore(CreditStore):
             idempotent=bool(result_dict.get("idempotent", False)),
         )
 
+    # ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+    def create_lease(
+        self,
+        user_id: str,
+        amount: Decimal,
+        operation_type: str,
+        *,
+        billing_mode: str = "strict",
+        floor: Decimal = Decimal(0),
+        max_concurrent: int | None = None,
+        ttl_seconds: int = 600,
+        model: str | None = None,
+        overdraft_floor: Decimal | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> LeaseResult:
+        amount = _dec(amount)
+        floor = _dec(floor)
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "create_lease",
+                    [
+                        user_id,
+                        amount,
+                        operation_type,
+                        billing_mode,
+                        floor,
+                        max_concurrent,
+                        ttl_seconds,
+                        model,
+                        str(overdraft_floor) if overdraft_floor is not None else None,
+                        json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
+                    ],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = row[0] if row and isinstance(row[0], dict) else {}
+        if not result:
+            return LeaseResult(lease_id="", user_id=user_id, error="no result")
+        if "error" in result:
+            return LeaseResult(
+                lease_id="",
+                user_id=user_id,
+                available=_dec(result.get("available")),
+                reserved_total=_dec(result.get("reserved")),
+                billing_mode=billing_mode,  # type: ignore[arg-type]
+                error=str(result["error"]),
+            )
+        return LeaseResult(
+            lease_id=str(result.get("lease_id", "")),
+            user_id=str(result.get("user_id", user_id)),
+            amount=_dec(result.get("amount")),
+            available=_dec(result.get("available")),
+            reserved_total=_dec(result.get("reserved")),
+            billing_mode=str(result.get("billing_mode", billing_mode)),  # type: ignore[arg-type]
+            expires_at=str(result.get("expires_at", "")),
+        )
+
+    def settle_lease(
+        self,
+        user_id: str,
+        lease_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        amount = _dec(amount)
+        min_balance = _dec(min_balance)
+        meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "settle_lease",
+                    [user_id, lease_id, amount, idempotency_key, min_balance, model, json.dumps(meta)],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = row[0] if row and isinstance(row[0], dict) else {}
+        if not result:
+            return DeductionResult(
+                transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
+            )
+        if "error" in result:
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                balance_after=_dec(result.get("balance_after")),
+                error=str(result["error"]),
+            )
+        return DeductionResult(
+            transaction_id=str(result.get("transaction_id", "")),
+            user_id=user_id,
+            amount=_dec(result.get("amount")),
+            allowance_consumed=_dec(result.get("allowance_consumed")),
+            balance_after=_dec(result.get("balance_after")),
+            idempotent=bool(result.get("idempotent", False)),
+            cap_warning=result.get("cap_warning") or None,
+        )
+
+    def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("release_lease", [user_id, lease_id])
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = row[0] if row and isinstance(row[0], dict) else {}
+        return ReleaseResult(
+            lease_id=lease_id,
+            user_id=user_id,
+            released=bool(result.get("released", False)),
+            reason=result.get("reason"),
+        )
+
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("renew_lease", [user_id, lease_id, ttl_seconds])
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = row[0] if row and isinstance(row[0], dict) else {}
+        if "error" in result:
+            return LeaseResult(lease_id=lease_id, user_id=user_id, error=str(result["error"]))
+        return LeaseResult(
+            lease_id=str(result.get("lease_id", lease_id)),
+            user_id=user_id,
+            amount=_dec(result.get("amount")),
+            available=_dec(result.get("available")),
+            reserved_total=_dec(result.get("reserved")),
+            billing_mode=str(result.get("billing_mode", "strict")),  # type: ignore[arg-type]
+            expires_at=str(result.get("expires_at", "")),
+        )
+
+    def get_available(self, user_id: str) -> AvailableResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("get_available_credits", [user_id])
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        result = row[0] if row and isinstance(row[0], dict) else {}
+        return AvailableResult(
+            user_id=user_id,
+            balance=_dec(result.get("balance")),
+            reserved=_dec(result.get("reserved")),
+            available=_dec(result.get("available")),
+        )
+
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
@@ -440,6 +614,14 @@ class PostgresStore(CreditStore):
             plan_name=result_dict.get("plan_name") or None,
             free_allowance=_dec(result_dict.get("free_allowance")),
             features=result_dict.get("features") or {},
+            default_billing_mode=str(result_dict.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            per_operation={
+                k: OperationPolicy.model_validate(v) for k, v in (result_dict.get("per_operation") or {}).items()
+            },
+            max_concurrent=result_dict.get("max_concurrent"),
+            overdraft_floor=_dec(result_dict["overdraft_floor"])
+            if result_dict.get("overdraft_floor") is not None
+            else None,
         )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:

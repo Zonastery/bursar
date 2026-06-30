@@ -6,10 +6,14 @@ export type { PricingConfig } from "./config.js";
 export { loadConfigFromDict } from "./config.js";
 export {
   CapReachedError,
+  ConcurrencyLimitError,
   ConfigError,
   ExpressionError,
+  FeatureNotEntitledError,
   ImportError,
   InsufficientCreditsError,
+  LeaseExpiredError,
+  LeaseNotFoundError,
   PricingNotLoadedError,
   RefundError,
   StoreError,
@@ -18,7 +22,14 @@ export { validateExpression, evaluateExpression } from "./expr.js";
 
 // Manager
 export { CreditManager } from "./manager.js";
-export type { CreditManagerOptions } from "./manager.js";
+export type {
+  CanAffordOptions,
+  CreditManagerOptions,
+  PolicyPreset,
+  ReserveOptions,
+  RunBilledOptions,
+  SettleOptions,
+} from "./manager.js";
 
 // Types
 export type {
@@ -26,7 +37,10 @@ export type {
   AddTeamMemberResult,
   AggregateStats,
   AllowanceResult,
+  AvailableResult,
   BalanceResult,
+  BillingMode,
+  CanAffordResult,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -35,10 +49,13 @@ export type {
   DeductionResult,
   DeductWithAllowanceOptions,
   GetUserPlanResult,
+  LeaseResult,
+  OperationPolicy,
   PlanDefinition,
   PricingConfigData,
   PricingConfigResult,
   RefundResult,
+  ReleaseResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -56,6 +73,9 @@ export type {
   TeamMember,
   TopUserRow,
 } from "./types.js";
+
+// Store options
+export type { CreateLeaseOptions, SettleLeaseOptions } from "./stores/credit-store.js";
 
 // Stores
 export type { CreditStore } from "./stores/credit-store.js";

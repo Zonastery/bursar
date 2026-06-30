@@ -16,6 +16,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+#: Billing mode for an operation. ``strict`` never lets the balance fall below
+#: the floor at admission (lease worst-case ⇒ zero debt); ``overdraft`` permits
+#: the balance to go negative down to a configured floor and always bills the
+#: full actual cost at settle (interface plan §1/D3/D5).
+BillingMode = Literal["strict", "overdraft"]
+
 # ── Metadata ──────────────────────────────────────────────────────────
 
 
@@ -93,6 +99,63 @@ class ReserveResult(BaseModel):
     error: str | None = None
 
 
+class LeaseResult(BaseModel):
+    """Result of acquiring (or renewing) a lease — the atomic admission hold.
+
+    A lease is the *only* admission control (interface plan §3/D4): it holds
+    ``amount`` against ``available = balance − Σ(active holds)`` under one lock so
+    concurrent operations see each other and ``max_concurrent`` is real. On failure
+    ``error`` carries a business code (``insufficient_credits``, ``concurrency_limit``,
+    ``cap_reached``, ``feature_not_entitled``, ``invalid_amount``, ``lease_not_found``,
+    ``lease_expired``, ``lease_released``) for the manager to map to a typed exception.
+    """
+
+    lease_id: str
+    user_id: str
+    amount: Decimal = Decimal(0)
+    available: Decimal = Decimal(0)
+    reserved_total: Decimal = Decimal(0)
+    billing_mode: BillingMode = "strict"
+    expires_at: str = ""
+    error: str | None = None
+
+
+class ReleaseResult(BaseModel):
+    """Result of releasing a lease without charging (interface plan §3).
+
+    Idempotent and safe on missing/already-finalized leases: ``released`` is
+    ``True`` only when this call transitioned an active/expired lease to released.
+    ``reason`` is one of ``released``, ``already_released``, ``already_settled``,
+    ``not_found`` — never a bare void (resolves H1).
+    """
+
+    lease_id: str
+    user_id: str
+    released: bool = False
+    reason: str | None = None
+
+
+class CanAffordResult(BaseModel):
+    """Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+
+    Never used for admission control; that is exclusively the lease (``reserve``).
+    """
+
+    affordable: bool = False
+    available: Decimal = Decimal(0)
+    worst_case: Decimal = Decimal(0)
+    reason: str | None = None
+
+
+class AvailableResult(BaseModel):
+    """Advisory available-balance read: ``available = balance − reserved`` (D4/H3)."""
+
+    user_id: str
+    balance: Decimal = Decimal(0)
+    reserved: Decimal = Decimal(0)
+    available: Decimal = Decimal(0)
+
+
 class DeductionResult(BaseModel):
     """Result of deducting credits after an operation completes.
 
@@ -148,14 +211,39 @@ class SetupResult(BaseModel):
 # ── Plan types ─────────────────────────────────────────────────────────
 
 
+class OperationPolicy(BaseModel):
+    """Per-operation financial-safety policy (interface plan §1).
+
+    Resolved per call as: explicit arg → ``PlanDefinition.per_operation[type]`` →
+    plan default → the manager's constructor preset. ``max_concurrent`` bounds the
+    number of simultaneously-active leases for an operation type; ``overdraft_floor``
+    (only meaningful when ``billing_mode == "overdraft"``) is the negative balance
+    floor admission is allowed down to.
+    """
+
+    billing_mode: BillingMode = "strict"
+    max_concurrent: int | None = None
+    overdraft_floor: Decimal | None = None
+
+
 class PlanDefinition(BaseModel):
-    """Definition of a subscription plan with free allowance and rate overrides."""
+    """Definition of a subscription plan with free allowance and rate overrides.
+
+    Beyond allowance/rates/features, a plan carries the **financial-safety policy**
+    (interface plan §1): a ``default_billing_mode`` for the whole plan, optional
+    ``per_operation`` overrides keyed by operation type, and plan-wide
+    ``max_concurrent`` / ``overdraft_floor`` defaults.
+    """
 
     id: str
     name: str
     free_allowance: Decimal = Field(default=Decimal(0), ge=0)
     rate_overrides: dict[str, str] | None = None
     features: dict[str, Any] | None = None
+    default_billing_mode: BillingMode = "strict"
+    per_operation: dict[str, OperationPolicy] | None = None
+    max_concurrent: int | None = None
+    overdraft_floor: Decimal | None = None
 
 
 class AllowanceResult(BaseModel):
@@ -168,13 +256,22 @@ class AllowanceResult(BaseModel):
 
 
 class GetUserPlanResult(BaseModel):
-    """Result of fetching a user's current plan."""
+    """Result of fetching a user's current plan.
+
+    Carries the plan's financial-safety policy (``default_billing_mode``,
+    ``per_operation``, ``max_concurrent``, ``overdraft_floor``) so the manager
+    can resolve admission policy without a second round-trip (interface plan §1).
+    """
 
     user_id: str
     plan_id: str | None = None
     plan_name: str | None = None
     free_allowance: Decimal = Decimal(0)
     features: dict[str, Any] = Field(default_factory=dict)
+    default_billing_mode: BillingMode = "strict"
+    per_operation: dict[str, OperationPolicy] = Field(default_factory=dict)
+    max_concurrent: int | None = None
+    overdraft_floor: Decimal | None = None
 
 
 class CheckFeatureResult(BaseModel):

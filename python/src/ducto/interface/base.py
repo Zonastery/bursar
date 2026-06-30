@@ -16,6 +16,7 @@ from ducto.interface.models import (
     AddTeamMemberResult,
     AggregateStatsRow,
     AllowanceResult,
+    AvailableResult,
     BalanceResult,
     CapCheckResult,
     CheckFeatureResult,
@@ -24,10 +25,12 @@ from ducto.interface.models import (
     DailySpendRow,
     DeductionResult,
     GetUserPlanResult,
+    LeaseResult,
     PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
+    ReleaseResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -185,6 +188,102 @@ class CreditStore(ABC):
 
         If ``idempotency_key`` is provided and a matching transaction already
         exists, returns the existing result (idempotent replay).
+        """
+        ...
+
+    # ── Lease lifecycle (atomic admission) ─────────────────────────────
+    #
+    # The lease is the canonical admission primitive (interface plan §3/D4).
+    # ``reserve``/``settle``/``release``/``renew`` on the manager map onto these.
+    # Leases reuse the credit_reservations table/records extended with a status
+    # (active → settled | released | expired), a billing mode, and an overdraft
+    # floor. ``available = balance − Σ(amount WHERE status='active' AND unexpired)``.
+
+    @abstractmethod
+    def create_lease(
+        self,
+        user_id: str,
+        amount: Decimal,
+        operation_type: str,
+        *,
+        billing_mode: str = "strict",
+        floor: Decimal = Decimal(0),
+        max_concurrent: int | None = None,
+        ttl_seconds: int = 600,
+        model: str | None = None,
+        overdraft_floor: Decimal | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> LeaseResult:
+        """Atomically acquire a lease (hold) — the only admission control (D4).
+
+        Under one lock the store: (1) ensures the balance row exists; (2) enforces
+        ``max_concurrent`` by **counting active leases** for ``(user_id,
+        operation_type)``; (3) enforces ``deny`` spend caps for ``amount`` (admission
+        gate); (4) computes ``available = balance − Σ active holds`` and rejects with
+        ``error="insufficient_credits"`` if ``available − amount < floor``; (5)
+        inserts an ``active`` lease expiring after ``ttl_seconds``.
+
+        ``floor`` is the resolved admission floor (``>= 0`` for strict; the negative
+        ``overdraft_floor`` for overdraft). ``billing_mode``/``overdraft_floor`` are
+        persisted on the lease for settle-time/observability. Business failures are
+        returned via ``LeaseResult.error``; the store never raises domain exceptions.
+        """
+        ...
+
+    @abstractmethod
+    def settle_lease(
+        self,
+        user_id: str,
+        lease_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        """Charge the **actual** cost against a lease, then mark it settled (D5).
+
+        De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft),
+        and — unlike :meth:`deduct_credits` — never clamps to the reserved ceiling.
+        Pipeline: idempotency replay → allowance consume → spend-cap (advisory at
+        settle: a breach sets ``cap_warning`` but never blocks) → debit (no floor
+        block; balance may go negative in overdraft) → ledger row → mark lease
+        ``settled``. ``amount == 0`` releases the lease without charging.
+
+        Lease-state failures are returned via ``DeductionResult.error``:
+        ``lease_not_found`` (missing / other user / released), ``lease_expired``
+        (TTL elapsed — call :meth:`renew_lease` for long jobs). A replayed settle
+        (same idempotency key, or a re-settle of an already-settled lease) returns
+        the original result with ``idempotent=True``.
+        """
+        ...
+
+    @abstractmethod
+    def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
+        """Release a lease without charging (work failed/aborted).
+
+        Idempotent and safe on missing/already-finalized leases (resolves H1):
+        transitions an ``active``/``expired`` lease to ``released`` and reports
+        ``released=True``; otherwise reports ``released=False`` with a ``reason``.
+        """
+        ...
+
+    @abstractmethod
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        """Extend an active lease's TTL (long batch/agentic jobs, resolves B4).
+
+        Returns ``error="lease_expired"`` if the TTL already elapsed and
+        ``error="lease_not_found"`` if missing/other-user/finalized.
+        """
+        ...
+
+    @abstractmethod
+    def get_available(self, user_id: str) -> AvailableResult:
+        """Advisory, non-locking read of ``available = balance − Σ active holds``.
+
+        For UI only — never an admission gate (D4/H3); the value may be stale the
+        instant it is read.
         """
         ...
 

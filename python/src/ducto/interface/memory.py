@@ -16,6 +16,7 @@ from ducto.interface.models import (
     AddTeamMemberResult,
     AggregateStatsRow,
     AllowanceResult,
+    AvailableResult,
     BalanceResult,
     CapCheckResult,
     CreateTeamResult,
@@ -23,11 +24,13 @@ from ducto.interface.models import (
     DailySpendRow,
     DeductionResult,
     GetUserPlanResult,
+    LeaseResult,
     PlanDefinition,
     PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
+    ReleaseResult,
     ReserveResult,
     SetupResult,
     SetUserPlanResult,
@@ -79,7 +82,14 @@ class _TransactionRecord(BaseModel):
 
 
 class _ReservationRecord(BaseModel):
-    """Internal reservation record for MemoryStore."""
+    """Internal reservation/lease record for MemoryStore.
+
+    The legacy ``reserve_credits``/``deduct_credits`` path uses the base fields and
+    keeps ``status='active'``. The lease lifecycle (``create_lease``/``settle_lease``/
+    ``release_lease``/``renew_lease``) additionally drives ``status`` through
+    ``active → settled | released | expired`` and records the resolved
+    ``billing_mode``/``overdraft_floor`` plus the settling transaction id.
+    """
 
     id: str
     user_id: str
@@ -87,6 +97,10 @@ class _ReservationRecord(BaseModel):
     operation_type: str
     metadata: dict[str, Any] = {}
     expires_at: datetime
+    status: str = "active"
+    billing_mode: str = "strict"
+    overdraft_floor: Decimal | None = None
+    settle_tx_id: str | None = None
 
 
 class _UsageWindowRecord(BaseModel):
@@ -472,6 +486,302 @@ class MemoryStore(CreditStore):
                 idempotent=False,
             )
 
+    # ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+    def _active_leases(self, user_id: str, operation_type: str | None = None) -> list[_ReservationRecord]:
+        """Active, unexpired holds for a user (assumes the lock is held)."""
+        now = _utcnow()
+        return [
+            r
+            for r in self._reservations.values()
+            if r.user_id == user_id
+            and r.status == "active"
+            and r.expires_at > now
+            and (operation_type is None or r.operation_type == operation_type)
+        ]
+
+    def create_lease(
+        self,
+        user_id: str,
+        amount: Decimal,
+        operation_type: str,
+        *,
+        billing_mode: str = "strict",
+        floor: Decimal = Decimal(0),
+        max_concurrent: int | None = None,
+        ttl_seconds: int = 600,
+        model: str | None = None,
+        overdraft_floor: Decimal | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> LeaseResult:
+        amount = _as_decimal(amount)
+        floor = _as_decimal(floor)
+
+        if not amount.is_finite() or amount <= 0:
+            return LeaseResult(lease_id="", user_id=user_id, amount=Decimal(0), error="invalid_amount")
+
+        with self._lock:
+            # Ensure a balance row exists (overdraft admits brand-new users at 0).
+            balance = self._balances.setdefault(user_id, Decimal(0))
+
+            # (2) Concurrency: count active leases for this operation type.
+            if max_concurrent is not None and len(self._active_leases(user_id, operation_type)) >= max_concurrent:
+                return LeaseResult(
+                    lease_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    billing_mode=billing_mode,  # type: ignore[arg-type]
+                    error="concurrency_limit",
+                )
+
+            # (3) Deny spend cap at admission: a blocked user can't even start.
+            for cap in self._user_caps(user_id, model):
+                if cap.action != "deny":
+                    continue
+                spend = self._cap_window_spend(user_id, cap, model)
+                if spend + amount > cap.limit:
+                    return LeaseResult(
+                        lease_id="",
+                        user_id=user_id,
+                        amount=Decimal(0),
+                        billing_mode=billing_mode,  # type: ignore[arg-type]
+                        error="cap_reached",
+                    )
+
+            # (4) available = balance − Σ active holds; reject if floor breached.
+            reserved_total = sum((r.amount for r in self._active_leases(user_id)), Decimal(0))
+            available = balance - reserved_total
+            if available - amount < floor:
+                return LeaseResult(
+                    lease_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    available=available,
+                    reserved_total=reserved_total,
+                    billing_mode=billing_mode,  # type: ignore[arg-type]
+                    error="insufficient_credits",
+                )
+
+            # (5) Insert the active lease.
+            lid = str(uuid.uuid4())
+            expires_at = _utcnow() + timedelta(seconds=ttl_seconds)
+            self._reservations[lid] = _ReservationRecord(
+                id=lid,
+                user_id=user_id,
+                amount=amount,
+                operation_type=operation_type,
+                metadata=metadata.model_dump(exclude_none=True) if metadata else {},
+                expires_at=expires_at,
+                status="active",
+                billing_mode=billing_mode,
+                overdraft_floor=_as_decimal(overdraft_floor) if overdraft_floor is not None else None,
+            )
+
+            return LeaseResult(
+                lease_id=lid,
+                user_id=user_id,
+                amount=amount,
+                available=available - amount,
+                reserved_total=reserved_total + amount,
+                billing_mode=billing_mode,  # type: ignore[arg-type]
+                expires_at=expires_at.isoformat(),
+            )
+
+    def _replay_deduction(self, tx: _TransactionRecord, user_id: str, balance: Decimal) -> DeductionResult:
+        """Build an idempotent-replay ``DeductionResult`` from a ledger row (lock held)."""
+        return DeductionResult(
+            transaction_id=tx.id,
+            user_id=user_id,
+            amount=abs(tx.amount),
+            allowance_consumed=_as_decimal(tx.metadata.get("allowance_consumed", 0)),
+            balance_after=balance,
+            idempotent=True,
+        )
+
+    def _settle_lease_state(
+        self,
+        lease: _ReservationRecord | None,
+        user_id: str,
+        balance: Decimal,
+    ) -> DeductionResult | None:
+        """Validate a lease for settle. Returns a short-circuit result, or ``None`` to
+        proceed (assumes the lock is held).
+
+        - missing / other-user / released → ``lease_not_found``
+        - already settled → idempotent replay of the original charge
+        - TTL elapsed → mark ``expired`` and return ``lease_expired``
+        """
+        now = _utcnow()
+        if lease is None or lease.user_id != user_id or lease.status == "released":
+            return DeductionResult(
+                transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=balance, error="lease_not_found"
+            )
+        if lease.status == "settled":
+            if lease.settle_tx_id:
+                tx = next((t for t in self._transactions if t.id == lease.settle_tx_id), None)
+                if tx is not None:
+                    return self._replay_deduction(tx, user_id, balance)
+            return DeductionResult(
+                transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=balance, idempotent=True
+            )
+        if lease.status == "expired" or lease.expires_at <= now:
+            lease.status = "expired"
+            return DeductionResult(
+                transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=balance, error="lease_expired"
+            )
+        return None
+
+    def settle_lease(
+        self,
+        user_id: str,
+        lease_id: str,
+        amount: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        min_balance: Decimal = Decimal(0),
+        model: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        amount = _as_decimal(amount)
+
+        if not amount.is_finite() or amount < 0:
+            return DeductionResult(
+                transaction_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                balance_after=self._balances.get(user_id, Decimal(0)),
+                error="invalid_amount",
+            )
+
+        with self._lock:
+            balance = self._balances.get(user_id, Decimal(0))
+
+            # Idempotency replay (user-scoped).
+            if idempotency_key is not None:
+                for tx in self._transactions:
+                    if tx.user_id == user_id and tx.metadata.get("idempotency_key") == idempotency_key:
+                        return self._replay_deduction(tx, user_id, balance)
+
+            lease = self._reservations.get(lease_id)
+            precheck = self._settle_lease_state(lease, user_id, balance)
+            if precheck is not None:
+                return precheck
+            assert lease is not None  # _settle_lease_state returns early on None
+
+            # Active & unexpired → settle. De-clamped: charge the ACTUAL cost (D5),
+            # never clamp to the lease hold.
+
+            # Zero-cost: release the lease without charging (resolves M3).
+            if amount == 0:
+                lease.status = "settled"
+                return DeductionResult(
+                    transaction_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    balance_after=balance,
+                    idempotent=False,
+                )
+
+            # Allowance consume on the actual cost.
+            plan_key = self._user_plan_map.get(user_id)
+            consume = Decimal(0)
+            if plan_key and plan_key in self._plan_definitions:
+                consume = min(self._allowance_remaining(user_id, plan_key), amount)
+            net = amount - consume
+
+            # Spend cap is ADVISORY at settle (work is done): record the strongest
+            # breaching action, never block (interface plan §7). 'deny' surfaces as
+            # a non-blocking signal the manager re-emits as credits.cap_reached.
+            cap_warning: str | None = None
+            for cap in self._user_caps(user_id, model):
+                spend = self._cap_window_spend(user_id, cap, model)
+                if spend + net > cap.limit and (
+                    cap_warning is None or (cap_warning != "deny" and cap.action == "deny")
+                ):
+                    cap_warning = cap.action
+
+            if consume > 0 and plan_key:
+                self._increment_usage_window(user_id, plan_key, consume)
+
+            self._balances[user_id] = balance - net
+
+            tx_id = str(uuid.uuid4())
+            tx_meta: dict[str, Any] = metadata.model_dump(exclude_none=True) if metadata else {}
+            if model is not None:
+                tx_meta["model"] = model
+            if idempotency_key is not None:
+                tx_meta["idempotency_key"] = idempotency_key
+            tx_meta["allowance_consumed"] = str(consume)
+            self._transactions.append(
+                _TransactionRecord(
+                    id=tx_id,
+                    user_id=user_id,
+                    amount=-net,
+                    type="usage",
+                    metadata=tx_meta,
+                    created_at=_utcnow(),
+                )
+            )
+
+            lease.status = "settled"
+            lease.settle_tx_id = tx_id
+
+            return DeductionResult(
+                transaction_id=tx_id,
+                user_id=user_id,
+                amount=net,
+                allowance_consumed=consume,
+                balance_after=self._balances[user_id],
+                idempotent=False,
+                cap_warning=cap_warning,
+            )
+
+    def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
+        with self._lock:
+            lease = self._reservations.get(lease_id)
+            if lease is None or lease.user_id != user_id:
+                return ReleaseResult(lease_id=lease_id, user_id=user_id, released=False, reason="not_found")
+            if lease.status == "settled":
+                return ReleaseResult(lease_id=lease_id, user_id=user_id, released=False, reason="already_settled")
+            if lease.status == "released":
+                return ReleaseResult(lease_id=lease_id, user_id=user_id, released=False, reason="already_released")
+            lease.status = "released"
+            return ReleaseResult(lease_id=lease_id, user_id=user_id, released=True, reason="released")
+
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        with self._lock:
+            now = _utcnow()
+            lease = self._reservations.get(lease_id)
+            if lease is None or lease.user_id != user_id or lease.status in ("released", "settled"):
+                return LeaseResult(lease_id=lease_id, user_id=user_id, amount=Decimal(0), error="lease_not_found")
+            if lease.status == "expired" or lease.expires_at <= now:
+                lease.status = "expired"
+                return LeaseResult(lease_id=lease_id, user_id=user_id, amount=Decimal(0), error="lease_expired")
+
+            lease.expires_at = now + timedelta(seconds=ttl_seconds)
+            reserved_total = sum((r.amount for r in self._active_leases(user_id)), Decimal(0))
+            balance = self._balances.get(user_id, Decimal(0))
+            return LeaseResult(
+                lease_id=lease_id,
+                user_id=user_id,
+                amount=lease.amount,
+                available=balance - reserved_total,
+                reserved_total=reserved_total,
+                billing_mode=lease.billing_mode,  # type: ignore[arg-type]
+                expires_at=lease.expires_at.isoformat(),
+            )
+
+    def get_available(self, user_id: str) -> AvailableResult:
+        with self._lock:
+            balance = self._balances.get(user_id, Decimal(0))
+            reserved = sum((r.amount for r in self._active_leases(user_id)), Decimal(0))
+            return AvailableResult(
+                user_id=user_id,
+                balance=balance,
+                reserved=reserved,
+                available=balance - reserved,
+            )
+
     # ── Internal helpers (assume the lock is held) ─────────────────────
 
     def _purge_expired_reservations(self, user_id: str) -> None:
@@ -629,6 +939,10 @@ class MemoryStore(CreditStore):
                 plan_name=plan_def.name if plan_def else None,
                 free_allowance=plan_def.free_allowance if plan_def else Decimal(0),
                 features=plan_def.features if plan_def and plan_def.features else {},
+                default_billing_mode=plan_def.default_billing_mode if plan_def else "strict",
+                per_operation=plan_def.per_operation if plan_def and plan_def.per_operation else {},
+                max_concurrent=plan_def.max_concurrent if plan_def else None,
+                overdraft_floor=plan_def.overdraft_floor if plan_def else None,
             )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:

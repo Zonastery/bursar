@@ -44,6 +44,12 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.cap_warning",
         "credits.low_balance",
         "credits.plan_changed",
+        # Lease lifecycle (interface plan §3/M4): make admission, release, expiry
+        # and overdraft observable end-to-end.
+        "credits.reserved",
+        "credits.reservation_released",
+        "credits.lease_expired",
+        "credits.overdraft",
     }
 )
 

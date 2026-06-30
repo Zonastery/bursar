@@ -190,6 +190,22 @@ store.set_spend_cap(SpendCap(user_id="user_abc", cap_type="daily", limit=100, ac
 store.setSpendCap({ userId: "user_abc", type: "daily", limit: 100, action: "deny" });
 ```
 
+### Financial safety (leases)
+
+Because ducto charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload). See the [Financial Safety](https://github.com/apoorwv/ducto/blob/main/docs/docs/financial-safety.mdx) guide.
+
+```python
+lease = manager.reserve("user_abc", Decimal("40"))                 # worst-case hold
+deduction = manager.settle("user_abc", lease.lease_id, Decimal("11"))  # actual cost; de-clamped
+# on failure: manager.release("user_abc", lease.lease_id)          # idempotent
+```
+
+```typescript
+const lease = await manager.reserve("user_abc", new Decimal(40));               // worst-case hold
+const deduction = await manager.settle("user_abc", lease.leaseId, new Decimal(11)); // actual cost
+// on failure: await manager.release("user_abc", lease.leaseId);                // idempotent
+```
+
 ### Usage analytics
 
 ```python

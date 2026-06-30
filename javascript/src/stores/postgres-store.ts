@@ -5,7 +5,9 @@ import type {
   AddTeamMemberResult,
   AggregateStats,
   AllowanceResult,
+  AvailableResult,
   BalanceResult,
+  BillingMode,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -14,12 +16,15 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   GetUserPlanResult,
+  LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  OperationPolicy,
   PaginatedTransactions,
   PricingConfigData,
   PricingConfigResult,
   RefundResult,
+  ReleaseResult,
   ReserveResult,
   SetUserPlanResult,
   SetupResult,
@@ -31,7 +36,7 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -53,6 +58,32 @@ function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
 /** A money serialized for an SQL parameter: send as a decimal string. */
 function decParam(value: Decimal): string {
   return value.toString();
+}
+
+/** Parse the ``per_operation`` JSONB map into typed `OperationPolicy` records. */
+function parsePerOperation(raw: unknown): Record<string, OperationPolicy> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, OperationPolicy> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const op = (v ?? {}) as Record<string, unknown>;
+    out[k] = {
+      billingMode:
+        (String(op.billing_mode ?? op.billingMode ?? "strict") as BillingMode) ?? "strict",
+      maxConcurrent:
+        op.max_concurrent != null
+          ? Number(op.max_concurrent)
+          : op.maxConcurrent != null
+            ? Number(op.maxConcurrent)
+            : null,
+      overdraftFloor:
+        op.overdraft_floor != null
+          ? dec(op.overdraft_floor)
+          : op.overdraftFloor != null
+            ? dec(op.overdraftFloor)
+            : null,
+    };
+  }
+  return out;
 }
 
 /**
@@ -349,6 +380,167 @@ export class PostgresStore implements CreditStore {
     };
   }
 
+  // ── Lease lifecycle (atomic admission) ─────────────────────────────
+
+  async createLease(
+    userId: string,
+    amount: Decimal,
+    operationType: string,
+    options?: CreateLeaseOptions,
+  ): Promise<LeaseResult> {
+    const billingMode = options?.billingMode ?? "strict";
+    const floor = options?.floor ?? ZERO;
+    const overdraftFloor = options?.overdraftFloor ?? null;
+    const rows = await this.callproc("create_lease", [
+      userId,
+      decParam(amount),
+      operationType,
+      billingMode,
+      decParam(floor),
+      options?.maxConcurrent ?? null,
+      options?.ttlSeconds ?? 600,
+      options?.model ?? null,
+      overdraftFloor != null ? decParam(overdraftFloor) : null,
+      JSON.stringify(options?.metadata ?? {}),
+    ]);
+
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if (!row || Object.keys(row).length === 0) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode,
+        expiresAt: "",
+        error: "no result",
+      };
+    }
+    if ("error" in row && row.error) {
+      return {
+        leaseId: "",
+        userId,
+        amount: ZERO,
+        available: dec(row.available),
+        reservedTotal: dec(row.reserved),
+        billingMode,
+        expiresAt: "",
+        error: String(row.error),
+      };
+    }
+    return {
+      leaseId: String(row.lease_id ?? ""),
+      userId: String(row.user_id ?? userId),
+      amount: dec(row.amount),
+      available: dec(row.available),
+      reservedTotal: dec(row.reserved),
+      billingMode: (String(row.billing_mode ?? billingMode) as BillingMode) ?? billingMode,
+      expiresAt: String(row.expires_at ?? ""),
+    };
+  }
+
+  async settleLease(
+    userId: string,
+    leaseId: string,
+    amount: Decimal,
+    options?: SettleLeaseOptions,
+  ): Promise<DeductionResult> {
+    const minBalance = options?.minBalance ?? ZERO;
+    const rows = await this.callproc("settle_lease", [
+      userId,
+      leaseId,
+      decParam(amount),
+      options?.idempotencyKey ?? null,
+      decParam(minBalance),
+      options?.model ?? null,
+      JSON.stringify(options?.metadata ?? {}),
+    ]);
+
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if (!row || Object.keys(row).length === 0) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: ZERO,
+        idempotent: false,
+        capWarning: null,
+        error: "no result",
+      };
+    }
+    if ("error" in row && row.error) {
+      return {
+        transactionId: "",
+        userId,
+        amount: ZERO,
+        allowanceConsumed: ZERO,
+        balanceAfter: dec(row.balance_after),
+        idempotent: false,
+        capWarning: null,
+        error: String(row.error),
+      };
+    }
+    return {
+      transactionId: String(row.transaction_id ?? ""),
+      userId,
+      amount: dec(row.amount),
+      allowanceConsumed: dec(row.allowance_consumed),
+      balanceAfter: dec(row.balance_after),
+      idempotent: Boolean(row.idempotent),
+      capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+    };
+  }
+
+  async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
+    const rows = await this.callproc("release_lease", [userId, leaseId]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    return {
+      leaseId,
+      userId,
+      released: Boolean(row.released),
+      reason: row.reason != null ? String(row.reason) : null,
+    };
+  }
+
+  async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult> {
+    const rows = await this.callproc("renew_lease", [userId, leaseId, ttlSeconds]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if ("error" in row && row.error) {
+      return {
+        leaseId,
+        userId,
+        amount: ZERO,
+        available: ZERO,
+        reservedTotal: ZERO,
+        billingMode: "strict",
+        expiresAt: "",
+        error: String(row.error),
+      };
+    }
+    return {
+      leaseId: String(row.lease_id ?? leaseId),
+      userId,
+      amount: dec(row.amount),
+      available: dec(row.available),
+      reservedTotal: dec(row.reserved),
+      billingMode: String(row.billing_mode ?? "strict") as BillingMode,
+      expiresAt: String(row.expires_at ?? ""),
+    };
+  }
+
+  async getAvailable(userId: string): Promise<AvailableResult> {
+    const rows = await this.callproc("get_available_credits", [userId]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    return {
+      userId,
+      balance: dec(row.balance),
+      reserved: dec(row.reserved),
+      available: dec(row.available),
+    };
+  }
+
   async getActivePricing(): Promise<PricingConfigResult | null> {
     const rows = await this.callproc("get_active_pricing_config", []);
     if (!rows || rows.length === 0) return null;
@@ -380,6 +572,10 @@ export class PostgresStore implements CreditStore {
       planName: (row.plan_name as string) ?? null,
       freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
+      defaultBillingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
+      perOperation: parsePerOperation(row.per_operation),
+      maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
+      overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
     };
   }
 

@@ -869,9 +869,7 @@ class TestPostgresStoreIntegration:
 
     # ── H4 — RPC atomicity: cap-fail must NOT consume allowance ──────────
 
-    def test_deduct_with_allowance_cap_deny_does_not_consume_allowance(
-        self, store: PostgresStore
-    ) -> None:
+    def test_deduct_with_allowance_cap_deny_does_not_consume_allowance(self, store: PostgresStore) -> None:
         """H4 — deny cap aborts without consuming any allowance (all-or-nothing).
 
         Setup: balance=20, monthly allowance=10, deny cap at 8.
@@ -958,9 +956,7 @@ class TestPostgresStoreIntegration:
 
         # The connection must still be usable: a normal get_balance succeeds
         balance = store.get_balance(_PG_USER)
-        assert balance.balance == Decimal("100"), (
-            f"Connection broken after error: balance={balance.balance}"
-        )
+        assert balance.balance == Decimal("100"), f"Connection broken after error: balance={balance.balance}"
 
         # And a normal deduction also works
         ok = store.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="h5_ok")
@@ -1327,3 +1323,269 @@ class TestHttpxSupabaseStoreContract:
         assert call.kwargs["json"]["p_amount"] == "10"
         assert result.amount == Decimal("-10")
         assert result.team_balance_after == Decimal("90")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lease lifecycle — real Postgres (interface plan §3/§4, parity with MemoryStore)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLeaseLifecyclePg:
+    """create_lease / settle_lease / release_lease / renew_lease / get_available
+    against a real Postgres + the new 016 RPCs."""
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def _expire(self, store: PostgresStore, lease_id: str) -> None:
+        """Force a lease past its TTL (white-box) instead of sleeping."""
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.credit_reservations SET expires_at = now() - interval '1 second' WHERE id = %s",
+                    [lease_id],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_create_lease_holds_against_available(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("30"), "usage", floor=Decimal("0"))
+        assert lease.error is None
+        assert lease.lease_id
+        avail = store.get_available(_PG_USER)
+        assert avail.balance == Decimal("100")
+        assert avail.reserved == Decimal("30")
+        assert avail.available == Decimal("70")
+
+    def test_strict_floor_rejects(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("99"), "usage", floor=Decimal("5"))
+        assert lease.error == "insufficient_credits"
+
+    def test_concurrency_limit(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        a = store.create_lease(_PG_USER, Decimal("10"), "chat", floor=Decimal("0"), max_concurrent=1)
+        assert a.error is None
+        b = store.create_lease(_PG_USER, Decimal("10"), "chat", floor=Decimal("0"), max_concurrent=1)
+        assert b.error == "concurrency_limit"
+        # A different op type has its own slot.
+        c = store.create_lease(_PG_USER, Decimal("10"), "batch", floor=Decimal("0"), max_concurrent=1)
+        assert c.error is None
+
+    def test_settle_declamped_overdraft_goes_negative(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("0"), "adjustment")
+        lease = store.create_lease(
+            _PG_USER,
+            Decimal("10"),
+            "usage",
+            billing_mode="overdraft",
+            floor=Decimal("-50"),
+            overdraft_floor=Decimal("-50"),
+        )
+        assert lease.error is None
+        # Actual 60 > hold 10 → de-clamped (D5); balance goes to -60 (past the floor).
+        ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("60"))
+        assert ded.error is None
+        assert ded.balance_after == Decimal("-60")
+        # New admission rejected once available ≤ floor.
+        nxt = store.create_lease(_PG_USER, Decimal("1"), "usage", billing_mode="overdraft", floor=Decimal("-50"))
+        assert nxt.error == "insufficient_credits"
+
+    def test_settle_after_settle_replays(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("20"), "usage", floor=Decimal("0"))
+        first = store.settle_lease(_PG_USER, lease.lease_id, Decimal("20"))
+        assert first.error is None
+        second = store.settle_lease(_PG_USER, lease.lease_id, Decimal("20"))
+        assert second.idempotent is True
+        assert store.get_balance(_PG_USER).balance == Decimal("80")
+
+    def test_release_idempotent_and_settle_after_release(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("20"), "usage", floor=Decimal("0"))
+        r1 = store.release_lease(_PG_USER, lease.lease_id)
+        assert r1.released is True and r1.reason == "released"
+        r2 = store.release_lease(_PG_USER, lease.lease_id)
+        assert r2.released is False and r2.reason == "already_released"
+        ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("20"))
+        assert ded.error == "lease_not_found"
+        # Released hold no longer counts against available.
+        assert store.get_available(_PG_USER).available == Decimal("100")
+
+    def test_expired_lease_settle_and_renew(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("20"), "usage", floor=Decimal("0"))
+        self._expire(store, lease.lease_id)
+        ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("20"))
+        assert ded.error == "lease_expired"
+        renewed = store.renew_lease(_PG_USER, lease.lease_id, 600)
+        assert renewed.error == "lease_expired"
+
+    def test_renew_extends_then_settles(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("20"), "usage", ttl_seconds=600, floor=Decimal("0"))
+        renewed = store.renew_lease(_PG_USER, lease.lease_id, 3600)
+        assert renewed.error is None
+        ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("20"))
+        assert ded.balance_after == Decimal("80")
+
+    def test_get_user_plan_returns_policy_fields(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={
+                    "pro": PlanDefinition(
+                        id="pro",
+                        name="Pro",
+                        default_billing_mode="overdraft",
+                        max_concurrent=3,
+                        overdraft_floor=Decimal("-25"),
+                    )
+                },
+            )
+        )
+        store.add_credits(_PG_USER, Decimal("0"), "adjustment")
+        store.set_user_plan(_PG_USER, "pro")
+        plan = store.get_user_plan(_PG_USER)
+        assert plan.default_billing_mode == "overdraft"
+        assert plan.max_concurrent == 3
+        assert plan.overdraft_floor == Decimal("-25")
+
+    def test_manager_reserve_settle_flow_pg(self, store: PostgresStore) -> None:
+        m = CreditManager(store=store, policy="strict_prepaid")
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = m.reserve(_PG_USER, Decimal("40"))
+        ded = m.settle(_PG_USER, lease.lease_id, Decimal("25"))
+        assert ded.balance_after == Decimal("75")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lease lifecycle — adversarial / financial-safety against real Postgres
+# (validates FOR UPDATE serialization, idempotency, floor exactness, allowance)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLeaseAdversarialPg:
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def test_concurrent_create_lease_no_over_admission_pg(self, store: PostgresStore) -> None:
+        """N concurrent create_lease on one row. FOR UPDATE serializes them:
+        with balance 100 / floor 0 / hold 30, exactly 3 leases admit and the
+        held total never exceeds the balance."""
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        n = 30
+
+        def one(_: int) -> object:
+            s = PostgresStore(store._database_url)
+            return s.create_lease(_PG_USER, Decimal("30"), "usage", floor=Decimal("0"))
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            results = list(ex.map(one, range(n)))
+
+        admitted = [r for r in results if r.error is None]  # type: ignore[attr-defined]
+        assert len(admitted) == 3
+        avail = store.get_available(_PG_USER)
+        assert avail.reserved == Decimal("90")
+        assert avail.available == Decimal("10")
+        assert avail.balance == Decimal("100")  # held, not yet charged
+
+    def test_concurrent_max_concurrent_pg(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("10000"), "purchase")
+
+        def one(_: int) -> object:
+            s = PostgresStore(store._database_url)
+            return s.create_lease(_PG_USER, Decimal("1"), "chat", floor=Decimal("0"), max_concurrent=5)
+
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            results = list(ex.map(one, range(40)))
+        assert sum(1 for r in results if r.error is None) == 5  # type: ignore[attr-defined]
+
+    def test_concurrent_settle_same_key_one_debit_pg(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
+
+        def one(_: int) -> object:
+            s = PostgresStore(store._database_url)
+            return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"), idempotency_key="k")
+
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            list(ex.map(one, range(12)))
+        assert store.get_balance(_PG_USER).balance == Decimal("50")  # charged exactly once
+
+    def test_concurrent_settle_same_lease_no_key_one_debit_pg(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
+
+        def one(_: int) -> object:
+            s = PostgresStore(store._database_url)
+            return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"))
+
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            list(ex.map(one, range(12)))
+        # Lease-settled replay (no key) also guarantees a single debit.
+        assert store.get_balance(_PG_USER).balance == Decimal("50")
+
+    def test_floor_boundary_inclusive_and_exclusive_pg(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        # available - amount == floor → allowed (the 95 hold stays active).
+        assert store.create_lease(_PG_USER, Decimal("95"), "usage", floor=Decimal("5")).error is None
+        # With 95 held, available is 5; a further 1-credit hold → 5-1=4 < floor 5 → rejected.
+        assert store.create_lease(_PG_USER, Decimal("1"), "usage", floor=Decimal("5")).error == "insufficient_credits"
+
+    def test_allowance_consumed_at_settle_pg(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal("10"))},
+            )
+        )
+        store.add_credits(_PG_USER, Decimal("100"), "purchase")
+        store.set_user_plan(_PG_USER, "free")
+
+        l1 = store.create_lease(_PG_USER, Decimal("20"), "usage", floor=Decimal("0"))
+        d1 = store.settle_lease(_PG_USER, l1.lease_id, Decimal("8"))
+        assert d1.allowance_consumed == Decimal("8")
+        assert d1.amount == Decimal("0")
+        assert store.get_balance(_PG_USER).balance == Decimal("100")
+
+        l2 = store.create_lease(_PG_USER, Decimal("20"), "usage", floor=Decimal("0"))
+        d2 = store.settle_lease(_PG_USER, l2.lease_id, Decimal("8"))
+        assert d2.allowance_consumed == Decimal("2")  # only 2 allowance left this period
+        assert d2.amount == Decimal("6")
+        assert store.get_balance(_PG_USER).balance == Decimal("94")
+
+    def test_deny_cap_blocks_admission_advisory_at_settle_pg(self, store: PostgresStore) -> None:
+        store.add_credits(_PG_USER, Decimal("1000"), "purchase")
+        conn = psycopg2.connect(store._database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "VALUES (%s, 'monthly', 100, 'deny')",
+                    [_PG_USER],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Admission gate: a hold beyond the cap is rejected.
+        assert store.create_lease(_PG_USER, Decimal("150"), "usage", floor=Decimal("0")).error == "cap_reached"
+        # Admit within the cap, then settle past it: advisory only — charge proceeds.
+        lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
+        ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("120"))
+        assert ded.error is None
+        assert ded.cap_warning == "deny"
+        assert store.get_balance(_PG_USER).balance == Decimal("880")
