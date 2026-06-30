@@ -58,6 +58,7 @@ const sidebars: SidebarsConfig = {
         'notebooks/expression_evaluator',
         'notebooks/credit_expiry',
         'notebooks/financial_safety',
+        'notebooks/saas_billing_patterns',
       ],
     },
   ],
