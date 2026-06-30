@@ -296,7 +296,7 @@ class TestPlanManagement:
         store.add_credits("user-1", Decimal("50"))
 
         result = store.deduct_with_allowance("user-1", Decimal("20"))
-        assert result.amount == Decimal(0)   # fully covered by allowance
+        assert result.amount == Decimal(0)  # fully covered by allowance
         assert result.allowance_consumed == Decimal("20")
         assert store.get_balance("user-1").balance == Decimal("50")  # balance untouched
         assert store.check_allowance("user-1").allowance_remaining == Decimal("80")
@@ -428,8 +428,6 @@ class TestUsageAnalytics:
         store = MemoryStore()
         store.add_credits("user_1", Decimal("1000"))
 
-        from ducto.interface.models import CreditMetadata
-
         store.deduct_with_allowance("user_1", Decimal("100"), model="gpt-4")
         store.deduct_with_allowance("user_1", Decimal("50"), model="claude-3")
 
@@ -468,7 +466,6 @@ class TestUsageAnalytics:
         store = MemoryStore()
         store.add_credits("user_1", Decimal("1000"))
         store.add_credits("user_2", Decimal("1000"))
-        from ducto.interface.models import CreditMetadata
 
         store.deduct_with_allowance("user_1", Decimal("50"), model="gpt-4")
         store.deduct_with_allowance("user_2", Decimal("30"), model="claude-3")
@@ -513,7 +510,6 @@ class TestUsageAnalytics:
         assert result[0].total_count == 3
 
     def test_list_transactions_filters_by_type(self) -> None:
-        from ducto.interface.models import CreditMetadata
 
         store = MemoryStore()
         store.add_credits("user_1", Decimal("1000"), "purchase")

@@ -18,7 +18,6 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from unittest.mock import MagicMock
 
 from ducto import CreditManager, UsageMetrics
 from ducto.events import CreditEvent, CreditEventEmitter
@@ -1237,12 +1236,8 @@ class TestConcurrentEmitAndSubscribe:
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [
-            threading.Thread(target=_subscriber, args=(i,), daemon=True)
-            for i in range(subscribe_count)
-        ] + [
-            threading.Thread(target=_emitter, args=(i,), daemon=True)
-            for i in range(emit_count)
+        threads = [threading.Thread(target=_subscriber, args=(i,), daemon=True) for i in range(subscribe_count)] + [
+            threading.Thread(target=_emitter, args=(i,), daemon=True) for i in range(emit_count)
         ]
 
         for t in threads:
@@ -1386,6 +1381,7 @@ class TestDeductFixedDeprecationWarning:
 
     def test_no_warning_when_use_allowance_explicit_false(self) -> None:
         import warnings as _w
+
         mgr, _ = self._make_mgr()
         with _w.catch_warnings():
             _w.simplefilter("error", DeprecationWarning)
@@ -1393,6 +1389,7 @@ class TestDeductFixedDeprecationWarning:
 
     def test_no_warning_when_use_allowance_explicit_true(self) -> None:
         import warnings as _w
+
         mgr, _ = self._make_mgr()
         with _w.catch_warnings():
             _w.simplefilter("error", DeprecationWarning)
@@ -1423,6 +1420,7 @@ class TestDeductFixedAllowance:
 
         # Use the default (no explicit use_allowance) — the DeprecationWarning is expected.
         import warnings as _w
+
         with _w.catch_warnings():
             _w.simplefilter("ignore", DeprecationWarning)
             result = mgr.deduct_fixed("u1", job_name="report")
@@ -1436,7 +1434,7 @@ class TestDeductFixedAllowance:
         mgr, store = self._setup()
 
         result = mgr.deduct_fixed("u1", job_name="report", use_allowance=True)
-        assert result.amount == Decimal(0)          # 10 fully covered by allowance
+        assert result.amount == Decimal(0)  # 10 fully covered by allowance
         assert result.allowance_consumed == Decimal(10)
         assert mgr.check_allowance("u1").allowance_remaining == Decimal(40)
 
@@ -1461,7 +1459,7 @@ class TestDeductSkipAllowance:
         store.add_credits("u1", Decimal(50))
 
         result = mgr.deduct("u1", UsageMetrics(input_tokens=20), skip_allowance=True)
-        assert result.amount == Decimal(20)          # full charge, not offset by allowance
+        assert result.amount == Decimal(20)  # full charge, not offset by allowance
         assert result.allowance_consumed == Decimal(0)
         # Allowance pool untouched.
         assert mgr.check_allowance("u1").allowance_remaining == Decimal(100)
@@ -1480,7 +1478,7 @@ class TestDeductSkipAllowance:
         store.add_credits("u1", Decimal(50))
 
         result = mgr.deduct("u1", UsageMetrics(input_tokens=20), skip_allowance=False)
-        assert result.amount == Decimal(0)           # fully covered by allowance
+        assert result.amount == Decimal(0)  # fully covered by allowance
         assert result.allowance_consumed == Decimal(20)
         assert mgr.check_allowance("u1").allowance_remaining == Decimal(80)
 
@@ -1498,7 +1496,9 @@ class TestFloorBreachEvent:
     any charge commits.
     """
 
-    def _make_mgr(self, emitter: CreditEventEmitter, min_balance: Decimal = Decimal(5)) -> tuple[CreditManager, MemoryStore]:
+    def _make_mgr(
+        self, emitter: CreditEventEmitter, min_balance: Decimal = Decimal(5)
+    ) -> tuple[CreditManager, MemoryStore]:
         store = MemoryStore()
         mgr = CreditManager(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
