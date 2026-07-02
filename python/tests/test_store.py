@@ -26,6 +26,7 @@ from ducto.interface.models import (
     SetUserPlanResult,
     SpendCap,
     SweepResult,
+    TierBalancesResult,
 )
 
 
@@ -1029,7 +1030,7 @@ class _MinimalCoreStore(CreditStore):
 
     Exercises WS8: analytics/transaction-listing/teams are optional
     capabilities with a default raise, so a minimal custom store subclass
-    does not need to implement all ~35 methods — only the 21 core ones.
+    does not need to implement all ~35 methods — only the core ones.
     """
 
     def setup(self, database_url: str | None = None):
@@ -1038,8 +1039,11 @@ class _MinimalCoreStore(CreditStore):
     def get_balance(self, user_id: str):
         return BalanceResult(user_id=user_id)
 
-    def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None):
+    def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None, tier=None):
         return AddCreditsResult(transaction_id="tx", user_id=user_id, amount=amount, new_balance=amount)
+
+    def get_credit_tiers(self, user_id: str):
+        return TierBalancesResult(user_id=user_id, tiers=[], total_balance=Decimal(0))
 
     def deduct_with_allowance(
         self,

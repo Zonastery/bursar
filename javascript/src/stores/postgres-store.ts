@@ -883,20 +883,19 @@ export class PostgresStore extends CreditStore {
   // ── Credit tiers ─────────────────────────────────────────────────────
 
   async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+    // get_user_credit_tiers returns one JSONB envelope object (not a rowset):
+    // {user_id, tiers: [...], total_balance}. callproc's scalar-JSONB
+    // unwrapping surfaces it as a single-element array.
     const rows = await this.callproc("get_user_credit_tiers", [userId]);
-    const tiers: TierBalance[] = (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        tierKey: String(row.tier_key ?? ""),
-        name: String(row.name ?? ""),
-        priority: Number(row.priority ?? 0),
-        expires: Boolean(row.expires ?? false),
-        balance: dec(row.balance),
-      };
-    });
-    // totalBalance == BalanceResult.balance — reuse the existing verified path
-    // rather than assuming an extra column on this RPC's row shape.
-    const balance = await this.getBalance(userId);
-    return { userId, tiers, totalBalance: balance.balance };
+    const envelope = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const tierRows = (envelope.tiers as Record<string, unknown>[] | undefined) ?? [];
+    const tiers: TierBalance[] = tierRows.map((row) => ({
+      tierKey: String(row.tier_key ?? ""),
+      name: String(row.name ?? ""),
+      priority: Number(row.priority ?? 0),
+      expires: Boolean(row.expires ?? false),
+      balance: dec(row.balance),
+    }));
+    return { userId, tiers, totalBalance: dec(envelope.total_balance) };
   }
 }

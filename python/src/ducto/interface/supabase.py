@@ -76,6 +76,7 @@ _BUSINESS_ERROR_CODES = frozenset(
         "tier_required",
         "tier_does_not_expire",
         "expires_at_required",
+        "invalid_expires_at",
     }
 )
 

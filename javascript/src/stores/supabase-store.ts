@@ -870,17 +870,18 @@ export class HttpxSupabaseStore extends CreditStore {
   // ── Credit tiers ─────────────────────────────────────────────────────
 
   async getCreditTiers(userId: string): Promise<TierBalancesResult> {
-    const rows = await this.rpcAll("get_user_credit_tiers", { p_user_id: userId });
-    const tiers: TierBalance[] = rows.map((row) => ({
+    // get_user_credit_tiers returns one JSONB envelope object (not a rowset):
+    // {user_id, tiers: [...], total_balance} — use rpc() (single-object), not
+    // rpcAll() (which is for genuine SETOF/TABLE-returning functions).
+    const envelope = await this.rpc("get_user_credit_tiers", { p_user_id: userId });
+    const tierRows = (envelope.tiers as Record<string, unknown>[] | undefined) ?? [];
+    const tiers: TierBalance[] = tierRows.map((row) => ({
       tierKey: String(row.tier_key ?? ""),
       name: String(row.name ?? ""),
       priority: Number(row.priority ?? 0),
       expires: Boolean(row.expires ?? false),
       balance: dec(row.balance),
     }));
-    // totalBalance == BalanceResult.balance — reuse the existing verified path
-    // rather than assuming an extra column on this RPC's row shape.
-    const balance = await this.getBalance(userId);
-    return { userId, tiers, totalBalance: balance.balance };
+    return { userId, tiers, totalBalance: dec(envelope.total_balance) };
   }
 }

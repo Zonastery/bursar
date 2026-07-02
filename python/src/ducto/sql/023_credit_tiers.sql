@@ -333,6 +333,16 @@ BEGIN
                 END IF;
                 v_computed_expires_at := now() + (v_tier_ttl_days || ' days')::interval;
                 v_metadata := v_metadata || jsonb_build_object('expires_at', to_jsonb(v_computed_expires_at));
+            ELSE
+                -- Parity with MemoryStore (Python/JS): an explicit expires_at
+                -- must be in the future, not just present.
+                IF (v_metadata->>'expires_at')::timestamptz <= now() THEN
+                    RETURN jsonb_build_object(
+                        'error', 'invalid_expires_at',
+                        'tier', v_resolved_tier,
+                        'expires_at', v_metadata->>'expires_at'
+                    );
+                END IF;
             END IF;
         END IF;
     END IF;

@@ -879,7 +879,7 @@ class MemoryStore(CreditStore):
                     tiers=[
                         TierBalance(
                             tier_key="default",
-                            name="",
+                            name="default",
                             priority=0,
                             expires=False,
                             balance=total_balance,
