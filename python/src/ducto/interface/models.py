@@ -67,6 +67,7 @@ class PricingConfigData(BaseModel):
     min_balance: Decimal = Field(default=Decimal(0), ge=0)
     signup_bonus: int = 50
     plans: dict[str, PlanDefinition] | None = None
+    tiers: dict[str, TierDefinition] | None = None
 
 
 # ── Runtime results ───────────────────────────────────────────────────
@@ -88,6 +89,7 @@ class AddCreditsResult(BaseModel):
     amount: Decimal
     new_balance: Decimal
     lifetime_purchased: Decimal = Decimal(0)
+    tier: str = "default"
 
 
 class LeaseResult(BaseModel):
@@ -180,6 +182,7 @@ class DeductionResult(BaseModel):
     idempotent: bool = False
     cap_warning: str | None = None
     error: str | None = None
+    tier_breakdown: dict[str, Decimal] | None = None
 
 
 class PricingConfigResult(BaseModel):
@@ -267,6 +270,27 @@ class PlanDefinition(BaseModel):
         return data
 
 
+class TierDefinition(BaseModel):
+    """Definition of a credit tier controlling deduction priority and expiry.
+
+    ``priority`` controls deduction order (lower drains first; ties broken by
+    key ascending, not an error). ``expires`` marks whether credits granted
+    into this tier are subject to expiry; when ``True``, ``default_ttl_days``
+    (if set) fixes the default expiry window used by ``add_credits`` calls
+    that omit an explicit ``expires_at``. At most one tier may set
+    ``allow_overdraft=True`` (the sole tier permitted to absorb overdraft
+    debt) and at most one may set ``is_default=True`` (untagged
+    ``add_credits()`` calls land here) — enforced by config validation.
+    """
+
+    name: str
+    priority: int
+    expires: bool = False
+    default_ttl_days: int | None = None
+    allow_overdraft: bool = False
+    is_default: bool = False
+
+
 class AllowanceResult(BaseModel):
     """Result of checking plan allowance."""
 
@@ -331,6 +355,7 @@ class RefundResult(BaseModel):
     amount: Decimal = Decimal(0)
     new_balance: Decimal = Decimal(0)
     error: str | None = None
+    tier_breakdown: dict[str, Decimal] | None = None
 
 
 class SweepResult(BaseModel):
@@ -339,6 +364,32 @@ class SweepResult(BaseModel):
     expired_count: int = 0
     expired_amount: Decimal = Decimal(0)
     dry_run: bool = False
+    expired_by_tier: dict[str, Decimal] | None = None
+
+
+# ── Tier query API ──────────────────────────────────────────────────────
+
+
+class TierBalance(BaseModel):
+    """Balance for a single credit tier."""
+
+    tier_key: str
+    name: str = ""
+    priority: int = 0
+    expires: bool = False
+    balance: Decimal = Decimal(0)
+
+
+class TierBalancesResult(BaseModel):
+    """Per-tier balance breakdown for a user, ordered by priority ascending.
+
+    ``total_balance`` mirrors ``BalanceResult.balance`` — the maintained
+    aggregate cache, kept equal to the sum of tier balances.
+    """
+
+    user_id: str
+    tiers: list[TierBalance]
+    total_balance: Decimal
 
 
 # ── Usage analytics ──────────────────────────────────────────────────────

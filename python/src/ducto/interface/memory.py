@@ -42,6 +42,9 @@ from ducto.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TierBalance,
+    TierBalancesResult,
+    TierDefinition,
     TopUserRow,
     TransactionRow,
 )
@@ -170,6 +173,12 @@ class MemoryStore(CreditStore):
         # When each user was (most recently) assigned their current plan —
         # the anchor for rolling_30d/anniversary allowance windows (WS9).
         self._user_plan_assigned_at: dict[str, datetime] = {}
+        # Credit tiers (aggregate per-tier balance model): tier definitions loaded
+        # from config (parallel to _plan_definitions), and each user's balance
+        # per tier. ``self._balances[user_id]`` remains a dual-written aggregate
+        # kept equal to SUM of that user's tier balances.
+        self._tier_definitions: dict[str, TierDefinition] = {}
+        self._tier_balances: dict[tuple[str, str], Decimal] = {}
         self._usage_windows: list[_UsageWindowRecord] = []
         self._teams: dict[str, _TeamRecord] = {}
         self._team_members: dict[str, dict[str, _TeamMemberRecord]] = {}
@@ -205,6 +214,7 @@ class MemoryStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
+        tier: str | None = None,
     ) -> AddCreditsResult:
         amount = _as_decimal(amount)
 
@@ -216,23 +226,30 @@ class MemoryStore(CreditStore):
             raise StoreError(f"invalid_amount: {amount} for type {type}")
 
         with self._lock:
+            resolved_tier = self._resolve_add_credits_tier(tier)
+            resolved_expires_at = self._reconcile_add_credits_expiry(resolved_tier, expires_at)
+
             current = self._balances.get(user_id, Decimal(0))
             self._balances[user_id] = current + amount
             self._lifetime[user_id] = self._lifetime.get(user_id, Decimal(0)) + (
                 amount if type == "purchase" else Decimal(0)
             )
+            tier_balance_key = (user_id, resolved_tier)
+            self._tier_balances[tier_balance_key] = self._tier_balances.get(tier_balance_key, Decimal(0)) + amount
 
             tx_id = str(uuid.uuid4())
+            tx_meta: dict[str, Any] = metadata.model_dump() if metadata else {}
+            tx_meta["tier"] = resolved_tier
             tx = _TransactionRecord(
                 id=tx_id,
                 user_id=user_id,
                 amount=amount,
                 type=type,
-                metadata=metadata.model_dump() if metadata else {},
+                metadata=tx_meta,
                 created_at=self._utcnow(),
                 # Store tz-aware (naive bounds assumed UTC) so sweep compares
                 # datetimes safely without a tz-aware/naive TypeError (M9).
-                expires_at=self._ensure_aware(expires_at) if expires_at else None,
+                expires_at=resolved_expires_at,
             )
             self._transactions.append(tx)
 
@@ -242,7 +259,135 @@ class MemoryStore(CreditStore):
                 amount=amount,
                 new_balance=self._balances[user_id],
                 lifetime_purchased=self._lifetime[user_id],
+                tier=resolved_tier,
             )
+
+    def _resolve_add_credits_tier(self, tier: str | None) -> str:
+        """Resolve ``add_credits(tier=...)`` against configured tiers (lock held).
+
+        - No tiers configured: ``tier`` must be ``None`` or ``"default"``.
+        - Tiers configured + given: must be a known key, else ``StoreError``
+          with error code ``tier_not_found``.
+        - Tiers configured + omitted: resolves to the tier with
+          ``is_default=True``; if none is marked default, raises
+          ``StoreError`` with error code ``tier_required`` (deliberately
+          strict — never silently misroute real money).
+        """
+        if not self._tier_definitions:
+            if tier is not None and tier != "default":
+                raise StoreError(f"tier_not_found: {tier}")
+            return "default"
+        if tier is not None:
+            if tier not in self._tier_definitions:
+                raise StoreError(f"tier_not_found: {tier}")
+            return tier
+        for tier_key, tdef in self._tier_definitions.items():
+            if tdef.is_default:
+                return tier_key
+        raise StoreError("tier_required")
+
+    def _reconcile_add_credits_expiry(self, resolved_tier: str, expires_at: datetime | None) -> datetime | None:
+        """Reconcile ``add_credits(expires_at=...)`` against the resolved tier's
+        ``expires`` flag (lock held).
+
+        - No tiers configured (implicit ``"default"`` tier): behaves exactly as
+          ``add_credits`` always has — no restriction on ``expires_at``.
+        - Non-expiring tier + explicit ``expires_at``: raises ``StoreError``
+          with error code ``tier_does_not_expire``.
+        - Expiring tier + explicit ``expires_at``: validated to be in the
+          future and used as-is.
+        - Expiring tier + omitted ``expires_at``: uses ``default_ttl_days``
+          when configured, else raises ``StoreError`` with error code
+          ``expires_at_required``.
+        """
+        tier_def = self._tier_definitions.get(resolved_tier)
+        if tier_def is None:
+            # No tiers configured — unchanged legacy behavior (M-tiers zero
+            # behavioral change requirement).
+            return self._ensure_aware(expires_at) if expires_at else None
+        if not tier_def.expires:
+            if expires_at is not None:
+                raise StoreError(f"tier_does_not_expire: {resolved_tier}")
+            return None
+        if expires_at is not None:
+            aware = self._ensure_aware(expires_at)
+            if aware <= _utcnow():
+                raise StoreError(f"invalid_expires_at: {expires_at}")
+            return aware
+        if tier_def.default_ttl_days is not None:
+            return _utcnow() + timedelta(days=tier_def.default_ttl_days)
+        raise StoreError(f"expires_at_required: {resolved_tier}")
+
+    def _overdraft_sink(self) -> str:
+        """Resolve the tier that absorbs overdraft debt (lock held).
+
+        ``allow_overdraft`` tier, else the tier with the highest ``priority``
+        number, else ``"default"`` (always resolvable per plan).
+        """
+        if not self._tier_definitions:
+            return "default"
+        for tier_key, tdef in self._tier_definitions.items():
+            if tdef.allow_overdraft:
+                return tier_key
+        return max(self._tier_definitions.items(), key=lambda kv: (kv[1].priority, kv[0]))[0]
+
+    def _walk_tiers(self, user_id: str, net: Decimal) -> dict[str, Decimal]:
+        """Priority-walk debit of ``net`` across a user's tier balances (lock held).
+
+        Mirrors the deduction algorithm's tier-walk step used by both
+        ``deduct_with_allowance`` and ``settle_lease``: drains configured tiers
+        in ascending priority order (or the synthetic ``[{"default",
+        priority=0, allow_overdraft=True}]`` when no tiers are configured),
+        then any tier keys the user holds a nonzero balance in that are no
+        longer configured (the "config drift" safety net, appended last so
+        money under a removed/renamed tier key never gets stuck).
+
+        If ``net`` still isn't fully covered after exhausting every tier (only
+        reachable under a negative floor / overdraft — the floor check that
+        ran before this helper guarantees full coverage in strict mode), the
+        remainder routes to the overdraft sink and that tier's balance is
+        allowed to go negative.
+
+        Uses plain Decimal ``min()`` arithmetic — an exact greedy split, never
+        proportional/rounded — so the returned dict's values always sum to
+        exactly ``net``.
+        """
+        if self._tier_definitions:
+            walk_order = [
+                tier_key
+                for tier_key, _ in sorted(self._tier_definitions.items(), key=lambda kv: (kv[1].priority, kv[0]))
+            ]
+        else:
+            walk_order = ["default"]
+
+        configured_keys = set(walk_order)
+        drift_keys = sorted(
+            tier_key
+            for (uid, tier_key), bal in self._tier_balances.items()
+            if uid == user_id and tier_key not in configured_keys and bal != 0
+        )
+        walk_order.extend(drift_keys)
+
+        remaining = net
+        tier_breakdown: dict[str, Decimal] = {}
+        for tier_key in walk_order:
+            if remaining <= 0:
+                break
+            balance_key = (user_id, tier_key)
+            available = self._tier_balances.get(balance_key, Decimal(0))
+            take = min(available, remaining)
+            if take > 0:
+                tier_breakdown[tier_key] = take
+                remaining -= take
+                self._tier_balances[balance_key] = available - take
+
+        if remaining > 0:
+            sink = self._overdraft_sink()
+            sink_key = (user_id, sink)
+            self._tier_balances[sink_key] = self._tier_balances.get(sink_key, Decimal(0)) - remaining
+            tier_breakdown[sink] = tier_breakdown.get(sink, Decimal(0)) + remaining
+
+        return tier_breakdown
 
     def deduct_with_allowance(
         self,
@@ -327,10 +472,13 @@ class MemoryStore(CreditStore):
                     error="insufficient_credits",
                 )
 
-            # (6) Commit: consume allowance, debit balance, insert one ledger row.
+            # (6) Commit: consume allowance, walk tiers, debit balance, insert one
+            # ledger row. The aggregate balance stays a maintained cache, unchanged
+            # (still one scalar decrement); the tier walk is the new per-tier commit.
             if consume > 0 and plan_key:
                 self._increment_usage_window(user_id, plan_key, consume, period_start)
 
+            tier_breakdown = self._walk_tiers(user_id, net)
             self._balances[user_id] = balance - net
             new_balance = self._balances[user_id]
 
@@ -345,6 +493,7 @@ class MemoryStore(CreditStore):
             # not the (wrong) current balance at replay time (Fix 8).
             tx_meta["allowance_consumed"] = str(consume)
             tx_meta["balance_after"] = str(new_balance)
+            tx_meta["tier_breakdown"] = {k: str(v) for k, v in tier_breakdown.items()}
             self._transactions.append(
                 _TransactionRecord(
                     id=tx_id,
@@ -364,6 +513,7 @@ class MemoryStore(CreditStore):
                 balance_after=new_balance,
                 idempotent=False,
                 cap_warning=cap_warning,
+                tier_breakdown=tier_breakdown,
             )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -479,6 +629,11 @@ class MemoryStore(CreditStore):
         Uses the ``balance_after`` stored in the transaction's metadata rather than
         the current balance so that multiple replays return a stable result (Fix 8).
         Falls back to ``balance`` (current) for transactions written before this fix.
+
+        Likewise echoes back the ``tier_breakdown`` stored in the original ledger
+        row's metadata verbatim — never recomputed — so replay is correct even if
+        tiers/balances changed since (idempotent replay must return the exact
+        original per-tier breakdown).
         """
         original_balance_after = _as_decimal(tx.metadata.get("balance_after", balance))
         return DeductionResult(
@@ -488,7 +643,19 @@ class MemoryStore(CreditStore):
             allowance_consumed=_as_decimal(tx.metadata.get("allowance_consumed", 0)),
             balance_after=original_balance_after,
             idempotent=True,
+            tier_breakdown=self._decimal_breakdown(tx.metadata.get("tier_breakdown")) or None,
         )
+
+    @staticmethod
+    def _decimal_breakdown(raw: Any) -> dict[str, Decimal]:
+        """Parse a ``dict[str, str]`` tier-breakdown metadata blob into ``Decimal`` values.
+
+        Returns ``{}`` for ``None``/malformed input so callers can treat absence
+        uniformly (pre-tiers transactions have no ``tier_breakdown`` key at all).
+        """
+        if not isinstance(raw, dict):
+            return {}
+        return {k: _as_decimal(v) for k, v in raw.items()}
 
     def _settle_lease_state(
         self,
@@ -611,6 +778,7 @@ class MemoryStore(CreditStore):
             if consume > 0 and plan_key:
                 self._increment_usage_window(user_id, plan_key, consume, period_start)
 
+            tier_breakdown = self._walk_tiers(user_id, net)
             self._balances[user_id] = balance - net
             new_balance = self._balances[user_id]
 
@@ -624,6 +792,7 @@ class MemoryStore(CreditStore):
             # not the (wrong) current balance at replay time (Fix 8).
             tx_meta["allowance_consumed"] = str(consume)
             tx_meta["balance_after"] = str(new_balance)
+            tx_meta["tier_breakdown"] = {k: str(v) for k, v in tier_breakdown.items()}
             self._transactions.append(
                 _TransactionRecord(
                     id=tx_id,
@@ -646,6 +815,7 @@ class MemoryStore(CreditStore):
                 balance_after=new_balance,
                 idempotent=False,
                 cap_warning=cap_warning,
+                tier_breakdown=tier_breakdown,
             )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -696,6 +866,40 @@ class MemoryStore(CreditStore):
                 reserved=reserved,
                 available=balance - reserved,
             )
+
+    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+        with self._lock:
+            total_balance = self._balances.get(user_id, Decimal(0))
+
+            if not self._tier_definitions:
+                # No tiers configured — synthesize a single "default" entry so
+                # the API shape is uniform regardless of whether tiers exist.
+                return TierBalancesResult(
+                    user_id=user_id,
+                    tiers=[
+                        TierBalance(
+                            tier_key="default",
+                            name="",
+                            priority=0,
+                            expires=False,
+                            balance=total_balance,
+                        )
+                    ],
+                    total_balance=total_balance,
+                )
+
+            configured = sorted(self._tier_definitions.items(), key=lambda kv: (kv[1].priority, kv[0]))
+            tiers = [
+                TierBalance(
+                    tier_key=tier_key,
+                    name=tdef.name,
+                    priority=tdef.priority,
+                    expires=tdef.expires,
+                    balance=self._tier_balances.get((user_id, tier_key), Decimal(0)),
+                )
+                for tier_key, tdef in configured
+            ]
+            return TierBalancesResult(user_id=user_id, tiers=tiers, total_balance=total_balance)
 
     # ── Internal helpers (assume the lock is held) ─────────────────────
 
@@ -834,6 +1038,11 @@ class MemoryStore(CreditStore):
             if plans:
                 for plan_key, plan in plans.items():
                     self._plan_definitions[plan_key] = plan
+            # Extract tier definitions from config, keyed on tier_key (mirrors plans).
+            tiers = getattr(config, "tiers", None)
+            if tiers:
+                for tier_key, tier in tiers.items():
+                    self._tier_definitions[tier_key] = tier
             return record_id
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -1014,6 +1223,38 @@ class MemoryStore(CreditStore):
                     error="over_refund",
                 )
 
+            # LIFO tier restoration (usage only — team_usage has no tier concept;
+            # tiers apply only to user_credits/user_credit_tiers, not team pools).
+            # Re-derives tier_remaining from the ledger each time (sum of ALL prior
+            # refunds' own tier_breakdown), never a separate running counter, so
+            # repeated partial refunds compose correctly without double-restoring.
+            refund_tier_breakdown: dict[str, Decimal] | None = None
+            if orig_tx.type == "usage":
+                original_breakdown = self._decimal_breakdown(orig_tx.metadata.get("tier_breakdown"))
+                if original_breakdown:
+                    prior_refund_breakdowns = [
+                        self._decimal_breakdown(t.metadata.get("tier_breakdown"))
+                        for t in self._transactions
+                        if t.type == "refund" and t.reference_id == transaction_id
+                    ]
+                    tier_remaining: dict[str, Decimal] = {}
+                    for tier_key, orig_amt in original_breakdown.items():
+                        already = sum((b.get(tier_key, Decimal(0)) for b in prior_refund_breakdowns), Decimal(0))
+                        tier_remaining[tier_key] = orig_amt - already
+
+                    to_allocate = refund_amount
+                    new_breakdown: dict[str, Decimal] = {}
+                    for tier_key in self._reverse_priority_order(list(tier_remaining.keys())):
+                        if to_allocate <= 0:
+                            break
+                        give = min(tier_remaining.get(tier_key, Decimal(0)), to_allocate)
+                        if give > 0:
+                            new_breakdown[tier_key] = give
+                            to_allocate -= give
+                            balance_key = (orig_tx.user_id, tier_key)
+                            self._tier_balances[balance_key] = self._tier_balances.get(balance_key, Decimal(0)) + give
+                    refund_tier_breakdown = new_breakdown
+
             # Restore balance and append the refund ledger row.
             self._balances[orig_tx.user_id] = current + refund_amount
 
@@ -1021,6 +1262,8 @@ class MemoryStore(CreditStore):
             tx_meta = metadata.model_dump(exclude_none=True) if metadata else {}
             if reason:
                 tx_meta["reason"] = reason
+            if refund_tier_breakdown is not None:
+                tx_meta["tier_breakdown"] = {k: str(v) for k, v in refund_tier_breakdown.items()}
             self._transactions.append(
                 _TransactionRecord(
                     id=tx_id,
@@ -1040,7 +1283,24 @@ class MemoryStore(CreditStore):
                 user_id=orig_tx.user_id,
                 amount=refund_amount,
                 new_balance=self._balances[orig_tx.user_id],
+                tier_breakdown=refund_tier_breakdown,
             )
+
+    def _reverse_priority_order(self, tier_keys: list[str]) -> list[str]:
+        """Order tier keys for LIFO refund restoration (lock held): highest
+        ``priority`` number (last-drained) first. Tier keys no longer present in
+        config (config drift) sort before all configured tiers — they were
+        appended last in the forward deduction walk, so they were drained last
+        and are restored first.
+        """
+
+        def sort_key(tier_key: str) -> tuple[int, int, str]:
+            tdef = self._tier_definitions.get(tier_key)
+            if tdef is None:
+                return (0, 0, tier_key)
+            return (1, -tdef.priority, tier_key)
+
+        return sorted(tier_keys, key=sort_key)
 
     # ── Credit expiry ─────────────────────────────────────────────────────
 
@@ -1049,36 +1309,50 @@ class MemoryStore(CreditStore):
 
         Swept grants are marked with ``swept_at`` (H4) so a second sweep reports
         zero and never double-debits — parity with the SQL ``expire_credits``.
+
+        Grouping is per ``(user_id, tier_key)`` (not just per-user): each grant's
+        tier is read from ``metadata["tier"]`` (defaulting to ``"default"`` for
+        pre-existing transactions written before tiers existed) — a tier's
+        ``expires`` flag is only consulted at ``add_credits`` time, so a
+        transaction's fate is fixed regardless of later config changes. The
+        existing clamp (never expire more than what's left) is unchanged, just
+        re-scoped to the tier's own balance instead of the user's aggregate.
         """
         with self._lock:
             now = self._utcnow()
-            expired_by_user: dict[str, Decimal] = {}
+            expired_by_tier_key: dict[tuple[str, str], Decimal] = {}
             expired_txs: list[_TransactionRecord] = []
 
             for tx in self._transactions:
                 if tx.swept_at is not None:
                     continue
                 if tx.expires_at and tx.type in ("purchase", "adjustment") and tx.expires_at <= now:
-                    expired_by_user[tx.user_id] = expired_by_user.get(tx.user_id, Decimal(0)) + tx.amount
+                    tier_key = tx.metadata.get("tier", "default")
+                    key = (tx.user_id, tier_key)
+                    expired_by_tier_key[key] = expired_by_tier_key.get(key, Decimal(0)) + tx.amount
                     expired_txs.append(tx)
 
             expired_count = 0
             expired_amount = Decimal(0)
+            expired_by_tier: dict[str, Decimal] = {}
 
-            for user_id, total_expired in expired_by_user.items():
-                current_balance = self._balances.get(user_id, Decimal(0))
-                to_expire = min(total_expired, current_balance)
+            for (user_id, tier_key), total_expired in expired_by_tier_key.items():
+                current_tier_balance = self._tier_balances.get((user_id, tier_key), Decimal(0))
+                to_expire = min(total_expired, current_tier_balance)
 
                 if to_expire > 0:
                     expired_count += 1
                     expired_amount += to_expire
+                    expired_by_tier[tier_key] = expired_by_tier.get(tier_key, Decimal(0)) + to_expire
 
                     if not dry_run:
+                        self._tier_balances[(user_id, tier_key)] = current_tier_balance - to_expire
+                        current_balance = self._balances.get(user_id, Decimal(0))
                         self._balances[user_id] = current_balance - to_expire
 
                         # Mark swept grants so they are not re-swept (H4).
                         for et in expired_txs:
-                            if et.user_id == user_id:
+                            if et.user_id == user_id and et.metadata.get("tier", "default") == tier_key:
                                 et.swept_at = now
 
                         tx_id = str(uuid.uuid4())
@@ -1088,7 +1362,11 @@ class MemoryStore(CreditStore):
                                 user_id=user_id,
                                 amount=-to_expire,
                                 type="adjustment",
-                                metadata={"reason": "credit_expired", "expired_amount": str(to_expire)},
+                                metadata={
+                                    "reason": "credit_expired",
+                                    "expired_amount": str(to_expire),
+                                    "tier": tier_key,
+                                },
                                 created_at=now,
                             )
                         )
@@ -1097,6 +1375,7 @@ class MemoryStore(CreditStore):
                 expired_count=expired_count,
                 expired_amount=expired_amount,
                 dry_run=dry_run,
+                expired_by_tier=expired_by_tier,
             )
 
     # ── Usage analytics ─────────────────────────────────────────────────
