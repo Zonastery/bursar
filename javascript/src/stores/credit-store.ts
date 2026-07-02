@@ -33,6 +33,7 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
+  TierBalancesResult,
   TopUserRow,
 } from "../types.js";
 
@@ -80,6 +81,8 @@ export abstract class CreditStore {
     type?: string,
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
+    /** Target credit tier (credit tiers); omitted/`null` resolves to the config's default tier. */
+    tier?: string | null,
   ): Promise<AddCreditsResult>;
   /**
    * Atomically calculate-and-charge in one server-side transaction:
@@ -193,6 +196,16 @@ export abstract class CreditStore {
 
   // ── Credit expiry ────────────────────────────────────────────────────
   abstract sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>;
+
+  // ── Credit tiers ─────────────────────────────────────────────────────
+  /**
+   * Per-tier credit balances for a user (credit tiers).
+   *
+   * Sorted by `priority` ascending. When no tiers are configured, synthesizes
+   * a single `"default"` entry from the aggregate balance so the shape is
+   * uniform either way.
+   */
+  abstract getCreditTiers(userId: string): Promise<TierBalancesResult>;
 
   // ── Usage analytics (optional capability — WS8) ──────────────────────
   async spendByUser(_start: Date, _end: Date): Promise<SpendByUserRow[]> {

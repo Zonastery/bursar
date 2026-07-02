@@ -31,6 +31,46 @@ export interface PricingConfigData {
   minBalance?: number | null;
   signupBonus?: number | null;
   plans?: Record<string, PlanDefinition> | null;
+  tiers?: Record<string, TierDefinition> | null;
+}
+
+/**
+ * Definition of a credit tier (credit tiers feature).
+ *
+ * ``priority`` controls deduction order (ascending = drained first, ties
+ * broken by config key ascending — not an error). ``expires`` gates whether
+ * ``addCredits`` into this tier requires/accepts an ``expiresAt``.
+ * ``defaultTtlDays`` is used to compute an expiry when ``addCredits`` omits
+ * ``expiresAt`` for an expiring tier. At most one tier may set
+ * ``allowOverdraft: true`` (the tier that absorbs overdraft debt) and at most
+ * one may set ``isDefault: true`` (the tier untagged ``addCredits`` calls
+ * land in) — both enforced at config-validation time.
+ */
+export interface TierDefinition {
+  name: string;
+  priority: number;
+  expires: boolean;
+  defaultTtlDays?: number | null;
+  allowOverdraft?: boolean;
+  isDefault?: boolean;
+}
+
+/** A single tier's current balance, as returned by `getCreditTiers`. */
+export interface TierBalance {
+  tierKey: string;
+  name: string;
+  priority: number;
+  expires: boolean;
+  balance: Decimal;
+}
+
+/** Result of querying a user's per-tier credit balances. */
+export interface TierBalancesResult {
+  userId: string;
+  /** Sorted by `priority` ascending. */
+  tiers: TierBalance[];
+  /** Equal to `BalanceResult.balance` — the aggregate across all tiers. */
+  totalBalance: Decimal;
 }
 
 /** Current credit balance for a user. */
@@ -47,6 +87,8 @@ export interface AddCreditsResult {
   amount: Decimal;
   newBalance: Decimal;
   lifetimePurchased: Decimal;
+  /** The tier this grant landed in (`"default"` when no tiers are configured). */
+  tier: string;
 }
 
 /** Result of deducting credits. */
@@ -59,6 +101,8 @@ export interface DeductionResult {
   idempotent: boolean;
   capWarning: string | null;
   error?: string | null;
+  /** Exact per-tier split of `amount` (credit tiers); `null` when not computed. */
+  tierBreakdown?: Record<string, Decimal> | null;
 }
 
 /** Options for an atomic allowance-aware deduction. */
@@ -240,6 +284,8 @@ export interface RefundResult {
   amount: Decimal;
   newBalance: Decimal;
   error?: string | null;
+  /** Per-tier LIFO restoration split of `amount` (credit tiers); `null` when not computed. */
+  tierBreakdown?: Record<string, Decimal> | null;
 }
 
 /** Result of sweeping expired credits. */
@@ -247,6 +293,8 @@ export interface SweepResult {
   expiredCount: number;
   expiredAmount: Decimal;
   dryRun: boolean;
+  /** Per-tier split of `expiredAmount` (credit tiers); `null` when not computed. */
+  expiredByTier?: Record<string, Decimal> | null;
 }
 
 // ── Transaction listing ──────────────────────────────────────────────

@@ -35,6 +35,8 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
+  TierBalance,
+  TierBalancesResult,
   TopUserRow,
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
@@ -60,6 +62,21 @@ function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
 /** A money serialized for a JSON RPC parameter: send as a decimal string. */
 function decParam(value: Decimal): string {
   return value.toString();
+}
+
+/**
+ * Parse a JSON `{tier_key: "3.0000", ...}` object (e.g. `tier_breakdown`,
+ * `expired_by_tier`) into `Record<string, Decimal>`, converting every value
+ * the same way scalar money fields are (never left as a raw string/number).
+ * Returns `null` when `raw` is not an object (absent/error responses).
+ */
+function decRecord(raw: unknown): Record<string, Decimal> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<string, Decimal> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    out[k] = dec(v);
+  }
+  return out;
 }
 
 /** Parse the ``per_operation`` JSONB map into typed `OperationPolicy` records. */
@@ -214,6 +231,7 @@ export class HttpxSupabaseStore extends CreditStore {
     type = "adjustment",
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
+    tier?: string | null,
   ): Promise<AddCreditsResult> {
     const meta: Record<string, unknown> = { ...(metadata ?? {}) };
     if (expiresAt) {
@@ -224,6 +242,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_amount: decParam(amount),
       p_type: type,
       p_metadata: meta,
+      p_tier: tier ?? null,
     });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`credits_add: ${code}`);
@@ -233,6 +252,7 @@ export class HttpxSupabaseStore extends CreditStore {
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
+      tier: String(row.tier ?? tier ?? "default"),
     };
   }
 
@@ -279,6 +299,7 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
 
@@ -372,6 +393,7 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
 
@@ -610,6 +632,7 @@ export class HttpxSupabaseStore extends CreditStore {
       userId: String(row.user_id ?? ""),
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
+      tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
 
@@ -840,6 +863,24 @@ export class HttpxSupabaseStore extends CreditStore {
       expiredCount: Number(row.expired_count ?? 0),
       expiredAmount: dec(row.expired_amount),
       dryRun,
+      expiredByTier: decRecord(row.expired_by_tier),
     };
+  }
+
+  // ── Credit tiers ─────────────────────────────────────────────────────
+
+  async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+    const rows = await this.rpcAll("get_user_credit_tiers", { p_user_id: userId });
+    const tiers: TierBalance[] = rows.map((row) => ({
+      tierKey: String(row.tier_key ?? ""),
+      name: String(row.name ?? ""),
+      priority: Number(row.priority ?? 0),
+      expires: Boolean(row.expires ?? false),
+      balance: dec(row.balance),
+    }));
+    // totalBalance == BalanceResult.balance — reuse the existing verified path
+    // rather than assuming an extra column on this RPC's row shape.
+    const balance = await this.getBalance(userId);
+    return { userId, tiers, totalBalance: balance.balance };
   }
 }
