@@ -2,7 +2,7 @@ import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod } from "./allowance.js";
-import type { PlanDefinition } from "./types.js";
+import type { PlanDefinition, TierDefinition } from "./types.js";
 
 /** Valid `allowancePeriod` values (WS9b). */
 const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
@@ -39,6 +39,7 @@ export interface PricingConfig {
   signupBonus?: number | null;
   fixed: Record<string, number>;
   plans?: Record<string, PlanDefinition> | null;
+  tiers?: Record<string, TierDefinition> | null;
 }
 
 /** Variable set for validating `tools` expressions: base set + `this_tool_calls` (WS2). */
@@ -94,6 +95,9 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
     max_concurrent: "maxConcurrent",
     signup_bonus: "signupBonus",
     allowance_period: "allowancePeriod",
+    default_ttl_days: "defaultTtlDays",
+    allow_overdraft: "allowOverdraft",
+    is_default: "isDefault",
   };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
@@ -106,6 +110,11 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
 /** Recursively normalise a plan definition object. */
 function normalisePlan(p: Record<string, unknown>): Record<string, unknown> {
   return normaliseKeys(p);
+}
+
+/** Recursively normalise a tier definition object (credit tiers). */
+function normaliseTier(t: Record<string, unknown>): Record<string, unknown> {
+  return normaliseKeys(t);
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
@@ -153,6 +162,44 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
     }
   }
 
+  // Credit tiers (sibling to `plans`): validate + normalise. An explicit empty
+  // `tiers: {}` is a config error (ambiguous intent — omit the key entirely
+  // for "no tiers"), mirroring the Python `config.py` validator exactly.
+  if (d.tiers !== undefined && d.tiers !== null) {
+    if (typeof d.tiers !== "object" || Array.isArray(d.tiers)) {
+      throw new ConfigError("tiers must be a dict of tier definitions");
+    }
+    if (Object.keys(d.tiers as object).length === 0) {
+      throw new ConfigError(
+        "tiers must not be an empty object; omit the `tiers` key entirely for no tiers",
+      );
+    }
+  }
+  const rawTiers = d.tiers as Record<string, Record<string, unknown>> | undefined;
+  const tiers = rawTiers
+    ? Object.fromEntries(Object.entries(rawTiers).map(([k, v]) => [k, normaliseTier(v)]))
+    : undefined;
+
+  if (tiers) {
+    let overdraftCount = 0;
+    let defaultCount = 0;
+    for (const [tierKey, t] of Object.entries(tiers)) {
+      if (t.allowOverdraft === true) overdraftCount++;
+      if (t.isDefault === true) defaultCount++;
+      if (t.defaultTtlDays != null && (t.defaultTtlDays as number) <= 0) {
+        throw new ConfigError(
+          `tiers.${tierKey}.defaultTtlDays must be > 0, got ${String(t.defaultTtlDays)}`,
+        );
+      }
+    }
+    if (overdraftCount > 1) {
+      throw new ConfigError("at most one tier may set allowOverdraft: true");
+    }
+    if (defaultCount > 1) {
+      throw new ConfigError("at most one tier may set isDefault: true");
+    }
+  }
+
   const config: PricingConfig = {
     models: d.models as Record<string, string>,
     tools: { _default: "tool_calls * 0", ...(d.tools as Record<string, string> | undefined) },
@@ -189,6 +236,21 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       };
     }
     config.plans = planDefs;
+  }
+
+  if (tiers) {
+    const tierDefs: Record<string, TierDefinition> = {};
+    for (const [key, t] of Object.entries(tiers)) {
+      tierDefs[key] = {
+        name: (t.name as string | undefined) ?? key,
+        priority: Number(t.priority ?? 0),
+        expires: Boolean(t.expires ?? false),
+        defaultTtlDays: t.defaultTtlDays != null ? Number(t.defaultTtlDays) : null,
+        allowOverdraft: Boolean(t.allowOverdraft ?? false),
+        isDefault: Boolean(t.isDefault ?? false),
+      };
+    }
+    config.tiers = tierDefs;
   }
 
   validateExpressions(config);

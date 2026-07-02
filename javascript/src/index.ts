@@ -74,6 +74,9 @@ export type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
+  TierBalance,
+  TierBalancesResult,
+  TierDefinition,
   TopUserRow,
 } from "./types.js";
 

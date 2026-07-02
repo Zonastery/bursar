@@ -126,6 +126,7 @@ describe("HttpxSupabaseStore", () => {
         p_amount: "100.25",
         p_type: "purchase",
         p_metadata: {},
+        p_tier: null,
       });
       expect(result.newBalance.toString()).toBe("100.25");
     });

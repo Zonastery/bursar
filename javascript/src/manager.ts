@@ -36,6 +36,7 @@ import type {
   SpendByUserRow,
   SweepResult,
   TeamDeductionResult,
+  TierBalancesResult,
   TopUserRow,
 } from "./types.js";
 import type {
@@ -335,7 +336,13 @@ export class CreditManager {
   async addCredits(
     userId: string,
     amount: Decimal | number,
-    options?: { type?: string; metadata?: CreditMetadata | null; expiresAt?: Date | null },
+    options?: {
+      type?: string;
+      metadata?: CreditMetadata | null;
+      expiresAt?: Date | null;
+      /** Target credit tier (credit tiers); omitted resolves to the config's default tier. */
+      tier?: string | null;
+    },
   ): Promise<AddCreditsResult> {
     const type = options?.type ?? "adjustment";
     const result = await this.store.addCredits(
@@ -344,6 +351,7 @@ export class CreditManager {
       type,
       options?.metadata,
       options?.expiresAt,
+      options?.tier,
     );
     this.emit("credits.added", userId, {
       transactionId: result.transactionId,
@@ -725,6 +733,11 @@ export class CreditManager {
   /** Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3). */
   async getAvailable(userId: string): Promise<AvailableResult> {
     return await this.store.getAvailable(userId);
+  }
+
+  /** Get a user's per-tier credit balances (credit tiers). Thin pass-through, no event emission. */
+  async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+    return await this.store.getCreditTiers(userId);
   }
 
   /**
