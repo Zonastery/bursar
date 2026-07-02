@@ -43,6 +43,8 @@ from ducto.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TierBalance,
+    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -69,6 +71,11 @@ _BUSINESS_ERROR_CODES = frozenset(
         "lease_not_found",
         "lease_expired",
         "lease_released",
+        # Credit tier business codes (023).
+        "tier_not_found",
+        "tier_required",
+        "tier_does_not_expire",
+        "expires_at_required",
     }
 )
 
@@ -87,6 +94,18 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     if isinstance(value, bool):
         return default
     return Decimal(str(value))
+
+
+def _dec_map(value: Any) -> dict[str, Decimal] | None:
+    """Coerce a ``{tier_key: amount}`` JSON object into ``dict[str, Decimal]`` (023).
+
+    Used for ``tier_breakdown``/``expired_by_tier`` fields. Returns ``None`` for a
+    missing/empty/non-dict value so callers can distinguish "no tier data" from
+    "empty breakdown" the same way the rest of this module treats optional fields.
+    """
+    if not value or not isinstance(value, dict):
+        return None
+    return {str(k): _dec(v) for k, v in value.items()}
 
 
 def run_migrations(database_url: str) -> SetupResult:
@@ -276,6 +295,7 @@ class HttpxSupabaseStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
+        tier: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json") if metadata else {}
@@ -290,6 +310,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_amount": str(amount),
                 "p_type": type,
                 "p_metadata": meta,
+                "p_tier": tier,
             },
         )
         if "error" in row and row["error"]:
@@ -300,6 +321,7 @@ class HttpxSupabaseStore(CreditStore):
             amount=_dec(row.get("amount"), amount),
             new_balance=_dec(row.get("new_balance")),
             lifetime_purchased=_dec(row.get("lifetime_purchased")),
+            tier=str(row.get("tier", "default")),
         )
 
     def deduct_with_allowance(
@@ -356,6 +378,7 @@ class HttpxSupabaseStore(CreditStore):
             balance_after=_dec(row.get("balance_after")),
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
+            tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -454,6 +477,7 @@ class HttpxSupabaseStore(CreditStore):
             balance_after=_dec(row.get("balance_after")),
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
+            tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -630,6 +654,7 @@ class HttpxSupabaseStore(CreditStore):
             user_id=str(row.get("user_id", "")),
             amount=_dec(row.get("amount")),
             new_balance=_dec(row.get("new_balance")),
+            tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -850,4 +875,25 @@ class HttpxSupabaseStore(CreditStore):
             expired_count=int(row.get("expired_count", 0)),
             expired_amount=_dec(row.get("expired_amount")),
             dry_run=dry_run,
+            expired_by_tier=_dec_map(row.get("expired_by_tier")),
+        )
+
+    # ── Credit tiers (023) ────────────────────────────────────────────────
+
+    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+        row = self._rpc("get_user_credit_tiers", {"p_user_id": user_id})
+        tiers = [
+            TierBalance(
+                tier_key=str(t.get("tier_key", "")),
+                name=str(t.get("name", "")),
+                priority=int(t.get("priority", 0)),
+                expires=bool(t.get("expires", False)),
+                balance=_dec(t.get("balance")),
+            )
+            for t in (row.get("tiers") or [])
+        ]
+        return TierBalancesResult(
+            user_id=str(row.get("user_id", user_id)),
+            tiers=tiers,
+            total_balance=_dec(row.get("total_balance")),
         )
