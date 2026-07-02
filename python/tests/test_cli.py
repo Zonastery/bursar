@@ -388,8 +388,8 @@ class TestPricingValidationSchemas:
         config = {
             "models": {"_default": "input_tokens * 1", "gpt-4": "input_tokens * 2"},
             "tools": {"_default": "tool_calls * 5", "code_exec": "tool_calls * 50"},
-            "search": {"costs": "search_queries * 5", "rag": "search_queries * 10"},
-            "cache": {"discount": "clamp(-cache_read_tokens * 0.002, -max(input_tokens), 0)"},
+            "search": "search_queries * 5",
+            "cache": "clamp(-cache_read_tokens * 0.002, -max(input_tokens), 0)",
             "fixed": {"batch": 100, "roadmap_gen": 20000},
             "min_balance": 5000,
             "plans": {
@@ -430,7 +430,8 @@ class TestPricingValidationSchemas:
         p.write_text(yaml.dump(config))
         _run("pricing", "validate", str(p))
 
-    def test_mixed_search_nested_dict_fails(self, tmp_path: Path) -> None:
+    def test_search_as_dict_fails(self, tmp_path: Path) -> None:
+        """search/cache are single expression strings (WS1), not dicts."""
         config = {
             "models": {"_default": "input_tokens * 1"},
             "search": {"costs": "search_queries * 1", "rag": {"costs": "search_queries * 2"}},

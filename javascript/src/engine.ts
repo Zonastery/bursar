@@ -62,8 +62,8 @@ export class PricingEngine {
     return {
       models: { ...this.config.models },
       tools: Object.keys(this.config.tools).length > 0 ? { ...this.config.tools } : null,
-      search: Object.keys(this.config.search).length > 0 ? { ...this.config.search } : null,
-      cache: Object.keys(this.config.cache).length > 0 ? { ...this.config.cache } : null,
+      search: this.config.search ?? null,
+      cache: this.config.cache ?? null,
       fixed: Object.keys(this.config.fixed).length > 0 ? { ...this.config.fixed } : null,
       minBalance: this.config.minBalance,
       plans: this.config.plans ? { ...this.config.plans } : null,
@@ -148,9 +148,14 @@ export class PricingEngine {
     const calls = metrics.toolCalls ?? [];
     const uniqueNames = [...new Set(calls.map((t) => t.name))];
 
+    // WS2: `tool_calls` always means the GLOBAL total across all tools — it is
+    // never overridden. Each branch instead gets its own `this_tool_calls`,
+    // scoped to just that branch's call count, alongside the unchanged globals.
     for (const toolName of uniqueNames) {
       if (Object.prototype.hasOwnProperty.call(this.config.tools, toolName)) {
-        total = total.plus(evaluateExpression(this.config.tools[toolName], variables));
+        const thisToolCalls = calls.filter((t) => t.name === toolName).length;
+        const local = { ...variables, this_tool_calls: thisToolCalls };
+        total = total.plus(evaluateExpression(this.config.tools[toolName], local));
         seenSpecific.add(toolName);
       }
     }
@@ -161,7 +166,7 @@ export class PricingEngine {
     // Python and (masked by 2dp rounding) under-charging on repeated unknowns.
     const unknownCount = calls.filter((t) => !seenSpecific.has(t.name)).length;
     if (unknownCount > 0) {
-      const local = { ...variables, tool_calls: unknownCount };
+      const local = { ...variables, this_tool_calls: unknownCount };
       total = total.plus(evaluateExpression(defaultExpr, local));
     }
 
@@ -169,15 +174,15 @@ export class PricingEngine {
   }
 
   private calcSearch(variables: Record<string, number>): Decimal {
-    if (this.config.search && "costs" in this.config.search) {
-      return evaluateExpression(this.config.search["costs"], variables);
+    if (this.config.search) {
+      return evaluateExpression(this.config.search, variables);
     }
     return new Decimal(0);
   }
 
   private calcCache(variables: Record<string, number>): Decimal {
-    if (this.config.cache && "discount" in this.config.cache) {
-      return evaluateExpression(this.config.cache["discount"], variables);
+    if (this.config.cache) {
+      return evaluateExpression(this.config.cache, variables);
     }
     return new Decimal(0);
   }

@@ -12,6 +12,7 @@ import {
   RefundError,
 } from "../src/errors.js";
 import type { PricingConfigData } from "../src/types.js";
+import { resolveAllowanceWindow } from "../src/allowance.js";
 
 const TEST_CONFIG: PricingConfigData = {
   models: {
@@ -238,7 +239,7 @@ describe("CreditManager", () => {
     expectDecimal((await manager.getBalance("user-1")).balance, "992.5");
 
     // purchase
-    await manager.addCredits("user-1", 500, "purchase");
+    await manager.addCredits("user-1", 500, { type: "purchase" });
     const balance = await manager.getBalance("user-1");
     expectDecimal(balance.balance, "1492.5");
     expectDecimal(balance.lifetimePurchased, "500");
@@ -405,7 +406,7 @@ describe("CreditManager", () => {
 
     it("refund of a purchase (not a debit) is rejected", async () => {
       await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
-      const add = await manager.addCredits("user-1", 100, "purchase");
+      const add = await manager.addCredits("user-1", 100, { type: "purchase" });
       await expect(() => manager.refundCredits(add.transactionId)).rejects.toThrow(RefundError);
     });
 
@@ -500,13 +501,10 @@ describe("CreditManager", () => {
     it("sweepExpiredCredits delegates to store (fixed clock, no sleep)", async () => {
       await manager.publishPricingFromDict(TEST_CONFIG);
       // Grant expiring 1 minute before the fixed clock.
-      await manager.addCredits(
-        "user-1",
-        100,
-        "purchase",
-        null,
-        new Date(FIXED_NOW.getTime() - 60_000),
-      );
+      await manager.addCredits("user-1", 100, {
+        type: "purchase",
+        expiresAt: new Date(FIXED_NOW.getTime() - 60_000),
+      });
 
       const result = await manager.sweepExpiredCredits();
       expect(result.expiredCount).toBe(1);
@@ -516,13 +514,10 @@ describe("CreditManager", () => {
 
     it("dryRun through manager reports without modifying", async () => {
       await manager.publishPricingFromDict(TEST_CONFIG);
-      await manager.addCredits(
-        "user-1",
-        100,
-        "purchase",
-        null,
-        new Date(FIXED_NOW.getTime() - 60_000),
-      );
+      await manager.addCredits("user-1", 100, {
+        type: "purchase",
+        expiresAt: new Date(FIXED_NOW.getTime() - 60_000),
+      });
 
       const result = await manager.sweepExpiredCredits(true);
       expect(result.expiredCount).toBe(1);
@@ -542,13 +537,10 @@ describe("CreditManager", () => {
 
     it("double-sweep reports zero the second time (H4)", async () => {
       await manager.publishPricingFromDict(TEST_CONFIG);
-      await manager.addCredits(
-        "user-1",
-        100,
-        "purchase",
-        null,
-        new Date(FIXED_NOW.getTime() - 60_000),
-      );
+      await manager.addCredits("user-1", 100, {
+        type: "purchase",
+        expiresAt: new Date(FIXED_NOW.getTime() - 60_000),
+      });
 
       const first = await manager.sweepExpiredCredits();
       expect(first.expiredCount).toBe(1);
@@ -741,9 +733,9 @@ describe("CreditManager", () => {
   describe("low_balance event", () => {
     it("fires once when a deduction crosses the threshold (edge-triggered, M18)", async () => {
       const emitter = new CreditEventEmitter();
-      // minBalance default 5 → threshold = 10.
+      // Explicit minBalance: 5 → threshold = 10 (WS6: the implicit default is now 0).
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
       await mgr.addCredits("user-1", 12);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -776,7 +768,7 @@ describe("CreditManager", () => {
     it("honours a configurable absolute threshold", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter, {
-        lowBalanceThreshold: new Decimal(50),
+        lowBalance: { thresholds: [new Decimal(50)] },
       });
       await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 60);
@@ -791,7 +783,8 @@ describe("CreditManager", () => {
     it("does not fire on an idempotent replay (balance did not move)", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      // Explicit minBalance: 5 → threshold = 10 (WS6: the implicit default is now 0).
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
       await mgr.addCredits("user-1", 12);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -838,7 +831,10 @@ describe("CreditManager", () => {
       await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
 
       const events = record(emitter, ["credits.expired"]);
-      await mgr.addCredits("user-1", 100, "purchase", null, new Date(FIXED_NOW.getTime() - 60_000));
+      await mgr.addCredits("user-1", 100, {
+        type: "purchase",
+        expiresAt: new Date(FIXED_NOW.getTime() - 60_000),
+      });
       await mgr.sweepExpiredCredits();
 
       expect(events).toHaveLength(1);
@@ -980,7 +976,7 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       // Explicit threshold of 20 to make the test deterministic
       const mgr = new CreditManager(store, undefined, emitter, {
-        lowBalanceThreshold: new Decimal(20),
+        lowBalance: { thresholds: [new Decimal(20)] },
       });
       await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 25);
@@ -1148,12 +1144,13 @@ describe("CreditManager", () => {
   // M15 — Low-balance threshold default (minBalance * 2)
   describe("M15: low_balance threshold defaults to minBalance * 2", () => {
     it("fires when balance crosses minBalance*2 from above (minBalance=5 → threshold=10)", async () => {
-      // No explicit lowBalanceThreshold — must default to minBalance*2 = 10.
+      // No explicit lowBalance.thresholds — must default to minBalance*2 = 10.
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
 
-      // Use a pricing config with minBalance=5 (the default engine value).
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      // Explicit minBalance: 5 (WS6: the engine's implicit default is now 0, so
+      // this must be set explicitly to exercise the minBalance*2 default).
+      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
       // Start at 12 so a single deduction of 3 crosses 10 from above.
       await mgr.addCredits("user-1", 12);
 
@@ -1261,6 +1258,183 @@ describe("CreditManager", () => {
       expect(stats.activeUsers).toBeGreaterThan(0);
       // Two usage deductions occurred
       expect(stats.totalCreditsConsumed.gt(0)).toBe(true);
+    });
+  });
+
+  // ── WS9c: calendar_month plans take the fast path (no window computation) ──
+  describe("WS9c: calendar_month plan — deduct/settle behaviour is unchanged", () => {
+    it("deduct() behaves identically for an explicit calendar_month plan and a planless user", async () => {
+      const s = new MemoryStore();
+      s.setClock(() => FIXED_NOW);
+      const mgr = new CreditManager(s);
+
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          basic: {
+            id: "basic",
+            name: "Basic",
+            freeAllowance: new Decimal(10),
+            allowancePeriod: "calendar_month",
+          },
+        },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "basic");
+      await mgr.publishPricingFromDict(config);
+
+      await mgr.addCredits("user-1", 100);
+
+      // Allowance (10) covers part of a 15-credit deduction; net 5 comes from balance —
+      // exactly the pre-WS9 calendar-month behaviour (no periodStart threading needed).
+      const d1 = await mgr.deduct("user-1", { inputTokens: 15 });
+      expectDecimal(d1.allowanceConsumed, "10");
+      expectDecimal(d1.amount, "5");
+      expectDecimal((await mgr.getBalance("user-1")).balance, "95");
+
+      // A reserve/settle round-trip behaves the same way.
+      const lease = await mgr.reserve("user-1", { inputTokens: 8 });
+      const settled = await mgr.settle("user-1", lease.leaseId, { inputTokens: 8 });
+      expectDecimal(settled.amount, "8");
+      expectDecimal((await mgr.getBalance("user-1")).balance, "87");
+    });
+
+    it("getUserPlan reports allowancePeriod calendar_month when omitted from the plan definition", async () => {
+      const s = new MemoryStore();
+      const mgr = new CreditManager(s);
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: { basic: { id: "basic", name: "Basic", freeAllowance: new Decimal(0) } },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "basic");
+      const plan = await mgr.getUserPlan("user-1");
+      expect(plan.allowancePeriod ?? "calendar_month").toBe("calendar_month");
+    });
+  });
+
+  // ── manager.checkAllowance (new passthrough method, no prior coverage) ────
+  describe("checkAllowance", () => {
+    it("calendar_month plan delegates straight to store.checkAllowance (fast path)", async () => {
+      const s = new MemoryStore();
+      s.setClock(() => FIXED_NOW);
+      const mgr = new CreditManager(s);
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          basic: {
+            id: "basic",
+            name: "Basic",
+            freeAllowance: new Decimal(20),
+            allowancePeriod: "calendar_month",
+          },
+        },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "basic");
+
+      const direct = await s.checkAllowance("user-1");
+      const viaManager = await mgr.checkAllowance("user-1");
+      expect(viaManager).toEqual(direct);
+    });
+
+    it("planless user delegates straight to store.checkAllowance (fast path)", async () => {
+      const s = new MemoryStore();
+      s.setClock(() => FIXED_NOW);
+      const mgr = new CreditManager(s);
+
+      const direct = await s.checkAllowance("no-such-user");
+      const viaManager = await mgr.checkAllowance("no-such-user");
+      expect(viaManager).toEqual(direct);
+      expect(viaManager.allowanceRemaining.toString()).toBe("0");
+    });
+
+    // NOTE: manager.checkAllowance resolves rolling_30d/anniversary windows via
+    // `resolveAllowanceWindow(new Date(), ...)` — the manager has no injectable
+    // clock of its own (only MemoryStore does, via setClock). So these tests
+    // anchor the plan at the REAL "now" (store defaults to the real wall clock)
+    // and assert against `resolveAllowanceWindow` computed with that same "now",
+    // rather than pinning to a fixed historical date the manager can't see.
+    it("rolling_30d plan overrides periodStart/periodEnd with the resolved window", async () => {
+      const s = new MemoryStore();
+      const mgr = new CreditManager(s);
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          rolling: {
+            id: "rolling",
+            name: "Rolling",
+            freeAllowance: new Decimal(10),
+            allowancePeriod: "rolling_30d",
+          },
+        },
+      };
+      await s.setActivePricing(config);
+      const before = new Date();
+      await s.setUserPlan("user-1", "rolling"); // anchors planAssignedAt at "now"
+      const after = new Date();
+      const anchor = (await s.getUserPlan("user-1")).planAssignedAt!;
+      expect(anchor.getTime()).toBeGreaterThanOrEqual(before.getTime());
+      expect(anchor.getTime()).toBeLessThanOrEqual(after.getTime());
+
+      const result = await mgr.checkAllowance("user-1");
+      const now = new Date();
+      const expectedWindow = resolveAllowanceWindow(now, "rolling_30d", anchor);
+      const expectedPeriodEnd = new Date(expectedWindow.end.getTime() - 86_400_000);
+      expect(result.periodStart).toBe(expectedWindow.start.toISOString());
+      expect(result.periodEnd).toBe(expectedPeriodEnd.toISOString());
+      expect(result.allowanceRemaining.toString()).toBe("10");
+    });
+
+    it("anniversary plan overrides periodStart/periodEnd with the resolved window", async () => {
+      const s = new MemoryStore();
+      const mgr = new CreditManager(s);
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          anniv: {
+            id: "anniv",
+            name: "Anniversary",
+            freeAllowance: new Decimal(8),
+            allowancePeriod: "anniversary",
+          },
+        },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "anniv");
+      const anchor = (await s.getUserPlan("user-1")).planAssignedAt!;
+
+      const result = await mgr.checkAllowance("user-1");
+      const now = new Date();
+      const expectedWindow = resolveAllowanceWindow(now, "anniversary", anchor);
+      const expectedPeriodEnd = new Date(expectedWindow.end.getTime() - 86_400_000);
+      expect(result.periodStart).toBe(expectedWindow.start.toISOString());
+      expect(result.periodEnd).toBe(expectedPeriodEnd.toISOString());
+      expect(result.allowanceRemaining.toString()).toBe("8");
+    });
+
+    it("rolling_30d plan reflects a partial deduction in allowanceRemaining", async () => {
+      const s = new MemoryStore();
+      const mgr = new CreditManager(s);
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          rolling: {
+            id: "rolling",
+            name: "Rolling",
+            freeAllowance: new Decimal(10),
+            allowancePeriod: "rolling_30d",
+          },
+        },
+      };
+      await s.setActivePricing(config);
+      await s.setUserPlan("user-1", "rolling");
+      await mgr.publishPricingFromDict(config);
+      await mgr.addCredits("user-1", 100);
+
+      await mgr.deduct("user-1", { inputTokens: 4 });
+      const result = await mgr.checkAllowance("user-1");
+      expect(result.allowanceRemaining.toString()).toBe("6");
     });
   });
 });

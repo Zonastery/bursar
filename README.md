@@ -57,7 +57,7 @@ await manager.deduct("user_abc", { model: "gpt-4", inputTokens: 500, outputToken
 - **Usage analytics** — Time-windowed aggregation by user, model, daily, top users, and aggregate stats.
 - **Event hooks** — Typed pub/sub for `credits.deducted`, `credits.low_balance`, `credits.expired`, and more.
 - **Pluggable storage** — Supabase (zero HTTP deps), raw PostgreSQL, or in-memory.
-- **Safe defaults** — `min_balance` floor, idempotent deductions, concurrent reservation protection.
+- **Safe defaults** — `min_balance` floor (defaults to `0`), idempotent deductions, concurrent reservation protection.
 
 ## Documentation
 
@@ -160,7 +160,7 @@ report = manager.sweep_expired_credits(dry_run=True)                   # preview
 ```
 
 ```typescript
-await manager.addCredits("user_abc", 100, "purchase", null, new Date("2025-01-01"));
+await manager.addCredits("user_abc", 100, { type: "purchase", expiresAt: new Date("2025-01-01") });
 const result = await manager.sweepExpiredCredits();                      // sweep
 const report = await manager.sweepExpiredCredits(true);                  // preview only
 ```

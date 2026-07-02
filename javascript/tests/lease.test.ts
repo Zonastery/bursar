@@ -350,7 +350,7 @@ describe("multi-level low_balance", () => {
     const m = new CreditManager(store, undefined, emitter, {
       policy: "overdraft",
       overdraftFloor: D(0),
-      lowBalanceThresholds: [D(50), D(20), D(10)],
+      lowBalance: { thresholds: [D(50), D(20), D(10)] },
     });
     await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
     const fired: Decimal[] = [];
@@ -378,9 +378,11 @@ describe("multi-level low_balance", () => {
     const m = new CreditManager(store, undefined, undefined, {
       policy: "overdraft",
       overdraftFloor: D(0),
-      lowBalanceThresholds: [D(20)],
-      onLowBalance: () => {
-        throw new Error("handler down");
+      lowBalance: {
+        thresholds: [D(20)],
+        onTrigger: () => {
+          throw new Error("handler down");
+        },
       },
     });
     await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });

@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, NonNegativeInt, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ducto.expr import ExpressionError, validate_expression
 from ducto.interface.models import PlanDefinition
@@ -24,13 +24,22 @@ class PricingConfig(BaseModel):
     version: Literal[1] = 1
     models: dict[str, str]
     tools: dict[str, str] = Field(default_factory=lambda: {"_default": "tool_calls * 0"})
-    search: dict[str, str] = Field(default_factory=dict)
-    cache: dict[str, str] = Field(default_factory=dict)
+    search: str | None = None
+    cache: str | None = None
     # Money field: fractional credits, never float (contract §1).
-    min_balance: Decimal = Field(default=Decimal(5), ge=0)
+    min_balance: Decimal = Field(default=Decimal(0), ge=0)
     signup_bonus: int = Field(default=50, ge=0)
-    fixed: dict[str, NonNegativeInt] = Field(default_factory=dict)
+    fixed: dict[str, Decimal] = Field(default_factory=dict)
     plans: dict[str, PlanDefinition] | None = None
+
+    @field_validator("fixed")
+    @classmethod
+    def validate_fixed_non_negative(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:
+        """Each fixed-cost value must be >= 0 (Decimal dict values need a validator)."""
+        for job_name, amount in value.items():
+            if amount < 0:
+                raise ValueError(f"fixed.{job_name} must be >= 0, got {amount}")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -75,21 +84,25 @@ class PricingConfig(BaseModel):
             except ExpressionError as e:
                 raise ConfigError(f"invalid expression in models.{model_name}: {e}") from e
 
+        # ``this_tool_calls`` is valid ONLY inside tools expressions (WS2) — it is
+        # NOT part of the global METRIC_VARIABLES set used by models/search/cache.
+        tools_known = known | {"this_tool_calls"}
         for tool_name, expr in self.tools.items():
             try:
-                validate_expression(expr, known_variables=known)
+                validate_expression(expr, known_variables=tools_known)
             except ExpressionError as e:
                 raise ConfigError(f"invalid expression in tools.{tool_name}: {e}") from e
 
-        for section_name, section in [
+        for section_name, section_expr in [
             ("search", self.search),
             ("cache", self.cache),
         ]:
-            for key, expr in section.items():
-                try:
-                    validate_expression(expr, known_variables=known)
-                except ExpressionError as e:
-                    raise ConfigError(f"invalid expression in {section_name}.{key}: {e}") from e
+            if section_expr is None:
+                continue
+            try:
+                validate_expression(section_expr, known_variables=known)
+            except ExpressionError as e:
+                raise ConfigError(f"invalid expression in {section_name}: {e}") from e
 
         return self
 

@@ -24,7 +24,7 @@ from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.interface.base import CapReachedError
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import AllowanceResult, PlanDefinition, PricingConfigData, SpendCap
-from ducto.manager import InsufficientCreditsError, PricingNotLoadedError
+from ducto.manager import InsufficientCreditsError, LowBalanceConfig, PricingNotLoadedError
 
 # ──────────────────────────────────────────────────────────────────────────
 # TZ FIXES (Phase-2a follow-up): the 7 pre-existing failures were tests that
@@ -871,7 +871,7 @@ class TestLowBalanceEvent:
     def test_low_balance_custom_threshold(self) -> None:
         store = MemoryStore()
         emitter = CreditEventEmitter()
-        mgr = CreditManager(store=store, emitter=emitter, low_balance_threshold=Decimal(50))
+        mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(50)]))
         mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
         mgr.add_credits("user-1", 100)
 
@@ -1074,7 +1074,7 @@ class TestLowBalanceEdgeTriggered:
     def test_fires_once_on_crossing_not_on_subsequent_below(self) -> None:
         store = MemoryStore()
         emitter = CreditEventEmitter()
-        mgr = CreditManager(store=store, emitter=emitter, low_balance_threshold=Decimal(20))
+        mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(20)]))
         mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 10})
         mgr.add_credits("user-1", Decimal(25))
 
@@ -1290,7 +1290,7 @@ class TestLowBalanceThresholdReResolution:
     """M15 — Low-balance threshold with explicit value fires exactly once."""
 
     def test_low_balance_explicit_threshold_fires_once(self) -> None:
-        """Manager with low_balance_threshold=5; add 6 credits.
+        """Manager with low_balance thresholds=[5]; add 6 credits.
 
         Deduct 2 → balance=4 → low_balance fires (4 < 5).
         Deduct 1 more → balance=3 → low_balance does NOT fire again (edge-triggered).
@@ -1298,7 +1298,7 @@ class TestLowBalanceThresholdReResolution:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         # Explicit threshold=5; min_balance=0 so the floor never blocks.
-        mgr = CreditManager(store=store, emitter=emitter, low_balance_threshold=Decimal(5))
+        mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(5)]))
         mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
         mgr.add_credits("user-1", 6)
 
@@ -1359,41 +1359,183 @@ class TestManagerCheckAllowance:
         assert result.allowance_remaining == Decimal(70)
 
 
-# ── Fix 7: deduct_fixed does NOT consume inference allowance by default ─────
+# ── WS9: manager.check_allowance() period_start/period_end override wiring ──
 
 
-class TestDeductFixedDeprecationWarning:
-    """deduct_fixed() must emit a DeprecationWarning when use_allowance is omitted (#6)."""
+class TestManagerCheckAllowanceWindowOverride:
+    """manager.check_allowance() for rolling_30d/anniversary plans must override
+    the store's generic calendar-month period_start/period_end with the window
+    the manager itself resolved (via resolve_allowance_window), matching what
+    deduct()/reserve()/settle() actually use. calendar_month plans (and
+    planless users) take the unchanged fast path -- see
+    TestManagerCheckAllowance and TestResolveAllowancePeriodStartFastPath above
+    for that regression guard.
 
-    def _make_mgr(self) -> tuple[CreditManager, MemoryStore]:
-        store = MemoryStore()
-        mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict(
-            {"models": {"_default": "input_tokens * 1"}, "fixed": {"job": 5}, "min_balance": 0}
+    NOTE: the manager resolves "now" via real wall-clock ``datetime.now(UTC)``
+    (manager.py does not consult the store's injectable clock — that clock only
+    affects the store's own internal timestamps), so ``plan_assigned_at`` is
+    anchored via ``MemoryStore(clock=...)`` at plan-assignment time and the
+    expected window is computed by calling the same ``resolve_allowance_window``
+    resolver directly with that anchor, rather than hardcoding a date.
+    """
+
+    def _mgr_with_plan(
+        self, period: str, allowance: Decimal, assigned_at: datetime
+    ) -> tuple[CreditManager, MemoryStore]:
+        store = MemoryStore(clock=lambda: assigned_at)
+        v2 = PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            plans={
+                "basic": PlanDefinition(
+                    id="basic", name="Basic", free_allowance=allowance, allowance_period=period
+                )
+            },
+            min_balance=Decimal(0),
         )
-        store.add_credits("u1", Decimal(50))
+        store.set_active_pricing(v2)
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+        store.set_user_plan("u1", "basic")
         return mgr, store
 
-    def test_deprecation_warning_when_use_allowance_not_set(self) -> None:
-        mgr, _ = self._make_mgr()
-        with pytest.warns(DeprecationWarning, match="use_allowance is now False"):
-            mgr.deduct_fixed("u1", job_name="job")
+    def test_rolling_30d_overrides_period_start_and_end(self) -> None:
+        from ducto.allowance import resolve_allowance_window
 
-    def test_no_warning_when_use_allowance_explicit_false(self) -> None:
-        import warnings as _w
+        assigned_at = datetime(2024, 1, 1, tzinfo=UTC)
+        mgr, store = self._mgr_with_plan("rolling_30d", Decimal(100), assigned_at)
 
-        mgr, _ = self._make_mgr()
-        with _w.catch_warnings():
-            _w.simplefilter("error", DeprecationWarning)
-            mgr.deduct_fixed("u1", job_name="job", use_allowance=False)  # no warning
+        result = mgr.check_allowance("u1")
+        now = datetime.now(UTC)
+        expected_start, expected_end_exclusive = resolve_allowance_window(now, "rolling_30d", assigned_at)
+        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
+        assert result.period_start == datetime(
+            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
+        ).isoformat()
+        assert result.period_end == datetime(
+            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+        ).isoformat()
 
-    def test_no_warning_when_use_allowance_explicit_true(self) -> None:
-        import warnings as _w
+    def test_anniversary_overrides_period_start_and_end(self) -> None:
+        from ducto.allowance import resolve_allowance_window
 
-        mgr, _ = self._make_mgr()
-        with _w.catch_warnings():
-            _w.simplefilter("error", DeprecationWarning)
-            mgr.deduct_fixed("u1", job_name="job", use_allowance=True)  # no warning
+        assigned_at = datetime(2024, 1, 15, tzinfo=UTC)
+        mgr, store = self._mgr_with_plan("anniversary", Decimal(100), assigned_at)
+
+        result = mgr.check_allowance("u1")
+        now = datetime.now(UTC)
+        expected_start, expected_end_exclusive = resolve_allowance_window(now, "anniversary", assigned_at)
+        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
+        assert result.period_start == datetime(
+            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
+        ).isoformat()
+        assert result.period_end == datetime(
+            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+        ).isoformat()
+
+    def test_rolling_30d_reports_correct_allowance_remaining_after_partial_deduct(self) -> None:
+        # MemoryStore.check_allowance self-resolves its window from its OWN clock
+        # + plan_assigned_at (it ignores any period_start a caller passes — see
+        # its docstring), so "now" here must track real wall-clock time (like
+        # manager._resolve_allowance_period_start does) rather than a pinned
+        # instant, or the manager's deduct() and the store's self-resolved
+        # check_allowance would key different windows.
+        assigned_at = datetime.now(UTC)
+        mgr, store = self._mgr_with_plan("rolling_30d", Decimal(50), assigned_at)
+        store.add_credits("u1", Decimal(1000))
+
+        mgr.deduct("u1", UsageMetrics(input_tokens=20))
+        result = mgr.check_allowance("u1")
+        assert result.allowance_remaining == Decimal(30)
+
+    def test_calendar_month_plan_period_start_matches_store_unmodified(self) -> None:
+        """Regression guard: a calendar_month plan's period_start/period_end pass
+        through byte-for-byte from the store — no manager override applied."""
+        assigned_at = datetime(2024, 1, 15, tzinfo=UTC)
+        mgr, store = self._mgr_with_plan("calendar_month", Decimal(100), assigned_at)
+
+        via_manager = mgr.check_allowance("u1")
+        direct = store.check_allowance("u1")
+        assert via_manager == direct
+
+
+# ── WS9: _resolve_allowance_period_start fast path (regression safety net) ──
+
+
+class TestResolveAllowancePeriodStartFastPath:
+    """A calendar_month plan (the default) must return None from
+    _resolve_allowance_period_start (WS9's fast path), and deduct/settle
+    behavior for calendar_month plans is UNCHANGED from before WS9 -- this is
+    the safety net against breaking existing behavior."""
+
+    def test_calendar_month_plan_resolves_to_none(self) -> None:
+        store = MemoryStore()
+        v2 = PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(100))},
+            min_balance=Decimal(0),
+        )
+        store.set_active_pricing(v2)
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+        store.set_user_plan("u1", "basic")
+
+        assert mgr._resolve_allowance_period_start("u1") is None
+
+    def test_planless_user_resolves_to_none(self) -> None:
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        assert mgr._resolve_allowance_period_start("nobody") is None
+
+    def test_non_calendar_month_plan_resolves_to_a_date(self) -> None:
+        from datetime import date
+
+        store = MemoryStore()
+        v2 = PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            plans={
+                "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100), allowance_period="rolling_30d")
+            },
+            min_balance=Decimal(0),
+        )
+        store.set_active_pricing(v2)
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+        store.set_user_plan("u1", "pro")
+
+        result = mgr._resolve_allowance_period_start("u1")
+        assert isinstance(result, date)
+
+    def test_deduct_and_settle_unchanged_for_calendar_month_plan(self) -> None:
+        """Regression safety net: deduct()/settle() behavior for a calendar_month
+        plan is byte-for-byte identical to pre-WS9 behavior."""
+        store = MemoryStore()
+        v2 = PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(100))},
+            min_balance=Decimal(0),
+        )
+        store.set_active_pricing(v2)
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(v2)
+        store.set_user_plan("u1", "basic")
+        store.add_credits("u1", Decimal(200))
+
+        # deduct() path.
+        result = mgr.deduct("u1", UsageMetrics(input_tokens=30))
+        assert result.amount == Decimal(0)  # fully covered by allowance
+        assert result.allowance_consumed == Decimal(30)
+        assert mgr.check_allowance("u1").allowance_remaining == Decimal(70)
+
+        # reserve()/settle() path.
+        lease = mgr.reserve("u1", Decimal(20))
+        settle_result = mgr.settle("u1", lease.lease_id, Decimal(20))
+        assert settle_result.amount == Decimal(0)  # fully covered by remaining allowance
+        assert settle_result.allowance_consumed == Decimal(20)
+        assert mgr.check_allowance("u1").allowance_remaining == Decimal(50)
+
+
+# ── Fix 7: deduct_fixed does NOT consume inference allowance by default ─────
 
 
 class TestDeductFixedAllowance:
@@ -1418,12 +1560,7 @@ class TestDeductFixedAllowance:
         """Default use_allowance=False: fixed job charges balance, not the free allowance."""
         mgr, store = self._setup()
 
-        # Use the default (no explicit use_allowance) — the DeprecationWarning is expected.
-        import warnings as _w
-
-        with _w.catch_warnings():
-            _w.simplefilter("ignore", DeprecationWarning)
-            result = mgr.deduct_fixed("u1", job_name="report")
+        result = mgr.deduct_fixed("u1", job_name="report")
         assert result.amount == Decimal(10)
         assert result.allowance_consumed == Decimal(0)
         # Allowance intact — the batch job did not eat inference credits.

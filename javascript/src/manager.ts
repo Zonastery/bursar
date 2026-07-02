@@ -15,6 +15,7 @@ import { PricingEngine as PricingEngineClass } from "./engine.js";
 import type {
   AddCreditsResult,
   AggregateStats,
+  AllowanceResult,
   AvailableResult,
   BalanceResult,
   BillingMode,
@@ -45,12 +46,13 @@ import type {
 import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
+import { resolveAllowanceWindow } from "./allowance.js";
 
 /**
  * Default `low_balance` threshold multiplier (contract §6 / M18). The event
  * fires when a deduction crosses ``minBalance * LOW_BALANCE_MULTIPLIER`` from
- * above. Override via the ``lowBalanceThreshold`` constructor option to set an
- * absolute threshold instead.
+ * above. Override via the ``lowBalance.thresholds`` constructor option to set
+ * an absolute threshold (or multiple levels) instead.
  */
 const LOW_BALANCE_MULTIPLIER = 2;
 
@@ -83,15 +85,21 @@ function isAmount(value: MetricsOrAmount): value is Decimal | number {
   return value instanceof Decimal || typeof value === "number";
 }
 
+/**
+ * Multi-level ``credits.low_balance`` configuration (WS7 — collapses the
+ * former ``lowBalanceThreshold`` / ``lowBalanceThresholds`` / ``onLowBalance``
+ * trio into one option). Each threshold is edge-triggered once per descent and
+ * re-arms after a top-up (interface plan §6). When ``lowBalance`` is omitted
+ * entirely, the manager falls back to ``[minBalance * LOW_BALANCE_MULTIPLIER]``,
+ * resolved lazily against the loaded engine.
+ */
+export interface LowBalanceConfig {
+  thresholds?: (Decimal | number)[] | null;
+  onTrigger?: ((event: CreditEvent) => void | Promise<void>) | null;
+}
+
 /** Optional behavioural knobs for the manager. */
 export interface CreditManagerOptions {
-  /**
-   * Absolute balance threshold for the ``credits.low_balance`` event. When
-   * omitted, the manager uses ``engine.minBalance * 2`` (documented default,
-   * M18). The event is **edge-triggered**: it fires only on the deduction that
-   * crosses the threshold from above, never repeatedly while already below it.
-   */
-  lowBalanceThreshold?: Decimal | number | null;
   /**
    * Financial-safety preset for planless users (interface plan §2). Defaults to
    * ``"strict_prepaid"``. Per-plan / per-call policy layers on top of this.
@@ -102,13 +110,13 @@ export interface CreditManagerOptions {
   /** Default ``maxConcurrent`` lease bound applied by the preset. */
   maxConcurrent?: number | null;
   /**
-   * Multi-level ``credits.low_balance`` thresholds (interface plan §6). Each level
-   * is edge-triggered once per descent and re-arms after a top-up. When unset, the
-   * single-threshold ``lowBalanceThreshold`` behaviour applies.
+   * ``credits.low_balance`` thresholds and handler (interface plan §6). When
+   * omitted, the manager uses ``[engine.minBalance * 2]`` (documented default,
+   * M18), resolved lazily. The event is **edge-triggered**: each configured
+   * level fires only on the deduction that crosses it from above, never
+   * repeatedly while already below it, and re-arms on top-up.
    */
-  lowBalanceThresholds?: (Decimal | number)[] | null;
-  /** Non-blocking handler invoked on each ``credits.low_balance`` (errors swallowed). */
-  onLowBalance?: ((event: CreditEvent) => void | Promise<void>) | null;
+  lowBalance?: LowBalanceConfig | null;
   /** Default lease TTL (seconds) for ``reserve``/``runBilled`` (default 600). */
   defaultTtlSeconds?: number;
 }
@@ -164,7 +172,6 @@ export class CreditManager {
   private store: CreditStore;
   private engine: PricingEngine | null = null;
   private emitter: CreditEventEmitter | null = null;
-  private lowBalanceThreshold: Decimal | null;
   // Financial-safety policy (interface plan §1/§2): `policy` is the preset default
   // used for planless users; per-plan / per-call policy layers on top.
   private policy: PolicyPreset;
@@ -172,6 +179,8 @@ export class CreditManager {
   private defaultMaxConcurrent: number | null;
   private defaultTtl: number;
   // Multi-level low_balance thresholds (interface plan §6), sorted high→low.
+  // Populated from `options.lowBalance.thresholds` (WS7); `null` means
+  // "unconfigured" — falls back to `[minBalance * LOW_BALANCE_MULTIPLIER]` lazily.
   private lowBalanceThresholds: Decimal[] | null;
   private onLowBalance: ((event: CreditEvent) => void | Promise<void>) | null;
   // Edge-trigger state: per-user set of thresholds currently breached ("below"),
@@ -194,17 +203,15 @@ export class CreditManager {
     this.store = store;
     if (engine) this.engine = engine;
     if (emitter) this.emitter = emitter;
-    this.lowBalanceThreshold =
-      options?.lowBalanceThreshold != null ? toDecimal(options.lowBalanceThreshold) : null;
     this.policy = policy;
     this.overdraftFloor =
       options?.overdraftFloor != null ? toDecimal(options.overdraftFloor) : null;
     this.defaultMaxConcurrent = options?.maxConcurrent ?? null;
     this.defaultTtl = options?.defaultTtlSeconds ?? DEFAULT_LEASE_TTL_SECONDS;
-    this.lowBalanceThresholds = options?.lowBalanceThresholds?.length
-      ? options.lowBalanceThresholds.map(toDecimal).sort((a, b) => b.comparedTo(a))
+    this.lowBalanceThresholds = options?.lowBalance?.thresholds?.length
+      ? options.lowBalance.thresholds.map(toDecimal).sort((a, b) => b.comparedTo(a))
       : null;
-    this.onLowBalance = options?.onLowBalance ?? null;
+    this.onLowBalance = options?.lowBalance?.onTrigger ?? null;
   }
 
   /** Emit a credit lifecycle event. No-op if no emitter is configured. */
@@ -212,17 +219,22 @@ export class CreditManager {
     this.emitter?.emit({ type, timestamp: new Date(), userId, data });
   }
 
-  /** The configured min-balance floor as a `Decimal` (defaults to 5). */
+  /** The configured min-balance floor as a `Decimal` (defaults to 0). */
   private minBalanceDecimal(): Decimal {
-    return new Decimal(this.engine?.minBalance ?? 5);
+    return new Decimal(this.engine?.minBalance ?? 0);
   }
 
   /**
-   * Resolve the `low_balance` threshold: the explicit override when configured,
-   * otherwise ``minBalance * LOW_BALANCE_MULTIPLIER`` (documented default).
+   * Resolve the single `low_balance` threshold used by the ``deduct`` fast path:
+   * the lowest configured level when ``lowBalance.thresholds`` is set, otherwise
+   * ``minBalance * LOW_BALANCE_MULTIPLIER`` (documented default).
    */
   private resolveLowBalanceThreshold(): Decimal {
-    return this.lowBalanceThreshold ?? this.minBalanceDecimal().times(LOW_BALANCE_MULTIPLIER);
+    if (this.lowBalanceThresholds) {
+      // `lowBalanceThresholds` is sorted high→low; the last element is lowest.
+      return this.lowBalanceThresholds[this.lowBalanceThresholds.length - 1];
+    }
+    return this.minBalanceDecimal().times(LOW_BALANCE_MULTIPLIER);
   }
 
   /** Run bundled SQL migrations through the store. */
@@ -246,10 +258,10 @@ export class CreditManager {
     const engineDict: Record<string, unknown> = {
       models,
       tools: tools ?? { _default: "tool_calls * 0" },
-      search: search ?? {},
-      cache: cache ?? {},
+      search: search ?? null,
+      cache: cache ?? null,
       fixed: fixed ?? {},
-      minBalance: minBalance ?? 5,
+      minBalance: minBalance ?? 0,
       ...(plans ? { plans } : {}),
     };
 
@@ -268,10 +280,10 @@ export class CreditManager {
     const raw: Record<string, unknown> = {
       models,
       tools: tools ?? { _default: "tool_calls * 0" },
-      search: search ?? {},
-      cache: cache ?? {},
+      search: search ?? null,
+      cache: cache ?? null,
       fixed: fixed ?? {},
-      minBalance: minBalance ?? 5,
+      minBalance: minBalance ?? 0,
       ...(plans ? { plans } : {}),
     };
     this.engine = PricingEngineClass.fromDict(raw);
@@ -323,16 +335,15 @@ export class CreditManager {
   async addCredits(
     userId: string,
     amount: Decimal | number,
-    type = "adjustment",
-    metadata?: CreditMetadata | null,
-    expiresAt?: Date | null,
+    options?: { type?: string; metadata?: CreditMetadata | null; expiresAt?: Date | null },
   ): Promise<AddCreditsResult> {
+    const type = options?.type ?? "adjustment";
     const result = await this.store.addCredits(
       userId,
       toDecimal(amount),
       type,
-      metadata,
-      expiresAt,
+      options?.metadata,
+      options?.expiresAt,
     );
     this.emit("credits.added", userId, {
       transactionId: result.transactionId,
@@ -423,6 +434,33 @@ export class CreditManager {
   }
 
   /**
+   * Resolve the free-allowance period start for a user (WS9c).
+   *
+   * Fast path: a ``calendar_month`` plan (the default, and the vast majority of
+   * users) needs no computation — returns ``null`` and the store falls back to
+   * its own calendar-month window, exactly matching pre-WS9 behaviour. Only
+   * ``rolling_30d``/``anniversary`` plans pay the cost of resolving a window,
+   * anchored at the plan's ``planAssignedAt``.
+   */
+  private async resolveAllowancePeriodStart(userId: string): Promise<Date | null> {
+    let plan: GetUserPlanResult | null;
+    try {
+      plan = await this.store.getUserPlan(userId);
+    } catch {
+      return null;
+    }
+    if (!plan || !plan.allowancePeriod || plan.allowancePeriod === "calendar_month") {
+      return null;
+    }
+    const { start } = resolveAllowanceWindow(
+      new Date(),
+      plan.allowancePeriod,
+      plan.planAssignedAt ?? null,
+    );
+    return start;
+  }
+
+  /**
    * Compute the credit cost and model from metrics, or pass a raw amount through.
    *
    * For {@link UsageMetrics} the cost is ``engine.calculate(...).total`` (exact
@@ -496,6 +534,7 @@ export class CreditManager {
     const floor = this.resolveFloor(policy);
     const { amount, model } = this.costOf(metricsOrAmount);
     const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
+    const periodStart = await this.resolveAllowancePeriodStart(userId);
 
     const result = await this.store.createLease(userId, amount, operationType, {
       billingMode: policy.billingMode,
@@ -505,6 +544,7 @@ export class CreditManager {
       model,
       overdraftFloor: policy.overdraftFloor,
       metadata: options?.metadata,
+      periodStart,
     });
 
     if (result.error) {
@@ -569,11 +609,14 @@ export class CreditManager {
       if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
     }
 
+    const periodStart = await this.resolveAllowancePeriodStart(userId);
+
     const result = await this.store.settleLease(userId, leaseId, amount, {
       idempotencyKey,
       minBalance: this.engine ? new Decimal(this.engine.minBalance) : new Decimal(0),
       model,
       metadata: txMeta as CreditMetadata,
+      periodStart,
     });
 
     if (result.error) {
@@ -676,12 +719,46 @@ export class CreditManager {
       reason = "insufficient_credits";
     }
 
-    return { affordable, available: avail.available, worstCase, reason };
+    return { affordable, spendable: avail.available, worstCase, reason };
   }
 
   /** Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3). */
   async getAvailable(userId: string): Promise<AvailableResult> {
     return await this.store.getAvailable(userId);
+  }
+
+  /**
+   * Get remaining free allowance for the current billing period.
+   *
+   * Convenience wrapper that routes through the manager so callers never need
+   * to reach past it into the raw store. Returns a zero-allowance result for
+   * planless users (no exception).
+   *
+   * For ``rolling_30d``/``anniversary`` plans (WS9), resolves and threads
+   * ``periodStart`` so the reported window matches the one actually used by
+   * ``deduct``/``settle``/``reserve`` — a ``calendar_month`` plan (the default)
+   * takes the fast path unchanged.
+   */
+  async checkAllowance(userId: string): Promise<AllowanceResult> {
+    const plan = await this.store.getUserPlan(userId);
+    if (!plan.planId || !plan.allowancePeriod || plan.allowancePeriod === "calendar_month") {
+      return await this.store.checkAllowance(userId);
+    }
+    const { start, end } = resolveAllowanceWindow(
+      new Date(),
+      plan.allowancePeriod,
+      plan.planAssignedAt ?? null,
+    );
+    const result = await this.store.checkAllowance(userId, start);
+    // The store/SQL layer only knows a generic calendar-month periodEnd (see
+    // 022_configurable_allowance_window.sql); override it here with the
+    // authoritative window this manager resolved.
+    const periodEnd = new Date(end.getTime() - 86_400_000);
+    return {
+      ...result,
+      periodStart: start.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+    };
   }
 
   /**
@@ -857,11 +934,14 @@ export class CreditManager {
     if (metrics.fixedJob) meta["fixedJob"] = metrics.fixedJob;
     if (idempotencyKey) meta["idempotencyKey"] = idempotencyKey;
 
+    const periodStart = await this.resolveAllowancePeriodStart(userId);
+
     const options: DeductWithAllowanceOptions = {
       idempotencyKey: idempotencyKey ?? null,
       minBalance: this.minBalanceDecimal(),
       model: metrics.model ?? null,
       metadata: meta as CreditMetadata,
+      periodStart,
     };
 
     // 3) Atomic charge.

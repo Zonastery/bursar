@@ -7,7 +7,7 @@ dependency in the critical path.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from types import TracebackType
 from typing import Any
@@ -312,6 +312,7 @@ class HttpxSupabaseStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
 
@@ -322,6 +323,11 @@ class HttpxSupabaseStore(CreditStore):
         ``skip_allowance`` is forwarded as ``p_skip_allowance`` so that
         fixed-cost batch jobs do not consume the user's inference allowance
         (Fix 7 — mirrors the postgres.py and memory.py implementations).
+
+        ``period_start`` (WS9) is forwarded as ``p_period_start`` (an ISO date
+        string, matching the ``expires_at`` date marshalling convention
+        elsewhere in this file); ``None`` falls back to the current UTC
+        calendar month.
         """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
@@ -336,6 +342,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_model": model,
                 "p_metadata": meta,
                 "p_skip_allowance": skip_allowance,
+                "p_period_start": period_start.isoformat() if period_start is not None else None,
             },
         )
 
@@ -373,6 +380,7 @@ class HttpxSupabaseStore(CreditStore):
         model: str | None = None,
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
+        period_start: date | None = None,
     ) -> LeaseResult:
         amount = _dec(amount)
         floor = _dec(floor)
@@ -389,6 +397,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_model": model,
                 "p_overdraft_floor": str(overdraft_floor) if overdraft_floor is not None else None,
                 "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
+                "p_period_start": period_start.isoformat() if period_start is not None else None,
             },
         )
         if "error" in row:
@@ -421,6 +430,7 @@ class HttpxSupabaseStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         amount = _dec(amount)
         min_balance = _dec(min_balance)
@@ -436,6 +446,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_model": model,
                 "p_metadata": meta,
                 "p_skip_allowance": skip_allowance,
+                "p_period_start": period_start.isoformat() if period_start is not None else None,
             },
         )
         if "error" in row:
@@ -546,6 +557,10 @@ class HttpxSupabaseStore(CreditStore):
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
             max_concurrent=row.get("max_concurrent"),
             overdraft_floor=_dec(row["overdraft_floor"]) if row.get("overdraft_floor") is not None else None,
+            allowance_period=str(row.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
+            plan_assigned_at=(
+                datetime.fromisoformat(str(row["plan_assigned_at"])) if row.get("plan_assigned_at") else None
+            ),
         )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
@@ -555,8 +570,11 @@ class HttpxSupabaseStore(CreditStore):
             plan_id=str(row.get("plan_id", plan_id)),
         )
 
-    def check_allowance(self, user_id: str) -> AllowanceResult:
-        row = self._rpc("check_plan_allowance", {"p_user_id": user_id})
+    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
+        row = self._rpc(
+            "check_plan_allowance",
+            {"p_user_id": user_id, "p_period_start": period_start.isoformat() if period_start else None},
+        )
         if not row:
             return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
         return AllowanceResult(

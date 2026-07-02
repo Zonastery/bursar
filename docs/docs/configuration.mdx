@@ -18,20 +18,18 @@ models:
   _default: "input_tokens * 0.001 + output_tokens * 0.003"
 
 tools:
-  _default: "tool_calls * 5 / 1000"
-  code_exec: "tool_calls * 10 / 1000"
+  _default: "this_tool_calls * 5 / 1000"
+  code_exec: "this_tool_calls * 10 / 1000"
 
-search:
-  costs: "search_queries * 0.5 + search_results * 0.05"
+search: "search_queries * 0.5 + search_results * 0.05"
 
-cache:
-  discount: "-cache_read_tokens * 0.0045"
+cache: "-cache_read_tokens * 0.0045"
 
 fixed:
   batch_train: 100
-  daily_report: 10
+  quick_summary: 0.5
 
-min_balance: 5
+min_balance: 0
 ```
 
 The same config as JSON:
@@ -44,13 +42,13 @@ The same config as JSON:
     "_default": "input_tokens * 0.001 + output_tokens * 0.003"
   },
   "tools": {
-    "_default": "tool_calls * 5 / 1000",
-    "code_exec": "tool_calls * 10 / 1000"
+    "_default": "this_tool_calls * 5 / 1000",
+    "code_exec": "this_tool_calls * 10 / 1000"
   },
-  "search": { "costs": "search_queries * 0.5 + search_results * 0.05" },
-  "cache": { "discount": "-cache_read_tokens * 0.0045" },
-  "fixed": { "batch_train": 100, "daily_report": 10 },
-  "min_balance": 5
+  "search": "search_queries * 0.5 + search_results * 0.05",
+  "cache": "-cache_read_tokens * 0.0045",
+  "fixed": { "batch_train": 100, "quick_summary": 0.5 },
+  "min_balance": 0
 }
 ```
 
@@ -58,7 +56,7 @@ The same config as JSON:
 
 Extends flat pricing with subscription plan definitions. Plans give users free monthly allowances, rate overrides, feature entitlements, and financial-safety policy (billing mode, concurrency caps, overdraft floor).
 
-The `plans` key is an optional field on the v1 schema — `version: 1` is the only valid value and is required whether or not you use plans.
+The `plans` key is an optional field on the v1 schema — you can include or omit it within the same versioned config.
 
 ```yaml
 version: 1
@@ -83,6 +81,7 @@ plans:
     id: pro
     name: Pro Plan
     free_allowance: 500000
+    allowance_period: anniversary      # "calendar_month" (default), "rolling_30d", or "anniversary"
     default_billing_mode: strict
     max_concurrent: 4
     per_operation:
@@ -129,6 +128,7 @@ The same config as JSON:
       "id": "pro",
       "name": "Pro Plan",
       "free_allowance": 500000,
+      "allowance_period": "anniversary",
       "default_billing_mode": "strict",
       "max_concurrent": 4,
       "per_operation": {
@@ -149,13 +149,33 @@ The same config as JSON:
 |-------|------|----------|-------------|
 | `id` | string | yes | Unique plan identifier |
 | `name` | string | yes | Human-readable name |
-| `free_allowance` | number | yes | Monthly free credits, fractional (`NUMERIC(18,4)`; 0 = none) |
+| `free_allowance` | number | yes | Free credits per allowance period, fractional (`NUMERIC(18,4)`; 0 = none) |
+| `allowance_period` | `"calendar_month"` \| `"rolling_30d"` \| `"anniversary"` | no | How the free-allowance window resets. Default: `"calendar_month"`. See [`allowance_period`](#allowance_period) below. |
 | `rate_overrides` | object | no | Per-model expression overrides for this plan |
 | `features` | object | no | Arbitrary feature entitlements. Presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
 | `default_billing_mode` | `"strict"` \| `"overdraft"` | no | Default billing mode for this plan's users. Default: `"strict"`. |
 | `max_concurrent` | integer | no | Plan-wide default maximum simultaneous active leases per operation type. `null` = unlimited. |
 | `overdraft_floor` | number | no | Plan-wide negative balance floor for overdraft mode (e.g. `-50`). Only applies when `default_billing_mode` is `"overdraft"`. |
 | `per_operation` | object | no | Per-operation-type policy overrides. Keys are operation type strings; values are [`OperationPolicy`](#operationpolicy-fields) objects. Overrides the plan defaults for that operation type. |
+
+### `allowance_period`
+
+Controls how a plan's `free_allowance` window resets. Three modes:
+
+- **`calendar_month`** (default) — resets on calendar-month UTC boundaries, the same for every user regardless of when they were assigned the plan. This is the original, unconditional behavior.
+- **`rolling_30d`** — a rolling 30-day window anchored to the timestamp the user was assigned this plan.
+- **`anniversary`** — a monthly window that resets on the same day-of-month the user was assigned the plan. For example, a user assigned on the 14th resets on the 14th of every subsequent month. If the assignment day doesn't exist in a given month (e.g. the 31st in February), the reset clamps to the last day of that month, then returns to the 31st in months that have one.
+
+The anchor for `rolling_30d` and `anniversary` is the timestamp of `set_user_plan()` / `setUserPlan()` — **not** the user's account signup date. This is intentional: your allowance cycle starts when you subscribe to a plan with a non-calendar period, so switching a user to a different plan re-anchors their cycle.
+
+```yaml
+plans:
+  pro:
+    id: pro
+    name: Pro Plan
+    free_allowance: 500000
+    allowance_period: anniversary   # or rolling_30d, or calendar_month (default)
+```
 
 ### `OperationPolicy` fields
 
@@ -175,13 +195,13 @@ Policy resolution order (most specific wins): per-call `billing_mode` arg → `p
 2. **Deduct flow:** `CreditManager.deduct()` calculates the cost, then charges it in one atomic `deduct_with_allowance` transaction. Free allowance is consumed first; only the remaining **net** is debited from the balance. If allowance fully covers the cost, the balance is untouched. Allowance, spend cap, balance floor and debit all commit (or roll back) together — see [Architecture](/docs/architecture).
 3. **No plan:** With no plan assigned, allowance is `0` and the full cost is charged to the balance.
 
-The `free_allowance` is a monthly window: consumption resets at the start of each calendar month (UTC).
+By default (`allowance_period: calendar_month`) `free_allowance` is a monthly window: consumption resets at the start of each calendar month (UTC). See [`allowance_period`](#allowance_period) above for the `rolling_30d` and `anniversary` alternatives.
 
 ## Sections
 
-### `version` (required)
+### `version` (optional)
 
-Only `1` is valid. `plans` is an optional field on the v1 schema — you can include or omit it within the same versioned config.
+Only `1` is valid. Defaults to `1` when omitted, so you rarely need to set it explicitly. `models` is the only field that's actually required on the config; `plans` is optional and can be included or omitted within the same versioned config.
 
 ### `models` (required)
 
@@ -193,15 +213,23 @@ Per-model pricing expressions. Non-empty dict.
 
 ### `tools` (optional)
 
-Per-tool pricing overrides. `_default` applies to tool calls not individually configured.
+Per-tool pricing overrides. `_default` applies to tool calls not individually configured. Each `tools.*` expression (including `_default`) can reference `this_tool_calls`, the count of calls matching that specific key (for `_default`, the count of calls not matched by any other key) — see [Expressions](/docs/expressions) for details. `tool_calls` remains available too and is always the total across every tool.
 
 ### `search` (optional)
 
-Search/RAG query pricing. A dict of named expressions (arbitrary string keys). The expression key is just a label; any variables available in pricing expressions (e.g. `search_queries`, `search_results`) can be referenced. Cross-reference [Expressions](/docs/expressions) for the full variable list.
+Search/RAG query pricing — a **single expression string**, not a dict. Any variables available in pricing expressions (e.g. `search_queries`, `search_results`) can be referenced. Cross-reference [Expressions](/docs/expressions) for the full variable list.
+
+```yaml
+search: "search_queries * 0.5 + search_results * 0.05"
+```
 
 ### `cache` (optional)
 
-Cache read discounts. A dict of named expressions (arbitrary string keys, e.g. `discount`). Costs should be negative (savings rebate) or zero. Cross-reference [Expressions](/docs/expressions) for available cache variables.
+Cache read discounts — a **single expression string**, not a dict. This should typically evaluate to `<= 0` (a rebate/discount taken off the total); ducto does not enforce the sign, so a positive `cache` expression is valid syntax but will silently *increase* the total cost — treat the non-positive convention as a config-authoring rule you must follow yourself. Cross-reference [Expressions](/docs/expressions) for available cache variables.
+
+```yaml
+cache: "-cache_read_tokens * 0.0045"
+```
 
 ### `fixed` (optional)
 
@@ -209,7 +237,7 @@ Fixed-cost jobs. Keys match `UsageMetrics.fixed_job`. Values are non-negative nu
 
 ### `min_balance` (optional)
 
-The **balance floor** — the minimum balance a user must keep. Default `5`. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below `min_balance`; concretely, `deduct_with_allowance` aborts when `balance - net < min_balance` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`min_balance * 2`, configurable — see [Architecture](/docs/architecture)). Stored as a fractional decimal like all money.
+The **balance floor** — the minimum balance a user must keep. Default `0`, meaning users can spend down to exactly zero unless you configure a higher floor. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below `min_balance`; concretely, `deduct_with_allowance` aborts when `balance - net < min_balance` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`min_balance * 2`, configurable — see [Architecture](/docs/architecture)). Because the default is now `0`, that derived threshold is also `0` by default, which means **low-balance alerting is effectively opt-in** — set `min_balance` explicitly, or configure `low_balance` / `lowBalance` on the `CreditManager` constructor (see [Architecture](/docs/architecture) and the CreditManager API reference), if you want `credits.low_balance` to fire. Stored as a fractional decimal like all money.
 
 ## Loading
 
@@ -287,3 +315,4 @@ At load time the engine validates:
 4. Plan names are unique
 5. Plan `rate_overrides` expressions are valid
 6. No unknown sections
+7. `this_tool_calls` is used only inside `tools.*` expressions — referencing it in `models`, `search`, or `cache` raises a config-load-time error

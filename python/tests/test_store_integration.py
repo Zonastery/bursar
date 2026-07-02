@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +29,7 @@ except ModuleNotFoundError:
 import pytest
 
 from ducto import CreditManager, UsageMetrics
+from ducto.allowance import resolve_allowance_window
 from ducto.interface.base import StoreError
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import CreditMetadata, PlanDefinition, PricingConfigData, SpendCap
@@ -1071,6 +1072,7 @@ class TestHttpxSupabaseStoreContract:
                 "p_model": "gpt-4",
                 "p_metadata": {"model": "gpt-4"},
                 "p_skip_allowance": False,
+                "p_period_start": None,
             },
             headers=self._EXPECTED_HEADERS,
         )
@@ -1106,6 +1108,7 @@ class TestHttpxSupabaseStoreContract:
                 "p_model": None,
                 "p_metadata": {},
                 "p_skip_allowance": True,
+                "p_period_start": None,
             },
             headers=self._EXPECTED_HEADERS,
         )
@@ -1352,7 +1355,19 @@ class TestLeaseLifecyclePg:
         c = store.create_lease(_PG_USER, Decimal("10"), "batch", floor=Decimal("0"), max_concurrent=1)
         assert c.error is None
 
-    def test_settle_declamped_overdraft_goes_negative(self, store: PostgresStore) -> None:
+    def test_settle_clamps_to_overdraft_floor(self, store: PostgresStore) -> None:
+        """C1: settle_lease clamps the charge so balance stays >= overdraft_floor.
+
+        Matches MemoryStore (the reference implementation) exactly: balance=0,
+        overdraft_floor=-50, actual settle=60 -> max debit is 50, so
+        balance_after == -50, NOT -60 (see test_lease.py
+        TestOverdraft.test_settle_clamps_to_overdraft_floor). Before migration
+        022 consolidated the two conflicting settle_lease overloads, every real
+        caller (8 positional args including skip_allowance) always resolved to
+        the un-floor-clamped 019 overload, so this never actually clamped in
+        production -- a pre-existing bug fixed as a side effect of WS9's
+        overload consolidation.
+        """
         store.add_credits(_PG_USER, Decimal("0"), "adjustment")
         lease = store.create_lease(
             _PG_USER,
@@ -1363,11 +1378,11 @@ class TestLeaseLifecyclePg:
             overdraft_floor=Decimal("-50"),
         )
         assert lease.error is None
-        # Actual 60 > hold 10 → de-clamped (D5); balance goes to -60 (past the floor).
+        # Actual 60 > hold 10, but floor-clamped (C1): max debit = 0 - (-50) = 50.
         ded = store.settle_lease(_PG_USER, lease.lease_id, Decimal("60"))
         assert ded.error is None
-        assert ded.balance_after == Decimal("-60")
-        # New admission rejected once available ≤ floor.
+        assert ded.balance_after == Decimal("-50")
+        # New admission rejected once available <= floor.
         nxt = store.create_lease(_PG_USER, Decimal("1"), "usage", billing_mode="overdraft", floor=Decimal("-50"))
         assert nxt.error == "insufficient_credits"
 
@@ -1563,3 +1578,474 @@ class TestLeaseAdversarialPg:
         assert ded.error is None
         assert ded.cap_warning == "deny"
         assert store.get_balance(_PG_USER).balance == Decimal("880")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WS9 — configurable allowance window against real Postgres (migration 022)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAllowanceWindowPg:
+    """allowance_period / plan_assigned_at / p_period_start threading (WS9)
+    against a real Postgres instance running migration 022. MemoryStore
+    coverage for the same rollover semantics already lives in
+    ``test_store.py::TestAllowancePeriodRollover`` — this class targets the
+    SQL layer specifically: JSONB round-trip, RPC signature consolidation,
+    and explicit ``period_start`` threading through the atomic RPCs.
+    """
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def _raw_allowance_period(self, store: PostgresStore, plan_key: str) -> str:
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT allowance_period FROM public.credit_plans WHERE plan_key = %s", [plan_key])
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        assert row is not None, f"no credit_plans row for plan_key={plan_key!r}"
+        return str(row[0])
+
+    # ── 1/2. allowance_period + plan_assigned_at round-trip (all 3 modes) ──
+
+    def test_get_user_plan_round_trips_rolling_30d(self, store: PostgresStore) -> None:
+        user = _new_uuid(9001)
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
+            )
+        )
+        store.set_user_plan(user, "pro")
+
+        result = store.get_user_plan(user)
+        assert result.allowance_period == "rolling_30d"
+        assert result.plan_assigned_at is not None
+
+    def test_sync_plans_persists_allowance_period_calendar_month_default(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"basic": PlanDefinition(id="basic", name="Basic")},
+            )
+        )
+        user = _new_uuid(9002)
+        store.set_user_plan(user, "basic")
+        assert store.get_user_plan(user).allowance_period == "calendar_month"
+        assert self._raw_allowance_period(store, "basic") == "calendar_month"
+
+    def test_sync_plans_persists_allowance_period_rolling_30d(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
+            )
+        )
+        user = _new_uuid(9003)
+        store.set_user_plan(user, "pro")
+        assert store.get_user_plan(user).allowance_period == "rolling_30d"
+        assert self._raw_allowance_period(store, "pro") == "rolling_30d"
+
+    def test_sync_plans_persists_allowance_period_anniversary(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"elite": PlanDefinition(id="elite", name="Elite", allowance_period="anniversary")},
+            )
+        )
+        user = _new_uuid(9004)
+        store.set_user_plan(user, "elite")
+        assert store.get_user_plan(user).allowance_period == "anniversary"
+        assert self._raw_allowance_period(store, "elite") == "anniversary"
+
+    # ── 3. deduct_with_allowance: explicit period_start isolates windows ───
+
+    def test_deduct_with_allowance_period_start_isolates_windows(self, store: PostgresStore) -> None:
+        user = _new_uuid(9005)
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
+            )
+        )
+        store.set_user_plan(user, "basic")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        window_a = date(2024, 1, 1)
+        window_b = date(2024, 6, 1)
+
+        d1 = store.deduct_with_allowance(user, Decimal("4"), idempotency_key="wa1", period_start=window_a)
+        assert d1.allowance_consumed == Decimal("4")
+        assert store.check_allowance(user, period_start=window_a).allowance_remaining == Decimal("6")
+
+        # A different period_start gets its own fresh allowance, unaffected by window_a's usage.
+        d2 = store.deduct_with_allowance(user, Decimal("7"), idempotency_key="wb1", period_start=window_b)
+        assert d2.allowance_consumed == Decimal("7")
+        assert store.check_allowance(user, period_start=window_b).allowance_remaining == Decimal("3")
+        # window_a's usage is untouched by window_b's deduction.
+        assert store.check_allowance(user, period_start=window_a).allowance_remaining == Decimal("6")
+
+    # ── 4. create_lease/settle_lease: explicit period_start isolates windows ─
+
+    def test_lease_period_start_isolates_windows(self, store: PostgresStore) -> None:
+        user = _new_uuid(9006)
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
+            )
+        )
+        store.set_user_plan(user, "basic")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        window_a = date(2024, 1, 1)
+        window_b = date(2024, 6, 1)
+
+        lease_a = store.create_lease(user, Decimal("20"), "usage", floor=Decimal("0"), period_start=window_a)
+        settle_a = store.settle_lease(user, lease_a.lease_id, Decimal("4"), period_start=window_a)
+        assert settle_a.allowance_consumed == Decimal("4")
+        assert store.check_allowance(user, period_start=window_a).allowance_remaining == Decimal("6")
+
+        lease_b = store.create_lease(user, Decimal("20"), "usage", floor=Decimal("0"), period_start=window_b)
+        settle_b = store.settle_lease(user, lease_b.lease_id, Decimal("7"), period_start=window_b)
+        assert settle_b.allowance_consumed == Decimal("7")
+        assert store.check_allowance(user, period_start=window_b).allowance_remaining == Decimal("3")
+        # window_a's window is untouched.
+        assert store.check_allowance(user, period_start=window_a).allowance_remaining == Decimal("6")
+
+    # ── 5. manager.deduct() with a rolling_30d plan actually rolls over ─────
+
+    def test_manager_deduct_rolling_30d_rolls_over_vs_calendar_month_control(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={
+                    "roll": PlanDefinition(
+                        id="roll", name="Roll", free_allowance=Decimal("10"), allowance_period="rolling_30d"
+                    ),
+                    "cal": PlanDefinition(id="cal", name="Cal", free_allowance=Decimal("10")),
+                },
+            )
+        )
+        roll_user = _new_uuid(9007)
+        cal_user = _new_uuid(9008)
+        store.set_user_plan(roll_user, "roll")
+        store.set_user_plan(cal_user, "cal")
+        store.add_credits(roll_user, Decimal("1000"), "purchase")
+        store.add_credits(cal_user, Decimal("1000"), "purchase")
+
+        # Simulate 35 elapsed days since plan assignment (rolling_30d has rolled
+        # over at least once; calendar_month has NOT necessarily rolled over —
+        # only if "now" crossed a 1st-of-month boundary, which it may not have).
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' "
+                    "WHERE user_id IN (%s, %s)",
+                    [roll_user, cal_user],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        m_roll = CreditManager(store=store)
+        m_roll.publish_pricing_from_dict(
+            {"models": {"_default": "input_tokens * 1"}, "min_balance": 0, "signup_bonus": 0}
+        )
+        m_roll.deduct(roll_user, UsageMetrics(input_tokens=10))
+        # Full allowance available again: the rolling window rolled over based on
+        # plan_assigned_at (35 days ago), independent of the calendar month.
+        assert m_roll.check_allowance(roll_user).allowance_remaining == Decimal("0")
+
+        # Prove the rolling window actually isolated this deduction from the
+        # "original" (pre-rollover) window: deducting against the pre-rollover
+        # period_start directly still shows it untouched.
+        original_window = date.today() - timedelta(days=35)
+        assert store.check_allowance(roll_user, period_start=original_window).allowance_remaining == Decimal("10")
+
+    # ── 6. manager.reserve()/settle() with an anniversary plan ──────────────
+
+    def test_manager_reserve_settle_anniversary_plan(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={
+                    "anniv": PlanDefinition(
+                        id="anniv", name="Anniv", free_allowance=Decimal("10"), allowance_period="anniversary"
+                    )
+                },
+            )
+        )
+        user = _new_uuid(9009)
+        store.set_user_plan(user, "anniv")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        # Push plan_assigned_at back >1 month so "now" is past this month's
+        # anniversary reset day, landing in a fresh window.
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '40 days' "
+                    "WHERE user_id = %s",
+                    [user],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        m = CreditManager(store=store, policy="strict_prepaid")
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+
+        lease = m.reserve(user, Decimal("6"))
+        ded = m.settle(user, lease.lease_id, Decimal("6"))
+        assert ded.allowance_consumed == Decimal("6")
+        assert ded.amount == Decimal("0")
+        assert m.check_allowance(user).allowance_remaining == Decimal("4")
+
+    # ── 7. manager.check_allowance() cross-checked against the resolver ────
+
+    def test_manager_check_allowance_rolling_30d_matches_resolver(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={
+                    "roll": PlanDefinition(
+                        id="roll", name="Roll", free_allowance=Decimal("20"), allowance_period="rolling_30d"
+                    )
+                },
+            )
+        )
+        user = _new_uuid(9010)
+        store.set_user_plan(user, "roll")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        plan = store.get_user_plan(user)
+        assert plan.plan_assigned_at is not None
+
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+
+        # Partial deduction, then cross-check the manager's reported window
+        # against calling the pure resolver directly with the same anchor.
+        m.deduct(user, UsageMetrics(input_tokens=8))
+        result = m.check_allowance(user)
+
+        now = datetime.now(UTC)
+        expected_start, expected_end_exclusive = resolve_allowance_window(now, "rolling_30d", plan.plan_assigned_at)
+        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
+
+        assert result.period_start == datetime(
+            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
+        ).isoformat()
+        assert result.period_end == datetime(
+            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+        ).isoformat()
+        assert result.allowance_remaining == Decimal("12")
+
+    def test_manager_check_allowance_anniversary_matches_resolver(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={
+                    "anniv": PlanDefinition(
+                        id="anniv", name="Anniv", free_allowance=Decimal("15"), allowance_period="anniversary"
+                    )
+                },
+            )
+        )
+        user = _new_uuid(9011)
+        store.set_user_plan(user, "anniv")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        plan = store.get_user_plan(user)
+        assert plan.plan_assigned_at is not None
+
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.deduct(user, UsageMetrics(input_tokens=5))
+        result = m.check_allowance(user)
+
+        now = datetime.now(UTC)
+        expected_start, expected_end_exclusive = resolve_allowance_window(now, "anniversary", plan.plan_assigned_at)
+        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
+
+        assert result.period_start == datetime(
+            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
+        ).isoformat()
+        assert result.period_end == datetime(
+            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+        ).isoformat()
+        assert result.allowance_remaining == Decimal("10")
+
+    # ── 8. manager.check_allowance() regression guard for calendar_month ───
+
+    def test_manager_check_allowance_calendar_month_unchanged(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                min_balance=Decimal("0"),
+                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
+            )
+        )
+        user = _new_uuid(9012)
+        store.set_user_plan(user, "basic")
+        store.add_credits(user, Decimal("1000"), "purchase")
+
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.deduct(user, UsageMetrics(input_tokens=3))
+
+        # calendar_month is the fast path: manager.check_allowance() delegates
+        # straight to store.check_allowance(user) with no period_start override,
+        # identical to calling the store directly.
+        direct = store.check_allowance(user)
+        via_manager = m.check_allowance(user)
+        assert via_manager == direct
+        assert via_manager.allowance_remaining == Decimal("7")
+
+    def test_manager_check_allowance_planless_user_zero_shape_pg(self, store: PostgresStore) -> None:
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        user = _new_uuid(9013)
+        result = m.check_allowance(user)
+        assert result.allowance_remaining == Decimal(0)
+        assert result == store.check_allowance(user)
+
+    # ── 9. plan-switch re-anchors plan_assigned_at ──────────────────────────
+
+    def test_set_user_plan_reanchors_plan_assigned_at_pg(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "planA": PlanDefinition(id="planA", name="Plan A", allowance_period="anniversary"),
+                    "planB": PlanDefinition(id="planB", name="Plan B", allowance_period="anniversary"),
+                },
+            )
+        )
+        user = _new_uuid(9014)
+        store.set_user_plan(user, "planA")
+        first_assigned_at = store.get_user_plan(user).plan_assigned_at
+        assert first_assigned_at is not None
+
+        # Force a small delay so the re-anchor timestamp is observably later —
+        # Postgres now() has microsecond resolution, but the two RPC calls could
+        # otherwise land within the same tick on a very fast machine.
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.user_credits SET plan_assigned_at = plan_assigned_at - interval '1 second' "
+                    "WHERE user_id = %s",
+                    [user],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        first_assigned_at = store.get_user_plan(user).plan_assigned_at
+
+        store.set_user_plan(user, "planB")
+        second_assigned_at = store.get_user_plan(user).plan_assigned_at
+        assert second_assigned_at is not None
+        assert first_assigned_at is not None
+        assert second_assigned_at > first_assigned_at
+
+    # ── 10. WS3: fractional fixed job cost round-trips through Postgres ────
+
+    def test_fractional_fixed_cost_round_trips_pg(self, store: PostgresStore) -> None:
+        config = PricingConfigData(models={"_default": "input_tokens * 1"}, fixed={"job": Decimal("2.5")})
+        store.set_active_pricing(config)
+
+        fetched = store.get_active_pricing()
+        assert fetched is not None
+        assert fetched.config.fixed["job"] == Decimal("2.5")
+        assert isinstance(fetched.config.fixed["job"], Decimal)
+
+        user = _new_uuid(9015)
+        store.add_credits(user, Decimal("100"), "purchase")
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict(config)
+        result = m.deduct_fixed(user, "job")
+        assert result.amount == Decimal("2.5")
+        assert result.amount != Decimal("2")
+        assert result.amount != Decimal("3")
+        assert store.get_balance(user).balance == Decimal("97.5")
+
+    # ── 11. settle_lease canonical-signature joint regression guard ────────
+
+    def test_settle_lease_floor_clamp_and_period_start_joint_pg(self, store: PostgresStore) -> None:
+        """Guards against migration 022's overload-consolidation bug (see
+        021's un-consolidated 7-arg vs 019's un-clamped 8-arg overloads):
+        floor-clamping (C1) and a non-default period_start must both apply
+        in the SAME settle_lease call now that there is exactly one canonical
+        signature. Before 022, every real caller (8 positional args including
+        skip_allowance) always resolved to the un-floor-clamped overload.
+        """
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                min_balance=Decimal("0"),
+                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("5"))},
+            )
+        )
+        user = _new_uuid(9016)
+        store.set_user_plan(user, "basic")
+        store.add_credits(user, Decimal("0"), "adjustment")
+
+        window = date(2024, 3, 1)
+        lease = store.create_lease(
+            user,
+            Decimal("20"),
+            "usage",
+            billing_mode="overdraft",
+            floor=Decimal("-20"),
+            overdraft_floor=Decimal("-20"),
+            period_start=window,
+        )
+        assert lease.error is None
+
+        # Actual cost 100 (de-clamped settle can exceed the hold): allowance
+        # covers 5 (window-keyed), net=95 requested but floor-clamped to max
+        # debit = balance(0) - floor(-20) = 20.
+        ded = store.settle_lease(user, lease.lease_id, Decimal("100"), period_start=window)
+        assert ded.error is None
+        assert ded.allowance_consumed == Decimal("5")
+        assert ded.amount == Decimal("20")  # floor-clamped, NOT 95
+        assert ded.balance_after == Decimal("-20")
+        # The allowance was consumed against the EXPLICIT window, not "now".
+        assert store.check_allowance(user, period_start=window).allowance_remaining == Decimal("0")
+
+    # ── 12. increment_usage_window: investigate actual current behavior ────
+
+    def test_increment_usage_window_plan_key_string_vs_uuid_pg(self, store: PostgresStore) -> None:
+        """Open question from the WS9 implementation plan: increment_usage_window's
+        SQL signature is (p_user_id UUID, p_plan_id UUID, p_amount NUMERIC, ...),
+        but the store method's ``plan_id`` param actually receives a plan_key
+        STRING (e.g. "basic"), not a UUID, on every real call site. Confirmed
+        dead code on the hot paths (deduct_with_allowance/settle_lease/create_lease
+        consume allowance inline, never via this RPC). This test documents
+        whatever Postgres actually does when called this way -- it does NOT fix
+        anything (see the gap notes in the final summary).
+        """
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
+            )
+        )
+        user = _new_uuid(9017)
+        store.set_user_plan(user, "basic")
+
+        with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
+            store.increment_usage_window(user, "basic", Decimal("1"))

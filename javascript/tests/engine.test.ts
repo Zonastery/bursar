@@ -17,8 +17,8 @@ const TEST_CONFIG = {
     _default: "tool_calls * 5 / 1000",
     code_exec: "tool_calls * 10 / 1000",
   },
-  search: { costs: "search_queries * 0.5 + search_results * 0.05" },
-  cache: { discount: "-cache_read_tokens * (0.001 / 1000)" },
+  search: "search_queries * 0.5 + search_results * 0.05",
+  cache: "-cache_read_tokens * (0.001 / 1000)",
   fixed: { batch_train: 100 },
   minBalance: 5,
 };
@@ -222,14 +222,14 @@ describe("PricingEngine", () => {
       expect(cost!.toFixed(4)).toBe("100.0000");
     });
 
-    it("rejects fractional fixed cost (H7: must be non-negative integer)", () => {
-      // H7 fix: Python config.py uses NonNegativeInt; JS must match.
-      expect(() =>
-        PricingEngine.fromDict({
-          models: { _default: "input_tokens * 1" },
-          fixed: { tiny: 0.5 },
-        }),
-      ).toThrow("fixed.tiny must be a non-negative integer");
+    it("accepts fractional (Decimal-compatible) fixed cost (WS3)", () => {
+      // WS3: fixed costs are Decimal-compatible, not integer-only. Only
+      // negative values are rejected (see config.test.ts for that case).
+      const engine = PricingEngine.fromDict({
+        models: { _default: "input_tokens * 1" },
+        fixed: { tiny: 0.5 },
+      });
+      expect(engine.getFixedCost("tiny")!.toFixed(4)).toBe("0.5000");
     });
 
     it("returns an integer fixed cost as exact Decimal", () => {
@@ -292,6 +292,55 @@ describe("tool calls with duplicate names", () => {
   });
 });
 
+// ── WS2: per-tool pricing gets its own `this_tool_calls` variable ──
+describe("WS2: this_tool_calls is scoped per tool, tool_calls stays global", () => {
+  it("code_exec is priced on its OWN call count, not the total across all tools", () => {
+    const engine = PricingEngine.fromDict({
+      models: { _default: "input_tokens * 0" },
+      tools: {
+        code_exec: "this_tool_calls * 10 / 1000",
+        _default: "this_tool_calls * 5 / 1000",
+      },
+    });
+    const metrics: UsageMetrics = {
+      model: "x",
+      inputTokens: 0,
+      toolCalls: [
+        { name: "code_exec" },
+        { name: "code_exec" },
+        { name: "other_a" },
+        { name: "other_b" },
+        { name: "other_c" },
+      ],
+    };
+    const result = engine.calculate(metrics);
+    // code_exec: this_tool_calls = 2 (its own count, NOT 5 total) → 2*10/1000 = 0.02
+    // default (3 unconfigured calls): this_tool_calls = 3 → 3*5/1000 = 0.015
+    // total tool credits = 0.02 + 0.015 = 0.035
+    expect(result.toolCredits.toFixed(4)).toBe("0.0350");
+  });
+
+  it("tool_calls (global) is still usable and reflects the TOTAL across all tools", () => {
+    // A tool expression referencing the global `tool_calls` (not `this_tool_calls`)
+    // must see the total call count across every tool, unaffected by WS2.
+    const engine = PricingEngine.fromDict({
+      models: { _default: "input_tokens * 0" },
+      tools: {
+        code_exec: "tool_calls * 1 / 1000",
+        _default: "tool_calls * 0",
+      },
+    });
+    const metrics: UsageMetrics = {
+      model: "x",
+      inputTokens: 0,
+      toolCalls: [{ name: "code_exec" }, { name: "other_a" }, { name: "other_b" }],
+    };
+    const result = engine.calculate(metrics);
+    // code_exec expression uses global tool_calls = 3 (total) → 3 * 1/1000 = 0.003
+    expect(result.toolCredits.toFixed(4)).toBe("0.0030");
+  });
+});
+
 // ── EN2: No tools section in config ──
 describe("config with no tools section", () => {
   it("tool calls default to zero cost when no tools section provided", () => {
@@ -344,7 +393,7 @@ describe("total clamped at zero when discount exceeds cost", () => {
   it("large cache discount produces total = 0.0000 (not negative)", () => {
     const engine = PricingEngine.fromDict({
       models: { _default: "input_tokens * 0.000001" },
-      cache: { discount: "-cache_read_tokens * 1" },
+      cache: "-cache_read_tokens * 1",
     });
     const result = engine.calculate({
       model: "x",

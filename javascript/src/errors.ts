@@ -45,3 +45,12 @@ export class LeaseExpiredError extends Error {
 export class LeaseNotFoundError extends Error {
   override readonly name = "LeaseNotFoundError";
 }
+
+/**
+ * Thrown by the default (concrete) implementation of an optional `CreditStore`
+ * capability (analytics, transaction listing, teams — WS8) when a custom store
+ * subclass does not override it.
+ */
+export class CapabilityNotSupportedError extends Error {
+  override readonly name = "CapabilityNotSupportedError";
+}

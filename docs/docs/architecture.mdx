@@ -12,7 +12,8 @@ ducto/
 ├── events.py            # CreditEventEmitter — typed pub/sub for lifecycle events
 ├── manager.py           # CreditManager — orchestration layer
 ├── interface/
-│   ├── base.py          # CreditStore ABC (29 abstract methods + check_feature)
+│   ├── base.py          # CreditStore ABC — core abstract methods + optional
+│   │                    #   capability groups with CapabilityNotSupportedError defaults
 │   ├── models.py        # Pydantic schemas for all store operations
 │   ├── memory.py        # MemoryStore (thread-safe, in-memory for testing)
 │   ├── supabase.py      # HttpxSupabaseStore adapter + run_migrations()
@@ -35,7 +36,7 @@ ducto/
     └── 015_atomic_deduct.sql     # deduct_with_allowance() atomic RPC
 ```
 
-`CreditStore` (`interface/base.py`) declares **29 abstract methods** plus one concrete convenience method, `check_feature`. The JavaScript `CreditStore` interface mirrors it with **28 methods** (it folds `listUserTransactions`/`listUsageEvents` into the same surface but exposes `deductWithAllowance` and the analytics methods identically).
+`CreditStore` (`interface/base.py`) declares the **core** abstract methods every store must implement, plus several **optional capability groups** that ship with a default implementation and do not need to be overridden by a minimal custom store — see [Storage interface: core vs. optional capabilities](#storage-interface-core-vs-optional-capabilities) below. The JavaScript `CreditStore` interface mirrors the same split (it folds `listUserTransactions`/`listUsageEvents` into the same surface but exposes `deductWithAllowance` and the analytics methods identically).
 
 ## Credit Lifecycle
 
@@ -105,9 +106,18 @@ reserve(user_id, estimate)   → LeaseResult (lease_id, hold placed on balance)
 
 The lower-level `reserve_credits` + `deduct_credits` pair (column-level reservation) is also retained but does not carry the full policy and concurrency machinery of `reserve`/`settle`.
 
+### Which charge method should I use?
+
+| Method | Use when |
+|---|---|
+| `deduct()` / `deduct()` | The cost is already known before you charge — a simple, immediate, pre-computed-cost deduction. No admission hold. |
+| `reserve()` → do work → `settle()` / `release()` | The cost is **not** known until after the work runs (streaming, agentic, variable-length jobs) and you need admission control (a hold) before starting. `run_billed()` / `runBilled()` is a one-call shortcut for this exact shape. |
+| `deduct_fixed()` / `deductFixed()` | A named, fixed-price batch job (e.g. a report or training run) — single atomic charge, no estimate/settle cycle. |
+| `deduct_team()` / `deductTeam()` | Charging a shared team credit pool instead of an individual user's balance. |
+
 ### Low-balance alerts
 
-After a successful deduction the manager may emit `credits.low_balance`. The threshold is **configurable** via the `CreditManager(low_balance_threshold=...)` constructor argument; when unset it defaults to `min_balance * 2`. The alert is **edge-triggered** — it fires only on the deduction that takes the balance from above the threshold to at-or-below it (`balance_before > threshold >= balance_after`), not on every call near the threshold.
+After a successful deduction the manager may emit `credits.low_balance`. The threshold(s) are **configurable** via the `CreditManager(low_balance=LowBalanceConfig(...))` constructor argument (`lowBalance: { thresholds, onTrigger }` in JS); when unset it defaults to a single threshold of `min_balance * 2` (which is `0` by default, since `min_balance` now defaults to `0` — see [Pricing Configuration](/docs/configuration#min_balance-optional)). Each threshold is **edge-triggered** — it fires only on the deduction that takes the balance from above the threshold to at-or-below it (`balance_before > threshold >= balance_after`), not on every call near the threshold, and re-arms after a top-up brings the balance back above that level.
 
 ## Additional Operations
 
@@ -115,6 +125,25 @@ After a successful deduction the manager may emit `credits.low_balance`. The thr
 - **Expiry:** `manager.sweep_expired_credits()` → store finds expired grants, debits the balance, and **marks swept grants** so a second sweep reports zero and never double-debits. Dry-run mode previews without modifying. SQL and `MemoryStore` behave identically.
 - **Team deduction:** `manager.deduct_team()` → `PricingEngine` calculates the cost → store debits the team pool, attributed to a user. Threads an `idempotency_key` (both SDKs) so a retried team deduction does not double-charge the shared pool.
 - **Analytics:** `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, plus `list_user_transactions` / `list_usage_events` (the latter on the SQL stores and the JS manager) filter `credit_transactions` in a time window — backed by SQL window functions (Postgres/Supabase) or an in-memory scan (`MemoryStore`).
+
+## Storage interface: core vs. optional capabilities
+
+Implementing a custom `CreditStore` backend used to mean implementing every abstract method, including several feature areas many integrators never touch. The interface now separates **core** methods (required) from **optional capability groups** (each with a default implementation that raises `CapabilityNotSupportedError` unless you override it):
+
+- **Core (required):** credit balance / add / deduct (`get_balance`, `add_credits`, `deduct_with_allowance`), the full lease lifecycle (`create_lease` / `settle_lease` / `release_lease` / `renew_lease` / `get_available`), pricing config versioning (`get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing`), plan management (`set_user_plan`, `get_user_plan`, `check_feature`, `check_allowance`), spend cap checks (`check_spend_cap`), refunds (`refund_credits`), and the credit expiry sweep (`sweep_expired_credits`).
+- **Optional — Analytics:** `spend_by_user`/`spendByUser`, `spend_by_model`/`spendByModel`, `top_users`/`topUsers`, `daily_spend`/`dailySpend`, `aggregate_stats`/`aggregateStats`.
+- **Optional — Transaction listing:** `list_user_transactions`/`listUserTransactions`.
+- **Optional — Teams:** `create_team`/`createTeam`, `get_team_balance`/`getTeamBalance`, `add_team_member`/`addTeamMember`, `get_team_members`/`getTeamMembers`, `deduct_team`/`deductTeam`.
+
+A minimal custom store can skip all three optional groups entirely and still satisfy `CreditStore` — calling an unoverridden optional method raises `CapabilityNotSupportedError` (exported from both SDKs) instead of a missing-method `TypeError`, so the failure mode is explicit and catchable.
+
+## Scope & boundaries
+
+A few things ducto deliberately does **not** do:
+
+- **No credit-pack purchasing or currency conversion.** ducto tracks and enforces credit balances; it does not talk to a payment provider or convert currency to credits. Call `add_credits` / `addCredits` yourself after a successful payment (Stripe, etc.) completes.
+- **`CreditEventEmitter` is in-process and synchronous only.** It is not a durable message bus — handlers run inline, in-process, and are not retried or persisted. If you need durable delivery (webhooks, a queue, at-least-once semantics), bridge to it yourself from an event handler.
+- **Plans are immutable per pricing version.** Editing a plan's `free_allowance` or rate overrides means publishing a new pricing version (`publish_pricing_from_dict` / `publishPricingFromDict` or `publish_pricing` / `publishPricing`) — plans are never edited in place on an already-published version.
 
 ## Events
 

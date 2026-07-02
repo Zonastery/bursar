@@ -25,6 +25,7 @@ from ducto import (
     ConcurrencyLimitError,
     CreditManager,
     InsufficientCreditsError,
+    LowBalanceConfig,
 )
 from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.interface.memory import MemoryStore
@@ -329,7 +330,7 @@ class TestOverdraftReconcile:
             emitter=emitter,
             policy="overdraft",
             overdraft_floor=Decimal(-100),
-            low_balance_thresholds=[Decimal(20)],
+            low_balance=LowBalanceConfig(thresholds=[Decimal(20)]),
         )
         m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
         store.add_credits("u1", Decimal(50))

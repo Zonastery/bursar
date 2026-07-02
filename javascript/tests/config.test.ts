@@ -5,8 +5,8 @@ import { ConfigError } from "../src/errors.js";
 const VALID_CONFIG = {
   models: { "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   tools: { _default: "tool_calls * 5 / 1000" },
-  search: { costs: "search_queries * 0.5" },
-  cache: { discount: "-cache_read_tokens * (0.001 / 1000)" },
+  search: "search_queries * 0.5",
+  cache: "-cache_read_tokens * (0.001 / 1000)",
   fixed: { batch_process: 50 },
   minBalance: 10,
 };
@@ -52,9 +52,11 @@ describe("loadConfigFromDict", () => {
 
   it("applies defaults for missing optional fields", () => {
     const config = loadConfigFromDict({ models: { a: "input_tokens * 1" } });
-    expect(config.minBalance).toBe(5);
-    expect(config.search).toEqual({});
-    expect(config.cache).toEqual({});
+    // WS6: minBalance defaults to 0 (was 5).
+    expect(config.minBalance).toBe(0);
+    // WS1: search/cache are a single expression string (or null), not a Record.
+    expect(config.search).toBeNull();
+    expect(config.cache).toBeNull();
     expect(config.fixed).toEqual({});
   });
 
@@ -124,6 +126,24 @@ describe("loadConfigFromDict", () => {
     expect(() => loadConfigFromDict({ models: { _default: expr } })).not.toThrow();
   });
 
+  // ── WS2: `this_tool_calls` is scoped to `tools` expressions only ──
+  it("rejects this_tool_calls in a models expression", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { _default: "this_tool_calls * 1" },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts this_tool_calls in a tools expression", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { _default: "input_tokens * 1" },
+        tools: { code_exec: "this_tool_calls * 10 / 1000" },
+      }),
+    ).not.toThrow();
+  });
+
   // ── C5/C7: config-load rejects ** and div-by-zero-prone forms via validation ──
   it("rejects exponentiation in a model expression", () => {
     expect(() =>
@@ -163,13 +183,14 @@ describe("loadConfigFromDict", () => {
   });
 
   // ── CF3: Empty sections are allowed ──
-  it("accepts empty tools, search, cache, fixed sections alongside valid models", () => {
+  it("accepts empty/absent tools, search, cache, fixed sections alongside valid models", () => {
+    // WS1: search/cache are a single expression string (or null/absent), not a Record.
     expect(() =>
       loadConfigFromDict({
         models: { "gpt-4": "input_tokens * 0.001" },
         tools: {},
-        search: {},
-        cache: {},
+        search: null,
+        cache: null,
         fixed: {},
       }),
     ).not.toThrow();
@@ -220,5 +241,59 @@ describe("loadConfigFromDict", () => {
         },
       }),
     ).toThrow(ConfigError);
+  });
+
+  // ── WS3: fractional (Decimal-compatible) fixed-job costs ──
+  it("rejects a negative fixed job cost", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        fixed: { batch_job: -1 },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts a fractional fixed job cost (no longer integer-only)", () => {
+    const config = loadConfigFromDict({
+      models: { "gpt-4": "input_tokens * 0.001" },
+      fixed: { batch_job: 2.5 },
+    });
+    expect(config.fixed["batch_job"]).toBe(2.5);
+  });
+
+  // ── WS9b: allowancePeriod on plan definitions ──
+  describe("allowancePeriod", () => {
+    for (const period of ["calendar_month", "rolling_30d", "anniversary"] as const) {
+      it(`loads successfully with allowancePeriod: "${period}"`, () => {
+        const config = loadConfigFromDict({
+          models: { "gpt-4": "input_tokens * 0.001" },
+          plans: {
+            pro: { id: "p1", name: "Pro", allowancePeriod: period },
+          },
+        });
+        expect(config.plans!.pro.allowancePeriod).toBe(period);
+      });
+    }
+
+    it("rejects an invalid allowancePeriod value", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models: { "gpt-4": "input_tokens * 0.001" },
+          plans: {
+            pro: { id: "p1", name: "Pro", allowancePeriod: "weekly" },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("defaults to calendar_month when omitted", () => {
+      const config = loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          pro: { id: "p1", name: "Pro" },
+        },
+      });
+      expect(config.plans!.pro.allowancePeriod).toBe("calendar_month");
+    });
   });
 });

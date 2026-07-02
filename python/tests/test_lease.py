@@ -22,6 +22,7 @@ from ducto import (
     InsufficientCreditsError,
     LeaseExpiredError,
     LeaseNotFoundError,
+    LowBalanceConfig,
     UsageMetrics,
 )
 from ducto.events import CreditEvent, CreditEventEmitter
@@ -318,7 +319,7 @@ class TestMultiLevelLowBalance:
             emitter=emitter,
             policy="overdraft",
             overdraft_floor=Decimal(0),
-            low_balance_thresholds=[Decimal(50), Decimal(20), Decimal(10)],
+            low_balance=LowBalanceConfig(thresholds=[Decimal(50), Decimal(20), Decimal(10)]),
         )
         m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
         fired = self._events(m, emitter)
@@ -347,8 +348,7 @@ class TestMultiLevelLowBalance:
             store=store,
             policy="overdraft",
             overdraft_floor=Decimal(0),
-            low_balance_thresholds=[Decimal(20)],
-            on_low_balance=boom,
+            low_balance=LowBalanceConfig(thresholds=[Decimal(20)], on_trigger=boom),
         )
         m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
         store.add_credits("u1", Decimal(100))

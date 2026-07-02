@@ -233,46 +233,69 @@ For **UI only** — disabling a button, showing a balance bar — use the non-lo
 
 ```python
 avail = manager.get_available("user_abc")        # .balance, .reserved, .available
-ok = manager.can_afford("user_abc", Decimal("50"))  # .affordable, .available, .worst_case, .reason
+ok = manager.can_afford("user_abc", Decimal("50"))  # .affordable, .spendable, .worst_case, .reason
 ```
 
 ```typescript
 const avail = await manager.getAvailable("user_abc");          // .balance, .reserved, .available
-const ok = await manager.canAfford("user_abc", new Decimal(50)); // .affordable, .available, .worstCase, .reason
+const ok = await manager.canAfford("user_abc", new Decimal(50)); // .affordable, .spendable, .worstCase, .reason
 ```
+
+:::info `AvailableResult.available` vs. `CanAffordResult.spendable` — do not confuse these
+These two reads answer different questions and are **not** interchangeable:
+
+| | `AvailableResult.available` (`getAvailable`) | `CanAffordResult.spendable` (`canAfford`) |
+|---|---|---|
+| Formula | `balance − active holds` | `balance − active holds + allowance_remaining` |
+| Includes free allowance? | **No** — cash only | **Yes** — effective spending power |
+| Typical use | "How much cash is left?" balance display | "Can this button be enabled?" affordability check |
+
+A free-tier user with a small cash balance but a large remaining monthly allowance will show a low `available` but a high `spendable` — `spendable` is what actually determines whether `reserve` will admit a given hold, so it's the right field for a "Send" button. This field was previously named `CanAffordResult.available`, which was easy to confuse with the unrelated, cash-only `AvailableResult.available` — it has been renamed to `spendable` specifically to remove that ambiguity. `AvailableResult.available` is unchanged.
+:::
 
 ## Multi-level low-balance + reload hook
 
-Pass `lowBalanceThresholds` (sorted internally high → low) for **edge-triggered** alerts: each level fires once on the descent that crosses it, and re-arms only after a top-up climbs back above it. `onLowBalance` is an async-safe, **non-blocking** callable — a payment-provider-agnostic place to enqueue a reload or notify. A handler that raises never breaks the operation.
+Pass a single `low_balance` / `lowBalance` config object with `thresholds` (sorted internally high → low) for **edge-triggered** alerts: each level fires once on the descent that crosses it, and re-arms only after a top-up climbs back above it. `on_trigger` / `onTrigger` is an async-safe, **non-blocking** callable — a payment-provider-agnostic place to enqueue a reload or notify. A handler that raises never breaks the operation.
 
 ```python
+from decimal import Decimal
+from ducto import CreditManager, LowBalanceConfig
+
 def reload_hook(event):
     # provider-agnostic: charge a saved card, enqueue a job, send an email, page on-call …
     trigger_reload(event.user_id, event.data["balance"], event.data["threshold"])
 
 manager = CreditManager(
     store=store,
-    low_balance_thresholds=[Decimal("50"), Decimal("20"), Decimal("10")],
-    on_low_balance=reload_hook,
+    low_balance=LowBalanceConfig(
+        thresholds=[Decimal("50"), Decimal("20"), Decimal("10")],
+        on_trigger=reload_hook,
+    ),
 )
 ```
 
 ```typescript
-const manager = new CreditManager(store, null, null, {
-  lowBalanceThresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
-  onLowBalance: (event) => {
-    // provider-agnostic reload / notify
-    triggerReload(event.userId, event.data?.balance, event.data?.threshold);
+import { CreditManager, LowBalanceConfig } from "@apoorwv/ducto";
+
+const manager = new CreditManager(store, undefined, undefined, {
+  lowBalance: {
+    thresholds: [50, 20, 10],
+    onTrigger: (event) => {
+      // provider-agnostic reload / notify
+      triggerReload(event.userId, event.data?.balance, event.data?.threshold);
+    },
   },
 });
 ```
+
+Omitting `low_balance` / `lowBalance` entirely falls back to a single derived threshold of `min_balance * 2`. Because `min_balance` now defaults to `0` (see [Pricing Configuration](/docs/configuration#min_balance-optional)), that derived threshold is also `0` by default — **low-balance alerting is effectively opt-in**: set `min_balance` explicitly, or configure `low_balance`/`lowBalance` yourself, if you want `credits.low_balance` to fire.
 
 New lifecycle events join the existing ones: `credits.reserved`, `credits.reservation_released`, `credits.lease_expired`, `credits.overdraft`, plus `credits.low_balance`.
 
 ## Guarantees
 
 - **`strict_prepaid` ⇒ structural zero debt.** Admission is the only gate and rejects any hold that would take `available` below the floor (`≥ 0`). If you size each hold at its worst case, no settle can drive the balance negative — the debt is structurally impossible, not merely unlikely.
-- **`overdraft` ⇒ bounded admission + full billing + reload.** New work is admitted only down to the negative `overdraftFloor`, so exposure is bounded. `settle` is de-clamped and bills the full actual cost (you never silently under-bill), and `onLowBalance` drives the reload that reconciles the balance back above the floor.
+- **`overdraft` ⇒ bounded admission + full billing + reload.** New work is admitted only down to the negative `overdraftFloor`, so exposure is bounded. `settle` is de-clamped and bills the full actual cost (you never silently under-bill), and the `lowBalance.onTrigger` hook drives the reload that reconciles the balance back above the floor.
 
 ## See also
 

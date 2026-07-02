@@ -1,4 +1,5 @@
 import type { Decimal } from "decimal.js";
+import type { AllowancePeriod } from "./allowance.js";
 
 /**
  * Billing mode for an operation. ``strict`` never lets the balance fall below
@@ -24,8 +25,8 @@ export interface CreditMetadata {
 export interface PricingConfigData {
   models: Record<string, string>;
   tools?: Record<string, string> | null;
-  search?: Record<string, string> | null;
-  cache?: Record<string, string> | null;
+  search?: string | null;
+  cache?: string | null;
   fixed?: Record<string, number> | null;
   minBalance?: number | null;
   signupBonus?: number | null;
@@ -66,6 +67,8 @@ export interface DeductWithAllowanceOptions {
   minBalance?: Decimal;
   model?: string | null;
   metadata?: CreditMetadata | null;
+  /** Free-allowance window start override (WS9); defaults to calendar-month when omitted. */
+  periodStart?: Date | null;
 }
 
 /** Pricing config fetched from store. */
@@ -125,6 +128,8 @@ export interface PlanDefinition {
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
   overdraftFloor?: Decimal | null;
+  /** Free-allowance reset window mode (WS9). Defaults to `"calendar_month"` when absent. */
+  allowancePeriod?: AllowancePeriod;
 }
 
 /** Result of checking plan allowance. */
@@ -152,6 +157,10 @@ export interface GetUserPlanResult {
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
   overdraftFloor?: Decimal | null;
+  /** Free-allowance reset window mode (WS9). Absent/omitted means `"calendar_month"`. */
+  allowancePeriod?: AllowancePeriod;
+  /** Timestamp the current plan was assigned — the anchor for non-calendar periods. */
+  planAssignedAt?: Date | null;
 }
 
 /**
@@ -197,7 +206,8 @@ export interface ReleaseResult {
  */
 export interface CanAffordResult {
   affordable: boolean;
-  available: Decimal;
+  /** Effective spending power including allowance: `balance − reserved (+ allowance headroom)`. */
+  spendable: Decimal;
   worstCase: Decimal;
   reason?: string | null;
 }

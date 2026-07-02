@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import Decimal from "decimal.js";
 import { quantizeMoney } from "../expr.js";
 import { StoreError } from "../errors.js";
+import { resolveAllowanceWindow } from "../allowance.js";
+import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -39,7 +41,8 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
+import { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -63,6 +66,9 @@ function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition 
   const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as Record<string, string> | null | undefined;
   const perOperationRaw = (p["perOperation"] ?? p["per_operation"]) as Record<string, unknown> | null | undefined;
   const maxConcurrentRaw = (p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
+  const allowancePeriodRaw = (p["allowancePeriod"] ?? p["allowance_period"]) as
+    | AllowancePeriod
+    | undefined;
 
   const billingMode = (defaultBillingModeRaw === "overdraft" ? "overdraft" : "strict") as "strict" | "overdraft";
   return {
@@ -75,6 +81,7 @@ function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition 
     overdraftFloor: overdraftFloorRaw != null ? new Decimal(overdraftFloorRaw) : null,
     maxConcurrent: maxConcurrentRaw ?? null,
     perOperation: (perOperationRaw as PlanDefinition["perOperation"]) ?? undefined,
+    allowancePeriod: allowancePeriodRaw ?? "calendar_month",
   };
 }
 
@@ -125,7 +132,7 @@ const DEFAULT_LEASE_TTL_SECONDS = 600;
  * so a `Promise.all` of concurrent deductions cannot interleave and double-spend
  * (C2). A test-only injectable clock is exposed for deterministic time tests.
  */
-export class MemoryStore implements CreditStore {
+export class MemoryStore extends CreditStore {
   private balances = new Map<string, Decimal>();
   private lifetime = new Map<string, Decimal>();
   private transactions: TransactionRecord[] = [];
@@ -142,6 +149,8 @@ export class MemoryStore implements CreditStore {
   }> = [];
   private planDefinitions = new Map<string, PlanDefinition>();
   private userPlanMap = new Map<string, string>();
+  /** Timestamp each user's CURRENT plan was assigned — anchor for WS9 non-calendar periods. */
+  private userPlanAssignedAt = new Map<string, Date>();
   private usageWindows: Array<{
     userId: string;
     planId: string;
@@ -178,8 +187,16 @@ export class MemoryStore implements CreditStore {
     return this.balances.get(userId) ?? ZERO;
   }
 
-  /** Billing-period key (UTC month start, YYYY-MM-DD) for the current clock. */
-  private billingPeriod(): string {
+  /**
+   * Billing-period key (YYYY-MM-DD) used as the in-memory usage-window bucket.
+   *
+   * When an explicit ``periodStart`` is supplied (WS9 — a non-calendar-month
+   * allowance window resolved by the manager), it is used directly. Otherwise
+   * falls back to the UTC calendar-month start for the current clock, exactly
+   * matching pre-WS9 behaviour.
+   */
+  private billingPeriod(periodStart?: Date | null): string {
+    if (periodStart) return periodStart.toISOString().slice(0, 10);
     const now = this.now();
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
       .toISOString()
@@ -283,6 +300,7 @@ export class MemoryStore implements CreditStore {
     const minBalance = options?.minBalance ?? ZERO;
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? null;
+    const periodStart = options?.periodStart ?? null;
 
     // ── critical section (synchronous; no awaits) ──
 
@@ -327,7 +345,7 @@ export class MemoryStore implements CreditStore {
     const planId = this.userPlanMap.get(userId);
     const planDef = planId ? this.planDefinitions.get(planId) : undefined;
     if (planId && planDef) {
-      const billingPeriod = this.billingPeriod();
+      const billingPeriod = this.billingPeriod(periodStart);
       let used = ZERO;
       for (const w of this.usageWindows) {
         if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
@@ -387,7 +405,7 @@ export class MemoryStore implements CreditStore {
 
     // (6) Commit: consume allowance, debit balance, insert ledger row.
     if (consume.gt(0) && planId) {
-      this.incrementUsageWindowSync(userId, planId, consume);
+      this.incrementUsageWindowSync(userId, planId, consume, periodStart);
     }
 
     this.balances.set(userId, current.minus(net));
@@ -636,6 +654,7 @@ export class MemoryStore implements CreditStore {
     const idempotencyKey = options?.idempotencyKey ?? null;
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? null;
+    const periodStart = options?.periodStart ?? null;
 
     // ── critical section (synchronous; no awaits) ──
     if (!amount.isFinite() || amount.lt(0)) {
@@ -689,7 +708,7 @@ export class MemoryStore implements CreditStore {
     const planId = this.userPlanMap.get(userId);
     const planDef = planId ? this.planDefinitions.get(planId) : undefined;
     if (planId && planDef) {
-      const billingPeriod = this.billingPeriod();
+      const billingPeriod = this.billingPeriod(periodStart);
       let used = ZERO;
       for (const w of this.usageWindows) {
         if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
@@ -735,7 +754,7 @@ export class MemoryStore implements CreditStore {
     }
 
     if (consume.gt(0) && planId) {
-      this.incrementUsageWindowSync(userId, planId, consume);
+      this.incrementUsageWindowSync(userId, planId, consume, periodStart);
     }
 
     this.balances.set(userId, balance.minus(net));
@@ -923,6 +942,8 @@ export class MemoryStore implements CreditStore {
       perOperation: (planDef?.perOperation as GetUserPlanResult["perOperation"]) ?? {},
       maxConcurrent: planDef?.maxConcurrent ?? null,
       overdraftFloor: planDef?.overdraftFloor ?? null,
+      allowancePeriod: planDef?.allowancePeriod ?? "calendar_month",
+      planAssignedAt: planId ? (this.userPlanAssignedAt.get(userId) ?? null) : null,
     };
   }
 
@@ -941,10 +962,19 @@ export class MemoryStore implements CreditStore {
 
   async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
     this.userPlanMap.set(userId, planId);
+    // WS9: record the assignment time as the anchor for non-calendar-month
+    // allowance periods. Uses the SAME injectable clock as everything else so
+    // tests can control it deterministically.
+    this.userPlanAssignedAt.set(userId, this.now());
     return { userId, planId };
   }
 
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
+  async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
+    // periodStart is unused here: MemoryStore already has direct access to
+    // planAssignedAt and its own (injectable, test-controllable) clock, so it
+    // self-resolves the window rather than trusting a caller-supplied date that
+    // may have been computed against the manager's wall clock instead.
+    void periodStart;
     const planId = this.userPlanMap.get(userId);
     if (!planId) {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
@@ -954,9 +984,13 @@ export class MemoryStore implements CreditStore {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
     const now = this.now();
-    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
-    const billingPeriod = periodStart.toISOString().slice(0, 10);
+    const allowancePeriod: AllowancePeriod = planDef.allowancePeriod ?? "calendar_month";
+    const anchor = this.userPlanAssignedAt.get(userId) ?? null;
+    const { start, end: exclusiveEnd } = resolveAllowanceWindow(now, allowancePeriod, anchor);
+    // Preserve the pre-WS9 display convention: periodEnd is the LAST DAY of the
+    // window (inclusive), i.e. one day before the resolver's exclusive end.
+    const periodEnd = new Date(exclusiveEnd.getTime() - 86_400_000);
+    const billingPeriod = start.toISOString().slice(0, 10);
     let usage = ZERO;
     for (const w of this.usageWindows) {
       if (w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod) {
@@ -966,13 +1000,18 @@ export class MemoryStore implements CreditStore {
     return {
       planId,
       allowanceRemaining: Decimal.max(planDef.freeAllowance.minus(usage), ZERO),
-      periodStart: periodStart.toISOString(),
+      periodStart: start.toISOString(),
       periodEnd: periodEnd.toISOString(),
     };
   }
 
-  private incrementUsageWindowSync(userId: string, planId: string, amount: Decimal): void {
-    const billingPeriod = this.billingPeriod();
+  private incrementUsageWindowSync(
+    userId: string,
+    planId: string,
+    amount: Decimal,
+    periodStart?: Date | null,
+  ): void {
+    const billingPeriod = this.billingPeriod(periodStart);
     const existing = this.usageWindows.find(
       (w) => w.userId === userId && w.planId === planId && w.billingPeriod === billingPeriod,
     );

@@ -102,10 +102,25 @@ percentile(100, a, b, c)                                  # max
 | `cache_read_tokens` | `UsageMetrics.cache_read_tokens` | `cacheReadTokens` |
 | `cache_write_tokens` | `UsageMetrics.cache_write_tokens` | `cacheWriteTokens` |
 | `tool_calls` | `len(UsageMetrics.tool_calls)` | `toolCalls.length` |
+| `this_tool_calls` | count of calls matching the current tool key | count of calls matching the current tool key |
 | `search_queries` | `UsageMetrics.search_queries` | `searchQueries` |
 | `search_results` | `UsageMetrics.search_results` | `searchResults` |
 | `web_search_calls` | `UsageMetrics.web_search_calls` | `webSearchCalls` |
 | `code_exec_calls` | `UsageMetrics.code_exec_calls` | `codeExecCalls` |
+
+`tool_calls` is always the **global total** — the count of every tool call across all tools, everywhere it appears (`models`, `search`, `cache`, and every `tools.*` expression, including `tools._default`).
+
+`this_tool_calls` is scoped **only** to `tools.*` expressions and is bound to the count of calls matching that specific tool. Referencing `this_tool_calls` in `models`, `search`, or `cache` is rejected with `ExpressionError` at config-load time — it is not a general-purpose variable.
+
+Inside `tools._default`, `this_tool_calls` is bound to the count of calls that did **not** match any other, more specific `tools.*` key (the "everything else" bucket). This replaces the old behavior where `_default` (and every other `tools.*` key) received `tool_calls` rebound to a per-key count — that override is gone; `tool_calls` inside `tools.*` now behaves exactly like everywhere else (the global total), and `this_tool_calls` is the new, unambiguous way to get the per-key count.
+
+```yaml
+tools:
+  code_exec: "this_tool_calls * 10 / 1000"   # priced per call to code_exec specifically
+  _default: "this_tool_calls * 5 / 1000"     # priced per call to any OTHER tool
+```
+
+With 2 `code_exec` calls and 3 calls to other tools: `code_exec` costs `2 * 10 / 1000`, and `_default` costs `3 * 5 / 1000`. (In the old, buggy behavior, `code_exec`'s expression would have seen `tool_calls == 5`, the total across all tools, and mispriced accordingly.)
 
 ## Safety
 

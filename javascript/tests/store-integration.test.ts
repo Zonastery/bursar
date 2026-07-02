@@ -6,6 +6,12 @@ import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
+import { CreditManager } from "../src/manager.js";
+import { resolveAllowanceWindow } from "../src/allowance.js";
+import type { AllowancePeriod } from "../src/allowance.js";
+import type { PricingConfigData } from "../src/types.js";
+
+const ALLOWANCE_PERIODS: AllowancePeriod[] = ["calendar_month", "rolling_30d", "anniversary"];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = join(__dirname, "../../python/src/ducto/sql");
@@ -16,6 +22,17 @@ const D = (n: number | string) => new Decimal(n);
 const PG_USER = "00000000-0000-0000-0000-000000000001";
 const PG_USER2 = "00000000-0000-0000-0000-000000000099";
 const PLAN_UUID = "00000000-0000-0000-0000-0000000000a1";
+const PG_USER3 = "00000000-0000-0000-0000-000000000003";
+const PG_USER4 = "00000000-0000-0000-0000-000000000004";
+const PG_USER5 = "00000000-0000-0000-0000-000000000005";
+const PG_USER6 = "00000000-0000-0000-0000-000000000006";
+const PG_USER7 = "00000000-0000-0000-0000-000000000007";
+const PG_USER8 = "00000000-0000-0000-0000-000000000008";
+const PG_USER9 = "00000000-0000-0000-0000-000000000009";
+const PG_USER10 = "00000000-0000-0000-0000-000000000010";
+const PG_USER11 = "00000000-0000-0000-0000-000000000011";
+const PG_USER12 = "00000000-0000-0000-0000-000000000012";
+const PG_USER13 = "00000000-0000-0000-0000-000000000013";
 
 // ───────────────────────────────────────────────────────────────────────────
 // MemoryStore concurrency — always runs (no DB required). Asserts the C2 fix
@@ -110,6 +127,27 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       PG_USER,
       PG_USER2,
     ]);
+    // WS9 / WS10 / WS3 tests below use several more fixed user UUIDs — seed them
+    // all up front (auth.users FK is required before any user_credits row can
+    // reference them via team/plan features).
+    await pool.query(
+      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
+      [
+        [
+          PG_USER3,
+          PG_USER4,
+          PG_USER5,
+          PG_USER6,
+          PG_USER7,
+          PG_USER8,
+          PG_USER9,
+          PG_USER10,
+          PG_USER11,
+          PG_USER12,
+          PG_USER13,
+        ],
+      ],
+    );
   }, 60000);
 
   afterEach(async () => {
@@ -809,4 +847,467 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const teamBal = (await store.getTeamBalance(team.teamId)).balance;
     expect(teamBal.gte(0)).toBe(true);
   }, 30000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Configurable allowance window (WS9) — real Postgres. Covers gaps identified
+// after the store-level `checkAllowance(userId, periodStart?)` threading and
+// the new `CreditManager.checkAllowance` passthrough: allowance_period/
+// plan_assigned_at round-trip, window isolation via explicit periodStart on
+// deductWithAllowance/createLease/settleLease, rolling_30d/anniversary plans
+// driven through the MANAGER (not just the raw store), and a direct live-DB
+// regression guard for the positional-argument bug (a missing p_skip_allowance
+// placeholder previously shifted periodStart into the wrong SQL parameter
+// slot — only ever caught by a MOCKED test before this).
+// ───────────────────────────────────────────────────────────────────────────
+describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postgres", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    await pool.query(BOOTSTRAP_SQL);
+    await applyMigrations(pool);
+    await pool.query(
+      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
+      [
+        [
+          PG_USER,
+          PG_USER2,
+          PG_USER3,
+          PG_USER4,
+          PG_USER5,
+          PG_USER6,
+          PG_USER7,
+          PG_USER8,
+          PG_USER9,
+          PG_USER10,
+          PG_USER11,
+          PG_USER12,
+          PG_USER13,
+        ],
+      ],
+    );
+  }, 60000);
+
+  afterEach(async () => {
+    if (pool) {
+      await pool.query("DELETE FROM public.credit_reservations");
+      await pool.query("DELETE FROM public.credit_team_members");
+      await pool.query("DELETE FROM public.credit_teams");
+      await pool.query("DELETE FROM public.credit_usage_window");
+      await pool.query("DELETE FROM public.credit_transactions");
+      await pool.query("DELETE FROM public.credit_spend_caps");
+      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
+      await pool.query("DELETE FROM public.user_credits");
+      await pool.query("DELETE FROM public.credit_plans");
+    }
+  });
+
+  afterAll(async () => {
+    if (pool) await pool.end();
+  });
+
+  // ── 1/2: getUserPlan + plan-sync round-trip allowance_period ────────
+  it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+       VALUES ($1, 'Rolling', 20, $2, 'rolling_30d')`,
+      [PLAN_UUID, PLAN_UUID],
+    );
+    const before = new Date();
+    await store.setUserPlan(PG_USER, PLAN_UUID);
+    const after = new Date();
+
+    const plan = await store.getUserPlan(PG_USER);
+    expect(plan.allowancePeriod).toBe("rolling_30d");
+    expect(plan.planAssignedAt).not.toBeNull();
+    expect(plan.planAssignedAt!.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
+    expect(plan.planAssignedAt!.getTime()).toBeLessThanOrEqual(after.getTime() + 1000);
+  });
+
+  it.each(ALLOWANCE_PERIODS)(
+    "plan-sync persists allowance_period=%s to credit_plans via setActivePricing",
+    async (allowancePeriod) => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const planKey = `sync-${allowancePeriod}`;
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          [planKey]: {
+            id: planKey,
+            name: `Plan ${allowancePeriod}`,
+            freeAllowance: D(15),
+            allowancePeriod,
+          },
+        },
+      };
+      await store.setActivePricing(config);
+      await store.setUserPlan(PG_USER, planKey);
+
+      const plan = await store.getUserPlan(PG_USER);
+      expect(plan.allowancePeriod).toBe(allowancePeriod);
+
+      const raw = await pool.query(
+        `SELECT allowance_period FROM public.credit_plans WHERE plan_key = $1`,
+        [planKey],
+      );
+      expect((raw.rows[0] as { allowance_period: string }).allowance_period).toBe(
+        allowancePeriod,
+      );
+    },
+  );
+
+  // ── 3: deductWithAllowance periodStart isolates usage windows ───────
+  it("deductWithAllowance with explicit periodStart isolates usage into that window", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+       VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d')`,
+      [PLAN_UUID, PLAN_UUID],
+    );
+    await store.addCredits(PG_USER, D(1000), "purchase");
+    await store.setUserPlan(PG_USER, PLAN_UUID);
+
+    const day1 = new Date("2026-01-01T00:00:00.000Z");
+    const day31 = new Date("2026-01-31T00:00:00.000Z");
+
+    // Window 1: consume the full allowance.
+    const r1 = await store.deductWithAllowance(PG_USER, D(10), {
+      idempotencyKey: "iso-1",
+      periodStart: day1,
+    });
+    expect(r1.allowanceConsumed.toString()).toBe("10");
+    expect((await store.checkAllowance(PG_USER, day1)).allowanceRemaining.toString()).toBe("0");
+
+    // A different periodStart is a DIFFERENT window — full allowance again.
+    expect((await store.checkAllowance(PG_USER, day31)).allowanceRemaining.toString()).toBe("10");
+    const r2 = await store.deductWithAllowance(PG_USER, D(10), {
+      idempotencyKey: "iso-2",
+      periodStart: day31,
+    });
+    expect(r2.allowanceConsumed.toString()).toBe("10");
+
+    // Window 1 remains exhausted — the two windows are isolated from each other.
+    expect((await store.checkAllowance(PG_USER, day1)).allowanceRemaining.toString()).toBe("0");
+  });
+
+  // ── 4: createLease/settleLease periodStart isolates usage windows ───
+  it("createLease/settleLease with explicit periodStart isolates usage into that window", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+       VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d')`,
+      [PLAN_UUID, PLAN_UUID],
+    );
+    await store.addCredits(PG_USER, D(1000), "purchase");
+    await store.setUserPlan(PG_USER, PLAN_UUID);
+
+    const day1 = new Date("2026-01-01T00:00:00.000Z");
+    const day31 = new Date("2026-01-31T00:00:00.000Z");
+
+    const lease1 = await store.createLease(PG_USER, D(10), "usage", { periodStart: day1 });
+    const s1 = await store.settleLease(PG_USER, lease1.leaseId, D(10), { periodStart: day1 });
+    expect(s1.allowanceConsumed.toString()).toBe("10");
+    expect((await store.checkAllowance(PG_USER, day1)).allowanceRemaining.toString()).toBe("0");
+
+    // A different window gets its own full allowance.
+    const lease2 = await store.createLease(PG_USER, D(10), "usage", { periodStart: day31 });
+    const s2 = await store.settleLease(PG_USER, lease2.leaseId, D(10), { periodStart: day31 });
+    expect(s2.allowanceConsumed.toString()).toBe("10");
+    expect((await store.checkAllowance(PG_USER, day1)).allowanceRemaining.toString()).toBe("0");
+    expect((await store.checkAllowance(PG_USER, day31)).allowanceRemaining.toString()).toBe("0");
+  });
+
+  // ── 5: rolling_30d plan through manager.deduct(), backdated anchor ───
+  it("manager.deduct() on a rolling_30d plan resolves the window from a backdated plan_assigned_at", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+    const config: PricingConfigData = {
+      models: { _default: "input_tokens * 1" },
+      plans: {
+        rolling: {
+          id: "rolling",
+          name: "Rolling",
+          freeAllowance: D(10),
+          allowancePeriod: "rolling_30d",
+        },
+      },
+    };
+    await store.setActivePricing(config);
+    await manager.publishPricingFromDict(config);
+    await manager.addCredits(PG_USER3, 1000);
+    await manager.setUserPlan(PG_USER3, "rolling");
+
+    // Backdate plan_assigned_at by 35 days — puts "now" into the SECOND 30-day
+    // window, so the allowance must have reset to full (unlike a calendar_month
+    // plan, which would key off the current calendar month instead).
+    await pool.query(
+      `UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
+      [PG_USER3],
+    );
+
+    const d1 = await manager.deduct(PG_USER3, { inputTokens: 4 });
+    expect(d1.allowanceConsumed.toString()).toBe("4");
+    const allowance = await manager.checkAllowance(PG_USER3);
+    expect(allowance.allowanceRemaining.toString()).toBe("6");
+
+    // Cross-check: the window manager.deduct() actually used is anchored 35 days
+    // ago, NOT the current calendar month a calendar_month plan would use.
+    const plan = await store.getUserPlan(PG_USER3);
+    const resolved = resolveAllowanceWindow(new Date(), "rolling_30d", plan.planAssignedAt);
+    const calendarWindow = resolveAllowanceWindow(new Date(), "calendar_month", null);
+    expect(resolved.start.toISOString()).not.toBe(calendarWindow.start.toISOString());
+  });
+
+  // ── 6: anniversary plan through manager.reserve()/settle() ──────────
+  it("manager.reserve()/settle() on an anniversary plan resolves the window from a backdated plan_assigned_at", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+    const config: PricingConfigData = {
+      models: { _default: "input_tokens * 1" },
+      plans: {
+        anniv: {
+          id: "anniv",
+          name: "Anniversary",
+          freeAllowance: D(10),
+          allowancePeriod: "anniversary",
+        },
+      },
+    };
+    await store.setActivePricing(config);
+    await manager.publishPricingFromDict(config);
+    await manager.addCredits(PG_USER4, 1000);
+    await manager.setUserPlan(PG_USER4, "anniv");
+
+    // Backdate 35 days so the anniversary reset (monthly, on the anchor's
+    // day-of-month) has already occurred — the allowance should be fresh.
+    await pool.query(
+      `UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
+      [PG_USER4],
+    );
+
+    const lease = await manager.reserve(PG_USER4, { inputTokens: 6 });
+    const settled = await manager.settle(PG_USER4, lease.leaseId, { inputTokens: 6 });
+    expect(settled.allowanceConsumed.toString()).toBe("6");
+    const allowance = await manager.checkAllowance(PG_USER4);
+    expect(allowance.allowanceRemaining.toString()).toBe("4");
+  });
+
+  // ── 7: manager.checkAllowance() cross-checked against resolveAllowanceWindow ──
+  it.each(["rolling_30d", "anniversary"] as const satisfies readonly AllowancePeriod[])(
+    "manager.checkAllowance() for a %s plan matches resolveAllowanceWindow and reflects partial usage",
+    async (allowancePeriod) => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const manager = new CreditManager(store);
+      const planKey = `ca-${allowancePeriod}`;
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          [planKey]: {
+            id: planKey,
+            name: planKey,
+            freeAllowance: D(20),
+            allowancePeriod,
+          },
+        },
+      };
+      await store.setActivePricing(config);
+      await manager.publishPricingFromDict(config);
+      await manager.addCredits(PG_USER5, 1000);
+      await manager.setUserPlan(PG_USER5, planKey);
+
+      const plan = await store.getUserPlan(PG_USER5);
+      const anchor = plan.planAssignedAt;
+
+      await manager.deduct(PG_USER5, { inputTokens: 7 });
+
+      const now = new Date();
+      const expected = resolveAllowanceWindow(now, allowancePeriod, anchor);
+      const expectedPeriodEnd = new Date(expected.end.getTime() - 86_400_000);
+
+      const result = await manager.checkAllowance(PG_USER5);
+      expect(result.periodStart).toBe(expected.start.toISOString());
+      expect(result.periodEnd).toBe(expectedPeriodEnd.toISOString());
+      expect(result.allowanceRemaining.toString()).toBe("13");
+    },
+  );
+
+  // ── 8: manager.checkAllowance() fast path (calendar_month / planless) ──
+  it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a calendar_month plan", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+       VALUES ($1, 'Cal', 15, $2, 'calendar_month')`,
+      [PLAN_UUID, PLAN_UUID],
+    );
+    await store.addCredits(PG_USER6, D(100), "purchase");
+    await store.setUserPlan(PG_USER6, PLAN_UUID);
+    await store.deductWithAllowance(PG_USER6, D(5), { idempotencyKey: "fastpath-1" });
+
+    const direct = await store.checkAllowance(PG_USER6);
+    const viaManager = await manager.checkAllowance(PG_USER6);
+    expect(viaManager).toEqual(direct);
+  });
+
+  it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a planless user", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+    await store.addCredits(PG_USER7, D(10), "purchase");
+
+    const direct = await store.checkAllowance(PG_USER7);
+    const viaManager = await manager.checkAllowance(PG_USER7);
+    expect(viaManager).toEqual(direct);
+  });
+
+  // ── 9: positional-argument regression guard against REAL Postgres ───
+  it("deductWithAllowance with a non-null periodStart does not throw a Postgres type-cast error (positional-arg regression guard)", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER8, D(100), "purchase");
+
+    // Before the fix, a missing p_skip_allowance positional placeholder shifted
+    // periodStart into the boolean slot, causing Postgres to reject the RPC call
+    // with a cast error (`invalid input syntax for type boolean`) instead of
+    // silently mis-binding — so a throw here is exactly what the bug produced.
+    const periodStart = new Date("2026-03-01T00:00:00.000Z");
+    await expect(
+      store.deductWithAllowance(PG_USER8, D(10), {
+        idempotencyKey: "regress-1",
+        periodStart,
+      }),
+    ).resolves.not.toThrow();
+
+    const r = await store.deductWithAllowance(PG_USER8, D(5), {
+      idempotencyKey: "regress-2",
+      periodStart,
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.amount.toString()).toBe("5");
+  });
+
+  it("settleLease with a non-null periodStart does not throw a Postgres type-cast error (positional-arg regression guard)", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.addCredits(PG_USER9, D(100), "purchase");
+    const periodStart = new Date("2026-03-01T00:00:00.000Z");
+
+    const lease = await store.createLease(PG_USER9, D(10), "usage", { periodStart });
+    await expect(
+      store.settleLease(PG_USER9, lease.leaseId, D(10), { periodStart }),
+    ).resolves.not.toThrow();
+  });
+
+  // ── 10: plan-switch re-anchoring via real Postgres ───────────────────
+  it("setUserPlan re-anchors plan_assigned_at on every (re-)assignment", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const PLAN_X = "00000000-0000-0000-0000-0000000000d1";
+    const PLAN_Y = "00000000-0000-0000-0000-0000000000d2";
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key)
+       VALUES ($1, 'X', 5, $2), ($3, 'Y', 5, $4)`,
+      [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
+    );
+
+    await store.setUserPlan(PG_USER10, PLAN_X);
+    const first = (await store.getUserPlan(PG_USER10)).planAssignedAt!;
+
+    // Postgres timestamptz resolution — sleep briefly so the second now() call
+    // is guaranteed to differ from the first.
+    await new Promise((r) => setTimeout(r, 10));
+
+    await store.setUserPlan(PG_USER10, PLAN_Y);
+    const second = (await store.getUserPlan(PG_USER10)).planAssignedAt!;
+
+    expect(second.getTime()).toBeGreaterThan(first.getTime());
+  });
+
+  // ── 11: WS3 — fractional fixed job cost round-trips through Postgres JSONB ──
+  it("WS3 — fractional fixed job cost round-trips through real Postgres JSONB and charges exactly", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+    const config: PricingConfigData = {
+      models: { _default: "input_tokens * 1" },
+      fixed: { job: 2.5 },
+    };
+    await store.setActivePricing(config);
+    await manager.publishPricingFromDict(config);
+
+    const stored = await store.getActivePricing();
+    expect(stored?.config.fixed?.job).toBe(2.5);
+
+    await manager.addCredits(PG_USER11, 10);
+    const result = await manager.deductFixed(PG_USER11, "job");
+    expect(result.amount.toString()).toBe("2.5");
+    expect((await manager.getBalance(PG_USER11)).balance.toString()).toBe("7.5");
+  });
+
+  // ── 12: WS10 — manager.addCredits options-object form persists expiresAt ──
+  it("WS10 — manager.addCredits options-object form persists expiresAt and sweepExpiredCredits reclaims exactly that grant", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store);
+
+    await manager.addCredits(PG_USER12, D(30), {
+      type: "purchase",
+      metadata: { referenceType: "promo" },
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    // A second, non-expiring grant must survive the sweep untouched.
+    await manager.addCredits(PG_USER12, D(20), { type: "purchase" });
+
+    expect((await manager.getBalance(PG_USER12)).balance.toString()).toBe("50");
+
+    const swept = await manager.sweepExpiredCredits();
+    expect(swept.expiredAmount.toString()).toBe("30");
+    expect((await manager.getBalance(PG_USER12)).balance.toString()).toBe("20");
+  });
+
+  // ── 13: settle_lease canonical-signature joint regression guard ─────
+  it("settleLease jointly exercises floor-clamp (C1) and periodStart (WS9) against the canonical single signature", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+       VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d')`,
+      [PLAN_UUID, PLAN_UUID],
+    );
+    // Balance of 8: floor 0 means settle can debit at most 8 net regardless of
+    // the lease's nominal amount — this exercises the 021 floor-clamp fix.
+    await store.addCredits(PG_USER13, D(8), "purchase");
+    await store.setUserPlan(PG_USER13, PLAN_UUID);
+
+    // Lease admission only needs to cover the worst-case hold — request a small
+    // amount well within `balance(8) + allowance headroom(5) = 13` so admission
+    // succeeds; settle then bills the real (larger) actual cost (de-clamped).
+    const periodStart = new Date("2026-05-01T00:00:00.000Z");
+    const lease = await store.createLease(PG_USER13, D(5), "usage", {
+      billingMode: "strict",
+      floor: D(0),
+      periodStart,
+    });
+    expect(lease.error).toBeUndefined();
+
+    // Settle the ACTUAL cost of 20: allowance (5) covers the first 5, leaving a
+    // net of 15 to debit — but the floor-clamp must cap the debit at the
+    // available balance (8), so v_net clamps to 8 and allowance re-clamps too.
+    const settled = await store.settleLease(PG_USER13, lease.leaseId, D(20), {
+      minBalance: D(0),
+      periodStart,
+    });
+    expect(settled.error).toBeUndefined();
+    // Floor-clamp (021/C1): net debit is capped at the available balance (8),
+    // NOT the full 15 (20 actual cost − 5 allowance) it would otherwise be.
+    expect(settled.amount.toString()).toBe("8");
+    expect(settled.balanceAfter.toString()).toBe("0");
+    // Allowance still consumes its full share (5) — the clamp only bites the
+    // balance-funded remainder, confirming p_period_start and the floor clamp
+    // operate independently rather than one silently overriding the other.
+    expect(settled.allowanceConsumed.toString()).toBe("5");
+
+    // The allowance consumed must have come from the SAME window keyed by
+    // periodStart — confirms p_period_start threaded correctly alongside the
+    // floor clamp rather than one silently overriding the other.
+    const allowance = await store.checkAllowance(PG_USER13, periodStart);
+    expect(allowance.allowanceRemaining.toString()).toBe(
+      D(5).minus(settled.allowanceConsumed).toString(),
+    );
+  });
 });

@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
+import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -36,7 +37,8 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
+import { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -108,12 +110,13 @@ export interface PgPoolConstructor {
  *   databaseUrl: Postgres connection string.
  *   poolCtor: Optional PG Pool constructor (default: loads ``pg`` on first use).
  */
-export class PostgresStore implements CreditStore {
+export class PostgresStore extends CreditStore {
   private databaseUrl: string;
   private poolCtor: PgPoolConstructor;
   private pool: PgPool | null = null;
 
   constructor(databaseUrl: string, poolCtor?: PgPoolConstructor) {
+    super();
     this.databaseUrl = databaseUrl;
     this.poolCtor = poolCtor ?? null!; // lazy-loaded
   }
@@ -240,6 +243,7 @@ export class PostgresStore implements CreditStore {
     const minBalance = options?.minBalance ?? ZERO;
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? {};
+    const periodStart = options?.periodStart ?? null;
 
     const rows = await this.callproc("deduct_with_allowance", [
       userId,
@@ -248,6 +252,8 @@ export class PostgresStore implements CreditStore {
       decParam(minBalance),
       model,
       JSON.stringify(metadata ?? {}),
+      false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
+      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -289,6 +295,7 @@ export class PostgresStore implements CreditStore {
     const billingMode = options?.billingMode ?? "strict";
     const floor = options?.floor ?? ZERO;
     const overdraftFloor = options?.overdraftFloor ?? null;
+    const periodStart = options?.periodStart ?? null;
     const rows = await this.callproc("create_lease", [
       userId,
       decParam(amount),
@@ -300,6 +307,7 @@ export class PostgresStore implements CreditStore {
       options?.model ?? null,
       overdraftFloor != null ? decParam(overdraftFloor) : null,
       JSON.stringify(options?.metadata ?? {}),
+      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -345,6 +353,7 @@ export class PostgresStore implements CreditStore {
     options?: SettleLeaseOptions,
   ): Promise<DeductionResult> {
     const minBalance = options?.minBalance ?? ZERO;
+    const periodStart = options?.periodStart ?? null;
     const rows = await this.callproc("settle_lease", [
       userId,
       leaseId,
@@ -353,6 +362,8 @@ export class PostgresStore implements CreditStore {
       decParam(minBalance),
       options?.model ?? null,
       JSON.stringify(options?.metadata ?? {}),
+      false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
+      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -506,6 +517,8 @@ export class PostgresStore implements CreditStore {
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
+      allowancePeriod: (row.allowance_period as AllowancePeriod | undefined) ?? "calendar_month",
+      planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
     };
   }
 
@@ -531,8 +544,11 @@ export class PostgresStore implements CreditStore {
     };
   }
 
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
-    const rows = await this.callproc("check_plan_allowance", [userId]);
+  async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
+    const rows = await this.callproc("check_plan_allowance", [
+      userId,
+      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+    ]);
     if (!rows || rows.length === 0) {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }

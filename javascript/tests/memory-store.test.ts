@@ -1,8 +1,27 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Decimal from "decimal.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
-import { StoreError } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
+import { CreditStore } from "../src/stores/credit-store.js";
+import { CapabilityNotSupportedError, StoreError } from "../src/errors.js";
+import { resolveAllowanceWindow } from "../src/allowance.js";
+import type {
+  AddCreditsResult,
+  AllowanceResult,
+  AvailableResult,
+  BalanceResult,
+  CapCheckResult,
+  CheckFeatureResult,
+  DeductionResult,
+  GetUserPlanResult,
+  LeaseResult,
+  PaginatedTransactions,
+  PricingConfigData,
+  RefundResult,
+  ReleaseResult,
+  SetUserPlanResult,
+  SetupResult,
+  SweepResult,
+} from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
 
@@ -1384,5 +1403,334 @@ describe("MemoryStore", () => {
       expect(active.hasFeature).toBe(false);
       expect(active.value).toBe(false);
     });
+  });
+});
+
+// ── WS9: configurable free-allowance reset window ─────────────────────────
+describe("WS9 — configurable allowance reset window", () => {
+  let store: MemoryStore;
+
+  beforeEach(() => {
+    store = new MemoryStore();
+  });
+
+  async function setupPlan(
+    allowancePeriod: "calendar_month" | "rolling_30d" | "anniversary",
+    freeAllowance = 5,
+  ): Promise<void> {
+    const config: PricingConfigData = {
+      models: { _default: "1" },
+      plans: {
+        "plan-ws9": { id: "plan-ws9", name: "Plan WS9", freeAllowance: D(freeAllowance), allowancePeriod },
+      },
+    };
+    await store.setActivePricing(config);
+  }
+
+  describe("rolling_30d — deductWithAllowance path", () => {
+    it("resets exactly at the 30-day boundary", async () => {
+      const anchor = new Date("2026-01-01T00:00:00.000Z");
+      store.setClock(() => anchor);
+      await setupPlan("rolling_30d");
+      await store.setUserPlan("user-1", "plan-ws9"); // anchors userPlanAssignedAt at `anchor`
+      await store.addCredits("user-1", D(100), "adjustment");
+
+      const plan = await store.getUserPlan("user-1");
+      expect(plan.allowancePeriod).toBe("rolling_30d");
+      expect(plan.planAssignedAt?.toISOString()).toBe(anchor.toISOString());
+
+      // Window 1: consume all 5 credits of allowance.
+      const w1Start = resolveAllowanceWindow(anchor, "rolling_30d", anchor).start;
+      const r1 = await store.deductWithAllowance("user-1", D(5), {
+        periodStart: w1Start,
+      });
+      expect(r1.allowanceConsumed.toString()).toBe("5");
+      const a1 = await store.checkAllowance("user-1");
+      expect(a1.allowanceRemaining.toString()).toBe("0");
+
+      // Still within window 1 (day 29) — allowance stays exhausted.
+      const day29 = new Date(anchor.getTime() + 29 * 86_400_000);
+      store.setClock(() => day29);
+      const stillWindow1 = await store.checkAllowance("user-1");
+      expect(stillWindow1.allowanceRemaining.toString()).toBe("0");
+
+      // Day 30 — new 30-day window begins; allowance resets to full.
+      const day30 = new Date(anchor.getTime() + 30 * 86_400_000);
+      store.setClock(() => day30);
+      const resetAllowance = await store.checkAllowance("user-1");
+      expect(resetAllowance.allowanceRemaining.toString()).toBe("5");
+
+      // Consuming in the new window uses the fresh allowance.
+      const w2Start = resolveAllowanceWindow(day30, "rolling_30d", anchor).start;
+      const r2 = await store.deductWithAllowance("user-1", D(3), {
+        periodStart: w2Start,
+      });
+      expect(r2.allowanceConsumed.toString()).toBe("3");
+      const a2 = await store.checkAllowance("user-1");
+      expect(a2.allowanceRemaining.toString()).toBe("2");
+    });
+  });
+
+  describe("rolling_30d — settleLease path", () => {
+    it("resets exactly at the 30-day boundary", async () => {
+      const anchor = new Date("2026-01-01T00:00:00.000Z");
+      store.setClock(() => anchor);
+      await setupPlan("rolling_30d");
+      await store.setUserPlan("user-1", "plan-ws9");
+      await store.addCredits("user-1", D(100), "adjustment");
+
+      const w1Start = resolveAllowanceWindow(anchor, "rolling_30d", anchor).start;
+      const lease1 = await store.createLease("user-1", D(5), "usage", { periodStart: w1Start });
+      const s1 = await store.settleLease("user-1", lease1.leaseId, D(5), {
+        periodStart: w1Start,
+      });
+      expect(s1.allowanceConsumed.toString()).toBe("5");
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("0");
+
+      // Roll past the 30-day boundary.
+      const day30 = new Date(anchor.getTime() + 30 * 86_400_000);
+      store.setClock(() => day30);
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("5");
+
+      const w2Start = resolveAllowanceWindow(day30, "rolling_30d", anchor).start;
+      const lease2 = await store.createLease("user-1", D(2), "usage", { periodStart: w2Start });
+      const s2 = await store.settleLease("user-1", lease2.leaseId, D(2), {
+        periodStart: w2Start,
+      });
+      expect(s2.allowanceConsumed.toString()).toBe("2");
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("3");
+    });
+  });
+
+  describe("anniversary — deductWithAllowance and settleLease paths", () => {
+    it("resets on the anchor's day-of-month (clamped)", async () => {
+      // Anchor day 31 in a non-leap February clamps: windows are
+      // [Jan 31, Feb 28) → [Feb 28, Mar 31) → [Mar 31, Apr 30) → ...
+      const anchor = new Date("2026-01-31T00:00:00.000Z");
+      store.setClock(() => anchor);
+      await setupPlan("anniversary");
+      await store.setUserPlan("user-1", "plan-ws9");
+      await store.addCredits("user-1", D(100), "adjustment");
+
+      // Window [Jan 31, Feb 28): consume via deductWithAllowance.
+      let win = resolveAllowanceWindow(anchor, "anniversary", anchor);
+      const r1 = await store.deductWithAllowance("user-1", D(5), { periodStart: win.start });
+      expect(r1.allowanceConsumed.toString()).toBe("5");
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("0");
+
+      // Feb 15 is still inside [Jan 31, Feb 28) — no reset yet.
+      const febMid = new Date("2026-02-15T00:00:00.000Z");
+      store.setClock(() => febMid);
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("0");
+
+      // Feb 28 crosses into [Feb 28, Mar 31) — fresh allowance.
+      const feb28 = new Date("2026-02-28T00:00:00.000Z");
+      store.setClock(() => feb28);
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("5");
+
+      // Consume via the lease (settleLease) path this time.
+      win = resolveAllowanceWindow(feb28, "anniversary", anchor);
+      const lease = await store.createLease("user-1", D(4), "usage", { periodStart: win.start });
+      const s1 = await store.settleLease("user-1", lease.leaseId, D(4), {
+        periodStart: win.start,
+      });
+      expect(s1.allowanceConsumed.toString()).toBe("4");
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("1");
+
+      // March 30 — still within the [Feb 28, Mar 31) window, no reset yet.
+      const mar30 = new Date("2026-03-30T00:00:00.000Z");
+      store.setClock(() => mar30);
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("1");
+
+      // March 31 — crosses into [Mar 31, Apr 30) → allowance resets to full.
+      const mar31 = new Date("2026-03-31T00:00:00.000Z");
+      store.setClock(() => mar31);
+      expect((await store.checkAllowance("user-1")).allowanceRemaining.toString()).toBe("5");
+    });
+  });
+
+  describe("switching plans mid-window re-anchors future windows", () => {
+    it("re-anchors the anniversary/rolling window to the NEW plan-assignment time", async () => {
+      const t0 = new Date("2026-01-10T00:00:00.000Z");
+      store.setClock(() => t0);
+
+      const config: PricingConfigData = {
+        models: { _default: "1" },
+        plans: {
+          "plan-a": { id: "plan-a", name: "Plan A", freeAllowance: D(5), allowancePeriod: "rolling_30d" },
+          "plan-b": { id: "plan-b", name: "Plan B", freeAllowance: D(9), allowancePeriod: "rolling_30d" },
+        },
+      };
+      await store.setActivePricing(config);
+      await store.setUserPlan("user-1", "plan-a");
+      const planAAssignedAt = (await store.getUserPlan("user-1")).planAssignedAt;
+      expect(planAAssignedAt?.toISOString()).toBe(t0.toISOString());
+
+      // Switch plans later — the anchor must move to the NEW assignment time.
+      const t1 = new Date("2026-01-20T00:00:00.000Z");
+      store.setClock(() => t1);
+      await store.setUserPlan("user-1", "plan-b");
+      const plan = await store.getUserPlan("user-1");
+      expect(plan.planId).toBe("plan-b");
+      expect(plan.freeAllowance.toString()).toBe("9");
+      expect(plan.planAssignedAt?.toISOString()).toBe(t1.toISOString());
+
+      // The window resolved for "now" must be anchored at t1, not t0.
+      const window = resolveAllowanceWindow(t1, "rolling_30d", plan.planAssignedAt ?? null);
+      expect(window.start.toISOString()).toBe(t1.toISOString().slice(0, 10) + "T00:00:00.000Z");
+    });
+  });
+});
+
+// ── WS8: CreditStore core/optional-capability split ──────────────────────
+describe("CreditStore optional capabilities (WS8)", () => {
+  it("a minimal store implementing only core methods rejects an optional capability with CapabilityNotSupportedError", async () => {
+    // Deliberately implements ONLY the abstract (core) methods, none of the
+    // optional analytics/transaction-listing/teams methods. Every abstract
+    // method just needs to satisfy the type checker; bodies are unused here.
+    class MinimalStore extends CreditStore {
+      async setup(): Promise<SetupResult> {
+        return { tablesCreated: [], rpcsCreated: [], errors: [], success: true };
+      }
+      async getBalance(userId: string): Promise<BalanceResult> {
+        return { userId, balance: D(0), lifetimePurchased: D(0) };
+      }
+      async addCredits(userId: string, amount: Decimal): Promise<AddCreditsResult> {
+        return { transactionId: "", userId, amount, newBalance: amount, lifetimePurchased: D(0) };
+      }
+      async deductWithAllowance(userId: string, amount: Decimal): Promise<DeductionResult> {
+        return {
+          transactionId: "",
+          userId,
+          amount,
+          allowanceConsumed: D(0),
+          balanceAfter: D(0),
+          idempotent: false,
+          capWarning: null,
+        };
+      }
+      async createLease(userId: string, amount: Decimal): Promise<LeaseResult> {
+        return {
+          leaseId: "",
+          userId,
+          amount,
+          available: D(0),
+          reservedTotal: D(0),
+          billingMode: "strict",
+          expiresAt: "",
+        };
+      }
+      async settleLease(userId: string): Promise<DeductionResult> {
+        return {
+          transactionId: "",
+          userId,
+          amount: D(0),
+          allowanceConsumed: D(0),
+          balanceAfter: D(0),
+          idempotent: false,
+          capWarning: null,
+        };
+      }
+      async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
+        return { leaseId, userId, released: true, reason: "released" };
+      }
+      async renewLease(userId: string, leaseId: string): Promise<LeaseResult> {
+        return {
+          leaseId,
+          userId,
+          amount: D(0),
+          available: D(0),
+          reservedTotal: D(0),
+          billingMode: "strict",
+          expiresAt: "",
+        };
+      }
+      async getAvailable(userId: string): Promise<AvailableResult> {
+        return { userId, balance: D(0), reserved: D(0), available: D(0) };
+      }
+      async getActivePricing() {
+        return null;
+      }
+      async setActivePricing(): Promise<string> {
+        return "";
+      }
+      async getPricingHistory() {
+        return [];
+      }
+      async getPricingConfig() {
+        return null;
+      }
+      async activatePricing(): Promise<string> {
+        return "";
+      }
+      async getUserPlan(userId: string): Promise<GetUserPlanResult> {
+        return { userId, planId: null, planName: null, freeAllowance: D(0), features: {} };
+      }
+      async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
+        return { userId, planId };
+      }
+      async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
+        return { userId, feature, value: null, hasFeature: false };
+      }
+      async checkAllowance(): Promise<AllowanceResult> {
+        return { planId: "", allowanceRemaining: D(0), periodStart: "", periodEnd: "" };
+      }
+      async incrementUsageWindow(): Promise<void> {
+        return;
+      }
+      async checkSpendCap(): Promise<CapCheckResult> {
+        return { capped: false, currentSpend: D(0), limit: D(0), action: null };
+      }
+      async refundCredits(transactionId: string): Promise<RefundResult> {
+        return {
+          refundTransactionId: "",
+          originalTransactionId: transactionId,
+          userId: "",
+          amount: D(0),
+          newBalance: D(0),
+        };
+      }
+      async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
+        return { expiredCount: 0, expiredAmount: D(0), dryRun };
+      }
+      async listUsageEvents(): Promise<PaginatedTransactions> {
+        return { items: [], total: 0 };
+      }
+    }
+
+    const minimal = new MinimalStore();
+    await expect(minimal.createTeam("t1")).rejects.toThrow(CapabilityNotSupportedError);
+    await expect(minimal.getTeamBalance("t1")).rejects.toThrow(CapabilityNotSupportedError);
+    await expect(minimal.addTeamMember("t1", "u1")).rejects.toThrow(CapabilityNotSupportedError);
+    await expect(minimal.getTeamMembers("t1")).rejects.toThrow(CapabilityNotSupportedError);
+    await expect(minimal.deductTeam("t1", "u1", D(1))).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.spendByUser(new Date(), new Date())).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.spendByModel(new Date(), new Date())).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.topUsers(10, new Date(), new Date())).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.dailySpend(new Date(), new Date())).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.aggregateStats(new Date(), new Date())).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+    await expect(minimal.listUserTransactions("u1")).rejects.toThrow(
+      CapabilityNotSupportedError,
+    );
+  });
+
+  it("MemoryStore overrides every optional capability concretely (no CapabilityNotSupportedError)", async () => {
+    // MemoryStore implements all optional methods, so calling them must NOT throw.
+    const full = new MemoryStore();
+    await expect(full.spendByUser(new Date(0), new Date())).resolves.toBeDefined();
+    const team = await full.createTeam("full-team");
+    await expect(full.getTeamBalance(team.teamId)).resolves.toBeDefined();
   });
 });

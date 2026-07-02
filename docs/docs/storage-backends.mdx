@@ -25,11 +25,13 @@ Every store implements `CreditStore`. All money arguments and return fields are 
 | Spend caps | `check_spend_cap` |
 | Refunds | `refund_credits` |
 | Expiry | `sweep_expired_credits` |
-| Analytics | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions` |
-| Teams | `create_team`, `get_team_balance`, `add_team_member`, `get_team_members`, `deduct_team` |
+| Analytics *(optional)* | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions` |
+| Teams *(optional)* | `create_team`, `get_team_balance`, `add_team_member`, `get_team_members`, `deduct_team` |
 | Setup | `setup` |
 
 `deduct_with_allowance` is the canonical atomic "calculate-then-charge" entry point — allowance, spend cap, balance floor, and debit all commit (or roll back) together in one transaction.
+
+Rows marked *(optional)* have default implementations that raise `CapabilityNotSupportedError` (exported from both SDKs) unless a custom store overrides them — everything else is **core** and required. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full breakdown.
 
 ## MemoryStore
 

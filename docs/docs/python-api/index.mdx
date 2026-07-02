@@ -46,6 +46,7 @@ All importable from `ducto`:
 | `StoreError` | Base for store-level errors (connection, timeout) |
 | `ConfigError` | Invalid pricing config structure or expression |
 | `ExpressionError` | Expression evaluation failure (div by zero, overflow) |
+| `CapabilityNotSupportedError` | An optional `CreditStore` capability (analytics, transaction listing, or teams) was called on a store that didn't override its default implementation |
 
 ## Result Types
 
@@ -79,8 +80,9 @@ All result models are importable from `ducto`:
 | Model | Description |
 |-------|-------------|
 | `PricingConfigData` | Pricing config schema (models, tools, search, cache, fixed, plans) |
-| `PlanDefinition` | Subscription plan definition (allowance, features, billing policy) |
+| `PlanDefinition` | Subscription plan definition (allowance, `allowance_period`, features, billing policy) |
 | `OperationPolicy` | Per-operation financial-safety policy (billing mode, floors, concurrency) |
+| `LowBalanceConfig` | `CreditManager(low_balance=...)` config: `thresholds` + `on_trigger` |
 | `CreditMetadata` | Flexible metadata attached to transactions |
 | `SpendCap` | Per-user daily/monthly spend cap configuration |
 

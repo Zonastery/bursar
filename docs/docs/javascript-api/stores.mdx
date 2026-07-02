@@ -22,10 +22,12 @@ Full `CreditStore` interface. All money arguments and result fields are `Decimal
 | Spend caps | `checkSpendCap(userId, model?, amount?)` |
 | Refunds | `refundCredits(transactionId, amount?, reason?, metadata?)` |
 | Expiry | `sweepExpiredCredits(dryRun?)` |
-| Analytics | `spendByUser(start, end)`, `spendByModel(start, end)`, `topUsers(limit, start, end)`, `dailySpend(start, end)`, `aggregateStats(start, end)`, `listUserTransactions(userId, options?)`, `listUsageEvents(userId, options?)` |
-| Teams | `createTeam(name, initialBalance?)`, `getTeamBalance(teamId)`, `addTeamMember(teamId, userId, role?, spendCap?)`, `getTeamMembers(teamId)`, `deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` |
+| Analytics *(optional)* | `spendByUser(start, end)`, `spendByModel(start, end)`, `topUsers(limit, start, end)`, `dailySpend(start, end)`, `aggregateStats(start, end)`, `listUserTransactions(userId, options?)`, `listUsageEvents(userId, options?)` |
+| Teams *(optional)* | `createTeam(name, initialBalance?)`, `getTeamBalance(teamId)`, `addTeamMember(teamId, userId, role?, spendCap?)`, `getTeamMembers(teamId)`, `deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` |
 
-`deductWithAllowance(userId, amount, options?)` is the atomic path used by `CreditManager.deduct()`; `options` is `{ idempotencyKey?, minBalance?, model?, metadata? }`. The lease methods (`createLease` / `settleLease` / `releaseLease` / `renewLease`) are used by `CreditManager.reserve()` / `settle()` / `release()` / `renew()`.
+`deductWithAllowance(userId, amount, options?)` is the atomic path used by `CreditManager.deduct()`; `options` is `{ idempotencyKey?, minBalance?, model?, metadata? }`. The lease methods (`createLease` / `settleLease` / `releaseLease` / `renewLease`) are used by `CreditManager.reserve()` / `settle()` / `release()` / `renew()`. These, together with balances, pricing, plans, and spend caps, form the **core** `CreditStore` interface every store must implement.
+
+Rows marked *(optional)* — Analytics and Teams, along with `listUserTransactions` — have default implementations that throw `CapabilityNotSupportedError` unless overridden, so a minimal custom store can skip them entirely. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full core-vs-optional breakdown.
 
 `MemoryStore` also exposes a synchronous `setSpendCap(cap: SpendCap)` helper (not on the `CreditStore` interface) for configuring per-user spend caps in tests: `store.setSpendCap({ userId, type: "daily", limit: new Decimal(50), action: "deny" })`.
 
@@ -80,6 +82,8 @@ class MyStore implements CreditStore {
     amount: Decimal,
     options?: DeductWithAllowanceOptions,
   ): Promise<DeductionResult> { ... }
-  // ... the remaining methods (see the CreditStore interface)
+  // ... the remaining core methods (see the CreditStore interface)
+  // Analytics, listUserTransactions/listUsageEvents, and team methods are optional:
+  // omit them and the default implementation throws CapabilityNotSupportedError.
 }
 ```

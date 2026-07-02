@@ -209,7 +209,12 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_user_plan FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, UUID) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.check_plan_allowance FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.increment_usage_window FROM anon, authenticated;
+-- Explicit signature (not the bare name): migration 022 adds a second overload
+-- of check_plan_allowance (with a trailing p_period_start DATE param), and a
+-- bare-name REVOKE becomes ambiguous ("not unique") once both overloads exist
+-- on a re-run of setup() -- WS9 fix for migration idempotency.
+REVOKE EXECUTE ON FUNCTION public.check_plan_allowance(UUID) FROM anon, authenticated;
+-- Same reasoning: migration 022 adds a second overload of increment_usage_window.
+REVOKE EXECUTE ON FUNCTION public.increment_usage_window(UUID, UUID, NUMERIC) FROM anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

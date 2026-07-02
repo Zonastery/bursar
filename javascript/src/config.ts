@@ -1,7 +1,15 @@
 import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
+import type { AllowancePeriod } from "./allowance.js";
 import type { PlanDefinition } from "./types.js";
+
+/** Valid `allowancePeriod` values (WS9b). */
+const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
+  "calendar_month",
+  "rolling_30d",
+  "anniversary",
+]);
 
 /**
  * Canonical metric-variable set — MUST mirror `PricingEngine.buildVariables`
@@ -25,13 +33,16 @@ export const KNOWN_VARIABLES: ReadonlySet<string> = new Set([
 export interface PricingConfig {
   models: Record<string, string>;
   tools: Record<string, string>;
-  search: Record<string, string>;
-  cache: Record<string, string>;
+  search?: string | null;
+  cache?: string | null;
   minBalance: number;
   signupBonus?: number | null;
   fixed: Record<string, number>;
   plans?: Record<string, PlanDefinition> | null;
 }
+
+/** Variable set for validating `tools` expressions: base set + `this_tool_calls` (WS2). */
+const TOOLS_VARIABLES: ReadonlySet<string> = new Set([...KNOWN_VARIABLES, "this_tool_calls"]);
 
 function validateExpressions(raw: PricingConfig): void {
   for (const [key, expr] of Object.entries(raw.models)) {
@@ -43,23 +54,23 @@ function validateExpressions(raw: PricingConfig): void {
   }
   for (const [key, expr] of Object.entries(raw.tools)) {
     try {
-      validateExpression(expr, KNOWN_VARIABLES);
+      validateExpression(expr, TOOLS_VARIABLES);
     } catch (e) {
       throw new ConfigError(`invalid expression in tools.${key}: ${(e as Error).message}`);
     }
   }
-  for (const [key, expr] of Object.entries(raw.search)) {
+  if (raw.search) {
     try {
-      validateExpression(expr, KNOWN_VARIABLES);
+      validateExpression(raw.search, KNOWN_VARIABLES);
     } catch (e) {
-      throw new ConfigError(`invalid expression in search.${key}: ${(e as Error).message}`);
+      throw new ConfigError(`invalid expression in search: ${(e as Error).message}`);
     }
   }
-  for (const [key, expr] of Object.entries(raw.cache)) {
+  if (raw.cache) {
     try {
-      validateExpression(expr, KNOWN_VARIABLES);
+      validateExpression(raw.cache, KNOWN_VARIABLES);
     } catch (e) {
-      throw new ConfigError(`invalid expression in cache.${key}: ${(e as Error).message}`);
+      throw new ConfigError(`invalid expression in cache: ${(e as Error).message}`);
     }
   }
 }
@@ -82,6 +93,7 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
     per_operation: "perOperation",
     max_concurrent: "maxConcurrent",
     signup_bonus: "signupBonus",
+    allowance_period: "allowancePeriod",
   };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
@@ -93,11 +105,7 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
 
 /** Recursively normalise a plan definition object. */
 function normalisePlan(p: Record<string, unknown>): Record<string, unknown> {
-  const norm = normaliseKeys(p);
-  if (norm.rateOverrides && typeof norm.rateOverrides === "object") {
-    norm.rateOverrides = norm.rateOverrides;
-  }
-  return norm;
+  return normaliseKeys(p);
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
@@ -131,6 +139,13 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
           }
         }
       }
+      // WS9b: allowancePeriod must be one of the three valid strings if present.
+      if (plan.allowancePeriod != null && !ALLOWANCE_PERIODS.has(plan.allowancePeriod as string)) {
+        throw new ConfigError(
+          `invalid allowancePeriod in plans.${planKey}: ${String(plan.allowancePeriod)} ` +
+            `(expected one of ${[...ALLOWANCE_PERIODS].sort().join(", ")})`,
+        );
+      }
     }
     const planNames = Object.values(plans).map((p) => p.name as string);
     if (new Set(planNames).size !== planNames.length) {
@@ -141,20 +156,19 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
   const config: PricingConfig = {
     models: d.models as Record<string, string>,
     tools: { _default: "tool_calls * 0", ...(d.tools as Record<string, string> | undefined) },
-    search: (d.search as Record<string, string>) ?? {},
-    cache: (d.cache as Record<string, string>) ?? {},
-    minBalance: (d.minBalance as number) ?? 5,
+    search: (d.search as string | null | undefined) ?? null,
+    cache: (d.cache as string | null | undefined) ?? null,
+    minBalance: (d.minBalance as number) ?? 0,
     signupBonus: d.signupBonus as number | undefined,
     fixed: (d.fixed as Record<string, number>) ?? {},
   };
   if (config.minBalance < 0) throw new ConfigError("min_balance must be >= 0");
 
-  // H7: validate fixed job costs are non-negative integers (Python uses NonNegativeInt).
+  // WS3: fixed job costs may be fractional (Decimal-compatible) — only non-negative
+  // is enforced. Was: Number.isInteger check (contradicted docs).
   for (const [job, cost] of Object.entries(config.fixed)) {
-    if (!Number.isInteger(cost) || cost < 0) {
-      throw new ConfigError(
-        `fixed.${job} must be a non-negative integer, got ${cost}`,
-      );
+    if (cost < 0) {
+      throw new ConfigError(`fixed.${job} must be non-negative, got ${cost}`);
     }
   }
 
@@ -171,6 +185,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
         overdraftFloor:
           p.overdraftFloor != null ? new Decimal(p.overdraftFloor as number | string) : null,
         maxConcurrent: (p.maxConcurrent as number | null) ?? null,
+        allowancePeriod: ((p.allowancePeriod as AllowancePeriod) ?? "calendar_month") as AllowancePeriod,
       };
     }
     config.plans = planDefs;

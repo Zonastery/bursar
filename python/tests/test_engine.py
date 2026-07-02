@@ -27,12 +27,8 @@ FULL_PRICING = {
         "web_search": "web_search_calls * 0.5",
         "code_exec": "code_exec_calls * 0.3",
     },
-    "search": {
-        "costs": "search_queries * 0.5 + search_results * 0.05",
-    },
-    "cache": {
-        "discount": "-cache_read_tokens * 0.0045",
-    },
+    "search": "search_queries * 0.5 + search_results * 0.05",
+    "cache": "-cache_read_tokens * 0.0045",
     "min_balance": 5,
     "fixed": {
         "batch_job": 20,
@@ -207,8 +203,9 @@ class TestEngineMinBalance:
         assert isinstance(engine.min_balance, Decimal)
 
     def test_default_min_balance(self) -> None:
+        """WS6 — min_balance defaults to 0 (was 5)."""
         engine = PricingEngine.from_dict(MINIMAL_PRICING)
-        assert engine.min_balance == Decimal(5)
+        assert engine.min_balance == Decimal(0)
 
 
 class TestEngineFixedJob:
@@ -391,7 +388,7 @@ class TestTotalClampedAtZero:
     def test_cache_discount_exceeds_model_cost(self) -> None:
         config = {
             "models": {"_default": "input_tokens * 0.001"},
-            "cache": {"discount": "-cache_read_tokens * 0.01"},
+            "cache": "-cache_read_tokens * 0.01",
         }
         engine = PricingEngine.from_dict(config)
         # model cost: 10 * 0.001 = 0.01
@@ -518,7 +515,7 @@ class TestCacheDiscountClampedAtZero:
         # raw total = 0.01 - 50.0 = -49.99 -> clamped to 0.0000
         config = {
             "models": {"_default": "input_tokens * 0.001"},
-            "cache": {"discount": "-cache_read_tokens * 0.01"},
+            "cache": "-cache_read_tokens * 0.01",
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=10, cache_read_tokens=5000))
@@ -531,8 +528,85 @@ class TestCacheDiscountClampedAtZero:
         # Extreme scenario: effectively unlimited cache discount.
         config = {
             "models": {"_default": "input_tokens * 0.001"},
-            "cache": {"discount": "-cache_read_tokens * 1000"},
+            "cache": "-cache_read_tokens * 1000",
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=1, cache_read_tokens=999999))
         assert result.total == Decimal("0.0000")
+
+
+# ── WS2: this_tool_calls is scoped per-tool, not the global total ────────────
+
+
+class TestThisToolCallsPerTool:
+    """WS2 — each tool formula sees ITS OWN call count via this_tool_calls.
+
+    Previously the engine bound the shared ``tool_calls`` variable to the
+    unknown-call count when evaluating the ``_default`` formula (and left it
+    as the global total otherwise) — a known tool's formula always saw the
+    GLOBAL total, never its own count. Now ``this_tool_calls`` carries the
+    per-branch count and ``tool_calls`` always stays the global total in
+    every branch.
+    """
+
+    _CONFIG = {
+        "models": {"_default": "input_tokens * 0"},
+        "tools": {
+            "code_exec": "this_tool_calls * 10 / 1000",
+            "_default": "this_tool_calls * 5 / 1000",
+        },
+    }
+
+    def test_known_tool_priced_on_its_own_count_not_total(self) -> None:
+        # 2 code_exec calls + 3 unconfigured calls = 5 total tool_calls.
+        # code_exec must be priced on exactly 2 (this_tool_calls), not 5.
+        engine = PricingEngine.from_dict(self._CONFIG)
+        result = engine.calculate(
+            UsageMetrics(
+                model="_default",
+                tool_calls=[
+                    ToolCall(name="code_exec"),
+                    ToolCall(name="code_exec"),
+                    ToolCall(name="other_a"),
+                    ToolCall(name="other_b"),
+                    ToolCall(name="other_c"),
+                ],
+            )
+        )
+        # code_exec: 2 * 10 / 1000 = 0.02
+        # _default (3 unknown calls): 3 * 5 / 1000 = 0.015
+        # total tool_credits = 0.035
+        assert result.tool_credits == Decimal("0.0350")
+
+    def test_default_branch_priced_on_unknown_count_not_total(self) -> None:
+        # Only unconfigured tool calls: _default must see exactly 3 (this_tool_calls),
+        # which happens to equal the total here too — verified against the mixed case above.
+        engine = PricingEngine.from_dict(self._CONFIG)
+        result = engine.calculate(
+            UsageMetrics(
+                model="_default",
+                tool_calls=[ToolCall(name="other_a"), ToolCall(name="other_b"), ToolCall(name="other_c")],
+            )
+        )
+        # _default: 3 * 5 / 1000 = 0.015
+        assert result.tool_credits == Decimal("0.0150")
+
+    def test_tool_calls_variable_stays_global_total_in_tools_expression(self) -> None:
+        # A tool formula that references the GLOBAL tool_calls (not this_tool_calls)
+        # must see the total across ALL tools, not just its own count.
+        config = {
+            "models": {"_default": "input_tokens * 0"},
+            "tools": {
+                "code_exec": "tool_calls * 1",
+                "_default": "tool_calls * 0",
+            },
+        }
+        engine = PricingEngine.from_dict(config)
+        result = engine.calculate(
+            UsageMetrics(
+                model="_default",
+                tool_calls=[ToolCall(name="code_exec"), ToolCall(name="other_a"), ToolCall(name="other_b")],
+            )
+        )
+        # code_exec formula uses global tool_calls=3 (not this_tool_calls=1) -> 3 * 1 = 3
+        assert result.tool_credits == Decimal("3.0000")

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel
 
+from ducto.allowance import resolve_allowance_window
 from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
@@ -141,9 +143,17 @@ class MemoryStore(CreditStore):
     read-modify-write inside :meth:`deduct_with_allowance` — is atomic and cannot
     double-spend under concurrent callers. The lock is re-entrant so helpers can
     be called while held.
+
+    Args:
+        clock: Optional injectable clock (a zero-arg callable returning a
+            UTC-aware ``datetime``), used everywhere the store would otherwise
+            call ``datetime.now(UTC)``. Defaults to the real clock; tests pass
+            a fake clock to fast-forward time (e.g. to simulate an allowance
+            billing-period rollover) without any wall-clock sleep (WS9f).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock: Callable[[], datetime] = clock if clock is not None else _utcnow
         self._lock = threading.RLock()
         self._balances: dict[str, Decimal] = {}
         self._lifetime: dict[str, Decimal] = {}
@@ -157,10 +167,17 @@ class MemoryStore(CreditStore):
         # (L6) so set_user_plan(user, "pro") resolves identically across backends.
         self._plan_definitions: dict[str, PlanDefinition] = {}
         self._user_plan_map: dict[str, str] = {}
+        # When each user was (most recently) assigned their current plan —
+        # the anchor for rolling_30d/anniversary allowance windows (WS9).
+        self._user_plan_assigned_at: dict[str, datetime] = {}
         self._usage_windows: list[_UsageWindowRecord] = []
         self._teams: dict[str, _TeamRecord] = {}
         self._team_members: dict[str, dict[str, _TeamMemberRecord]] = {}
         self._spend_caps: list[SpendCap] = []
+
+    def _utcnow(self) -> datetime:
+        """Return the store's current time (injectable clock, WS9f)."""
+        return self._clock()
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -212,7 +229,7 @@ class MemoryStore(CreditStore):
                 amount=amount,
                 type=type,
                 metadata=metadata.model_dump() if metadata else {},
-                created_at=_utcnow(),
+                created_at=self._utcnow(),
                 # Store tz-aware (naive bounds assumed UTC) so sweep compares
                 # datetimes safely without a tz-aware/naive TypeError (M9).
                 expires_at=self._ensure_aware(expires_at) if expires_at else None,
@@ -237,6 +254,7 @@ class MemoryStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         """Atomic calculate-then-charge under the store lock (contract §2).
 
@@ -244,6 +262,10 @@ class MemoryStore(CreditStore):
         pipeline (idempotency replay → allowance consume → cap deny on net →
         balance floor → debit → ledger insert) runs while holding ``self._lock``
         so it is all-or-nothing and cannot double-spend under threads.
+
+        ``period_start`` (WS9) keys allowance consumption to a specific
+        ``rolling_30d``/``anniversary`` window; ``None`` resolves the window
+        from the user's plan (falling back to the current UTC calendar month).
         """
         amount = _as_decimal(amount)
         min_balance = _as_decimal(min_balance)
@@ -274,7 +296,7 @@ class MemoryStore(CreditStore):
             plan_key = self._user_plan_map.get(user_id)
             consume = Decimal(0)
             if not skip_allowance and plan_key and plan_key in self._plan_definitions:
-                remaining = self._allowance_remaining(user_id, plan_key)
+                remaining = self._allowance_remaining(user_id, plan_key, period_start)
                 consume = min(remaining, amount)
             net = amount - consume
 
@@ -307,7 +329,7 @@ class MemoryStore(CreditStore):
 
             # (6) Commit: consume allowance, debit balance, insert one ledger row.
             if consume > 0 and plan_key:
-                self._increment_usage_window(user_id, plan_key, consume)
+                self._increment_usage_window(user_id, plan_key, consume, period_start)
 
             self._balances[user_id] = balance - net
             new_balance = self._balances[user_id]
@@ -330,7 +352,7 @@ class MemoryStore(CreditStore):
                     amount=-net,
                     type="usage",
                     metadata=tx_meta,
-                    created_at=_utcnow(),
+                    created_at=self._utcnow(),
                 )
             )
 
@@ -348,7 +370,7 @@ class MemoryStore(CreditStore):
 
     def _active_leases(self, user_id: str, operation_type: str | None = None) -> list[_ReservationRecord]:
         """Active, unexpired holds for a user (assumes the lock is held)."""
-        now = _utcnow()
+        now = self._utcnow()
         return [
             r
             for r in self._reservations.values()
@@ -371,6 +393,7 @@ class MemoryStore(CreditStore):
         model: str | None = None,
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
+        period_start: date | None = None,
     ) -> LeaseResult:
         amount = _as_decimal(amount)
         floor = _as_decimal(floor)
@@ -385,7 +408,7 @@ class MemoryStore(CreditStore):
             # (1A) Allowance headroom: remaining free allowance extends the effective
             #      available so free-tier users aren't falsely rejected at admission
             #      for a worst-case hold they can fully cover with allowance (Fix 1).
-            allowance_credit = self._allowance_remaining(user_id, self._user_plan_map.get(user_id) or "")
+            allowance_credit = self._allowance_remaining(user_id, self._user_plan_map.get(user_id) or "", period_start)
 
             # (2) Concurrency: count active leases for this operation type.
             if max_concurrent is not None and len(self._active_leases(user_id, operation_type)) >= max_concurrent:
@@ -427,7 +450,7 @@ class MemoryStore(CreditStore):
 
             # (5) Insert the active lease.
             lid = str(uuid.uuid4())
-            expires_at = _utcnow() + timedelta(seconds=ttl_seconds)
+            expires_at = self._utcnow() + timedelta(seconds=ttl_seconds)
             self._reservations[lid] = _ReservationRecord(
                 id=lid,
                 user_id=user_id,
@@ -480,7 +503,7 @@ class MemoryStore(CreditStore):
         - already settled → idempotent replay of the original charge
         - TTL elapsed → mark ``expired`` and return ``lease_expired``
         """
-        now = _utcnow()
+        now = self._utcnow()
         if lease is None or lease.user_id != user_id or lease.status == "released":
             return DeductionResult(
                 transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=balance, error="lease_not_found"
@@ -511,6 +534,7 @@ class MemoryStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         amount = _as_decimal(amount)
 
@@ -557,7 +581,7 @@ class MemoryStore(CreditStore):
             plan_key = self._user_plan_map.get(user_id)
             consume = Decimal(0)
             if not skip_allowance and plan_key and plan_key in self._plan_definitions:
-                consume = min(self._allowance_remaining(user_id, plan_key), amount)
+                consume = min(self._allowance_remaining(user_id, plan_key, period_start), amount)
             net = amount - consume
 
             # Floor enforcement (C1): clamp net so balance stays ≥ floor.
@@ -585,7 +609,7 @@ class MemoryStore(CreditStore):
                     cap_warning = cap.action
 
             if consume > 0 and plan_key:
-                self._increment_usage_window(user_id, plan_key, consume)
+                self._increment_usage_window(user_id, plan_key, consume, period_start)
 
             self._balances[user_id] = balance - net
             new_balance = self._balances[user_id]
@@ -607,7 +631,7 @@ class MemoryStore(CreditStore):
                     amount=-net,
                     type="usage",
                     metadata=tx_meta,
-                    created_at=_utcnow(),
+                    created_at=self._utcnow(),
                 )
             )
 
@@ -638,7 +662,7 @@ class MemoryStore(CreditStore):
 
     def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
         with self._lock:
-            now = _utcnow()
+            now = self._utcnow()
             lease = self._reservations.get(lease_id)
             if lease is None or lease.user_id != user_id or lease.status in ("released", "settled"):
                 return LeaseResult(lease_id=lease_id, user_id=user_id, amount=Decimal(0), error="lease_not_found")
@@ -676,19 +700,43 @@ class MemoryStore(CreditStore):
     # ── Internal helpers (assume the lock is held) ─────────────────────
 
     def _purge_expired_reservations(self, user_id: str) -> None:
-        now = _utcnow()
+        now = self._utcnow()
         expired = [rid for rid, r in self._reservations.items() if r.user_id == user_id and r.expires_at <= now]
         for rid in expired:
             del self._reservations[rid]
 
-    def _billing_period(self) -> str:
-        return _utcnow().strftime("%Y-%m-01")
+    def _billing_period(self, period_start: date | None = None) -> str:
+        """Key used to bucket allowance usage windows (WS9).
 
-    def _allowance_remaining(self, user_id: str, plan_key: str) -> Decimal:
+        When ``period_start`` is given (a resolved ``rolling_30d``/
+        ``anniversary`` window start), it is formatted directly as the key.
+        Otherwise falls back to the current UTC calendar month — the pre-WS9
+        behavior, unchanged.
+        """
+        if period_start is not None:
+            return period_start.strftime("%Y-%m-%d")
+        return self._utcnow().strftime("%Y-%m-01")
+
+    def _period_start_for_user_plan(self, user_id: str, plan_key: str) -> date | None:
+        """Resolve the ``rolling_30d``/``anniversary`` window start for a user's plan.
+
+        Returns ``None`` for ``calendar_month`` (or unknown) plans so callers
+        fall back to ``_billing_period()``'s calendar-month default.
+        """
+        plan_def = self._plan_definitions.get(plan_key)
+        if plan_def is None or plan_def.allowance_period == "calendar_month":
+            return None
+        anchor = self._user_plan_assigned_at.get(user_id)
+        period_start, _period_end = resolve_allowance_window(self._utcnow(), plan_def.allowance_period, anchor)
+        return period_start
+
+    def _allowance_remaining(self, user_id: str, plan_key: str, period_start: date | None = None) -> Decimal:
         plan_def = self._plan_definitions.get(plan_key)
         if plan_def is None:
             return Decimal(0)
-        period = self._billing_period()
+        if period_start is None:
+            period_start = self._period_start_for_user_plan(user_id, plan_key)
+        period = self._billing_period(period_start)
         usage = sum(
             (
                 w.usage
@@ -699,8 +747,12 @@ class MemoryStore(CreditStore):
         )
         return max(plan_def.free_allowance - usage, Decimal(0))
 
-    def _increment_usage_window(self, user_id: str, plan_key: str, amount: Decimal) -> None:
-        period = self._billing_period()
+    def _increment_usage_window(
+        self, user_id: str, plan_key: str, amount: Decimal, period_start: date | None = None
+    ) -> None:
+        if period_start is None:
+            period_start = self._period_start_for_user_plan(user_id, plan_key)
+        period = self._billing_period(period_start)
         for w in self._usage_windows:
             if w.user_id == user_id and w.plan_id == plan_key and w.billing_period == period:
                 w.usage += amount
@@ -720,7 +772,7 @@ class MemoryStore(CreditStore):
         return sorted(caps, key=lambda c: (c.action != "deny", c.limit))
 
     def _cap_window_spend(self, user_id: str, cap: SpendCap, model: str | None) -> Decimal:
-        now = _utcnow()
+        now = self._utcnow()
         if cap.cap_type == "daily":
             window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
@@ -774,7 +826,7 @@ class MemoryStore(CreditStore):
                     "label": label,
                     "active": True,
                     "config": config.model_dump(mode="json"),
-                    "created_at": _utcnow().isoformat(),
+                    "created_at": self._utcnow().isoformat(),
                 }
             )
             # Extract plan definitions from config, keyed on plan_key (L6).
@@ -836,36 +888,53 @@ class MemoryStore(CreditStore):
                 per_operation=plan_def.per_operation if plan_def and plan_def.per_operation else {},
                 max_concurrent=plan_def.max_concurrent if plan_def else None,
                 overdraft_floor=plan_def.overdraft_floor if plan_def else None,
+                allowance_period=plan_def.allowance_period if plan_def else "calendar_month",
+                plan_assigned_at=self._user_plan_assigned_at.get(user_id) if plan_key else None,
             )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
         # ``plan_id`` is the plan_key (matches SQL set_user_plan(UUID, TEXT); L6).
+        # Re-anchors the allowance window (WS9): every (re-)assignment records a
+        # fresh plan_assigned_at, using the injectable clock so tests can
+        # time-travel (WS9f).
         with self._lock:
             self._user_plan_map[user_id] = plan_id
+            self._user_plan_assigned_at[user_id] = self._utcnow()
             return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
 
-    def check_allowance(self, user_id: str) -> AllowanceResult:
+    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
+        # period_start is unused here: MemoryStore already has direct access to
+        # plan_assigned_at and its own (injectable, test-controllable) clock, so
+        # it self-resolves the window rather than trusting a caller-supplied date
+        # that may have been computed against the manager's wall clock instead.
+        del period_start
         with self._lock:
             plan_key = self._user_plan_map.get(user_id)
-            if not plan_key or plan_key not in self._plan_definitions:
+            plan_def = self._plan_definitions.get(plan_key) if plan_key else None
+            if not plan_key or plan_def is None:
                 return AllowanceResult(
                     plan_id="",
                     allowance_remaining=Decimal(0),
                     period_start="",
                     period_end="",
                 )
-            now = _utcnow()
-            period_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            if now.month == 12:
-                period_end = now.replace(year=now.year + 1, month=1, day=1) - timedelta(days=1)
-            else:
-                period_end = now.replace(month=now.month + 1, day=1) - timedelta(days=1)
-            period_end = period_end.replace(hour=0, minute=0, second=0, microsecond=0)
+            anchor = self._user_plan_assigned_at.get(user_id)
+            period_start, period_end_exclusive = resolve_allowance_window(
+                self._utcnow(), plan_def.allowance_period, anchor
+            )
+            # Display convention (preserved exactly): period_end is the LAST DAY
+            # INCLUSIVE, i.e. one day before the resolver's exclusive end.
+            period_end_inclusive = period_end_exclusive - timedelta(days=1)
             return AllowanceResult(
                 plan_id=plan_key,
-                allowance_remaining=self._allowance_remaining(user_id, plan_key),
-                period_start=period_start.isoformat(),
-                period_end=period_end.isoformat(),
+                allowance_remaining=self._allowance_remaining(user_id, plan_key, period_start),
+                period_start=datetime(period_start.year, period_start.month, period_start.day, tzinfo=UTC).isoformat(),
+                period_end=datetime(
+                    period_end_inclusive.year,
+                    period_end_inclusive.month,
+                    period_end_inclusive.day,
+                    tzinfo=UTC,
+                ).isoformat(),
             )
 
     def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
@@ -961,7 +1030,7 @@ class MemoryStore(CreditStore):
                     reference_type=reason,
                     reference_id=transaction_id,
                     metadata=tx_meta,
-                    created_at=_utcnow(),
+                    created_at=self._utcnow(),
                 )
             )
 
@@ -982,7 +1051,7 @@ class MemoryStore(CreditStore):
         zero and never double-debits — parity with the SQL ``expire_credits``.
         """
         with self._lock:
-            now = _utcnow()
+            now = self._utcnow()
             expired_by_user: dict[str, Decimal] = {}
             expired_txs: list[_TransactionRecord] = []
 
@@ -1201,7 +1270,7 @@ class MemoryStore(CreditStore):
                 and (from_aware is None or (t.created_at is not None and t.created_at >= from_aware))
                 and (to_aware is None or (t.created_at is not None and t.created_at <= to_aware))
             ]
-            filtered.sort(key=lambda t: t.created_at or _utcnow(), reverse=True)
+            filtered.sort(key=lambda t: t.created_at or self._utcnow(), reverse=True)
             total = len(filtered)
             page = filtered[offset : offset + limit]
             return [
@@ -1229,7 +1298,7 @@ class MemoryStore(CreditStore):
                 name=name,
                 balance=_as_decimal(initial_balance),
                 member_count=0,
-                created_at=_utcnow(),
+                created_at=self._utcnow(),
             )
             self._team_members[team_id] = {}
             return CreateTeamResult(team_id=team_id, name=name)
@@ -1262,7 +1331,7 @@ class MemoryStore(CreditStore):
                 role=role,
                 spend_cap=_as_decimal(spend_cap) if spend_cap is not None else None,
                 total_spent=Decimal(0),
-                joined_at=_utcnow(),
+                joined_at=self._utcnow(),
             )
             team = self._teams.get(team_id)
             if team is not None:
@@ -1291,7 +1360,7 @@ class MemoryStore(CreditStore):
             ]
 
     def _team_month_spent(self, team_id: str, user_id: str) -> Decimal:
-        window_start = _utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        window_start = self._utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         spent = Decimal(0)
         for t in self._transactions:
             if (
@@ -1394,7 +1463,7 @@ class MemoryStore(CreditStore):
                     amount=-amount,
                     type="team_usage",
                     metadata=tx_meta,
-                    created_at=_utcnow(),
+                    created_at=self._utcnow(),
                 )
             )
 

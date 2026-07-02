@@ -8,7 +8,7 @@ stores for testing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from ducto.interface.models import (
@@ -62,6 +62,17 @@ class RefundError(StoreError):
     Stores return a business code (``already_refunded``/``over_refund``/
     ``not_found``) on ``RefundResult.error``; the manager maps it to this
     exception (contract §4).
+    """
+
+
+class CapabilityNotSupportedError(StoreError):
+    """Raised when a store does not implement an optional capability (WS8).
+
+    The ``CreditStore`` ABC only requires core credit ops, lease lifecycle,
+    pricing config versioning, plan management, spend caps, refunds, and
+    expiry. Analytics, transaction-listing, and teams are optional
+    capabilities with a default implementation that raises this error, so a
+    minimal custom store subclass does not need to implement ~35 methods.
     """
 
 
@@ -122,6 +133,7 @@ class CreditStore(ABC):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         """Atomically charge a gross cost in a single server-side transaction.
 
@@ -160,6 +172,10 @@ class CreditStore(ABC):
                 entirely; the full ``amount`` is charged to the balance.
                 Use for fixed-cost batch jobs that should not consume inference
                 allowance (Fix 7).
+            period_start: Explicit allowance-window start date (WS9), used to key
+                allowance consumption for ``rolling_30d``/``anniversary`` plans.
+                ``None`` (the default) falls back to the current UTC calendar
+                month, matching the pre-WS9 behavior exactly.
 
         Returns:
             ``DeductionResult`` with net ``amount``, ``allowance_consumed``,
@@ -189,6 +205,7 @@ class CreditStore(ABC):
         model: str | None = None,
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
+        period_start: date | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease (hold) — the only admission control (D4).
 
@@ -203,6 +220,10 @@ class CreditStore(ABC):
         ``overdraft_floor`` for overdraft). ``billing_mode``/``overdraft_floor`` are
         persisted on the lease for settle-time/observability. Business failures are
         returned via ``LeaseResult.error``; the store never raises domain exceptions.
+
+        ``period_start`` (WS9) keys the allowance-headroom lookup for
+        ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
+        UTC calendar month.
         """
         ...
 
@@ -218,6 +239,7 @@ class CreditStore(ABC):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         """Charge the **actual** cost against a lease, then mark it settled (D5).
 
@@ -232,6 +254,10 @@ class CreditStore(ABC):
         ``skip_allowance=True`` prevents the free inference allowance from being
         consumed at settle time — mirrors :meth:`deduct_with_allowance` Fix 7 so
         the lease path and the direct-deduct path behave consistently.
+
+        ``period_start`` (WS9) keys allowance consumption for
+        ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
+        UTC calendar month.
 
         Lease-state failures are returned via ``DeductionResult.error``:
         ``lease_not_found`` (missing / other user / released), ``lease_expired``
@@ -353,8 +379,13 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def check_allowance(self, user_id: str) -> AllowanceResult:
-        """Get remaining free allowance for current billing period."""
+    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
+        """Get remaining free allowance for current billing period.
+
+        ``period_start`` overrides the window key for ``rolling_30d``/``anniversary``
+        plans (resolved by the manager via :func:`ducto.allowance.resolve_allowance_window`);
+        ``None`` keeps the calendar-month default (WS9).
+        """
         ...
 
     @abstractmethod
@@ -424,9 +455,12 @@ class CreditStore(ABC):
         """
         ...
 
-    # ── Usage analytics ─────────────────────────────────────────────────
+    # ── Usage analytics (optional capability — WS8) ──────────────────────
+    #
+    # These methods have a default implementation that raises
+    # CapabilityNotSupportedError. Override them to support usage analytics;
+    # a minimal custom store does not need to implement this group at all.
 
-    @abstractmethod
     def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
         """Aggregate spend by user in a time window.
 
@@ -437,9 +471,8 @@ class CreditStore(ABC):
         Returns:
             List of ``SpendByUserRow`` with totals per user.
         """
-        ...
+        raise CapabilityNotSupportedError("spend_by_user is not supported by this store")
 
-    @abstractmethod
     def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
         """Aggregate spend by model in a time window.
 
@@ -450,9 +483,8 @@ class CreditStore(ABC):
         Returns:
             List of ``SpendByModelRow`` with totals per model.
         """
-        ...
+        raise CapabilityNotSupportedError("spend_by_model is not supported by this store")
 
-    @abstractmethod
     def top_users(self, limit: int, start: datetime, end: datetime) -> list[TopUserRow]:
         """Top users by spend in a time window.
 
@@ -464,9 +496,8 @@ class CreditStore(ABC):
         Returns:
             List of ``TopUserRow`` sorted by total_spend descending.
         """
-        ...
+        raise CapabilityNotSupportedError("top_users is not supported by this store")
 
-    @abstractmethod
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
         """Daily spend aggregation in a time window.
 
@@ -477,9 +508,8 @@ class CreditStore(ABC):
         Returns:
             List of ``DailySpendRow`` with per-day totals.
         """
-        ...
+        raise CapabilityNotSupportedError("daily_spend is not supported by this store")
 
-    @abstractmethod
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window.
 
@@ -491,11 +521,10 @@ class CreditStore(ABC):
             ``AggregateStatsRow`` with total credits consumed, active users,
             average daily spend, top model, and top user.
         """
-        ...
+        raise CapabilityNotSupportedError("aggregate_stats is not supported by this store")
 
-    # ── Transaction listing ─────────────────────────────────────────────────
+    # ── Transaction listing (optional capability — WS8) ──────────────────────
 
-    @abstractmethod
     def list_user_transactions(
         self,
         user_id: str,
@@ -519,11 +548,10 @@ class CreditStore(ABC):
             List of ``TransactionRow`` objects. Each row includes ``total_count``
             representing the total matching rows before pagination.
         """
-        ...
+        raise CapabilityNotSupportedError("list_user_transactions is not supported by this store")
 
-    # ── Team/shared balance pools ─────────────────────────────────────────
+    # ── Team/shared balance pools (optional capability — WS8) ──────────────
 
-    @abstractmethod
     def create_team(
         self,
         name: str,
@@ -538,9 +566,8 @@ class CreditStore(ABC):
         Returns:
             ``CreateTeamResult`` with the new team id.
         """
-        ...
+        raise CapabilityNotSupportedError("create_team is not supported by this store")
 
-    @abstractmethod
     def get_team_balance(self, team_id: str) -> TeamBalanceResult:
         """Fetch team balance and member count.
 
@@ -550,9 +577,8 @@ class CreditStore(ABC):
         Returns:
             ``TeamBalanceResult`` with balance and member count.
         """
-        ...
+        raise CapabilityNotSupportedError("get_team_balance is not supported by this store")
 
-    @abstractmethod
     def add_team_member(
         self,
         team_id: str,
@@ -571,9 +597,8 @@ class CreditStore(ABC):
         Returns:
             ``AddTeamMemberResult`` confirming membership.
         """
-        ...
+        raise CapabilityNotSupportedError("add_team_member is not supported by this store")
 
-    @abstractmethod
     def get_team_members(self, team_id: str) -> list[TeamMember]:
         """List all members of a team.
 
@@ -583,9 +608,8 @@ class CreditStore(ABC):
         Returns:
             List of ``TeamMember``.
         """
-        ...
+        raise CapabilityNotSupportedError("get_team_members is not supported by this store")
 
-    @abstractmethod
     def deduct_team(
         self,
         team_id: str,
@@ -608,4 +632,4 @@ class CreditStore(ABC):
         Returns:
             ``TeamDeductionResult`` with transaction details.
         """
-        ...
+        raise CapabilityNotSupportedError("deduct_team is not supported by this store")

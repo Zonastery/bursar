@@ -9,13 +9,11 @@ CreditManager(
     store,
     engine=None,
     emitter=None,
-    low_balance_threshold=None,
     *,
     policy="strict_prepaid",
     overdraft_floor=None,
     max_concurrent=None,
-    low_balance_thresholds=None,
-    on_low_balance=None,
+    low_balance=None,
     default_ttl_seconds=600,
 )
 ```
@@ -25,13 +23,24 @@ CreditManager(
 | `store` | `CreditStore` | required | Store adapter (MemoryStore, HttpxSupabaseStore, PostgresStore, etc.) |
 | `engine` | `PricingEngine \| None` | `None` | Pre-configured pricing engine. If omitted, call `load_pricing_from_store()` or `publish_pricing_from_dict()` before `deduct()`. |
 | `emitter` | `CreditEventEmitter \| None` | `None` | Event emitter for credit lifecycle events. |
-| `low_balance_threshold` | `Decimal \| None` | `None` | **Simple single-level.** Absolute balance at or below which a deduction crossing it emits `credits.low_balance` (edge-triggered). When `None`, defaults to `min_balance * 2`. Ignored when `low_balance_thresholds` is set. |
 | `policy` | `str` | `"strict_prepaid"` | Financial-safety preset for planless users: `"strict_prepaid"` (floor ≥ 0, zero debt) or `"overdraft"` (admits to a negative floor). |
 | `overdraft_floor` | `Decimal \| None` | `None` | Negative admission floor when `policy="overdraft"`. |
 | `max_concurrent` | `int \| None` | `None` | Default maximum simultaneously-active leases per operation type. |
-| `low_balance_thresholds` | `list[Decimal] \| None` | `None` | **Multi-level.** List of thresholds (e.g. `[50, 20, 10]`) for graduated low-balance signals. Each level fires once per descent and re-arms only after the balance rises back above it. Takes precedence over `low_balance_threshold`. |
-| `on_low_balance` | `Callable[[CreditEvent], None] \| None` | `None` | Non-blocking callback invoked on low-balance events. Exceptions from the handler are caught and logged — never break the deduction. |
+| `low_balance` | `LowBalanceConfig \| None` | `None` | Low-balance alerting config: `thresholds` (a list, sorted internally high → low; supports single or multi-level) and `on_trigger` (a non-blocking callback invoked on each `credits.low_balance`). Each threshold is edge-triggered and re-arms only after the balance rises back above it. When `None`, falls back to a single threshold of `min_balance * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#min_balance-optional) — so alerting is effectively opt-in unless you set `min_balance` or `low_balance` explicitly). |
 | `default_ttl_seconds` | `int` | `600` | Default lease TTL for `reserve()` and `run_billed()`. |
+
+```python
+from ducto import CreditManager, LowBalanceConfig
+from decimal import Decimal
+
+manager = CreditManager(
+    store=store,
+    low_balance=LowBalanceConfig(
+        thresholds=[Decimal(100), Decimal(20)],   # multi-level, edge-triggered, high-to-low
+        on_trigger=lambda event: send_alert(event.user_id, event.data["balance"]),
+    ),
+)
+```
 
 ```python
 from ducto import CreditManager
@@ -92,9 +101,11 @@ Return `BalanceResult` with `balance` and `lifetime_purchased`.
 
 Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deduct_with_allowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Returns a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowance_consumed`, `balance_after`, `idempotent` and `cap_warning`. Raises `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap) on failure. A zero/negative cost short-circuits to a zero-amount result.
 
-### `deduct_fixed(user_id, job_name, idempotency_key=None, metadata=None)`
+### `deduct_fixed(user_id, job_name, idempotency_key=None, metadata=None, use_allowance=False)`
 
-Deduct a fixed cost (configured in pricing `fixed` section). Raises `ValueError` for an unknown/unconfigured `job_name` instead of charging 0.
+Deduct a fixed cost (configured in pricing `fixed` section, which may be fractional). Raises `ValueError` for an unknown/unconfigured `job_name` instead of charging 0.
+
+`use_allowance` defaults to `False`: fixed-cost jobs do **not** consume free inference allowance by default, so a batch job doesn't silently eat a user's monthly allowance meant for inference. Pass `use_allowance=True` to opt into the old allowance-first behavior (consume free allowance before the balance, same as `deduct()`).
 
 ## Plan Management
 
@@ -151,7 +162,7 @@ assert result.new_balance == Decimal("100")
 
 The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the full conceptual guide.
 
-The `policy`, `overdraft_floor`, `max_concurrent`, `low_balance_thresholds`, `on_low_balance`, and `default_ttl_seconds` constructor params control the lease/financial-safety behavior. See the [Constructor](#constructor) section for the full parameter table.
+The `policy`, `overdraft_floor`, `max_concurrent`, `low_balance`, and `default_ttl_seconds` constructor params control the lease/financial-safety behavior. See the [Constructor](#constructor) section for the full parameter table.
 
 - **`strict_prepaid`** (default) — floor `≥ 0`, structurally zero debt; size holds at the worst case.
 - **`overdraft`** — admits down to a negative `overdraft_floor`; `settle` bills the full actual cost even past it (reconcile with `add_credits`).
@@ -174,11 +185,13 @@ Extend a lease's TTL for long batch/agentic jobs. Returns a `LeaseResult`; raise
 
 ### `can_afford(user_id, metrics_or_amount, *, required_feature=None, billing_mode=None, operation_type="usage")`
 
-Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. Returns a `CanAffordResult` with `.affordable`, `.available`, `.worst_case`, `.reason`.
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. Returns a `CanAffordResult` with `.affordable`, `.spendable`, `.worst_case`, `.reason`.
+
+`.spendable` is the user's **effective spending power**: `balance − active_holds + allowance_remaining`. This is what actually determines whether `reserve()` will admit a given hold — use it to drive UI affordability checks (e.g. enabling a "Send" button). It is distinct from `AvailableResult.available` (see [`get_available`](#get_availableuser_id) below), which is cash-only and excludes allowance. (This field was renamed from `available` to `spendable` to remove the confusion with the unrelated `AvailableResult.available`.)
 
 ### `get_available(user_id)`
 
-Advisory `available = balance − reserved` read (UI only). Returns an `AvailableResult` with `.balance`, `.reserved`, `.available`.
+Advisory `available = balance − reserved` read (UI only) — **cash only**, excludes any free allowance. Returns an `AvailableResult` with `.balance`, `.reserved`, `.available`. Contrast with `CanAffordResult.spendable` (returned by [`can_afford`](#can_afforduser_id-metrics_or_amount--required_feature-none-billing_mode-none-operation_type-usage)), which adds remaining allowance on top and reflects effective spending power.
 
 ### `run_billed(user_id, *, estimate, do_work, operation_type="usage", billing_mode=None, required_feature=None, idempotency_key=None, ttl=None)`
 

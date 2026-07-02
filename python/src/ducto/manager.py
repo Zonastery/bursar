@@ -32,12 +32,13 @@ from __future__ import annotations
 
 import logging
 import threading
-import warnings
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from ducto.allowance import resolve_allowance_window
 from ducto.engine import PricingEngine
 from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.interface.base import CapReachedError, CreditStore
@@ -105,10 +106,6 @@ class LeaseNotFoundError(CreditError):
 
 logger = logging.getLogger(__name__)
 
-# Sentinel used by deduct_fixed to detect callers that haven't explicitly opted
-# in or out of allowance consumption after the Fix-7 default change (#6).
-_USE_ALLOWANCE_UNSET: object = object()
-
 #: Default ``low_balance`` threshold = this multiple of the engine's
 #: ``min_balance`` (contract §6 / M18). Override via the ``CreditManager``
 #: ``low_balance_threshold`` constructor argument.
@@ -124,6 +121,33 @@ DEFAULT_LEASE_TTL_SECONDS = 600
 POLICY_PRESETS = frozenset({"strict_prepaid", "overdraft"})
 
 
+@dataclass
+class LowBalanceConfig:
+    """Configuration for the ``credits.low_balance`` signal (interface plan §6 / WS7).
+
+    Collapses the previous three overlapping ``CreditManager`` constructor
+    params (``low_balance_threshold``, ``low_balance_thresholds``,
+    ``on_low_balance``) into one object.
+
+    Args:
+        thresholds: Absolute balance levels at/below which a deduction that
+            *crosses* a level emits ``credits.low_balance``. A single-element
+            list behaves like the old single-threshold form; multiple elements
+            fire once per level per descent (edge-triggered, high→low), and
+            each level re-arms independently once the balance climbs back
+            above it (e.g. via ``add_credits``). When ``None`` (the default
+            when no ``LowBalanceConfig`` is passed at all), the threshold is
+            derived lazily as ``min_balance * DEFAULT_LOW_BALANCE_MULTIPLIER``
+            at deduct time, so it tracks the engine's configured floor.
+        on_trigger: Optional non-blocking callback invoked (in addition to the
+            ``credits.low_balance`` event) whenever a level fires. Exceptions
+            raised by the callback are logged and never propagate (H4).
+    """
+
+    thresholds: list[Decimal] | None = None
+    on_trigger: Callable[[CreditEvent], None] | None = None
+
+
 class CreditManager:
     """Orchestrates credit operations: pricing -> atomic deduct.
 
@@ -133,14 +157,11 @@ class CreditManager:
             call ``load_pricing_from_store()`` or ``publish_pricing_from_dict()``
             before ``deduct()``.
         emitter: An optional ``CreditEventEmitter`` for lifecycle events.
-        low_balance_threshold: Absolute balance at or below which a deduction
-            that *crosses* the threshold emits ``credits.low_balance`` (contract
-            §6 / M18). When ``None`` (the default), the threshold is derived as
-            ``min_balance * DEFAULT_LOW_BALANCE_MULTIPLIER`` (= ``min_balance *
-            2``) at deduct time, so it tracks the engine's configured floor. The
-            alert is **edge-triggered**: it fires once, on the deduction that
-            takes the balance from above the threshold to at-or-below it, not on
-            every call near the threshold.
+        low_balance: An optional :class:`LowBalanceConfig` configuring the
+            ``credits.low_balance`` signal (contract §6 / M18 / WS7). When
+            ``None`` (the default), no explicit thresholds are configured and
+            the threshold is derived lazily from ``min_balance`` at deduct
+            time (see :class:`LowBalanceConfig`).
     """
 
     def __init__(
@@ -148,13 +169,11 @@ class CreditManager:
         store: CreditStore,
         engine: PricingEngine | None = None,
         emitter: CreditEventEmitter | None = None,
-        low_balance_threshold: Decimal | None = None,
         *,
         policy: str = "strict_prepaid",
         overdraft_floor: Decimal | None = None,
         max_concurrent: int | None = None,
-        low_balance_thresholds: list[Decimal] | None = None,
-        on_low_balance: Callable[[CreditEvent], None] | None = None,
+        low_balance: LowBalanceConfig | None = None,
         default_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
     ) -> None:
         if policy not in POLICY_PRESETS:
@@ -162,18 +181,21 @@ class CreditManager:
         self._store = store
         self._engine = engine
         self._emitter = emitter
-        self._low_balance_threshold = low_balance_threshold
         # Financial-safety policy (interface plan §1/§2). ``policy`` is the preset
         # default used for planless users; per-plan / per-call policy layers on top.
         self._policy = policy
         self._overdraft_floor = Decimal(overdraft_floor) if overdraft_floor is not None else None
         self._default_max_concurrent = max_concurrent
         self._default_ttl = default_ttl_seconds
-        # Multi-level low_balance thresholds (interface plan §6), sorted high→low.
+        # Multi-level low_balance thresholds (interface plan §6 / WS7), sorted
+        # high→low. None when no LowBalanceConfig (or an empty thresholds list)
+        # was supplied -- the threshold is then derived lazily at deduct time.
         self._low_balance_thresholds = (
-            sorted((Decimal(t) for t in low_balance_thresholds), reverse=True) if low_balance_thresholds else None
+            sorted((Decimal(t) for t in low_balance.thresholds), reverse=True)
+            if low_balance is not None and low_balance.thresholds
+            else None
         )
-        self._on_low_balance = on_low_balance
+        self._on_low_balance = low_balance.on_trigger if low_balance is not None else None
         # Edge-trigger state: per-user set of thresholds currently breached ("below").
         # A level re-arms only after the balance climbs back above it (a top-up).
         self._lb_below: dict[str, set[Decimal]] = {}
@@ -192,15 +214,12 @@ class CreditManager:
             )
 
     def _resolve_low_balance_threshold(self) -> Decimal:
-        """Resolve the configured low-balance threshold (contract §6 / M18).
-
-        Uses the explicit constructor value when set, else derives it from the
-        engine's ``min_balance`` (defaulting to ``Decimal(5)`` if no engine is
-        loaded) times :data:`DEFAULT_LOW_BALANCE_MULTIPLIER`.
+        """Resolve the low-balance threshold when no explicit thresholds are
+        configured (contract §6 / M18 / WS7): derived lazily from the engine's
+        ``min_balance`` (defaulting to ``Decimal(0)`` if no engine is loaded)
+        times :data:`DEFAULT_LOW_BALANCE_MULTIPLIER`.
         """
-        if self._low_balance_threshold is not None:
-            return self._low_balance_threshold
-        min_bal = self._engine.min_balance if self._engine else Decimal(5)
+        min_bal = self._engine.min_balance if self._engine else Decimal(0)
         return min_bal * DEFAULT_LOW_BALANCE_MULTIPLIER
 
     # -- Schema management -----------------------------------------------
@@ -382,7 +401,27 @@ class CreditManager:
         """Admission floor for a policy: ``overdraft_floor`` (≤0) or ``min_balance`` (≥0)."""
         if policy.billing_mode == "overdraft":
             return policy.overdraft_floor if policy.overdraft_floor is not None else Decimal(0)
-        return self._engine.min_balance if self._engine else Decimal(5)
+        return self._engine.min_balance if self._engine else Decimal(0)
+
+    def _resolve_allowance_period_start(self, user_id: str) -> date | None:
+        """Resolve the allowance-window ``period_start`` for a user (WS9).
+
+        Fast path: a ``calendar_month`` plan (the default, and the pre-WS9
+        behavior) returns ``None`` so the store/SQL default (calendar-month via
+        ``date_trunc('month', now())``) applies with no extra computation —
+        this keeps existing calendar_month behavior byte-for-byte unchanged.
+
+        For ``rolling_30d``/``anniversary`` plans, resolves the window via
+        :func:`resolve_allowance_window` anchored on ``plan_assigned_at`` and
+        returns just the ``period_start`` date.
+        """
+        plan = self._store.get_user_plan(user_id)
+        if plan.allowance_period == "calendar_month":
+            return None
+        period_start, _period_end = resolve_allowance_window(
+            datetime.now(UTC), plan.allowance_period, plan.plan_assigned_at
+        )
+        return period_start
 
     def _cost_of(self, metrics_or_amount: UsageMetrics | Decimal | int) -> tuple[Decimal, str | None]:
         """Compute the credit cost and model from metrics, or pass a raw amount.
@@ -458,6 +497,7 @@ class CreditManager:
         # the explicit ``model`` kwarg so cap checks and analytics are not blind.
         effective_model = derived_model if derived_model is not None else model
         ttl_seconds = ttl if ttl is not None else self._default_ttl
+        period_start = self._resolve_allowance_period_start(user_id)
 
         result = self._store.create_lease(
             user_id,
@@ -470,6 +510,7 @@ class CreditManager:
             model=effective_model,
             overdraft_floor=policy.overdraft_floor,
             metadata=metadata,
+            period_start=period_start,
         )
 
         if result.error:
@@ -536,6 +577,7 @@ class CreditManager:
             model=model,
             metadata=tx_meta,
             skip_allowance=skip_allowance,
+            period_start=self._resolve_allowance_period_start(user_id),
         )
 
         if result.error:
@@ -613,7 +655,7 @@ class CreditManager:
     ) -> CanAffordResult:
         """Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
 
-        ``available`` in the result reflects the user's effective spending power:
+        ``spendable`` in the result reflects the user's effective spending power:
         ``balance − active holds + allowance_remaining``. This matches the headroom
         ``reserve`` uses so the Send-button check agrees with the admission gate
         (Fix 1). Never use this as an admission gate; only ``reserve`` is authoritative.
@@ -629,14 +671,14 @@ class CreditManager:
         except Exception:
             return CanAffordResult(
                 affordable=False,
-                available=avail.available,
+                spendable=avail.available,
                 worst_case=worst_case,
                 reason="policy_unavailable",
             )
         floor = self._resolve_floor(policy)
 
-        # Include remaining free allowance in the effective available so the advisory
-        # check agrees with what create_lease will actually admit (Fix 1).
+        # Include remaining free allowance in the effective spendable amount so the
+        # advisory check agrees with what create_lease will actually admit (Fix 1).
         allowance_credit = Decimal(0)
         try:
             ar = self._store.check_allowance(user_id)
@@ -644,7 +686,7 @@ class CreditManager:
         except Exception:
             pass  # advisory check: fail open if allowance fetch fails
 
-        effective_available = avail.available + allowance_credit
+        spendable = avail.available + allowance_credit
 
         affordable = True
         reason: str | None = None
@@ -653,13 +695,13 @@ class CreditManager:
             if not check.has_feature:
                 affordable = False
                 reason = "feature_not_entitled"
-        if affordable and (effective_available - worst_case) < floor:
+        if affordable and (spendable - worst_case) < floor:
             affordable = False
             reason = "insufficient_credits"
 
         return CanAffordResult(
             affordable=affordable,
-            available=effective_available,
+            spendable=spendable,
             worst_case=worst_case,
             reason=reason,
         )
@@ -674,8 +716,35 @@ class CreditManager:
         Convenience wrapper that routes through the manager so callers never need
         to reach past it into the raw store. Returns a zero-allowance result for
         planless users (no exception).
+
+        For ``rolling_30d``/``anniversary`` plans (WS9), resolves and threads
+        ``period_start`` so the reported window matches the one actually used by
+        ``deduct``/``settle``/``reserve`` — a ``calendar_month`` plan (the
+        default) takes the fast path unchanged.
         """
-        return self._store.check_allowance(user_id)
+        plan = self._store.get_user_plan(user_id)
+        if not plan.plan_id or plan.allowance_period == "calendar_month":
+            return self._store.check_allowance(user_id)
+        period_start, period_end_exclusive = resolve_allowance_window(
+            datetime.now(UTC), plan.allowance_period, plan.plan_assigned_at
+        )
+        result = self._store.check_allowance(user_id, period_start=period_start)
+        # The store/SQL layer only knows a generic calendar-month period_end
+        # (see 022_configurable_allowance_window.sql); override it here with the
+        # authoritative window this manager resolved.
+        period_end_inclusive = period_end_exclusive - timedelta(days=1)
+        period_start_dt = datetime(period_start.year, period_start.month, period_start.day, tzinfo=UTC)
+        return result.model_copy(
+            update={
+                "period_start": period_start_dt.isoformat(),
+                "period_end": datetime(
+                    period_end_inclusive.year,
+                    period_end_inclusive.month,
+                    period_end_inclusive.day,
+                    tzinfo=UTC,
+                ).isoformat(),
+            }
+        )
 
     def run_billed(
         self,
@@ -892,6 +961,7 @@ class CreditManager:
             model=metrics.model,
             metadata=tx_meta,
             skip_allowance=skip_allowance,
+            period_start=self._resolve_allowance_period_start(user_id),
         )
 
         # 4) Error path: emit a failure event and raise the typed exception.
@@ -947,19 +1017,11 @@ class CreditManager:
                 },
             )
 
-        # Edge-triggered low_balance (M18): emit only when THIS deduction crossed
-        # the configured threshold (balance_before > threshold >= balance_after).
-        threshold = self._resolve_low_balance_threshold()
+        # Edge-triggered low_balance (M18): multi-level if configured (WS7), else
+        # single-threshold — see _emit_low_balance for the shared logic used by
+        # both the direct-deduct path and the lease/settle path.
         balance_before = result.balance_after + result.amount
-        if balance_before > threshold >= result.balance_after:
-            self._emit(
-                "credits.low_balance",
-                user_id,
-                {
-                    "balance": result.balance_after,
-                    "threshold": threshold,
-                },
-            )
+        self._emit_low_balance(user_id, balance_before, result.balance_after)
 
         return result
 
@@ -1156,7 +1218,7 @@ class CreditManager:
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
         *,
-        use_allowance: bool | object = _USE_ALLOWANCE_UNSET,
+        use_allowance: bool = False,
     ) -> DeductionResult:
         """Shortcut for fixed-cost batch jobs (roadmap gen, topic gen, etc.).
 
@@ -1164,28 +1226,16 @@ class CreditManager:
         charging 0 credits (L1): the engine returns ``None`` for an unknown job,
         which would otherwise become a "successful" free deduction.
 
-        **BEHAVIOURAL CHANGE (Fix 7):** ``use_allowance`` now defaults to
-        ``False``. Fixed-cost operations (PDF generation, training runs, …) and
-        monthly free inference allowances are separate budgets and must not
-        cross-contaminate. Callers that do not pass ``use_allowance`` explicitly
-        will receive a ``DeprecationWarning`` (#6). Pass ``use_allowance=False``
-        to silence the warning and adopt the new behaviour, or
-        ``use_allowance=True`` to keep the old allowance-first billing.
+        ``use_allowance`` defaults to ``False``: fixed-cost operations (PDF
+        generation, training runs, …) and monthly free inference allowances are
+        separate budgets and must not cross-contaminate. Pass
+        ``use_allowance=True`` to bill fixed-cost jobs against the allowance
+        pool first instead.
 
         Raises:
             PricingNotLoadedError: If pricing hasn't been loaded.
             ValueError: If ``job_name`` is not a configured fixed-cost job.
         """
-        if use_allowance is _USE_ALLOWANCE_UNSET:
-            warnings.warn(
-                "deduct_fixed() default changed: use_allowance is now False (Fix 7). "
-                "Fixed-cost jobs no longer consume the free inference allowance. "
-                "Pass use_allowance=False to silence this warning, or use_allowance=True "
-                "to restore the previous allowance-first behaviour.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            use_allowance = False
         if not self._engine:
             raise PricingNotLoadedError(
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."

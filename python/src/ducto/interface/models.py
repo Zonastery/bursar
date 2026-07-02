@@ -11,6 +11,7 @@ on persistence), not inside these models.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -60,10 +61,10 @@ class PricingConfigData(BaseModel):
     version: Literal[1] = 1
     models: dict[str, str]
     tools: dict[str, str] = Field(default_factory=lambda: {"_default": "tool_calls * 0"})
-    search: dict[str, str] = Field(default_factory=dict)
-    cache: dict[str, str] = Field(default_factory=dict)
-    fixed: dict[str, int] = Field(default_factory=dict)
-    min_balance: Decimal = Field(default=Decimal(5), ge=0)
+    search: str | None = None
+    cache: str | None = None
+    fixed: dict[str, Decimal] = Field(default_factory=dict)
+    min_balance: Decimal = Field(default=Decimal(0), ge=0)
     signup_bonus: int = 50
     plans: dict[str, PlanDefinition] | None = None
 
@@ -130,9 +131,9 @@ class CanAffordResult(BaseModel):
 
     Never used for admission control; that is exclusively the lease (``reserve``).
 
-    **Semantic note (#8):** ``available`` here is the *effective* spending power::
+    **Semantic note (#8):** ``spendable`` here is the *effective* spending power::
 
-        effective_available = balance − active_holds + allowance_remaining
+        spendable = balance − active_holds + allowance_remaining
 
     This includes the user's remaining free allowance so that UI elements (e.g.
     a "Send" button) correctly reflect what ``reserve()`` will actually admit.
@@ -141,7 +142,7 @@ class CanAffordResult(BaseModel):
     """
 
     affordable: bool = False
-    available: Decimal = Decimal(0)
+    spendable: Decimal = Decimal(0)
     worst_case: Decimal = Decimal(0)
     reason: str | None = None
 
@@ -251,6 +252,10 @@ class PlanDefinition(BaseModel):
     per_operation: dict[str, OperationPolicy] | None = None
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
+    #: Free-allowance reset window (WS9). ``calendar_month`` (default) resets on
+    #: the 1st of each UTC month; ``rolling_30d``/``anniversary`` anchor to when
+    #: the user was assigned the plan (``GetUserPlanResult.plan_assigned_at``).
+    allowance_period: Literal["calendar_month", "rolling_30d", "anniversary"] = "calendar_month"
 
     @model_validator(mode="before")
     @classmethod
@@ -277,6 +282,10 @@ class GetUserPlanResult(BaseModel):
     Carries the plan's financial-safety policy (``default_billing_mode``,
     ``per_operation``, ``max_concurrent``, ``overdraft_floor``) so the manager
     can resolve admission policy without a second round-trip (interface plan §1).
+
+    ``allowance_period`` and ``plan_assigned_at`` (WS9) let the manager resolve
+    the user's allowance reset window in one call, without a second round-trip
+    to the store.
     """
 
     user_id: str
@@ -288,6 +297,8 @@ class GetUserPlanResult(BaseModel):
     per_operation: dict[str, OperationPolicy] = Field(default_factory=dict)
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
+    allowance_period: Literal["calendar_month", "rolling_30d", "anniversary"] = "calendar_month"
+    plan_assigned_at: datetime | None = None
 
 
 class CheckFeatureResult(BaseModel):

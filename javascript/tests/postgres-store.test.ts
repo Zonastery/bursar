@@ -110,6 +110,8 @@ describe("PostgresStore", () => {
         "5",
         "gpt-4",
         JSON.stringify({ foo: "bar" }),
+        false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
+        null, // p_period_start (WS9): omitted → calendar-month fallback
       ]);
       // Parses NUMERIC strings to exact Decimal.
       expect(result.amount.toString()).toBe("2.5");

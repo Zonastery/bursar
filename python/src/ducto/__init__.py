@@ -12,7 +12,7 @@ from ducto.config import ConfigError, PricingConfig
 from ducto.engine import PricingEngine
 from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.expr import ExpressionError, evaluate_expression, validate_expression
-from ducto.interface.base import CapReachedError, RefundError, StoreError
+from ducto.interface.base import CapabilityNotSupportedError, CapReachedError, RefundError, StoreError
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import (
     AddCreditsResult,
@@ -57,6 +57,7 @@ from ducto.manager import (
     InsufficientCreditsError,
     LeaseExpiredError,
     LeaseNotFoundError,
+    LowBalanceConfig,
     PricingNotLoadedError,
 )
 from ducto.metrics import ToolCall, UsageMetrics
@@ -70,6 +71,7 @@ __all__ = [
     "BalanceResult",
     "CanAffordResult",
     "CapCheckResult",
+    "CapabilityNotSupportedError",
     "CapReachedError",
     "CheckFeatureResult",
     "ConcurrencyLimitError",
@@ -90,6 +92,7 @@ __all__ = [
     "LeaseExpiredError",
     "LeaseNotFoundError",
     "LeaseResult",
+    "LowBalanceConfig",
     "MemoryStore",
     "OperationPolicy",
     "PlanDefinition",

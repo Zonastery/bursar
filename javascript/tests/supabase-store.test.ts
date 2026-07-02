@@ -155,6 +155,7 @@ describe("HttpxSupabaseStore", () => {
         p_min_balance: "5",
         p_model: "gpt-4",
         p_metadata: { tier: "pro" },
+        p_period_start: null, // WS9: omitted → calendar-month fallback
       });
       expect(result.amount.toString()).toBe("2.5");
       expect(result.balanceAfter.toString()).toBe("97.5");

@@ -69,6 +69,43 @@ class TestConfigValidation:
         )
         assert config.tools["web_search"] == "web_search_calls * 2"
 
+    # ── WS2: this_tool_calls is valid only inside tools expressions ────────
+
+    def test_this_tool_calls_valid_in_tools_expression(self) -> None:
+        """WS2 — this_tool_calls is a known variable inside tools.* expressions."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tools": {"code_exec": "this_tool_calls * 10 / 1000", "_default": "this_tool_calls * 5 / 1000"},
+            }
+        )
+        assert config.tools["code_exec"] == "this_tool_calls * 10 / 1000"
+
+    def test_this_tool_calls_rejected_in_models_expression(self) -> None:
+        """WS2 — this_tool_calls is NOT a global metric; using it in models.* fails."""
+        with pytest.raises(ConfigError, match="unknown variable"):
+            load_config_from_dict({"models": {"_default": "this_tool_calls * 1"}})
+
+    def test_this_tool_calls_rejected_in_search_expression(self) -> None:
+        """WS2 — this_tool_calls is NOT valid in a search expression either."""
+        with pytest.raises(ConfigError, match="unknown variable"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "search": "this_tool_calls * 1",
+                }
+            )
+
+    def test_this_tool_calls_rejected_in_cache_expression(self) -> None:
+        """WS2 — this_tool_calls is NOT valid in a cache expression either."""
+        with pytest.raises(ConfigError, match="unknown variable"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "cache": "this_tool_calls * 1",
+                }
+            )
+
     def test_fixed_costs_are_positive(self) -> None:
         """Positive fixed cost values are accepted."""
         config = load_config_from_dict(
@@ -79,6 +116,29 @@ class TestConfigValidation:
         )
         assert config.fixed["batch_job"] == 20
 
+    # ── WS3: fractional (Decimal) fixed-job costs ──────────────────────────
+
+    def test_fractional_fixed_cost_accepted(self) -> None:
+        """WS3 — a fractional fixed cost like 2.5 is accepted and stored exactly."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "fixed": {"partial_job": 2.5},
+            }
+        )
+        assert config.fixed["partial_job"] == Decimal("2.5")
+        assert isinstance(config.fixed["partial_job"], Decimal)
+
+    def test_fractional_fixed_cost_string_accepted(self) -> None:
+        """WS3 — a string fractional value coerces to an exact Decimal."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "fixed": {"partial_job": "0.75"},
+            }
+        )
+        assert config.fixed["partial_job"] == Decimal("0.75")
+
     def test_min_balance_is_decimal(self) -> None:
         """min_balance is a Decimal money field (contract §1)."""
         config = load_config_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 10})
@@ -86,8 +146,9 @@ class TestConfigValidation:
         assert isinstance(config.min_balance, Decimal)
 
     def test_min_balance_default_is_decimal(self) -> None:
+        """WS6 — min_balance defaults to 0 (was 5)."""
         config = load_config_from_dict({"models": {"_default": "input_tokens * 1"}})
-        assert config.min_balance == Decimal(5)
+        assert config.min_balance == Decimal(0)
         assert isinstance(config.min_balance, Decimal)
 
     def test_negative_min_balance_rejected(self) -> None:
@@ -107,8 +168,8 @@ class TestConfigValidation:
         config = load_config_from_dict(
             {
                 "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
-                "search": {"costs": "search_queries * 0.5 + search_results * 0.05"},
-                "cache": {"discount": "-cache_read_tokens * 0.0045"},
+                "search": "search_queries * 0.5 + search_results * 0.05",
+                "cache": "-cache_read_tokens * 0.0045",
             }
         )
         assert config.models["_default"]
@@ -228,20 +289,38 @@ class TestConfigValidation:
     # ── CF4: Empty sections are allowed ────────────────────────────────────
 
     def test_empty_sections_allowed(self) -> None:
-        """CF4 — Empty tools/search/cache/fixed sections are valid when models is present."""
+        """CF4 — Empty tools/fixed and omitted search/cache are valid when models is present.
+
+        search/cache are single expression strings (WS1); their "empty" state is
+        the default ``None``, not an empty dict.
+        """
         config = load_config_from_dict(
             {
                 "models": {"_default": "input_tokens * 1"},
                 "tools": {},
-                "search": {},
-                "cache": {},
                 "fixed": {},
             }
         )
         assert config.tools == {}
-        assert config.search == {}
-        assert config.cache == {}
+        assert config.search is None
+        assert config.cache is None
         assert config.fixed == {}
+
+    def test_search_and_cache_none_when_omitted(self) -> None:
+        """WS1 — search/cache default to None (not an empty dict) when omitted."""
+        config = load_config_from_dict({"models": {"_default": "input_tokens * 1"}})
+        assert config.search is None
+        assert config.cache is None
+
+    def test_search_as_dict_rejected(self) -> None:
+        """WS1 — search/cache must be a single expression string, not a dict."""
+        with pytest.raises(ValidationError):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "search": {"costs": "search_queries * 1"},
+                }
+            )
 
     # ── CF5: Plan with features: null ──────────────────────────────────────
 
@@ -362,3 +441,64 @@ class TestConfigValidation:
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=11))
         # ceil(11 * 0.5) = ceil(5.5) = 6
         assert result.total == Decimal("6.0000")
+
+    # ── WS9: PlanDefinition.allowance_period ────────────────────────────────
+
+    def test_plan_allowance_period_calendar_month_loads(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {"pro": {"id": "pro", "name": "Pro", "allowance_period": "calendar_month"}},
+            }
+        )
+        assert config.plans is not None
+        assert config.plans["pro"].allowance_period == "calendar_month"
+
+    def test_plan_allowance_period_rolling_30d_loads(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {"pro": {"id": "pro", "name": "Pro", "allowance_period": "rolling_30d"}},
+            }
+        )
+        assert config.plans is not None
+        assert config.plans["pro"].allowance_period == "rolling_30d"
+
+    def test_plan_allowance_period_anniversary_loads(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {"pro": {"id": "pro", "name": "Pro", "allowance_period": "anniversary"}},
+            }
+        )
+        assert config.plans is not None
+        assert config.plans["pro"].allowance_period == "anniversary"
+
+    def test_plan_allowance_period_invalid_value_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "plans": {"pro": {"id": "pro", "name": "Pro", "allowance_period": "weekly"}},
+                }
+            )
+
+    def test_plan_allowance_period_defaults_to_calendar_month(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {"pro": {"id": "pro", "name": "Pro"}},
+            }
+        )
+        assert config.plans is not None
+        assert config.plans["pro"].allowance_period == "calendar_month"
+
+    def test_pricing_config_field_alignment_unaffected_by_allowance_period(self) -> None:
+        """allowance_period is nested inside PlanDefinition, not a top-level
+        PricingConfig/PricingConfigData field, so the field-parity test
+        (test_pricing_config_field_alignment) must still pass."""
+        config_fields = set(PricingConfig.model_fields.keys())
+        data_fields = set(PricingConfigData.model_fields.keys())
+        assert config_fields == data_fields
+        assert "allowance_period" not in config_fields
+        assert "allowance_period" not in data_fields

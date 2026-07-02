@@ -1,10 +1,13 @@
 export { PricingEngine } from "./engine.js";
+export type { AllowancePeriod } from "./allowance.js";
+export { resolveAllowanceWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
 export type { PricingConfig } from "./config.js";
 export { loadConfigFromDict } from "./config.js";
 export {
+  CapabilityNotSupportedError,
   CapReachedError,
   ConcurrencyLimitError,
   ConfigError,
@@ -25,6 +28,7 @@ export { CreditManager } from "./manager.js";
 export type {
   CanAffordOptions,
   CreditManagerOptions,
+  LowBalanceConfig,
   PolicyPreset,
   ReserveOptions,
   RunBilledOptions,
@@ -77,7 +81,7 @@ export type {
 export type { CreateLeaseOptions, SettleLeaseOptions } from "./stores/credit-store.js";
 
 // Stores
-export type { CreditStore } from "./stores/credit-store.js";
+export { CreditStore } from "./stores/credit-store.js";
 export { HttpxSupabaseStore } from "./stores/supabase-store.js";
 export { PostgresStore } from "./stores/postgres-store.js";
 

@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
+import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -36,7 +37,8 @@ import type {
   TeamMember,
   TopUserRow,
 } from "../types.js";
-import type { CreateLeaseOptions, CreditStore, SettleLeaseOptions } from "./credit-store.js";
+import { CreditStore } from "./credit-store.js";
+import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
 
 const ZERO = new Decimal(0);
 
@@ -103,11 +105,12 @@ function parsePerOperation(raw: unknown): Record<string, OperationPolicy> {
  *   url: Supabase project URL (e.g. ``https://<project>.supabase.co``).
  *   key: Supabase ``service_role`` key.
  */
-export class HttpxSupabaseStore implements CreditStore {
+export class HttpxSupabaseStore extends CreditStore {
   private url: string;
   private key: string;
 
   constructor(url: string, key: string) {
+    super();
     this.url = url.replace(/\/+$/, "");
     this.key = key;
   }
@@ -242,6 +245,7 @@ export class HttpxSupabaseStore implements CreditStore {
     const minBalance = options?.minBalance ?? ZERO;
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? {};
+    const periodStart = options?.periodStart ?? null;
 
     const row = await this.rpc("deduct_with_allowance", {
       p_user_id: userId,
@@ -250,6 +254,7 @@ export class HttpxSupabaseStore implements CreditStore {
       p_min_balance: decParam(minBalance),
       p_model: model,
       p_metadata: metadata ?? {},
+      p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -288,6 +293,7 @@ export class HttpxSupabaseStore implements CreditStore {
     const billingMode = options?.billingMode ?? "strict";
     const floor = options?.floor ?? ZERO;
     const overdraftFloor = options?.overdraftFloor ?? null;
+    const periodStart = options?.periodStart ?? null;
     const row = await this.rpc("create_lease", {
       p_user_id: userId,
       p_amount: decParam(amount),
@@ -299,6 +305,7 @@ export class HttpxSupabaseStore implements CreditStore {
       p_model: options?.model ?? null,
       p_overdraft_floor: overdraftFloor != null ? decParam(overdraftFloor) : null,
       p_metadata: options?.metadata ?? {},
+      p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -332,6 +339,7 @@ export class HttpxSupabaseStore implements CreditStore {
     options?: SettleLeaseOptions,
   ): Promise<DeductionResult> {
     const minBalance = options?.minBalance ?? ZERO;
+    const periodStart = options?.periodStart ?? null;
     const row = await this.rpc("settle_lease", {
       p_user_id: userId,
       p_lease_id: leaseId,
@@ -340,6 +348,7 @@ export class HttpxSupabaseStore implements CreditStore {
       p_min_balance: decParam(minBalance),
       p_model: options?.model ?? null,
       p_metadata: options?.metadata ?? {},
+      p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -487,6 +496,8 @@ export class HttpxSupabaseStore implements CreditStore {
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
+      allowancePeriod: (row.allowance_period as AllowancePeriod | undefined) ?? "calendar_month",
+      planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
     };
   }
 
@@ -516,8 +527,11 @@ export class HttpxSupabaseStore implements CreditStore {
     };
   }
 
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
-    const row = await this.rpc("check_plan_allowance", { p_user_id: userId });
+  async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
+    const row = await this.rpc("check_plan_allowance", {
+      p_user_id: userId,
+      p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+    });
     if (!row || Object.keys(row).length === 0) {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }

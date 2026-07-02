@@ -1,4 +1,5 @@
 import type { Decimal } from "decimal.js";
+import { CapabilityNotSupportedError } from "../errors.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -44,6 +45,8 @@ export interface CreateLeaseOptions {
   model?: string | null;
   overdraftFloor?: Decimal | null;
   metadata?: CreditMetadata | null;
+  /** Free-allowance window start override (WS9); defaults to calendar-month when omitted. */
+  periodStart?: Date | null;
 }
 
 /** Options for charging the actual cost against a lease (interface plan §3 / D5). */
@@ -52,13 +55,26 @@ export interface SettleLeaseOptions {
   minBalance?: Decimal;
   model?: string | null;
   metadata?: CreditMetadata | null;
+  /** Free-allowance window start override (WS9); defaults to calendar-month when omitted. */
+  periodStart?: Date | null;
 }
 
-/** Interface for credit storage backends. */
-export interface CreditStore {
-  setup(databaseUrl?: string | null): Promise<SetupResult>;
-  getBalance(userId: string): Promise<BalanceResult>;
-  addCredits(
+/**
+ * Abstract base for credit storage backends (WS8).
+ *
+ * Split into two tiers:
+ *  - **Core** (abstract, must be implemented): balance/credit ops, the atomic
+ *    lease lifecycle, pricing-config versioning, plan management, spend caps,
+ *    refunds, and expiry sweeping. Every backend needs these.
+ *  - **Optional capabilities** (concrete, default-throwing): usage analytics,
+ *    transaction listing, and shared team-balance pools. A custom store that
+ *    doesn't need these can skip them entirely — the default implementation
+ *    throws {@link CapabilityNotSupportedError} instead of forcing a stub.
+ */
+export abstract class CreditStore {
+  abstract setup(databaseUrl?: string | null): Promise<SetupResult>;
+  abstract getBalance(userId: string): Promise<BalanceResult>;
+  abstract addCredits(
     userId: string,
     amount: Decimal,
     type?: string,
@@ -70,7 +86,7 @@ export interface CreditStore {
    * consume free allowance, enforce spend caps, apply the balance floor,
    * and debit the net amount — idempotency-keyed end-to-end. See contract §2.
    */
-  deductWithAllowance(
+  abstract deductWithAllowance(
     userId: string,
     amount: Decimal,
     options?: DeductWithAllowanceOptions,
@@ -95,7 +111,7 @@ export interface CreditStore {
    * an ``active`` lease expiring after ``ttlSeconds``. Business failures are
    * returned via ``LeaseResult.error``; the store never raises domain exceptions.
    */
-  createLease(
+  abstract createLease(
     userId: string,
     amount: Decimal,
     operationType: string,
@@ -112,7 +128,7 @@ export interface CreditStore {
    * Lease-state failures (``lease_not_found``/``lease_expired``) are returned via
    * ``DeductionResult.error``; a replay returns the original result idempotently.
    */
-  settleLease(
+  abstract settleLease(
     userId: string,
     leaseId: string,
     amount: Decimal,
@@ -125,7 +141,7 @@ export interface CreditStore {
    * Transitions an ``active``/``expired`` lease to ``released`` and reports
    * ``released=true``; otherwise reports ``released=false`` with a ``reason``.
    */
-  releaseLease(userId: string, leaseId: string): Promise<ReleaseResult>;
+  abstract releaseLease(userId: string, leaseId: string): Promise<ReleaseResult>;
 
   /**
    * Extend an active lease's TTL (long batch/agentic jobs, resolves B4).
@@ -133,35 +149,42 @@ export interface CreditStore {
    * Returns ``error="lease_expired"`` if the TTL already elapsed and
    * ``error="lease_not_found"`` if missing/other-user/finalized.
    */
-  renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult>;
+  abstract renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult>;
 
   /**
    * Advisory, non-locking read of ``available = balance − Σ active holds``.
    *
    * For UI only — never an admission gate (D4/H3); may be stale the instant read.
    */
-  getAvailable(userId: string): Promise<AvailableResult>;
+  abstract getAvailable(userId: string): Promise<AvailableResult>;
 
-  getActivePricing(): Promise<PricingConfigResult | null>;
-  setActivePricing(config: PricingConfigData, label?: string | null): Promise<string>;
+  abstract getActivePricing(): Promise<PricingConfigResult | null>;
+  abstract setActivePricing(config: PricingConfigData, label?: string | null): Promise<string>;
 
   // H8: pricing history / activation — parity with Python base.py:293-312.
-  getPricingHistory(): Promise<PricingConfigHistoryItem[]>;
-  getPricingConfig(version: number): Promise<PricingConfigResult | null>;
-  activatePricing(version: number): Promise<string>;
+  abstract getPricingHistory(): Promise<PricingConfigHistoryItem[]>;
+  abstract getPricingConfig(version: number): Promise<PricingConfigResult | null>;
+  abstract activatePricing(version: number): Promise<string>;
 
   // ── Plan management ────────────────────────────────────────────────
-  getUserPlan(userId: string): Promise<GetUserPlanResult>;
-  setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
-  checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
-  checkAllowance(userId: string): Promise<AllowanceResult>;
-  incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void>;
+  abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;
+  abstract setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
+  abstract checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
+  // periodStart overrides the window key for rolling_30d/anniversary plans
+  // (resolved by CreditManager via resolveAllowanceWindow); undefined keeps
+  // the calendar-month default (WS9).
+  abstract checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult>;
+  abstract incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void>;
 
   // ── Spend caps and rate limiting ────────────────────────────────────
-  checkSpendCap(userId: string, model?: string | null, amount?: Decimal): Promise<CapCheckResult>;
+  abstract checkSpendCap(
+    userId: string,
+    model?: string | null,
+    amount?: Decimal,
+  ): Promise<CapCheckResult>;
 
   // ── Refunds ────────────────────────────────────────────────────────
-  refundCredits(
+  abstract refundCredits(
     transactionId: string,
     amount?: Decimal,
     reason?: string,
@@ -169,39 +192,62 @@ export interface CreditStore {
   ): Promise<RefundResult>;
 
   // ── Credit expiry ────────────────────────────────────────────────────
-  sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>;
+  abstract sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>;
 
-  // ── Usage analytics ──────────────────────────────────────────────────
-  spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]>;
-  spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]>;
-  topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]>;
-  dailySpend(start: Date, end: Date): Promise<DailySpendRow[]>;
+  // ── Usage analytics (optional capability — WS8) ──────────────────────
+  async spendByUser(_start: Date, _end: Date): Promise<SpendByUserRow[]> {
+    throw new CapabilityNotSupportedError("spendByUser is not supported by this store");
+  }
+  async spendByModel(_start: Date, _end: Date): Promise<SpendByModelRow[]> {
+    throw new CapabilityNotSupportedError("spendByModel is not supported by this store");
+  }
+  async topUsers(_limit: number, _start: Date, _end: Date): Promise<TopUserRow[]> {
+    throw new CapabilityNotSupportedError("topUsers is not supported by this store");
+  }
+  async dailySpend(_start: Date, _end: Date): Promise<DailySpendRow[]> {
+    throw new CapabilityNotSupportedError("dailySpend is not supported by this store");
+  }
+  async aggregateStats(_start: Date, _end: Date): Promise<AggregateStats> {
+    throw new CapabilityNotSupportedError("aggregateStats is not supported by this store");
+  }
 
-  // ── Transaction listing ─────────────────────────────────────────────
-  listUserTransactions(
+  // ── Transaction listing (optional capability — WS8) ──────────────────
+  async listUserTransactions(
+    _userId: string,
+    _options?: ListTransactionsOptions,
+  ): Promise<PaginatedTransactions> {
+    throw new CapabilityNotSupportedError("listUserTransactions is not supported by this store");
+  }
+  abstract listUsageEvents(
     userId: string,
-    options?: ListTransactionsOptions,
+    options?: ListUsageEventsOptions,
   ): Promise<PaginatedTransactions>;
-  listUsageEvents(userId: string, options?: ListUsageEventsOptions): Promise<PaginatedTransactions>;
 
-  // ── Aggregate stats ────────────────────────────────────────────────
-  aggregateStats(start: Date, end: Date): Promise<AggregateStats>;
-
-  // ── Team/shared balance pools ──────────────────────────────────────
-  createTeam(name: string, initialBalance?: Decimal): Promise<CreateTeamResult>;
-  getTeamBalance(teamId: string): Promise<TeamBalanceResult>;
-  addTeamMember(
-    teamId: string,
-    userId: string,
-    role?: string,
-    spendCap?: Decimal | null,
-  ): Promise<AddTeamMemberResult>;
-  getTeamMembers(teamId: string): Promise<TeamMember[]>;
-  deductTeam(
-    teamId: string,
-    userId: string,
-    amount: Decimal,
-    metadata?: CreditMetadata | null,
-    idempotencyKey?: string | null,
-  ): Promise<TeamDeductionResult>;
+  // ── Team/shared balance pools (optional capability — WS8) ────────────
+  async createTeam(_name: string, _initialBalance?: Decimal): Promise<CreateTeamResult> {
+    throw new CapabilityNotSupportedError("createTeam is not supported by this store");
+  }
+  async getTeamBalance(_teamId: string): Promise<TeamBalanceResult> {
+    throw new CapabilityNotSupportedError("getTeamBalance is not supported by this store");
+  }
+  async addTeamMember(
+    _teamId: string,
+    _userId: string,
+    _role?: string,
+    _spendCap?: Decimal | null,
+  ): Promise<AddTeamMemberResult> {
+    throw new CapabilityNotSupportedError("addTeamMember is not supported by this store");
+  }
+  async getTeamMembers(_teamId: string): Promise<TeamMember[]> {
+    throw new CapabilityNotSupportedError("getTeamMembers is not supported by this store");
+  }
+  async deductTeam(
+    _teamId: string,
+    _userId: string,
+    _amount: Decimal,
+    _metadata?: CreditMetadata | null,
+    _idempotencyKey?: string | null,
+  ): Promise<TeamDeductionResult> {
+    throw new CapabilityNotSupportedError("deductTeam is not supported by this store");
+  }
 }

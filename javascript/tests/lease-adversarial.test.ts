@@ -420,7 +420,7 @@ describe("overdraft reconcile", () => {
     const m = new CreditManager(store, undefined, emitter, {
       policy: "overdraft",
       overdraftFloor: D(-100),
-      lowBalanceThresholds: [D(20)],
+      lowBalance: { thresholds: [D(20)] },
     });
     await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
     await store.addCredits("u1", D(50));

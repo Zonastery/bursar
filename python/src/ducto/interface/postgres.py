@@ -7,7 +7,7 @@ Postgres database that has the ducto schema installed.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -191,12 +191,17 @@ class PostgresStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
 
         The whole calculate-then-charge pipeline runs in one server-side
         transaction; this wrapper only marshals params and maps the JSON envelope
         (success or business-error code) onto ``DeductionResult``.
+
+        ``period_start`` (WS9) is passed as ``p_period_start`` (ISO date string,
+        matching the ``expires_at``/date marshalling convention elsewhere in this
+        file); ``None`` lets the RPC fall back to the current UTC calendar month.
         """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
@@ -207,7 +212,16 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "deduct_with_allowance",
-                    [user_id, amount, idempotency_key, min_balance, model, json.dumps(meta), skip_allowance],
+                    [
+                        user_id,
+                        amount,
+                        idempotency_key,
+                        min_balance,
+                        model,
+                        json.dumps(meta),
+                        skip_allowance,
+                        period_start.isoformat() if period_start is not None else None,
+                    ],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -257,6 +271,7 @@ class PostgresStore(CreditStore):
         model: str | None = None,
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
+        period_start: date | None = None,
     ) -> LeaseResult:
         amount = _dec(amount)
         floor = _dec(floor)
@@ -276,6 +291,7 @@ class PostgresStore(CreditStore):
                         model,
                         str(overdraft_floor) if overdraft_floor is not None else None,
                         json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
+                        period_start.isoformat() if period_start is not None else None,
                     ],
                 )
                 row = cur.fetchone()
@@ -316,6 +332,7 @@ class PostgresStore(CreditStore):
         model: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        period_start: date | None = None,
     ) -> DeductionResult:
         amount = _dec(amount)
         min_balance = _dec(min_balance)
@@ -325,7 +342,17 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "settle_lease",
-                    [user_id, lease_id, amount, idempotency_key, min_balance, model, json.dumps(meta), skip_allowance],
+                    [
+                        user_id,
+                        lease_id,
+                        amount,
+                        idempotency_key,
+                        min_balance,
+                        model,
+                        json.dumps(meta),
+                        skip_allowance,
+                        period_start.isoformat() if period_start is not None else None,
+                    ],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -523,6 +550,12 @@ class PostgresStore(CreditStore):
             overdraft_floor=_dec(result_dict["overdraft_floor"])
             if result_dict.get("overdraft_floor") is not None
             else None,
+            allowance_period=str(result_dict.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
+            plan_assigned_at=(
+                datetime.fromisoformat(str(result_dict["plan_assigned_at"]))
+                if result_dict.get("plan_assigned_at")
+                else None
+            ),
         )
 
     def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
@@ -541,11 +574,11 @@ class PostgresStore(CreditStore):
             plan_id=str(result_dict.get("plan_id", plan_id)),
         )
 
-    def check_allowance(self, user_id: str) -> AllowanceResult:
+    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("check_plan_allowance", [user_id])
+                cur.callproc("check_plan_allowance", [user_id, period_start])
                 row = cur.fetchone()
         finally:
             conn.close()

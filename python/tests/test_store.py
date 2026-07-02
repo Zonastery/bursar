@@ -8,7 +8,25 @@ from decimal import Decimal
 import pytest
 
 from ducto import ConfigError, CreditManager, MemoryStore
-from ducto.interface.models import PlanDefinition, PricingConfigData, SpendCap
+from ducto.interface.base import CapabilityNotSupportedError, CreditStore, StoreError
+from ducto.interface.models import (
+    AddCreditsResult,
+    AllowanceResult,
+    AvailableResult,
+    BalanceResult,
+    CapCheckResult,
+    DeductionResult,
+    GetUserPlanResult,
+    LeaseResult,
+    PlanDefinition,
+    PricingConfigData,
+    RefundResult,
+    ReleaseResult,
+    SetupResult,
+    SetUserPlanResult,
+    SpendCap,
+    SweepResult,
+)
 
 
 def test_get_pricing_when_none() -> None:
@@ -556,22 +574,14 @@ def test_load_pricing_file_json(tmp_path) -> None:
 # ── M1 — Allowance monthly window reset ──────────────────────────────────────
 
 
-@pytest.mark.skip(
-    reason=(
-        "MemoryStore._billing_period() derives the period key from the real clock "
-        "('%Y-%m-01') with no injectable clock. Simulating a month rollover "
-        "requires either monkey-patching _utcnow or adding a clock injection "
-        "parameter; neither is available without modifying the store. "
-        "Add a clock-injection parameter to MemoryStore and remove this skip."
-    )
-)
 def test_allowance_resets_across_billing_periods() -> None:
-    """M1 — allowance window is fresh in each calendar month.
+    """M1 / WS9f — allowance window is fresh in each calendar month.
 
-    The test structure is correct; it is skipped because MemoryStore has no
-    injectable clock to fast-forward the billing period.
+    Uses MemoryStore's injectable clock (WS9f) to fast-forward past the month
+    boundary without any wall-clock sleep.
     """
-    store = MemoryStore()
+    clock_box = {"now": datetime(2024, 1, 15, tzinfo=UTC)}
+    store = MemoryStore(clock=lambda: clock_box["now"])
     store.set_active_pricing(
         PricingConfigData(
             models={"_default": "1"},
@@ -585,11 +595,13 @@ def test_allowance_resets_across_billing_periods() -> None:
     r1 = store.deduct_with_allowance("u", Decimal("4"))
     assert r1.error is None
     assert r1.allowance_consumed == Decimal("4")
+    assert store.check_allowance("u").allowance_remaining == Decimal("1")
 
-    # Simulate month rollover — not possible without clock injection.
-    # next_month_store = ... inject new billing period ...
+    # Simulate month rollover via the injectable clock.
+    clock_box["now"] = datetime(2024, 2, 1, tzinfo=UTC)
 
-    # Period 2: allowance should reset to 5
+    # Period 2: allowance should reset to 5 (fresh calendar month).
+    assert store.check_allowance("u").allowance_remaining == Decimal("5")
     r2 = store.deduct_with_allowance("u", Decimal("4"))
     assert r2.error is None
     assert r2.allowance_consumed == Decimal("4")
@@ -1007,3 +1019,296 @@ class TestCheckFeatureZeroValues:
         store = self._make_store_with_features({"disabled_feature": False})
         result = store.check_feature("user-1", "disabled_feature")
         assert result.has_feature is False
+
+
+# ── WS8: CreditStore ABC split into core (required) + optional capabilities ──
+
+
+class _MinimalCoreStore(CreditStore):
+    """A store implementing ONLY the core abstract methods of CreditStore.
+
+    Exercises WS8: analytics/transaction-listing/teams are optional
+    capabilities with a default raise, so a minimal custom store subclass
+    does not need to implement all ~35 methods — only the 21 core ones.
+    """
+
+    def setup(self, database_url: str | None = None):
+        return SetupResult()
+
+    def get_balance(self, user_id: str):
+        return BalanceResult(user_id=user_id)
+
+    def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None):
+        return AddCreditsResult(transaction_id="tx", user_id=user_id, amount=amount, new_balance=amount)
+
+    def deduct_with_allowance(
+        self,
+        user_id,
+        amount,
+        *,
+        idempotency_key=None,
+        min_balance=Decimal(0),
+        model=None,
+        metadata=None,
+        skip_allowance=False,
+    ):
+        return DeductionResult(transaction_id="tx", user_id=user_id, amount=amount, balance_after=Decimal(0))
+
+    def create_lease(
+        self,
+        user_id,
+        amount,
+        operation_type,
+        *,
+        billing_mode="strict",
+        floor=Decimal(0),
+        max_concurrent=None,
+        ttl_seconds=600,
+        model=None,
+        overdraft_floor=None,
+        metadata=None,
+    ):
+        return LeaseResult(lease_id="lease", user_id=user_id, amount=amount)
+
+    def settle_lease(
+        self,
+        user_id,
+        lease_id,
+        amount,
+        *,
+        idempotency_key=None,
+        min_balance=Decimal(0),
+        model=None,
+        metadata=None,
+        skip_allowance=False,
+    ):
+        return DeductionResult(transaction_id="tx", user_id=user_id, amount=amount, balance_after=Decimal(0))
+
+    def release_lease(self, user_id, lease_id):
+        return ReleaseResult(lease_id=lease_id, user_id=user_id, released=True, reason="released")
+
+    def renew_lease(self, user_id, lease_id, ttl_seconds):
+        return LeaseResult(lease_id=lease_id, user_id=user_id)
+
+    def get_available(self, user_id: str):
+        return AvailableResult(user_id=user_id)
+
+    def get_active_pricing(self):
+        return None
+
+    def set_active_pricing(self, config, label=None):
+        return "id"
+
+    def get_pricing_history(self):
+        return []
+
+    def get_pricing_config(self, version: int):
+        return None
+
+    def activate_pricing(self, version: int):
+        return "id"
+
+    def get_user_plan(self, user_id: str):
+        return GetUserPlanResult(user_id=user_id)
+
+    def set_user_plan(self, user_id: str, plan_id: str):
+        return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
+
+    def check_allowance(self, user_id: str):
+        return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
+
+    def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
+        return None
+
+    def check_spend_cap(self, user_id: str, model=None, amount=None):
+        return CapCheckResult()
+
+    def refund_credits(self, transaction_id, amount=None, reason=None, metadata=None):
+        return RefundResult(refund_transaction_id="", original_transaction_id=transaction_id, user_id="")
+
+    def sweep_expired_credits(self, dry_run: bool = False):
+        return SweepResult(dry_run=dry_run)
+
+
+class TestOptionalCapabilities:
+    """WS8 — analytics/transaction-listing/teams raise CapabilityNotSupportedError
+    by default on a store that only implements the core abstract methods."""
+
+    def test_minimal_store_instantiates(self) -> None:
+        # No TypeError for missing abstract methods — the optional-capability
+        # group is now concrete with a default raise, not abstract.
+        store = _MinimalCoreStore()
+        assert store.get_balance("u1").user_id == "u1"
+
+    def test_create_team_raises_capability_not_supported(self) -> None:
+        store = _MinimalCoreStore()
+        with pytest.raises(CapabilityNotSupportedError):
+            store.create_team("acme")
+
+    def test_spend_by_user_raises_capability_not_supported(self) -> None:
+        store = _MinimalCoreStore()
+        with pytest.raises(CapabilityNotSupportedError):
+            store.spend_by_user(datetime.now(UTC), datetime.now(UTC))
+
+    def test_list_user_transactions_raises_capability_not_supported(self) -> None:
+        store = _MinimalCoreStore()
+        with pytest.raises(CapabilityNotSupportedError):
+            store.list_user_transactions("u1")
+
+    def test_capability_not_supported_is_a_store_error(self) -> None:
+        """CapabilityNotSupportedError is a StoreError subclass (contract §4 style)."""
+        assert issubclass(CapabilityNotSupportedError, StoreError)
+
+
+# ── WS9f: configurable allowance-period rollover (MemoryStore, injectable clock) ──
+
+
+class TestAllowancePeriodRollover:
+    """Allowance rollover across all three allowance_period modes.
+
+    Uses MemoryStore's injectable clock (WS9f) to fast-forward past window
+    boundaries with no wall-clock sleep. Each mode is tested through BOTH the
+    deduct_with_allowance path and the settle_lease (lease) path, since they
+    independently key allowance consumption.
+    """
+
+    def _store_with_plan(self, period: str, allowance: Decimal, now: datetime) -> tuple[MemoryStore, dict]:
+        clock_box = {"now": now}
+        store = MemoryStore(clock=lambda: clock_box["now"])
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "basic": PlanDefinition(id="basic", name="Basic", free_allowance=allowance, allowance_period=period)
+                },
+                min_balance=Decimal(0),
+            )
+        )
+        store.set_user_plan("u", "basic")
+        store.add_credits("u", Decimal("1000"))
+        return store, clock_box
+
+    # ── calendar_month ──────────────────────────────────────────────────
+
+    def test_calendar_month_resets_via_deduct(self) -> None:
+        store, clock = self._store_with_plan("calendar_month", Decimal("5"), datetime(2024, 1, 15, tzinfo=UTC))
+        store.deduct_with_allowance("u", Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        clock["now"] = datetime(2024, 2, 1, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    def test_calendar_month_resets_via_settle(self) -> None:
+        store, clock = self._store_with_plan("calendar_month", Decimal("5"), datetime(2024, 1, 15, tzinfo=UTC))
+        lease = store.create_lease("u", Decimal("4"), "usage", floor=Decimal(0))
+        store.settle_lease("u", lease.lease_id, Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        clock["now"] = datetime(2024, 2, 1, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    # ── rolling_30d ──────────────────────────────────────────────────────
+
+    def test_rolling_30d_resets_via_deduct(self) -> None:
+        store, clock = self._store_with_plan("rolling_30d", Decimal("5"), datetime(2024, 1, 1, tzinfo=UTC))
+        store.deduct_with_allowance("u", Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        # Still within the first 30-day window (29 days elapsed).
+        clock["now"] = datetime(2024, 1, 30, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        # 30 days elapsed -> rolls into a fresh window.
+        clock["now"] = datetime(2024, 1, 31, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    def test_rolling_30d_resets_via_settle(self) -> None:
+        store, clock = self._store_with_plan("rolling_30d", Decimal("5"), datetime(2024, 1, 1, tzinfo=UTC))
+        lease = store.create_lease("u", Decimal("4"), "usage", floor=Decimal(0))
+        store.settle_lease("u", lease.lease_id, Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        clock["now"] = datetime(2024, 1, 31, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    # ── anniversary ──────────────────────────────────────────────────────
+
+    def test_anniversary_resets_via_deduct(self) -> None:
+        store, clock = self._store_with_plan("anniversary", Decimal("5"), datetime(2024, 1, 15, tzinfo=UTC))
+        store.deduct_with_allowance("u", Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        # Before the 15th next month: still in the same window.
+        clock["now"] = datetime(2024, 2, 10, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        # On/after the 15th next month: fresh window.
+        clock["now"] = datetime(2024, 2, 15, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    def test_anniversary_resets_via_settle(self) -> None:
+        store, clock = self._store_with_plan("anniversary", Decimal("5"), datetime(2024, 1, 15, tzinfo=UTC))
+        lease = store.create_lease("u", Decimal("4"), "usage", floor=Decimal(0))
+        store.settle_lease("u", lease.lease_id, Decimal("4"))
+        assert store.check_allowance("u").allowance_remaining == Decimal("1")
+        clock["now"] = datetime(2024, 2, 15, tzinfo=UTC)
+        assert store.check_allowance("u").allowance_remaining == Decimal("5")
+
+    # ── Plan switch mid-window re-anchors ────────────────────────────────
+
+    def test_switching_plan_mid_window_updates_plan_assigned_at(self) -> None:
+        clock_box = {"now": datetime(2024, 1, 15, tzinfo=UTC)}
+        store = MemoryStore(clock=lambda: clock_box["now"])
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "basic": PlanDefinition(
+                        id="basic", name="Basic", free_allowance=Decimal("5"), allowance_period="anniversary"
+                    ),
+                    "pro": PlanDefinition(
+                        id="pro", name="Pro", free_allowance=Decimal("50"), allowance_period="anniversary"
+                    ),
+                },
+                min_balance=Decimal(0),
+            )
+        )
+        store.set_user_plan("u", "basic")
+        first_assigned_at = store.get_user_plan("u").plan_assigned_at
+        assert first_assigned_at == datetime(2024, 1, 15, tzinfo=UTC)
+
+        # Re-assign (even to a different plan) later re-anchors plan_assigned_at.
+        clock_box["now"] = datetime(2024, 3, 20, tzinfo=UTC)
+        store.set_user_plan("u", "pro")
+        second_assigned_at = store.get_user_plan("u").plan_assigned_at
+        assert second_assigned_at == datetime(2024, 3, 20, tzinfo=UTC)
+        assert second_assigned_at != first_assigned_at
+
+        # Future windows anchor off the NEW assignment time (day-of-month 20).
+        allowance = store.check_allowance("u")
+        assert allowance.plan_id == "pro"
+        assert allowance.allowance_remaining == Decimal("50")
+
+    def test_get_user_plan_reports_allowance_period(self) -> None:
+        store = MemoryStore()
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
+            )
+        )
+        store.set_user_plan("u", "pro")
+        result = store.get_user_plan("u")
+        assert result.allowance_period == "rolling_30d"
+        assert result.plan_assigned_at is not None
+
+    def test_get_user_plan_defaults_to_calendar_month(self) -> None:
+        store = MemoryStore()
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"pro": PlanDefinition(id="pro", name="Pro")},
+            )
+        )
+        store.set_user_plan("u", "pro")
+        result = store.get_user_plan("u")
+        assert result.allowance_period == "calendar_month"
+
+    def test_no_plan_reports_calendar_month_and_no_assigned_at(self) -> None:
+        store = MemoryStore()
+        result = store.get_user_plan("nobody")
+        assert result.allowance_period == "calendar_month"
+        assert result.plan_assigned_at is None

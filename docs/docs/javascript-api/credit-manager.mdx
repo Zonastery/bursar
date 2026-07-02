@@ -21,9 +21,7 @@ const manager = new CreditManager(store);
 | `policy` | `"strict_prepaid" \| "overdraft"` | `"strict_prepaid"` | Financial-safety preset for planless users. `strict_prepaid` keeps balance ≥ floor; `overdraft` permits negative balance down to `overdraftFloor`. |
 | `overdraftFloor` | `Decimal \| number \| null` | `null` | Negative balance floor for the `overdraft` preset. |
 | `maxConcurrent` | `number \| null` | `null` | Default max simultaneously-active leases per operation type. |
-| `lowBalanceThreshold` | `Decimal \| number \| null` | `minBalance * 2` | Absolute balance at or below which `credits.low_balance` fires (edge-triggered: fires only when a deduction *crosses* the threshold from above). |
-| `lowBalanceThresholds` | `(Decimal \| number)[] \| null` | `null` | Multi-level thresholds. Each level fires once per descent and re-arms after a top-up. When set, overrides `lowBalanceThreshold`. |
-| `onLowBalance` | `(event: CreditEvent) => void \| Promise<void>` | `null` | Non-blocking hook invoked on each `credits.low_balance`. Errors are swallowed — never breaks the deduction. |
+| `lowBalance` | `LowBalanceConfig \| null` | `null` | Low-balance alerting config: `{ thresholds, onTrigger }`. `thresholds` is a list (sorted internally high → low; supports single or multi-level) — each fires once per descent (edge-triggered) and re-arms after a top-up climbs back above it. `onTrigger` is a non-blocking hook invoked on each `credits.low_balance`; errors are swallowed — never breaks the deduction. When omitted, falls back to a single threshold of `minBalance * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#min_balance-optional) — so alerting is effectively opt-in unless you set `minBalance` or `lowBalance` explicitly). |
 | `defaultTtlSeconds` | `number` | `600` | Default lease TTL for `reserve()` / `runBilled()`. |
 
 ```typescript
@@ -33,9 +31,10 @@ import { CreditManager, CreditEventEmitter } from "@apoorwv/ducto";
 const emitter = new CreditEventEmitter();
 const manager = new CreditManager(store, engine, emitter, {
   policy: "strict_prepaid",
-  lowBalanceThreshold: new Decimal(25),
-  lowBalanceThresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
-  onLowBalance: (event) => triggerReload(event),
+  lowBalance: {
+    thresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
+    onTrigger: (event) => triggerReload(event),
+  },
   defaultTtlSeconds: 600,
 });
 ```
@@ -73,9 +72,18 @@ Publish a typed `PricingConfigData` and update the in-memory engine. Awaits the 
 
 ## Balance Operations
 
-### `addCredits(userId: string, amount: Decimal | number, type?: string, metadata?: CreditMetadata | null, expiresAt?: Date | null): Promise<AddCreditsResult>`
+### `addCredits(userId: string, amount: Decimal | number, options?: AddCreditsOptions): Promise<AddCreditsResult>`
 
-Add credits to a user's account. `type` defaults to `"adjustment"`. `expiresAt` creates time-bounded credits swept by `sweepExpiredCredits()`. Returns `{ transactionId, userId, amount, newBalance, lifetimePurchased }` (money as `Decimal`). Emits `credits.added`.
+Add credits to a user's account. `options` is `{ type?, metadata?, expiresAt? }` — `type` defaults to `"adjustment"`; `expiresAt` creates time-bounded credits swept by `sweepExpiredCredits()`. Returns `{ transactionId, userId, amount, newBalance, lifetimePurchased }` (money as `Decimal`). Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
+
+```typescript
+await manager.addCredits("user-1", 100, {
+  type: "purchase",
+  expiresAt: new Date("2025-01-01"),
+});
+```
+
+This replaces the old positional signature (`addCredits(userId, amount, type, metadata, expiresAt)`), which required threading `null` through unused positional params to reach `expiresAt`.
 
 ### `getBalance(userId: string): Promise<BalanceResult>`
 
@@ -87,7 +95,7 @@ Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and char
 
 ### `deductFixed(userId: string, jobName: string, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<DeductionResult>`
 
-Deduct a fixed cost (configured in the pricing `fixed` section). Throws `ConfigError` for an unknown/unconfigured `jobName` — never silently charges 0.
+Deduct a fixed cost (configured in the pricing `fixed` section, which may be fractional). Throws `ConfigError` for an unknown/unconfigured `jobName` — never silently charges 0. Fixed-cost jobs do not consume free inference allowance (this has always been `deductFixed`'s behavior in JS and is unchanged).
 
 ### `deductTeam(teamId: string, userId: string, metrics: UsageMetrics, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<TeamDeductionResult>`
 
@@ -136,7 +144,7 @@ console.log(result.amount.toString(), result.newBalance.toString());
 
 ## Lease Lifecycle / Financial Safety
 
-The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the conceptual guide. Lease-related constructor options (`policy`, `overdraftFloor`, `maxConcurrent`, `defaultTtlSeconds`) are documented in the [Constructor](#constructor) section above.
+The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the conceptual guide. Lease-related constructor options (`policy`, `overdraftFloor`, `maxConcurrent`, `lowBalance`, `defaultTtlSeconds`) are documented in the [Constructor](#constructor) section above.
 
 ### `reserve(userId: string, metricsOrAmount: UsageMetrics | Decimal | number, options?: ReserveOptions): Promise<LeaseResult>`
 
@@ -156,11 +164,13 @@ Extend a lease's TTL for long batch/agentic jobs. Returns `LeaseResult`; throws 
 
 ### `canAfford(userId: string, metricsOrAmount: UsageMetrics | Decimal | number, options?: CanAffordOptions): Promise<CanAffordResult>`
 
-Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. `CanAffordOptions`: `{ requiredFeature?, billingMode?, operationType? }`. Returns `{ affordable, available, worstCase, reason }` (money as `Decimal`).
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. `CanAffordOptions`: `{ requiredFeature?, billingMode?, operationType? }`. Returns `{ affordable, spendable, worstCase, reason }` (money as `Decimal`).
+
+`spendable` is the user's **effective spending power**: `balance − activeHolds + allowanceRemaining`. This is what actually determines whether `reserve()` will admit a given hold — use it to drive UI affordability checks (e.g. enabling a "Send" button). It is distinct from `AvailableResult.available` (see `getAvailable` below), which is cash-only and excludes allowance. (This field was renamed from `available` to `spendable` to remove the confusion with the unrelated `AvailableResult.available`.)
 
 ### `getAvailable(userId: string): Promise<AvailableResult>`
 
-Advisory `available = balance − reserved` read (UI only). Returns `{ userId, balance, reserved, available }` (money as `Decimal`).
+Advisory `available = balance − reserved` read (UI only) — **cash only**, excludes any free allowance. Returns `{ userId, balance, reserved, available }` (money as `Decimal`). Contrast with `CanAffordResult.spendable` above, which adds remaining allowance and reflects effective spending power.
 
 ### `runBilled<T>(userId: string, options: RunBilledOptions<T>): Promise<{ result: T; deduction: DeductionResult }>`
 
@@ -204,7 +214,7 @@ Both return `{ items: UserTransactionRow[], total: number }`. `listUsageEvents` 
 Sweep expired credits from all users' balances. `dryRun=true` reports what would be expired without modifying any balances. Returns `{ expiredCount, expiredAmount, dryRun }` (`expiredAmount` is `Decimal`). Emits `credits.expired` (only on non-dry-run with `expiredCount > 0`).
 
 ```typescript
-await manager.addCredits("user-1", 100, "purchase", null, new Date("2024-01-01"));
+await manager.addCredits("user-1", 100, { type: "purchase", expiresAt: new Date("2024-01-01") });
 const result = await manager.sweepExpiredCredits();
 // result.expiredCount === 1, result.expiredAmount === 100
 const dryRun = await manager.sweepExpiredCredits(true);

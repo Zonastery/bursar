@@ -128,8 +128,8 @@ class PricingEngine:
         return PricingConfigData(
             models=dict(self._config.models),
             tools=dict(self._config.tools),
-            search=dict(self._config.search),
-            cache=dict(self._config.cache),
+            search=self._config.search,
+            cache=self._config.cache,
             min_balance=self._config.min_balance,
             fixed=dict(self._config.fixed),
             plans=self._config.plans,
@@ -164,10 +164,11 @@ class PricingEngine:
         """Get the fixed credit cost for a named batch job.
 
         Returns ``None`` for an unknown / unconfigured job so callers (the
-        manager) can reject it rather than silently charging 0 (L1).
+        manager) can reject it rather than silently charging 0 (L1). Values
+        are already ``Decimal`` (fractional fixed costs are charged exactly).
         """
         if self._config.fixed and job_name in self._config.fixed:
-            return _q(Decimal(self._config.fixed[job_name]))
+            return _q(self._config.fixed[job_name])
         return None
 
     def _build_variables(self, metrics: UsageMetrics) -> dict[str, int]:
@@ -204,6 +205,12 @@ class PricingEngine:
 
         Uses specific tool formula if available, falls back to _default.
         No double-counting when a specific override exists.
+
+        Each branch gets its own ``this_tool_calls`` count — the specific
+        tool's own call count for a known-tool formula, or the unknown-call
+        count for the ``_default`` formula — while ``tool_calls`` in the base
+        ``variables`` dict always stays the GLOBAL total across all tools and
+        is never overridden here (WS2).
         """
         tools_config = self._config.tools
         default_expr = tools_config.get("_default", "tool_calls * 0")
@@ -214,28 +221,31 @@ class PricingEngine:
         seen_specific = set()
         for tool_name in tool_names:
             if tool_name in tools_config:
-                total += evaluate_expression(tools_config[tool_name], variables)
+                this_tool_count = sum(1 for t in metrics.tool_calls if t.name == tool_name)
+                local_vars = dict(variables)
+                local_vars["this_tool_calls"] = this_tool_count
+                total += evaluate_expression(tools_config[tool_name], local_vars)
                 seen_specific.add(tool_name)
 
         unknown_tool_count = sum(1 for t in metrics.tool_calls if t.name not in seen_specific)
         if unknown_tool_count > 0:
             local_vars = dict(variables)
-            local_vars["tool_calls"] = unknown_tool_count
+            local_vars["this_tool_calls"] = unknown_tool_count
             total += evaluate_expression(default_expr, local_vars)
 
         return total
 
     def _calc_search(self, variables: dict[str, int]) -> Decimal:
-        """Evaluate search cost expression if configured."""
-        if not self._config.search or "costs" not in self._config.search:
+        """Evaluate the search cost expression if configured."""
+        if not self._config.search:
             return Decimal(0)
-        return evaluate_expression(self._config.search["costs"], variables)
+        return evaluate_expression(self._config.search, variables)
 
     def _calc_cache(self, variables: dict[str, int]) -> Decimal:
-        """Evaluate cache discount expression if configured."""
-        if not self._config.cache or "discount" not in self._config.cache:
+        """Evaluate the cache discount expression if configured."""
+        if not self._config.cache:
             return Decimal(0)
-        return evaluate_expression(self._config.cache["discount"], variables)
+        return evaluate_expression(self._config.cache, variables)
 
     def _calc_fixed(self, metrics: UsageMetrics) -> Decimal:
         """Lookup fixed cost for a batch job, if applicable."""
@@ -243,5 +253,5 @@ class PricingEngine:
             return Decimal(0)
         job = metrics.fixed_job
         if job in self._config.fixed:
-            return Decimal(self._config.fixed[job])
+            return self._config.fixed[job]
         return Decimal(0)

@@ -27,12 +27,14 @@ Full `CreditStore` interface. All money arguments and result fields are `Decimal
 | Spend caps | `check_spend_cap(user_id, model?, amount?)` |
 | Refunds | `refund_credits(transaction_id, amount?, reason?, metadata?)` |
 | Expiry | `sweep_expired_credits(dry_run?)` |
-| Analytics | `spend_by_user(start, end)`, `spend_by_model(start, end)`, `top_users(limit, start, end)`, `daily_spend(start, end)`, `aggregate_stats(start, end)`, `list_user_transactions(user_id, types?, from_date?, to_date?, limit?, offset?)` |
-| Teams | `create_team(name, initial_balance?)`, `get_team_balance(team_id)`, `add_team_member(team_id, user_id, role?, spend_cap?)`, `get_team_members(team_id)`, `deduct_team(team_id, user_id, amount, metadata?, idempotency_key?)` |
+| Analytics *(optional)* | `spend_by_user(start, end)`, `spend_by_model(start, end)`, `top_users(limit, start, end)`, `daily_spend(start, end)`, `aggregate_stats(start, end)`, `list_user_transactions(user_id, types?, from_date?, to_date?, limit?, offset?)` |
+| Teams *(optional)* | `create_team(name, initial_balance?)`, `get_team_balance(team_id)`, `add_team_member(team_id, user_id, role?, spend_cap?)`, `get_team_members(team_id)`, `deduct_team(team_id, user_id, amount, metadata?, idempotency_key?)` |
 
 `deduct_with_allowance` is the atomic deduction path used by `CreditManager.deduct()`: it consumes free allowance, enforces spend caps and the balance floor, and debits the net — all in one transaction, idempotency-keyed. The `MemoryStore` guards every method with a re-entrant lock so this is atomic in-process too.
 
-The **lease lifecycle** methods (`create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available`) back the manager's `reserve()`/`settle()`/`release()`/`renew()`/`get_available()` API. Custom store implementations must implement all abstract methods; `check_feature` has a default implementation (calls `get_user_plan()` and inspects `features`) and may be overridden for optimized queries.
+The **lease lifecycle** methods (`create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available`) back the manager's `reserve()`/`settle()`/`release()`/`renew()`/`get_available()` API and are part of the **core** interface every store must implement.
+
+Rows marked *(optional)* — Analytics and Teams, along with `list_user_transactions` — have default implementations on `CreditStore` that raise `CapabilityNotSupportedError` unless overridden, so a minimal custom store can skip them entirely. `check_feature` also has a default implementation (calls `get_user_plan()` and inspects `features`) but is core, not optional — it's cheap to leave as-is and may be overridden purely for optimized queries. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full core-vs-optional breakdown.
 
 ## HttpxSupabaseStore
 
@@ -88,6 +90,8 @@ class MyStore(CreditStore):
     def get_balance(self, user_id: str) -> BalanceResult: ...
     def add_credits(self, user_id: str, amount: Decimal, **kwargs) -> AddCreditsResult: ...
     def deduct_with_allowance(self, user_id: str, amount: Decimal, **kwargs) -> DeductionResult: ...
-    # ... the remaining required methods (see the CreditStore base class)
+    # ... the remaining core methods (see the CreditStore base class)
     # `check_feature` has a default implementation, so it is optional to override.
+    # Analytics, `list_user_transactions`, and team methods are also optional: skip them
+    # entirely and the base class raises CapabilityNotSupportedError if a caller invokes one.
 ```
