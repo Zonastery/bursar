@@ -65,6 +65,7 @@ from ducto.interface.models import (
     SpendByUserRow,
     SweepResult,
     TeamDeductionResult,
+    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -258,9 +259,15 @@ class CreditManager:
         tx_type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
+        tier: str | None = None,
     ) -> AddCreditsResult:
-        """Add credits to a user's account (``amount`` is a ``Decimal``)."""
-        result = self._store.add_credits(user_id, Decimal(amount), tx_type, metadata, expires_at)
+        """Add credits to a user's account (``amount`` is a ``Decimal``).
+
+        ``tier`` is an optional tier key to grant into (see
+        :meth:`get_credit_tiers`); omitted resolves to the configured
+        ``is_default`` tier, or ``"default"`` when no tiers are configured.
+        """
+        result = self._store.add_credits(user_id, Decimal(amount), tx_type, metadata, expires_at, tier)
         self._emit(
             "credits.added",
             user_id,
@@ -667,6 +674,11 @@ class CreditManager:
     def get_available(self, user_id: str) -> AvailableResult:
         """Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3)."""
         return self._store.get_available(user_id)
+
+    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+        """Per-tier balance breakdown for a user (pure read, no event — matches
+        :meth:`get_balance`/:meth:`get_available`)."""
+        return self._store.get_credit_tiers(user_id)
 
     def check_allowance(self, user_id: str) -> AllowanceResult:
         """Get remaining free allowance for the current billing period (Fix 6).

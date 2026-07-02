@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, NonNegativeInt, model_validator
 
 from ducto.expr import ExpressionError, validate_expression
-from ducto.interface.models import PlanDefinition
+from ducto.interface.models import PlanDefinition, TierDefinition
 from ducto.metrics import METRIC_VARIABLES
 
 
@@ -31,6 +31,7 @@ class PricingConfig(BaseModel):
     signup_bonus: int = Field(default=50, ge=0)
     fixed: dict[str, NonNegativeInt] = Field(default_factory=dict)
     plans: dict[str, PlanDefinition] | None = None
+    tiers: dict[str, TierDefinition] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -57,7 +58,45 @@ class PricingConfig(BaseModel):
                 plan_names.append(name)
             if len(plan_names) != len(set(plan_names)):
                 raise ConfigError("duplicate plan names in pricing config")
+        cls._validate_tiers(data.get("tiers"))
         return data
+
+    @staticmethod
+    def _validate_tiers(tiers: Any) -> None:
+        """Validate the optional ``tiers`` section (reject ambiguous/conflicting config).
+
+        - An explicit empty ``tiers: {}`` is ambiguous (omit the key entirely
+          for "no tiers").
+        - At most one tier may set ``allow_overdraft=True``.
+        - At most one tier may set ``is_default=True``.
+        - ``default_ttl_days``, when set, must be ``> 0``.
+        """
+        if tiers is None:
+            return
+        if not isinstance(tiers, dict):
+            raise ConfigError("tiers must be a dict")
+        if len(tiers) == 0:
+            raise ConfigError("tiers must not be an empty dict — omit the 'tiers' key entirely for no tiers")
+
+        overdraft_count = 0
+        default_count = 0
+        for t in tiers.values():
+            if isinstance(t, dict):
+                allow_overdraft = t.get("allow_overdraft", False)
+                is_default = t.get("is_default", False)
+                ttl = t.get("default_ttl_days")
+            else:
+                allow_overdraft = getattr(t, "allow_overdraft", False)
+                is_default = getattr(t, "is_default", False)
+                ttl = getattr(t, "default_ttl_days", None)
+            overdraft_count += bool(allow_overdraft)
+            default_count += bool(is_default)
+            if ttl is not None and ttl <= 0:
+                raise ConfigError("tier default_ttl_days must be > 0 when set")
+        if overdraft_count > 1:
+            raise ConfigError("at most one tier may set allow_overdraft=True")
+        if default_count > 1:
+            raise ConfigError("at most one tier may set is_default=True")
 
     @model_validator(mode="after")
     def validate_expressions(self) -> "PricingConfig":
