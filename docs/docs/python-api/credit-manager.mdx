@@ -78,19 +78,29 @@ Publish a `PricingConfigData` object as the active config and rebuild the intern
 
 ## Balance Operations
 
-### `add_credits(user_id, amount, tx_type="adjustment", metadata=None, expires_at=None) -> AddCreditsResult`
+### `add_credits(user_id, amount, tx_type="adjustment", metadata=None, expires_at=None, tier=None) -> AddCreditsResult`
 
 Add credits to a user's account. `amount` is a `Decimal` (or `int`). `tx_type` is the transaction label (e.g. `"purchase"`, `"adjustment"`). `expires_at` sets an expiry datetime for time-bound credits. Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
 
-Returns `AddCreditsResult` with `transaction_id`, `amount`, `new_balance`, `lifetime_purchased`.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tier` | `str \| None` | `None` | Which configured [credit tier](/docs/configuration#credit-tiers) to grant into. Resolution: an explicit `tier` must match a configured tier key, else `StoreError("tier_not_found")`; when omitted, resolves to the tier with `is_default=true`, or raises `StoreError("tier_required")` if no tier is marked default. When no `tiers` are configured, `tier` must be `None` or `"default"`. |
+
+`expires_at` is reconciled against the resolved tier's `expires` flag: a non-expiring tier with an explicit `expires_at` raises `StoreError("tier_does_not_expire")`; an expiring tier with `expires_at` omitted falls back to the tier's `default_ttl_days`, or raises `StoreError("expires_at_required")` if that isn't configured either.
+
+Returns `AddCreditsResult` with `transaction_id`, `amount`, `new_balance`, `lifetime_purchased`, `tier`.
 
 ### `get_balance(user_id) -> BalanceResult`
 
 Return `BalanceResult` with `balance` and `lifetime_purchased`.
 
+### `get_credit_tiers(user_id) -> TierBalancesResult`
+
+Return the per-tier balance breakdown for a user. `TierBalancesResult` has `user_id`, `tiers: list[TierBalance]` (sorted by `priority` ascending), and `total_balance` (equal to `BalanceResult.balance`). Each `TierBalance` has `tier_key`, `name`, `priority`, `expires`, `balance`. When no `tiers` are configured, returns a single synthetic `"default"` entry so the shape is uniform either way.
+
 ### `deduct(user_id, metrics, idempotency_key=None, metadata=None)`
 
-Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deduct_with_allowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Returns a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowance_consumed`, `balance_after`, `idempotent` and `cap_warning`. Raises `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap) on failure. A zero/negative cost short-circuits to a zero-amount result.
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deduct_with_allowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Returns a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowance_consumed`, `balance_after`, `idempotent`, `cap_warning`, and `tier_breakdown` (`dict[str, Decimal] | None` — the exact per-tier split of the debit, present when tiers are configured). Raises `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap) on failure. A zero/negative cost short-circuits to a zero-amount result.
 
 ### `deduct_fixed(user_id, job_name, idempotency_key=None, metadata=None)`
 
@@ -139,6 +149,8 @@ assert result.balance_after == 10  # balance unchanged
 ### `refund_credits(transaction_id, amount=None, reason=None, metadata=None)`
 
 Refund a previous deduction. Supports partial refunds. On a business failure (over-refund, duplicate, refunding a refund/purchase, not found) `result.error` is set (`over_refund` / `already_refunded` / `not_found`), `credits.refund_failed` is emitted, and **no** `credits.refunded` event fires. Inspect `result.error` before treating it as success.
+
+`RefundResult` gains `tier_breakdown: dict[str, Decimal] | None`, restoring tiers LIFO (highest-priority-number tier — the last one drained — first). Refunding into an expiring tier restores only the tier's aggregate balance; it does not re-attach the original grant's exact expiry date.
 
 ```python
 result = manager.refund_credits(tx_id)
@@ -207,7 +219,7 @@ Time-windowed aggregation queries. All accept `start` / `end` `datetime` range.
 
 ### `sweep_expired_credits(dry_run=False)`
 
-Sweep expired credits from all users' balances. Dry-run reports without modifying.
+Sweep expired credits from all users' balances. Dry-run reports without modifying. `SweepResult` gains `expired_by_tier: dict[str, Decimal] | None`, re-scoping the sweep from per-user to per-`(user, tier)` — a tier's `expires` flag is only consulted at `add_credits` time, so a grant's fate is fixed regardless of later config changes.
 
 ```python
 manager.add_credits("user_1", 100, "purchase", expires_at=datetime(2024, 1, 1))

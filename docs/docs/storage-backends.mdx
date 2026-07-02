@@ -18,7 +18,7 @@ Every store implements `CreditStore`. All money arguments and return fields are 
 
 | Category | Methods |
 |----------|---------|
-| Balances | `get_balance`, `add_credits`, `deduct_with_allowance` |
+| Balances | `get_balance`, `add_credits`, `deduct_with_allowance`, `get_credit_tiers` |
 | Leases | `create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available` |
 | Pricing | `get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing` |
 | Plans | `get_user_plan`, `check_feature`, `set_user_plan`, `check_allowance`, `increment_usage_window` |
@@ -151,5 +151,6 @@ Fifteen bundled SQL files create the required schema:
 | `013_list_usage_events.sql` | `list_usage_events` RPC (REVOKE'd from `anon`/`authenticated`) |
 | `014_numeric_money.sql` | Widens money columns to `NUMERIC(18,4)` (idempotent, no-op on fresh installs) |
 | `015_atomic_deduct.sql` | `deduct_with_allowance` — the atomic allowance + cap + floor + debit RPC |
+| `023_credit_tiers.sql` | `credit_tiers` config table, `user_credit_tiers` per-user-per-tier balances, tier-aware rewrites of `credits_add`/`deduct_with_allowance`/`settle_lease`/`refund_credits`/`expire_credits`, new `get_user_credit_tiers` RPC |
 
 All DDL is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE`). Migrations return a `SetupResult` with `tables_created` (list of applied files), `rpcs_created`, and `errors`. Check `result.success` (true when `errors` is empty) before going further.

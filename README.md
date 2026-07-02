@@ -50,6 +50,7 @@ await manager.deduct("user_abc", { model: "gpt-4", inputTokens: 500, outputToken
 - **Database-backed pricing** — Live updates without redeploys. Dict loading for testing.
 - **Multi-dimensional** — Per-model, per-tool, search/RAG, cache discounts, fixed-cost jobs.
 - **Subscription plans** — Free monthly allowances consumed before balance deductions.
+- **Credit tiers** — Configurable priority-ordered credit buckets (e.g. gifted, purchased) with independent expiry rules and per-tier balance queries.
 - **Refunds** — Full and partial credit reversals with duplicate detection.
 - **Credit expiry** — Time-bound credits with low-water-mark sweep and dry-run mode.
 - **Team / shared balances** — Separate team credit pools with per-member spend caps.
