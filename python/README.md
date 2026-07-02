@@ -197,7 +197,10 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
       "name": "Free Tier",
       "free_allowance": 50000,
       "rate_overrides": { "_default": "input_tokens * 0.02 + output_tokens * 0.06" },
-      "features": { "max_concurrency": 1 }
+      "features": { "max_concurrency": 1, "background_removal": true },
+      "feature_limits": {
+        "background_removal": { "max_calls": 5, "period": "monthly", "action": "deny" }
+      }
     },
     "pro": {
       "id": "pro",
@@ -335,25 +338,20 @@ for callers that need a reservation step.
 
 ## SQL Migrations
 
-15 bundled migrations (`DATABASE_URL=… ducto migrate`):
+10 bundled migrations (`DATABASE_URL=… ducto migrate`):
 
 | File | Contents |
 |------|----------|
-| `001_credit_tables.sql` | Core tables + RLS |
-| `002_credit_rpcs.sql` | Balance RPCs |
-| `003_pricing_config.sql` | Config table + RPCs |
-| `004_user_plans.sql` | Plans + usage windows |
-| `005_credit_refunds.sql` | Refund RPC |
-| `006_credit_expiry.sql` | Expiry sweep RPC |
-| `007_usage_analytics.sql` | Analytics RPCs |
-| `008_team_balances.sql` | Teams + members |
-| `009_spend_caps.sql` | Spend cap RPC |
-| `010_aggregate_stats.sql` | Aggregate stats RPC |
-| `011_feature_entitlements.sql` | Feature entitlement RPC |
-| `012_list_transactions.sql` | List user transactions RPC |
-| `013_list_usage_events.sql` | List usage events RPC |
-| `014_numeric_money.sql` | Convert money columns to `NUMERIC(18,4)` |
-| `015_atomic_deduct.sql` | Atomic `deduct_with_allowance` RPC |
+| `001_core_schema.sql` | Core tables (`user_credits`, `credit_transactions`, `credit_reservations`) + RLS + signup bonus trigger |
+| `002_credit_rpcs.sql` | `credits_add`, `get_credits_balance` |
+| `003_pricing_config.sql` | Pricing config table + get/set/list/activate RPCs |
+| `004_plans.sql` | Subscription plans, usage windows, allowance RPCs |
+| `005_spend_caps.sql` | Spend cap table + `check_spend_cap` RPC |
+| `006_refunds_and_expiry.sql` | `refund_credits`, `expire_credits` |
+| `007_analytics.sql` | Analytics + transaction-listing RPCs |
+| `008_teams.sql` | Team balance pools + RPCs |
+| `009_deduct_and_leases.sql` | Atomic `deduct_with_allowance` + full lease lifecycle |
+| `010_credit_tiers.sql` | Configurable credit tiers (priority-ordered balance buckets) |
 
 ## Architecture
 

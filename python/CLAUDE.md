@@ -20,7 +20,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 | `src/ducto/events.py` | `CreditEventEmitter` — typed pub/sub, 14 event types. |
 | `src/ducto/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
 | `src/ducto/config.py` | `PricingConfig` — validates expression strings at load time. |
-| `src/ducto/sql/` | Numbered SQL migrations (`001_…` → `023_…`). `016` adds the lease lifecycle; `023` adds configurable credit tiers (priority-ordered balance buckets). |
+| `src/ducto/sql/` | Numbered SQL migrations, one per feature domain (`001_core_schema.sql` → `012_feature_limits.sql`). `009_deduct_and_leases.sql` has the atomic deduct + full lease lifecycle; `010_credit_tiers.sql` adds configurable credit tiers (priority-ordered balance buckets); `011_lazy_expiry.sql` adds lazy per-user credit expiry + idempotent `add_credits`; `012_feature_limits.sql` adds the `check_feature_limit` RPC for per-feature invocation-count limits (ledger-derived count over `credit_transactions`, no new table — `011_feature_limits.sql` was unavailable since `011_lazy_expiry.sql` already claimed that slot). All idempotent — `setup()` re-applies every file on every run. |
 | `src/ducto/__init__.py` | Package exports — everything users `import from ducto`. |
 
 ## Architecture

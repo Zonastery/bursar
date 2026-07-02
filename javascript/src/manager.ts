@@ -3,6 +3,7 @@ import {
   CapReachedError,
   ConcurrencyLimitError,
   ConfigError,
+  FeatureLimitReachedError,
   FeatureNotEntitledError,
   InsufficientCreditsError,
   LeaseExpiredError,
@@ -25,6 +26,8 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   OperationPolicy,
@@ -47,7 +50,7 @@ import type {
 import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
-import { resolveAllowanceWindow } from "./allowance.js";
+import { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 
 /**
  * Default `low_balance` threshold multiplier (contract §6 / M18). The event
@@ -120,6 +123,18 @@ export interface CreditManagerOptions {
   lowBalance?: LowBalanceConfig | null;
   /** Default lease TTL (seconds) for ``reserve``/``runBilled`` (default 600). */
   defaultTtlSeconds?: number;
+  /**
+   * Enable lazy-on-read credit expiry (default ``false``, unchanged behaviour).
+   *
+   * Allowance windows and lease TTLs are already lazy-on-read (checked via
+   * `expiresAt`/window filters at read time); credit expiry otherwise requires
+   * an explicit ``sweepExpiredCredits`` call (e.g. from a cron job). When
+   * ``true``, the manager transparently sweeps a user's own expired credits
+   * (scoped to that user — never a global sweep) before ``getBalance``,
+   * ``getCreditTiers``, ``deduct``, ``deductFixed``, ``deductTeam``,
+   * ``reserve``, and ``settle`` so a caller never needs to run a cron job.
+   */
+  lazyExpiry?: boolean;
 }
 
 /** Options for {@link CreditManager.reserve}. */
@@ -129,12 +144,20 @@ export interface ReserveOptions {
   requiredFeature?: string | null;
   ttl?: number | null;
   metadata?: CreditMetadata | null;
+  /** Named feature to enforce/tag a per-feature invocation-count limit for (independent of `requiredFeature`). */
+  feature?: string | null;
 }
 
 /** Options for {@link CreditManager.settle}. */
 export interface SettleOptions {
   idempotencyKey?: string | null;
   metadata?: CreditMetadata | null;
+  /**
+   * The same feature name supplied to `reserve` — re-supplied at settle time
+   * for accurate per-feature invocation-count accounting, exactly like `model`
+   * is re-supplied at settle for per-model spend-cap accuracy.
+   */
+  feature?: string | null;
 }
 
 /** Options for {@link CreditManager.canAfford}. */
@@ -142,6 +165,31 @@ export interface CanAffordOptions {
   requiredFeature?: string | null;
   billingMode?: BillingMode | null;
   operationType?: string;
+}
+
+/** Options for {@link CreditManager.grantSubscriptionCycle}. */
+export interface GrantSubscriptionCycleOptions {
+  /** Target credit tier for the granted cycle. Defaults to ``"subscription"``. */
+  tier?: string;
+  /** Explicit expiry for the granted cycle. Mutually exclusive with ``ttlDays``. */
+  expiresAt?: Date;
+  /** TTL in days from now for the granted cycle. Mutually exclusive with ``expiresAt``. */
+  ttlDays?: number;
+  /**
+   * Expire any remaining balance in ``tier`` before granting the new cycle
+   * (default ``true``) — the usual "use it or lose it" subscription semantics.
+   * When ``false``, the new cycle's credits are added on top of any leftover
+   * balance.
+   */
+  replacePrior?: boolean;
+  /** Optional plan to assign after granting (e.g. resolved from a webhook's price/plan id). */
+  planKey?: string;
+  /**
+   * Replay-safe idempotency key — safe to call again with the same key on
+   * webhook redelivery (e.g. Stripe's at-least-once delivery guarantee).
+   */
+  idempotencyKey?: string;
+  metadata?: CreditMetadata | null;
 }
 
 /** Options for {@link CreditManager.runBilled}. */
@@ -153,6 +201,8 @@ export interface RunBilledOptions<T> {
   requiredFeature?: string | null;
   idempotencyKey?: string | null;
   ttl?: number | null;
+  /** Named feature to enforce/tag a per-feature invocation-count limit for (independent of `requiredFeature`). */
+  feature?: string | null;
 }
 
 /**
@@ -184,6 +234,10 @@ export class CreditManager {
   // "unconfigured" — falls back to `[minBalance * LOW_BALANCE_MULTIPLIER]` lazily.
   private lowBalanceThresholds: Decimal[] | null;
   private onLowBalance: ((event: CreditEvent) => void | Promise<void>) | null;
+  // Lazy-on-read credit expiry (closes the gap with allowance windows/lease
+  // TTLs, which are already lazy-on-read). Default `false` — unchanged
+  // behaviour; explicit `sweepExpiredCredits`/cron remains required.
+  private lazyExpiry: boolean;
   // Edge-trigger state: per-user set of thresholds currently breached ("below"),
   // keyed by `.toString()`. A level re-arms only after the balance climbs back
   // above it (a top-up).
@@ -213,6 +267,7 @@ export class CreditManager {
       ? options.lowBalance.thresholds.map(toDecimal).sort((a, b) => b.comparedTo(a))
       : null;
     this.onLowBalance = options?.lowBalance?.onTrigger ?? null;
+    this.lazyExpiry = options?.lazyExpiry ?? false;
   }
 
   /** Emit a credit lifecycle event. No-op if no emitter is configured. */
@@ -327,8 +382,58 @@ export class CreditManager {
     return this.store.checkFeature(userId, feature);
   }
 
+  /**
+   * Advisory, non-locking read of a per-feature invocation-count limit (UI only).
+   *
+   * Resolves the `FeatureLimit` (if any) from the user's plan and the
+   * calendar-aligned window, then delegates counting to the store. Returns
+   * `limited: false` (zeroed fields, `action: null`) when no `FeatureLimit`
+   * is configured for `feature` on the user's plan — never used for
+   * admission control; that is exclusively the atomic check-and-increment
+   * inside `deduct`/`reserve`.
+   */
+  async checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult> {
+    const { limit, periodStart, periodEnd } = await this.resolveFeatureLimit(userId, feature);
+    if (limit == null || periodStart == null || periodEnd == null) {
+      return {
+        userId,
+        feature,
+        limited: false,
+        limit: 0,
+        used: 0,
+        remaining: 0,
+        periodStart: "",
+        periodEnd: "",
+        action: null,
+      };
+    }
+    const result = await this.store.checkFeatureLimit(
+      userId,
+      feature,
+      limit.maxCalls,
+      periodStart,
+      periodEnd,
+    );
+    // The store only counts; the manager (which owns plan lookup) overrides
+    // `limited`/`action` from the resolved FeatureLimit (mirrors how
+    // checkAllowance overrides periodEnd after the store call).
+    return { ...result, limited: true, action: limit.action };
+  }
+
+  /**
+   * Sweep a single user's own expired credits when ``options.lazyExpiry`` is
+   * enabled — no-op otherwise. Mirrors the fact that allowance windows and
+   * lease TTLs are already lazy-on-read; this closes the same gap for the
+   * stored aggregate expiry balance without requiring a cron job.
+   */
+  private async maybeLazyExpire(userId: string): Promise<void> {
+    if (!this.lazyExpiry) return;
+    await this.runSweep(false, userId);
+  }
+
   /** Get a user's current credit balance. */
   async getBalance(userId: string): Promise<BalanceResult> {
+    await this.maybeLazyExpire(userId);
     return await this.store.getBalance(userId);
   }
 
@@ -342,6 +447,8 @@ export class CreditManager {
       expiresAt?: Date | null;
       /** Target credit tier (credit tiers); omitted resolves to the config's default tier. */
       tier?: string | null;
+      /** Replay-safe idempotency key (parity with `deduct`/`settle`/`refund`). */
+      idempotencyKey?: string | null;
     },
   ): Promise<AddCreditsResult> {
     const type = options?.type ?? "adjustment";
@@ -352,12 +459,14 @@ export class CreditManager {
       options?.metadata,
       options?.expiresAt,
       options?.tier,
+      options?.idempotencyKey,
     );
     this.emit("credits.added", userId, {
       transactionId: result.transactionId,
       amount: result.amount,
       newBalance: result.newBalance,
       type,
+      idempotent: result.idempotent ?? false,
     });
     // Re-arm multi-level low_balance: any level the topped-up balance is now back
     // above can fire again on the next descent (interface plan §6).
@@ -368,6 +477,100 @@ export class CreditManager {
         if (result.newBalance.gt(t)) below.delete(t.toString());
       }
     }
+    return result;
+  }
+
+  /**
+   * Grant one billing-cycle's worth of credits — idempotent-safe for a
+   * payment-provider webhook handler (Stripe, etc. — ducto stays
+   * provider-agnostic) to call even on webhook redelivery.
+   *
+   * 1. At most one of ``expiresAt``/``ttlDays`` may be given (throws
+   *    ``ConfigError`` otherwise).
+   * 2. When ``ttlDays`` is given, ``expiresAt = now + ttlDays`` days.
+   * 3. When ``replacePrior`` (default ``true``), any remaining balance in
+   *    ``tier`` is expired immediately via a direct ``store.addCredits``
+   *    negative adjustment — naturally idempotent (a replay finds the tier
+   *    already at zero and skips the call).
+   * 4. The new cycle is granted via a direct ``store.addCredits`` call
+   *    (bypassing {@link addCredits} so only ``credits.cycle_renewed`` fires,
+   *    not a duplicate ``credits.added``), threading ``idempotencyKey`` so a
+   *    redelivered webhook replays the prior grant instead of double-crediting.
+   * 5. When ``planKey`` is given, assigns it via {@link setUserPlan}.
+   * 6. Emits ``credits.cycle_renewed`` and returns the grant result.
+   */
+  async grantSubscriptionCycle(
+    userId: string,
+    amount: Decimal | number,
+    options?: GrantSubscriptionCycleOptions,
+  ): Promise<AddCreditsResult> {
+    if (options?.expiresAt != null && options?.ttlDays != null) {
+      throw new ConfigError(
+        "grantSubscriptionCycle: specify at most one of 'expiresAt' or 'ttlDays', not both",
+      );
+    }
+    const tier = options?.tier ?? "subscription";
+    const replacePrior = options?.replacePrior ?? true;
+    const expiresAt: Date | undefined =
+      options?.ttlDays != null
+        ? new Date(Date.now() + options.ttlDays * 86_400_000)
+        : options?.expiresAt;
+    const amountDec = toDecimal(amount);
+
+    // Snapshot the tier's leftover balance and lifetimePurchased BEFORE granting.
+    // A redelivered webhook must be a full no-op -- including skipping the
+    // replace-prior wipe below -- not just avoiding a double-grant. AddCreditsResult
+    // carries no reliable cross-store "was this a replay" flag (Postgres/Supabase
+    // never populate `idempotent`), so a genuine new grant is detected after the
+    // fact by checking whether lifetimePurchased actually moved by `amountDec`; an
+    // idempotent replay leaves it unchanged.
+    let priorLeftover = new Decimal(0);
+    let preLifetimePurchased = new Decimal(0);
+    if (replacePrior) {
+      const tiersBefore = await this.getCreditTiers(userId);
+      const current = tiersBefore.tiers.find((t) => t.tierKey === tier);
+      if (current) priorLeftover = current.balance;
+      preLifetimePurchased = (await this.getBalance(userId)).lifetimePurchased;
+    }
+
+    let result = await this.store.addCredits(
+      userId,
+      amountDec,
+      "purchase",
+      options?.metadata,
+      expiresAt,
+      tier,
+      options?.idempotencyKey,
+    );
+
+    const isFreshGrant = result.lifetimePurchased.minus(preLifetimePurchased).eq(amountDec);
+    if (replacePrior && isFreshGrant && priorLeftover.gt(0)) {
+      await this.store.addCredits(
+        userId,
+        priorLeftover.negated(),
+        "adjustment",
+        { reason: "cycle_replaced" },
+        undefined,
+        tier,
+      );
+      // Reflect the post-replace balance so the returned result is accurate
+      // (the grant call above only knows the pre-replace balance).
+      result = { ...result, newBalance: (await this.getBalance(userId)).balance };
+    }
+
+    if (options?.planKey) {
+      await this.setUserPlan(userId, options.planKey);
+    }
+
+    this.emit("credits.cycle_renewed", userId, {
+      transactionId: result.transactionId,
+      amount: amountDec,
+      newBalance: result.newBalance,
+      tier,
+      planKey: options?.planKey ?? null,
+      idempotencyKey: options?.idempotencyKey ?? null,
+    });
+
     return result;
   }
 
@@ -469,6 +672,32 @@ export class CreditManager {
   }
 
   /**
+   * Resolve the `FeatureLimit` (if any) configured for `feature` on the
+   * user's plan, plus the calendar-aligned `[start, end)` window it applies
+   * to (via {@link resolveCalendarWindow}).
+   *
+   * Returns `{ limit: null, periodStart: null, periodEnd: null }` when
+   * `feature` is omitted or no limit is configured for it — the store then
+   * skips enforcement entirely (mirrors `resolveAllowancePeriodStart`).
+   */
+  private async resolveFeatureLimit(
+    userId: string,
+    feature?: string | null,
+  ): Promise<{ limit: FeatureLimit | null; periodStart: Date | null; periodEnd: Date | null }> {
+    if (feature == null) return { limit: null, periodStart: null, periodEnd: null };
+    let plan: GetUserPlanResult | null;
+    try {
+      plan = await this.store.getUserPlan(userId);
+    } catch {
+      return { limit: null, periodStart: null, periodEnd: null };
+    }
+    const limit = plan?.featureLimits?.[feature] ?? null;
+    if (limit == null) return { limit: null, periodStart: null, periodEnd: null };
+    const { start, end } = resolveCalendarWindow(new Date(), limit.period);
+    return { limit, periodStart: start, periodEnd: end };
+  }
+
+  /**
    * Compute the credit cost and model from metrics, or pass a raw amount through.
    *
    * For {@link UsageMetrics} the cost is ``engine.calculate(...).total`` (exact
@@ -494,6 +723,8 @@ export class CreditManager {
         throw new ConcurrencyLimitError(`Concurrency limit reached. user=${userId}`);
       case "cap_reached":
         throw new CapReachedError(`Spend cap exceeded. user=${userId}, requested=${amount}`);
+      case "feature_limit_reached":
+        throw new FeatureLimitReachedError(`Feature limit reached. user=${userId}`);
       case "feature_not_entitled":
         throw new FeatureNotEntitledError(`Feature not entitled. user=${userId}`);
       case "insufficient_credits":
@@ -526,6 +757,7 @@ export class CreditManager {
     metricsOrAmount: MetricsOrAmount,
     options?: ReserveOptions,
   ): Promise<LeaseResult> {
+    await this.maybeLazyExpire(userId);
     const operationType = options?.operationType ?? "usage";
     const requiredFeature = options?.requiredFeature ?? null;
 
@@ -543,6 +775,11 @@ export class CreditManager {
     const { amount, model } = this.costOf(metricsOrAmount);
     const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
     const periodStart = await this.resolveAllowancePeriodStart(userId);
+    const feature = options?.feature ?? null;
+    const { limit: featureLimit, periodStart: featurePeriodStart } = await this.resolveFeatureLimit(
+      userId,
+      feature,
+    );
 
     const result = await this.store.createLease(userId, amount, operationType, {
       billingMode: policy.billingMode,
@@ -553,6 +790,9 @@ export class CreditManager {
       overdraftFloor: policy.overdraftFloor,
       metadata: options?.metadata,
       periodStart,
+      feature,
+      featureLimit,
+      featurePeriodStart,
     });
 
     if (result.error) {
@@ -591,6 +831,7 @@ export class CreditManager {
     metricsOrAmount: MetricsOrAmount,
     options?: SettleOptions,
   ): Promise<DeductionResult> {
+    await this.maybeLazyExpire(userId);
     const idempotencyKey = options?.idempotencyKey ?? null;
     const { amount, model } = this.costOf(metricsOrAmount);
 
@@ -618,6 +859,13 @@ export class CreditManager {
     }
 
     const periodStart = await this.resolveAllowancePeriodStart(userId);
+    // The caller re-supplies the same `feature` at settle as at reserve time,
+    // exactly like `model` is re-supplied for per-model spend-cap accuracy.
+    const feature = options?.feature ?? null;
+    const { limit: featureLimit, periodStart: featurePeriodStart } = await this.resolveFeatureLimit(
+      userId,
+      feature,
+    );
 
     const result = await this.store.settleLease(userId, leaseId, amount, {
       idempotencyKey,
@@ -625,6 +873,9 @@ export class CreditManager {
       model,
       metadata: txMeta as CreditMetadata,
       periodStart,
+      feature,
+      featureLimit,
+      featurePeriodStart,
     });
 
     if (result.error) {
@@ -667,6 +918,22 @@ export class CreditManager {
       });
     }
 
+    // Feature-limit signal: mirrors the cap signal above ("prefer deny" was
+    // already applied by the store when choosing featureLimitWarning).
+    if (result.featureLimitWarning === "deny") {
+      this.emit("credits.feature_limit_reached", userId, {
+        feature,
+        amount: result.amount,
+        blocking: false,
+      });
+    } else if (result.featureLimitWarning === "warn" || result.featureLimitWarning === "notify") {
+      this.emit("credits.feature_limit_warning", userId, {
+        feature,
+        action: result.featureLimitWarning,
+        amount: result.amount,
+      });
+    }
+
     await this.postChargeSignals(userId, result);
     return result;
   }
@@ -706,6 +973,7 @@ export class CreditManager {
     metricsOrAmount: MetricsOrAmount,
     options?: CanAffordOptions,
   ): Promise<CanAffordResult> {
+    await this.maybeLazyExpire(userId);
     const operationType = options?.operationType ?? "usage";
     const requiredFeature = options?.requiredFeature ?? null;
     const { amount: worstCase } = this.costOf(metricsOrAmount);
@@ -732,11 +1000,13 @@ export class CreditManager {
 
   /** Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3). */
   async getAvailable(userId: string): Promise<AvailableResult> {
+    await this.maybeLazyExpire(userId);
     return await this.store.getAvailable(userId);
   }
 
   /** Get a user's per-tier credit balances (credit tiers). Thin pass-through, no event emission. */
   async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+    await this.maybeLazyExpire(userId);
     return await this.store.getCreditTiers(userId);
   }
 
@@ -764,7 +1034,7 @@ export class CreditManager {
     );
     const result = await this.store.checkAllowance(userId, start);
     // The store/SQL layer only knows a generic calendar-month periodEnd (see
-    // 022_configurable_allowance_window.sql); override it here with the
+    // 004_plans.sql / 009_deduct_and_leases.sql); override it here with the
     // authoritative window this manager resolved.
     const periodEnd = new Date(end.getTime() - 86_400_000);
     return {
@@ -792,6 +1062,7 @@ export class CreditManager {
       billingMode: options.billingMode,
       requiredFeature: options.requiredFeature,
       ttl: options.ttl,
+      feature: options.feature,
     });
 
     let workResult: T;
@@ -805,6 +1076,7 @@ export class CreditManager {
 
     const deduction = await this.settle(userId, lease.leaseId, actual, {
       idempotencyKey: options.idempotencyKey,
+      feature: options.feature,
     });
     return { result: workResult, deduction };
   }
@@ -902,7 +1174,10 @@ export class CreditManager {
     metrics: UsageMetrics,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
+    /** Named feature to enforce/tag a per-feature invocation-count limit for. */
+    feature?: string | null,
   ): Promise<DeductionResult> {
+    await this.maybeLazyExpire(userId);
     if (!this.engine)
       throw new PricingNotLoadedError(
         "pricing not loaded: call loadPricingFromStore or publishPricing first",
@@ -923,6 +1198,7 @@ export class CreditManager {
         balanceAfter: balance.balance,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
       };
       this.emit("credits.deducted", userId, {
         amount: new Decimal(0),
@@ -948,6 +1224,10 @@ export class CreditManager {
     if (idempotencyKey) meta["idempotencyKey"] = idempotencyKey;
 
     const periodStart = await this.resolveAllowancePeriodStart(userId);
+    const { limit: featureLimit, periodStart: featurePeriodStart } = await this.resolveFeatureLimit(
+      userId,
+      feature,
+    );
 
     const options: DeductWithAllowanceOptions = {
       idempotencyKey: idempotencyKey ?? null,
@@ -955,6 +1235,9 @@ export class CreditManager {
       model: metrics.model ?? null,
       metadata: meta as CreditMetadata,
       periodStart,
+      feature: feature ?? null,
+      featureLimit,
+      featurePeriodStart,
     };
 
     // 3) Atomic charge.
@@ -968,6 +1251,14 @@ export class CreditManager {
       });
       if (result.error === "cap_reached") {
         throw new CapReachedError(`Spend cap exceeded for user ${userId} (requested ${cost})`);
+      }
+      if (result.error === "feature_limit_reached") {
+        this.emit("credits.feature_limit_reached", userId, {
+          feature,
+          amount: cost,
+          model: metrics.model ?? null,
+        });
+        throw new FeatureLimitReachedError(`Feature limit exceeded for '${feature}'. user=${userId}`);
       }
       // insufficient_credits, invalid_amount, and any other business error.
       throw new InsufficientCreditsError(
@@ -990,6 +1281,19 @@ export class CreditManager {
         action: result.capWarning,
         amount: result.amount,
         model: metrics.model ?? null,
+      });
+    }
+
+    // Non-blocking feature-limit signal surfaced by the store (parallels
+    // capWarning above). A 'deny' feature limit never reaches here — it
+    // aborts in the error path — so only warn/notify can appear here.
+    if (result.featureLimitWarning === "warn" || result.featureLimitWarning === "notify") {
+      this.emit("credits.feature_limit_warning", userId, {
+        feature,
+        balanceAfter: result.balanceAfter,
+        amount: result.amount,
+        model: metrics.model ?? null,
+        action: result.featureLimitWarning,
       });
     }
 
@@ -1061,6 +1365,9 @@ export class CreditManager {
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<TeamDeductionResult> {
+    // Lazy expiry is scoped to the individual member's credits, not the team's
+    // shared pool — there's no per-team expiry concept.
+    await this.maybeLazyExpire(userId);
     if (!this.engine)
       throw new PricingNotLoadedError(
         "pricing not loaded: call loadPricingFromStore or publishPricing first",
@@ -1118,6 +1425,7 @@ export class CreditManager {
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
   ): Promise<DeductionResult> {
+    await this.maybeLazyExpire(userId);
     if (!this.engine)
       throw new PricingNotLoadedError(
         "pricing not loaded: call loadPricingFromStore or publishPricing first",
@@ -1131,20 +1439,30 @@ export class CreditManager {
   }
 
   /**
-   * Sweep expired credits from all users' balances.
-   *
-   * When ``dryRun`` is true, reports what would be expired without modifying
-   * any balances.
+   * Sweep expired credits — global when ``userId`` is omitted, scoped to a
+   * single user when given (used by ``maybeLazyExpire``). Shared by the public
+   * ``sweepExpiredCredits`` (always global) and the lazy-on-read trigger.
    */
-  async sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult> {
-    const result = await this.store.sweepExpiredCredits(dryRun);
+  private async runSweep(dryRun: boolean, userId?: string): Promise<SweepResult> {
+    const result = await this.store.sweepExpiredCredits(dryRun, userId);
     if (!dryRun && result.expiredCount > 0) {
-      this.emit("credits.expired", "system", {
+      this.emit("credits.expired", userId ?? "system", {
         expiredCount: result.expiredCount,
         expiredAmount: result.expiredAmount,
       });
     }
     return result;
+  }
+
+  /**
+   * Sweep expired credits from all users' balances.
+   *
+   * When ``dryRun`` is true, reports what would be expired without modifying
+   * any balances. Unaffected by ``options.lazyExpiry`` — this always runs a
+   * global sweep; lazy expiry only scopes *automatic* per-user sweeps.
+   */
+  async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
+    return await this.runSweep(dryRun, undefined);
   }
 
   // ── Usage analytics ──────────────────────────────────────────────────

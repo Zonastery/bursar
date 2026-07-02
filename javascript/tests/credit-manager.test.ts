@@ -7,6 +7,7 @@ import type { CreditEvent } from "../src/stores/events.js";
 import {
   CapReachedError,
   ConfigError,
+  FeatureLimitReachedError,
   InsufficientCreditsError,
   PricingNotLoadedError,
   RefundError,
@@ -1510,5 +1511,177 @@ describe("CreditManager", () => {
       expect(result.tierBreakdown?.gifted?.toString()).toBe("20");
       expect(result.tierBreakdown?.purchased?.toString()).toBe("5");
     });
+  });
+});
+
+// ── Feature limits (per-feature invocation-count limits) ───────────────────
+//
+// Manager wiring: `feature` kwarg on `deduct`/`reserve`/`settle`/`runBilled`,
+// error mapping (`feature_limit_reached` -> FeatureLimitReachedError), event
+// emission (`credits.feature_limit_reached`/`credits.feature_limit_warning`),
+// and the public `checkFeatureLimit` method — mirrors the existing
+// `TestSpendCapsManager`-equivalent coverage above (spend caps).
+describe("CreditManager — feature limits", () => {
+  let store: MemoryStore;
+  let manager: CreditManager;
+
+  // NOTE: unlike most other describe blocks in this file, the store's clock is
+  // NOT overridden here. `resolveCalendarWindow` (feature-limit window
+  // resolution) is invoked by the manager against the REAL wall clock —
+  // mirrors Python `_resolve_feature_limit` (`datetime.now(UTC)`), matching
+  // how `_resolve_allowance_period_start` also uses real time for non-
+  // calendar-month periods. Pinning the store's clock to a fixed instant
+  // while the manager resolves windows against real time would desync
+  // transaction timestamps from the resolved window, so both must share the
+  // real clock here.
+  beforeEach(() => {
+    store = new MemoryStore();
+    manager = new CreditManager(store);
+  });
+
+  const FEATURE_LIMIT_CONFIG: PricingConfigData = {
+    models: { _default: "input_tokens * 1" },
+    plans: {
+      free: {
+        id: "free",
+        name: "Free",
+        freeAllowance: D(0),
+        featureLimits: {
+          export: { maxCalls: 2, period: "monthly", action: "deny" },
+          hdExport: { maxCalls: 1, period: "monthly", action: "warn" },
+        },
+      },
+    },
+  };
+
+  function D(n: number | string): Decimal {
+    return new Decimal(n);
+  }
+
+  it("deduct(feature=...) under the limit succeeds; at the limit throws FeatureLimitReachedError", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+
+    const r1 = await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+    expect(r1.error).toBeUndefined();
+    const r2 = await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+    expect(r2.error).toBeUndefined();
+
+    await expect(manager.deduct("user-1", { inputTokens: 1 }, null, null, "export")).rejects.toThrow(
+      FeatureLimitReachedError,
+    );
+  });
+
+  it("deduct(feature=...) emits credits.feature_limit_reached on breach", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+    const emitter = new CreditEventEmitter();
+    manager = new CreditManager(store, undefined, emitter);
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    const events = record(emitter, ["credits.feature_limit_reached", "credits.deduct_failed"]);
+
+    await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+    await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+    await expect(manager.deduct("user-1", { inputTokens: 1 }, null, null, "export")).rejects.toThrow(
+      FeatureLimitReachedError,
+    );
+
+    const reached = events.filter((e) => e.type === "credits.feature_limit_reached");
+    expect(reached).toHaveLength(1);
+    expect(reached[0]?.data?.feature).toBe("export");
+  });
+
+  it("deduct(feature=...) warn action emits credits.feature_limit_warning without blocking", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+    const emitter = new CreditEventEmitter();
+    manager = new CreditManager(store, undefined, emitter);
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    const events = record(emitter, ["credits.feature_limit_warning"]);
+
+    await manager.deduct("user-1", { inputTokens: 1 }, null, null, "hdExport");
+    const r2 = await manager.deduct("user-1", { inputTokens: 1 }, null, null, "hdExport");
+    expect(r2.error).toBeUndefined();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data?.action).toBe("warn");
+    expect(events[0]?.data?.feature).toBe("hdExport");
+  });
+
+  it("reserve(feature=...) enforces deny at admission; settle(feature=...) re-supplies the feature", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+
+    const l1 = await manager.reserve("user-1", D(1), { feature: "export" });
+    await manager.settle("user-1", l1.leaseId, D(1), { feature: "export" });
+    const l2 = await manager.reserve("user-1", D(1), { feature: "export" });
+    await manager.settle("user-1", l2.leaseId, D(1), { feature: "export" });
+
+    await expect(manager.reserve("user-1", D(1), { feature: "export" })).rejects.toThrow(
+      FeatureLimitReachedError,
+    );
+  });
+
+  it("runBilled(feature=...) threads the feature through reserve and settle", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+
+    await manager.runBilled("user-1", {
+      estimate: D(1),
+      doWork: async () => ({ result: "ok", actual: D(1) }),
+      feature: "export",
+    });
+    await manager.runBilled("user-1", {
+      estimate: D(1),
+      doWork: async () => ({ result: "ok", actual: D(1) }),
+      feature: "export",
+    });
+
+    await expect(
+      manager.runBilled("user-1", {
+        estimate: D(1),
+        doWork: async () => ({ result: "ok", actual: D(1) }),
+        feature: "export",
+      }),
+    ).rejects.toThrow(FeatureLimitReachedError);
+  });
+
+  it("checkFeatureLimit returns limited:false when no limit is configured for the feature", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+
+    const result = await manager.checkFeatureLimit("user-1", "unconfigured-feature");
+    expect(result.limited).toBe(false);
+    expect(result.action).toBeNull();
+  });
+
+  it("checkFeatureLimit resolves the configured limit and current usage", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.setUserPlan("user-1", "free");
+    await manager.addCredits("user-1", 100);
+
+    await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+
+    const result = await manager.checkFeatureLimit("user-1", "export");
+    expect(result.limited).toBe(true);
+    expect(result.limit).toBe(2);
+    expect(result.used).toBe(1);
+    expect(result.remaining).toBe(1);
+    expect(result.action).toBe("deny");
+  });
+
+  it("planless user: no feature limit is ever enforced", async () => {
+    await manager.publishPricingFromDict(FEATURE_LIMIT_CONFIG);
+    await manager.addCredits("user-1", 100);
+
+    for (let i = 0; i < 5; i++) {
+      const r = await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
+      expect(r.error).toBeUndefined();
+    }
   });
 });

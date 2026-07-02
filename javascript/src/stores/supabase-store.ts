@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
+import { resolveCalendarWindow } from "../allowance.js";
 import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
@@ -16,6 +17,8 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   ListTransactionsOptions,
@@ -65,6 +68,17 @@ function decParam(value: Decimal): string {
 }
 
 /**
+ * Derive the feature-limit window END from its (already calendar-aligned)
+ * START — the manager only resolves/threads the start (mirrors Python
+ * `base.py`); the RPC needs an explicit end for its `WHERE` clause, so this
+ * store computes it via `resolveCalendarWindow` (idempotent on an aligned
+ * start — re-resolving it yields the identical window).
+ */
+function featureWindowEnd(start: Date, period: FeatureLimit["period"]): Date {
+  return resolveCalendarWindow(start, period).end;
+}
+
+/**
  * Parse a JSON `{tier_key: "3.0000", ...}` object (e.g. `tier_breakdown`,
  * `expired_by_tier`) into `Record<string, Decimal>`, converting every value
  * the same way scalar money fields are (never left as a raw string/number).
@@ -75,6 +89,21 @@ function decRecord(raw: unknown): Record<string, Decimal> | null {
   const out: Record<string, Decimal> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     out[k] = dec(v);
+  }
+  return out;
+}
+
+/** Parse the ``feature_limits`` JSONB map into typed `FeatureLimit` records. */
+function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, FeatureLimit> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const fl = (v ?? {}) as Record<string, unknown>;
+    out[k] = {
+      maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
+      period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
+      action: (String(fl.action ?? "deny") as FeatureLimit["action"]) ?? "deny",
+    };
   }
   return out;
 }
@@ -232,6 +261,11 @@ export class HttpxSupabaseStore extends CreditStore {
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
     tier?: string | null,
+    // NOTE: threaded through defensively as a new named param to the
+    // `credits_add` RPC. Confirm the SQL migration adds a `p_idempotency_key`
+    // parameter (with a default) before relying on this against a real
+    // database (see 011_lazy_expiry.sql).
+    idempotencyKey?: string | null,
   ): Promise<AddCreditsResult> {
     const meta: Record<string, unknown> = { ...(metadata ?? {}) };
     if (expiresAt) {
@@ -243,6 +277,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_type: type,
       p_metadata: meta,
       p_tier: tier ?? null,
+      p_idempotency_key: idempotencyKey ?? null,
     });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`credits_add: ${code}`);
@@ -253,6 +288,7 @@ export class HttpxSupabaseStore extends CreditStore {
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
       tier: String(row.tier ?? tier ?? "default"),
+      idempotent: Boolean(row.idempotent),
     };
   }
 
@@ -266,6 +302,13 @@ export class HttpxSupabaseStore extends CreditStore {
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? {};
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
 
     const row = await this.rpc("deduct_with_allowance", {
       p_user_id: userId,
@@ -275,6 +318,13 @@ export class HttpxSupabaseStore extends CreditStore {
       p_model: model,
       p_metadata: metadata ?? {},
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      p_feature: feature,
+      p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
+      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_period_start:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      p_feature_period_end:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -287,6 +337,7 @@ export class HttpxSupabaseStore extends CreditStore {
         balanceAfter: dec(row.balance_after),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: code,
       };
     }
@@ -299,6 +350,7 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -315,6 +367,13 @@ export class HttpxSupabaseStore extends CreditStore {
     const floor = options?.floor ?? ZERO;
     const overdraftFloor = options?.overdraftFloor ?? null;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
     const row = await this.rpc("create_lease", {
       p_user_id: userId,
       p_amount: decParam(amount),
@@ -327,6 +386,13 @@ export class HttpxSupabaseStore extends CreditStore {
       p_overdraft_floor: overdraftFloor != null ? decParam(overdraftFloor) : null,
       p_metadata: options?.metadata ?? {},
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      p_feature: feature,
+      p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
+      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_period_start:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      p_feature_period_end:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -361,6 +427,13 @@ export class HttpxSupabaseStore extends CreditStore {
   ): Promise<DeductionResult> {
     const minBalance = options?.minBalance ?? ZERO;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
     const row = await this.rpc("settle_lease", {
       p_user_id: userId,
       p_lease_id: leaseId,
@@ -370,6 +443,13 @@ export class HttpxSupabaseStore extends CreditStore {
       p_model: options?.model ?? null,
       p_metadata: options?.metadata ?? {},
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      p_feature: feature,
+      p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
+      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_period_start:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      p_feature_period_end:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     });
 
     const code = this.errorCode(row);
@@ -382,6 +462,7 @@ export class HttpxSupabaseStore extends CreditStore {
         balanceAfter: dec(row.balance_after),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: code,
       };
     }
@@ -393,6 +474,7 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -514,6 +596,7 @@ export class HttpxSupabaseStore extends CreditStore {
       planName: (row.plan_name as string) ?? null,
       freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
+      featureLimits: parseFeatureLimits(row.feature_limits),
       defaultBillingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
@@ -575,6 +658,49 @@ export class HttpxSupabaseStore extends CreditStore {
     });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`increment_usage_window: ${code}`);
+  }
+
+  /** Advisory, non-locking read of invocation-count usage (UI only). Mirrors `checkSpendCap`. */
+  async checkFeatureLimit(
+    userId: string,
+    feature: string,
+    maxCalls: number,
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<FeatureLimitResult> {
+    const row = await this.rpc("check_feature_limit", {
+      p_user_id: userId,
+      p_feature: feature,
+      p_max_calls: maxCalls,
+      p_period_start: periodStart.toISOString().slice(0, 10),
+      p_period_end: periodEnd.toISOString().slice(0, 10),
+    });
+    if (!row || Object.keys(row).length === 0) {
+      return {
+        userId,
+        feature,
+        limited: false,
+        limit: 0,
+        used: 0,
+        remaining: 0,
+        periodStart: "",
+        periodEnd: "",
+        action: null,
+      };
+    }
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`check_feature_limit: ${code}`);
+    return {
+      userId: String(row.user_id ?? userId),
+      feature: String(row.feature ?? feature),
+      limited: Boolean(row.limited ?? true),
+      limit: Number(row.limit ?? maxCalls),
+      used: Number(row.used ?? 0),
+      remaining: Number(row.remaining ?? Math.max(maxCalls - Number(row.used ?? 0), 0)),
+      periodStart: String(row.period_start ?? ""),
+      periodEnd: String(row.period_end ?? ""),
+      action: (row.action as FeatureLimitResult["action"]) ?? null,
+    };
   }
 
   // ── Spend caps and rate limiting ──────────────────────────────────────
@@ -853,9 +979,14 @@ export class HttpxSupabaseStore extends CreditStore {
 
   // ── Credit expiry ────────────────────────────────────────────────────
 
-  async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
+  async sweepExpiredCredits(dryRun = false, userId?: string): Promise<SweepResult> {
+    // NOTE: `userId` is threaded through defensively as a new named param to
+    // `expire_credits`. Confirm the SQL migration adds a `p_user_id` parameter
+    // (with a default of NULL, meaning "global sweep") before relying on this
+    // against a real database (see 011_lazy_expiry.sql).
     const row = await this.rpc("expire_credits", {
       p_dry_run: dryRun,
+      p_user_id: userId ?? null,
     });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`expire_credits: ${code}`);

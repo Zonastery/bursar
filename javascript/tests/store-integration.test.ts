@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
 import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -7,6 +7,7 @@ import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditManager } from "../src/manager.js";
+import { InsufficientCreditsError } from "../src/errors.js";
 import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
@@ -35,6 +36,11 @@ const PG_USER10 = "00000000-0000-0000-0000-000000000010";
 const PG_USER11 = "00000000-0000-0000-0000-000000000011";
 const PG_USER12 = "00000000-0000-0000-0000-000000000012";
 const PG_USER13 = "00000000-0000-0000-0000-000000000013";
+// ── New for lazyExpiry / grantSubscriptionCycle real-Postgres coverage ──
+const PG_USER14 = "00000000-0000-0000-0000-000000000014";
+const PG_USER15 = "00000000-0000-0000-0000-000000000015";
+const PG_USER16 = "00000000-0000-0000-0000-000000000016";
+const PG_USER17 = "00000000-0000-0000-0000-000000000017";
 
 // ───────────────────────────────────────────────────────────────────────────
 // MemoryStore concurrency — always runs (no DB required). Asserts the C2 fix
@@ -147,6 +153,11 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
           PG_USER11,
           PG_USER12,
           PG_USER13,
+          // lazyExpiry / addCredits-idempotency / scoped-sweep coverage below.
+          PG_USER14,
+          PG_USER15,
+          PG_USER16,
+          PG_USER17,
         ],
       ],
     );
@@ -332,6 +343,137 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     expect(a.error).toBeUndefined();
     const b = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "acc-2" });
     expect(b.error).toBe("cap_reached");
+  });
+
+  // ── Feature limits (per-feature invocation-count limits) ─────────────
+  //
+  // NOTE: these tests exercise the `feature`/`featureMaxCalls`/`featureAction`/
+  // `featurePeriodStart`/`featurePeriodEnd` trailing params on
+  // `deduct_with_allowance`/`create_lease` (already present in
+  // `009_deduct_and_leases.sql` at the time this was written) and the
+  // `check_feature_limit` RPC (added by a new `..._feature_limits.sql`
+  // migration, landing in parallel on the SQL track). If that migration/RPC
+  // hasn't landed yet when this suite runs against a live Postgres, the
+  // `checkFeatureLimit` test below will fail with an RPC-not-found error —
+  // that is a landing-order issue for the SQL track, not a JS-side bug.
+  describe("Feature limits (per-feature invocation-count limits)", () => {
+    const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+    const monthEnd = new Date(
+      Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1),
+    );
+
+    it("deny action: under limit succeeds, at limit blocks with feature_limit_reached", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(100), "purchase");
+      const featureLimit = { maxCalls: 2, period: "monthly" as const, action: "deny" as const };
+      const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
+
+      const r1 = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-1",
+      });
+      expect(r1.error).toBeUndefined();
+      const r2 = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-2",
+      });
+      expect(r2.error).toBeUndefined();
+      // Third call: count (2) >= maxCalls (2) → deny, nothing further debited.
+      const r3 = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-3",
+      });
+      expect(r3.error).toBe("feature_limit_reached");
+      expect((await store.getBalance(PG_USER)).balance.toString()).toBe("98");
+    });
+
+    it("warn action: breach surfaces featureLimitWarning, never blocks", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(100), "purchase");
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+      const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
+
+      await store.deductWithAllowance(PG_USER, D(1), { ...opts, idempotencyKey: "fl-warn-1" });
+      const r2 = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-warn-2",
+      });
+      expect(r2.error).toBeUndefined();
+      expect(r2.featureLimitWarning).toBe("warn");
+    });
+
+    it("createLease: deny-only admission blocks once the limit is reached", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(100), "purchase");
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
+      await store.deductWithAllowance(PG_USER, D(1), { ...opts, idempotencyKey: "fl-lease-1" });
+      const lease = await store.createLease(PG_USER, D(1), "usage", opts);
+      expect(lease.error).toBe("feature_limit_reached");
+    });
+
+    it("release_lease and refund_credits do NOT restore quota", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(100), "purchase");
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
+
+      // Reserve then release near the limit — never counted, nothing to undo.
+      const lease = await store.createLease(PG_USER, D(1), "usage");
+      await store.releaseLease(PG_USER, lease.leaseId);
+      const stillOk = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-release-1",
+      });
+      expect(stillOk.error).toBeUndefined();
+
+      // Refund of the counted deduction does not free up quota.
+      const refund = await store.refundCredits(stillOk.transactionId);
+      expect(refund.error).toBeUndefined();
+      const blocked = await store.deductWithAllowance(PG_USER, D(1), {
+        ...opts,
+        idempotencyKey: "fl-release-2",
+      });
+      expect(blocked.error).toBe("feature_limit_reached");
+    });
+
+    it("checkFeatureLimit: advisory count, no side effects", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(100), "purchase");
+      await store.deductWithAllowance(PG_USER, D(1), {
+        feature: "export",
+        idempotencyKey: "fl-check-1",
+      });
+      await store.deductWithAllowance(PG_USER, D(1), {
+        feature: "export",
+        idempotencyKey: "fl-check-2",
+      });
+
+      const result = await store.checkFeatureLimit(PG_USER, "export", 5, monthStart, monthEnd);
+      expect(result.used).toBe(2);
+      expect(result.remaining).toBe(3);
+    });
+
+    it("concurrency: exactly N succeed under limit N", async () => {
+      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      await store.addCredits(PG_USER, D(1000), "purchase");
+      const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+
+      const results = await Promise.all(
+        Array.from({ length: 10 }, (_, i) =>
+          store.deductWithAllowance(PG_USER, D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: monthStart,
+            idempotencyKey: `fl-conc-${i}`,
+          }),
+        ),
+      );
+      const succeeded = results.filter((r) => !r.error);
+      const denied = results.filter((r) => r.error === "feature_limit_reached");
+      expect(succeeded.length).toBe(5);
+      expect(denied.length).toBe(5);
+    }, 30000);
   });
 
   // ── Refunds ─────────────────────────────────────────────────────────
@@ -849,6 +991,114 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const teamBal = (await store.getTeamBalance(team.teamId)).balance;
     expect(teamBal.gte(0)).toBe(true);
   }, 30000);
+
+  // ── Lazy expiry: scoped sweep isolation via the real expire_credits RPC ──
+  it("sweepExpiredCredits(dryRun, userId) scopes to exactly that user, leaving other users' expired grants untouched", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    // A short-lived FUTURE expiresAt, real wall-clock wait — this database is
+    // shared with other suites/tests (possibly a concurrently-running Python
+    // integration run against the same cluster) that may have tiers
+    // configured globally at any given moment, in which case a *past*
+    // expiresAt would be rejected outright (invalid_expires_at); a
+    // future-then-elapsed expiresAt is valid either way, exactly like the
+    // "Credit tiers — real Postgres" block's own sweep test below.
+    await store.addCredits(PG_USER14, D(40), "purchase", null, new Date(Date.now() + 500));
+    await store.addCredits(PG_USER15, D(60), "purchase", null, new Date(Date.now() + 500));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const swept = await store.sweepExpiredCredits(false, PG_USER14);
+    expect(swept.expiredAmount.toString()).toBe("40");
+    expect((await store.getBalance(PG_USER14)).balance.toString()).toBe("0");
+
+    // User B's expired grant is UNTOUCHED — the scoped sweep never looked at it.
+    expect((await store.getBalance(PG_USER15)).balance.toString()).toBe("60");
+
+    // A global sweep (or an individually-scoped one) still reaches user B.
+    const globalSweep = await store.sweepExpiredCredits(false);
+    expect(globalSweep.expiredAmount.toString()).toBe("60");
+    expect((await store.getBalance(PG_USER15)).balance.toString()).toBe("0");
+    // Release the connection immediately rather than waiting on pg's idle
+    // timeout — this file already creates 60+ short-lived PostgresStore pools
+    // and a full run comfortably exceeds Postgres's default max_connections
+    // if they're all left open simultaneously.
+    await store.close();
+  }, 10000);
+
+  // ── addCredits idempotency via the real credits_add RPC ──────────────
+  it("addCredits with the same idempotencyKey replays the original grant exactly once (credits_add RPC)", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+
+    const r1 = await store.addCredits(
+      PG_USER16,
+      D(100),
+      "purchase",
+      undefined,
+      undefined,
+      undefined,
+      "evt-1",
+    );
+    const r2 = await store.addCredits(
+      PG_USER16,
+      D(100),
+      "purchase",
+      undefined,
+      undefined,
+      undefined,
+      "evt-1",
+    );
+
+    expect(r2.transactionId).toBe(r1.transactionId);
+    expect((await store.getBalance(PG_USER16)).balance.toString()).toBe("100");
+
+    const { rows } = await pool.query(
+      `SELECT id FROM public.credit_transactions
+       WHERE user_id = $1 AND metadata->>'idempotency_key' = $2`,
+      [PG_USER16, "evt-1"],
+    );
+    expect(rows).toHaveLength(1);
+    await store.close();
+  });
+
+  // ── lazyExpiry: true end-to-end via CreditManager + real PostgresStore ──
+  it("lazyExpiry: true transparently sweeps a user's own expired credits before every read/spend call, no explicit sweep anywhere", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const manager = new CreditManager(store, undefined, undefined, { lazyExpiry: true });
+
+    // 50 permanent + 100 that expires shortly. A short-lived FUTURE
+    // expiresAt + a real wall-clock wait (rather than an already-past
+    // expiresAt) keeps this valid regardless of whether some tier happens to
+    // be configured globally at this moment on this shared database — see
+    // the scoped-sweep test above for the same reasoning.
+    await store.addCredits(PG_USER17, D(50), "purchase");
+    await store.addCredits(PG_USER17, D(100), "purchase", null, new Date(Date.now() + 500));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    // No manual sweepExpiredCredits() call anywhere in this test — every one
+    // of these calls must transparently sweep user17's own expired grant
+    // first and reflect the TRUE post-expiry balance of 50.
+    expect((await manager.getBalance(PG_USER17)).balance.toString()).toBe("50");
+    expect((await manager.getAvailable(PG_USER17)).available.toString()).toBe("50");
+
+    const tooMuch = await manager.canAfford(PG_USER17, D(80));
+    expect(tooMuch.affordable).toBe(false);
+    expect(tooMuch.spendable.toString()).toBe("50");
+
+    const justRight = await manager.canAfford(PG_USER17, D(50));
+    expect(justRight.affordable).toBe(true);
+
+    // reserve() (admission) never sizes a hold against the already-expired
+    // grant — requesting more than the legitimately-remaining 50 fails.
+    await expect(manager.reserve(PG_USER17, D(80))).rejects.toThrow(InsufficientCreditsError);
+
+    // The 50 that legitimately remains is still spendable end-to-end
+    // (reserve -> settle), landing the balance at exactly 0.
+    const lease = await manager.reserve(PG_USER17, D(50));
+    expect(lease.error).toBeUndefined();
+    const settled = await manager.settle(PG_USER17, lease.leaseId, D(50));
+    expect(settled.error).toBeUndefined();
+    expect((await manager.getBalance(PG_USER17)).balance.toString()).toBe("0");
+    await store.close();
+  }, 10000);
 });
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1315,7 +1565,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Credit tiers (023_credit_tiers.sql) — real Postgres. Mirrors the
+// Credit tiers (010_credit_tiers.sql) — real Postgres. Mirrors the
 // tiers.test.ts MemoryStore scenarios against the actual RPCs
 // (credits_add / deduct_with_allowance / settle_lease / refund_credits /
 // expire_credits / get_user_credit_tiers), guarded by the same
@@ -1519,7 +1769,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       [[MGR_USER1, MGR_USER2, MGR_USER3, MGR_USER4]],
     );
     // These UUIDs are new to this describe block: the INSERT above fires
-    // grant_signup_bonus() (021_signup_bonus_config.sql) for the first time,
+    // grant_signup_bonus() (001_core_schema.sql) for the first time,
     // crediting a real balance (defaults to 50 if unset) before the first
     // test runs. Wipe it (transactions first — FK from credit_transactions to
     // user_credits) so every test starts from a true zero balance — mirrors
@@ -1671,5 +1921,184 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 
     const tiers = await mgr.getCreditTiers(MGR_USER4);
     expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("-25");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// CreditManager.grantSubscriptionCycle — real Postgres. A real bug was found
+// and fixed in this exact implementation: with replacePrior:true (the
+// default), a redelivered webhook (same idempotencyKey) used to wipe the
+// tier's balance UNCONDITIONALLY before the idempotent grant call, so a
+// replay would double-wipe a balance it had just legitimately granted down to
+// zero. The fix snapshots the tier's leftover balance and lifetimePurchased
+// BEFORE granting, then only performs the wipe AFTER, gated on
+// `result.lifetimePurchased.minus(preLifetimePurchased).eq(amountDec)` (i.e.
+// only for a genuine new grant, never a replay). This is proven against
+// MemoryStore in tests/subscription-cycle.test.ts; this block proves the same
+// fix against the actual credits_add / tier-balance Postgres RPCs, since a
+// client/server logic mismatch could hide exactly there.
+// ───────────────────────────────────────────────────────────────────────────
+describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Postgres", () => {
+  let pool: pg.Pool;
+  // One store per test, closed in afterEach — this file already opens 60+
+  // short-lived PostgresStore pools elsewhere, comfortably exceeding
+  // Postgres's default max_connections if every one of them is left open
+  // (idle connections aren't reaped by `pg` until well after this suite
+  // finishes running).
+  let store: PostgresStore;
+
+  const SUB_USER1 = "00000000-0000-0000-0000-000000000401";
+  const SUB_USER2 = "00000000-0000-0000-0000-000000000402";
+  const SUB_USER3 = "00000000-0000-0000-0000-000000000403";
+  const SUB_USER4 = "00000000-0000-0000-0000-000000000404";
+
+  // A "subscription" tier that expires, with a defaultTtlDays fallback so the
+  // replacePrior expire-adjustment (which never passes an explicit
+  // expiresAt) can always resolve one, exactly like any other expiring tier
+  // — mirrors tests/subscription-cycle.test.ts's SUBSCRIPTION_CONFIG.
+  const SUBSCRIPTION_CONFIG: PricingConfigData = {
+    models: { _default: "input_tokens * 1" },
+    tiers: {
+      subscription: {
+        name: "Subscription",
+        priority: 10,
+        expires: true,
+        defaultTtlDays: 30,
+        isDefault: true,
+      },
+    },
+  };
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    await pool.query(BOOTSTRAP_SQL);
+    await applyMigrations(pool);
+    await pool.query(
+      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
+      [[SUB_USER1, SUB_USER2, SUB_USER3, SUB_USER4]],
+    );
+    // Fresh UUIDs to this describe block trigger grant_signup_bonus() on
+    // first INSERT (001_core_schema.sql) — wipe any resulting balance so
+    // every test starts from a true zero, exactly like the "CreditManager
+    // end-to-end — credit tiers" block above.
+    await pool.query("DELETE FROM public.credit_transactions");
+    await pool.query("DELETE FROM public.user_credits");
+  }, 60000);
+
+  beforeEach(() => {
+    store = new PostgresStore(DATABASE_URL!, pg.Pool);
+  });
+
+  afterEach(async () => {
+    await store.close();
+    if (pool) {
+      await pool.query("DELETE FROM public.credit_reservations");
+      await pool.query("DELETE FROM public.credit_transactions");
+      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
+      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
+      await pool.query("DELETE FROM public.user_credits");
+      await pool.query("DELETE FROM public.credit_plans");
+      await pool.query("DELETE FROM public.user_credit_tiers");
+      await pool.query("DELETE FROM public.credit_tiers");
+    }
+  });
+
+  afterAll(async () => {
+    if (pool) await pool.end();
+  });
+
+  it("first cycle grant increases the balance; a SAME-idempotencyKey redelivery is a full no-op (the exact regression this fix addresses)", async () => {
+    const manager = new CreditManager(store);
+    await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
+
+    const first = await manager.grantSubscriptionCycle(SUB_USER1, D(100), {
+      ttlDays: 30,
+      idempotencyKey: "invoice-123",
+    });
+    expect(first.tier).toBe("subscription");
+    expect(first.amount.toString()).toBe("100");
+    expect((await manager.getBalance(SUB_USER1)).balance.toString()).toBe("100");
+
+    // Redelivery of the SAME webhook event against the REAL credits_add /
+    // tier-balance RPCs: before the fix this unconditionally wiped the
+    // "subscription" tier (replacePrior defaults to true) down to zero even
+    // though the grant itself replayed idempotently — a redelivered webhook
+    // must be a full no-op, not a balance-destroying one.
+    const redelivered = await manager.grantSubscriptionCycle(SUB_USER1, D(100), {
+      ttlDays: 30,
+      idempotencyKey: "invoice-123",
+    });
+    expect(redelivered.transactionId).toBe(first.transactionId);
+    expect((await manager.getBalance(SUB_USER1)).balance.toString()).toBe("100");
+
+    // A THIRD redelivery must still be a no-op.
+    await manager.grantSubscriptionCycle(SUB_USER1, D(100), {
+      ttlDays: 30,
+      idempotencyKey: "invoice-123",
+    });
+    expect((await manager.getBalance(SUB_USER1)).balance.toString()).toBe("100");
+  });
+
+  it("a genuinely new cycle (different idempotencyKey) expires the leftover balance from a prior cycle when replacePrior: true", async () => {
+    const manager = new CreditManager(store);
+    await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
+
+    await manager.grantSubscriptionCycle(SUB_USER2, D(100), {
+      ttlDays: 30,
+      idempotencyKey: "cycle-1",
+    });
+    expect((await manager.getBalance(SUB_USER2)).balance.toString()).toBe("100");
+
+    // Cycle 2 — no usage in between, 100 left over from cycle 1, a genuinely
+    // new idempotencyKey (a real new billing cycle, not a webhook replay).
+    await manager.grantSubscriptionCycle(SUB_USER2, D(50), {
+      ttlDays: 30,
+      idempotencyKey: "cycle-2",
+    });
+    // The 100 leftover was expired, not stacked: balance is 50, not 150.
+    expect((await manager.getBalance(SUB_USER2)).balance.toString()).toBe("50");
+  });
+
+  it("replacePrior: false stacks the new cycle on top of any leftover balance", async () => {
+    const manager = new CreditManager(store);
+    await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
+
+    await manager.grantSubscriptionCycle(SUB_USER3, D(100), {
+      ttlDays: 30,
+      idempotencyKey: "cycle-1",
+    });
+    await manager.grantSubscriptionCycle(SUB_USER3, D(50), {
+      ttlDays: 30,
+      replacePrior: false,
+      idempotencyKey: "cycle-2",
+    });
+    expect((await manager.getBalance(SUB_USER3)).balance.toString()).toBe("150");
+  });
+
+  it("assigns planKey via setUserPlan and emits credits.cycle_renewed against the real store", async () => {
+    const emitter = new CreditEventEmitter();
+    const events: CreditEvent[] = [];
+    emitter.on("credits.cycle_renewed", (e) => events.push(e));
+    const manager = new CreditManager(store, undefined, emitter);
+    await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
+
+    // set_user_plan resolves plan_key -> credit_plans.id server-side, so the
+    // plan must actually exist (unlike MemoryStore, where planId IS the raw
+    // plan_key string).
+    const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Pro', 0, $2)`,
+      [SUB_PLAN, "pro-monthly"],
+    );
+
+    await manager.grantSubscriptionCycle(SUB_USER4, D(100), {
+      ttlDays: 30,
+      planKey: "pro-monthly",
+    });
+
+    expect((await manager.getUserPlan(SUB_USER4)).planId).toBe(SUB_PLAN);
+    expect(events).toHaveLength(1);
+    expect(events[0].userId).toBe(SUB_USER4);
+    expect(events[0].data?.tier).toBe("subscription");
   });
 });

@@ -15,6 +15,8 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   ListTransactionsOptions,
@@ -37,8 +39,30 @@ import type {
   TopUserRow,
 } from "../types.js";
 
+/**
+ * Per-feature invocation-count limit enforcement inputs, threaded through the
+ * three atomic ops by the manager (resolved once via `getUserPlan` +
+ * `resolveCalendarWindow`). `feature` alone (with `featureLimit`/
+ * `featurePeriodStart` omitted) still tags the inserted transaction's
+ * `metadata.feature` — enforcement only runs when `featureLimit` is given.
+ *
+ * Mirrors Python `base.py` exactly: only the window START is threaded down
+ * (not an explicit end) — the store derives the window end itself from
+ * `featureLimit.period` (e.g. via `resolveCalendarWindow(featurePeriodStart,
+ * featureLimit.period).end`), since `featurePeriodStart` is already
+ * calendar-aligned so re-resolving it yields the identical window.
+ */
+export interface FeatureLimitOptions {
+  /** Feature name tagged onto the transaction and checked against `featureLimit`. */
+  feature?: string | null;
+  /** The resolved `FeatureLimit` for `feature` (looked up from the user's plan). `null`/omitted skips enforcement. */
+  featureLimit?: FeatureLimit | null;
+  /** Calendar-aligned window start for `featureLimit.period` (resolved via `resolveCalendarWindow`). */
+  featurePeriodStart?: Date | null;
+}
+
 /** Options for atomically acquiring a lease (interface plan §3 / D4). */
-export interface CreateLeaseOptions {
+export interface CreateLeaseOptions extends FeatureLimitOptions {
   billingMode?: BillingMode;
   floor?: Decimal;
   maxConcurrent?: number | null;
@@ -51,7 +75,7 @@ export interface CreateLeaseOptions {
 }
 
 /** Options for charging the actual cost against a lease (interface plan §3 / D5). */
-export interface SettleLeaseOptions {
+export interface SettleLeaseOptions extends FeatureLimitOptions {
   idempotencyKey?: string | null;
   minBalance?: Decimal;
   model?: string | null;
@@ -83,6 +107,12 @@ export abstract class CreditStore {
     expiresAt?: Date | null,
     /** Target credit tier (credit tiers); omitted/`null` resolves to the config's default tier. */
     tier?: string | null,
+    /**
+     * Replay-safe idempotency key (parity with the `deduct`/`settle`/`refund`
+     * idempotency idiom). When a prior grant for this `userId` carries the same
+     * key, the prior result is returned unchanged and no new credits are granted.
+     */
+    idempotencyKey?: string | null,
   ): Promise<AddCreditsResult>;
   /**
    * Atomically calculate-and-charge in one server-side transaction:
@@ -179,6 +209,24 @@ export abstract class CreditStore {
   abstract checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult>;
   abstract incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void>;
 
+  /**
+   * Advisory, non-locking read of invocation-count usage (UI only).
+   *
+   * Mirrors `checkSpendCap`/`checkAllowance`: the caller (the manager) has
+   * already resolved the `FeatureLimit` from the user's plan and the calendar
+   * window via `resolveCalendarWindow` — this method only counts. Counting is
+   * ledger-derived (see `deductWithAllowance`): the number of committed
+   * `usage` transactions with `metadata.feature === feature` in
+   * `[periodStart, periodEnd)`. Never used for admission control.
+   */
+  abstract checkFeatureLimit(
+    userId: string,
+    feature: string,
+    maxCalls: number,
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<FeatureLimitResult>;
+
   // ── Spend caps and rate limiting ────────────────────────────────────
   abstract checkSpendCap(
     userId: string,
@@ -195,7 +243,15 @@ export abstract class CreditStore {
   ): Promise<RefundResult>;
 
   // ── Credit expiry ────────────────────────────────────────────────────
-  abstract sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>;
+  /**
+   * Sweep expired credit grants and debit the aggregate/tier balances.
+   *
+   * When `userId` is omitted (default), sweeps globally across every user —
+   * unchanged behaviour/output shape from before this parameter existed. When
+   * given, restricts the scan/expiry to that user's transactions only (used by
+   * `CreditManager`'s lazy-on-read expiry, `options.lazyExpiry`).
+   */
+  abstract sweepExpiredCredits(dryRun?: boolean, userId?: string): Promise<SweepResult>;
 
   // ── Credit tiers ─────────────────────────────────────────────────────
   /**

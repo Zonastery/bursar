@@ -17,6 +17,14 @@ Supported ``period`` values (mirrors ``PlanDefinition.allowance_period``):
   target month's actual length (e.g. an anchor of the 31st resets on the 28th/29th
   in February, then returns to the 31st in a 31-day month). Falls back to
   ``calendar_month`` when no anchor is available.
+
+``resolve_calendar_window`` is a separate, anchor-free resolver used by
+per-feature invocation-count limits (``PlanDefinition.feature_limits``). It
+supports ``"daily"``/``"weekly"``/``"monthly"``/``"yearly"`` cadences, all
+calendar-aligned (every user on a plan resets at the same instant) rather than
+anchored to a per-user timestamp — a deliberately simpler model than the
+allowance windows above, since feature-limit cadences have no signup-anchor
+requirement in the current design.
 """
 
 from __future__ import annotations
@@ -24,7 +32,7 @@ from __future__ import annotations
 import calendar
 from datetime import date, datetime, timedelta
 
-__all__ = ["resolve_allowance_window"]
+__all__ = ["resolve_allowance_window", "resolve_calendar_window"]
 
 
 def _month_start(d: date) -> date:
@@ -118,3 +126,52 @@ def resolve_allowance_window(now: datetime, period: str, anchor: datetime | None
         return _anniversary_window(now_date, anchor.date())
 
     raise ValueError(f"unrecognized allowance_period: {period!r}")
+
+
+def _day_window(now: date) -> tuple[date, date]:
+    return now, now + timedelta(days=1)
+
+
+def _iso_week_window(now: date) -> tuple[date, date]:
+    """Monday-start ISO week window: ``[Monday, next Monday)``."""
+    start = now - timedelta(days=now.weekday())
+    return start, start + timedelta(days=7)
+
+
+def _year_window(now: date) -> tuple[date, date]:
+    start = date(now.year, 1, 1)
+    return start, date(now.year + 1, 1, 1)
+
+
+def resolve_calendar_window(now: datetime, period: str) -> tuple[date, date]:
+    """Resolve the calendar-aligned ``[period_start, period_end)`` window for a cadence.
+
+    Used by per-feature invocation-count limits (``PlanDefinition.feature_limits``).
+    Unlike :func:`resolve_allowance_window`, this resolver takes no anchor: every
+    user resets at the same UTC instant, which keeps the cadence easy to reason
+    about and avoids needing a per-feature signup anchor.
+
+    Args:
+        now: Current instant. Only the UTC date part is used (time-of-day is
+            discarded); callers should pass a UTC-aware (or UTC-naive) datetime.
+        period: One of ``"daily"``, ``"weekly"``, ``"monthly"``, ``"yearly"``.
+
+    Returns:
+        ``(period_start, period_end)`` as ``date`` objects, both UTC, with
+        ``period_end`` EXCLUSIVE.
+
+    Raises:
+        ValueError: If ``period`` is not a recognized cadence.
+    """
+    now_date = now.date()
+
+    if period == "daily":
+        return _day_window(now_date)
+    if period == "weekly":
+        return _iso_week_window(now_date)
+    if period == "monthly":
+        return _calendar_month_window(now_date)
+    if period == "yearly":
+        return _year_window(now_date)
+
+    raise ValueError(f"unrecognized feature-limit period: {period!r}")

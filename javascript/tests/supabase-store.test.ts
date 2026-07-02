@@ -127,6 +127,7 @@ describe("HttpxSupabaseStore", () => {
         p_type: "purchase",
         p_metadata: {},
         p_tier: null,
+        p_idempotency_key: null,
       });
       expect(result.newBalance.toString()).toBe("100.25");
     });
@@ -157,6 +158,11 @@ describe("HttpxSupabaseStore", () => {
         p_model: "gpt-4",
         p_metadata: { tier: "pro" },
         p_period_start: null, // WS9: omitted → calendar-month fallback
+        p_feature: null,
+        p_feature_max_calls: null,
+        p_feature_action: null,
+        p_feature_period_start: null,
+        p_feature_period_end: null,
       });
       expect(result.amount.toString()).toBe("2.5");
       expect(result.balanceAfter.toString()).toBe("97.5");
@@ -179,6 +185,72 @@ describe("HttpxSupabaseStore", () => {
         p_user_id: "u1",
         p_amount: "50",
         p_metadata: { model: "gpt-4", idempotency_key: "team-idem-1" },
+      });
+    });
+
+    it("addCredits threads a non-null idempotencyKey and tier into the credits_add RPC body", async () => {
+      const captured = mockFetch({
+        id: "tx-2",
+        user_id: "u1",
+        amount: "50",
+        new_balance: "150",
+        lifetime_purchased: "150",
+        tier: "gifted",
+      });
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      const result = await store.addCredits(
+        "u1",
+        D(50),
+        "purchase",
+        undefined,
+        undefined,
+        "gifted",
+        "evt-1",
+      );
+
+      expect(captured[0].url).toBe(`${URL_BASE}/rest/v1/rpc/credits_add`);
+      expect(captured[0].body).toEqual({
+        p_user_id: "u1",
+        p_amount: "50",
+        p_type: "purchase",
+        p_metadata: {},
+        p_tier: "gifted",
+        p_idempotency_key: "evt-1",
+      });
+      expect(result.tier).toBe("gifted");
+    });
+
+    it("sweepExpiredCredits threads p_dry_run and a non-null p_user_id into the expire_credits RPC body (lazy per-user sweep)", async () => {
+      const captured = mockFetch({
+        expired_count: 1,
+        expired_amount: "25",
+        expired_by_tier: { default: "25" },
+        dry_run: false,
+      });
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      const result = await store.sweepExpiredCredits(false, "u1");
+
+      expect(captured[0].url).toBe(`${URL_BASE}/rest/v1/rpc/expire_credits`);
+      expect(captured[0].body).toEqual({
+        p_dry_run: false,
+        p_user_id: "u1",
+      });
+      expect(result.expiredAmount.toString()).toBe("25");
+    });
+
+    it("sweepExpiredCredits omits p_user_id (sends null) for a global sweep", async () => {
+      const captured = mockFetch({
+        expired_count: 0,
+        expired_amount: "0",
+        expired_by_tier: {},
+        dry_run: true,
+      });
+      const store = new HttpxSupabaseStore(URL_BASE, KEY);
+      await store.sweepExpiredCredits(true);
+
+      expect(captured[0].body).toEqual({
+        p_dry_run: true,
+        p_user_id: null,
       });
     });
   });
@@ -260,7 +332,13 @@ describe("HttpxSupabaseStore", () => {
 
   describe("checkFeature presence vs truthiness (M6)", () => {
     it("treats numeric 0 as present", async () => {
-      mockFetch({ user_id: "u1", plan_id: "p", plan_name: "P", free_allowance: "0", features: { quota: 0 } });
+      mockFetch({
+        user_id: "u1",
+        plan_id: "p",
+        plan_name: "P",
+        free_allowance: "0",
+        features: { quota: 0 },
+      });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "quota");
       expect(result.value).toBe(0);
@@ -268,7 +346,13 @@ describe("HttpxSupabaseStore", () => {
     });
 
     it("treats explicit false as absent", async () => {
-      mockFetch({ user_id: "u1", plan_id: "p", plan_name: "P", free_allowance: "0", features: { flag: false } });
+      mockFetch({
+        user_id: "u1",
+        plan_id: "p",
+        plan_name: "P",
+        free_allowance: "0",
+        features: { flag: false },
+      });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "flag");
       expect(result.hasFeature).toBe(false);
@@ -414,9 +498,7 @@ describe("HttpxSupabaseStore", () => {
       const captured = mockFetch({ user_id: "u1", balance: "0", lifetime_purchased: "0" });
       const store = new HttpxSupabaseStore("https://example.supabase.co//", KEY);
       await store.getBalance("u1");
-      expect(captured[0].url).toBe(
-        "https://example.supabase.co/rest/v1/rpc/get_credits_balance",
-      );
+      expect(captured[0].url).toBe("https://example.supabase.co/rest/v1/rpc/get_credits_balance");
       // No double-slash in the path part (exclude the https:// protocol)
       expect(captured[0].url.replace(/^https:\/\//, "")).not.toMatch(/\/\//);
     });

@@ -53,7 +53,7 @@ describe("Credit tiers — adversarial", () => {
       // that simply omits a previously-defined tier does NOT do this —
       // `setActivePricing`/`sync_tiers_from_config` are upsert-only and never
       // delete a stale tier definition (see MemoryStore.setActivePricing and
-      // 023_credit_tiers.sql's `sync_tiers_from_config`), so a tier can only
+      // 010_credit_tiers.sql's `sync_tiers_from_config`), so a tier can only
       // become "orphaned" via an out-of-band removal like this one.
       tierDefinitionsOf(store).delete("gifted");
 

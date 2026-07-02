@@ -7,13 +7,14 @@ dependency in the critical path.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from types import TracebackType
 from typing import Any
 
 import httpx
 
+from ducto.allowance import resolve_calendar_window
 from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
@@ -27,6 +28,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
@@ -68,6 +71,7 @@ _BUSINESS_ERROR_CODES = frozenset(
         # Lease lifecycle business codes (interface plan §3 / M2).
         "concurrency_limit",
         "feature_not_entitled",
+        "feature_limit_reached",
         "lease_not_found",
         "lease_expired",
         "lease_released",
@@ -107,6 +111,21 @@ def _dec_map(value: Any) -> dict[str, Decimal] | None:
     if not value or not isinstance(value, dict):
         return None
     return {str(k): _dec(v) for k, v in value.items()}
+
+
+def _feature_period_end(feature_limit: FeatureLimit | None, feature_period_start: date | None) -> date | None:
+    """Derive the exclusive feature-limit window end from ``feature_period_start``.
+
+    Mirrors ``postgres.py``'s helper of the same name: the store methods (per
+    the ``base.py`` contract) only receive an already calendar-aligned
+    ``feature_period_start`` — not an explicit end — so the end is derived by
+    re-resolving :func:`resolve_calendar_window` from that start date. Returns
+    ``None`` when no limit/period is configured (nothing to enforce).
+    """
+    if feature_limit is None or feature_period_start is None:
+        return None
+    _, period_end = resolve_calendar_window(datetime.combine(feature_period_start, time.min), feature_limit.period)
+    return period_end
 
 
 def run_migrations(database_url: str) -> SetupResult:
@@ -297,6 +316,7 @@ class HttpxSupabaseStore(CreditStore):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         tier: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json") if metadata else {}
@@ -312,6 +332,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_type": type,
                 "p_metadata": meta,
                 "p_tier": tier,
+                "p_idempotency_key": idempotency_key,
             },
         )
         if "error" in row and row["error"]:
@@ -336,6 +357,9 @@ class HttpxSupabaseStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
 
@@ -351,10 +375,18 @@ class HttpxSupabaseStore(CreditStore):
         string, matching the ``expires_at`` date marshalling convention
         elsewhere in this file); ``None`` falls back to the current UTC
         calendar month.
+
+        ``feature``/``feature_limit``/``feature_period_start`` are forwarded as
+        ``p_feature``/``p_feature_max_calls``/``p_feature_action``/
+        ``p_feature_period_start``; the exclusive window end is derived here
+        (via :func:`ducto.allowance.resolve_calendar_window`) and forwarded as
+        ``p_feature_period_end``. ``feature_limit=None`` skips enforcement
+        (the RPC still tags ``metadata.feature`` when ``feature`` is given).
         """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
         row = self._rpc(
             "deduct_with_allowance",
             {
@@ -366,6 +398,13 @@ class HttpxSupabaseStore(CreditStore):
                 "p_metadata": meta,
                 "p_skip_allowance": skip_allowance,
                 "p_period_start": period_start.isoformat() if period_start is not None else None,
+                "p_feature": feature,
+                "p_feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
+                "p_feature_action": feature_limit.action if feature_limit is not None else None,
+                "p_feature_period_start": (
+                    feature_period_start.isoformat() if feature_period_start is not None else None
+                ),
+                "p_feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
             },
         )
 
@@ -386,6 +425,7 @@ class HttpxSupabaseStore(CreditStore):
             balance_after=_dec(row.get("balance_after")),
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
+            feature_limit_warning=row.get("feature_limit_warning") or None,
             tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
 
@@ -405,9 +445,13 @@ class HttpxSupabaseStore(CreditStore):
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> LeaseResult:
         amount = _dec(amount)
         floor = _dec(floor)
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
         row = self._rpc(
             "create_lease",
             {
@@ -422,6 +466,13 @@ class HttpxSupabaseStore(CreditStore):
                 "p_overdraft_floor": str(overdraft_floor) if overdraft_floor is not None else None,
                 "p_metadata": (metadata.model_dump(mode="json") if metadata else {}),
                 "p_period_start": period_start.isoformat() if period_start is not None else None,
+                "p_feature": feature,
+                "p_feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
+                "p_feature_action": feature_limit.action if feature_limit is not None else None,
+                "p_feature_period_start": (
+                    feature_period_start.isoformat() if feature_period_start is not None else None
+                ),
+                "p_feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
             },
         )
         if "error" in row:
@@ -455,10 +506,14 @@ class HttpxSupabaseStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         amount = _dec(amount)
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
         row = self._rpc(
             "settle_lease",
             {
@@ -471,6 +526,13 @@ class HttpxSupabaseStore(CreditStore):
                 "p_metadata": meta,
                 "p_skip_allowance": skip_allowance,
                 "p_period_start": period_start.isoformat() if period_start is not None else None,
+                "p_feature": feature,
+                "p_feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
+                "p_feature_action": feature_limit.action if feature_limit is not None else None,
+                "p_feature_period_start": (
+                    feature_period_start.isoformat() if feature_period_start is not None else None
+                ),
+                "p_feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
             },
         )
         if "error" in row:
@@ -489,6 +551,7 @@ class HttpxSupabaseStore(CreditStore):
             balance_after=_dec(row.get("balance_after")),
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
+            feature_limit_warning=row.get("feature_limit_warning") or None,
             tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
 
@@ -578,6 +641,9 @@ class HttpxSupabaseStore(CreditStore):
             plan_name=row.get("plan_name") or None,
             free_allowance=_dec(row.get("free_allowance")),
             features=row.get("features") or {},
+            feature_limits={
+                k: FeatureLimit.model_validate(v) for k, v in (row.get("feature_limits") or {}).items()
+            },
             default_billing_mode=str(row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
             max_concurrent=row.get("max_concurrent"),
@@ -613,6 +679,38 @@ class HttpxSupabaseStore(CreditStore):
         self._rpc(
             "increment_usage_window",
             {"p_user_id": user_id, "p_plan_id": plan_id, "p_amount": str(_dec(amount))},
+        )
+
+    def check_feature_limit(
+        self,
+        user_id: str,
+        feature: str,
+        max_calls: int,
+        period_start: date,
+        period_end: date,
+    ) -> FeatureLimitResult:
+        """Call the advisory ``check_feature_limit`` RPC (mirrors ``check_spend_cap``)."""
+        row = self._rpc(
+            "check_feature_limit",
+            {
+                "p_user_id": user_id,
+                "p_feature": feature,
+                "p_max_calls": max_calls,
+                "p_period_start": period_start.isoformat(),
+                "p_period_end": period_end.isoformat(),
+            },
+        )
+        if not row:
+            return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
+        return FeatureLimitResult(
+            user_id=user_id,
+            feature=feature,
+            limited=bool(row.get("limited", False)),
+            limit=int(row.get("limit") or 0),
+            used=int(row.get("used") or 0),
+            remaining=int(row.get("remaining") or 0),
+            period_start=str(row.get("period_start", "")),
+            period_end=str(row.get("period_end", "")),
         )
 
     # ── Spend caps and rate limiting ────────────────────────────────────
@@ -888,8 +986,8 @@ class HttpxSupabaseStore(CreditStore):
 
     # ── Credit expiry ───────────────────────────────────────────────────
 
-    def sweep_expired_credits(self, dry_run: bool = False) -> SweepResult:
-        row = self._rpc("expire_credits", {"p_dry_run": dry_run})
+    def sweep_expired_credits(self, dry_run: bool = False, user_id: str | None = None) -> SweepResult:
+        row = self._rpc("expire_credits", {"p_dry_run": dry_run, "p_user_id": user_id})
         return SweepResult(
             expired_count=int(row.get("expired_count", 0)),
             expired_amount=_dec(row.get("expired_amount")),

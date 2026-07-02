@@ -14,9 +14,6 @@ END;
 $$;
 
 -- Enum type for transaction categories. Extensible via ALTER TYPE ... ADD VALUE.
--- 'team_usage' is included here (not in 008) so it is committed long before any
--- later migration references it: Postgres forbids using a freshly-added enum
--- value in the same transaction that adds it (H5).
 DO $$ BEGIN
     CREATE TYPE public.credit_tx_type AS ENUM (
         'purchase', 'subscription', 'signup_bonus', 'usage', 'refund', 'adjustment', 'team_usage'
@@ -24,16 +21,13 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
--- For installs created before 'team_usage' existed: add it idempotently.
--- This runs (and commits) in 001's own migration transaction, before 008/009
--- ever reference the value at runtime.
-ALTER TYPE public.credit_tx_type ADD VALUE IF NOT EXISTS 'team_usage';
-
--- user_credits: current balance per user (non-negative enforced at DB level)
+-- user_credits: current balance per user.
 -- Money columns are NUMERIC(18,4): fractional credits, no integer truncation.
+-- No CHECK (balance >= 0): overdraft billing mode requires the balance to be
+-- able to go negative down to a per-policy floor enforced in RPC logic.
 CREATE TABLE IF NOT EXISTS public.user_credits (
     user_id UUID PRIMARY KEY,
-    balance NUMERIC(18,4) NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    balance NUMERIC(18,4) NOT NULL DEFAULT 0,
     lifetime_purchased NUMERIC(18,4) NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -54,7 +48,7 @@ BEGIN
 END;
 $$;
 
--- credit_transactions: immutable ledger (append-only by convention)
+-- credit_transactions: immutable ledger (append-only by convention).
 -- amount is NUMERIC(18,4): fractional, signed (negative = debit).
 CREATE TABLE IF NOT EXISTS public.credit_transactions (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -68,9 +62,7 @@ CREATE TABLE IF NOT EXISTS public.credit_transactions (
 );
 
 -- Idempotency guarantee: unique on (user_id, idempotency_key) inside metadata JSONB.
--- User-scoped so the same key from two different users never collides (H16).
--- NOTE: a legacy non-user-scoped index (idx_credit_transactions_idempotency) may
--- exist from older installs; 014_numeric_money.sql drops it in favour of this one.
+-- User-scoped so the same key from two different users never collides.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency_user
     ON public.credit_transactions (user_id, (metadata ->> 'idempotency_key'))
     WHERE metadata ->> 'idempotency_key' IS NOT NULL;
@@ -79,21 +71,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency_user
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_id
     ON public.credit_transactions (user_id, created_at DESC);
 
--- Upgrade pre-existing tables that still have type TEXT to the new enum.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'credit_transactions'
-        AND column_name = 'type' AND data_type = 'text'
-    ) THEN
-        ALTER TABLE public.credit_transactions
-        ALTER COLUMN type TYPE public.credit_tx_type USING type::public.credit_tx_type;
-    END IF;
-END;
-$$;
-
--- credit_reservations: optimistic concurrency guard for expensive operations
+-- credit_reservations: time-bounded holds against a user's balance. Backs
+-- both the legacy reservation table shape and the lease lifecycle (see
+-- 009_deduct_and_leases.sql for the lease-specific columns).
 CREATE TABLE IF NOT EXISTS public.credit_reservations (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.user_credits(user_id),
@@ -139,20 +119,28 @@ BEGIN
 END;
 $$;
 
--- Signup bonus trigger: give 50 free credits on user signup.
+-- Signup bonus trigger: give free credits (amount from active pricing config's
+-- `signup_bonus` field, falling back to 50) on user signup.
 -- SECURITY DEFINER so the trigger function runs with table-owner privileges.
 CREATE OR REPLACE FUNCTION public.grant_signup_bonus()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+  v_bonus NUMERIC;
 BEGIN
+  SELECT COALESCE(
+    (SELECT (config->>'signup_bonus')::numeric FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1),
+    50
+  ) INTO v_bonus;
+
   INSERT INTO public.user_credits (user_id, balance, lifetime_purchased)
-  VALUES (NEW.id, 50, 0)
+  VALUES (NEW.id, v_bonus, 0)
   ON CONFLICT (user_id) DO NOTHING;
 
   INSERT INTO public.credit_transactions (user_id, amount, type)
-  VALUES (NEW.id, 50, 'signup_bonus');
+  VALUES (NEW.id, v_bonus, 'signup_bonus');
 
   RETURN NEW;
 END;

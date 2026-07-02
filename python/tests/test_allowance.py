@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from ducto.allowance import resolve_allowance_window
+from ducto.allowance import resolve_allowance_window, resolve_calendar_window
 
 
 def _utc(*args: int) -> datetime:
@@ -236,3 +236,103 @@ class TestReturnTypesAreDates:
         start, end = resolve_allowance_window(_utc(2024, 6, 15), "calendar_month", None)
         last_valid_day = end - timedelta(days=1)
         assert last_valid_day == date(2024, 6, 30)
+
+
+# ── resolve_calendar_window (per-feature invocation-count limits) ───────────
+
+
+class TestCalendarWindowDaily:
+    """daily: [today, tomorrow) at UTC-date granularity, no anchor."""
+
+    def test_mid_day(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 15, 12, 30), "daily")
+        assert start == date(2024, 6, 15)
+        assert end == date(2024, 6, 16)
+
+    def test_last_instant_of_day(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 15, 23, 59, 59), "daily")
+        assert start == date(2024, 6, 15)
+        assert end == date(2024, 6, 16)
+
+    def test_rolls_into_next_month(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 30, 12, 0), "daily")
+        assert start == date(2024, 6, 30)
+        assert end == date(2024, 7, 1)
+
+
+class TestCalendarWindowWeekly:
+    """weekly: ISO week, Monday-start, [Monday, next Monday)."""
+
+    def test_mid_week(self) -> None:
+        # 2024-06-13 is a Thursday.
+        start, end = resolve_calendar_window(_utc(2024, 6, 13), "weekly")
+        assert start == date(2024, 6, 10)  # Monday
+        assert end == date(2024, 6, 17)  # next Monday
+
+    def test_on_monday_itself(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 10), "weekly")
+        assert start == date(2024, 6, 10)
+        assert end == date(2024, 6, 17)
+
+    def test_on_sunday_boundary(self) -> None:
+        # Sunday 2024-06-16 is the last day of the Mon 6/10 - Mon 6/17 week.
+        start, end = resolve_calendar_window(_utc(2024, 6, 16), "weekly")
+        assert start == date(2024, 6, 10)
+        assert end == date(2024, 6, 17)
+
+    def test_week_spanning_month_boundary(self) -> None:
+        # 2024-07-01 is a Monday; 2024-06-30 (Sunday) is in the prior ISO week.
+        start, end = resolve_calendar_window(_utc(2024, 6, 30), "weekly")
+        assert start == date(2024, 6, 24)
+        assert end == date(2024, 7, 1)
+
+
+class TestCalendarWindowMonthly:
+    """monthly must match resolve_allowance_window(..., "calendar_month", None) exactly."""
+
+    def test_matches_calendar_month_mid_month(self) -> None:
+        now = _utc(2024, 6, 15, 12, 30)
+        assert resolve_calendar_window(now, "monthly") == resolve_allowance_window(now, "calendar_month", None)
+
+    def test_matches_calendar_month_first_instant(self) -> None:
+        now = _utc(2024, 6, 1, 0, 0, 0)
+        assert resolve_calendar_window(now, "monthly") == resolve_allowance_window(now, "calendar_month", None)
+
+    def test_matches_calendar_month_december_rollover(self) -> None:
+        now = _utc(2024, 12, 15)
+        assert resolve_calendar_window(now, "monthly") == resolve_allowance_window(now, "calendar_month", None)
+        start, end = resolve_calendar_window(now, "monthly")
+        assert start == date(2024, 12, 1)
+        assert end == date(2025, 1, 1)
+
+
+class TestCalendarWindowYearly:
+    """yearly: [Jan 1, next Jan 1) at UTC-date granularity."""
+
+    def test_mid_year(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 15), "yearly")
+        assert start == date(2024, 1, 1)
+        assert end == date(2025, 1, 1)
+
+    def test_dec_31_still_in_same_year_window(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 12, 31, 23, 59, 59), "yearly")
+        assert start == date(2024, 1, 1)
+        assert end == date(2025, 1, 1)
+
+    def test_jan_1_starts_new_window(self) -> None:
+        start, end = resolve_calendar_window(_utc(2025, 1, 1, 0, 0, 0), "yearly")
+        assert start == date(2025, 1, 1)
+        assert end == date(2026, 1, 1)
+
+
+class TestCalendarWindowInvalidPeriod:
+    def test_unrecognized_period_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized feature-limit period"):
+            resolve_calendar_window(_utc(2024, 1, 1), "calendar_month")
+
+
+class TestCalendarWindowReturnTypes:
+    def test_returns_date_not_datetime(self) -> None:
+        start, end = resolve_calendar_window(_utc(2024, 6, 15), "monthly")
+        assert type(start) is date
+        assert type(end) is date

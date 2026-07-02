@@ -7,12 +7,13 @@ Postgres database that has the ducto schema installed.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
 import psycopg2
 
+from ducto.allowance import resolve_calendar_window
 from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
@@ -26,6 +27,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
@@ -64,6 +67,24 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     if isinstance(value, float):
         return Decimal(str(value))
     return Decimal(value)
+
+
+def _feature_period_end(feature_limit: FeatureLimit | None, feature_period_start: date | None) -> date | None:
+    """Derive the exclusive feature-limit window end from ``feature_period_start``.
+
+    The store methods (per the ``base.py`` contract) only receive an already
+    calendar-aligned ``feature_period_start`` — not an explicit end — so the
+    end is derived by re-resolving :func:`resolve_calendar_window` from that
+    start date. Because ``feature_period_start`` is, by construction, already
+    the aligned start of its own window, feeding it back in as ``now`` yields
+    the exact same start plus the correct calendar-aware end (e.g. a
+    variable-length month) without needing the caller to pass a redundant end.
+    Returns ``None`` when no limit/period is configured (nothing to enforce).
+    """
+    if feature_limit is None or feature_period_start is None:
+        return None
+    _, period_end = resolve_calendar_window(datetime.combine(feature_period_start, time.min), feature_limit.period)
+    return period_end
 
 
 def _dec_map(value: Any) -> dict[str, Decimal] | None:
@@ -169,6 +190,7 @@ class PostgresStore(CreditStore):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         tier: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
         conn = self._conn()
@@ -179,7 +201,7 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "credits_add",
-                    [user_id, amount, type, json.dumps(meta), tier],
+                    [user_id, amount, type, json.dumps(meta), tier, idempotency_key],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -209,6 +231,9 @@ class PostgresStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
 
@@ -219,10 +244,20 @@ class PostgresStore(CreditStore):
         ``period_start`` (WS9) is passed as ``p_period_start`` (ISO date string,
         matching the ``expires_at``/date marshalling convention elsewhere in this
         file); ``None`` lets the RPC fall back to the current UTC calendar month.
+
+        ``feature``/``feature_limit``/``feature_period_start`` are threaded into
+        the RPC's trailing ``p_feature*`` params; the RPC derives the window end
+        itself from ``feature_limit.period`` is NOT possible server-side (the
+        cadence lives in Python), so the exclusive window end is computed here
+        via :func:`ducto.allowance.resolve_calendar_window` and passed as
+        ``p_feature_period_end``. ``feature_limit=None`` skips enforcement
+        entirely (the RPC still tags ``metadata.feature`` when ``feature`` is
+        given).
         """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
 
         conn = self._conn()
         try:
@@ -238,6 +273,11 @@ class PostgresStore(CreditStore):
                         json.dumps(meta),
                         skip_allowance,
                         period_start.isoformat() if period_start is not None else None,
+                        feature,
+                        feature_limit.max_calls if feature_limit is not None else None,
+                        feature_limit.action if feature_limit is not None else None,
+                        feature_period_start.isoformat() if feature_period_start is not None else None,
+                        feature_period_end.isoformat() if feature_period_end is not None else None,
                     ],
                 )
                 row = cur.fetchone()
@@ -271,6 +311,7 @@ class PostgresStore(CreditStore):
             balance_after=_dec(result_dict.get("balance_after")),
             idempotent=bool(result_dict.get("idempotent", False)),
             cap_warning=result_dict.get("cap_warning") or None,
+            feature_limit_warning=result_dict.get("feature_limit_warning") or None,
             tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
         )
 
@@ -290,9 +331,13 @@ class PostgresStore(CreditStore):
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> LeaseResult:
         amount = _dec(amount)
         floor = _dec(floor)
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -310,6 +355,11 @@ class PostgresStore(CreditStore):
                         str(overdraft_floor) if overdraft_floor is not None else None,
                         json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
                         period_start.isoformat() if period_start is not None else None,
+                        feature,
+                        feature_limit.max_calls if feature_limit is not None else None,
+                        feature_limit.action if feature_limit is not None else None,
+                        feature_period_start.isoformat() if feature_period_start is not None else None,
+                        feature_period_end.isoformat() if feature_period_end is not None else None,
                     ],
                 )
                 row = cur.fetchone()
@@ -351,10 +401,14 @@ class PostgresStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         amount = _dec(amount)
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
+        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -370,6 +424,11 @@ class PostgresStore(CreditStore):
                         json.dumps(meta),
                         skip_allowance,
                         period_start.isoformat() if period_start is not None else None,
+                        feature,
+                        feature_limit.max_calls if feature_limit is not None else None,
+                        feature_limit.action if feature_limit is not None else None,
+                        feature_period_start.isoformat() if feature_period_start is not None else None,
+                        feature_period_end.isoformat() if feature_period_end is not None else None,
                     ],
                 )
                 row = cur.fetchone()
@@ -398,6 +457,7 @@ class PostgresStore(CreditStore):
             balance_after=_dec(result.get("balance_after")),
             idempotent=bool(result.get("idempotent", False)),
             cap_warning=result.get("cap_warning") or None,
+            feature_limit_warning=result.get("feature_limit_warning") or None,
             tier_breakdown=_dec_map(result.get("tier_breakdown")),
         )
 
@@ -561,6 +621,9 @@ class PostgresStore(CreditStore):
             plan_name=result_dict.get("plan_name") or None,
             free_allowance=_dec(result_dict.get("free_allowance")),
             features=result_dict.get("features") or {},
+            feature_limits={
+                k: FeatureLimit.model_validate(v) for k, v in (result_dict.get("feature_limits") or {}).items()
+            },
             default_billing_mode=str(result_dict.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={
                 k: OperationPolicy.model_validate(v) for k, v in (result_dict.get("per_operation") or {}).items()
@@ -621,6 +684,42 @@ class PostgresStore(CreditStore):
             conn.commit()
         finally:
             conn.close()
+
+    def check_feature_limit(
+        self,
+        user_id: str,
+        feature: str,
+        max_calls: int,
+        period_start: date,
+        period_end: date,
+    ) -> FeatureLimitResult:
+        """Call the advisory ``check_feature_limit`` RPC (mirrors ``check_spend_cap``)."""
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "check_feature_limit",
+                    [user_id, feature, max_calls, period_start.isoformat(), period_end.isoformat()],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        if not row:
+            return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
+
+        result_dict = row[0] if isinstance(row[0], dict) else {}
+        return FeatureLimitResult(
+            user_id=user_id,
+            feature=feature,
+            limited=bool(result_dict.get("limited", False)),
+            limit=int(result_dict.get("limit") or 0),
+            used=int(result_dict.get("used") or 0),
+            remaining=int(result_dict.get("remaining") or 0),
+            period_start=str(result_dict.get("period_start", "")),
+            period_end=str(result_dict.get("period_end", "")),
+        )
 
     # ── Spend caps and rate limiting ────────────────────────────────────
 
@@ -974,11 +1073,11 @@ class PostgresStore(CreditStore):
 
     # ── Credit expiry ───────────────────────────────────────────────────
 
-    def sweep_expired_credits(self, dry_run: bool = False) -> SweepResult:
+    def sweep_expired_credits(self, dry_run: bool = False, user_id: str | None = None) -> SweepResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("expire_credits", [dry_run])
+                cur.callproc("expire_credits", [dry_run, user_id])
                 row = cur.fetchone()
             conn.commit()
         finally:

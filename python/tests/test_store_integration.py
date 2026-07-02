@@ -31,13 +31,21 @@ except ModuleNotFoundError:
 import pytest
 
 from ducto import ConfigError, CreditManager, UsageMetrics
-from ducto.allowance import resolve_allowance_window
+from ducto.allowance import resolve_allowance_window, resolve_calendar_window
 from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from ducto.interface.base import StoreError
 from ducto.interface.memory import MemoryStore
-from ducto.interface.models import CreditMetadata, PlanDefinition, PricingConfigData, SpendCap, TierDefinition
+from ducto.interface.models import (
+    CreditMetadata,
+    FeatureLimit,
+    PlanDefinition,
+    PricingConfigData,
+    SpendCap,
+    TierDefinition,
+)
 from ducto.interface.postgres import PostgresStore
 from ducto.interface.supabase import HttpxSupabaseStore
+from ducto.manager import InsufficientCreditsError
 
 # ---------------------------------------------------------------------------
 # Shared pricing config used across all tests
@@ -131,9 +139,9 @@ class TestMemoryStoreIntegration:
         result = store.setup()
         expected = [f.name for f in _get_sql_files()]
         assert result.tables_created == expected
-        # 015_atomic_deduct.sql et al. are present (would be missing if hardcoded).
-        assert "015_atomic_deduct.sql" in result.tables_created
-        assert "013_list_usage_events.sql" in result.tables_created
+        # 009_deduct_and_leases.sql et al. are present (would be missing if hardcoded).
+        assert "009_deduct_and_leases.sql" in result.tables_created
+        assert "010_credit_tiers.sql" in result.tables_created
 
     def test_check_feature(self) -> None:
         store = MemoryStore()
@@ -1076,6 +1084,11 @@ class TestHttpxSupabaseStoreContract:
                 "p_metadata": {"model": "gpt-4"},
                 "p_skip_allowance": False,
                 "p_period_start": None,
+                "p_feature": None,
+                "p_feature_max_calls": None,
+                "p_feature_action": None,
+                "p_feature_period_start": None,
+                "p_feature_period_end": None,
             },
             headers=self._EXPECTED_HEADERS,
         )
@@ -1112,6 +1125,11 @@ class TestHttpxSupabaseStoreContract:
                 "p_metadata": {},
                 "p_skip_allowance": True,
                 "p_period_start": None,
+                "p_feature": None,
+                "p_feature_max_calls": None,
+                "p_feature_action": None,
+                "p_feature_period_start": None,
+                "p_feature_period_end": None,
             },
             headers=self._EXPECTED_HEADERS,
         )
@@ -1135,6 +1153,71 @@ class TestHttpxSupabaseStoreContract:
         assert result.transaction_id == "tx_1"
         assert result.new_balance == Decimal("150")
         assert isinstance(result.new_balance, Decimal)
+
+    def test_add_credits_request_body_includes_tier_and_idempotency_key(self, store: HttpxSupabaseStore) -> None:
+        """``add_credits(..., tier=..., idempotency_key=...)`` must thread both
+        through to the RPC body as ``p_tier``/``p_idempotency_key`` -- the same
+        params ``credits_add`` (011_lazy_expiry.sql) now accepts, so a webhook
+        replay dedupes at the RPC layer rather than the client silently
+        double-granting through the Supabase REST path."""
+        mock = self._mock_post(
+            store,
+            {
+                "id": "tx_2",
+                "user_id": "u1",
+                "amount": 25,
+                "new_balance": 175,
+                "lifetime_purchased": 75,
+                "tier": "gifted",
+            },
+        )
+        result = store.add_credits(
+            "u1",
+            Decimal("25"),
+            type="purchase",
+            tier="gifted",
+            idempotency_key="evt-1",
+        )
+        mock.assert_called_once_with(
+            "https://test.supabase.co/rest/v1/rpc/credits_add",
+            json={
+                "p_user_id": "u1",
+                "p_amount": "25",
+                "p_type": "purchase",
+                "p_metadata": {},
+                "p_tier": "gifted",
+                "p_idempotency_key": "evt-1",
+            },
+            headers=self._EXPECTED_HEADERS,
+        )
+        assert result.transaction_id == "tx_2"
+        assert result.tier == "gifted"
+
+    def test_sweep_expired_credits_request_body_scoped_to_user(self, store: HttpxSupabaseStore) -> None:
+        """``sweep_expired_credits(user_id=...)`` must thread ``p_user_id`` into
+        the ``expire_credits`` RPC body -- the per-user lazy-sweep param added
+        alongside ``p_idempotency_key`` in 011_lazy_expiry.sql. No existing test
+        covered the ``expire_credits`` RPC contract at all before this."""
+        mock = self._mock_post(store, {"expired_count": 1, "expired_amount": 10, "expired_by_tier": {}})
+        store.sweep_expired_credits(dry_run=False, user_id="u1")
+        mock.assert_called_once_with(
+            "https://test.supabase.co/rest/v1/rpc/expire_credits",
+            json={"p_dry_run": False, "p_user_id": "u1"},
+            headers=self._EXPECTED_HEADERS,
+        )
+
+    def test_sweep_expired_credits_request_body_global_when_user_id_omitted(
+        self, store: HttpxSupabaseStore
+    ) -> None:
+        """Omitting ``user_id`` must send ``p_user_id: null`` -- preserving the
+        original global-sweep behavior (the periodic cron path) unchanged."""
+        mock = self._mock_post(store, {"expired_count": 0, "expired_amount": 0, "expired_by_tier": {}})
+        store.sweep_expired_credits(dry_run=True)
+        mock.assert_called_once_with(
+            "https://test.supabase.co/rest/v1/rpc/expire_credits",
+            json={"p_dry_run": True, "p_user_id": None},
+            headers=self._EXPECTED_HEADERS,
+        )
 
     # -- error-envelope handling (M10) --------------------------------------
 
@@ -2419,3 +2502,665 @@ class TestCreditManagerTiersPg:
 
         by_key = {t.tier_key: t.balance for t in mgr.get_credit_tiers(user).tiers}
         assert by_key["purchased"] == Decimal("-25")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lazy per-user expiry (011_lazy_expiry.sql) against a real Postgres instance
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLazyExpiryPg:
+    """``store.sweep_expired_credits(user_id=...)`` and ``CreditManager(lazy_expiry=True)``
+    against the real ``expire_credits`` RPC (011_lazy_expiry.sql's ``p_user_id``
+    param). MemoryStore coverage for the same scenarios lives in
+    ``test_lazy_expiry.py`` — this class targets the SQL layer specifically,
+    the one thing MemoryStore tests structurally cannot exercise.
+
+    Real Postgres has no injectable clock over a live RPC (unlike MemoryStore's
+    ``clock=`` fixture), so every expiry here uses a near-future ``expires_at``
+    plus a short real sleep, matching the idiom already established by
+    ``TestCreditManagerTiersPg.test_sweep_expired_credits_through_manager_scopes_per_tier``.
+    """
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def test_scoped_sweep_via_store_only_touches_target_user(self, store: PostgresStore) -> None:
+        """Two users each hold an expired grant. Sweeping user A directly via
+        ``store.sweep_expired_credits(user_id=...)`` (not through the manager)
+        must zero A's balance while leaving B's expired-but-unswept grant fully
+        intact (still counted) until B is swept individually."""
+        user_a = _new_uuid(9401)
+        user_b = _new_uuid(9402)
+        soon = datetime.now(UTC) + timedelta(milliseconds=500)
+        store.add_credits(user_a, Decimal("40"), "purchase", expires_at=soon)
+        store.add_credits(user_b, Decimal("60"), "purchase", expires_at=soon)
+        time.sleep(0.8)
+
+        swept_a = store.sweep_expired_credits(user_id=user_a)
+        assert swept_a.expired_count == 1
+        assert swept_a.expired_amount == Decimal("40")
+        assert store.get_balance(user_a).balance == Decimal("0")
+
+        # B untouched by A's scoped sweep -- still counts the expired grant.
+        assert store.get_balance(user_b).balance == Decimal("60")
+
+        swept_b = store.sweep_expired_credits(user_id=user_b)
+        assert swept_b.expired_count == 1
+        assert swept_b.expired_amount == Decimal("60")
+        assert store.get_balance(user_b).balance == Decimal("0")
+
+    def test_add_credits_idempotency_key_dedupes_at_the_credits_add_rpc(
+        self, store: PostgresStore, pg_database_url: str
+    ) -> None:
+        """Calling ``add_credits(..., idempotency_key=...)`` twice must return
+        the same transaction, move the balance only once, AND -- the part a
+        client-side illusion couldn't fake -- leave exactly one row with that
+        key in ``credit_transactions`` when queried directly."""
+        user = _new_uuid(9403)
+
+        r1 = store.add_credits(user, Decimal("100"), type="purchase", idempotency_key="evt-1")
+        r2 = store.add_credits(user, Decimal("100"), type="purchase", idempotency_key="evt-1")
+
+        assert r1.transaction_id != ""
+        assert r1.transaction_id == r2.transaction_id
+        assert store.get_balance(user).balance == Decimal("100")
+
+        conn = psycopg2.connect(pg_database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT count(*) FROM credit_transactions "
+                    "WHERE user_id = %s AND metadata ->> 'idempotency_key' = %s",
+                    [user, "evt-1"],
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == 1
+
+    def test_lazy_expiry_true_hides_expired_credits_across_all_gated_manager_methods(
+        self, store: PostgresStore
+    ) -> None:
+        """The flagship lazy-expiry scenario: a real ``CreditManager`` backed by
+        a real ``PostgresStore``, ``lazy_expiry=True``, and NO explicit
+        ``sweep_expired_credits()`` call anywhere in this test. Every
+        balance-authoritative method the manager gates on ``_maybe_lazy_expire``
+        must reflect the true, post-expiry balance -- proving the "credits page
+        must show the true non-expired balance" requirement against the real
+        RPCs, not just MemoryStore."""
+        mgr = CreditManager(store=store, lazy_expiry=True)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        user = _new_uuid(9404)
+
+        soon = datetime.now(UTC) + timedelta(milliseconds=500)
+        mgr.add_credits(user, Decimal("100"), tx_type="purchase", expires_at=soon)
+        time.sleep(0.8)
+
+        # No sweep_expired_credits() call anywhere below: lazy_expiry alone
+        # must hide the now-expired grant on every gated call.
+        assert mgr.get_balance(user).balance == Decimal("0")
+        assert mgr.get_available(user).available == Decimal("0")
+
+        afford = mgr.can_afford(user, Decimal("10"))
+        assert afford.affordable is False
+        assert afford.spendable == Decimal("0")
+
+        with pytest.raises(InsufficientCreditsError):
+            mgr.deduct(user, UsageMetrics(input_tokens=10))
+
+        with pytest.raises(InsufficientCreditsError):
+            mgr.reserve(user, Decimal("10"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# grant_subscription_cycle (011_lazy_expiry.sql's idempotent credits_add)
+# against a real Postgres instance
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestSubscriptionCyclePg:
+    """``CreditManager.grant_subscription_cycle`` end to end against a real
+    Postgres. MemoryStore coverage lives in ``test_subscription_cycle.py``.
+
+    The critical regression covered here: a real bug was just found and fixed
+    in the JS mirror of this method (wiping a tier's balance before the
+    idempotent grant, so webhook redelivery double-wiped a balance it had just
+    legitimately granted). The Python implementation guards against this by
+    snapshotting balance/``lifetime_purchased`` BEFORE granting and only
+    wiping-if-still-stale AFTER (detected via a ``lifetime_purchased`` delta) —
+    proven so far only against MemoryStore. This class proves it against the
+    real ``credits_add``/tier-balance RPCs.
+    """
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def _subscription_config(self) -> dict[str, Any]:
+        return {
+            "models": {"_default": "input_tokens * 1"},
+            "min_balance": 0,
+            "tiers": {
+                "subscription": {
+                    "name": "Subscription",
+                    "priority": 1,
+                    "expires": True,
+                    "is_default": True,
+                    "default_ttl_days": 30,
+                },
+            },
+        }
+
+    def test_first_cycle_grant_increases_balance_by_granted_amount(self, store: PostgresStore) -> None:
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(self._subscription_config())
+        user = _new_uuid(9405)
+
+        result = mgr.grant_subscription_cycle(user, Decimal("500"), ttl_days=30, idempotency_key="evt-cycle-1")
+        assert result.amount == Decimal("500")
+        assert mgr.get_balance(user).balance == Decimal("500")
+
+    def test_redelivered_webhook_same_idempotency_key_is_a_full_noop(self, store: PostgresStore) -> None:
+        """The exact bug class fixed in the JS mirror: redelivering the same
+        webhook event id with the default ``replace_prior=True`` must be a
+        full no-op -- not a double-grant, and NOT a wipe-then-nothing that
+        zeroes the balance the first (legitimate) call just granted."""
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(self._subscription_config())
+        user = _new_uuid(9406)
+
+        first = mgr.grant_subscription_cycle(user, Decimal("300"), ttl_days=30, idempotency_key="evt-redeliver")
+        assert mgr.get_balance(user).balance == Decimal("300")
+
+        for _ in range(3):
+            replay = mgr.grant_subscription_cycle(
+                user, Decimal("300"), ttl_days=30, idempotency_key="evt-redeliver"
+            )
+            assert replay.transaction_id == first.transaction_id
+            # Not zero (wiped), not 600/900 (double-granted) -- unchanged.
+            assert mgr.get_balance(user).balance == Decimal("300")
+
+    def test_new_cycle_with_replace_prior_expires_leftover_instead_of_stacking(
+        self, store: PostgresStore
+    ) -> None:
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(self._subscription_config())
+        user = _new_uuid(9407)
+
+        mgr.grant_subscription_cycle(user, Decimal("200"), ttl_days=30, idempotency_key="evt-month-1")
+        mgr.deduct(user, UsageMetrics(input_tokens=80), idempotency_key="usage-month-1")
+        # Leftover balance from cycle 1, after some usage.
+        assert mgr.get_balance(user).balance == Decimal("120")
+
+        result = mgr.grant_subscription_cycle(
+            user, Decimal("150"), ttl_days=30, idempotency_key="evt-month-2", replace_prior=True
+        )
+        # The 120 leftover is expired (wiped), not stacked -- balance is
+        # exactly the new cycle's grant.
+        assert mgr.get_balance(user).balance == Decimal("150")
+        assert result.new_balance == Decimal("150")
+
+    def test_replace_prior_false_stacks_new_grant_on_top_of_leftover(self, store: PostgresStore) -> None:
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict(self._subscription_config())
+        user = _new_uuid(9408)
+
+        mgr.grant_subscription_cycle(user, Decimal("100"), ttl_days=30, idempotency_key="evt-a")
+        assert mgr.get_balance(user).balance == Decimal("100")
+
+        mgr.grant_subscription_cycle(
+            user, Decimal("40"), ttl_days=30, idempotency_key="evt-b", replace_prior=False
+        )
+        assert mgr.get_balance(user).balance == Decimal("140")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Feature limits (per-feature invocation-count limits) — Postgres
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Ledger-derived counting: a feature call is counted by COUNT(*) over
+# committed `usage` transactions tagged `metadata.feature == <feature>` in
+# `[period_start, period_end)` — NO new counter table (see
+# 012_feature_limits.sql / the feature-limit blocks added to the three atomic
+# RPCs in 009_deduct_and_leases.sql). Driven directly at the store layer
+# (deduct_with_allowance / create_lease / settle_lease / check_feature_limit)
+# since FeatureLimit plan resolution is the manager track's responsibility —
+# these tests construct FeatureLimit instances directly, exactly as the
+# manager would after resolving them from a user's plan.
+
+
+class TestFeatureLimitsPg:
+    """Per-feature invocation-count limits against a real Postgres."""
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def _today_window(self) -> tuple[date, date]:
+        return resolve_calendar_window(datetime.now(UTC), "daily")
+
+    def _backdate_transaction(self, store: PostgresStore, transaction_id: str, when: datetime) -> None:
+        """White-box: force a transaction's created_at into the past (mirrors
+        TestLeaseLifecyclePg._expire) to simulate a call made in a prior
+        window -- Postgres's now() can't be mocked from the client."""
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.credit_transactions SET created_at = %s WHERE id = %s",
+                    [when, transaction_id],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_deduct_deny_blocks_after_max_calls_pg(self, store: PostgresStore) -> None:
+        user = _new_uuid(9501)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=2, period="daily", action="deny")
+
+        r1 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="f1",
+            feature="bg_removal",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r1.error is None
+        r2 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="f2",
+            feature="bg_removal",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r2.error is None
+        # Third call: prior count is now 2 == max_calls -> deny, nothing consumed.
+        r3 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="f3",
+            feature="bg_removal",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r3.error == "feature_limit_reached"
+        assert store.get_balance(user).balance == Decimal("998")
+
+    def test_deduct_tags_metadata_feature_even_without_limit_pg(self, store: PostgresStore) -> None:
+        """``feature`` is tagged on the ledger row even when no limit is
+        configured (``feature_limit=None``) so history is accurate once a
+        limit is enabled later (contract: "always tag")."""
+        user = _new_uuid(9502)
+        store.add_credits(user, Decimal("100"), "purchase")
+        r = store.deduct_with_allowance(user, Decimal("1"), feature="untracked_feature")
+        assert r.error is None
+        conn = store._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT metadata->>'feature' FROM public.credit_transactions WHERE id = %s",
+                    [r.transaction_id],
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row[0] == "untracked_feature"
+
+    def test_deduct_warn_action_does_not_block_pg(self, store: PostgresStore) -> None:
+        user = _new_uuid(9503)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="warn")
+
+        r1 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="w1",
+            feature="hd_export",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r1.error is None
+        assert r1.feature_limit_warning is None  # under limit, no warning yet
+
+        r2 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="w2",
+            feature="hd_export",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r2.error is None  # warn never blocks
+        assert r2.feature_limit_warning == "warn"
+        assert store.get_balance(user).balance == Decimal("998")
+
+    def test_create_lease_deny_blocks_at_admission_pg(self, store: PostgresStore) -> None:
+        user = _new_uuid(9504)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        # Commit one call's worth of usage to the ledger first (bypass
+        # admission on purpose -- create_lease has no feature params yet).
+        lease0 = store.create_lease(user, Decimal("1"), "usage", floor=Decimal("0"))
+        settled0 = store.settle_lease(
+            user,
+            lease0.lease_id,
+            Decimal("1"),
+            feature="video_gen",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert settled0.error is None
+
+        # Admission for a second call is denied -- count already at max_calls.
+        lease1 = store.create_lease(
+            user,
+            Decimal("1"),
+            "usage",
+            floor=Decimal("0"),
+            feature="video_gen",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert lease1.error == "feature_limit_reached"
+
+    def test_create_lease_warn_action_never_checked_at_admission_pg(self, store: PostgresStore) -> None:
+        """Admission only ever enforces ``deny``; a ``warn``/``notify`` limit
+        never blocks ``create_lease`` even once the count is already at/over
+        the limit -- nothing to warn about yet (no charge has happened)."""
+        user = _new_uuid(9505)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="warn")
+
+        lease0 = store.create_lease(user, Decimal("1"), "usage", floor=Decimal("0"))
+        settled0 = store.settle_lease(
+            user,
+            lease0.lease_id,
+            Decimal("1"),
+            feature="preview",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert settled0.error is None
+
+        lease1 = store.create_lease(
+            user,
+            Decimal("1"),
+            "usage",
+            floor=Decimal("0"),
+            feature="preview",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert lease1.error is None
+
+    def test_settle_lease_advisory_never_blocks_prefers_deny_pg(self, store: PostgresStore) -> None:
+        """``settle_lease`` is advisory-only: even a ``deny`` feature limit
+        already breached never blocks at settle -- it only sets
+        ``feature_limit_warning`` (the work already happened)."""
+        user = _new_uuid(9506)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        lease0 = store.create_lease(user, Decimal("1"), "usage", floor=Decimal("0"))
+        settled0 = store.settle_lease(
+            user,
+            lease0.lease_id,
+            Decimal("1"),
+            feature="voice_clone",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert settled0.error is None
+        assert settled0.feature_limit_warning is None  # first call, under limit
+
+        # Bypass admission on purpose (simulates the documented approximation:
+        # a lease admitted before the count reached the limit, or a race).
+        lease1 = store.create_lease(user, Decimal("1"), "usage", floor=Decimal("0"))
+        settled1 = store.settle_lease(
+            user,
+            lease1.lease_id,
+            Decimal("1"),
+            feature="voice_clone",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert settled1.error is None  # never blocks
+        assert settled1.feature_limit_warning == "deny"
+        assert store.get_balance(user).balance == Decimal("998")
+
+    def test_release_lease_does_not_count_toward_limit_pg(self, store: PostgresStore) -> None:
+        """A released (never-settled) lease was never counted -- create_lease
+        never inserts a usage row, so release needs no decrement logic."""
+        user = _new_uuid(9507)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, period_end = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        lease = store.create_lease(
+            user,
+            Decimal("1"),
+            "usage",
+            floor=Decimal("0"),
+            feature="draft_render",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert lease.error is None
+        assert store.release_lease(user, lease.lease_id).released is True
+
+        check = store.check_feature_limit(user, "draft_render", 1, period_start, period_end)
+        assert check.used == 0  # release never counted
+
+        # A subsequent create_lease for the same feature/window still succeeds.
+        lease2 = store.create_lease(
+            user,
+            Decimal("1"),
+            "usage",
+            floor=Decimal("0"),
+            feature="draft_render",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert lease2.error is None
+
+    def test_refund_does_not_restore_quota_pg(self, store: PostgresStore) -> None:
+        """A refund of a settled usage transaction does not free up quota --
+        the original ledger row (and therefore the count) is untouched by a
+        refund transaction, which is inserted separately."""
+        user = _new_uuid(9508)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, period_end = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        r1 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="r1",
+            feature="upscale",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r1.error is None
+        refund = store.refund_credits(r1.transaction_id)
+        assert refund.error is None
+
+        check = store.check_feature_limit(user, "upscale", 1, period_start, period_end)
+        assert check.used == 1  # unchanged by the refund
+
+        r2 = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="r2",
+            feature="upscale",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r2.error == "feature_limit_reached"
+
+    def test_check_feature_limit_rpc_pg(self, store: PostgresStore) -> None:
+        user = _new_uuid(9509)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, period_end = self._today_window()
+        limit = FeatureLimit(max_calls=3, period="daily", action="deny")
+
+        for i in range(2):
+            r = store.deduct_with_allowance(
+                user,
+                Decimal("1"),
+                idempotency_key=f"chk{i}",
+                feature="captioning",
+                feature_limit=limit,
+                feature_period_start=period_start,
+            )
+            assert r.error is None
+
+        check = store.check_feature_limit(user, "captioning", 3, period_start, period_end)
+        assert check.limited is True
+        assert check.limit == 3
+        assert check.used == 2
+        assert check.remaining == 1
+
+    def test_isolation_per_feature_and_per_user_pg(self, store: PostgresStore) -> None:
+        user_a = _new_uuid(9510)
+        user_b = _new_uuid(9511)
+        store.add_credits(user_a, Decimal("1000"), "purchase")
+        store.add_credits(user_b, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        store.deduct_with_allowance(
+            user_a,
+            Decimal("1"),
+            idempotency_key="iso1",
+            feature="feat_a",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        # Different feature, same user: independent count.
+        r_other_feature = store.deduct_with_allowance(
+            user_a,
+            Decimal("1"),
+            idempotency_key="iso2",
+            feature="feat_b",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r_other_feature.error is None
+        # Same feature, different user: independent count.
+        r_other_user = store.deduct_with_allowance(
+            user_b,
+            Decimal("1"),
+            idempotency_key="iso3",
+            feature="feat_a",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r_other_user.error is None
+        # Same user + same feature again: now denied.
+        r_repeat = store.deduct_with_allowance(
+            user_a,
+            Decimal("1"),
+            idempotency_key="iso4",
+            feature="feat_a",
+            feature_limit=limit,
+            feature_period_start=period_start,
+        )
+        assert r_repeat.error == "feature_limit_reached"
+
+    def test_window_rollover_resets_count_pg(self, store: PostgresStore) -> None:
+        """A committed usage row from a PRIOR daily window must not count
+        against the CURRENT window -- the count resets across the boundary.
+        Postgres's ``now()`` can't be mocked from the client, so this
+        backdates a real committed transaction's ``created_at`` into
+        yesterday (white-box, mirrors ``TestLeaseLifecyclePg._expire``)
+        rather than faking a clock."""
+        user = _new_uuid(9512)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        today_start, today_end = self._today_window()
+        yesterday_start = today_start - timedelta(days=1)
+        limit = FeatureLimit(max_calls=1, period="daily", action="deny")
+
+        # Consume "yesterday's" quota -- physically inserted now, then
+        # logically backdated into yesterday's window.
+        y = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="roll1",
+            feature="daily_report",
+            feature_limit=limit,
+            feature_period_start=yesterday_start,
+        )
+        assert y.error is None
+        self._backdate_transaction(
+            store, y.transaction_id, datetime.combine(yesterday_start, datetime.min.time(), tzinfo=UTC)
+        )
+
+        # Yesterday's window still shows it used (querying that same window).
+        check_yesterday = store.check_feature_limit(user, "daily_report", 1, yesterday_start, today_start)
+        assert check_yesterday.used == 1
+
+        # Today's window is a fresh slate -- the backdated row falls outside
+        # [today_start, today_end), so a new call for today succeeds.
+        t = store.deduct_with_allowance(
+            user,
+            Decimal("1"),
+            idempotency_key="roll2",
+            feature="daily_report",
+            feature_limit=limit,
+            feature_period_start=today_start,
+        )
+        assert t.error is None
+        check_today = store.check_feature_limit(user, "daily_report", 1, today_start, today_end)
+        assert check_today.used == 1
+        assert check_today.remaining == 0
+
+    def test_concurrent_deduct_exactly_n_succeed_under_limit_n_pg(self, store: PostgresStore) -> None:
+        """N concurrent ``deduct_with_allowance`` calls against the same
+        ``(user, feature, window)``, limit N -- ``deduct_with_allowance``
+        locks the user's balance row ``FOR UPDATE`` for the whole pipeline
+        (including the feature-limit count-and-decide step), so unlike
+        ``create_lease``'s documented admission-only approximation, this is
+        exact: exactly N of M succeed, never more."""
+        user = _new_uuid(9513)
+        store.add_credits(user, Decimal("1000"), "purchase")
+        period_start, _ = self._today_window()
+        limit = FeatureLimit(max_calls=5, period="daily", action="deny")
+        m = 20
+
+        def one(i: int) -> object:
+            s = PostgresStore(store._database_url)
+            return s.deduct_with_allowance(
+                user,
+                Decimal("1"),
+                idempotency_key=f"conc{i}",
+                feature="concurrent_feature",
+                feature_limit=limit,
+                feature_period_start=period_start,
+            )
+
+        with ThreadPoolExecutor(max_workers=m) as ex:
+            results = list(ex.map(one, range(m)))
+
+        succeeded = [r for r in results if not r.error]  # type: ignore[attr-defined]
+        denied = [r for r in results if r.error == "feature_limit_reached"]  # type: ignore[attr-defined]
+        assert len(succeeded) == 5
+        assert len(denied) == m - 5

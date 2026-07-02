@@ -1,6 +1,6 @@
 export { PricingEngine } from "./engine.js";
-export type { AllowancePeriod } from "./allowance.js";
-export { resolveAllowanceWindow } from "./allowance.js";
+export type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
+export { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
@@ -12,6 +12,7 @@ export {
   ConcurrencyLimitError,
   ConfigError,
   ExpressionError,
+  FeatureLimitReachedError,
   FeatureNotEntitledError,
   ImportError,
   InsufficientCreditsError,
@@ -52,6 +53,8 @@ export type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   OperationPolicy,

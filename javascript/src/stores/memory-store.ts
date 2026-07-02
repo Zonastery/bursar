@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import Decimal from "decimal.js";
 import { quantizeMoney } from "../expr.js";
 import { StoreError } from "../errors.js";
-import { resolveAllowanceWindow } from "../allowance.js";
+import { resolveAllowanceWindow, resolveCalendarWindow } from "../allowance.js";
 import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
@@ -19,6 +19,8 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   ListTransactionsOptions,
@@ -63,29 +65,74 @@ function featurePresent(value: unknown): boolean {
  */
 function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition {
   const p = raw as Record<string, unknown>;
-  const freeAllowanceRaw = (p["freeAllowance"] ?? p["free_allowance"]) as number | string | undefined;
-  const defaultBillingModeRaw = (p["defaultBillingMode"] ?? p["billingMode"] ?? p["default_billing_mode"] ?? p["billing_mode"]) as string | undefined;
-  const overdraftFloorRaw = (p["overdraftFloor"] ?? p["overdraft_floor"]) as number | string | null | undefined;
-  const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as Record<string, string> | null | undefined;
-  const perOperationRaw = (p["perOperation"] ?? p["per_operation"]) as Record<string, unknown> | null | undefined;
+  const freeAllowanceRaw = (p["freeAllowance"] ?? p["free_allowance"]) as
+    | number
+    | string
+    | undefined;
+  const defaultBillingModeRaw = (p["defaultBillingMode"] ??
+    p["billingMode"] ??
+    p["default_billing_mode"] ??
+    p["billing_mode"]) as string | undefined;
+  const overdraftFloorRaw = (p["overdraftFloor"] ?? p["overdraft_floor"]) as
+    | number
+    | string
+    | null
+    | undefined;
+  const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as
+    | Record<string, string>
+    | null
+    | undefined;
+  const perOperationRaw = (p["perOperation"] ?? p["per_operation"]) as
+    | Record<string, unknown>
+    | null
+    | undefined;
   const maxConcurrentRaw = (p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
   const allowancePeriodRaw = (p["allowancePeriod"] ?? p["allowance_period"]) as
     | AllowancePeriod
     | undefined;
+  const featureLimitsRaw = (p["featureLimits"] ?? p["feature_limits"]) as
+    | Record<string, unknown>
+    | null
+    | undefined;
 
-  const billingMode = (defaultBillingModeRaw === "overdraft" ? "overdraft" : "strict") as "strict" | "overdraft";
+  const billingMode = (defaultBillingModeRaw === "overdraft" ? "overdraft" : "strict") as
+    | "strict"
+    | "overdraft";
   return {
     id: (p["id"] as string | undefined) ?? planKey,
     name: (p["name"] as string | undefined) ?? planKey,
     freeAllowance: freeAllowanceRaw != null ? new Decimal(freeAllowanceRaw) : ZERO,
     rateOverrides: rateOverridesRaw ?? null,
     features: (p["features"] as Record<string, unknown> | null | undefined) ?? null,
+    featureLimits: normaliseFeatureLimitsMap(featureLimitsRaw),
     defaultBillingMode: billingMode,
     overdraftFloor: overdraftFloorRaw != null ? new Decimal(overdraftFloorRaw) : null,
     maxConcurrent: maxConcurrentRaw ?? null,
     perOperation: (perOperationRaw as PlanDefinition["perOperation"]) ?? undefined,
     allowancePeriod: allowancePeriodRaw ?? "calendar_month",
   };
+}
+
+/**
+ * Normalise a raw `featureLimits`/`feature_limits` map (possibly snake_case,
+ * from a JSON fixture or raw dict) into typed `FeatureLimit` records. Mirrors
+ * `normalisePlanDefinition`'s camelCase/snake_case tolerance.
+ */
+function normaliseFeatureLimitsMap(
+  raw: Record<string, unknown> | null | undefined,
+): Record<string, FeatureLimit> | null {
+  if (!raw) return null;
+  const out: Record<string, FeatureLimit> = {};
+  for (const [featureKey, rawLimit] of Object.entries(raw)) {
+    const l = (rawLimit ?? {}) as Record<string, unknown>;
+    const maxCallsRaw = (l["maxCalls"] ?? l["max_calls"]) as number | string | undefined;
+    out[featureKey] = {
+      maxCalls: maxCallsRaw != null ? Number(maxCallsRaw) : 0,
+      period: (l["period"] as FeatureLimit["period"] | undefined) ?? "monthly",
+      action: (l["action"] as FeatureLimit["action"] | undefined) ?? "deny",
+    };
+  }
+  return out;
 }
 
 /**
@@ -261,7 +308,9 @@ export class MemoryStore extends CreditStore {
       .sort((a, b) => a.priority - b.priority || a.tierKey.localeCompare(b.tierKey));
 
     const base: TierOrderEntry[] =
-      configured.length > 0 ? configured : [{ tierKey: "default", priority: 0, allowOverdraft: true }];
+      configured.length > 0
+        ? configured
+        : [{ tierKey: "default", priority: 0, allowOverdraft: true }];
 
     const known = new Set(base.map((t) => t.tierKey));
     const orphaned = new Set<string>();
@@ -333,7 +382,9 @@ export class MemoryStore extends CreditStore {
     }
     if (expiresAt != null) {
       if (expiresAt <= this.now()) {
-        throw new StoreError(`invalid_expires_at: ${expiresAt.toISOString()} must be in the future`);
+        throw new StoreError(
+          `invalid_expires_at: ${expiresAt.toISOString()} must be in the future`,
+        );
       }
       return expiresAt;
     }
@@ -362,15 +413,21 @@ export class MemoryStore extends CreditStore {
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
     return {
       tablesCreated: [
-        "001_credit_tables.sql",
+        "001_core_schema.sql",
         "002_credit_rpcs.sql",
         "003_pricing_config.sql",
-        "004_user_plans.sql",
-        "005_credit_refunds.sql",
-        "006_credit_expiry.sql",
-        "007_usage_analytics.sql",
-        "008_team_balances.sql",
-        "009_spend_caps.sql",
+        "004_plans.sql",
+        "005_spend_caps.sql",
+        "006_refunds_and_expiry.sql",
+        "007_analytics.sql",
+        "008_teams.sql",
+        "009_deduct_and_leases.sql",
+        "010_credit_tiers.sql",
+        // NOTE: the contract doc for this feature named this migration
+        // "011_feature_limits.sql", but "011_lazy_expiry.sql" already occupies
+        // that slot in python/src/ducto/sql/ (a numbering collision between two
+        // parallel work tracks) — using the next free number here instead.
+        "012_feature_limits.sql",
       ],
       rpcsCreated: [],
       errors: [],
@@ -393,7 +450,28 @@ export class MemoryStore extends CreditStore {
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
     tier?: string | null,
+    idempotencyKey?: string | null,
   ): Promise<AddCreditsResult> {
+    // Idempotency (user-scoped): replay the original result, mirroring the
+    // idiom used by deductWithAllowance/settleLease/refundCredits — scan for an
+    // existing transaction for this user whose metadata.idempotencyKey matches.
+    if (idempotencyKey) {
+      const existing = this.transactions.find(
+        (t) => t.userId === userId && t.metadata?.["idempotencyKey"] === idempotencyKey,
+      );
+      if (existing) {
+        return {
+          transactionId: existing.id,
+          userId,
+          amount: existing.amount,
+          newBalance: this.balance(userId),
+          lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
+          tier: (existing.metadata?.["tier"] as string | undefined) ?? "default",
+          idempotent: true,
+        };
+      }
+    }
+
     // L2: reject non-finite amounts always, and non-positive amounts unless this
     // is an explicit `adjustment` (parity with SQL `credits_add`). A negative or
     // zero purchase/grant must never drive the balance below the floor.
@@ -421,6 +499,7 @@ export class MemoryStore extends CreditStore {
     const txId = randomUUID();
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     txMeta["tier"] = resolvedTier;
+    if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
     const tx: TransactionRecord = {
       id: txId,
       userId,
@@ -439,6 +518,7 @@ export class MemoryStore extends CreditStore {
       newBalance: this.balance(userId),
       lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
       tier: resolvedTier,
+      idempotent: false,
     };
   }
 
@@ -506,6 +586,9 @@ export class MemoryStore extends CreditStore {
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? null;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
 
     // ── critical section (synchronous; no awaits) ──
 
@@ -519,6 +602,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: this.balance(userId),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "invalid_amount",
       };
     }
@@ -539,6 +623,7 @@ export class MemoryStore extends CreditStore {
           balanceAfter: this.balance(userId),
           idempotent: true,
           capWarning: null,
+          featureLimitWarning: null,
           // Idempotent replay echoes the ORIGINAL tier breakdown — never recomputed.
           tierBreakdown:
             (existing.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ?? null,
@@ -589,10 +674,37 @@ export class MemoryStore extends CreditStore {
             balanceAfter: this.balance(userId),
             idempotent: false,
             capWarning: null,
+            featureLimitWarning: null,
             error: "cap_reached",
           };
         }
         if (capWarning === null) capWarning = cap.action;
+      }
+    }
+
+    // (4b) Feature limit: ledger-derived count of prior committed `usage`
+    // transactions tagged metadata.feature === feature within
+    // [featurePeriodStart, featurePeriodEnd). Skipped entirely when no
+    // feature/limit was resolved by the caller (manager).
+    let featureLimitWarning: string | null = null;
+    if (feature != null && featureLimit != null && featurePeriodStart != null) {
+      const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
+      const count = this.featureUsageCount(userId, feature, featurePeriodStart, featurePeriodEnd);
+      if (count >= featureLimit.maxCalls) {
+        if (featureLimit.action === "deny") {
+          return {
+            transactionId: "",
+            userId,
+            amount: ZERO,
+            allowanceConsumed: ZERO,
+            balanceAfter: this.balance(userId),
+            idempotent: false,
+            capWarning: null,
+            featureLimitWarning: null,
+            error: "feature_limit_reached",
+          };
+        }
+        featureLimitWarning = featureLimit.action;
       }
     }
 
@@ -607,6 +719,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: current,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "insufficient_credits",
       };
     }
@@ -622,6 +735,10 @@ export class MemoryStore extends CreditStore {
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
     if (model != null) txMeta["model"] = model;
+    // Tag metadata.feature whenever `feature` is given, regardless of whether a
+    // limit is currently configured — this is what makes the ledger-derived
+    // count accurate once a limit is enabled later.
+    if (feature != null) txMeta["feature"] = feature;
     txMeta["allowanceConsumed"] = consume;
     txMeta["tierBreakdown"] = tierBreakdown;
 
@@ -643,6 +760,7 @@ export class MemoryStore extends CreditStore {
       balanceAfter: current.minus(net),
       idempotent: false,
       capWarning,
+      featureLimitWarning,
       tierBreakdown,
     };
   }
@@ -679,6 +797,9 @@ export class MemoryStore extends CreditStore {
     const model = options?.model ?? null;
     const overdraftFloor = options?.overdraftFloor ?? null;
     const metadata = options?.metadata ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
 
     // ── critical section (synchronous; no awaits) ──
     if (!amount.isFinite() || amount.lte(0)) {
@@ -733,6 +854,32 @@ export class MemoryStore extends CreditStore {
           billingMode,
           expiresAt: "",
           error: "cap_reached",
+        };
+      }
+    }
+
+    // (3b) Deny-only feature limit at admission — same ledger-derived count as
+    // deductWithAllowance/settleLease, but only ever enforces 'deny' (warn/notify
+    // are not checked here: nothing has been charged yet, so there is nothing to
+    // warn about). Skipped when no feature/limit was resolved by the caller.
+    if (
+      feature != null &&
+      featureLimit != null &&
+      featureLimit.action === "deny" &&
+      featurePeriodStart != null
+    ) {
+      const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
+      const count = this.featureUsageCount(userId, feature, featurePeriodStart, featurePeriodEnd);
+      if (count >= featureLimit.maxCalls) {
+        return {
+          leaseId: "",
+          userId,
+          amount: ZERO,
+          available: ZERO,
+          reservedTotal: ZERO,
+          billingMode,
+          expiresAt: "",
+          error: "feature_limit_reached",
         };
       }
     }
@@ -797,8 +944,10 @@ export class MemoryStore extends CreditStore {
       balanceAfter: balance,
       idempotent: true,
       capWarning: null,
+      featureLimitWarning: null,
       // Idempotent replay echoes the ORIGINAL tier breakdown — never recomputed.
-      tierBreakdown: (tx.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ?? null,
+      tierBreakdown:
+        (tx.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ?? null,
     };
   }
 
@@ -824,6 +973,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: balance,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "lease_not_found",
       };
     }
@@ -840,6 +990,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: balance,
         idempotent: true,
         capWarning: null,
+        featureLimitWarning: null,
       };
     }
     if (lease.status === "expired" || lease.expiresAt <= now) {
@@ -852,6 +1003,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: balance,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "lease_expired",
       };
     }
@@ -868,6 +1020,9 @@ export class MemoryStore extends CreditStore {
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? null;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
 
     // ── critical section (synchronous; no awaits) ──
     if (!amount.isFinite() || amount.lt(0)) {
@@ -879,6 +1034,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: this.balance(userId),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "invalid_amount",
       };
     }
@@ -913,6 +1069,7 @@ export class MemoryStore extends CreditStore {
         balanceAfter: balance,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
       };
     }
 
@@ -966,6 +1123,18 @@ export class MemoryStore extends CreditStore {
       }
     }
 
+    // Feature limit is ADVISORY at settle (work is done, never blocks): a
+    // breach — even a configured 'deny' — only sets featureLimitWarning
+    // ("prefer deny", mirroring capWarning's resolution above).
+    let featureLimitWarning: string | null = null;
+    if (feature != null && featureLimit != null && featurePeriodStart != null) {
+      const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
+      const count = this.featureUsageCount(userId, feature, featurePeriodStart, featurePeriodEnd);
+      if (count >= featureLimit.maxCalls) {
+        featureLimitWarning = featureLimit.action;
+      }
+    }
+
     if (consume.gt(0) && planId) {
       this.incrementUsageWindowSync(userId, planId, consume, periodStart);
     }
@@ -976,6 +1145,10 @@ export class MemoryStore extends CreditStore {
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (model != null) txMeta["model"] = model;
     if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
+    // Tag metadata.feature whenever `feature` is given — this is what makes
+    // this call countable by future checks (settle_lease is the ONLY place a
+    // leased operation's usage transaction is inserted).
+    if (feature != null) txMeta["feature"] = feature;
     txMeta["allowanceConsumed"] = consume;
     txMeta["tierBreakdown"] = tierBreakdown;
 
@@ -1000,6 +1173,7 @@ export class MemoryStore extends CreditStore {
       balanceAfter: balance.minus(net),
       idempotent: false,
       capWarning,
+      featureLimitWarning,
       tierBreakdown,
     };
   }
@@ -1164,6 +1338,7 @@ export class MemoryStore extends CreditStore {
       planName: planDef?.name ?? null,
       freeAllowance: planDef?.freeAllowance ?? ZERO,
       features: (planDef?.features as Record<string, unknown>) ?? {},
+      featureLimits: planDef?.featureLimits ?? {},
       defaultBillingMode: planDef?.defaultBillingMode ?? "strict",
       perOperation: (planDef?.perOperation as GetUserPlanResult["perOperation"]) ?? {},
       maxConcurrent: planDef?.maxConcurrent ?? null,
@@ -1334,9 +1509,9 @@ export class MemoryStore extends CreditStore {
     // Credit tiers: LIFO restoration (plan §5). The original debit's per-tier
     // breakdown drives allocation; legacy debits without a stored breakdown
     // (pre-tiers) fall back to the whole amount landing in "default".
-    const originalBreakdown =
-      (origTx.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ??
-      { default: originalDebit };
+    const originalBreakdown = (origTx.metadata?.["tierBreakdown"] as
+      | Record<string, Decimal>
+      | undefined) ?? { default: originalDebit };
 
     // tierRemaining[t] = original[t] - Σ(all PRIOR refunds' own breakdown[t]) —
     // derived fresh each time so repeated partial refunds compose correctly
@@ -1360,7 +1535,9 @@ export class MemoryStore extends CreditStore {
     // breakdown.
     let toAllocate = refundAmount;
     const newBreakdown: Record<string, Decimal> = {};
-    const reverseOrder = [...this.tierWalkOrder(origTx.userId, Object.keys(originalBreakdown))].reverse();
+    const reverseOrder = [
+      ...this.tierWalkOrder(origTx.userId, Object.keys(originalBreakdown)),
+    ].reverse();
     for (const t of reverseOrder) {
       if (toAllocate.lte(0)) break;
       const give = Decimal.min(tierRemaining[t.tierKey] ?? ZERO, toAllocate);
@@ -1399,7 +1576,7 @@ export class MemoryStore extends CreditStore {
 
   // ── Credit expiry ─────────────────────────────────────────────────────
 
-  async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
+  async sweepExpiredCredits(dryRun = false, userId?: string): Promise<SweepResult> {
     // ── critical section (synchronous; no awaits) ──
     const now = this.now();
     // Credit tiers: re-scoped from per-userId to per-(userId, tierKey), reading
@@ -1408,8 +1585,11 @@ export class MemoryStore extends CreditStore {
     const expiredByUserTier = new Map<string, Decimal>();
     const expiredTxsByUserTier = new Map<string, TransactionRecord[]>();
 
-    // Find all expired, not-yet-swept grant transactions.
+    // Find all expired, not-yet-swept grant transactions. When `userId` is
+    // given (lazy-on-read expiry), restrict the scan to that user only —
+    // omitted preserves the original global-sweep behaviour exactly.
     for (const tx of this.transactions) {
+      if (userId !== undefined && tx.userId !== userId) continue;
       if (
         tx.expiresAt &&
         !tx.sweptAt && // H4: never re-sweep a previously swept grant
@@ -1717,6 +1897,60 @@ export class MemoryStore extends CreditStore {
       if (t.createdAt >= windowStart) total = total.plus(t.amount.abs());
     }
     return total;
+  }
+
+  /**
+   * Ledger-derived count of committed `usage` transactions tagged
+   * `metadata.feature === feature` in `[periodStart, periodEnd)` — the
+   * counting primitive shared by `deductWithAllowance`/`createLease`/
+   * `settleLease`'s feature-limit enforcement and `checkFeatureLimit`.
+   * Mirrors `spendInWindow`, replacing "sum of amount" with "count of rows".
+   *
+   * Deliberately does NOT filter on `amount < 0` (unlike `spendInWindow`,
+   * which only cares about actual dollars spent): a call fully covered by
+   * free allowance nets to `amount === 0` but is still one invocation of the
+   * feature and must still count.
+   *
+   * `release_lease` never inserts a `usage` row (nothing to count) and
+   * `refund_credits` never deletes the original row (the count is
+   * unaffected) — both intentional, matching the SQL/Python design.
+   */
+  private featureUsageCount(
+    userId: string,
+    feature: string,
+    periodStart: Date,
+    periodEnd: Date,
+  ): number {
+    let count = 0;
+    for (const t of this.transactions) {
+      if (t.userId !== userId) continue;
+      if (t.type !== "usage") continue;
+      if ((t.metadata ?? {})["feature"] !== feature) continue;
+      if (t.createdAt >= periodStart && t.createdAt < periodEnd) count += 1;
+    }
+    return count;
+  }
+
+  async checkFeatureLimit(
+    userId: string,
+    feature: string,
+    maxCalls: number,
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<FeatureLimitResult> {
+    const used = this.featureUsageCount(userId, feature, periodStart, periodEnd);
+    return {
+      userId,
+      feature,
+      limited: true,
+      limit: maxCalls,
+      used,
+      remaining: Math.max(maxCalls - used, 0),
+      periodStart: periodStart.toISOString(),
+      periodEnd: periodEnd.toISOString(),
+      // The manager overwrites `action` with the resolved FeatureLimit.action.
+      action: null,
+    };
   }
 
   async checkSpendCap(

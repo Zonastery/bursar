@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
+import { resolveCalendarWindow } from "../allowance.js";
 import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
@@ -16,6 +17,8 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  FeatureLimit,
+  FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
   ListTransactionsOptions,
@@ -65,6 +68,17 @@ function decParam(value: Decimal): string {
 }
 
 /**
+ * Derive the feature-limit window END from its (already calendar-aligned)
+ * START — the manager only resolves/threads the start (mirrors Python
+ * `base.py`); the RPC needs an explicit end for its `WHERE` clause, so this
+ * store computes it via `resolveCalendarWindow` (idempotent on an aligned
+ * start — re-resolving it yields the identical window).
+ */
+function featureWindowEnd(start: Date, period: FeatureLimit["period"]): Date {
+  return resolveCalendarWindow(start, period).end;
+}
+
+/**
  * Parse a JSON `{tier_key: "3.0000", ...}` object (e.g. `tier_breakdown`,
  * `expired_by_tier`) into `Record<string, Decimal>`, converting every value
  * the same way scalar money fields are (never left as a raw string/number).
@@ -75,6 +89,21 @@ function decRecord(raw: unknown): Record<string, Decimal> | null {
   const out: Record<string, Decimal> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     out[k] = dec(v);
+  }
+  return out;
+}
+
+/** Parse the ``feature_limits`` JSONB map into typed `FeatureLimit` records. */
+function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, FeatureLimit> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const fl = (v ?? {}) as Record<string, unknown>;
+    out[k] = {
+      maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
+      period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
+      action: (String(fl.action ?? "deny") as FeatureLimit["action"]) ?? "deny",
+    };
   }
   return out;
 }
@@ -231,6 +260,11 @@ export class PostgresStore extends CreditStore {
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
     tier?: string | null,
+    // NOTE: threaded through defensively as a trailing positional param to the
+    // `credits_add` RPC. Confirm the SQL migration adds a `p_idempotency_key`
+    // parameter (with a default, so existing 5-arg call sites keep working)
+    // before relying on this against a real database (see 011_lazy_expiry.sql).
+    idempotencyKey?: string | null,
   ): Promise<AddCreditsResult> {
     const meta: Record<string, unknown> = { ...(metadata ?? {}) };
     if (expiresAt) {
@@ -242,6 +276,7 @@ export class PostgresStore extends CreditStore {
       type,
       JSON.stringify(meta),
       tier ?? null,
+      idempotencyKey ?? null,
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if ("error" in row && row.error) {
@@ -254,6 +289,7 @@ export class PostgresStore extends CreditStore {
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
       tier: String(row.tier ?? tier ?? "default"),
+      idempotent: Boolean(row.idempotent),
     };
   }
 
@@ -267,6 +303,13 @@ export class PostgresStore extends CreditStore {
     const model = options?.model ?? null;
     const metadata = options?.metadata ?? {};
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
 
     const rows = await this.callproc("deduct_with_allowance", [
       userId,
@@ -277,13 +320,19 @@ export class PostgresStore extends CreditStore {
       JSON.stringify(metadata ?? {}),
       false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
       periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      feature,
+      featureLimit != null ? featureLimit.maxCalls : null,
+      featureLimit != null ? featureLimit.action : null,
+      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if ("error" in row && row.error) {
       // Map the SQL error envelope to DeductionResult.error (the manager maps
       // codes to typed exceptions). cap_reached / insufficient_credits /
-      // invalid_amount all flow through here without throwing.
+      // invalid_amount / feature_limit_reached all flow through here without
+      // throwing.
       return {
         transactionId: "",
         userId,
@@ -292,6 +341,7 @@ export class PostgresStore extends CreditStore {
         balanceAfter: dec(row.balance_after),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: String(row.error),
       };
     }
@@ -304,6 +354,7 @@ export class PostgresStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -320,6 +371,13 @@ export class PostgresStore extends CreditStore {
     const floor = options?.floor ?? ZERO;
     const overdraftFloor = options?.overdraftFloor ?? null;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
     const rows = await this.callproc("create_lease", [
       userId,
       decParam(amount),
@@ -332,6 +390,11 @@ export class PostgresStore extends CreditStore {
       overdraftFloor != null ? decParam(overdraftFloor) : null,
       JSON.stringify(options?.metadata ?? {}),
       periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      feature,
+      featureLimit != null ? featureLimit.maxCalls : null,
+      featureLimit != null ? featureLimit.action : null,
+      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -378,6 +441,13 @@ export class PostgresStore extends CreditStore {
   ): Promise<DeductionResult> {
     const minBalance = options?.minBalance ?? ZERO;
     const periodStart = options?.periodStart ?? null;
+    const feature = options?.feature ?? null;
+    const featureLimit = options?.featureLimit ?? null;
+    const featurePeriodStart = options?.featurePeriodStart ?? null;
+    const featurePeriodEnd =
+      featureLimit != null && featurePeriodStart != null
+        ? featureWindowEnd(featurePeriodStart, featureLimit.period)
+        : null;
     const rows = await this.callproc("settle_lease", [
       userId,
       leaseId,
@@ -388,6 +458,11 @@ export class PostgresStore extends CreditStore {
       JSON.stringify(options?.metadata ?? {}),
       false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
       periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      feature,
+      featureLimit != null ? featureLimit.maxCalls : null,
+      featureLimit != null ? featureLimit.action : null,
+      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
     ]);
 
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -400,6 +475,7 @@ export class PostgresStore extends CreditStore {
         balanceAfter: ZERO,
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: "no result",
       };
     }
@@ -412,6 +488,7 @@ export class PostgresStore extends CreditStore {
         balanceAfter: dec(row.balance_after),
         idempotent: false,
         capWarning: null,
+        featureLimitWarning: null,
         error: String(row.error),
       };
     }
@@ -423,6 +500,7 @@ export class PostgresStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
+      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -538,6 +616,7 @@ export class PostgresStore extends CreditStore {
       planName: (row.plan_name as string) ?? null,
       freeAllowance: dec(row.free_allowance),
       features: (row.features as Record<string, unknown>) ?? {},
+      featureLimits: parseFeatureLimits(row.feature_limits),
       defaultBillingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
@@ -588,6 +667,48 @@ export class PostgresStore extends CreditStore {
 
   async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
     await this.callproc("increment_usage_window", [userId, planId, decParam(amount)]);
+  }
+
+  /** Advisory, non-locking read of invocation-count usage (UI only). Mirrors `checkSpendCap`. */
+  async checkFeatureLimit(
+    userId: string,
+    feature: string,
+    maxCalls: number,
+    periodStart: Date,
+    periodEnd: Date,
+  ): Promise<FeatureLimitResult> {
+    const rows = await this.callproc("check_feature_limit", [
+      userId,
+      feature,
+      maxCalls,
+      periodStart.toISOString().slice(0, 10),
+      periodEnd.toISOString().slice(0, 10),
+    ]);
+    if (!rows || rows.length === 0) {
+      return {
+        userId,
+        feature,
+        limited: false,
+        limit: 0,
+        used: 0,
+        remaining: 0,
+        periodStart: "",
+        periodEnd: "",
+        action: null,
+      };
+    }
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      userId: String(row.user_id ?? userId),
+      feature: String(row.feature ?? feature),
+      limited: Boolean(row.limited ?? true),
+      limit: Number(row.limit ?? maxCalls),
+      used: Number(row.used ?? 0),
+      remaining: Number(row.remaining ?? Math.max(maxCalls - Number(row.used ?? 0), 0)),
+      periodStart: String(row.period_start ?? ""),
+      periodEnd: String(row.period_end ?? ""),
+      action: (row.action as FeatureLimitResult["action"]) ?? null,
+    };
   }
 
   // ── Spend caps and rate limiting ──────────────────────────────────────
@@ -872,8 +993,13 @@ export class PostgresStore extends CreditStore {
 
   // ── Credit expiry ────────────────────────────────────────────────────
 
-  async sweepExpiredCredits(dryRun = false): Promise<SweepResult> {
-    const rows = await this.callproc("expire_credits", [dryRun]);
+  async sweepExpiredCredits(dryRun = false, userId?: string): Promise<SweepResult> {
+    // NOTE: `userId` is threaded through defensively as a trailing positional
+    // param to `expire_credits`. Confirm the SQL migration adds a `p_user_id`
+    // parameter (with a `DEFAULT NULL`, so the existing 1-arg call sites keep
+    // meaning "global sweep") before relying on this against a real database
+    // (see 011_lazy_expiry.sql).
+    const rows = await this.callproc("expire_credits", [dryRun, userId ?? null]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       expiredCount: Number(row.expired_count ?? 0),

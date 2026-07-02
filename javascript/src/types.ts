@@ -1,5 +1,5 @@
 import type { Decimal } from "decimal.js";
-import type { AllowancePeriod } from "./allowance.js";
+import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 
 /**
  * Billing mode for an operation. ``strict`` never lets the balance fall below
@@ -89,6 +89,8 @@ export interface AddCreditsResult {
   lifetimePurchased: Decimal;
   /** The tier this grant landed in (`"default"` when no tiers are configured). */
   tier: string;
+  /** `true` when this result is a replay of a prior grant with the same `idempotencyKey`. */
+  idempotent?: boolean;
 }
 
 /** Result of deducting credits. */
@@ -103,6 +105,12 @@ export interface DeductionResult {
   error?: string | null;
   /** Exact per-tier split of `amount` (credit tiers); `null` when not computed. */
   tierBreakdown?: Record<string, Decimal> | null;
+  /**
+   * Non-blocking `warn`/`notify` signal from a breached `FeatureLimit` (per-feature
+   * invocation-count limits). `null` when no limit was breached (or none configured).
+   * Mirrors `capWarning`.
+   */
+  featureLimitWarning?: string | null;
 }
 
 /** Options for an atomic allowance-aware deduction. */
@@ -113,6 +121,17 @@ export interface DeductWithAllowanceOptions {
   metadata?: CreditMetadata | null;
   /** Free-allowance window start override (WS9); defaults to calendar-month when omitted. */
   periodStart?: Date | null;
+  /** Feature name tagged onto the transaction and checked against `featureLimit`. */
+  feature?: string | null;
+  /** The resolved `FeatureLimit` for `feature` (looked up from the user's plan). `null`/omitted skips enforcement. */
+  featureLimit?: FeatureLimit | null;
+  /**
+   * Calendar-aligned window start for `featureLimit.period` (resolved via
+   * `resolveCalendarWindow`). Mirrors Python `base.py`: only the start is
+   * threaded down — the store derives the window end itself from
+   * `featureLimit.period`.
+   */
+  featurePeriodStart?: Date | null;
 }
 
 /** Pricing config fetched from store. */
@@ -155,6 +174,27 @@ export interface OperationPolicy {
 }
 
 /**
+ * Per-feature invocation-count limit (cadence-based rate limiting).
+ *
+ * `maxCalls` bounds how many times a feature may be invoked within one
+ * `period` window. Windows are calendar-aligned (see
+ * {@link resolveCalendarWindow} in `allowance.ts`): `"daily"` resets at UTC
+ * midnight, `"weekly"` on Monday (ISO week), `"monthly"` on the 1st,
+ * `"yearly"` on Jan 1 — every user resets together, no per-user anchor.
+ *
+ * `action` mirrors `SpendCap.action`: `"deny"` blocks the call (checked at
+ * admission/deduction); `"warn"`/`"notify"` are non-blocking signals, checked
+ * only on the immediate-charge and settle paths — admission
+ * (`reserve`/`createLease`) only ever enforces `"deny"`, exactly like spend
+ * caps.
+ */
+export interface FeatureLimit {
+  maxCalls: number;
+  period: FeatureLimitPeriod;
+  action: "deny" | "warn" | "notify";
+}
+
+/**
  * Definition of a subscription plan with free allowance and rate overrides.
  *
  * Beyond allowance/rates/features, a plan carries the financial-safety policy
@@ -168,6 +208,12 @@ export interface PlanDefinition {
   freeAllowance: Decimal;
   rateOverrides?: Record<string, string> | null;
   features?: Record<string, unknown> | null;
+  /**
+   * Per-feature invocation-count limits, keyed by feature name. Independent of
+   * `features` (boolean/value entitlement) — a feature can be entitled and
+   * rate-limited at the same time.
+   */
+  featureLimits?: Record<string, FeatureLimit> | null;
   defaultBillingMode?: BillingMode;
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
@@ -197,6 +243,8 @@ export interface GetUserPlanResult {
   planName: string | null;
   freeAllowance: Decimal;
   features: Record<string, unknown>;
+  /** Per-feature invocation-count limits, keyed by feature name. Empty when none configured. */
+  featureLimits?: Record<string, FeatureLimit>;
   defaultBillingMode?: BillingMode;
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
@@ -271,6 +319,28 @@ export interface CheckFeatureResult {
   value: unknown;
   hasFeature: boolean;
 }
+
+/**
+ * Advisory, non-locking read of a per-feature invocation-count limit (UI only).
+ *
+ * Mirrors `CapCheckResult`: `limited: false` means no `FeatureLimit` is
+ * configured for this feature on the user's plan (unlimited) — `limit`,
+ * `used`, `remaining`, and the period bounds are zeroed/empty in that case,
+ * and `action` is `null`. Never used for admission control; that is
+ * exclusively the atomic check-and-increment inside `deduct`/`reserve`.
+ */
+export interface FeatureLimitResult {
+  userId: string;
+  feature: string;
+  limited: boolean;
+  limit: number;
+  used: number;
+  remaining: number;
+  periodStart: string;
+  periodEnd: string;
+  action: "deny" | "warn" | "notify" | null;
+}
+
 export interface SetUserPlanResult {
   userId: string;
   planId: string;

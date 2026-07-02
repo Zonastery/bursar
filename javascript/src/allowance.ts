@@ -6,10 +6,20 @@
  * baseline for `allowancePeriod` handling. All computation uses UTC methods
  * exclusively (`getUTCFullYear`, `Date.UTC`, ...) — never local-timezone
  * Date methods.
+ *
+ * `resolveCalendarWindow` is a separate, anchor-free resolver used by
+ * per-feature invocation-count limits (`PlanDefinition.featureLimits`). It
+ * supports `"daily"`/`"weekly"`/`"monthly"`/`"yearly"` cadences, all
+ * calendar-aligned (every user resets at the same instant) rather than
+ * anchored to a per-user timestamp — MUST exactly match
+ * `ducto.allowance.resolve_calendar_window` in the Python SDK.
  */
 
 /** Supported free-allowance reset window modes. */
 export type AllowancePeriod = "calendar_month" | "rolling_30d" | "anniversary";
+
+/** Supported per-feature invocation-count limit cadences. */
+export type FeatureLimitPeriod = "daily" | "weekly" | "monthly" | "yearly";
 
 const MS_PER_DAY = 86_400_000;
 
@@ -107,5 +117,57 @@ export function resolveAllowanceWindow(
       return resolveAnniversary(now, anchor);
     default:
       throw new Error(`unrecognized allowance period: ${String(period)}`);
+  }
+}
+
+/** `[now, now + 1 day)` at UTC midnight. */
+function dayWindow(now: Date): { start: Date; end: Date } {
+  const start = utcMidnight(now);
+  return { start, end: new Date(start.getTime() + MS_PER_DAY) };
+}
+
+/** Monday-start ISO week window: `[Monday, next Monday)`. */
+function isoWeekWindow(now: Date): { start: Date; end: Date } {
+  const midnight = utcMidnight(now);
+  // getUTCDay(): 0=Sunday..6=Saturday. Days since the most recent Monday.
+  const dayOfWeek = midnight.getUTCDay();
+  const daysSinceMonday = (dayOfWeek + 6) % 7;
+  const start = new Date(midnight.getTime() - daysSinceMonday * MS_PER_DAY);
+  return { start, end: new Date(start.getTime() + 7 * MS_PER_DAY) };
+}
+
+/** `[Jan 1, next Jan 1)` of `now`'s UTC year. */
+function yearWindow(now: Date): { start: Date; end: Date } {
+  const start = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
+  const end = new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1));
+  return { start, end };
+}
+
+/**
+ * Resolve the calendar-aligned `[start, end)` window for a per-feature
+ * invocation-count limit cadence (`FeatureLimit.period`).
+ *
+ * Unlike {@link resolveAllowanceWindow}, this resolver takes no anchor: every
+ * user resets at the same UTC instant. `start`/`end` are UTC-midnight `Date`s
+ * at DATE granularity; `end` is EXCLUSIVE (the window is `[start, end)`).
+ *
+ * MUST exactly match `ducto.allowance.resolve_calendar_window` in Python
+ * (same Monday-start ISO week, same year boundary).
+ */
+export function resolveCalendarWindow(
+  now: Date,
+  period: FeatureLimitPeriod,
+): { start: Date; end: Date } {
+  switch (period) {
+    case "daily":
+      return dayWindow(now);
+    case "weekly":
+      return isoWeekWindow(now);
+    case "monthly":
+      return resolveCalendarMonth(now);
+    case "yearly":
+      return yearWindow(now);
+    default:
+      throw new Error(`unrecognized feature-limit period: ${String(period)}`);
   }
 }

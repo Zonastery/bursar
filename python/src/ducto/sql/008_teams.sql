@@ -1,11 +1,7 @@
 -- ducto: team/shared balance pools.
 -- credit_teams, credit_team_members tables, RPCs for team credit operations.
 --
--- NOTE: the 'team_usage' enum value is added in 001 (NOT here). Postgres forbids
--- using a freshly-added enum value in the same transaction that adds it, so it
--- must be committed by an earlier migration before any function below uses it (H5).
---
--- Money columns are NUMERIC(18,4) (M11): team balance, member spend_cap/total_spent.
+-- Money columns are NUMERIC(18,4): team balance, member spend_cap/total_spent.
 
 CREATE TABLE IF NOT EXISTS public.credit_teams (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -45,12 +41,6 @@ BEGIN
   END IF;
 END;
 $$;
-
--- Money params moved INTEGER -> NUMERIC (M11). Drop old overloads so the
--- NUMERIC definitions fully replace them (no-ops on fresh installs).
-DROP FUNCTION IF EXISTS public.create_team(TEXT, INTEGER);
-DROP FUNCTION IF EXISTS public.add_team_member(UUID, UUID, TEXT, INTEGER);
-DROP FUNCTION IF EXISTS public.deduct_team(UUID, UUID, INTEGER, JSONB);
 
 -- create_team: create a team with optional initial balance.
 CREATE OR REPLACE FUNCTION public.create_team(
@@ -149,12 +139,12 @@ $$;
 
 -- get_team_members: list all members of a team (SETOF).
 --
--- C4: credit_transactions has no team_id column — the team id lives in
+-- credit_transactions has no team_id column — the team id lives in
 -- metadata->>'team_id', so the join reads it from there.
--- M2 / contract §3: total_spent is the SAME monthly-windowed team_usage spend
--- that deduct_team enforces the per-user spend_cap against (single source of
--- truth, reset monthly). ABS() turns the stored negative debit into a positive
--- spent figure. Buckets are pinned to UTC for determinism (M16).
+-- total_spent is the SAME monthly-windowed team_usage spend that deduct_team
+-- enforces the per-user spend_cap against (single source of truth, reset
+-- monthly). ABS() turns the stored negative debit into a positive spent
+-- figure. Buckets are pinned to UTC for determinism.
 CREATE OR REPLACE FUNCTION public.get_team_members(p_team_id UUID)
 RETURNS SETOF JSONB
 LANGUAGE plpgsql
@@ -189,12 +179,12 @@ $$;
 
 -- deduct_team: deduct credits from team pool, attribute to user.
 --
--- Money is NUMERIC(18,4). The per-user spend cap (M2 / contract §3) is enforced
--- against the SAME monthly-windowed team_usage spend that get_team_members
--- reports — NOT the lifetime credit_team_members.total_spent counter — so the
--- cap and the displayed total agree. Idempotency is user-scoped (matches
--- deduct_credits / H16): a replay of the same metadata->>'idempotency_key'
--- returns the original transaction without double-charging the pool.
+-- The per-user spend cap is enforced against the SAME monthly-windowed
+-- team_usage spend that get_team_members reports — NOT the lifetime
+-- credit_team_members.total_spent counter — so the cap and the displayed
+-- total agree. Idempotency is user-scoped (matches deduct_credits): a replay
+-- of the same metadata->>'idempotency_key' returns the original transaction
+-- without double-charging the pool.
 CREATE OR REPLACE FUNCTION public.deduct_team(
   p_team_id UUID,
   p_user_id UUID,

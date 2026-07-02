@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveAllowanceWindow } from "../src/allowance.js";
+import { resolveAllowanceWindow, resolveCalendarWindow } from "../src/allowance.js";
 
 /** Build a UTC-midnight Date from y/m/d (m is 1-indexed for readability). */
 function utc(y: number, m: number, d: number): Date {
@@ -171,5 +171,98 @@ describe("resolveAllowanceWindow", () => {
     expect(() =>
       resolveAllowanceWindow(utc(2026, 1, 1), "bogus" as never, null),
     ).toThrow();
+  });
+});
+
+describe("resolveCalendarWindow (per-feature invocation-count limits)", () => {
+  describe("daily", () => {
+    it("resolves to [UTC midnight, next UTC midnight)", () => {
+      const { start, end } = resolveCalendarWindow(
+        new Date(Date.UTC(2026, 2, 15, 13, 45, 0)),
+        "daily",
+      );
+      expect(iso(start)).toBe("2026-03-15");
+      expect(iso(end)).toBe("2026-03-16");
+    });
+  });
+
+  describe("weekly (Monday-start ISO week)", () => {
+    it("mid-week resolves to the containing Monday-start week", () => {
+      // 2026-03-18 is a Wednesday.
+      const { start, end } = resolveCalendarWindow(utc(2026, 3, 18), "weekly");
+      expect(iso(start)).toBe("2026-03-16"); // Monday
+      expect(iso(end)).toBe("2026-03-23"); // next Monday
+    });
+
+    it("exact Monday boundary resolves to itself as the start", () => {
+      const { start, end } = resolveCalendarWindow(utc(2026, 3, 16), "weekly");
+      expect(iso(start)).toBe("2026-03-16");
+      expect(iso(end)).toBe("2026-03-23");
+    });
+
+    it("Sunday resolves to the PRECEDING Monday (end of that week)", () => {
+      // 2026-03-22 is a Sunday, still within the week that started Monday 03-16.
+      const { start, end } = resolveCalendarWindow(utc(2026, 3, 22), "weekly");
+      expect(iso(start)).toBe("2026-03-16");
+      expect(iso(end)).toBe("2026-03-23");
+    });
+
+    it("week spanning a month boundary", () => {
+      // 2026-03-30 is a Monday; the week runs into April.
+      const { start, end } = resolveCalendarWindow(utc(2026, 3, 31), "weekly");
+      expect(iso(start)).toBe("2026-03-30");
+      expect(iso(end)).toBe("2026-04-06");
+    });
+  });
+
+  describe("monthly", () => {
+    it("matches resolveAllowanceWindow's calendar_month for the same instant", () => {
+      const now = utc(2026, 3, 15);
+      const monthly = resolveCalendarWindow(now, "monthly");
+      const calendarMonth = resolveAllowanceWindow(now, "calendar_month", null);
+      expect(iso(monthly.start)).toBe(iso(calendarMonth.start));
+      expect(iso(monthly.end)).toBe(iso(calendarMonth.end));
+    });
+
+    it("December rolls over to January of the next year", () => {
+      const { start, end } = resolveCalendarWindow(utc(2026, 12, 15), "monthly");
+      expect(iso(start)).toBe("2026-12-01");
+      expect(iso(end)).toBe("2027-01-01");
+    });
+  });
+
+  describe("yearly", () => {
+    it("resolves to [Jan 1, next Jan 1)", () => {
+      const { start, end } = resolveCalendarWindow(utc(2026, 6, 15), "yearly");
+      expect(iso(start)).toBe("2026-01-01");
+      expect(iso(end)).toBe("2027-01-01");
+    });
+
+    it("Dec 31 -> Jan 1 year boundary: still resolves to the OLD year's window", () => {
+      const { start, end } = resolveCalendarWindow(utc(2026, 12, 31), "yearly");
+      expect(iso(start)).toBe("2026-01-01");
+      expect(iso(end)).toBe("2027-01-01");
+    });
+
+    it("Jan 1 resolves to the NEW year's window", () => {
+      const { start, end } = resolveCalendarWindow(utc(2027, 1, 1), "yearly");
+      expect(iso(start)).toBe("2027-01-01");
+      expect(iso(end)).toBe("2028-01-01");
+    });
+  });
+
+  it("is idempotent when re-resolved from its own (already-aligned) start", () => {
+    // The stores derive a feature-limit window's END by re-resolving the
+    // window from its already-aligned START — this must be a no-op.
+    for (const period of ["daily", "weekly", "monthly", "yearly"] as const) {
+      const { start, end } = resolveCalendarWindow(utc(2026, 3, 18), period);
+      const reResolved = resolveCalendarWindow(start, period);
+      expect(iso(reResolved.start)).toBe(iso(start));
+      expect(iso(reResolved.end)).toBe(iso(end));
+    }
+  });
+
+  it("throws for an unrecognized period", () => {
+    expect(() => resolveCalendarWindow(utc(2026, 1, 1), "bogus" as never)).toThrow();
   });
 });

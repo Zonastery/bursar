@@ -21,9 +21,9 @@ import pytest
 
 from ducto import CreditManager, UsageMetrics
 from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
-from ducto.interface.base import CapReachedError
+from ducto.interface.base import CapReachedError, FeatureLimitReachedError
 from ducto.interface.memory import MemoryStore
-from ducto.interface.models import AllowanceResult, PlanDefinition, PricingConfigData, SpendCap
+from ducto.interface.models import AllowanceResult, FeatureLimit, PlanDefinition, PricingConfigData, SpendCap
 from ducto.manager import InsufficientCreditsError, LowBalanceConfig, PricingNotLoadedError
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -741,6 +741,226 @@ class TestSpendCapsManager:
         result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=5))
         assert result.transaction_id != ""
         assert result.cap_warning is None
+
+
+class TestFeatureLimitsManager:
+    """Tests for per-feature invocation-count limits (manager wiring).
+
+    Mirrors ``TestSpendCapsManager``: a ``FeatureLimit`` is configured via
+    ``PlanDefinition.feature_limits`` (there is no per-user store setter
+    analogous to ``set_spend_cap``, mirroring ``TestPlanFeatures``), the plan
+    is assigned to the user, then ``deduct(feature=...)``/``reserve(feature=...)``
+    are driven up to and past the limit.
+    """
+
+    FEATURE = "bg_removal"
+
+    def _setup(
+        self,
+        *,
+        max_calls: int = 2,
+        period: str = "monthly",
+        action: str = "deny",
+        emitter: CreditEventEmitter | None = None,
+        user_id: str = "user-1",
+        feature: str | None = None,
+    ) -> tuple[MemoryStore, CreditManager]:
+        store = MemoryStore()
+        mgr = CreditManager(store=store, emitter=emitter)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        config = PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            min_balance=Decimal(0),
+            plans={
+                "free": PlanDefinition(
+                    id="free",
+                    name="Free",
+                    feature_limits={
+                        (feature or self.FEATURE): FeatureLimit(max_calls=max_calls, period=period, action=action)
+                    },
+                ),
+            },
+        )
+        store.set_active_pricing(config)
+        store.set_user_plan(user_id, "free")
+        store.add_credits(user_id, Decimal(1000))
+        return store, mgr
+
+    # -- deduct(): deny --------------------------------------------------
+
+    def test_deny_blocks_deduction_after_limit_reached(self) -> None:
+        store, mgr = self._setup(max_calls=2, action="deny")
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        with pytest.raises(FeatureLimitReachedError, match="Feature limit exceeded"):
+            mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        # Denied: no third debit.
+        assert mgr.get_balance("user-1").balance == Decimal("998")
+
+    def test_deny_within_limit_allows_deduction(self) -> None:
+        _store, mgr = self._setup(max_calls=2, action="deny")
+        result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        assert result.transaction_id != ""
+        assert result.feature_limit_warning is None
+
+    def test_deduct_without_feature_kwarg_is_never_limited(self) -> None:
+        """Omitting ``feature=`` skips feature-limit enforcement entirely."""
+        _store, mgr = self._setup(max_calls=1, action="deny")
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1))
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1))
+        result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1))
+        assert result.transaction_id != ""
+
+    def test_emits_feature_limit_reached_and_deduct_failed_on_deny(self) -> None:
+        emitter = CreditEventEmitter()
+        _store, mgr = self._setup(max_calls=1, action="deny", emitter=emitter)
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        limit_events: list[CreditEvent] = []
+        fail_events: list[CreditEvent] = []
+        emitter.on("credits.feature_limit_reached", limit_events.append)
+        emitter.on("credits.deduct_failed", fail_events.append)
+
+        with pytest.raises(FeatureLimitReachedError):
+            mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        assert len(limit_events) == 1
+        assert limit_events[0].type == "credits.feature_limit_reached"
+        assert limit_events[0].data is not None
+        assert limit_events[0].data["feature"] == self.FEATURE
+        assert len(fail_events) == 1
+        assert fail_events[0].data is not None
+        assert fail_events[0].data["error"] == "feature_limit_reached"
+
+    # -- deduct(): warn / notify ------------------------------------------
+
+    def test_warn_action_allows_deduction_and_emits_warning(self) -> None:
+        emitter = CreditEventEmitter()
+        _store, mgr = self._setup(max_calls=1, action="warn", emitter=emitter)
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        warn_events: list[CreditEvent] = []
+        emitter.on("credits.feature_limit_warning", warn_events.append)
+
+        # Second call breaches the limit=1 but 'warn' never blocks.
+        result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        assert result.transaction_id != ""
+        assert result.feature_limit_warning == "warn"
+        assert len(warn_events) == 1
+        assert warn_events[0].type == "credits.feature_limit_warning"
+        assert warn_events[0].data is not None
+        assert warn_events[0].data["feature"] == self.FEATURE
+        assert warn_events[0].data["action"] == "warn"
+
+    def test_notify_action_allows_deduction_and_emits_warning(self) -> None:
+        emitter = CreditEventEmitter()
+        _store, mgr = self._setup(max_calls=1, action="notify", emitter=emitter)
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        warn_events: list[CreditEvent] = []
+        emitter.on("credits.feature_limit_warning", warn_events.append)
+
+        result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        assert result.feature_limit_warning == "notify"
+        assert len(warn_events) == 1
+        assert warn_events[0].data is not None
+        assert warn_events[0].data["action"] == "notify"
+
+    # -- reserve()/settle(): deny-only at admission, advisory at settle --
+
+    def test_reserve_deny_blocks_admission_after_limit_reached(self) -> None:
+        _store, mgr = self._setup(max_calls=1, action="deny")
+        lease = mgr.reserve("user-1", Decimal(1), feature=self.FEATURE)
+        mgr.settle("user-1", lease.lease_id, Decimal(1), feature=self.FEATURE)
+
+        with pytest.raises(FeatureLimitReachedError):
+            mgr.reserve("user-1", Decimal(1), feature=self.FEATURE)
+
+    def test_settle_feature_limit_breach_is_advisory_not_blocking(self) -> None:
+        """A settle-time breach never raises — only the immediate-charge path does."""
+        emitter = CreditEventEmitter()
+        _store, mgr = self._setup(max_calls=1, action="deny", emitter=emitter)
+        lease1 = mgr.reserve("user-1", Decimal(1), feature=self.FEATURE)
+        mgr.settle("user-1", lease1.lease_id, Decimal(1), feature=self.FEATURE)
+
+        warn_events: list[CreditEvent] = []
+        emitter.on("credits.feature_limit_reached", warn_events.append)
+
+        # A second reserve() (deny-only admission) would raise, but a lease
+        # reserved for a *different* feature/no feature can still be settled
+        # against the now-breached feature: the work already happened, so
+        # settle is advisory-only and never blocks (contract: settle_lease).
+        lease2 = mgr.reserve("user-1", Decimal(1))
+        result = mgr.settle("user-1", lease2.lease_id, Decimal(1), feature=self.FEATURE)
+        assert result.transaction_id != ""
+        assert len(warn_events) == 1
+        assert warn_events[0].type == "credits.feature_limit_reached"
+        assert warn_events[0].data is not None
+        assert warn_events[0].data["blocking"] is False
+
+    def test_run_billed_threads_feature_through_reserve_and_settle(self) -> None:
+        _store, mgr = self._setup(max_calls=5, action="warn")
+
+        def do_work() -> tuple[str, Decimal]:
+            return "done", Decimal(1)
+
+        out = mgr.run_billed(
+            "user-1",
+            estimate=Decimal(1),
+            do_work=do_work,
+            feature=self.FEATURE,
+        )
+        assert out["result"] == "done"
+        assert out["deduction"].transaction_id != ""
+
+    # -- check_feature_limit(): advisory read ----------------------------
+
+    def test_check_feature_limit_no_limit_configured_returns_unlimited(self) -> None:
+        _store, mgr = self._setup(max_calls=5, action="deny", feature="other_feature")
+        result = mgr.check_feature_limit("user-1", self.FEATURE)
+        assert result.limited is False
+        assert result.limit == 0
+        assert result.used == 0
+        assert result.remaining == 0
+        assert result.action is None
+
+    def test_check_feature_limit_reports_usage_and_action(self) -> None:
+        _store, mgr = self._setup(max_calls=3, action="warn")
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+
+        result = mgr.check_feature_limit("user-1", self.FEATURE)
+        assert result.limited is True
+        assert result.limit == 3
+        assert result.used == 2
+        assert result.remaining == 1
+        assert result.action == "warn"
+
+    def test_check_feature_limit_planless_user_is_unlimited(self) -> None:
+        store = MemoryStore()
+        mgr = CreditManager(store=store)
+        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        result = mgr.check_feature_limit("nobody", self.FEATURE)
+        assert result.limited is False
+
+    def test_per_feature_isolation(self) -> None:
+        """A deduction tagged with a different feature does not count toward
+        the configured feature's limit."""
+        _store, mgr = self._setup(max_calls=1, action="deny")
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature="unrelated_feature")
+        # The configured feature's count is unaffected — still within limit.
+        result = mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        assert result.transaction_id != ""
+
+    def test_per_user_isolation(self) -> None:
+        _store, mgr = self._setup(max_calls=1, action="deny")
+        mgr._store.set_user_plan("user-2", "free")
+        mgr._store.add_credits("user-2", Decimal(1000))
+        mgr.deduct("user-1", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        # user-2's own count is independent — still within limit.
+        result = mgr.deduct("user-2", UsageMetrics(model="gpt-4", input_tokens=1), feature=self.FEATURE)
+        assert result.transaction_id != ""
 
 
 class TestEventSystem:

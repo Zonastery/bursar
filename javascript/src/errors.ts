@@ -26,6 +26,17 @@ export class CapReachedError extends Error {
   override readonly name = "CapReachedError";
 }
 
+/**
+ * Raised when a call would exceed a configured `deny` feature-limit.
+ *
+ * Stores return `error: "feature_limit_reached"` on the result object rather
+ * than throwing; the manager maps that code to this exception — mirrors
+ * `CapReachedError`.
+ */
+export class FeatureLimitReachedError extends Error {
+  override readonly name = "FeatureLimitReachedError";
+}
+
 export class RefundError extends Error {
   override readonly name = "RefundError";
 }

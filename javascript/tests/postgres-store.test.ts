@@ -72,7 +72,13 @@ describe("PostgresStore", () => {
 
   it("addCredits parses row result and sends amount as a decimal string", async () => {
     const { ctor, calls } = makeRecordingPool([
-      { id: "tx-1", user_id: "user-1", amount: "100", new_balance: "200", lifetime_purchased: "500" },
+      {
+        id: "tx-1",
+        user_id: "user-1",
+        amount: "100",
+        new_balance: "200",
+        lifetime_purchased: "500",
+      },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const result = await store.addCredits("user-1", D("100.5"), "purchase");
@@ -97,14 +103,7 @@ describe("PostgresStore", () => {
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
-      const result = await store.addCredits(
-        "user-1",
-        D(20),
-        "adjustment",
-        null,
-        null,
-        "gifted",
-      );
+      const result = await store.addCredits("user-1", D(20), "adjustment", null, null, "gifted");
       expect(calls[0].text).toContain("credits_add");
       expect(calls[0].params).toEqual([
         "user-1",
@@ -112,6 +111,7 @@ describe("PostgresStore", () => {
         "adjustment",
         JSON.stringify({}),
         "gifted",
+        null,
       ]);
       expect(result.tier).toBe("gifted");
     });
@@ -155,7 +155,7 @@ describe("PostgresStore", () => {
     // PostgresStore.addCredits now checks `"error" in row` (fixed alongside
     // tiers — it previously silently swallowed every credits_add failure,
     // including pre-existing invalid_amount/unauthorized envelopes, into a
-    // bogus "success"). The SQL `credits_add` (023_credit_tiers.sql) returns
+    // bogus "success"). The SQL `credits_add` (010_credit_tiers.sql) returns
     // error envelopes such as {error: "tier_not_found", tier: "<requested>"}
     // for every tier failure (tier_not_found/tier_required/
     // tier_does_not_expire/invalid_expires_at/expires_at_required); these
@@ -166,9 +166,9 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([{ error: "tier_not_found", tier: "bogus" }]),
       );
-      await expect(store.addCredits("user-1", D(10), "adjustment", null, null, "bogus")).rejects.toThrow(
-        "credits_add: tier_not_found",
-      );
+      await expect(
+        store.addCredits("user-1", D(10), "adjustment", null, null, "bogus"),
+      ).rejects.toThrow("credits_add: tier_not_found");
     });
 
     it("deductWithAllowance leaves tierBreakdown null when absent from the row", async () => {
@@ -234,7 +234,13 @@ describe("PostgresStore", () => {
             get_user_credit_tiers: {
               user_id: "user-1",
               tiers: [
-                { tier_key: "gifted", name: "Gifted", priority: 10, expires: true, balance: "20.0000" },
+                {
+                  tier_key: "gifted",
+                  name: "Gifted",
+                  priority: 10,
+                  expires: true,
+                  balance: "20.0000",
+                },
                 {
                   tier_key: "purchased",
                   name: "Purchased",
@@ -273,7 +279,7 @@ describe("PostgresStore", () => {
 
     it("getCreditTiers would misread a flat rowset as an empty envelope (documents the contract, not a rowset)", async () => {
       // If get_user_credit_tiers were (incorrectly) mocked as a flat array of
-      // per-tier rows — the WRONG shape per the SQL contract (023_credit_tiers.sql:
+      // per-tier rows — the WRONG shape per the SQL contract (010_credit_tiers.sql:
       // it RETURNS one JSONB envelope, not SETOF) — callproc's `rows.length === 1`
       // scalar-unwrap heuristic does not fire for a multi-row result, so `tiers`
       // would incorrectly stay empty. This pins down that getCreditTiers only
@@ -282,7 +288,13 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           { tier_key: "gifted", name: "Gifted", priority: 10, expires: true, balance: "20.0000" },
-          { tier_key: "purchased", name: "Purchased", priority: 20, expires: false, balance: "10.0000" },
+          {
+            tier_key: "purchased",
+            name: "Purchased",
+            priority: 20,
+            expires: false,
+            balance: "10.0000",
+          },
         ]),
       );
       const result = await store.getCreditTiers("user-1");
@@ -319,6 +331,11 @@ describe("PostgresStore", () => {
         JSON.stringify({ foo: "bar" }),
         false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
         null, // p_period_start (WS9): omitted → calendar-month fallback
+        null, // p_feature: omitted → no feature-limit enforcement/tagging
+        null, // p_feature_max_calls
+        null, // p_feature_action
+        null, // p_feature_period_start
+        null, // p_feature_period_end
       ]);
       // Parses NUMERIC strings to exact Decimal.
       expect(result.amount.toString()).toBe("2.5");
@@ -406,7 +423,9 @@ describe("PostgresStore", () => {
       // pg shape for `RETURNS JSONB`: one row, one column whose value is the obj.
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([{ get_credits_balance: { user_id: "u1", balance: "42", lifetime_purchased: "0" } }]),
+        makeMockPool([
+          { get_credits_balance: { user_id: "u1", balance: "42", lifetime_purchased: "0" } },
+        ]),
       );
       const result = await store.getBalance("u1");
       expect(result.balance.toString()).toBe("42");
@@ -428,7 +447,15 @@ describe("PostgresStore", () => {
   it("checkFeature treats numeric 0 as present (M6)", async () => {
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ user_id: "u1", plan_id: "p", plan_name: "P", free_allowance: "0", features: { quota: 0 } }]),
+      makeMockPool([
+        {
+          user_id: "u1",
+          plan_id: "p",
+          plan_name: "P",
+          free_allowance: "0",
+          features: { quota: 0 },
+        },
+      ]),
     );
     const result = await store.checkFeature("u1", "quota");
     expect(result.value).toBe(0);
@@ -438,7 +465,15 @@ describe("PostgresStore", () => {
   it("checkFeature treats explicit false as absent (M6)", async () => {
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ user_id: "u1", plan_id: "p", plan_name: "P", free_allowance: "0", features: { flag: false } }]),
+      makeMockPool([
+        {
+          user_id: "u1",
+          plan_id: "p",
+          plan_name: "P",
+          free_allowance: "0",
+          features: { flag: false },
+        },
+      ]),
     );
     const result = await store.checkFeature("u1", "flag");
     expect(result.hasFeature).toBe(false);
@@ -448,7 +483,15 @@ describe("PostgresStore", () => {
   it("NULL amount in RPC row is converted to Decimal zero, not NaN (PG2)", async () => {
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ id: "tx-1", user_id: "user-1", amount: null, new_balance: "100", lifetime_purchased: "100" }]),
+      makeMockPool([
+        {
+          id: "tx-1",
+          user_id: "user-1",
+          amount: null,
+          new_balance: "100",
+          lifetime_purchased: "100",
+        },
+      ]),
     );
     const result = await store.addCredits("user-1", D(50));
     // `dec(null)` returns ZERO — never NaN.
@@ -459,7 +502,13 @@ describe("PostgresStore", () => {
   // PG3 — Decimal value sent as string for non-round amounts
   it("addCredits sends non-round amount as exact decimal string (PG3)", async () => {
     const { ctor, calls } = makeRecordingPool([
-      { id: "tx-2", user_id: "user-1", amount: "0.0001", new_balance: "0.0001", lifetime_purchased: "0.0001" },
+      {
+        id: "tx-2",
+        user_id: "user-1",
+        amount: "0.0001",
+        new_balance: "0.0001",
+        lifetime_purchased: "0.0001",
+      },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     await store.addCredits("user-1", D("0.0001"), "purchase");
@@ -471,7 +520,13 @@ describe("PostgresStore", () => {
   // PG4 — expiresAt serialized as ISO string, not a Date object
   it("addCredits serializes expiresAt as ISO string (PG4)", async () => {
     const { ctor, calls } = makeRecordingPool([
-      { id: "tx-3", user_id: "user-1", amount: "50", new_balance: "150", lifetime_purchased: "150" },
+      {
+        id: "tx-3",
+        user_id: "user-1",
+        amount: "50",
+        new_balance: "150",
+        lifetime_purchased: "150",
+      },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const expiresAt = new Date("2024-01-15T00:00:00.000Z");
@@ -499,7 +554,11 @@ describe("PostgresStore", () => {
     const networkError = new Error("Connection refused");
     const query = vi.fn(() => Promise.reject(networkError));
     const ctor = vi.fn(
-      () => ({ query, end: vi.fn().mockResolvedValue(undefined) }) as unknown as import("../src/stores/postgres-store.js").PgPool,
+      () =>
+        ({
+          query,
+          end: vi.fn().mockResolvedValue(undefined),
+        }) as unknown as import("../src/stores/postgres-store.js").PgPool,
     ) as unknown as import("../src/stores/postgres-store.js").PgPoolConstructor;
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     // The postgres store propagates the raw error from the pool — callers should handle it.

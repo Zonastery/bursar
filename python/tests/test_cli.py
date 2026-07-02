@@ -69,7 +69,7 @@ class TestMigrate:
         import ducto.interface.supabase as sb
 
         class _Res:
-            tables_created = ["001_credit_tables.sql"]
+            tables_created = ["001_core_schema.sql"]
             errors: list[str] = []
             success = True
 

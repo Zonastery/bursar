@@ -1,23 +1,53 @@
--- ducto: credit management RPCs.
+-- ducto: core credit management RPCs.
 -- All functions use OR REPLACE for idempotent setup.
 -- All mutation functions require service_role (backend-only).
 
--- Money columns moved from INTEGER to NUMERIC(18,4) (M11). Because CREATE OR
--- REPLACE FUNCTION cannot change a parameter's type (it would create a second
--- overload instead), drop any pre-existing INTEGER-signature versions so the
--- NUMERIC definitions below fully replace them. Safe no-ops on a fresh install.
-DROP FUNCTION IF EXISTS public.credits_add(UUID, INTEGER, public.credit_tx_type, JSONB);
-DROP FUNCTION IF EXISTS public.reserve_credits(UUID, INTEGER, TEXT, JSONB, INTEGER);
-DROP FUNCTION IF EXISTS public.deduct_credits(UUID, UUID, INTEGER, JSONB);
+-- reserve_credits / deduct_credits (the original two-phase reservation flow)
+-- were superseded by the atomic lease lifecycle (see 009_deduct_and_leases.sql)
+-- and the atomic deduct_with_allowance RPC. Drop every overload by name so a
+-- database upgrading from the pre-squash migration history doesn't keep them
+-- around as dead code. The credit_reservations TABLE itself is unaffected —
+-- it backs the lease system.
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN
+        SELECT oid::regprocedure::text AS sig FROM pg_proc
+        WHERE proname IN ('reserve_credits', 'deduct_credits') AND pronamespace = 'public'::regnamespace
+    LOOP
+        EXECUTE 'DROP FUNCTION ' || r.sig;
+    END LOOP;
+END $$;
+
+-- credits_add gained a trailing p_tier param (see 010_credit_tiers.sql for the
+-- tier-resolution logic). Drop any pre-existing overload by name first so
+-- CREATE OR REPLACE below fully replaces it (no-op on fresh installs).
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN
+        SELECT oid::regprocedure::text AS sig FROM pg_proc
+        WHERE proname = 'credits_add' AND pronamespace = 'public'::regnamespace
+    LOOP
+        EXECUTE 'DROP FUNCTION ' || r.sig;
+    END LOOP;
+END $$;
 
 -- credits_add: Atomically add credits to user's balance and log transaction.
 -- Money is NUMERIC(18,4). Purchases must be a positive, finite amount;
 -- only the explicit 'adjustment' type may carry a negative/zero amount.
+--
+-- p_tier (see 010_credit_tiers.sql): resolves against configured credit tiers
+-- and reconciles p_metadata's `expires_at` against the resolved tier's
+-- `expires`/`default_ttl_days`. When no tiers are configured, p_tier must be
+-- NULL/'default' and expires_at passes through unchanged (zero behavioral
+-- change for pre-existing, tier-less configs).
 CREATE OR REPLACE FUNCTION public.credits_add(
     p_user_id UUID,
     p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
-    p_metadata JSONB DEFAULT NULL
+    p_metadata JSONB DEFAULT NULL,
+    p_tier TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -28,6 +58,13 @@ DECLARE
     v_new_balance NUMERIC;
     v_lifetime NUMERIC;
     v_transaction_id UUID;
+    v_tiers_configured BOOLEAN;
+    v_resolved_tier TEXT;
+    v_tier_expires BOOLEAN;
+    v_tier_ttl_days INTEGER;
+    v_has_expires_at BOOLEAN;
+    v_computed_expires_at TIMESTAMPTZ;
+    v_metadata JSONB;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
@@ -44,6 +81,71 @@ BEGIN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
+    -- ── Tier resolution ──────────────────────────────────────────────────
+    v_tiers_configured := EXISTS (SELECT 1 FROM public.credit_tiers);
+
+    IF NOT v_tiers_configured THEN
+        IF p_tier IS NOT NULL AND p_tier <> 'default' THEN
+            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+        END IF;
+        v_resolved_tier := 'default';
+    ELSIF p_tier IS NOT NULL THEN
+        SELECT tier_key, expires, default_ttl_days
+        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
+        FROM public.credit_tiers
+        WHERE tier_key = p_tier;
+
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+        END IF;
+    ELSE
+        SELECT tier_key, expires, default_ttl_days
+        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
+        FROM public.credit_tiers
+        WHERE is_default = true
+        LIMIT 1;
+
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('error', 'tier_required');
+        END IF;
+    END IF;
+
+    v_metadata := COALESCE(p_metadata, '{}'::jsonb);
+
+    -- ── expires_at reconciliation against the resolved tier ─────────────
+    -- Only applies when tiers are configured (v_tier_expires is NULL, i.e.
+    -- falsy, in the no-tiers-configured branch above, so this whole block
+    -- is skipped there).
+    IF v_tiers_configured THEN
+        v_has_expires_at := v_metadata ? 'expires_at';
+
+        IF NOT COALESCE(v_tier_expires, false) THEN
+            IF v_has_expires_at THEN
+                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'tier', v_resolved_tier);
+            END IF;
+        ELSE
+            IF NOT v_has_expires_at THEN
+                IF v_tier_ttl_days IS NULL THEN
+                    RETURN jsonb_build_object('error', 'expires_at_required', 'tier', v_resolved_tier);
+                END IF;
+                v_computed_expires_at := now() + (v_tier_ttl_days || ' days')::interval;
+                v_metadata := v_metadata || jsonb_build_object('expires_at', to_jsonb(v_computed_expires_at));
+            ELSE
+                -- Parity with MemoryStore (Python/JS): an explicit expires_at
+                -- must be in the future, not just present.
+                IF (v_metadata->>'expires_at')::timestamptz <= now() THEN
+                    RETURN jsonb_build_object(
+                        'error', 'invalid_expires_at',
+                        'tier', v_resolved_tier,
+                        'expires_at', v_metadata->>'expires_at'
+                    );
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+    v_metadata := v_metadata || jsonb_build_object('tier', v_resolved_tier);
+
     INSERT INTO public.user_credits (user_id, balance, lifetime_purchased)
     VALUES (p_user_id, p_amount, CASE WHEN p_type = 'purchase' THEN p_amount ELSE 0 END)
     ON CONFLICT (user_id) DO UPDATE SET
@@ -55,8 +157,15 @@ BEGIN
         updated_at = now()
     RETURNING balance, lifetime_purchased INTO v_new_balance, v_lifetime;
 
+    -- Per-tier balance: lazily created on first touch.
+    INSERT INTO public.user_credit_tiers (user_id, tier_key, balance)
+    VALUES (p_user_id, v_resolved_tier, p_amount)
+    ON CONFLICT (user_id, tier_key) DO UPDATE SET
+        balance = public.user_credit_tiers.balance + p_amount,
+        updated_at = now();
+
     INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
-    VALUES (p_user_id, p_amount, p_type, p_metadata)
+    VALUES (p_user_id, p_amount, p_type, v_metadata)
     RETURNING id INTO v_transaction_id;
 
     RETURN jsonb_build_object(
@@ -64,230 +173,8 @@ BEGIN
         'user_id', p_user_id,
         'amount', p_amount,
         'new_balance', v_new_balance,
-        'lifetime_purchased', v_lifetime
-    );
-END;
-$$;
-
-
--- reserve_credits: Optimistic concurrency guard.
--- Locks user row, checks available balance (including min_balance floor),
--- creates a time-bounded reservation. Prevents double-spending.
---
--- Canonical semantics (contract §3): the reservation is REJECTED if reserving
--- the full requested amount would push available balance below p_min_balance,
--- i.e. (available - p_amount) < p_min_balance. The amount is NEVER silently
--- capped — both SQL and MemoryStore reject identically. Money is NUMERIC(18,4).
-CREATE OR REPLACE FUNCTION public.reserve_credits(
-    p_user_id UUID,
-    p_amount NUMERIC,
-    p_operation_type TEXT,
-    p_metadata JSONB DEFAULT NULL,
-    p_min_balance NUMERIC DEFAULT 5
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_balance NUMERIC;
-    v_reserved NUMERIC;
-    v_available NUMERIC;
-    v_reservation_id UUID;
-BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
-    IF p_amount IS NULL OR p_amount <= 0 THEN
-        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
-    END IF;
-
-    -- Lock row so concurrent calls see an accurate (not stale) balance
-    SELECT COALESCE(balance, 0) INTO v_balance
-    FROM public.user_credits
-    WHERE user_id = p_user_id
-    FOR UPDATE;
-
-    IF v_balance IS NULL THEN
-        RETURN jsonb_build_object('error', 'no_balance_record');
-    END IF;
-
-    -- Clean up expired reservations (keeps the table bounded)
-    DELETE FROM public.credit_reservations
-    WHERE user_id = p_user_id AND expires_at <= now();
-
-    -- Sum currently active reservations
-    SELECT COALESCE(SUM(amount), 0) INTO v_reserved
-    FROM public.credit_reservations
-    WHERE user_id = p_user_id AND expires_at > now();
-
-    v_available := v_balance - v_reserved;
-
-    -- Reject (do NOT cap) if reserving the full amount would breach the floor.
-    IF v_available - p_amount < p_min_balance THEN
-        RETURN jsonb_build_object(
-            'error', 'insufficient_credits',
-            'available', v_available,
-            'balance', v_balance,
-            'reserved', v_reserved,
-            'min_balance', p_min_balance
-        );
-    END IF;
-
-    INSERT INTO public.credit_reservations (user_id, amount, operation_type, metadata)
-    VALUES (p_user_id, p_amount, p_operation_type, COALESCE(p_metadata, '{}'::jsonb))
-    RETURNING id INTO v_reservation_id;
-
-    RETURN jsonb_build_object(
-        'reservation_id', v_reservation_id,
-        'user_id', p_user_id,
-        'amount', p_amount,
-        'balance', v_balance,
-        'reserved', v_reserved + p_amount
-    );
-END;
-$$;
-
-
--- deduct_credits: Finalize a deduction against an existing reservation,
--- then release the reservation. Money is NUMERIC(18,4).
---
--- The reservation is the authority on the maximum deductible amount (C3):
---   * lock the reservation row FOR UPDATE,
---   * require it to exist, belong to this user, and be unexpired,
---   * clamp p_amount <= reservation.amount.
--- Idempotency (H16) is user-scoped: the lookup AND the unique index are keyed
--- on (user_id, idempotency_key); the insert is wrapped so a concurrent
--- duplicate (unique_violation) re-selects and returns the original result.
-CREATE OR REPLACE FUNCTION public.deduct_credits(
-    p_user_id UUID,
-    p_reservation_id UUID,
-    p_amount NUMERIC,
-    p_metadata JSONB DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_current_balance NUMERIC;
-    v_new_balance NUMERIC;
-    v_transaction_id UUID;
-    v_ref_id UUID;
-    v_idempotency_key TEXT;
-    v_operation_type TEXT;
-    v_reservation_amount NUMERIC;
-    v_amount NUMERIC := p_amount;
-BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
-    IF v_amount IS NULL OR v_amount <= 0 THEN
-        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
-    END IF;
-
-    v_idempotency_key := p_metadata->>'idempotency_key';
-
-    -- Idempotency check (user-scoped): return existing tx if key already used.
-    IF v_idempotency_key IS NOT NULL THEN
-        SELECT id INTO v_transaction_id
-        FROM public.credit_transactions
-        WHERE user_id = p_user_id
-          AND metadata->>'idempotency_key' = v_idempotency_key;
-
-        IF FOUND THEN
-            RETURN jsonb_build_object(
-                'id', v_transaction_id,
-                'user_id', p_user_id,
-                'amount', -v_amount,
-                'new_balance', (SELECT balance FROM public.user_credits WHERE user_id = p_user_id),
-                'idempotent', true
-            );
-        END IF;
-    END IF;
-
-    -- Lock the balance row BEFORE any mutation
-    SELECT balance INTO v_current_balance
-    FROM public.user_credits
-    WHERE user_id = p_user_id
-    FOR UPDATE;
-
-    IF v_current_balance IS NULL THEN
-        RETURN jsonb_build_object('error', 'no_balance_record');
-    END IF;
-
-    -- Lock and validate the reservation: it is the spend ceiling (C3).
-    SELECT amount, operation_type
-    INTO v_reservation_amount, v_operation_type
-    FROM public.credit_reservations
-    WHERE id = p_reservation_id
-      AND user_id = p_user_id
-      AND expires_at > now()
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('error', 'not_found', 'reservation_id', p_reservation_id);
-    END IF;
-
-    -- Clamp the deducted amount to the reserved ceiling.
-    v_amount := LEAST(v_amount, v_reservation_amount);
-
-    IF v_current_balance < v_amount THEN
-        RETURN jsonb_build_object('error', 'insufficient_credits', 'available', v_current_balance);
-    END IF;
-
-    -- Deduct atomically
-    UPDATE public.user_credits
-    SET balance = balance - v_amount,
-        updated_at = now()
-    WHERE user_id = p_user_id
-    RETURNING balance INTO v_new_balance;
-
-    -- Parse reference_id from metadata (gracefully handle bad UUIDs)
-    BEGIN
-        v_ref_id := (p_metadata->>'reference_id')::UUID;
-    EXCEPTION WHEN OTHERS THEN
-        v_ref_id := NULL;
-    END;
-
-    -- Insert ledger row; concurrent duplicate idempotency key -> re-select original.
-    BEGIN
-        INSERT INTO public.credit_transactions
-            (user_id, amount, type, reference_type, reference_id, metadata)
-        VALUES
-            (p_user_id, -v_amount, 'usage',
-             COALESCE(p_metadata->>'reference_type', v_operation_type),
-             v_ref_id,
-             p_metadata)
-        RETURNING id INTO v_transaction_id;
-    EXCEPTION WHEN unique_violation THEN
-        -- A concurrent call with the same (user_id, idempotency_key) won the race.
-        SELECT id INTO v_transaction_id
-        FROM public.credit_transactions
-        WHERE user_id = p_user_id
-          AND metadata->>'idempotency_key' = v_idempotency_key;
-        RETURN jsonb_build_object(
-            'id', v_transaction_id,
-            'user_id', p_user_id,
-            'amount', -v_amount,
-            'new_balance', (SELECT balance FROM public.user_credits WHERE user_id = p_user_id),
-            'idempotent', true
-        );
-    END;
-
-    -- Release reservation
-    DELETE FROM public.credit_reservations WHERE id = p_reservation_id AND user_id = p_user_id;
-
-    RETURN jsonb_build_object(
-        'id', v_transaction_id,
-        'user_id', p_user_id,
-        'amount', -v_amount,
-        'new_balance', v_new_balance,
-        'idempotent', false
+        'lifetime_purchased', v_lifetime,
+        'tier', v_resolved_tier
     );
 END;
 $$;
@@ -323,14 +210,7 @@ $$;
 
 -- Defense-in-depth: revoke direct execute from user roles.
 -- Only service_role RPC calls (via Supabase client with service key) should succeed.
--- credits_add is qualified with its exact signature (023_credit_tiers.sql adds a
--- 5th p_tier param): an unqualified REVOKE is ambiguous once both overloads
--- transiently coexist mid-re-run of the full migration set (023 hasn't dropped
--- this 4-arg signature yet when this line runs), which broke `setup()`'s
--- idempotency on an already-migrated database.
-REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.reserve_credits FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.deduct_credits FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT) FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.get_credits_balance FROM anon, authenticated;
 
 -- Refresh PostgREST schema cache so REST API can resolve the new RPCs.

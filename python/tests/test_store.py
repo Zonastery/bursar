@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from ducto import ConfigError, CreditManager, MemoryStore
+from ducto.allowance import resolve_calendar_window
 from ducto.interface.base import CapabilityNotSupportedError, CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
@@ -16,6 +17,8 @@ from ducto.interface.models import (
     BalanceResult,
     CapCheckResult,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     PlanDefinition,
@@ -373,6 +376,108 @@ class TestCreditExpiry:
         result = store.sweep_expired_credits()
         assert result.expired_amount == 50
         assert store.get_balance("user_1").balance == 30
+
+    # ── Lazy per-user scoped sweep ───────────────────────────────────────────
+
+    def test_scoped_sweep_only_expires_target_user(self) -> None:
+        """sweep_expired_credits(user_id=X) only touches X's expired grants."""
+        store = MemoryStore()
+        expires_at = datetime.now(UTC) - timedelta(hours=1)
+        store.add_credits("user_1", Decimal("100"), "purchase", expires_at=expires_at)
+        store.add_credits("user_2", Decimal("200"), "purchase", expires_at=expires_at)
+
+        result = store.sweep_expired_credits(user_id="user_1")
+        assert result.expired_count == 1
+        assert result.expired_amount == Decimal("100")
+        assert store.get_balance("user_1").balance == Decimal("0")
+        # user_2's expired grant is left completely untouched.
+        assert store.get_balance("user_2").balance == Decimal("200")
+
+        # A later global sweep still catches user_2's untouched expired grant.
+        global_result = store.sweep_expired_credits()
+        assert global_result.expired_count == 1
+        assert global_result.expired_amount == Decimal("200")
+        assert store.get_balance("user_2").balance == Decimal("0")
+
+    def test_scoped_sweep_is_idempotent(self) -> None:
+        """Repeated calls to the scoped sweep never double-expire (swept_at parity)."""
+        store = MemoryStore()
+        expires_at = datetime.now(UTC) - timedelta(hours=1)
+        store.add_credits("user_1", Decimal("40"), "purchase", expires_at=expires_at)
+
+        first = store.sweep_expired_credits(user_id="user_1")
+        assert first.expired_count == 1
+        assert first.expired_amount == Decimal("40")
+        assert store.get_balance("user_1").balance == Decimal("0")
+
+        second = store.sweep_expired_credits(user_id="user_1")
+        assert second.expired_count == 0
+        assert second.expired_amount == Decimal("0")
+        assert store.get_balance("user_1").balance == Decimal("0")
+
+    def test_scoped_sweep_on_user_with_no_expired_grants_is_a_noop(self) -> None:
+        store = MemoryStore()
+        expires_at = datetime.now(UTC) - timedelta(hours=1)
+        store.add_credits("user_1", Decimal("40"), "purchase", expires_at=expires_at)
+        store.add_credits("user_2", Decimal("999"))  # never expires
+
+        result = store.sweep_expired_credits(user_id="user_2")
+        assert result.expired_count == 0
+        assert result.expired_amount == Decimal("0")
+        # user_1's expired grant is untouched by user_2's scoped sweep.
+        assert store.get_balance("user_1").balance == Decimal("40")
+
+
+# ── add_credits idempotency ──────────────────────────────────────────────────
+
+
+class TestAddCreditsIdempotency:
+    def test_replayed_idempotency_key_does_not_double_grant(self) -> None:
+        store = MemoryStore()
+        first = store.add_credits("user_1", Decimal("100"), "purchase", idempotency_key="grant-1")
+        second = store.add_credits("user_1", Decimal("100"), "purchase", idempotency_key="grant-1")
+
+        assert second.transaction_id == first.transaction_id
+        assert second.amount == first.amount
+        assert second.new_balance == first.new_balance
+        # Balance reflects exactly ONE grant, not two.
+        assert store.get_balance("user_1").balance == Decimal("100")
+
+    def test_replayed_idempotency_key_creates_no_second_transaction(self) -> None:
+        store = MemoryStore()
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="grant-1")
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="grant-1")
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="grant-1")
+
+        transactions = store.list_user_transactions("user_1")
+        assert len(transactions) == 1
+        assert store.get_balance("user_1").balance == Decimal("50")
+
+    def test_different_idempotency_keys_both_grant(self) -> None:
+        store = MemoryStore()
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="grant-1")
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="grant-2")
+
+        assert store.get_balance("user_1").balance == Decimal("100")
+        assert len(store.list_user_transactions("user_1")) == 2
+
+    def test_idempotency_key_is_user_scoped(self) -> None:
+        """The same key for a different user grants independently (no cross-user collision)."""
+        store = MemoryStore()
+        store.add_credits("user_1", Decimal("50"), "purchase", idempotency_key="shared-key")
+        store.add_credits("user_2", Decimal("75"), "purchase", idempotency_key="shared-key")
+
+        assert store.get_balance("user_1").balance == Decimal("50")
+        assert store.get_balance("user_2").balance == Decimal("75")
+
+    def test_add_credits_without_idempotency_key_behaves_as_before(self) -> None:
+        """Regression check: omitting idempotency_key still allows repeated identical grants."""
+        store = MemoryStore()
+        store.add_credits("user_1", Decimal("10"))
+        store.add_credits("user_1", Decimal("10"))
+
+        assert store.get_balance("user_1").balance == Decimal("20")
+        assert len(store.list_user_transactions("user_1")) == 2
 
 
 # ── Refunds ────────────────────────────────────────────────────────────────
@@ -832,6 +937,363 @@ class TestSpendCaps:
         assert not result.capped
 
 
+# ── Feature limits (per-feature invocation-count limits) ───────────────────
+#
+# Counting is ledger-derived, exactly like spend caps: a feature invocation is
+# counted by counting already-committed `usage` transactions tagged
+# `metadata.feature == feature` within `[period_start, period_end)`. There is
+# no separate counter to decrement/restore, so `release_lease`/`refund_credits`
+# never free up quota (see the dedicated tests at the end of this class).
+
+
+class TestFeatureLimits:
+    def test_no_limit_configured_deduct_never_blocks(self) -> None:
+        store = MemoryStore()
+        store.add_credits("u", Decimal("1000"))
+        for _ in range(10):
+            r = store.deduct_with_allowance("u", Decimal("1"), feature="export")
+            assert r.error is None
+            assert r.feature_limit_warning is None
+
+    def test_no_limit_configured_create_lease_never_blocks(self) -> None:
+        store = MemoryStore()
+        store.add_credits("u", Decimal("1000"))
+        lease = store.create_lease("u", Decimal("1"), "op", feature="export")
+        assert lease.error is None
+
+    def test_no_limit_configured_settle_lease_never_blocks(self) -> None:
+        store = MemoryStore()
+        store.add_credits("u", Decimal("1000"))
+        lease = store.create_lease("u", Decimal("1"), "op")
+        r = store.settle_lease("u", lease.lease_id, Decimal("1"), feature="export")
+        assert r.error is None
+        assert r.feature_limit_warning is None
+
+    def test_feature_tagged_on_transaction_even_without_limit_configured(self) -> None:
+        """A `feature` name is always tagged, regardless of whether a limit is
+        configured, so enabling a limit later still has accurate history."""
+        store = MemoryStore()
+        store.add_credits("u", Decimal("1000"))
+        store.deduct_with_allowance("u", Decimal("1"), feature="export")
+        result = store.check_feature_limit("u", "export", 100, date(2000, 1, 1), date(2100, 1, 1))
+        assert result.used == 1
+
+    def test_deny_action_allows_calls_under_limit(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=3, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        for i in range(3):
+            r = store.deduct_with_allowance(
+                "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+            )
+            assert r.error is None, f"call {i} should be under the limit"
+
+    def test_deny_action_blocks_call_that_would_exceed_limit(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=3, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        for _ in range(3):
+            store.deduct_with_allowance(
+                "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+            )
+        r = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r.error == "feature_limit_reached"
+        # Nothing committed on the denied call: balance only reflects 3 debits.
+        assert store.get_balance("u").balance == Decimal("997")
+
+    def test_deny_action_keeps_blocking_over_limit(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        for _ in range(3):
+            r = store.deduct_with_allowance(
+                "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+            )
+            assert r.error == "feature_limit_reached"
+
+    def test_warn_action_allows_through_and_signals_after_limit_reached(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="warn")
+        period_start = date(2024, 6, 1)
+        r1 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r1.error is None
+        assert r1.feature_limit_warning is None
+
+        r2 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r2.error is None
+        assert r2.feature_limit_warning == "warn"
+
+    def test_notify_action_allows_through_and_signals_after_limit_reached(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="notify")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        r2 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r2.error is None
+        assert r2.feature_limit_warning == "notify"
+
+    def test_per_feature_isolation(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        blocked = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert blocked.error == "feature_limit_reached"
+
+        # A different feature name has its own independent count.
+        other = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="import", feature_limit=limit, feature_period_start=period_start
+        )
+        assert other.error is None
+
+    def test_per_user_isolation(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u1", Decimal("1000"))
+        store.add_credits("u2", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u1", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        blocked = store.deduct_with_allowance(
+            "u1", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert blocked.error == "feature_limit_reached"
+
+        # A different user's count is independent.
+        other = store.deduct_with_allowance(
+            "u2", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert other.error is None
+
+    def test_accumulation_then_block_across_n_deducts(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=5, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        for i in range(5):
+            r = store.deduct_with_allowance(
+                "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+            )
+            assert r.error is None, f"call {i} should succeed"
+
+        blocked = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert blocked.error == "feature_limit_reached"
+
+        check = store.check_feature_limit("u", "export", 5, period_start, date(2024, 7, 1))
+        assert check.used == 5
+        assert check.remaining == 0
+
+    # ── create_lease: deny-only at admission ────────────────────────────
+
+    def test_create_lease_deny_action_blocks_at_admission(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        lease = store.create_lease(
+            "u", Decimal("1"), "op", feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert lease.error == "feature_limit_reached"
+
+    def test_create_lease_warn_action_not_enforced_at_admission(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="warn")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        # Quota is already at/over the limit, but warn/notify are advisory-only
+        # signals with nothing to warn about at admission -- never enforced here.
+        lease = store.create_lease(
+            "u", Decimal("1"), "op", feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert lease.error is None
+
+    # ── settle_lease: advisory-only, never blocks ───────────────────────
+
+    def test_settle_lease_deny_action_never_blocks_but_warns(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        lease = store.create_lease("u", Decimal("1"), "op")
+        r = store.settle_lease(
+            "u", lease.lease_id, Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r.error is None
+        assert r.feature_limit_warning == "deny"
+
+    def test_settle_lease_warn_action_signals(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period="monthly", action="warn")
+        period_start = date(2024, 6, 1)
+        store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        lease = store.create_lease("u", Decimal("1"), "op")
+        r = store.settle_lease(
+            "u", lease.lease_id, Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r.error is None
+        assert r.feature_limit_warning == "warn"
+
+    # ── release_lease / refund_credits do NOT restore quota ─────────────
+
+    def test_release_lease_does_not_restore_quota(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        period_start = date(2024, 6, 1)
+        warn_limit = FeatureLimit(max_calls=1, period="monthly", action="warn")
+        deny_limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+
+        # Exhaust the quota via one committed deduct.
+        r1 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=warn_limit, feature_period_start=period_start
+        )
+        assert r1.error is None
+
+        # Reserve (admission never checks warn, so this succeeds) then release
+        # without settling -- a released lease never inserted a usage row.
+        lease = store.create_lease(
+            "u", Decimal("1"), "op", feature="export", feature_limit=warn_limit, feature_period_start=period_start
+        )
+        assert lease.error is None
+        released = store.release_lease("u", lease.lease_id)
+        assert released.released is True
+
+        # If release had freed up quota, this deny check would now pass
+        # (count back at 0). It must still see the single committed usage.
+        r2 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=deny_limit, feature_period_start=period_start
+        )
+        assert r2.error == "feature_limit_reached"
+
+    def test_refund_credits_does_not_restore_quota(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        period_start = date(2024, 6, 1)
+        deny_limit = FeatureLimit(max_calls=1, period="monthly", action="deny")
+
+        d = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=deny_limit, feature_period_start=period_start
+        )
+        assert d.error is None
+
+        refund = store.refund_credits(d.transaction_id)
+        assert refund.error is None
+
+        # Refunding does not delete the original usage row -- quota unaffected.
+        r2 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=deny_limit, feature_period_start=period_start
+        )
+        assert r2.error == "feature_limit_reached"
+
+    # ── Window rollover across all four cadences ────────────────────────
+
+    def _rollover_check(self, period: str, before: datetime, after: datetime) -> None:
+        clock_box = {"now": before}
+        store = MemoryStore(clock=lambda: clock_box["now"])
+        store.add_credits("u", Decimal("1000"))
+        limit = FeatureLimit(max_calls=1, period=period, action="deny")
+
+        period_start, _ = resolve_calendar_window(clock_box["now"], period)
+        r1 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert r1.error is None
+
+        blocked = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=period_start
+        )
+        assert blocked.error == "feature_limit_reached"
+
+        # Advance the clock past the window boundary; a fresh window resolves
+        # a new period_start, and the counter is reset (ledger-derived: only
+        # transactions inside the new window are counted).
+        clock_box["now"] = after
+        new_period_start, _ = resolve_calendar_window(clock_box["now"], period)
+        r2 = store.deduct_with_allowance(
+            "u", Decimal("1"), feature="export", feature_limit=limit, feature_period_start=new_period_start
+        )
+        assert r2.error is None
+
+    def test_window_rollover_daily(self) -> None:
+        self._rollover_check("daily", datetime(2024, 6, 15, 12, 0, tzinfo=UTC), datetime(2024, 6, 16, 0, 0, tzinfo=UTC))
+
+    def test_window_rollover_weekly(self) -> None:
+        # 2024-06-13 is a Thursday (week of Mon 6/10); 6/17 is the next Monday.
+        self._rollover_check("weekly", datetime(2024, 6, 13, tzinfo=UTC), datetime(2024, 6, 17, tzinfo=UTC))
+
+    def test_window_rollover_monthly(self) -> None:
+        self._rollover_check("monthly", datetime(2024, 1, 15, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
+
+    def test_window_rollover_yearly(self) -> None:
+        self._rollover_check("yearly", datetime(2024, 6, 15, tzinfo=UTC), datetime(2025, 1, 1, tzinfo=UTC))
+
+    # ── check_feature_limit: advisory read, no side effects ─────────────
+
+    def test_check_feature_limit_reports_used_and_remaining(self) -> None:
+        store = MemoryStore(clock=lambda: datetime(2024, 6, 15, tzinfo=UTC))
+        store.add_credits("u", Decimal("1000"))
+        period_start = date(2024, 6, 1)
+        period_end = date(2024, 7, 1)
+        store.deduct_with_allowance("u", Decimal("1"), feature="export")
+        store.deduct_with_allowance("u", Decimal("1"), feature="export")
+
+        result = store.check_feature_limit("u", "export", 5, period_start, period_end)
+        assert result.limited is True
+        assert result.limit == 5
+        assert result.used == 2
+        assert result.remaining == 3
+        assert result.period_start == str(period_start)
+        assert result.period_end == str(period_end)
+
+    def test_check_feature_limit_is_side_effect_free(self) -> None:
+        store = MemoryStore()
+        store.add_credits("u", Decimal("1000"))
+        period_start = date(2024, 6, 1)
+        period_end = date(2024, 7, 1)
+        for _ in range(3):
+            store.check_feature_limit("u", "export", 1, period_start, period_end)
+
+        result = store.check_feature_limit("u", "export", 1, period_start, period_end)
+        assert result.used == 0
+
+
 # ── ST2: Concurrent refund race on same transaction ────────────────────────────
 
 
@@ -1126,6 +1588,9 @@ class _MinimalCoreStore(CreditStore):
 
     def check_spend_cap(self, user_id: str, model=None, amount=None):
         return CapCheckResult()
+
+    def check_feature_limit(self, user_id: str, feature: str, max_calls: int, period_start, period_end):
+        return FeatureLimitResult(user_id=user_id, feature=feature)
 
     def refund_credits(self, transaction_id, amount=None, reason=None, metadata=None):
         return RefundResult(refund_transaction_id="", original_transaction_id=transaction_id, user_id="")

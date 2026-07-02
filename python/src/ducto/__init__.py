@@ -12,7 +12,13 @@ from ducto.config import ConfigError, PricingConfig
 from ducto.engine import PricingEngine
 from ducto.events import CreditEvent, CreditEventEmitter
 from ducto.expr import ExpressionError, evaluate_expression, validate_expression
-from ducto.interface.base import CapabilityNotSupportedError, CapReachedError, RefundError, StoreError
+from ducto.interface.base import (
+    CapabilityNotSupportedError,
+    CapReachedError,
+    FeatureLimitReachedError,
+    RefundError,
+    StoreError,
+)
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import (
     AddCreditsResult,
@@ -28,6 +34,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
@@ -89,6 +97,9 @@ __all__ = [
     "DailySpendRow",
     "DeductionResult",
     "ExpressionError",
+    "FeatureLimit",
+    "FeatureLimitReachedError",
+    "FeatureLimitResult",
     "FeatureNotEntitledError",
     "GetUserPlanResult",
     "InsufficientCreditsError",

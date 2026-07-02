@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ducto.allowance import resolve_allowance_window
+from ducto.allowance import resolve_allowance_window, resolve_calendar_window
 from ducto.interface.base import CreditStore, StoreError
 from ducto.interface.models import (
     AddCreditsResult,
@@ -25,6 +25,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     PlanDefinition,
@@ -215,6 +217,7 @@ class MemoryStore(CreditStore):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         tier: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _as_decimal(amount)
 
@@ -226,6 +229,26 @@ class MemoryStore(CreditStore):
             raise StoreError(f"invalid_amount: {amount} for type {type}")
 
         with self._lock:
+            # Idempotency replay (user-scoped): a retried grant (e.g. a
+            # redelivered webhook) with the same key returns the ORIGINAL
+            # transaction's result rather than granting a second time — no
+            # double-mutation, no second ledger row. Mirrors deduct_team's
+            # replay idiom: the CURRENT balance/lifetime is reported (not a
+            # frozen point-in-time snapshot like deduct_with_allowance's Fix
+            # 8), since a plain credit grant has no floor/cap check tied to
+            # the original call the way a debit does.
+            if idempotency_key is not None:
+                for tx in self._transactions:
+                    if tx.user_id == user_id and tx.metadata.get("idempotency_key") == idempotency_key:
+                        return AddCreditsResult(
+                            transaction_id=tx.id,
+                            user_id=user_id,
+                            amount=tx.amount,
+                            new_balance=self._balances.get(user_id, Decimal(0)),
+                            lifetime_purchased=self._lifetime.get(user_id, Decimal(0)),
+                            tier=tx.metadata.get("tier", "default"),
+                        )
+
             resolved_tier = self._resolve_add_credits_tier(tier)
             resolved_expires_at = self._reconcile_add_credits_expiry(resolved_tier, expires_at)
 
@@ -240,6 +263,8 @@ class MemoryStore(CreditStore):
             tx_id = str(uuid.uuid4())
             tx_meta: dict[str, Any] = metadata.model_dump() if metadata else {}
             tx_meta["tier"] = resolved_tier
+            if idempotency_key is not None:
+                tx_meta["idempotency_key"] = idempotency_key
             tx = _TransactionRecord(
                 id=tx_id,
                 user_id=user_id,
@@ -400,17 +425,27 @@ class MemoryStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         """Atomic calculate-then-charge under the store lock (contract §2).
 
-        Mirrors ``deduct_with_allowance`` in ``015_atomic_deduct.sql``: the entire
+        Mirrors ``deduct_with_allowance`` in ``009_deduct_and_leases.sql``: the entire
         pipeline (idempotency replay → allowance consume → cap deny on net →
-        balance floor → debit → ledger insert) runs while holding ``self._lock``
-        so it is all-or-nothing and cannot double-spend under threads.
+        feature-limit deny → balance floor → debit → ledger insert) runs while
+        holding ``self._lock`` so it is all-or-nothing and cannot double-spend
+        under threads.
 
         ``period_start`` (WS9) keys allowance consumption to a specific
         ``rolling_30d``/``anniversary`` window; ``None`` resolves the window
         from the user's plan (falling back to the current UTC calendar month).
+
+        ``feature``/``feature_limit``/``feature_period_start`` enforce a
+        per-feature invocation-count limit (see the ``check_feature_limit``
+        docstring for the ledger-derived counting model); ``feature_limit=None``
+        skips enforcement entirely (the transaction is still tagged with
+        ``feature`` when given).
         """
         amount = _as_decimal(amount)
         min_balance = _as_decimal(min_balance)
@@ -447,20 +482,30 @@ class MemoryStore(CreditStore):
 
             # (4) Spend cap on the NET amount: a deny cap aborts (no allowance
             # consumed); warn/notify just record the strongest signal.
-            cap_warning: str | None = None
-            for cap in self._user_caps(user_id, model):
-                spend = self._cap_window_spend(user_id, cap, model)
-                if spend + net > cap.limit:
-                    if cap.action == "deny":
-                        return DeductionResult(
-                            transaction_id="",
-                            user_id=user_id,
-                            amount=Decimal(0),
-                            balance_after=balance,
-                            error="cap_reached",
-                        )
-                    if cap_warning is None:
-                        cap_warning = cap.action
+            cap_denied, cap_warning = self._spend_cap_check(user_id, model, net)
+            if cap_denied:
+                return DeductionResult(
+                    transaction_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    balance_after=balance,
+                    error="cap_reached",
+                )
+
+            # (4b) Feature limit on the ledger-derived count: a deny breach
+            # aborts (no allowance consumed, nothing committed); warn/notify
+            # record a signal and continue.
+            feature_would_deny, feature_limit_warning = self._feature_limit_check(
+                user_id, feature, feature_limit, feature_period_start
+            )
+            if feature_would_deny:
+                return DeductionResult(
+                    transaction_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    balance_after=balance,
+                    error="feature_limit_reached",
+                )
 
             # (5) Balance floor on the NET amount.
             if balance - net < min_balance:
@@ -487,6 +532,11 @@ class MemoryStore(CreditStore):
             # System fields last so they win over caller metadata (contract §5).
             if model is not None:
                 tx_meta["model"] = model
+            # Always tag when `feature` is given, regardless of whether a limit
+            # is currently configured, so enabling a limit later still has
+            # accurate history within the window.
+            if feature is not None:
+                tx_meta["feature"] = feature
             if idempotency_key is not None:
                 tx_meta["idempotency_key"] = idempotency_key
             # Store balance_after so idempotent replay returns the original value,
@@ -513,6 +563,7 @@ class MemoryStore(CreditStore):
                 balance_after=new_balance,
                 idempotent=False,
                 cap_warning=cap_warning,
+                feature_limit_warning=feature_limit_warning,
                 tier_breakdown=tier_breakdown,
             )
 
@@ -544,6 +595,9 @@ class MemoryStore(CreditStore):
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> LeaseResult:
         amount = _as_decimal(amount)
         floor = _as_decimal(floor)
@@ -583,6 +637,19 @@ class MemoryStore(CreditStore):
                         billing_mode=billing_mode,  # type: ignore[arg-type]
                         error="cap_reached",
                     )
+
+            # (3b) Deny-only feature limit at admission — mirrors spend-cap
+            # admission: only `deny` is checked here, warn/notify are advisory
+            # signals with nothing to warn about yet (no charge has happened).
+            feature_would_deny, _ = self._feature_limit_check(user_id, feature, feature_limit, feature_period_start)
+            if feature_would_deny:
+                return LeaseResult(
+                    lease_id="",
+                    user_id=user_id,
+                    amount=Decimal(0),
+                    billing_mode=billing_mode,  # type: ignore[arg-type]
+                    error="feature_limit_reached",
+                )
 
             # (4) effective_available = balance − Σ active holds + allowance headroom.
             reserved_total = sum((r.amount for r in self._active_leases(user_id)), Decimal(0))
@@ -702,6 +769,9 @@ class MemoryStore(CreditStore):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         amount = _as_decimal(amount)
 
@@ -775,6 +845,11 @@ class MemoryStore(CreditStore):
                 ):
                     cap_warning = cap.action
 
+            # Feature limit is ADVISORY at settle (work is done): a breach —
+            # of any action, including "deny" — only sets feature_limit_warning,
+            # never blocks.
+            _, feature_limit_warning = self._feature_limit_check(user_id, feature, feature_limit, feature_period_start)
+
             if consume > 0 and plan_key:
                 self._increment_usage_window(user_id, plan_key, consume, period_start)
 
@@ -786,6 +861,10 @@ class MemoryStore(CreditStore):
             tx_meta: dict[str, Any] = metadata.model_dump(exclude_none=True) if metadata else {}
             if model is not None:
                 tx_meta["model"] = model
+            # Tag the transaction whenever `feature` is given — this is what
+            # makes the call countable for future feature-limit checks.
+            if feature is not None:
+                tx_meta["feature"] = feature
             if idempotency_key is not None:
                 tx_meta["idempotency_key"] = idempotency_key
             # Store balance_after so idempotent replay returns the original value,
@@ -815,6 +894,7 @@ class MemoryStore(CreditStore):
                 balance_after=new_balance,
                 idempotent=False,
                 cap_warning=cap_warning,
+                feature_limit_warning=feature_limit_warning,
                 tier_breakdown=tier_breakdown,
             )
 
@@ -970,6 +1050,24 @@ class MemoryStore(CreditStore):
             )
         )
 
+    def _spend_cap_check(self, user_id: str, model: str | None, net: Decimal) -> tuple[bool, str | None]:
+        """Evaluate spend caps against ``net`` (lock held; extracted from
+        :meth:`deduct_with_allowance` to keep its cyclomatic complexity down).
+
+        Returns ``(denied, warning)``: ``denied`` is ``True`` on the first
+        breached ``deny`` cap (short-circuits); ``warning`` is the strongest
+        non-blocking ``warn``/``notify`` signal seen otherwise.
+        """
+        cap_warning: str | None = None
+        for cap in self._user_caps(user_id, model):
+            spend = self._cap_window_spend(user_id, cap, model)
+            if spend + net > cap.limit:
+                if cap.action == "deny":
+                    return True, None
+                if cap_warning is None:
+                    cap_warning = cap.action
+        return False, cap_warning
+
     def _user_caps(self, user_id: str, model: str | None) -> list[SpendCap]:
         """Caps for a user ordered deny-first then by ascending limit (SQL parity)."""
         caps = [c for c in self._spend_caps if c.user_id == user_id and (not c.model or c.model == model)]
@@ -992,6 +1090,68 @@ class MemoryStore(CreditStore):
             if t.created_at is not None and t.created_at >= window_start:
                 spend += abs(t.amount)
         return spend
+
+    def _feature_limit_window_end(self, period_start: date, period: str) -> date:
+        """Resolve the exclusive window end for a calendar-aligned feature-limit period.
+
+        ``period_start`` is already the aligned window start (resolved by the
+        caller via :func:`ducto.allowance.resolve_calendar_window`), so
+        re-resolving the window for a ``now`` constructed from that same start
+        date returns the exact ``(period_start, period_end)`` pair unchanged —
+        this avoids duplicating the daily/weekly/monthly/yearly length logic.
+        """
+        _, period_end = resolve_calendar_window(datetime.combine(period_start, datetime.min.time(), tzinfo=UTC), period)
+        return period_end
+
+    def _feature_limit_check(
+        self,
+        user_id: str,
+        feature: str | None,
+        feature_limit: FeatureLimit | None,
+        feature_period_start: date | None,
+    ) -> tuple[bool, str | None]:
+        """Evaluate a feature limit against the ledger-derived count (lock held).
+
+        Returns ``(would_deny, warning_action)``: ``would_deny`` is ``True``
+        only when the limit is breached AND ``action == "deny"`` (used by
+        ``deduct_with_allowance``/``create_lease`` to abort); ``warning_action``
+        is the configured ``action`` whenever the limit is breached, regardless
+        of ``action`` (used by ``deduct_with_allowance``/``settle_lease`` for
+        the non-blocking ``feature_limit_warning`` signal). ``feature_limit is
+        None`` or ``feature_period_start is None`` means enforcement is
+        skipped entirely: ``(False, None)``.
+        """
+        if feature_limit is None or feature_period_start is None:
+            return False, None
+        feature_period_end = self._feature_limit_window_end(feature_period_start, feature_limit.period)
+        count = self._feature_usage_count(user_id, feature or "", feature_period_start, feature_period_end)
+        if count >= feature_limit.max_calls:
+            return feature_limit.action == "deny", feature_limit.action
+        return False, None
+
+    def _feature_usage_count(self, user_id: str, feature: str, period_start: date, period_end: date) -> int:
+        """Ledger-derived invocation count for ``feature`` in ``[period_start, period_end)``.
+
+        Mirrors ``_cap_window_spend`` but counts rows instead of summing amounts:
+        only committed ``usage`` transactions tagged ``metadata.feature ==
+        feature`` count. This is why :meth:`release_lease` never counts (it never
+        inserts a ``usage`` row) and :meth:`refund_credits` never frees up quota
+        (a refund does not delete the original ``usage`` row).
+
+        Deliberately does NOT filter on ``amount < 0`` (unlike
+        ``_cap_window_spend``, which only cares about actual dollars spent): a
+        call fully covered by free allowance nets to ``amount == 0`` but is
+        still one invocation of the feature and must still count.
+        """
+        count = 0
+        for t in self._transactions:
+            if t.user_id != user_id or t.type != "usage":
+                continue
+            if (t.metadata or {}).get("feature") != feature:
+                continue
+            if t.created_at is not None and period_start <= t.created_at.date() < period_end:
+                count += 1
+        return count
 
     # ── Pricing configuration ──────────────────────────────────────────
 
@@ -1093,6 +1253,7 @@ class MemoryStore(CreditStore):
                 plan_name=plan_def.name if plan_def else None,
                 free_allowance=plan_def.free_allowance if plan_def else Decimal(0),
                 features=plan_def.features if plan_def and plan_def.features else {},
+                feature_limits=plan_def.feature_limits if plan_def and plan_def.feature_limits else {},
                 default_billing_mode=plan_def.default_billing_mode if plan_def else "strict",
                 per_operation=plan_def.per_operation if plan_def and plan_def.per_operation else {},
                 max_concurrent=plan_def.max_concurrent if plan_def else None,
@@ -1304,8 +1465,8 @@ class MemoryStore(CreditStore):
 
     # ── Credit expiry ─────────────────────────────────────────────────────
 
-    def sweep_expired_credits(self, dry_run: bool = False) -> SweepResult:
-        """Sweep expired credits from all users' balances.
+    def sweep_expired_credits(self, dry_run: bool = False, user_id: str | None = None) -> SweepResult:
+        """Sweep expired credits from all users' balances, or a single user's.
 
         Swept grants are marked with ``swept_at`` (H4) so a second sweep reports
         zero and never double-debits — parity with the SQL ``expire_credits``.
@@ -1317,6 +1478,12 @@ class MemoryStore(CreditStore):
         transaction's fate is fixed regardless of later config changes. The
         existing clamp (never expire more than what's left) is unchanged, just
         re-scoped to the tier's own balance instead of the user's aggregate.
+
+        ``user_id`` (lazy per-user expiry): when given, the scan is restricted
+        to that user's own transactions only — other users' expired grants are
+        left completely untouched (they still show up in a later global or
+        per-user sweep). ``user_id=None`` (the default) preserves the exact
+        prior global-sweep behavior/output shape.
         """
         with self._lock:
             now = self._utcnow()
@@ -1325,6 +1492,8 @@ class MemoryStore(CreditStore):
 
             for tx in self._transactions:
                 if tx.swept_at is not None:
+                    continue
+                if user_id is not None and tx.user_id != user_id:
                     continue
                 if tx.expires_at and tx.type in ("purchase", "adjustment") and tx.expires_at <= now:
                     tier_key = tx.metadata.get("tier", "default")
@@ -1336,8 +1505,8 @@ class MemoryStore(CreditStore):
             expired_amount = Decimal(0)
             expired_by_tier: dict[str, Decimal] = {}
 
-            for (user_id, tier_key), total_expired in expired_by_tier_key.items():
-                current_tier_balance = self._tier_balances.get((user_id, tier_key), Decimal(0))
+            for (grp_user_id, tier_key), total_expired in expired_by_tier_key.items():
+                current_tier_balance = self._tier_balances.get((grp_user_id, tier_key), Decimal(0))
                 to_expire = min(total_expired, current_tier_balance)
 
                 if to_expire > 0:
@@ -1346,20 +1515,20 @@ class MemoryStore(CreditStore):
                     expired_by_tier[tier_key] = expired_by_tier.get(tier_key, Decimal(0)) + to_expire
 
                     if not dry_run:
-                        self._tier_balances[(user_id, tier_key)] = current_tier_balance - to_expire
-                        current_balance = self._balances.get(user_id, Decimal(0))
-                        self._balances[user_id] = current_balance - to_expire
+                        self._tier_balances[(grp_user_id, tier_key)] = current_tier_balance - to_expire
+                        current_balance = self._balances.get(grp_user_id, Decimal(0))
+                        self._balances[grp_user_id] = current_balance - to_expire
 
                         # Mark swept grants so they are not re-swept (H4).
                         for et in expired_txs:
-                            if et.user_id == user_id and et.metadata.get("tier", "default") == tier_key:
+                            if et.user_id == grp_user_id and et.metadata.get("tier", "default") == tier_key:
                                 et.swept_at = now
 
                         tx_id = str(uuid.uuid4())
                         self._transactions.append(
                             _TransactionRecord(
                                 id=tx_id,
-                                user_id=user_id,
+                                user_id=grp_user_id,
                                 amount=-to_expire,
                                 type="adjustment",
                                 metadata={
@@ -1526,6 +1695,27 @@ class MemoryStore(CreditStore):
                     )
 
             return CapCheckResult(capped=False, current_spend=Decimal(0), cap_limit=Decimal(0), action=None)
+
+    def check_feature_limit(
+        self,
+        user_id: str,
+        feature: str,
+        max_calls: int,
+        period_start: date,
+        period_end: date,
+    ) -> FeatureLimitResult:
+        with self._lock:
+            count = self._feature_usage_count(user_id, feature, period_start, period_end)
+            return FeatureLimitResult(
+                user_id=user_id,
+                feature=feature,
+                limited=True,
+                limit=max_calls,
+                used=count,
+                remaining=max(max_calls - count, 0),
+                period_start=str(period_start),
+                period_end=str(period_end),
+            )
 
     # ── Transaction listing ─────────────────────────────────────────────────
 

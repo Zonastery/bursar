@@ -19,24 +19,16 @@ ducto/
 │   ├── supabase.py      # HttpxSupabaseStore adapter + run_migrations()
 │   └── postgres.py      # PostgresStore adapter
 └── sql/
-    ├── 001_credit_tables.sql
-    ├── 002_credit_rpcs.sql
-    ├── 003_pricing_config.sql
-    ├── 004_user_plans.sql
-    ├── 005_credit_refunds.sql
-    ├── 006_credit_expiry.sql
-    ├── 007_usage_analytics.sql
-    ├── 008_team_balances.sql
-    ├── 009_spend_caps.sql
-    ├── 010_aggregate_stats.sql
-    ├── 011_feature_entitlements.sql
-    ├── 012_list_transactions.sql
-    ├── 013_list_usage_events.sql
-    ├── 014_numeric_money.sql     # widens money columns to NUMERIC(18,4)
-    ├── 015_atomic_deduct.sql     # deduct_with_allowance() atomic RPC
-    ├── 016_lease_lifecycle.sql   # create_lease / settle_lease / release_lease / renew_lease
-    ├── ...                       # 017-022: lease/allowance follow-up fixes
-    └── 023_credit_tiers.sql      # credit_tiers config + tier-aware deduct/settle/refund/sweep
+    ├── 001_core_schema.sql       # user_credits, credit_transactions, credit_reservations, RLS, signup bonus
+    ├── 002_credit_rpcs.sql       # credits_add, get_credits_balance
+    ├── 003_pricing_config.sql   # pricing config table + get/set/list/activate RPCs
+    ├── 004_plans.sql             # subscription plans, usage windows, allowance RPCs
+    ├── 005_spend_caps.sql        # spend cap table + check_spend_cap RPC
+    ├── 006_refunds_and_expiry.sql # refund_credits, expire_credits
+    ├── 007_analytics.sql         # analytics + transaction-listing RPCs
+    ├── 008_teams.sql             # team balance pools + RPCs
+    ├── 009_deduct_and_leases.sql # deduct_with_allowance() atomic RPC + full lease lifecycle
+    └── 010_credit_tiers.sql      # credit_tiers config + tier-aware deduct/settle/refund/sweep
 ```
 
 `CreditStore` (`interface/base.py`) declares the **core** abstract methods every store must implement, plus several **optional capability groups** that ship with a default implementation and do not need to be overridden by a minimal custom store — see [Storage interface: core vs. optional capabilities](#storage-interface-core-vs-optional-capabilities) below. The JavaScript `CreditStore` interface mirrors the same split (it folds `listUserTransactions`/`listUsageEvents` into the same surface but exposes `deductWithAllowance` and the analytics methods identically).
@@ -86,7 +78,7 @@ Steps a–e (lock, idempotency replay, allowance consume, spend cap, balance flo
 
 ### Why this replaced the old multi-step flow
 
-The previous design issued four independent store calls (consume allowance → check cap → reserve → deduct) with no spanning transaction and idempotency checked *last*. That allowed double-consumed allowance on retry, stranded reservations, and racy cap bypass under concurrency. Consolidating into `deduct_with_allowance` makes the hot path transactional and idempotent end-to-end. Money columns were also widened to `NUMERIC(18,4)` (migration 014) and all windows are pinned to UTC for determinism.
+The previous design issued four independent store calls (consume allowance → check cap → reserve → deduct) with no spanning transaction and idempotency checked *last*. That allowed double-consumed allowance on retry, stranded reservations, and racy cap bypass under concurrency. Consolidating into `deduct_with_allowance` makes the hot path transactional and idempotent end-to-end. Money columns are `NUMERIC(18,4)` throughout and all windows are pinned to UTC for determinism.
 
 ### Lease lifecycle: reserve → settle / release / renew
 

@@ -38,10 +38,10 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from ducto.allowance import resolve_allowance_window
+from ducto.allowance import resolve_allowance_window, resolve_calendar_window
 from ducto.engine import PricingEngine
 from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.interface.base import CapReachedError, CreditStore
+from ducto.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
 from ducto.interface.models import (
     AddCreditsResult,
     AggregateStatsRow,
@@ -54,6 +54,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
@@ -163,6 +165,14 @@ class CreditManager:
             ``None`` (the default), no explicit thresholds are configured and
             the threshold is derived lazily from ``min_balance`` at deduct
             time (see :class:`LowBalanceConfig`).
+        lazy_expiry: When ``True``, a per-user expiry sweep runs inline before
+            every balance-authoritative read/write (``get_balance``,
+            ``get_credit_tiers``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
+            ``reserve``, ``settle``) so expired grants are invisible without
+            waiting for the periodic cron ``sweep_expired_credits()``. Defaults
+            to ``False`` (unchanged behavior — a background/cron sweep is the
+            only way expired credits are removed); when ``False`` this is a
+            single boolean check with no other overhead.
     """
 
     def __init__(
@@ -176,6 +186,7 @@ class CreditManager:
         max_concurrent: int | None = None,
         low_balance: LowBalanceConfig | None = None,
         default_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        lazy_expiry: bool = False,
     ) -> None:
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
@@ -201,6 +212,7 @@ class CreditManager:
         # A level re-arms only after the balance climbs back above it (a top-up).
         self._lb_below: dict[str, set[Decimal]] = {}
         self._lb_lock = threading.RLock()
+        self._lazy_expiry = lazy_expiry
 
     def _emit(self, type_: str, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
@@ -269,6 +281,7 @@ class CreditManager:
 
     def get_balance(self, user_id: str) -> BalanceResult:
         """Get a user's current credit balance."""
+        self._maybe_lazy_expire(user_id)
         return self._store.get_balance(user_id)
 
     def add_credits(
@@ -305,6 +318,121 @@ class CreditManager:
                 for t in self._low_balance_thresholds:
                     if result.new_balance > t:
                         below.discard(t)
+        return result
+
+    def grant_subscription_cycle(
+        self,
+        user_id: str,
+        amount: Decimal | int,
+        *,
+        tier: str = "subscription",
+        expires_at: datetime | None = None,
+        ttl_days: int | None = None,
+        replace_prior: bool = True,
+        plan_key: str | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AddCreditsResult:
+        """Grant a subscription cycle's credits idempotently (safe for webhook redelivery).
+
+        Typical use: a payment-provider webhook (renewal, signup) calls this once
+        per cycle. ``idempotency_key`` should be the provider's event id so a
+        redelivered webhook is a no-op rather than a double-grant.
+
+        Args:
+            user_id: The user whose subscription cycle is renewing.
+            amount: The cycle's credit grant (coerced to ``Decimal``).
+            tier: The credit tier to grant into (and, when ``replace_prior``,
+                to zero out first). Requires a store with that tier configured
+                (see :meth:`get_credit_tiers`) — this is deliberate: tiers are
+                what let a subscription grant coexist with, and not clobber,
+                credits from other sources (purchases, gifts, ...).
+            expires_at: Explicit expiry for the new grant. Mutually exclusive
+                with ``ttl_days``.
+            ttl_days: Expire the new grant this many days from now. Mutually
+                exclusive with ``expires_at``.
+            replace_prior: When ``True`` (the default), any leftover balance in
+                ``tier`` from a prior cycle is expired immediately before the
+                new grant lands — a renewal replaces the unused balance rather
+                than stacking on top of it.
+            plan_key: When given, also calls :meth:`set_user_plan` — this
+                intentionally re-anchors the allowance window, which is correct
+                for a new subscription cycle.
+            idempotency_key: The provider's event id. Passed through to the
+                store's replay-safe ``add_credits`` so a redelivered webhook
+                does not double-grant.
+            metadata: Extra metadata to attach to the new grant's transaction.
+
+        Returns:
+            The ``AddCreditsResult`` for the new cycle's grant.
+
+        Raises:
+            ValueError: If both ``expires_at`` and ``ttl_days`` are given.
+        """
+        if expires_at is not None and ttl_days is not None:
+            raise ValueError("grant_subscription_cycle: expires_at and ttl_days are mutually exclusive")
+        if ttl_days is not None:
+            expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
+
+        amount_dec = Decimal(amount)
+
+        # Snapshot the tier's leftover balance (and the account's lifetime_purchased,
+        # which only moves on `type="purchase"` grants) BEFORE granting. A redelivered
+        # webhook must be a full no-op — including skipping the replace-prior wipe
+        # below — not just avoid a double-grant. AddCreditsResult carries no separate
+        # "was this a replay" flag (contract-only fields), so we detect a genuine new
+        # grant after the fact by checking whether lifetime_purchased actually moved
+        # by `amount_dec`; an idempotent replay leaves it unchanged. This has a small
+        # inherent race window (two non-atomic store reads/writes, no cross-tier RPC),
+        # acceptable for a periodic/webhook-driven cycle grant.
+        prior_leftover = Decimal(0)
+        pre_lifetime_purchased = Decimal(0)
+        if replace_prior:
+            tiers_before = self.get_credit_tiers(user_id)
+            for tb in tiers_before.tiers:
+                if tb.tier_key == tier:
+                    prior_leftover = tb.balance
+                    break
+            pre_lifetime_purchased = self.get_balance(user_id).lifetime_purchased
+
+        tx_metadata = CreditMetadata(**metadata) if metadata else None
+        result = self._store.add_credits(
+            user_id,
+            amount_dec,
+            type="purchase",
+            tier=tier,
+            expires_at=expires_at,
+            metadata=tx_metadata,
+            idempotency_key=idempotency_key,
+        )
+
+        is_fresh_grant = (result.lifetime_purchased - pre_lifetime_purchased) == amount_dec
+        if replace_prior and is_fresh_grant and prior_leftover > 0:
+            replace_meta: dict[str, Any] = {"reason": "cycle_replaced"}
+            self._store.add_credits(
+                user_id,
+                -prior_leftover,
+                type="adjustment",
+                tier=tier,
+                metadata=CreditMetadata(**replace_meta),
+            )
+            # Reflect the post-replace balance so the returned result is accurate
+            # (the grant call above only knows the pre-replace balance).
+            result = result.model_copy(update={"new_balance": self.get_balance(user_id).balance})
+
+        if plan_key is not None:
+            self.set_user_plan(user_id, plan_key)
+
+        self._emit(
+            "credits.cycle_renewed",
+            user_id,
+            {
+                "amount": amount_dec,
+                "tier": tier,
+                "plan_key": plan_key,
+                "idempotency_key": idempotency_key,
+            },
+        )
         return result
 
     # -- Plan management ------------------------------------------------
@@ -348,6 +476,26 @@ class CreditManager:
         - ``True`` / numeric (incl. ``0``) / string (incl. ``""``) => ``has_feature=True``
         """
         return self._store.check_feature(user_id, feature)
+
+    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
+        """Advisory, non-locking read of a per-feature invocation-count limit (UI only).
+
+        Convenience wrapper mirroring :meth:`check_allowance`/the store's
+        ``check_spend_cap``: resolves the ``FeatureLimit`` (if any) from the
+        user's plan and the calendar-aligned window, then delegates counting to
+        the store. Returns ``limited=False`` (zeroed fields, ``action=None``)
+        when no ``FeatureLimit`` is configured for ``feature`` on the user's
+        plan — never used for admission control; that is exclusively the
+        atomic check-and-increment inside ``deduct``/``reserve``.
+        """
+        limit, period_start, period_end = self._resolve_feature_limit(user_id, feature)
+        if limit is None or period_start is None or period_end is None:
+            return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
+        result = self._store.check_feature_limit(user_id, feature, limit.max_calls, period_start, period_end)
+        # The store only counts; the manager (which owns plan lookup) overrides
+        # `limited`/`action` from the resolved FeatureLimit (mirrors how
+        # check_allowance overrides period_end after the store call).
+        return result.model_copy(update={"limited": True, "action": limit.action})
 
     # ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
 
@@ -430,6 +578,29 @@ class CreditManager:
         )
         return period_start
 
+    def _resolve_feature_limit(
+        self, user_id: str, feature: str | None
+    ) -> tuple[FeatureLimit | None, date | None, date | None]:
+        """Resolve the configured ``FeatureLimit`` (if any) and its calendar window.
+
+        Mirrors ``_resolve_allowance_period_start``: the manager owns plan lookup
+        and window resolution so the store's atomic ops receive plain scalars.
+        Returns ``(None, None, None)`` when ``feature`` is ``None`` (no feature
+        named on this call) or when the user's plan has no ``FeatureLimit``
+        configured for it — both cases mean enforcement/tagging is skipped by
+        the store, except the store still tags ``metadata.feature`` whenever
+        ``feature`` itself is non-``None`` (independent of whether a limit is
+        configured).
+        """
+        if feature is None:
+            return None, None, None
+        plan = self._store.get_user_plan(user_id)
+        limit = plan.feature_limits.get(feature)
+        if limit is None:
+            return None, None, None
+        period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
+        return limit, period_start, period_end
+
     def _cost_of(self, metrics_or_amount: UsageMetrics | Decimal | int) -> tuple[Decimal, str | None]:
         """Compute the credit cost and model from metrics, or pass a raw amount.
 
@@ -451,6 +622,8 @@ class CreditManager:
             raise ConcurrencyLimitError(f"Concurrency limit reached. User={user_id}")
         if error == "cap_reached":
             raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={amount}")
+        if error == "feature_limit_reached":
+            raise FeatureLimitReachedError(f"Feature limit exceeded. User={user_id}")
         if error == "feature_not_entitled":
             raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
         if error == "insufficient_credits":
@@ -474,6 +647,7 @@ class CreditManager:
         ttl: int | None = None,
         metadata: CreditMetadata | None = None,
         model: str | None = None,
+        feature: str | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease — the only admission control (D4).
 
@@ -489,9 +663,19 @@ class CreditManager:
         ``Decimal``/``int`` amounts use the explicit ``model`` kwarg so per-model
         spend-caps and analytics remain accurate (Fix 5).
 
+        ``feature`` names a per-feature invocation-count limit (independent of
+        ``required_feature``, which is a boolean entitlement gate): when the
+        user's plan has a ``FeatureLimit`` configured for it, admission enforces
+        it as ``deny``-only (mirrors how admission only ever enforces ``deny``
+        spend caps — ``warn``/``notify`` have nothing to warn about yet, since no
+        charge has happened). Re-supply the same ``feature`` at :meth:`settle`
+        for accurate per-call counting, exactly as ``model`` is already
+        re-supplied at settle for per-model spend-cap accuracy (Fix 5).
+
         On any business failure raises the coherent typed exception; on success emits
         ``credits.reserved`` and returns the :class:`LeaseResult`.
         """
+        self._maybe_lazy_expire(user_id)
         if required_feature is not None:
             check = self._store.check_feature(user_id, required_feature)
             if not check.has_feature:
@@ -505,6 +689,7 @@ class CreditManager:
         effective_model = derived_model if derived_model is not None else model
         ttl_seconds = ttl if ttl is not None else self._default_ttl
         period_start = self._resolve_allowance_period_start(user_id)
+        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
 
         result = self._store.create_lease(
             user_id,
@@ -518,6 +703,9 @@ class CreditManager:
             overdraft_floor=policy.overdraft_floor,
             metadata=metadata,
             period_start=period_start,
+            feature=feature,
+            feature_limit=feature_limit,
+            feature_period_start=feature_period_start,
         )
 
         if result.error:
@@ -551,6 +739,7 @@ class CreditManager:
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
+        feature: str | None = None,
     ) -> DeductionResult:
         """Charge the ACTUAL cost against a lease and finalize it (D5).
 
@@ -564,7 +753,17 @@ class CreditManager:
         consumed at settle time. Use for fixed-cost operations reserved via the
         lease pattern (mirrors the ``deduct_fixed`` / ``deduct`` ``skip_allowance``
         flag — Fix 7 / #4).
+
+        ``feature`` re-supplies the same feature name passed to :meth:`reserve`
+        (no feature name is persisted on the lease itself) so the invocation is
+        tagged and counted for future invocation-count checks — exactly as
+        ``model`` is already re-supplied at settle for per-model spend-cap
+        accuracy (Fix 5). A breached ``FeatureLimit`` at settle is advisory only
+        (the work already happened) and surfaces as a non-blocking
+        ``credits.feature_limit_warning``/``credits.feature_limit_reached``
+        signal, never a raised exception.
         """
+        self._maybe_lazy_expire(user_id)
         amount, model = self._cost_of(metrics_or_amount)
 
         if isinstance(metrics_or_amount, UsageMetrics):
@@ -574,6 +773,8 @@ class CreditManager:
             if idempotency_key:
                 base["idempotency_key"] = idempotency_key
             tx_meta = CreditMetadata(**base)
+
+        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
 
         result = self._store.settle_lease(
             user_id,
@@ -585,6 +786,9 @@ class CreditManager:
             metadata=tx_meta,
             skip_allowance=skip_allowance,
             period_start=self._resolve_allowance_period_start(user_id),
+            feature=feature,
+            feature_limit=feature_limit,
+            feature_period_start=feature_period_start,
         )
 
         if result.error:
@@ -624,6 +828,27 @@ class CreditManager:
                     "amount": result.amount,
                     "model": model,
                     "action": result.cap_warning,
+                },
+            )
+
+        # Feature-limit signal: settle-time enforcement is advisory only (the work
+        # already happened) — a breach never raises, mirroring the cap-warning
+        # "prefer deny, else warn/notify" emission pattern immediately above.
+        if result.feature_limit_warning == "deny":
+            self._emit(
+                "credits.feature_limit_reached",
+                user_id,
+                {"feature": feature, "amount": result.amount, "blocking": False},
+            )
+        elif result.feature_limit_warning in ("warn", "notify"):
+            self._emit(
+                "credits.feature_limit_warning",
+                user_id,
+                {
+                    "feature": feature,
+                    "balance_after": result.balance_after,
+                    "amount": result.amount,
+                    "action": result.feature_limit_warning,
                 },
             )
 
@@ -667,6 +892,7 @@ class CreditManager:
         ``reserve`` uses so the Send-button check agrees with the admission gate
         (Fix 1). Never use this as an admission gate; only ``reserve`` is authoritative.
         """
+        self._maybe_lazy_expire(user_id)
         worst_case, _ = self._cost_of(metrics_or_amount)
         avail = self._store.get_available(user_id)
 
@@ -715,11 +941,13 @@ class CreditManager:
 
     def get_available(self, user_id: str) -> AvailableResult:
         """Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3)."""
+        self._maybe_lazy_expire(user_id)
         return self._store.get_available(user_id)
 
     def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
         """Per-tier balance breakdown for a user (pure read, no event — matches
         :meth:`get_balance`/:meth:`get_available`)."""
+        self._maybe_lazy_expire(user_id)
         return self._store.get_credit_tiers(user_id)
 
     def check_allowance(self, user_id: str) -> AllowanceResult:
@@ -742,7 +970,7 @@ class CreditManager:
         )
         result = self._store.check_allowance(user_id, period_start=period_start)
         # The store/SQL layer only knows a generic calendar-month period_end
-        # (see 022_configurable_allowance_window.sql); override it here with the
+        # (see 004_plans.sql / 009_deduct_and_leases.sql); override it here with the
         # authoritative window this manager resolved.
         period_end_inclusive = period_end_exclusive - timedelta(days=1)
         period_start_dt = datetime(period_start.year, period_start.month, period_start.day, tzinfo=UTC)
@@ -769,6 +997,7 @@ class CreditManager:
         required_feature: str | None = None,
         idempotency_key: str | None = None,
         ttl: int | None = None,
+        feature: str | None = None,
     ) -> dict[str, Any]:
         """One-call shortcut wiring reserve → do_work → settle (interface plan §4).
 
@@ -777,6 +1006,11 @@ class CreditManager:
         from ``do_work`` the lease is released and the error re-raised. For long jobs
         ``do_work`` may call :meth:`renew`. A crash between reserve and settle is
         covered by the lease TTL (and the store's reaper).
+
+        ``feature`` names a per-feature invocation-count limit and is passed
+        through to both :meth:`reserve` (deny-only admission check) and
+        :meth:`settle` (advisory recount + tagging) — the same feature name is
+        used at both ends since no feature name is persisted on the lease.
         """
         lease = self.reserve(
             user_id,
@@ -785,6 +1019,7 @@ class CreditManager:
             billing_mode=billing_mode,
             required_feature=required_feature,
             ttl=ttl,
+            feature=feature,
         )
         try:
             work_result, actual = do_work()
@@ -792,7 +1027,7 @@ class CreditManager:
             self.release(user_id, lease.lease_id)
             raise
 
-        deduction = self.settle(user_id, lease.lease_id, actual, idempotency_key=idempotency_key)
+        deduction = self.settle(user_id, lease.lease_id, actual, idempotency_key=idempotency_key, feature=feature)
         return {"result": work_result, "deduction": deduction}
 
     # ── Low-balance / overdraft signals (interface plan §6) ─────────────
@@ -903,6 +1138,7 @@ class CreditManager:
         metadata: CreditMetadata | None = None,
         *,
         skip_allowance: bool = False,
+        feature: str | None = None,
     ) -> DeductionResult:
         """Calculate the cost and charge it in one atomic store transaction.
 
@@ -923,6 +1159,12 @@ class CreditManager:
                 the full cost is charged to the balance. Pass ``True`` for
                 fixed-cost batch jobs (via ``deduct_fixed``) to keep inference
                 allowance uncontaminated (Fix 7).
+            feature: Optional feature name naming a per-feature invocation-count
+                limit. When the user's plan has a ``FeatureLimit`` configured for
+                it, the store enforces it (``deny`` aborts; ``warn``/``notify``
+                surface a non-blocking ``feature_limit_warning``) and tags the
+                transaction's ``metadata.feature`` regardless of whether a limit
+                is configured.
 
         Returns:
             ``DeductionResult`` whose ``amount`` is the net (positive) charge to
@@ -932,7 +1174,9 @@ class CreditManager:
             PricingNotLoadedError: If pricing hasn't been loaded.
             InsufficientCreditsError: If the balance floor would be breached.
             CapReachedError: If a ``deny`` spend cap would be exceeded.
+            FeatureLimitReachedError: If a ``deny`` feature limit would be exceeded.
         """
+        self._maybe_lazy_expire(user_id)
         if not self._engine:
             raise PricingNotLoadedError(
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
@@ -965,6 +1209,7 @@ class CreditManager:
 
         # 3) One atomic transaction in the store: allowance → cap → floor → debit.
         tx_meta = self._build_tx_metadata(metrics, breakdown.total, idempotency_key, metadata)
+        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
         result = self._store.deduct_with_allowance(
             user_id,
             cost,
@@ -974,6 +1219,9 @@ class CreditManager:
             metadata=tx_meta,
             skip_allowance=skip_allowance,
             period_start=self._resolve_allowance_period_start(user_id),
+            feature=feature,
+            feature_limit=feature_limit,
+            feature_period_start=feature_period_start,
         )
 
         # 4) Error path: emit a failure event and raise the typed exception.
@@ -998,6 +1246,17 @@ class CreditManager:
                     },
                 )
                 raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={cost}")
+            if result.error == "feature_limit_reached":
+                self._emit(
+                    "credits.feature_limit_reached",
+                    user_id,
+                    {
+                        "feature": feature,
+                        "amount": cost,
+                        "model": metrics.model,
+                    },
+                )
+                raise FeatureLimitReachedError(f"Feature limit exceeded for {feature!r}. User={user_id}")
             if result.error == "insufficient_credits":
                 raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
             # Any other business code (e.g. invalid_amount): surface it generically.
@@ -1026,6 +1285,22 @@ class CreditManager:
                     "amount": result.amount,
                     "model": metrics.model,
                     "action": result.cap_warning,
+                },
+            )
+
+        # Non-blocking feature-limit signal surfaced by the store (parallels cap_warning
+        # above). A 'deny' feature limit never reaches here — it aborts in the error
+        # path — so only warn/notify can appear on a successful deduction.
+        if result.feature_limit_warning in ("warn", "notify"):
+            self._emit(
+                "credits.feature_limit_warning",
+                user_id,
+                {
+                    "feature": feature,
+                    "balance_after": result.balance_after,
+                    "amount": result.amount,
+                    "model": metrics.model,
+                    "action": result.feature_limit_warning,
                 },
             )
 
@@ -1112,6 +1387,7 @@ class CreditManager:
         Returns:
             ``TeamDeductionResult`` with transaction details.
         """
+        self._maybe_lazy_expire(user_id)
         if not self._engine:
             raise PricingNotLoadedError(
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
@@ -1168,6 +1444,25 @@ class CreditManager:
         )
         return result
 
+    def _run_sweep(self, dry_run: bool, user_id: str | None) -> SweepResult:
+        """Shared body for the periodic global sweep and the per-call lazy trigger.
+
+        Threads ``user_id`` through to the store so a scoped call only sweeps
+        that user's expired grants; the emitted ``credits.expired`` event's
+        ``data`` also carries ``user_id`` when scoped (the global sweep keeps
+        emitting under the ``"system"`` pseudo-user, unchanged).
+        """
+        result = self._store.sweep_expired_credits(dry_run, user_id=user_id)
+        if not dry_run and result.expired_count > 0:
+            data: dict[str, Any] = {
+                "expired_count": result.expired_count,
+                "expired_amount": result.expired_amount,
+            }
+            if user_id is not None:
+                data["user_id"] = user_id
+            self._emit("credits.expired", user_id if user_id is not None else "system", data)
+        return result
+
     def sweep_expired_credits(self, dry_run: bool = False) -> SweepResult:
         """Sweep expired credits from all users' balances.
 
@@ -1177,17 +1472,23 @@ class CreditManager:
         Returns:
             ``SweepResult`` with expired count and amount.
         """
-        result = self._store.sweep_expired_credits(dry_run)
-        if not dry_run and result.expired_count > 0:
-            self._emit(
-                "credits.expired",
-                "system",
-                {
-                    "expired_count": result.expired_count,
-                    "expired_amount": result.expired_amount,
-                },
-            )
-        return result
+        return self._run_sweep(dry_run, user_id=None)
+
+    def _maybe_lazy_expire(self, user_id: str) -> None:
+        """Best-effort per-user expiry sweep, gated by the constructor's
+        ``lazy_expiry`` flag (default ``False`` -> single boolean check, no-op).
+
+        Called as the first line of methods that gate real money movement or
+        an authoritative balance read (``get_balance``, ``get_credit_tiers``,
+        ``deduct``, ``deduct_fixed``, ``deduct_team``, ``reserve``, ``settle``)
+        so expired grants are invisible without waiting for the periodic cron
+        ``sweep_expired_credits()``. Deliberately NOT wired into advisory/
+        analytics methods (``get_available``, ``can_afford``, ``spend_by_user``,
+        etc.) — those are non-authoritative and may be stale by design.
+        """
+        if not self._lazy_expiry:
+            return
+        self._run_sweep(dry_run=False, user_id=user_id)
 
     # ── Usage analytics ─────────────────────────────────────────────────
 
@@ -1248,6 +1549,7 @@ class CreditManager:
             PricingNotLoadedError: If pricing hasn't been loaded.
             ValueError: If ``job_name`` is not a configured fixed-cost job.
         """
+        self._maybe_lazy_expire(user_id)
         if not self._engine:
             raise PricingNotLoadedError(
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."

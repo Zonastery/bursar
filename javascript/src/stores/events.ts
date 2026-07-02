@@ -38,7 +38,11 @@ export type CreditEventType =
   | "credits.reserved"
   | "credits.reservation_released"
   | "credits.lease_expired"
-  | "credits.overdraft";
+  | "credits.overdraft"
+  | "credits.floor_breach"
+  | "credits.cycle_renewed"
+  | "credits.feature_limit_reached"
+  | "credits.feature_limit_warning";
 
 /**
  * A typed credit lifecycle event.

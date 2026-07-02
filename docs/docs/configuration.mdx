@@ -153,6 +153,7 @@ The same config as JSON:
 | `allowance_period` | `"calendar_month"` \| `"rolling_30d"` \| `"anniversary"` | no | How the free-allowance window resets. Default: `"calendar_month"`. See [`allowance_period`](#allowance_period) below. |
 | `rate_overrides` | object | no | Per-model expression overrides for this plan |
 | `features` | object | no | Arbitrary feature entitlements. Presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
+| `feature_limits` | object | no | Per-feature invocation-count limits, keyed by feature name. Independent of `features` — a feature can be entitled *and* rate-limited at the same time. See [`feature_limits`](#feature_limits) below. |
 | `default_billing_mode` | `"strict"` \| `"overdraft"` | no | Default billing mode for this plan's users. Default: `"strict"`. |
 | `max_concurrent` | integer | no | Plan-wide default maximum simultaneous active leases per operation type. `null` = unlimited. |
 | `overdraft_floor` | number | no | Plan-wide negative balance floor for overdraft mode (e.g. `-50`). Only applies when `default_billing_mode` is `"overdraft"`. |
@@ -188,6 +189,65 @@ Used inside `per_operation` to set different billing rules for specific operatio
 | `overdraft_floor` | number | no | Negative balance floor for this operation type (e.g. `-30`). Overrides the plan-level `overdraft_floor`. |
 
 Policy resolution order (most specific wins): per-call `billing_mode` arg → `per_operation[type]` → plan `default_billing_mode` → manager constructor preset. See [Financial Safety](/docs/financial-safety) for how policies interact with `reserve`/`settle`.
+
+### `feature_limits`
+
+Per-feature **invocation-count** limits — e.g. "Free users get at most 5 background removals a month." This is a different axis than everything else on this page: `free_allowance`/spend caps bound *credits*, `feature_limits` bounds how many times a named feature is *called*, regardless of what any single call costs. Keyed by feature name inside a plan; each value is a `FeatureLimit`:
+
+```yaml
+plans:
+  free:
+    id: free
+    name: Free
+    features:
+      background_removal: true
+    feature_limits:
+      background_removal:
+        max_calls: 5
+        period: monthly
+        action: deny
+```
+
+The same config as JSON:
+
+```json
+{
+  "plans": {
+    "free": {
+      "id": "free",
+      "name": "Free",
+      "features": { "background_removal": true },
+      "feature_limits": {
+        "background_removal": { "max_calls": 5, "period": "monthly", "action": "deny" }
+      }
+    }
+  }
+}
+```
+
+#### `FeatureLimit` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_calls` | integer (`>= 0`) | yes | Maximum number of invocations allowed within one `period` window. |
+| `period` | `"daily"` \| `"weekly"` \| `"monthly"` \| `"yearly"` | no | Cadence of the reset window. Default: `"monthly"`. See cadences below. |
+| `action` | `"deny"` \| `"warn"` \| `"notify"` | no | What happens once `max_calls` is reached within the window. Default: `"deny"`. Mirrors `SpendCap.action` both in name and in semantics — see [Architecture: Credit Lifecycle](/docs/architecture#credit-lifecycle) for how `deny`/`warn`/`notify` work for spend caps. |
+
+**Cadences** — all four are **calendar-aligned** and **unconditional**: every user on every plan resets at the same instant, with no per-user anchor (unlike `allowance_period`'s `rolling_30d`/`anniversary`, which anchor to plan-assignment time):
+
+- **`daily`** — resets at UTC midnight.
+- **`weekly`** — resets Monday, ISO week (UTC).
+- **`monthly`** (default) — resets on the 1st of the calendar month (UTC).
+- **`yearly`** — resets January 1st (UTC).
+
+**`action` semantics** (mirrors spend-cap `action`):
+
+- **`deny`** (default) — blocks the call once `max_calls` is reached. Enforced both at admission (`reserve`/`create_lease` — deny-only, nothing to warn about before a charge exists) and at immediate charge (`deduct`/`settle`).
+- **`warn`** / **`notify`** — non-blocking: the call still succeeds, but the result carries a signal (`DeductionResult.feature_limit_warning`) and a `credits.feature_limit_warning` event fires. These are only ever checked on the charge/settle paths, never at admission.
+
+Counting is derived from the transaction ledger — there is no separate counter to go stale or leak. Only a **settled** call increments the count: a released lease (`release_lease`, work never happened) is never counted, and refunding a deduction (`refund_credits`) does **not** free up quota — the feature was still invoked even if the charge was later reversed. A feature can carry a limit without also being declared in `features`, but the common case (shown above) is both together: entitled *and* rate-limited.
+
+See [Subscription Integration: Feature call limits](/docs/subscription-integration#feature-call-limits) for the runtime API (`deduct(feature=...)`, `reserve(feature=...)`, `check_feature_limit()`, `FeatureLimitReachedError`, `credits.feature_limit_warning`).
 
 ### How plans work
 

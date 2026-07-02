@@ -130,6 +130,29 @@ describe("CreditEventEmitter", () => {
     });
   });
 
+  // ── New event types (lazy expiry / subscription cycles) ────────────────────
+  describe("credits.cycle_renewed and credits.floor_breach are valid event types", () => {
+    it("credits.cycle_renewed round-trips through on()/emit() like any other type", () => {
+      const emitter = new CreditEventEmitter();
+      const calls: CreditEvent[] = [];
+      emitter.on("credits.cycle_renewed", (e) => calls.push(e));
+
+      emitter.emit(makeEvent("credits.cycle_renewed"));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].type).toBe("credits.cycle_renewed");
+    });
+
+    it("credits.floor_breach round-trips through on()/emit() like any other type", () => {
+      const emitter = new CreditEventEmitter();
+      const calls: CreditEvent[] = [];
+      emitter.on("credits.floor_breach", (e) => calls.push(e));
+
+      emitter.emit(makeEvent("credits.floor_breach"));
+      expect(calls).toHaveLength(1);
+      expect(calls[0].type).toBe("credits.floor_breach");
+    });
+  });
+
   // ── Handler exception isolation ────────────────────────────────────────────
   describe("handler exception isolation", () => {
     it("second handler still fires even when first handler throws, and emit does not throw", () => {

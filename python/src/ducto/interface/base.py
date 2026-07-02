@@ -24,6 +24,8 @@ from ducto.interface.models import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     PricingConfigData,
@@ -63,6 +65,15 @@ class RefundError(StoreError):
     Stores return a business code (``already_refunded``/``over_refund``/
     ``not_found``) on ``RefundResult.error``; the manager maps it to this
     exception (contract §4).
+    """
+
+
+class FeatureLimitReachedError(StoreError):
+    """Raised when a call would exceed a configured ``deny`` feature-limit.
+
+    Stores return ``error="feature_limit_reached"`` on the result model rather
+    than raising; the manager maps that code to this exception — mirrors
+    ``CapReachedError``.
     """
 
 
@@ -115,6 +126,7 @@ class CreditStore(ABC):
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         tier: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Atomically add credits and log a transaction.
 
@@ -125,6 +137,13 @@ class CreditStore(ABC):
                 configured, must be ``None`` or ``"default"``. When tiers are
                 configured and omitted, resolves to the tier with
                 ``is_default=True`` (raises if none is marked default).
+            idempotency_key: Optional user-scoped replay key. A retried grant
+                with the same key (e.g. a webhook redelivered by the sender)
+                returns the original transaction's result rather than
+                granting a second time — no double-mutation, no second
+                ledger row. Follows the same replay idiom already used by
+                :meth:`deduct_with_allowance`/:meth:`settle_lease`/
+                :meth:`deduct_team`.
         """
         ...
 
@@ -140,6 +159,9 @@ class CreditStore(ABC):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         """Atomically charge a gross cost in a single server-side transaction.
 
@@ -182,10 +204,39 @@ class CreditStore(ABC):
                 allowance consumption for ``rolling_30d``/``anniversary`` plans.
                 ``None`` (the default) falls back to the current UTC calendar
                 month, matching the pre-WS9 behavior exactly.
+            feature: Optional feature name tagged onto the inserted transaction's
+                ``metadata.feature`` and, when ``feature_limit`` is given, checked
+                against it. ``None`` skips feature-limit enforcement/tagging
+                entirely (the manager only passes this when the caller named a
+                feature via ``deduct(feature=...)``).
+            feature_limit: The resolved ``FeatureLimit`` for ``feature`` (looked
+                up from the user's plan by the manager). ``None`` means no limit
+                is configured for this feature — enforcement is skipped (the
+                transaction is still tagged with ``feature`` when given).
+            feature_period_start: The calendar-aligned window start for
+                ``feature_limit.period``, resolved by the manager via
+                :func:`ducto.allowance.resolve_calendar_window`.
+
+        Enforcement (inserted between the spend-cap step and the balance floor):
+        counting is **ledger-derived**, exactly like spend caps — no separate
+        counter table. The store counts prior committed ``usage`` transactions
+        with ``metadata.feature == feature`` in ``[feature_period_start,
+        feature_period_start + period)``; if that count has already reached
+        ``feature_limit.max_calls`` and ``feature_limit.action == "deny"``,
+        aborts with ``error="feature_limit_reached"`` (no allowance consumed,
+        no transaction inserted); ``warn``/``notify`` instead set
+        ``feature_limit_warning`` and continue. The ``usage`` transaction this
+        call inserts on success (tagged ``metadata.feature``) *is* the count
+        increment for future calls — there is nothing else to update. This
+        also means a later :meth:`refund_credits` of this transaction does
+        **not** free up quota (the row, and therefore the count, is untouched
+        by a refund), and a :meth:`release_lease` never counts at all (it
+        never inserts a ``usage`` row) — both are intentional.
 
         Returns:
             ``DeductionResult`` with net ``amount``, ``allowance_consumed``,
-            ``balance_after``, ``idempotent``, ``cap_warning``, and ``error``.
+            ``balance_after``, ``idempotent``, ``cap_warning``,
+            ``feature_limit_warning``, and ``error``.
         """
         ...
 
@@ -212,24 +263,39 @@ class CreditStore(ABC):
         overdraft_floor: Decimal | None = None,
         metadata: CreditMetadata | None = None,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease (hold) — the only admission control (D4).
 
         Under one lock the store: (1) ensures the balance row exists; (2) enforces
         ``max_concurrent`` by **counting active leases** for ``(user_id,
         operation_type)``; (3) enforces ``deny`` spend caps for ``amount`` (admission
-        gate); (4) computes ``available = balance − Σ active holds`` and rejects with
+        gate); (3b) enforces a ``deny`` ``feature_limit`` for ``feature`` — deny-only
+        at admission, exactly like spend caps: the same ledger-derived count as
+        :meth:`deduct_with_allowance` (counts prior committed ``usage`` transactions
+        tagged ``metadata.feature == feature`` in the window; ``warn``/``notify`` are
+        NOT checked here, mirroring how admission only ever enforces ``deny`` spend
+        caps); (4) computes ``available = balance − Σ active holds`` and rejects with
         ``error="insufficient_credits"`` if ``available − amount < floor``; (5)
-        inserts an ``active`` lease expiring after ``ttl_seconds``.
+        inserts an ``active`` lease expiring after ``ttl_seconds``. No lease-record
+        change is needed for feature limits: since ``create_lease`` never inserts a
+        ``usage`` transaction (only :meth:`settle_lease` does), a lease that is later
+        released instead of settled was never counted in the first place — nothing
+        to undo.
 
         ``floor`` is the resolved admission floor (``>= 0`` for strict; the negative
         ``overdraft_floor`` for overdraft). ``billing_mode``/``overdraft_floor`` are
         persisted on the lease for settle-time/observability. Business failures are
-        returned via ``LeaseResult.error``; the store never raises domain exceptions.
+        returned via ``LeaseResult.error`` (including ``"feature_limit_reached"``);
+        the store never raises domain exceptions.
 
         ``period_start`` (WS9) keys the allowance-headroom lookup for
         ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
-        UTC calendar month.
+        UTC calendar month. ``feature``/``feature_limit``/``feature_period_start``
+        are resolved by the manager exactly as in :meth:`deduct_with_allowance`;
+        ``feature_limit=None`` skips enforcement.
         """
         ...
 
@@ -246,6 +312,9 @@ class CreditStore(ABC):
         metadata: CreditMetadata | None = None,
         skip_allowance: bool = False,
         period_start: date | None = None,
+        feature: str | None = None,
+        feature_limit: FeatureLimit | None = None,
+        feature_period_start: date | None = None,
     ) -> DeductionResult:
         """Charge the **actual** cost against a lease, then mark it settled (D5).
 
@@ -253,9 +322,13 @@ class CreditStore(ABC):
         never clamps to the lease amount.
         Pipeline: idempotency replay → allowance consume (skipped when
         ``skip_allowance=True``, Fix 7) → spend-cap (advisory at settle: a breach
-        sets ``cap_warning`` but never blocks) → debit (no floor block; balance may
-        go negative in overdraft) → ledger row → mark lease ``settled``.
-        ``amount == 0`` releases the lease without charging.
+        sets ``cap_warning`` but never blocks) → feature-limit (advisory at settle,
+        same reasoning: the work already happened, so a breach only sets
+        ``feature_limit_warning`` and never blocks) → debit (no floor block; balance
+        may go negative in overdraft) → ledger row (tagged ``metadata.feature`` when
+        ``feature`` is given — this is what makes the call countable for future
+        checks) → mark lease ``settled``. ``amount == 0`` releases the lease without
+        charging (and does not tag/count anything).
 
         ``skip_allowance=True`` prevents the free inference allowance from being
         consumed at settle time — mirrors :meth:`deduct_with_allowance` Fix 7 so
@@ -263,7 +336,11 @@ class CreditStore(ABC):
 
         ``period_start`` (WS9) keys allowance consumption for
         ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
-        UTC calendar month.
+        UTC calendar month. ``feature``/``feature_limit``/``feature_period_start``
+        mirror :meth:`deduct_with_allowance` — the caller (manager) re-supplies
+        ``feature`` at settle time exactly as it already re-supplies ``model`` for
+        per-model spend-cap accuracy at settle (no feature name is persisted on the
+        lease itself).
 
         Lease-state failures are returned via ``DeductionResult.error``:
         ``lease_not_found`` (missing / other user / released), ``lease_expired``
@@ -409,6 +486,37 @@ class CreditStore(ABC):
         """Record allowance consumption for current billing period."""
         ...
 
+    @abstractmethod
+    def check_feature_limit(
+        self,
+        user_id: str,
+        feature: str,
+        max_calls: int,
+        period_start: date,
+        period_end: date,
+    ) -> FeatureLimitResult:
+        """Advisory, non-locking read of invocation-count usage (UI only).
+
+        Mirrors :meth:`check_spend_cap`/:meth:`check_allowance`: the caller (the
+        manager) has already resolved the ``FeatureLimit`` from the user's plan
+        and the calendar window via :func:`ducto.allowance.resolve_calendar_window`
+        — this method only counts. Counting is ledger-derived (see
+        :meth:`deduct_with_allowance`): the number of committed ``usage``
+        transactions with ``metadata.feature == feature`` in ``[period_start,
+        period_end)``. Never used for admission control.
+
+        Args:
+            user_id: The user to check.
+            feature: The feature name.
+            max_calls: The configured limit (``FeatureLimit.max_calls``).
+            period_start: Inclusive window start (resolved by the caller).
+            period_end: Exclusive window end (resolved by the caller).
+
+        Returns:
+            ``FeatureLimitResult`` with ``limited=True`` and the count/remaining.
+        """
+        ...
+
     # ── Spend caps and rate limiting ────────────────────────────────────
 
     @abstractmethod
@@ -460,11 +568,24 @@ class CreditStore(ABC):
     def sweep_expired_credits(
         self,
         dry_run: bool = False,
+        user_id: str | None = None,
     ) -> SweepResult:
-        """Sweep expired credits from all users' balances.
+        """Sweep expired credits from all users' balances, or a single user's.
+
+        Credit expiry is the one time-based mechanism in ducto that isn't
+        already lazy-on-read (allowance windows and lease TTLs need no cron).
+        ``user_id`` lets a caller (typically the manager layer, before a
+        balance-affecting operation) scope the sweep to just that user so it
+        can be invoked lazily on the request path instead of requiring an
+        operator-maintained cron job. ``user_id=None`` (the default) preserves
+        the original global-sweep behavior exactly.
 
         Args:
             dry_run: If True, report what would be expired without modifying.
+            user_id: Optional user to scope the sweep to. When given, only
+                that user's expired grants are considered/expired; other
+                users' expired grants are left untouched until they are swept
+                (globally or individually) themselves.
 
         Returns:
             ``SweepResult`` with count and amount of expired credits.

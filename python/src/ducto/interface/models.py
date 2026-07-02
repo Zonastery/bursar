@@ -99,8 +99,9 @@ class LeaseResult(BaseModel):
     ``amount`` against ``available = balance − Σ(active holds)`` under one lock so
     concurrent operations see each other and ``max_concurrent`` is real. On failure
     ``error`` carries a business code (``insufficient_credits``, ``concurrency_limit``,
-    ``cap_reached``, ``feature_not_entitled``, ``invalid_amount``, ``lease_not_found``,
-    ``lease_expired``, ``lease_released``) for the manager to map to a typed exception.
+    ``cap_reached``, ``feature_not_entitled``, ``feature_limit_reached``,
+    ``invalid_amount``, ``lease_not_found``, ``lease_expired``, ``lease_released``)
+    for the manager to map to a typed exception.
     """
 
     lease_id: str
@@ -181,6 +182,9 @@ class DeductionResult(BaseModel):
     allowance_consumed: Decimal = Decimal(0)
     idempotent: bool = False
     cap_warning: str | None = None
+    #: Non-blocking ``warn``/``notify`` signal from a breached ``FeatureLimit``
+    #: (parallels ``cap_warning``). ``None`` when no feature-limit warning fired.
+    feature_limit_warning: str | None = None
     error: str | None = None
     tier_breakdown: dict[str, Decimal] | None = None
 
@@ -234,6 +238,28 @@ class OperationPolicy(BaseModel):
     overdraft_floor: Decimal | None = None
 
 
+class FeatureLimit(BaseModel):
+    """Per-feature invocation-count limit (cadence-based rate limiting).
+
+    ``max_calls`` bounds how many times a feature may be invoked within one
+    ``period`` window. Windows are calendar-aligned (see
+    :func:`ducto.allowance.resolve_calendar_window`): ``daily`` resets at UTC
+    midnight, ``weekly`` on Monday (ISO week), ``monthly`` on the 1st,
+    ``yearly`` on Jan 1 — every user resets together, no per-user anchor.
+
+    ``action`` mirrors ``SpendCap.action``: ``deny`` blocks the call (checked
+    at admission/deduction); ``warn``/``notify`` are non-blocking signals,
+    checked only on the immediate-charge and settle paths — admission
+    (``reserve``/``create_lease``) only ever enforces ``deny``, exactly like
+    spend caps (interface plan precedent: deny-only at admission, advisory
+    elsewhere).
+    """
+
+    max_calls: int = Field(ge=0)
+    period: Literal["daily", "weekly", "monthly", "yearly"] = "monthly"
+    action: Literal["deny", "warn", "notify"] = "deny"
+
+
 class PlanDefinition(BaseModel):
     """Definition of a subscription plan with free allowance and rate overrides.
 
@@ -251,6 +277,10 @@ class PlanDefinition(BaseModel):
     free_allowance: Decimal = Field(default=Decimal(0), ge=0)
     rate_overrides: dict[str, str] | None = None
     features: dict[str, Any] | None = None
+    #: Per-feature invocation-count limits, keyed by feature name. Independent of
+    #: ``features`` (boolean/value entitlement) — a feature can be entitled and
+    #: rate-limited at the same time.
+    feature_limits: dict[str, FeatureLimit] | None = None
     default_billing_mode: BillingMode = "strict"
     per_operation: dict[str, OperationPolicy] | None = None
     max_concurrent: int | None = None
@@ -317,6 +347,7 @@ class GetUserPlanResult(BaseModel):
     plan_name: str | None = None
     free_allowance: Decimal = Decimal(0)
     features: dict[str, Any] = Field(default_factory=dict)
+    feature_limits: dict[str, FeatureLimit] = Field(default_factory=dict)
     default_billing_mode: BillingMode = "strict"
     per_operation: dict[str, OperationPolicy] = Field(default_factory=dict)
     max_concurrent: int | None = None
@@ -332,6 +363,27 @@ class CheckFeatureResult(BaseModel):
     feature: str
     value: Any = None
     has_feature: bool = False
+
+
+class FeatureLimitResult(BaseModel):
+    """Advisory, non-locking read of a per-feature invocation-count limit (UI only).
+
+    Mirrors ``CapCheckResult``: ``limited=False`` means no ``FeatureLimit`` is
+    configured for this feature on the user's plan (unlimited) — ``limit``,
+    ``used``, ``remaining``, and the period bounds are zeroed/empty in that
+    case, and ``action`` is ``None``. Never used for admission control; that is
+    exclusively the atomic check-and-increment inside ``deduct``/``reserve``.
+    """
+
+    user_id: str
+    feature: str
+    limited: bool = False
+    limit: int = 0
+    used: int = 0
+    remaining: int = 0
+    period_start: str = ""
+    period_end: str = ""
+    action: Literal["deny", "warn", "notify"] | None = None
 
 
 class SetUserPlanResult(BaseModel):

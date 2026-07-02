@@ -42,6 +42,8 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.expired",
         "credits.cap_reached",
         "credits.cap_warning",
+        "credits.feature_limit_reached",
+        "credits.feature_limit_warning",
         "credits.low_balance",
         "credits.plan_changed",
         # Lease lifecycle (interface plan §3/M4): make admission, release, expiry
@@ -50,6 +52,13 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.reservation_released",
         "credits.lease_expired",
         "credits.overdraft",
+        # Non-blocking signal emitted by _post_charge_signals when a settle/deduct
+        # leaves the balance below min_balance without going negative (manager.py).
+        # Pre-existing gap: this was emitted but missing from this frozenset.
+        "credits.floor_breach",
+        # Emitted by CreditManager.grant_subscription_cycle (webhook renewal/signup
+        # grant helper).
+        "credits.cycle_renewed",
     }
 )
 

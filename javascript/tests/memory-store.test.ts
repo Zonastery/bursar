@@ -37,7 +37,7 @@ describe("MemoryStore", () => {
     it("returns setup result with table names", async () => {
       const result = await store.setup();
       expect(result.success).toBe(true);
-      expect(result.tablesCreated).toHaveLength(9);
+      expect(result.tablesCreated).toHaveLength(11);
     });
   });
 
@@ -97,6 +97,45 @@ describe("MemoryStore", () => {
 
     it("rejects non-finite amounts (L2)", async () => {
       await expect(store.addCredits("user-1", new Decimal(Infinity))).rejects.toThrow(StoreError);
+    });
+  });
+
+  describe("addCredits idempotency", () => {
+    it("idempotency replays original (one grant)", async () => {
+      const r1 = await store.addCredits("user-1", D(100), "purchase", null, null, null, "k1");
+      expect(r1.idempotent).toBe(false);
+      const r2 = await store.addCredits("user-1", D(100), "purchase", null, null, null, "k1");
+      expect(r2.idempotent).toBe(true);
+      expect(r2.transactionId).toBe(r1.transactionId);
+      // Only granted once.
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("100");
+    });
+
+    it("different idempotencyKey grants again", async () => {
+      await store.addCredits("user-1", D(100), "purchase", null, null, null, "k1");
+      await store.addCredits("user-1", D(100), "purchase", null, null, null, "k2");
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("200");
+    });
+
+    it("idempotencyKey is user-scoped — a different user's grant with the same key is not a replay", async () => {
+      await store.addCredits("user-1", D(100), "purchase", null, null, null, "shared-key");
+      const r2 = await store.addCredits(
+        "user-2",
+        D(50),
+        "purchase",
+        null,
+        null,
+        null,
+        "shared-key",
+      );
+      expect(r2.idempotent).toBe(false);
+      expect((await store.getBalance("user-2")).balance.toString()).toBe("50");
+    });
+
+    it("omitted idempotencyKey never replays (each call grants)", async () => {
+      await store.addCredits("user-1", D(100), "purchase");
+      await store.addCredits("user-1", D(100), "purchase");
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("200");
     });
   });
 
@@ -489,7 +528,13 @@ describe("MemoryStore", () => {
     });
 
     it("credits past TTL expire on sweep", async () => {
-      await store.addCredits("user-1", D(100), "purchase", null, new Date("2026-01-01T00:00:00.500Z"));
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
       store.setClock(() => LATER);
 
       const result = await store.sweepExpiredCredits();
@@ -500,7 +545,13 @@ describe("MemoryStore", () => {
     });
 
     it("dryRun reports without modifying balance", async () => {
-      await store.addCredits("user-1", D(100), "purchase", null, new Date("2026-01-01T00:00:00.500Z"));
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
       store.setClock(() => LATER);
 
       const result = await store.sweepExpiredCredits(true);
@@ -511,7 +562,13 @@ describe("MemoryStore", () => {
     });
 
     it("double-sweep reports zero and does not double-debit (H4)", async () => {
-      await store.addCredits("user-1", D(100), "purchase", null, new Date("2026-01-01T00:00:00.500Z"));
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
       store.setClock(() => LATER);
 
       const first = await store.sweepExpiredCredits();
@@ -543,13 +600,94 @@ describe("MemoryStore", () => {
     });
 
     it("partial expiry caps at current balance", async () => {
-      await store.addCredits("user-1", D(50), "purchase", null, new Date("2026-01-01T00:00:00.500Z"));
+      await store.addCredits(
+        "user-1",
+        D(50),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
       await store.addCredits("user-1", D(30), "purchase"); // no expiry
       store.setClock(() => LATER);
 
       const result = await store.sweepExpiredCredits();
       expect(result.expiredAmount.toString()).toBe("50");
       expect((await store.getBalance("user-1")).balance.toString()).toBe("30");
+    });
+
+    // ── Per-user scoping (`userId` param) ────────────────────────────────
+    it("userId scopes the sweep to a single user, leaving other users untouched", async () => {
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
+      await store.addCredits(
+        "user-2",
+        D(200),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
+      store.setClock(() => LATER);
+
+      const result = await store.sweepExpiredCredits(false, "user-1");
+      expect(result.expiredCount).toBe(1);
+      expect(result.expiredAmount.toString()).toBe("100");
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("0");
+      // user-2's expired grant is untouched by the scoped sweep.
+      expect((await store.getBalance("user-2")).balance.toString()).toBe("200");
+    });
+
+    it("omitted userId preserves the original global-sweep behaviour exactly", async () => {
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
+      await store.addCredits(
+        "user-2",
+        D(200),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
+      store.setClock(() => LATER);
+
+      const result = await store.sweepExpiredCredits();
+      expect(result.expiredCount).toBe(2);
+      expect(result.expiredAmount.toString()).toBe("300");
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("0");
+      expect((await store.getBalance("user-2")).balance.toString()).toBe("0");
+    });
+
+    it("scoped dryRun reports without modifying the target user's balance", async () => {
+      await store.addCredits(
+        "user-1",
+        D(100),
+        "purchase",
+        null,
+        new Date("2026-01-01T00:00:00.500Z"),
+      );
+      store.setClock(() => LATER);
+
+      const result = await store.sweepExpiredCredits(true, "user-1");
+      expect(result.expiredCount).toBe(1);
+      expect(result.dryRun).toBe(true);
+      expect((await store.getBalance("user-1")).balance.toString()).toBe("100");
+    });
+
+    it("scoped sweep for a user with nothing expired reports zero", async () => {
+      await store.addCredits("user-1", D(100)); // no expiry
+      store.setClock(() => LATER);
+
+      const result = await store.sweepExpiredCredits(false, "user-1");
+      expect(result.expiredCount).toBe(0);
+      expect(result.expiredAmount.toString()).toBe("0");
     });
   });
 
@@ -1405,12 +1543,20 @@ describe("MemoryStore", () => {
       }
 
       // Page 1: limit=5, offset=0 → 5 results
-      const page1 = await store.listUserTransactions("user-tx", { types: ["usage"], limit: 5, offset: 0 });
+      const page1 = await store.listUserTransactions("user-tx", {
+        types: ["usage"],
+        limit: 5,
+        offset: 0,
+      });
       expect(page1.items).toHaveLength(5);
       expect(page1.total).toBe(12);
 
       // Page 2: limit=5, offset=5 → 5 different results
-      const page2 = await store.listUserTransactions("user-tx", { types: ["usage"], limit: 5, offset: 5 });
+      const page2 = await store.listUserTransactions("user-tx", {
+        types: ["usage"],
+        limit: 5,
+        offset: 5,
+      });
       expect(page2.items).toHaveLength(5);
       const page1Ids = new Set(page1.items.map((t) => t.id));
       for (const item of page2.items) {
@@ -1418,11 +1564,19 @@ describe("MemoryStore", () => {
       }
 
       // Page 3: limit=5, offset=10 → 2 results (last page, smaller than limit)
-      const page3 = await store.listUserTransactions("user-tx", { types: ["usage"], limit: 5, offset: 10 });
+      const page3 = await store.listUserTransactions("user-tx", {
+        types: ["usage"],
+        limit: 5,
+        offset: 10,
+      });
       expect(page3.items).toHaveLength(2);
 
       // Beyond: limit=5, offset=12 → 0 results, no error
-      const page4 = await store.listUserTransactions("user-tx", { types: ["usage"], limit: 5, offset: 12 });
+      const page4 = await store.listUserTransactions("user-tx", {
+        types: ["usage"],
+        limit: 5,
+        offset: 12,
+      });
       expect(page4.items).toHaveLength(0);
       expect(page4.total).toBe(12);
     });
@@ -1482,7 +1636,12 @@ describe("WS9 — configurable allowance reset window", () => {
     const config: PricingConfigData = {
       models: { _default: "1" },
       plans: {
-        "plan-ws9": { id: "plan-ws9", name: "Plan WS9", freeAllowance: D(freeAllowance), allowancePeriod },
+        "plan-ws9": {
+          id: "plan-ws9",
+          name: "Plan WS9",
+          freeAllowance: D(freeAllowance),
+          allowancePeriod,
+        },
       },
     };
     await store.setActivePricing(config);
@@ -1618,8 +1777,18 @@ describe("WS9 — configurable allowance reset window", () => {
       const config: PricingConfigData = {
         models: { _default: "1" },
         plans: {
-          "plan-a": { id: "plan-a", name: "Plan A", freeAllowance: D(5), allowancePeriod: "rolling_30d" },
-          "plan-b": { id: "plan-b", name: "Plan B", freeAllowance: D(9), allowancePeriod: "rolling_30d" },
+          "plan-a": {
+            id: "plan-a",
+            name: "Plan A",
+            freeAllowance: D(5),
+            allowancePeriod: "rolling_30d",
+          },
+          "plan-b": {
+            id: "plan-b",
+            name: "Plan B",
+            freeAllowance: D(9),
+            allowancePeriod: "rolling_30d",
+          },
         },
       };
       await store.setActivePricing(config);
@@ -1776,9 +1945,7 @@ describe("CreditStore optional capabilities (WS8)", () => {
     await expect(minimal.getTeamBalance("t1")).rejects.toThrow(CapabilityNotSupportedError);
     await expect(minimal.addTeamMember("t1", "u1")).rejects.toThrow(CapabilityNotSupportedError);
     await expect(minimal.getTeamMembers("t1")).rejects.toThrow(CapabilityNotSupportedError);
-    await expect(minimal.deductTeam("t1", "u1", D(1))).rejects.toThrow(
-      CapabilityNotSupportedError,
-    );
+    await expect(minimal.deductTeam("t1", "u1", D(1))).rejects.toThrow(CapabilityNotSupportedError);
     await expect(minimal.spendByUser(new Date(), new Date())).rejects.toThrow(
       CapabilityNotSupportedError,
     );
@@ -1794,9 +1961,7 @@ describe("CreditStore optional capabilities (WS8)", () => {
     await expect(minimal.aggregateStats(new Date(), new Date())).rejects.toThrow(
       CapabilityNotSupportedError,
     );
-    await expect(minimal.listUserTransactions("u1")).rejects.toThrow(
-      CapabilityNotSupportedError,
-    );
+    await expect(minimal.listUserTransactions("u1")).rejects.toThrow(CapabilityNotSupportedError);
   });
 
   it("MemoryStore overrides every optional capability concretely (no CapabilityNotSupportedError)", async () => {
@@ -1807,3 +1972,499 @@ describe("CreditStore optional capabilities (WS8)", () => {
     await expect(full.getTeamBalance(team.teamId)).resolves.toBeDefined();
   });
 });
+
+// ── Feature limits (per-feature invocation-count limits) ───────────────────
+//
+// Mirrors the Python `TestFeatureLimits` track: counting is ledger-derived
+// (committed `usage` transactions tagged `metadata.feature`), exactly like
+// spend caps — no separate counter storage. `feature`/`featureLimit`/
+// `featurePeriodStart` are resolved by the manager in production; here we
+// exercise the store directly (mirrors how spend caps are tested above).
+describe("Feature limits (per-feature invocation-count limits)", () => {
+  let store: MemoryStore;
+  // Default clock: any instant inside [WINDOW_START, WINDOW_START + 1 month) so
+  // transactions committed in tests without their own `setClock` land inside
+  // the fixed WINDOW_START/WINDOW_END used throughout. Window-rollover tests
+  // override the clock explicitly per period.
+  const DEFAULT_NOW = new Date("2026-03-15T00:00:00.000Z");
+
+  beforeEach(() => {
+    store = new MemoryStore();
+    store.setClock(() => DEFAULT_NOW);
+  });
+
+  const WINDOW_START = new Date("2026-03-01T00:00:00.000Z"); // aligned "monthly" start
+
+    describe("deductWithAllowance", () => {
+      it("no featureLimit given: feature is tagged but never enforced", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        for (let i = 0; i < 10; i++) {
+          const r = await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+          expect(r.error).toBeUndefined();
+        }
+        const bal = await store.getBalance("user-1");
+        expect(bal.balance.toString()).toBe("90");
+      });
+
+      it("under the limit: deduction succeeds, no warning", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 3, period: "monthly" as const, action: "deny" as const };
+        const r1 = await store.deductWithAllowance("user-1", D(1), {
+          feature: "export",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        expect(r1.error).toBeUndefined();
+        expect(r1.featureLimitWarning ?? null).toBeNull();
+      });
+
+      it("at the limit: deny blocks with feature_limit_reached, nothing consumed", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 2, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        await store.deductWithAllowance("user-1", D(1), opts);
+        await store.deductWithAllowance("user-1", D(1), opts);
+        // Third call: count (2) >= maxCalls (2) → deny.
+        const r3 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r3.error).toBe("feature_limit_reached");
+        // Nothing consumed by the blocked call.
+        const bal = await store.getBalance("user-1");
+        expect(bal.balance.toString()).toBe("98");
+      });
+
+      it("over the limit (maxCalls: 0): every call is denied", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 0, period: "monthly" as const, action: "deny" as const };
+        const r = await store.deductWithAllowance("user-1", D(1), {
+          feature: "export",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        expect(r.error).toBe("feature_limit_reached");
+      });
+
+      it("warn action: breach surfaces featureLimitWarning but does NOT block", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        const r1 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r1.error).toBeUndefined();
+        expect(r1.featureLimitWarning ?? null).toBeNull();
+        // Second call: count (1) >= maxCalls (1) → warn, but still succeeds.
+        const r2 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r2.error).toBeUndefined();
+        expect(r2.featureLimitWarning).toBe("warn");
+        const bal = await store.getBalance("user-1");
+        expect(bal.balance.toString()).toBe("98");
+      });
+
+      it("notify action: breach surfaces featureLimitWarning='notify', does NOT block", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "notify" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        await store.deductWithAllowance("user-1", D(1), opts);
+        const r2 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r2.error).toBeUndefined();
+        expect(r2.featureLimitWarning).toBe("notify");
+      });
+
+      it("isolation: a different feature name has an independent count", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        await store.deductWithAllowance("user-1", D(1), {
+          feature: "export",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        // "import" is a different feature — its own count starts at 0.
+        const r = await store.deductWithAllowance("user-1", D(1), {
+          feature: "import",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        expect(r.error).toBeUndefined();
+      });
+
+      it("isolation: a different user has an independent count", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        await store.addCredits("user-2", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        await store.deductWithAllowance("user-1", D(1), opts);
+        // user-1 is now at the limit; user-2 is unaffected.
+        const blocked = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(blocked.error).toBe("feature_limit_reached");
+        const other = await store.deductWithAllowance("user-2", D(1), opts);
+        expect(other.error).toBeUndefined();
+      });
+
+      it("accumulation-then-block across N deducts", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        for (let i = 0; i < 5; i++) {
+          const r = await store.deductWithAllowance("user-1", D(1), opts);
+          expect(r.error).toBeUndefined();
+        }
+        const blocked = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(blocked.error).toBe("feature_limit_reached");
+        const bal = await store.getBalance("user-1");
+        expect(bal.balance.toString()).toBe("95");
+      });
+
+      it("a call fully covered by free allowance (net amount 0) still counts as one invocation", async () => {
+        const config: PricingConfigData = {
+          models: { _default: "1" },
+          plans: {
+            free: { id: "free", name: "Free", freeAllowance: D(100) },
+          },
+        };
+        await store.setActivePricing(config);
+        await store.setUserPlan("user-1", "free");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+
+        // Fully covered by the free allowance — net charged amount is 0, but the
+        // feature was still invoked once (unlike spend-cap counting, which only
+        // cares about actual dollars spent).
+        const r1 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r1.error).toBeUndefined();
+        expect(r1.amount.toString()).toBe("0");
+        expect(r1.allowanceConsumed.toString()).toBe("1");
+
+        const r2 = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r2.error).toBe("feature_limit_reached");
+      });
+
+      it("always tags metadata.feature even when no limit is configured (accurate future history)", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+        // Now enable a limit for the SAME window: the untagged-limit call above
+        // must already count toward it (it was tagged at deduction time).
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const r = await store.deductWithAllowance("user-1", D(1), {
+          feature: "export",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        expect(r.error).toBe("feature_limit_reached");
+      });
+
+      describe("window rollover", () => {
+        it("daily: resets at the next UTC midnight", async () => {
+          await store.addCredits("user-1", D(100), "purchase");
+          const day1 = new Date("2026-03-15T00:00:00.000Z");
+          const day2 = new Date("2026-03-16T00:00:00.000Z");
+          const featureLimit = { maxCalls: 1, period: "daily" as const, action: "deny" as const };
+
+          store.setClock(() => day1);
+          const r1 = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: day1,
+          });
+          expect(r1.error).toBeUndefined();
+          const blocked = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: day1,
+          });
+          expect(blocked.error).toBe("feature_limit_reached");
+
+          store.setClock(() => day2);
+          const r2 = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: day2,
+          });
+          expect(r2.error).toBeUndefined();
+        });
+
+        it("weekly: resets on the next Monday (ISO week)", async () => {
+          await store.addCredits("user-1", D(100), "purchase");
+          const week1 = new Date("2026-03-16T00:00:00.000Z"); // Monday
+          const week2 = new Date("2026-03-23T00:00:00.000Z"); // next Monday
+          const featureLimit = { maxCalls: 1, period: "weekly" as const, action: "deny" as const };
+
+          store.setClock(() => week1);
+          await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: week1,
+          });
+          const blocked = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: week1,
+          });
+          expect(blocked.error).toBe("feature_limit_reached");
+
+          store.setClock(() => week2);
+          const r2 = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: week2,
+          });
+          expect(r2.error).toBeUndefined();
+        });
+
+        it("monthly: resets on the 1st of the next UTC month", async () => {
+          await store.addCredits("user-1", D(100), "purchase");
+          const month1 = new Date("2026-03-01T00:00:00.000Z");
+          const month2 = new Date("2026-04-01T00:00:00.000Z");
+          const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+
+          store.setClock(() => month1);
+          await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: month1,
+          });
+          const blocked = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: month1,
+          });
+          expect(blocked.error).toBe("feature_limit_reached");
+
+          store.setClock(() => month2);
+          const r2 = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: month2,
+          });
+          expect(r2.error).toBeUndefined();
+        });
+
+        it("yearly: resets on Jan 1 of the next year", async () => {
+          await store.addCredits("user-1", D(100), "purchase");
+          const year1 = new Date("2026-01-01T00:00:00.000Z");
+          const year2 = new Date("2027-01-01T00:00:00.000Z");
+          const featureLimit = { maxCalls: 1, period: "yearly" as const, action: "deny" as const };
+
+          store.setClock(() => year1);
+          await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: year1,
+          });
+          const blocked = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: year1,
+          });
+          expect(blocked.error).toBe("feature_limit_reached");
+
+          store.setClock(() => year2);
+          const r2 = await store.deductWithAllowance("user-1", D(1), {
+            feature: "export",
+            featureLimit,
+            featurePeriodStart: year2,
+          });
+          expect(r2.error).toBeUndefined();
+        });
+      });
+    });
+
+    describe("createLease (deny-only admission)", () => {
+      it("deny action: admission is blocked once the limit is reached", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        // Commit one usage transaction tagged `feature` via a direct deduct (the
+        // ledger-derived count only sees committed `usage` rows).
+        await store.deductWithAllowance("user-1", D(1), opts);
+        const lease = await store.createLease("user-1", D(1), "usage", opts);
+        expect(lease.error).toBe("feature_limit_reached");
+      });
+
+      it("warn/notify are NOT checked at admission (nothing to warn about yet)", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        await store.deductWithAllowance("user-1", D(1), opts);
+        // Count is already at the limit, but action='warn' is never enforced at
+        // admission — the lease must be granted.
+        const lease = await store.createLease("user-1", D(1), "usage", opts);
+        expect(lease.error).toBeUndefined();
+      });
+
+      it("under the limit: admission succeeds", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+        const lease = await store.createLease("user-1", D(1), "usage", {
+          feature: "export",
+          featureLimit,
+          featurePeriodStart: WINDOW_START,
+        });
+        expect(lease.error).toBeUndefined();
+      });
+    });
+
+    describe("settleLease (advisory only, never blocks)", () => {
+      it("deny action breach at settle: featureLimitWarning='deny', settle still succeeds", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        // Pre-fill the count to the limit via a committed deduction.
+        await store.deductWithAllowance("user-1", D(1), opts);
+        // Reserve+settle without a feature limit on the lease itself (create_lease
+        // deny would otherwise reject it) to reach settle with the count already
+        // at the limit.
+        const lease = await store.createLease("user-1", D(1), "usage");
+        const settled = await store.settleLease("user-1", lease.leaseId, D(1), opts);
+        expect(settled.error).toBeUndefined();
+        expect(settled.featureLimitWarning).toBe("deny");
+      });
+
+      it("tags metadata.feature on the settled transaction (countable for future checks)", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+        const lease = await store.createLease("user-1", D(1), "usage", opts);
+        await store.settleLease("user-1", lease.leaseId, D(1), opts);
+
+        const usage = await store.checkFeatureLimit(
+          "user-1",
+          "export",
+          5,
+          WINDOW_START,
+          new Date("2026-04-01T00:00:00.000Z"),
+        );
+        expect(usage.used).toBe(1);
+      });
+    });
+
+    describe("release/refund do NOT restore quota", () => {
+      it("release_lease never counted in the first place (no usage row inserted)", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+
+        // Reserve then release near the limit — a lease never inserts a usage
+        // row, so it was never counted, and releasing changes nothing.
+        const lease = await store.createLease("user-1", D(1), "usage", opts);
+        expect(lease.error).toBeUndefined();
+        await store.releaseLease("user-1", lease.leaseId);
+
+        // The count is still 0 — a fresh deduct against the same limit succeeds.
+        const r = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(r.error).toBeUndefined();
+      });
+
+      it("refund_credits does not free up quota (the counted row is untouched)", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
+
+        const deduct = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(deduct.error).toBeUndefined();
+        const refund = await store.refundCredits(deduct.transactionId);
+        expect(refund.error).toBeUndefined();
+
+        // The original usage row (and therefore the count) is unaffected by the
+        // refund — a subsequent call still sees count >= maxCalls.
+        const blocked = await store.deductWithAllowance("user-1", D(1), opts);
+        expect(blocked.error).toBe("feature_limit_reached");
+      });
+    });
+
+    describe("checkFeatureLimit (advisory read)", () => {
+      it("counts committed usage rows tagged with the feature in the window", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+        await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+        await store.deductWithAllowance("user-1", D(1), { feature: "import" }); // different feature
+
+        const result = await store.checkFeatureLimit(
+          "user-1",
+          "export",
+          5,
+          WINDOW_START,
+          new Date("2026-04-01T00:00:00.000Z"),
+        );
+        expect(result.limited).toBe(true);
+        expect(result.limit).toBe(5);
+        expect(result.used).toBe(2);
+        expect(result.remaining).toBe(3);
+      });
+
+      it("remaining floors at 0 when used exceeds max", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+        await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+
+        const result = await store.checkFeatureLimit(
+          "user-1",
+          "export",
+          1,
+          WINDOW_START,
+          new Date("2026-04-01T00:00:00.000Z"),
+        );
+        expect(result.used).toBe(2);
+        expect(result.remaining).toBe(0);
+      });
+
+      it("has no side effects and never blocks", async () => {
+        await store.addCredits("user-1", D(100), "purchase");
+        const before = await store.checkFeatureLimit(
+          "user-1",
+          "export",
+          0,
+          WINDOW_START,
+          new Date("2026-04-01T00:00:00.000Z"),
+        );
+        expect(before.used).toBe(0);
+        // A subsequent deduct is unaffected by the check above.
+        const r = await store.deductWithAllowance("user-1", D(1), { feature: "export" });
+        expect(r.error).toBeUndefined();
+      });
+    });
+
+    describe("PlanDefinition.featureLimits / GetUserPlanResult.featureLimits round-trip", () => {
+      it("setActivePricing + getUserPlan surfaces configured feature limits", async () => {
+        const config: PricingConfigData = {
+          models: { _default: "1" },
+          plans: {
+            free: {
+              id: "free",
+              name: "Free",
+              freeAllowance: D(0),
+              featureLimits: {
+                export: { maxCalls: 5, period: "monthly", action: "deny" },
+                hdExport: { maxCalls: 2, period: "weekly", action: "warn" },
+              },
+            },
+          },
+        };
+        await store.setActivePricing(config);
+        await store.setUserPlan("user-1", "free");
+
+        const plan = await store.getUserPlan("user-1");
+        expect(plan.featureLimits?.["export"]).toEqual({
+          maxCalls: 5,
+          period: "monthly",
+          action: "deny",
+        });
+        expect(plan.featureLimits?.["hdExport"]).toEqual({
+          maxCalls: 2,
+          period: "weekly",
+          action: "warn",
+        });
+      });
+
+      it("plan with no featureLimits configured returns an empty object", async () => {
+        const config: PricingConfigData = {
+          models: { _default: "1" },
+          plans: {
+            free: { id: "free", name: "Free", freeAllowance: D(0) },
+          },
+        };
+        await store.setActivePricing(config);
+        await store.setUserPlan("user-1", "free");
+
+        const plan = await store.getUserPlan("user-1");
+        expect(plan.featureLimits).toEqual({});
+      });
+    });
+  });

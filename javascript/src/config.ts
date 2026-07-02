@@ -1,8 +1,8 @@
 import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
-import type { AllowancePeriod } from "./allowance.js";
-import type { PlanDefinition, TierDefinition } from "./types.js";
+import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
+import type { FeatureLimit, PlanDefinition, TierDefinition } from "./types.js";
 
 /** Valid `allowancePeriod` values (WS9b). */
 const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
@@ -10,6 +10,17 @@ const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
   "rolling_30d",
   "anniversary",
 ]);
+
+/** Valid `FeatureLimit.period` cadences (mirrors Python `resolve_calendar_window`). */
+const FEATURE_LIMIT_PERIODS: ReadonlySet<string> = new Set([
+  "daily",
+  "weekly",
+  "monthly",
+  "yearly",
+]);
+
+/** Valid `FeatureLimit.action` values (mirrors `SpendCap.action`). */
+const FEATURE_LIMIT_ACTIONS: ReadonlySet<string> = new Set(["deny", "warn", "notify"]);
 
 /**
  * Canonical metric-variable set — MUST mirror `PricingEngine.buildVariables`
@@ -98,6 +109,8 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
     default_ttl_days: "defaultTtlDays",
     allow_overdraft: "allowOverdraft",
     is_default: "isDefault",
+    feature_limits: "featureLimits",
+    max_calls: "maxCalls",
   };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
@@ -115,6 +128,49 @@ function normalisePlan(p: Record<string, unknown>): Record<string, unknown> {
 /** Recursively normalise a tier definition object (credit tiers). */
 function normaliseTier(t: Record<string, unknown>): Record<string, unknown> {
   return normaliseKeys(t);
+}
+
+/**
+ * Normalise + validate a plan's `featureLimits` map (per-feature
+ * invocation-count limits, mirrors `per_operation`/`OperationPolicy`
+ * handling). Each entry's own keys are snake/camel-normalised (`max_calls`
+ * -> `maxCalls`) since, unlike top-level plan fields, these nested objects
+ * are not otherwise touched by `normaliseKeys`.
+ */
+function normaliseFeatureLimits(
+  planKey: string,
+  raw: Record<string, unknown>,
+): Record<string, FeatureLimit> {
+  const out: Record<string, FeatureLimit> = {};
+  for (const [featureKey, rawLimit] of Object.entries(raw)) {
+    const limit = normaliseKeys((rawLimit ?? {}) as Record<string, unknown>);
+    const maxCalls = Number(limit.maxCalls ?? 0);
+    const period = (limit.period as string | undefined) ?? "monthly";
+    const action = (limit.action as string | undefined) ?? "deny";
+    if (!Number.isFinite(maxCalls) || maxCalls < 0) {
+      throw new ConfigError(
+        `invalid featureLimits in plans.${planKey}.${featureKey}: maxCalls must be >= 0, got ${String(limit.maxCalls)}`,
+      );
+    }
+    if (!FEATURE_LIMIT_PERIODS.has(period)) {
+      throw new ConfigError(
+        `invalid featureLimits in plans.${planKey}.${featureKey}: unknown period '${period}' ` +
+          `(expected one of ${[...FEATURE_LIMIT_PERIODS].sort().join(", ")})`,
+      );
+    }
+    if (!FEATURE_LIMIT_ACTIONS.has(action)) {
+      throw new ConfigError(
+        `invalid featureLimits in plans.${planKey}.${featureKey}: unknown action '${action}' ` +
+          `(expected one of ${[...FEATURE_LIMIT_ACTIONS].sort().join(", ")})`,
+      );
+    }
+    out[featureKey] = {
+      maxCalls,
+      period: period as FeatureLimitPeriod,
+      action: action as FeatureLimit["action"],
+    };
+  }
+  return out;
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
@@ -153,6 +209,16 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
         throw new ConfigError(
           `invalid allowancePeriod in plans.${planKey}: ${String(plan.allowancePeriod)} ` +
             `(expected one of ${[...ALLOWANCE_PERIODS].sort().join(", ")})`,
+        );
+      }
+      // Per-feature invocation-count limits: normalise nested keys + validate.
+      if (plan.featureLimits != null) {
+        if (typeof plan.featureLimits !== "object" || Array.isArray(plan.featureLimits)) {
+          throw new ConfigError(`plans.${planKey}.featureLimits must be a dict`);
+        }
+        plan.featureLimits = normaliseFeatureLimits(
+          planKey,
+          plan.featureLimits as Record<string, unknown>,
         );
       }
     }
@@ -228,6 +294,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
         freeAllowance: new Decimal((p.freeAllowance as number | string | undefined) ?? 0),
         rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
         features: (p.features as Record<string, unknown>) ?? null,
+        featureLimits: (p.featureLimits as Record<string, FeatureLimit>) ?? null,
         defaultBillingMode: ((p.defaultBillingMode ?? p.billingMode) as "strict" | "overdraft") ?? "strict",
         overdraftFloor:
           p.overdraftFloor != null ? new Decimal(p.overdraftFloor as number | string) : null,

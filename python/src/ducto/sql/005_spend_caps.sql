@@ -23,16 +23,12 @@ BEGIN
 END;
 $$;
 
--- Money param moved INTEGER -> NUMERIC (M11). Drop the old overload so the
--- NUMERIC definition fully replaces it (no-op on fresh installs).
-DROP FUNCTION IF EXISTS public.check_spend_cap(UUID, TEXT, INTEGER);
-
 -- check_spend_cap: evaluate whether a pending deduction would exceed any cap.
 -- Returns JSONB with capped, current_spend, cap_limit, action, model.
 -- Checks deny caps first (hard block), then warn/notify (soft).
--- Windows are pinned to UTC for deterministic daily/monthly buckets (M16).
+-- Windows are pinned to UTC for deterministic daily/monthly buckets.
 -- NOTE: this is a non-authoritative pre-check; the authoritative cap
--- enforcement happens atomically inside deduct_with_allowance (contract §2).
+-- enforcement happens atomically inside deduct_with_allowance / create_lease.
 CREATE OR REPLACE FUNCTION public.check_spend_cap(
   p_user_id UUID,
   p_model TEXT DEFAULT NULL,
