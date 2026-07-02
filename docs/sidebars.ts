@@ -59,6 +59,7 @@ const sidebars: SidebarsConfig = {
         'notebooks/events',
         'notebooks/custom_store',
         'notebooks/cli_and_deployment',
+        'notebooks/credit_tiers',
       ],
     },
   ],

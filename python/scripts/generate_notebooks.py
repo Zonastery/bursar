@@ -2422,6 +2422,181 @@ changes safely in production.
 
 
 # ---------------------------------------------------------------------------
+# Notebook 13 - Credit Tiers
+# ---------------------------------------------------------------------------
+
+
+def n_credit_tiers() -> list[dict]:
+    return [
+        md("""# 13 - Credit Tiers
+
+Not all credits are equal. A signup bonus, a monthly subscription grant, and a credit-card purchase are all "credits" in the user's balance, but a product usually wants them spent in a specific order — burn the free gift before touching money the user paid for — and some of them expire while others don't. Every notebook up to this point used a single scalar balance where none of that distinction was possible.
+
+**Credit tiers** solve this by splitting the balance into named, priority-ordered buckets. Each tier has a `priority` (ascending — lower number drains first), an `expires` flag, and can optionally be marked `is_default` (where untagged grants land) or `allow_overdraft` (the one tier permitted to go negative). Deduction always walks tiers in ascending priority order, refunds restore them LIFO (last-drained-first), and expiry sweeps operate per tier instead of per user.
+
+If you never configure `tiers` at all — as every prior notebook did — nothing changes: ducto routes everything through a single synthetic `"default"` tier internally. Tiers are purely additive, and this notebook uses `MemoryStore` (as Notebook 04 did) since none of this behavior is Postgres-specific."""),
+        memory_setup(),
+        md("""### Configure tiers alongside model pricing
+
+`tiers` is a sibling of `plans` in the pricing config — both live on the same `PricingConfigData`. Here we configure two tiers: `gifted` (priority 10, expires, no default TTL — so every grant into it must carry an explicit `expires_at`) and `purchased` (priority 30, permanent, and `is_default=True` so any `add_credits()` call that doesn't name a tier lands here automatically).
+
+Priority is ascending: `gifted` at 10 drains before `purchased` at 30. Think of priority as a queue position, not a percentage or weight — the tier walk always fully exhausts one tier before touching the next."""),
+        code("""from datetime import UTC
+from ducto.interface.models import TierDefinition
+
+store.set_active_pricing(
+    PricingConfigData(
+        models={"_default": "input_tokens * 1"},
+        tiers={
+            "gifted": TierDefinition(
+                name="Gifted Credits", priority=10, expires=True,
+            ),
+            "purchased": TierDefinition(
+                name="Purchased Credits", priority=30, expires=False, is_default=True,
+            ),
+        },
+    ),
+    label="tiers-demo",
+)
+print("  Pricing config stored with 2 tiers: gifted (priority 10, expires) and purchased (priority 30, default)")"""),
+        md("""### Grant into a specific tier
+
+`add_credits()` takes an optional `tier=` keyword. Passing `tier="gifted"` routes the grant into that bucket instead of the default. Because `gifted` was configured with `expires=True` and no `default_ttl_days`, every grant into it must carry an explicit `expires_at` — omitting it raises `StoreError("expires_at_required")` rather than silently creating a permanent "gifted" credit.
+
+Omitting `tier` entirely (as in every earlier notebook) resolves to whichever tier is marked `is_default` — here, `purchased`."""),
+        code("""user = str(uuid.uuid4())
+
+# Grant 20 gifted credits, expiring in 30 days.
+gifted = store.add_credits(
+    user, 20, type="purchase", tier="gifted",
+    expires_at=datetime.now(UTC) + timedelta(days=30),
+)
+print(f"  Granted into tier: {gifted.tier}")   # "gifted"
+
+# Grant 50 purchased credits — no tier= means it resolves to the is_default tier.
+purchased = store.add_credits(user, 50, type="purchase")
+print(f"  Granted into tier: {purchased.tier}")  # "purchased" — resolved via is_default
+
+assert gifted.tier == "gifted"
+assert purchased.tier == "purchased"
+print(f"  Total balance: {store.get_balance(user).balance}")  # 70 — same balance API as always"""),
+        md("""### A non-expiring tier rejects `expires_at`
+
+The `expires` flag on a tier isn't just a hint — it's enforced. Trying to set an `expires_at` on a grant into `purchased` (configured with `expires=False`) raises immediately, before anything is written. This stops "permanent" credits from silently gaining a fuse."""),
+        code("""from ducto import StoreError
+
+try:
+    store.add_credits(user, 5, type="purchase", tier="purchased", expires_at=datetime.now(UTC) + timedelta(days=1))
+    raise AssertionError("expected StoreError")
+except StoreError as e:
+    print(f"  Rejected: {e}")
+    assert "tier_does_not_expire" in str(e)"""),
+        md("""### Query the per-tier breakdown
+
+`get_credit_tiers()` returns every tier's balance, sorted by `priority` ascending, plus a `total_balance` that always equals `get_balance().balance`. This is the read path a billing/usage UI would use to show a user "20 gifted + 50 purchased = 70 total" instead of one opaque number."""),
+        code("""tiers = store.get_credit_tiers(user)
+for t in tiers.tiers:
+    print(f"  {t.tier_key:10s} priority={t.priority:<3d} expires={t.expires!s:5s} balance={t.balance}")
+print(f"  Total: {tiers.total_balance}")
+
+assert tiers.total_balance == store.get_balance(user).balance == 70"""),
+        md("""### Deduct: the priority walk
+
+`deduct_with_allowance()` needs no tier argument — tier selection during a charge is fully automatic. It drains tiers in ascending `priority` order: `gifted` (priority 10) is exhausted first, and only the remainder spills into `purchased` (priority 30). The exact split comes back as `tier_breakdown` on the `DeductionResult` — this is not a proportional split, it's a greedy walk that empties one bucket before touching the next.
+
+Charging 35 credits: the 20 sitting in `gifted` is fully drained, and the remaining 15 comes out of `purchased`."""),
+        code("""from decimal import Decimal
+
+ded = store.deduct_with_allowance(user, Decimal("35"))
+print(f"  tier_breakdown: {ded.tier_breakdown}")
+print(f"  balance_after:  {ded.balance_after}")
+
+assert ded.tier_breakdown == {"gifted": Decimal("20"), "purchased": Decimal("15")}
+assert ded.balance_after == Decimal("35")  # 70 - 35
+
+after = store.get_credit_tiers(user)
+by_key = {t.tier_key: t.balance for t in after.tiers}
+assert by_key == {"gifted": Decimal("0"), "purchased": Decimal("35")}
+print("  ✓ gifted fully drained before purchased was touched")"""),
+        md("""### Refund: LIFO restoration
+
+Refunds restore tiers in the **reverse** order they were drained — last-drained-first. Since the deduction above drained `gifted` first and spilled into `purchased` second, a refund gives money back to `purchased` first, and would only overflow into `gifted` once `purchased`'s share of the original charge is fully restored.
+
+Refunding the full 35 credits here demonstrates both steps: the refund exactly reverses the deduction's own `tier_breakdown`, just in the opposite tier order."""),
+        code("""ref = store.refund_credits(ded.transaction_id, amount=Decimal("35"), reason="demo")
+print(f"  tier_breakdown: {ref.tier_breakdown}")
+assert ref.error is None
+assert ref.tier_breakdown == {"purchased": Decimal("15"), "gifted": Decimal("20")}
+
+restored = store.get_credit_tiers(user)
+by_key = {t.tier_key: t.balance for t in restored.tiers}
+assert by_key == {"gifted": Decimal("20"), "purchased": Decimal("50")}
+print("  ✓ both tiers are back to their pre-deduction balances")"""),
+        md("""### Expiry sweeps run per tier
+
+`sweep_expired_credits()` now scopes its work to `(user, tier)` instead of just `user`. A tier's `expires` flag is only consulted once, at grant time — the sweep itself just reads whatever `expires_at` was stamped on each transaction, so a later config change can't retroactively make an already-granted credit immortal or fragile. The `SweepResult.expired_by_tier` field reports exactly which tiers lost how much.
+
+Below, we grant a short-lived gifted credit and let it expire, while the existing 50 permanent `purchased` credits are left untouched."""),
+        code("""import time
+
+soon = datetime.now(UTC) + timedelta(milliseconds=500)
+store.add_credits(user, 15, type="purchase", tier="gifted", expires_at=soon)
+time.sleep(0.8)
+
+swept = store.sweep_expired_credits(dry_run=False)
+print(f"  expired_by_tier: {swept.expired_by_tier}")
+assert swept.expired_by_tier == {"gifted": Decimal("15")}
+
+final = store.get_credit_tiers(user)
+by_key = {t.tier_key: t.balance for t in final.tiers}
+assert by_key == {"gifted": Decimal("20"), "purchased": Decimal("50")}
+print("  ✓ only the expired gifted grant was removed; the permanent purchased balance is untouched")"""),
+        md("""### Overdraft: routing excess debt to one tier
+
+Overdraft (going below a `min_balance` of `0`) is only reachable when you explicitly pass a negative floor. When it happens, the excess is routed to whichever tier is marked `allow_overdraft` — never spread across tiers, and never dumped into a tier that didn't opt in. Fallback order if no tier volunteers: the tier with the highest `priority` value (drained last), then `"default"`.
+
+Here, `purchased` is re-published with `allow_overdraft=True`, and a charge larger than the combined balance is admitted by passing a negative `min_balance` directly to `deduct_with_allowance()` — the same floor parameter every earlier notebook has been implicitly using at its default of `0`."""),
+        code("""store.set_active_pricing(
+    PricingConfigData(
+        models={"_default": "input_tokens * 1"},
+        tiers={
+            "gifted": TierDefinition(name="Gifted Credits", priority=10, expires=True),
+            "purchased": TierDefinition(
+                name="Purchased Credits", priority=30, expires=False,
+                is_default=True, allow_overdraft=True,
+            ),
+        },
+    ),
+    label="tiers-overdraft-demo",
+)
+
+od_user = str(uuid.uuid4())
+store.add_credits(od_user, 10, type="purchase", tier="gifted", expires_at=datetime.now(UTC) + timedelta(days=1))
+store.add_credits(od_user, 5, type="purchase")  # → purchased (is_default)
+
+# Charge 40 against a floor of -50: 15 credits on hand, so 25 goes into overdraft.
+od = store.deduct_with_allowance(od_user, Decimal("40"), min_balance=Decimal("-50"))
+print(f"  tier_breakdown: {od.tier_breakdown}")
+print(f"  balance_after:  {od.balance_after}")
+
+assert od.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
+assert od.balance_after == Decimal("-25")
+
+by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(od_user).tiers}
+assert by_key["purchased"] == Decimal("-25")  # only the opted-in tier went negative
+print("  ✓ excess debt landed entirely in the allow_overdraft tier")"""),
+        md("""### Recap
+
+- `tiers` in the pricing config is optional and additive — every config from Notebooks 01–12 keeps working unchanged, routed through a synthetic `"default"` tier.
+- `add_credits(tier=...)` grants into a named bucket; `expires_at` is validated against that tier's `expires` flag at grant time.
+- `deduct_with_allowance()` and lease `settle()` need no tier argument — the priority walk (ascending `priority`, greedy, never proportional) is fully automatic, and the exact split comes back as `tier_breakdown`.
+- `refund_credits()` restores tiers LIFO — the reverse of the drain order.
+- `sweep_expired_credits()` now reports `expired_by_tier`, scoped per tier.
+- Overdraft debt is confined to a single, explicitly opted-in `allow_overdraft` tier — it never leaks into tiers that didn't ask for it."""),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 
@@ -2439,6 +2614,7 @@ ALL: list[tuple[str, list[dict]]] = [
     ("10_events.ipynb", n_events()),
     ("11_custom_store.ipynb", n_custom_store()),
     ("12_cli_and_deployment.ipynb", n_cli()),
+    ("13_credit_tiers.ipynb", n_credit_tiers()),
 ]
 
 

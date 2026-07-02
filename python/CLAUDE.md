@@ -20,7 +20,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 | `src/ducto/events.py` | `CreditEventEmitter` — typed pub/sub, 14 event types. |
 | `src/ducto/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
 | `src/ducto/config.py` | `PricingConfig` — validates expression strings at load time. |
-| `src/ducto/sql/` | Numbered SQL migrations (`001_…` → `016_…`). `016` adds the lease lifecycle. |
+| `src/ducto/sql/` | Numbered SQL migrations (`001_…` → `023_…`). `016` adds the lease lifecycle; `023` adds configurable credit tiers (priority-ordered balance buckets). |
 | `src/ducto/__init__.py` | Package exports — everything users `import from ducto`. |
 
 ## Architecture
@@ -58,7 +58,9 @@ CreditManager
 | `tests/test_manager.py` | CreditManager happy-path and error cases |
 | `tests/test_lease.py` | Lease lifecycle (27 tests) |
 | `tests/test_lease_adversarial.py` | Concurrency, fuzz, idempotency (31 tests) |
-| `tests/test_store_integration.py` | Real Postgres tests (requires `PG_TEST_DSN`) |
+| `tests/test_tiers.py` | Credit tiers — happy-path priority walk, refund LIFO, expiry, overdraft sink |
+| `tests/test_tiers_adversarial.py` | Credit tiers — concurrency, idempotent replay, config drift |
+| `tests/test_store_integration.py` | Real Postgres tests (requires `PG_TEST_DSN`), incl. `CreditManager` end-to-end tier coverage |
 | `tests/test_engine.py` | PricingEngine expression evaluation |
 
 Run: `pytest python/tests/` (unit) or `PG_TEST_DSN=... pytest python/tests/test_store_integration.py` (integration).

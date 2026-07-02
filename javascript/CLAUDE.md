@@ -64,7 +64,10 @@ new CreditManager(store, engine?, emitter?, options?)
 | `tests/credit-manager.test.ts` | CreditManager happy-path |
 | `tests/lease.test.ts` | Lease lifecycle (27 tests, mirrors Python) |
 | `tests/lease-adversarial.test.ts` | Concurrency invariants, fuzz (31 tests) |
+| `tests/tiers.test.ts` | Credit tiers — happy-path priority walk, refund LIFO, expiry, overdraft sink |
+| `tests/tiers-adversarial.test.ts` | Credit tiers — concurrency, idempotent replay, config drift |
 | `tests/postgres-store.test.ts` | Real Postgres tests (skipped without `PG_TEST_DSN`) |
+| `tests/store-integration.test.ts` | Real Postgres tests incl. `CreditManager` end-to-end tier coverage |
 | `tests/engine.test.ts` | PricingEngine expression evaluation |
 
 Run: `npm test` (all, skips DB tests without env var).

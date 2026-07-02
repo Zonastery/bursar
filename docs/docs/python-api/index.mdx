@@ -63,6 +63,7 @@ All result models are importable from `ducto`:
 | `AvailableResult` | `get_available()` |
 | `RefundResult` | `refund_credits()` |
 | `SweepResult` | `sweep_expired_credits()` |
+| `TierBalancesResult` | `get_credit_tiers()` |
 | `SetUserPlanResult` | `set_user_plan()` |
 | `GetUserPlanResult` | `get_user_plan()` |
 | `CheckFeatureResult` | `check_feature()` |
@@ -82,6 +83,7 @@ All result models are importable from `ducto`:
 | `PricingConfigData` | Pricing config schema (models, tools, search, cache, fixed, plans) |
 | `PlanDefinition` | Subscription plan definition (allowance, `allowance_period`, features, billing policy) |
 | `OperationPolicy` | Per-operation financial-safety policy (billing mode, floors, concurrency) |
+| `TierDefinition` | [Credit tier](/docs/configuration#credit-tiers) definition (priority, expiry, default/overdraft flags) |
 | `LowBalanceConfig` | `CreditManager(low_balance=...)` config: `thresholds` + `on_trigger` |
 | `CreditMetadata` | Flexible metadata attached to transactions |
 | `SpendCap` | Per-user daily/monthly spend cap configuration |
