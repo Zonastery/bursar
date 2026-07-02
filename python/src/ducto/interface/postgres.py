@@ -42,6 +42,8 @@ from ducto.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TierBalance,
+    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -62,6 +64,19 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     if isinstance(value, float):
         return Decimal(str(value))
     return Decimal(value)
+
+
+def _dec_map(value: Any) -> dict[str, Decimal] | None:
+    """Coerce a ``{tier_key: amount}`` JSONB object into ``dict[str, Decimal]`` (023).
+
+    Used for ``tier_breakdown``/``expired_by_tier`` fields, which come back from
+    RPCs as a JSON object of tier key -> NUMERIC amount. Returns ``None`` for a
+    missing/empty/non-dict value so callers can distinguish "no tier data" from
+    "empty breakdown" the same way the rest of this module treats optional fields.
+    """
+    if not value or not isinstance(value, dict):
+        return None
+    return {str(k): _dec(v) for k, v in value.items()}
 
 
 class PostgresStore(CreditStore):
@@ -153,6 +168,7 @@ class PostgresStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
+        tier: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
         conn = self._conn()
@@ -163,7 +179,7 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "credits_add",
-                    [user_id, amount, type, json.dumps(meta)],
+                    [user_id, amount, type, json.dumps(meta), tier],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -179,6 +195,7 @@ class PostgresStore(CreditStore):
             amount=_dec(result_dict.get("amount"), amount),
             new_balance=_dec(result_dict.get("new_balance")),
             lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
+            tier=str(result_dict.get("tier", "default")),
         )
 
     def deduct_with_allowance(
@@ -254,6 +271,7 @@ class PostgresStore(CreditStore):
             balance_after=_dec(result_dict.get("balance_after")),
             idempotent=bool(result_dict.get("idempotent", False)),
             cap_warning=result_dict.get("cap_warning") or None,
+            tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -380,6 +398,7 @@ class PostgresStore(CreditStore):
             balance_after=_dec(result.get("balance_after")),
             idempotent=bool(result.get("idempotent", False)),
             cap_warning=result.get("cap_warning") or None,
+            tier_breakdown=_dec_map(result.get("tier_breakdown")),
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -676,6 +695,7 @@ class PostgresStore(CreditStore):
             user_id=str(result_dict.get("user_id", "")),
             amount=_dec(result_dict.get("amount")),
             new_balance=_dec(result_dict.get("new_balance")),
+            tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
         )
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -969,4 +989,33 @@ class PostgresStore(CreditStore):
             expired_count=int(result_dict.get("expired_count", 0)),
             expired_amount=_dec(result_dict.get("expired_amount")),
             dry_run=dry_run,
+            expired_by_tier=_dec_map(result_dict.get("expired_by_tier")),
+        )
+
+    # ── Credit tiers (023) ────────────────────────────────────────────────
+
+    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("get_user_credit_tiers", [user_id])
+                row = cur.fetchone()
+        finally:
+            conn.close()
+
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        tiers = [
+            TierBalance(
+                tier_key=str(t.get("tier_key", "")),
+                name=str(t.get("name", "")),
+                priority=int(t.get("priority", 0)),
+                expires=bool(t.get("expires", False)),
+                balance=_dec(t.get("balance")),
+            )
+            for t in (result_dict.get("tiers") or [])
+        ]
+        return TierBalancesResult(
+            user_id=str(result_dict.get("user_id", user_id)),
+            tiers=tiers,
+            total_balance=_dec(result_dict.get("total_balance")),
         )

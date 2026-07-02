@@ -197,6 +197,72 @@ Policy resolution order (most specific wins): per-call `billing_mode` arg → `p
 
 By default (`allowance_period: calendar_month`) `free_allowance` is a monthly window: consumption resets at the start of each calendar month (UTC). See [`allowance_period`](#allowance_period) above for the `rolling_30d` and `anniversary` alternatives.
 
+## Credit Tiers
+
+Extends the balance model with named, priority-ordered credit buckets — e.g. gifted credits that drain before purchased credits, some tiers that expire and some that don't, plus per-tier balance queries. The `tiers` key is optional and is a sibling of `plans`.
+
+```yaml
+tiers:
+  gifted:
+    name: "Gifted Credits"
+    priority: 10          # ascending = drained first
+    expires: true
+    default_ttl_days: 30  # used when add_credits omits expires_at
+  purchased:
+    name: "Purchased Credits"
+    priority: 30
+    expires: false
+    is_default: true      # untagged add_credits() calls land here
+    allow_overdraft: true # only tier permitted to absorb overdraft debt
+```
+
+The same config as JSON:
+
+```json
+{
+  "tiers": {
+    "gifted": {
+      "name": "Gifted Credits",
+      "priority": 10,
+      "expires": true,
+      "default_ttl_days": 30
+    },
+    "purchased": {
+      "name": "Purchased Credits",
+      "priority": 30,
+      "expires": false,
+      "is_default": true,
+      "allow_overdraft": true
+    }
+  }
+}
+```
+
+### `TierDefinition` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Human-readable name |
+| `priority` | integer | no | Deduction order — ascending priority is drained first. Ties are broken by key name ascending, which is not a config error. |
+| `expires` | boolean | no | Whether credits granted into this tier can expire. Default: `false`. |
+| `default_ttl_days` | integer | no | TTL used when `add_credits`/`addCredits` omits `expires_at`/`expiresAt` for a grant into this tier. If absent on an expiring tier (`expires: true`), every `add_credits`/`addCredits` call into that tier must pass an explicit `expires_at`/`expiresAt`, or the call errors. |
+| `allow_overdraft` | boolean | no | Marks this tier as the sink for overdraft debt (only possible when a negative floor is configured). Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
+| `is_default` | boolean | no | Marks this tier as the destination for untagged `add_credits()`/`addCredits()` calls. Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
+
+:::note Tier names are independent of `free_allowance`
+A tier named `"allowance"` is unrelated to `PlanDefinition.free_allowance` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; ducto doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
+:::
+
+### No-tiers fallback
+
+Omitting `tiers` entirely preserves 100% of today's single-balance behavior: internally, ducto routes everything through a synthetic `"default"` tier, so every existing config keeps working with zero changes. An explicit empty `tiers: {}` is a config validation error — it's ambiguous whether you meant "no tiers configured" or "tiers not set up yet" — omit the key instead.
+
+### Deduction order
+
+On `deduct()`/`settle()`, today's existing free-allowance consumption and floor/cap checks run first and are unchanged — they stay purely aggregate, comparing against the summed balance across all tiers exactly as they compare against the single `balance` today. Only the debit step is tier-aware: once the net charge is known, it drains tiers in ascending `priority` order, exhausting each tier's balance before moving to the next.
+
+Overdraft — only reachable when a negative floor is configured — is absorbed by the tier marked `allow_overdraft`, falling back to the tier with the highest `priority` value (drained last) if none is marked, falling back to `"default"` if neither applies.
+
 ## Sections
 
 ### `version` (optional)

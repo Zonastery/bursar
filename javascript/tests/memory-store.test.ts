@@ -21,6 +21,7 @@ import type {
   SetUserPlanResult,
   SetupResult,
   SweepResult,
+  TierBalancesResult,
 } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
@@ -549,6 +550,66 @@ describe("MemoryStore", () => {
       const result = await store.sweepExpiredCredits();
       expect(result.expiredAmount.toString()).toBe("50");
       expect((await store.getBalance("user-1")).balance.toString()).toBe("30");
+    });
+  });
+
+  // ── Credit tiers: MemoryStore-level edge cases (see also tests/tiers.test.ts
+  // and tests/tiers-adversarial.test.ts for the main feature coverage) ──────
+  describe("credit tiers — MemoryStore edge cases", () => {
+    it("tier walk breaks a priority tie by tier key ascending", async () => {
+      await store.setActivePricing({
+        models: { _default: "input_tokens * 1" },
+        tiers: {
+          z: { name: "Z", priority: 10, expires: false },
+          a: { name: "A", priority: 10, expires: false },
+        },
+      });
+      await store.addCredits("user-1", D(10), "adjustment", null, null, "z");
+      await store.addCredits("user-1", D(10), "adjustment", null, null, "a");
+
+      const r = await store.deductWithAllowance("user-1", D(15));
+      expect(r.error).toBeUndefined();
+      // Same priority (10) → tie-break by tier key ascending: "a" drains
+      // fully before "z" is touched.
+      expect(r.tierBreakdown?.a?.toString()).toBe("10");
+      expect(r.tierBreakdown?.z?.toString()).toBe("5");
+    });
+
+    it("refund of a legacy debit lacking a stored tierBreakdown falls back to the 'default' bucket", async () => {
+      // deductWithAllowance/settleLease always stamp `metadata.tierBreakdown`
+      // today, so this state (a ledger row with none) can only arise from
+      // data that predates the credit-tiers migration. Simulate it via
+      // direct (white-box) ledger injection, mirroring the fallback documented
+      // in memory-store.ts's refundCredits: `?? { default: originalDebit }`.
+      await store.addCredits("user-1", D(100), "purchase");
+      const transactions = (
+        store as unknown as {
+          transactions: Array<{
+            id: string;
+            userId: string;
+            amount: Decimal;
+            type: string;
+            metadata?: Record<string, unknown>;
+            createdAt: Date;
+          }>;
+        }
+      ).transactions;
+      const legacyTxId = "legacy-tx-1";
+      transactions.push({
+        id: legacyTxId,
+        userId: "user-1",
+        amount: D(-30),
+        type: "usage",
+        metadata: {},
+        createdAt: new Date(),
+      });
+      const balances = (store as unknown as { balances: Map<string, Decimal> }).balances;
+      balances.set("user-1", balances.get("user-1")!.minus(D(30)));
+
+      const refund = await store.refundCredits(legacyTxId);
+      expect(refund.error).toBeUndefined();
+      expect(refund.tierBreakdown?.default?.toString()).toBe("30");
+      expect(Object.keys(refund.tierBreakdown ?? {})).toEqual(["default"]);
     });
   });
 
@@ -1596,7 +1657,14 @@ describe("CreditStore optional capabilities (WS8)", () => {
         return { userId, balance: D(0), lifetimePurchased: D(0) };
       }
       async addCredits(userId: string, amount: Decimal): Promise<AddCreditsResult> {
-        return { transactionId: "", userId, amount, newBalance: amount, lifetimePurchased: D(0) };
+        return {
+          transactionId: "",
+          userId,
+          amount,
+          newBalance: amount,
+          lifetimePurchased: D(0),
+          tier: "default",
+        };
       }
       async deductWithAllowance(userId: string, amount: Decimal): Promise<DeductionResult> {
         return {
@@ -1695,6 +1763,11 @@ describe("CreditStore optional capabilities (WS8)", () => {
       }
       async listUsageEvents(): Promise<PaginatedTransactions> {
         return { items: [], total: 0 };
+      }
+      // Credit tiers: getCreditTiers is a CORE (required) abstract method, not
+      // an optional capability — a minimal store must implement it too.
+      async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+        return { userId, tiers: [], totalBalance: D(0) };
       }
     }
 

@@ -1437,4 +1437,78 @@ describe("CreditManager", () => {
       expect(result.allowanceRemaining.toString()).toBe("6");
     });
   });
+
+  // ── Credit tiers pass-through (see tests/tiers.test.ts for the main
+  // feature coverage on MemoryStore itself) ─────────────────────────────
+  describe("credit tiers pass-through", () => {
+    const TIERED_CONFIG: PricingConfigData = {
+      models: { _default: "input_tokens * 1" },
+      tiers: {
+        gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
+        purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+      },
+    };
+
+    it("addCredits(..., { tier }) routes the grant into the requested tier", async () => {
+      await manager.publishPricingFromDict(TIERED_CONFIG);
+      const result = await manager.addCredits("user-1", 25, { tier: "gifted" });
+      expect(result.tier).toBe("gifted");
+
+      const tiers = await manager.getCreditTiers("user-1");
+      const gifted = tiers.tiers.find((t) => t.tierKey === "gifted");
+      expectDecimal(gifted!.balance, "25");
+    });
+
+    it("addCredits with an unknown tier rejects (store StoreError propagates)", async () => {
+      await manager.publishPricingFromDict(TIERED_CONFIG);
+      await expect(manager.addCredits("user-1", 10, { tier: "bogus" })).rejects.toThrow();
+    });
+
+    it("addCredits omitting tier resolves to the configured default tier", async () => {
+      await manager.publishPricingFromDict(TIERED_CONFIG);
+      const result = await manager.addCredits("user-1", 10);
+      expect(result.tier).toBe("purchased");
+    });
+
+    it("getCreditTiers passes through to the store with no event emitted", async () => {
+      const emitter = new CreditEventEmitter();
+      const mgr = new CreditManager(store, undefined, emitter);
+      await mgr.publishPricingFromDict(TIERED_CONFIG);
+      await mgr.addCredits("user-1", 20, { tier: "gifted" });
+      await mgr.addCredits("user-1", 10);
+
+      // Registered AFTER the setup addCredits calls above, so only events
+      // from the getCreditTiers call itself (if any) would land here.
+      const events = record(emitter, [
+        "credits.added",
+        "credits.deducted",
+        "credits.refunded",
+        "credits.expired",
+      ]);
+
+      const result = await mgr.getCreditTiers("user-1");
+      expect(result.userId).toBe("user-1");
+      expect(result.tiers.map((t) => t.tierKey).sort()).toEqual(["gifted", "purchased"]);
+      const gifted = result.tiers.find((t) => t.tierKey === "gifted");
+      const purchased = result.tiers.find((t) => t.tierKey === "purchased");
+      expectDecimal(gifted!.balance, "20");
+      expectDecimal(purchased!.balance, "10");
+      expectDecimal(result.totalBalance, "30");
+
+      // getCreditTiers itself emits nothing (thin pass-through, matches
+      // getBalance/getAvailable).
+      expect(events).toHaveLength(0);
+    });
+
+    it("deduct() reports tierBreakdown drained in priority order through the manager", async () => {
+      const mgr = new CreditManager(store);
+      await mgr.publishPricingFromDict(TIERED_CONFIG);
+      await mgr.addCredits("user-1", 20, { tier: "gifted" });
+      await mgr.addCredits("user-1", 10); // default → purchased
+
+      const result = await mgr.deduct("user-1", { inputTokens: 25 });
+      expect(result.tierBreakdown?.gifted?.toString()).toBe("20");
+      expect(result.tierBreakdown?.purchased?.toString()).toBe("5");
+    });
+  });
 });

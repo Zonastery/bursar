@@ -33,7 +33,8 @@ ducto/
     ├── 012_list_transactions.sql
     ├── 013_list_usage_events.sql
     ├── 014_numeric_money.sql     # widens money columns to NUMERIC(18,4)
-    └── 015_atomic_deduct.sql     # deduct_with_allowance() atomic RPC
+    ├── 015_atomic_deduct.sql     # deduct_with_allowance() atomic RPC
+    └── 023_credit_tiers.sql      # credit_tiers config + tier-aware deduct/settle/refund/sweep
 ```
 
 `CreditStore` (`interface/base.py`) declares the **core** abstract methods every store must implement, plus several **optional capability groups** that ship with a default implementation and do not need to be overridden by a minimal custom store — see [Storage interface: core vs. optional capabilities](#storage-interface-core-vs-optional-capabilities) below. The JavaScript `CreditStore` interface mirrors the same split (it folds `listUserTransactions`/`listUsageEvents` into the same surface but exposes `deductWithAllowance` and the analytics methods identically).
@@ -78,6 +79,8 @@ User → CreditManager.deduct(metrics, idempotency_key)
 ```
 
 Any failure rolls back the allowance consumption **and** the balance change together — there is no partial state, no stranded reservation, and no allowance leak on a failed charge. Idempotency is checked **first**, so a retried request with the same key replays the original result instead of re-consuming allowance.
+
+Steps a–e (lock, idempotency replay, allowance consume, spend cap, balance floor) are unchanged when [credit tiers](/docs/configuration#credit-tiers) are configured and remain purely aggregate — they compare against the summed balance across all tiers, exactly as they compare against the single `balance` today. Only step f changes: when tiers are configured, the debit walks tiers in ascending `priority` order instead of decrementing one scalar, recording the exact per-tier split as `tier_breakdown` in the transaction's metadata for later idempotent replay and refund. `settle_lease` applies the identical tier walk to its own already-floor-clamped `net`.
 
 ### Why this replaced the old multi-step flow
 

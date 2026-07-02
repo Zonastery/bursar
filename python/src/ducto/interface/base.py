@@ -39,6 +39,7 @@ from ducto.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
+    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -113,12 +114,17 @@ class CreditStore(ABC):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
+        tier: str | None = None,
     ) -> AddCreditsResult:
         """Atomically add credits and log a transaction.
 
         Args:
             amount: Fractional credit amount (``Decimal``).
             expires_at: Optional datetime after which the credits expire.
+            tier: Optional tier key to grant into. When no tiers are
+                configured, must be ``None`` or ``"default"``. When tiers are
+                configured and omitted, resolves to the tier with
+                ``is_default=True`` (raises if none is marked default).
         """
         ...
 
@@ -292,6 +298,16 @@ class CreditStore(ABC):
 
         For UI only — never an admission gate (D4/H3); the value may be stale the
         instant it is read.
+        """
+        ...
+
+    @abstractmethod
+    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+        """Return per-tier balance breakdown for a user, ordered by priority ascending.
+
+        When no tiers are configured, returns a single synthetic ``"default"``
+        tier entry so the shape is uniform regardless of whether tiers are
+        configured.
         """
         ...
 

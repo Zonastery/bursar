@@ -20,7 +20,7 @@ from decimal import Decimal
 import pytest
 
 from ducto import CreditManager, UsageMetrics
-from ducto.events import CreditEvent, CreditEventEmitter
+from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from ducto.interface.base import CapReachedError
 from ducto.interface.memory import MemoryStore
 from ducto.interface.models import AllowanceResult, PlanDefinition, PricingConfigData, SpendCap
@@ -268,6 +268,87 @@ class TestAddCredits:
 
         balance = manager.get_balance("user_1")
         assert balance.balance == Decimal("50")
+
+
+class TestCreditTiersPassThrough:
+    """CreditManager.add_credits(tier=...) / get_credit_tiers() are thin
+    pass-throughs to the store (mirroring get_balance/get_available): forward
+    args/return correctly, no extra logic, no event on the pure-read side."""
+
+    def _manager_with_tiers(self, store: MemoryStore) -> CreditManager:
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "min_balance": 0,
+                "tiers": {
+                    "gifted": {"name": "Gifted", "priority": 10},
+                    "purchased": {"name": "Purchased", "priority": 30, "is_default": True},
+                },
+            }
+        )
+        return m
+
+    def test_add_credits_forwards_tier_kwarg(self, store: MemoryStore) -> None:
+        m = self._manager_with_tiers(store)
+        result = m.add_credits("user_1", 25, tx_type="purchase", tier="gifted")
+        assert result.tier == "gifted"
+
+    def test_add_credits_omitted_tier_resolves_to_configured_default(self, store: MemoryStore) -> None:
+        m = self._manager_with_tiers(store)
+        result = m.add_credits("user_1", 10, tx_type="purchase")
+        assert result.tier == "purchased"
+
+    def test_get_credit_tiers_matches_store_result(self, store: MemoryStore) -> None:
+        m = self._manager_with_tiers(store)
+        m.add_credits("user_1", 25, tx_type="purchase", tier="gifted")
+        m.add_credits("user_1", 100, tx_type="purchase", tier="purchased")
+
+        result = m.get_credit_tiers("user_1")
+        assert result == store.get_credit_tiers("user_1")
+        by_key = {t.tier_key: t.balance for t in result.tiers}
+        assert by_key == {"gifted": Decimal("25"), "purchased": Decimal("100")}
+        assert result.total_balance == Decimal("125")
+
+    def test_get_credit_tiers_emits_no_event(self, store: MemoryStore) -> None:
+        """Pure read, like get_balance()/get_available() — no event fires."""
+        emitter = CreditEventEmitter()
+        events: list[CreditEvent] = []
+        for event_type in CREDIT_EVENT_TYPES:
+            emitter.on(event_type, events.append)
+
+        m = CreditManager(store=store, emitter=emitter)
+        m.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {"gifted": {"name": "Gifted", "priority": 10, "is_default": True}},
+            }
+        )
+        m.add_credits("user_1", 10, tx_type="purchase")
+        events.clear()  # only care about events from get_credit_tiers itself
+
+        m.get_credit_tiers("user_1")
+        assert events == []
+
+    def test_no_tiers_configured_manager_pass_through_unchanged(self, store: MemoryStore) -> None:
+        """Zero-tiers-configured regression check at the manager layer: tier
+        defaults to "default" and get_credit_tiers synthesizes one entry."""
+        m = CreditManager(store=store)
+        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        result = m.add_credits("user_1", 50, tx_type="purchase")
+        assert result.tier == "default"
+
+        tiers = m.get_credit_tiers("user_1")
+        assert len(tiers.tiers) == 1
+        assert tiers.tiers[0].tier_key == "default"
+        assert tiers.tiers[0].balance == Decimal("50")
+
+    def test_add_credits_unknown_tier_propagates_store_error(self, store: MemoryStore) -> None:
+        from ducto.interface.base import StoreError
+
+        m = self._manager_with_tiers(store)
+        with pytest.raises(StoreError, match="tier_not_found"):
+            m.add_credits("user_1", 10, tx_type="purchase", tier="nonexistent")
 
 
 class TestGetBalance:
