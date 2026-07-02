@@ -74,7 +74,7 @@ Publish a typed `PricingConfigData` and update the in-memory engine. Awaits the 
 
 ### `addCredits(userId: string, amount: Decimal | number, options?: AddCreditsOptions): Promise<AddCreditsResult>`
 
-Add credits to a user's account. `options` is `{ type?, metadata?, expiresAt? }` — `type` defaults to `"adjustment"`; `expiresAt` creates time-bounded credits swept by `sweepExpiredCredits()`. Returns `{ transactionId, userId, amount, newBalance, lifetimePurchased }` (money as `Decimal`). Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
+Add credits to a user's account. `options` is `{ type?, metadata?, expiresAt?, tier? }` — `type` defaults to `"adjustment"`; `expiresAt` creates time-bounded credits swept by `sweepExpiredCredits()`. `tier` selects which configured [credit tier](/docs/configuration#credit-tiers) to grant into: an explicit `tier` must match a configured tier key, else throws with `tier_not_found`; omitted resolves to the tier with `isDefault: true`, or throws `tier_required` if none is marked default; when no `tiers` are configured, `tier` must be `null`/omitted or `"default"`. `expiresAt` is reconciled against the resolved tier's `expires` flag (non-expiring tier + `expiresAt` throws `tier_does_not_expire`; expiring tier + omitted `expiresAt` falls back to `defaultTtlDays`, or throws `expires_at_required`). Returns `{ transactionId, userId, amount, newBalance, lifetimePurchased, tier }` (money as `Decimal`). Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
 
 ```typescript
 await manager.addCredits("user-1", 100, {
@@ -89,9 +89,13 @@ This replaces the old positional signature (`addCredits(userId, amount, type, me
 
 Returns `{ userId, balance, lifetimePurchased }` (money as `Decimal`).
 
+### `getCreditTiers(userId: string): Promise<TierBalancesResult>`
+
+Returns the per-tier balance breakdown for a user: `{ userId, tiers: TierBalance[], totalBalance }` — `tiers` sorted by `priority` ascending, `totalBalance` equal to `BalanceResult.balance`. Each `TierBalance` is `{ tierKey, name, priority, expires, balance }`. When no `tiers` are configured, returns a single synthetic `"default"` entry so the shape is uniform either way.
+
 ### `deduct(userId: string, metrics: UsageMetrics, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<DeductionResult>`
 
-Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deductWithAllowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Resolves to a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowanceConsumed`, `balanceAfter`, `idempotent` and `capWarning`. Throws `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap). A zero/negative cost short-circuits to a zero-amount result.
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deductWithAllowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Resolves to a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowanceConsumed`, `balanceAfter`, `idempotent`, `capWarning`, and `tierBreakdown` (`Record<string, Decimal> | null` — the exact per-tier split of the debit, present when tiers are configured). Throws `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap). A zero/negative cost short-circuits to a zero-amount result.
 
 ### `deductFixed(userId: string, jobName: string, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<DeductionResult>`
 
@@ -134,7 +138,9 @@ const result = await manager.deduct("user-1", { inputTokens: 5 });
 
 ### `refundCredits(transactionId: string, amount?: Decimal | number, reason?: string, metadata?: CreditMetadata | null): Promise<RefundResult>`
 
-Refund a previous deduction. Omit `amount` for a full refund; pass a partial `Decimal` or `number` for a partial refund. Returns `{ refundTransactionId, originalTransactionId, userId, amount, newBalance, error? }` (money as `Decimal`). On a business failure (`over_refund` / `already_refunded` / `not_found`) `result.error` is set, `credits.refund_failed` is emitted, and a `RefundError` is thrown — `credits.refunded` is never emitted on failure.
+Refund a previous deduction. Omit `amount` for a full refund; pass a partial `Decimal` or `number` for a partial refund. Returns `{ refundTransactionId, originalTransactionId, userId, amount, newBalance, error?, tierBreakdown }` (money as `Decimal`; `tierBreakdown` is `Record<string, Decimal> | null`, restoring tiers LIFO — highest-priority-number tier, the last one drained, first). On a business failure (`over_refund` / `already_refunded` / `not_found`) `result.error` is set, `credits.refund_failed` is emitted, and a `RefundError` is thrown — `credits.refunded` is never emitted on failure.
+
+Refunding into an expiring tier restores only the tier's aggregate balance; it does not re-attach the original grant's exact expiry date.
 
 ```typescript
 const result = await manager.refundCredits(txId);
@@ -211,7 +217,7 @@ Both return `{ items: UserTransactionRow[], total: number }`. `listUsageEvents` 
 
 ### `sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>`
 
-Sweep expired credits from all users' balances. `dryRun=true` reports what would be expired without modifying any balances. Returns `{ expiredCount, expiredAmount, dryRun }` (`expiredAmount` is `Decimal`). Emits `credits.expired` (only on non-dry-run with `expiredCount > 0`).
+Sweep expired credits from all users' balances. `dryRun=true` reports what would be expired without modifying any balances. Returns `{ expiredCount, expiredAmount, dryRun, expiredByTier }` (`expiredAmount` is `Decimal`; `expiredByTier` is `Record<string, Decimal> | null`, re-scoping the sweep from per-user to per-`(user, tier)` — a tier's `expires` flag is only consulted at `addCredits` time, so a grant's fate is fixed regardless of later config changes). Emits `credits.expired` (only on non-dry-run with `expiredCount > 0`).
 
 ```typescript
 await manager.addCredits("user-1", 100, { type: "purchase", expiresAt: new Date("2024-01-01") });
