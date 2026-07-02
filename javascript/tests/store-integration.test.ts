@@ -1311,3 +1311,162 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     );
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Credit tiers (023_credit_tiers.sql) — real Postgres. Mirrors the
+// tiers.test.ts MemoryStore scenarios against the actual RPCs
+// (credits_add / deduct_with_allowance / settle_lease / refund_credits /
+// expire_credits / get_user_credit_tiers), guarded by the same
+// skip-without-DATABASE_URL pattern as the rest of this file.
+// ───────────────────────────────────────────────────────────────────────────
+describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
+  let pool: pg.Pool;
+
+  const TIER_CONFIG: PricingConfigData = {
+    models: { _default: "input_tokens * 1" },
+    tiers: {
+      gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
+      purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+    },
+  };
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    await pool.query(BOOTSTRAP_SQL);
+    await applyMigrations(pool);
+    await pool.query(
+      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
+      [[PG_USER, PG_USER2, PG_USER3, PG_USER4, PG_USER5, PG_USER6]],
+    );
+  }, 60000);
+
+  afterEach(async () => {
+    if (pool) {
+      await pool.query("DELETE FROM public.credit_reservations");
+      await pool.query("DELETE FROM public.credit_transactions");
+      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
+      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
+      await pool.query("DELETE FROM public.user_credits");
+      await pool.query("DELETE FROM public.credit_plans");
+      // credit_tiers is upsert-only (sync_tiers_from_config never deletes a
+      // stale row, matching MemoryStore's own accumulate-only semantics — see
+      // tiers-adversarial.test.ts's config-drift test) — clear it explicitly
+      // between tests so one test's tier config never leaks into the next.
+      await pool.query("DELETE FROM public.user_credit_tiers");
+      await pool.query("DELETE FROM public.credit_tiers");
+    }
+  });
+
+  afterAll(async () => {
+    if (pool) await pool.end();
+  });
+
+  it("addCredits into an explicit tier is reflected by getCreditTiers, sorted by priority", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.setActivePricing(TIER_CONFIG);
+
+    const add = await store.addCredits(PG_USER, D(20), "adjustment", null, null, "gifted");
+    expect(add.tier).toBe("gifted");
+    await store.addCredits(PG_USER, D(10)); // omitted → default "purchased"
+
+    const tiers = await store.getCreditTiers(PG_USER);
+    expect(tiers.tiers.map((t) => t.tierKey)).toEqual(["gifted", "purchased"]);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+    expect(tiers.totalBalance.toString()).toBe("30");
+  });
+
+  it("deductWithAllowance drains tiers in priority order and returns an exact tierBreakdown", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.setActivePricing(TIER_CONFIG);
+    await store.addCredits(PG_USER2, D(20), "adjustment", null, null, "gifted");
+    await store.addCredits(PG_USER2, D(10)); // omitted → default "purchased"
+
+    const r = await store.deductWithAllowance(PG_USER2, D(25), { minBalance: D(0) });
+    expect(r.error).toBeUndefined();
+    expect(r.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(r.tierBreakdown?.purchased?.toString()).toBe("5");
+
+    const tiers = await store.getCreditTiers(PG_USER2);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("5");
+  });
+
+  it("settleLease applies the same tier walk as deductWithAllowance", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.setActivePricing(TIER_CONFIG);
+    await store.addCredits(PG_USER3, D(20), "adjustment", null, null, "gifted");
+    await store.addCredits(PG_USER3, D(10)); // omitted → default "purchased"
+
+    const lease = await store.createLease(PG_USER3, D(25), "usage", { floor: D(0) });
+    expect(lease.error).toBeUndefined();
+    const settled = await store.settleLease(PG_USER3, lease.leaseId, D(18));
+    expect(settled.error).toBeUndefined();
+    expect(settled.tierBreakdown?.gifted?.toString()).toBe("18");
+
+    const tiers = await store.getCreditTiers(PG_USER3);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("2");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+  });
+
+  it("refundCredits restores tiers LIFO (reverse priority order)", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.setActivePricing(TIER_CONFIG);
+    await store.addCredits(PG_USER4, D(20), "adjustment", null, null, "gifted");
+    await store.addCredits(PG_USER4, D(20)); // omitted → default "purchased"
+
+    const deduct = await store.deductWithAllowance(PG_USER4, D(25), { minBalance: D(0) });
+    expect(deduct.error).toBeUndefined();
+    expect(deduct.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(deduct.tierBreakdown?.purchased?.toString()).toBe("5");
+
+    const refund = await store.refundCredits(deduct.transactionId);
+    expect(refund.error).toBeUndefined();
+    // LIFO: purchased (last drained) is restored first, then gifted.
+    expect(refund.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(refund.tierBreakdown?.gifted?.toString()).toBe("20");
+
+    const tiers = await store.getCreditTiers(PG_USER4);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("20");
+  });
+
+  it("sweepExpiredCredits expires only the expiring tier's grant, leaving the non-expiring tier untouched", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    await store.setActivePricing(TIER_CONFIG);
+    // Already-imminent expiresAt (must be in the future at grant time — see
+    // invalid_expires_at — but elapsed by the time we sweep).
+    await store.addCredits(
+      PG_USER5,
+      D(15),
+      "adjustment",
+      null,
+      new Date(Date.now() + 500),
+      "gifted",
+    );
+    await store.addCredits(PG_USER5, D(10)); // omitted → default "purchased" — never expires
+
+    // Real wall-clock wait — there is no injectable clock over a live RPC.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const swept = await store.sweepExpiredCredits(false);
+    expect(swept.expiredByTier?.gifted?.toString()).toBe("15");
+
+    const tiers = await store.getCreditTiers(PG_USER5);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+  }, 10000);
+
+  it("addCredits / getCreditTiers synthesize the 'default' tier when no tiers are configured", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    // No setActivePricing call in this test — no tiers configured at all.
+    const add = await store.addCredits(PG_USER6, D(50), "purchase");
+    expect(add.tier).toBe("default");
+
+    const tiers = await store.getCreditTiers(PG_USER6);
+    expect(tiers.tiers).toHaveLength(1);
+    expect(tiers.tiers[0]).toMatchObject({ tierKey: "default", name: "default", priority: 0 });
+    expect(tiers.tiers[0].balance.toString()).toBe("50");
+    expect(tiers.totalBalance.toString()).toBe("50");
+  });
+});

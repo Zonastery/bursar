@@ -83,6 +83,213 @@ describe("PostgresStore", () => {
     expect(calls[0].params[1]).toBe("100.5");
   });
 
+  // ── Credit tiers ─────────────────────────────────────────────────────
+  describe("credit tiers", () => {
+    it("addCredits sends the tier as the 5th credits_add param", async () => {
+      const { ctor, calls } = makeRecordingPool([
+        {
+          id: "tx-tier-1",
+          user_id: "user-1",
+          amount: "20",
+          new_balance: "20",
+          lifetime_purchased: "0",
+          tier: "gifted",
+        },
+      ]);
+      const store = new PostgresStore("postgresql://localhost/db", ctor);
+      const result = await store.addCredits(
+        "user-1",
+        D(20),
+        "adjustment",
+        null,
+        null,
+        "gifted",
+      );
+      expect(calls[0].text).toContain("credits_add");
+      expect(calls[0].params).toEqual([
+        "user-1",
+        "20",
+        "adjustment",
+        JSON.stringify({}),
+        "gifted",
+      ]);
+      expect(result.tier).toBe("gifted");
+    });
+
+    it("addCredits omits tier as null when not specified, and defaults result.tier to 'default'", async () => {
+      const { ctor, calls } = makeRecordingPool([
+        { id: "tx-1", user_id: "user-1", amount: "10", new_balance: "10", lifetime_purchased: "0" },
+      ]);
+      const store = new PostgresStore("postgresql://localhost/db", ctor);
+      const result = await store.addCredits("user-1", D(10));
+      expect(calls[0].params[4]).toBeNull();
+      // Row omitted `tier` entirely (e.g. a no-tiers-configured deployment) —
+      // the store falls back to "default" rather than surfacing `undefined`.
+      expect(result.tier).toBe("default");
+    });
+
+    it("deductWithAllowance parses tier_breakdown into a Record<string, Decimal>", async () => {
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          {
+            transaction_id: "tx-1",
+            amount: "15.0000",
+            allowance_consumed: "0.0000",
+            balance_after: "5.0000",
+            idempotent: false,
+            cap_warning: null,
+            tier_breakdown: { gifted: "10.0000", purchased: "5.0000" },
+          },
+        ]),
+      );
+      const result = await store.deductWithAllowance("user-1", D(15));
+      expect(result.tierBreakdown).not.toBeNull();
+      expect(result.tierBreakdown!.gifted).toBeInstanceOf(Decimal);
+      expect(result.tierBreakdown!.gifted.toString()).toBe("10");
+      expect(result.tierBreakdown!.purchased.toString()).toBe("5");
+    });
+
+    // KNOWN GAP (discovered while writing these tests, not introduced by them):
+    // unlike deductWithAllowance/settleLease/createLease/refundCredits,
+    // PostgresStore.addCredits now checks `"error" in row` (fixed alongside
+    // tiers — it previously silently swallowed every credits_add failure,
+    // including pre-existing invalid_amount/unauthorized envelopes, into a
+    // bogus "success"). The SQL `credits_add` (023_credit_tiers.sql) returns
+    // error envelopes such as {error: "tier_not_found", tier: "<requested>"}
+    // for every tier failure (tier_not_found/tier_required/
+    // tier_does_not_expire/invalid_expires_at/expires_at_required); these
+    // must now surface as a thrown StoreError, matching SupabaseStore's
+    // pre-existing errorCode()-checked behavior.
+    it("addCredits surfaces the SQL error envelope for tier failures", async () => {
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([{ error: "tier_not_found", tier: "bogus" }]),
+      );
+      await expect(store.addCredits("user-1", D(10), "adjustment", null, null, "bogus")).rejects.toThrow(
+        "credits_add: tier_not_found",
+      );
+    });
+
+    it("deductWithAllowance leaves tierBreakdown null when absent from the row", async () => {
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          {
+            transaction_id: "tx-1",
+            amount: "15.0000",
+            allowance_consumed: "0.0000",
+            balance_after: "5.0000",
+            idempotent: false,
+            cap_warning: null,
+          },
+        ]),
+      );
+      const result = await store.deductWithAllowance("user-1", D(15));
+      expect(result.tierBreakdown).toBeNull();
+    });
+
+    it("refundCredits parses tier_breakdown (LIFO restoration split)", async () => {
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          {
+            refund_transaction_id: "refund-1",
+            user_id: "user-1",
+            amount: "15.0000",
+            new_balance: "115.0000",
+            tier_breakdown: { purchased: "5.0000", gifted: "10.0000" },
+          },
+        ]),
+      );
+      const result = await store.refundCredits("tx-1");
+      expect(result.tierBreakdown!.purchased.toString()).toBe("5");
+      expect(result.tierBreakdown!.gifted.toString()).toBe("10");
+    });
+
+    it("sweepExpiredCredits parses expired_by_tier", async () => {
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          {
+            expired_count: 2,
+            expired_amount: "30.0000",
+            expired_by_tier: { gifted: "30.0000" },
+          },
+        ]),
+      );
+      const result = await store.sweepExpiredCredits();
+      expect(result.expiredByTier!.gifted.toString()).toBe("30");
+    });
+
+    it("getCreditTiers unwraps the single-JSONB envelope {user_id, tiers, total_balance} (not a rowset)", async () => {
+      // get_user_credit_tiers RETURNS JSONB — a single scalar envelope object,
+      // NOT one row per tier. callproc's scalar-JSONB unwrapping surfaces it
+      // as a single-element array whose one element IS the envelope; the
+      // per-tier rows live under its `tiers` array field.
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          {
+            get_user_credit_tiers: {
+              user_id: "user-1",
+              tiers: [
+                { tier_key: "gifted", name: "Gifted", priority: 10, expires: true, balance: "20.0000" },
+                {
+                  tier_key: "purchased",
+                  name: "Purchased",
+                  priority: 20,
+                  expires: false,
+                  balance: "10.0000",
+                },
+              ],
+              total_balance: "30.0000",
+            },
+          },
+        ]),
+      );
+      const result = await store.getCreditTiers("user-1");
+      expect(result.userId).toBe("user-1");
+      expect(result.tiers).toHaveLength(2);
+      expect(result.tiers[0]).toMatchObject({
+        tierKey: "gifted",
+        name: "Gifted",
+        priority: 10,
+        expires: true,
+      });
+      expect(result.tiers[0].balance.toString()).toBe("20");
+      expect(result.tiers[1].balance.toString()).toBe("10");
+      expect(result.totalBalance).toBeInstanceOf(Decimal);
+      expect(result.totalBalance.toString()).toBe("30");
+    });
+
+    it("getCreditTiers returns an empty tier list and zero balance for empty results", async () => {
+      const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
+      const result = await store.getCreditTiers("user-1");
+      expect(result.userId).toBe("user-1");
+      expect(result.tiers).toEqual([]);
+      expect(result.totalBalance.toString()).toBe("0");
+    });
+
+    it("getCreditTiers would misread a flat rowset as an empty envelope (documents the contract, not a rowset)", async () => {
+      // If get_user_credit_tiers were (incorrectly) mocked as a flat array of
+      // per-tier rows — the WRONG shape per the SQL contract (023_credit_tiers.sql:
+      // it RETURNS one JSONB envelope, not SETOF) — callproc's `rows.length === 1`
+      // scalar-unwrap heuristic does not fire for a multi-row result, so `tiers`
+      // would incorrectly stay empty. This pins down that getCreditTiers only
+      // works against the real envelope shape, not a rowset.
+      const store = new PostgresStore(
+        "postgresql://localhost/db",
+        makeMockPool([
+          { tier_key: "gifted", name: "Gifted", priority: 10, expires: true, balance: "20.0000" },
+          { tier_key: "purchased", name: "Purchased", priority: 20, expires: false, balance: "10.0000" },
+        ]),
+      );
+      const result = await store.getCreditTiers("user-1");
+      expect(result.tiers).toEqual([]);
+    });
+  });
+
   describe("deductWithAllowance", () => {
     it("calls deduct_with_allowance with all params (decimal strings)", async () => {
       const { ctor, calls } = makeRecordingPool([

@@ -1144,6 +1144,33 @@ class TestOptionalCapabilities:
         store = _MinimalCoreStore()
         assert store.get_balance("u1").user_id == "u1"
 
+    def test_minimal_store_implements_get_credit_tiers(self) -> None:
+        """get_credit_tiers is a CORE abstract method (credit tiers), not an
+        optional capability — _MinimalCoreStore already implements it (see its
+        class body above), so this must succeed with no
+        CapabilityNotSupportedError."""
+        store = _MinimalCoreStore()
+        result = store.get_credit_tiers("u1")
+        assert result.user_id == "u1"
+
+    def test_get_credit_tiers_is_a_required_core_abstract_method(self) -> None:
+        """get_credit_tiers is required (unlike the optional-capability group
+        below, which has a default raise): it's part of
+        CreditStore.__abstractmethods__, so a store subclass implementing
+        every OTHER core method but omitting it cannot be instantiated at all
+        (TypeError) — confirming it's core to the ABC contract added for
+        tiers, not an optional capability with a default implementation."""
+        assert "get_credit_tiers" in CreditStore.__abstractmethods__
+
+        # Build a store with every _MinimalCoreStore method EXCEPT
+        # get_credit_tiers, based directly on CreditStore (not
+        # _MinimalCoreStore, whose inherited implementation would otherwise
+        # satisfy the ABC).
+        namespace = {k: v for k, v in _MinimalCoreStore.__dict__.items() if k != "get_credit_tiers"}
+        missing_tiers_store_cls = type("_MissingTiersStore", (CreditStore,), namespace)
+        with pytest.raises(TypeError, match="get_credit_tiers"):
+            missing_tiers_store_cls()
+
     def test_create_team_raises_capability_not_supported(self) -> None:
         store = _MinimalCoreStore()
         with pytest.raises(CapabilityNotSupportedError):

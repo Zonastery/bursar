@@ -502,3 +502,220 @@ class TestConfigValidation:
         assert config_fields == data_fields
         assert "allowance_period" not in config_fields
         assert "allowance_period" not in data_fields
+
+
+# ── Credit tiers: TierDefinition / tiers-section Pydantic validation ────────
+#
+# These are the config.py-level (Pydantic) validation tests, distinct from
+# the store-runtime checks in test_tiers.py's TestTierConfigValidation (which
+# also documents where PricingConfigData/MemoryStore.set_active_pricing do
+# NOT perform this validation themselves).
+
+
+class TestTierConfigValidation:
+    def test_minimal_tier_loads_with_defaults(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {"gifted": {"name": "Gifted", "priority": 10}},
+            }
+        )
+        assert config.tiers is not None
+        tier = config.tiers["gifted"]
+        assert tier.name == "Gifted"
+        assert tier.priority == 10
+        assert tier.expires is False
+        assert tier.default_ttl_days is None
+        assert tier.allow_overdraft is False
+        assert tier.is_default is False
+
+    def test_full_tier_fields_load_correctly(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {
+                    "gifted": {
+                        "name": "Gifted Credits",
+                        "priority": 10,
+                        "expires": True,
+                        "default_ttl_days": 30,
+                    },
+                    "purchased": {
+                        "name": "Purchased Credits",
+                        "priority": 30,
+                        "is_default": True,
+                        "allow_overdraft": True,
+                    },
+                },
+            }
+        )
+        assert config.tiers is not None
+        gifted = config.tiers["gifted"]
+        assert gifted.expires is True
+        assert gifted.default_ttl_days == 30
+        purchased = config.tiers["purchased"]
+        assert purchased.is_default is True
+        assert purchased.allow_overdraft is True
+
+    def test_tier_missing_name_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {"a": {"priority": 1}},
+                }
+            )
+
+    def test_tier_missing_priority_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {"a": {"name": "A"}},
+                }
+            )
+
+    def test_tiers_not_a_dict_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="tiers must be a dict"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": ["not", "a", "dict"],
+                }
+            )
+
+    def test_empty_tiers_dict_rejected(self) -> None:
+        """An explicit tiers: {} is ambiguous — omit the key entirely for
+        "no tiers configured" instead."""
+        with pytest.raises(ConfigError, match="empty dict"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {},
+                }
+            )
+
+    def test_omitted_tiers_is_valid_and_none(self) -> None:
+        config = load_config_from_dict({"models": {"_default": "input_tokens * 1"}})
+        assert config.tiers is None
+
+    def test_duplicate_allow_overdraft_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="allow_overdraft"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {
+                        "a": {"name": "A", "priority": 1, "allow_overdraft": True},
+                        "b": {"name": "B", "priority": 2, "allow_overdraft": True},
+                    },
+                }
+            )
+
+    def test_single_allow_overdraft_accepted(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {
+                    "a": {"name": "A", "priority": 1, "allow_overdraft": True},
+                    "b": {"name": "B", "priority": 2},
+                },
+            }
+        )
+        assert config.tiers is not None
+        assert config.tiers["a"].allow_overdraft is True
+        assert config.tiers["b"].allow_overdraft is False
+
+    def test_duplicate_is_default_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="is_default"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {
+                        "a": {"name": "A", "priority": 1, "is_default": True},
+                        "b": {"name": "B", "priority": 2, "is_default": True},
+                    },
+                }
+            )
+
+    def test_single_is_default_accepted(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {
+                    "a": {"name": "A", "priority": 1, "is_default": True},
+                    "b": {"name": "B", "priority": 2},
+                },
+            }
+        )
+        assert config.tiers is not None
+        assert config.tiers["a"].is_default is True
+
+    def test_default_ttl_days_zero_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="default_ttl_days"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {"a": {"name": "A", "priority": 1, "expires": True, "default_ttl_days": 0}},
+                }
+            )
+
+    def test_default_ttl_days_negative_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="default_ttl_days"):
+            load_config_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {"a": {"name": "A", "priority": 1, "expires": True, "default_ttl_days": -1}},
+                }
+            )
+
+    def test_default_ttl_days_positive_accepted(self) -> None:
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {"a": {"name": "A", "priority": 1, "expires": True, "default_ttl_days": 1}},
+            }
+        )
+        assert config.tiers is not None
+        assert config.tiers["a"].default_ttl_days == 1
+
+    def test_default_ttl_days_none_is_valid_even_when_expires_true(self) -> None:
+        """A tier may expire with no default_ttl_days — add_credits() must
+        then always be called with an explicit expires_at (enforced at the
+        store layer, see test_tiers.py)."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {"a": {"name": "A", "priority": 1, "expires": True}},
+            }
+        )
+        assert config.tiers is not None
+        assert config.tiers["a"].expires is True
+        assert config.tiers["a"].default_ttl_days is None
+
+    def test_ties_in_priority_are_not_an_error(self) -> None:
+        """Priority ties are broken by key ascending at the store layer, not
+        rejected at config-load time."""
+        config = load_config_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {
+                    "a": {"name": "A", "priority": 5},
+                    "b": {"name": "B", "priority": 5},
+                },
+            }
+        )
+        assert config.tiers is not None
+        assert config.tiers["a"].priority == config.tiers["b"].priority == 5
+
+    def test_pricing_config_data_round_trips_tiers(self) -> None:
+        """PricingConfigData (the store-facing raw model) carries the same
+        tiers shape as the validated PricingConfig."""
+        raw = {
+            "models": {"_default": "input_tokens * 1"},
+            "tiers": {"gifted": {"name": "Gifted", "priority": 10, "expires": True, "default_ttl_days": 7}},
+        }
+        validated = load_config_from_dict(raw)
+        data = PricingConfigData.model_validate(raw)
+        assert validated.tiers is not None
+        assert data.tiers is not None
+        assert validated.tiers["gifted"].model_dump() == data.tiers["gifted"].model_dump()

@@ -311,11 +311,11 @@ class MemoryStore(CreditStore):
             return None
         if expires_at is not None:
             aware = self._ensure_aware(expires_at)
-            if aware <= _utcnow():
+            if aware <= self._utcnow():
                 raise StoreError(f"invalid_expires_at: {expires_at}")
             return aware
         if tier_def.default_ttl_days is not None:
-            return _utcnow() + timedelta(days=tier_def.default_ttl_days)
+            return self._utcnow() + timedelta(days=tier_def.default_ttl_days)
         raise StoreError(f"expires_at_required: {resolved_tier}")
 
     def _overdraft_sink(self) -> str:

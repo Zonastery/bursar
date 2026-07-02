@@ -244,6 +244,9 @@ export class PostgresStore extends CreditStore {
       tier ?? null,
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    if ("error" in row && row.error) {
+      throw new StoreError(`credits_add: ${String(row.error)}`);
+    }
     return {
       transactionId: String(row.id ?? ""),
       userId: String(row.user_id ?? userId),

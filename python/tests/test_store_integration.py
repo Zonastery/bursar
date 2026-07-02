@@ -28,11 +28,11 @@ except ModuleNotFoundError:
 
 import pytest
 
-from ducto import CreditManager, UsageMetrics
+from ducto import ConfigError, CreditManager, UsageMetrics
 from ducto.allowance import resolve_allowance_window
 from ducto.interface.base import StoreError
 from ducto.interface.memory import MemoryStore
-from ducto.interface.models import CreditMetadata, PlanDefinition, PricingConfigData, SpendCap
+from ducto.interface.models import CreditMetadata, PlanDefinition, PricingConfigData, SpendCap, TierDefinition
 from ducto.interface.postgres import PostgresStore
 from ducto.interface.supabase import HttpxSupabaseStore
 
@@ -2049,3 +2049,179 @@ class TestAllowanceWindowPg:
 
         with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
             store.increment_usage_window(user, "basic", Decimal("1"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credit tiers (migration 023) against a real Postgres instance
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestCreditTiersPg:
+    """Tier-aware add_credits/deduct_with_allowance/settle_lease/refund_credits/
+    sweep_expired_credits/get_credit_tiers against a real Postgres + the 023
+    RPCs (``sync_tiers_from_config``, ``get_user_credit_tiers``, and the
+    ``CREATE OR REPLACE`` tier-aware rewrites of ``credits_add``/
+    ``deduct_with_allowance``/``settle_lease``/``expire_credits``/
+    ``refund_credits``). MemoryStore coverage for the same scenarios lives in
+    ``test_tiers.py``/``test_tiers_adversarial.py`` — this class targets the
+    SQL layer specifically. Skips without a live ``pg_database_url`` (see
+    ``conftest.py``); does not attempt to spin up Postgres itself.
+    """
+
+    @pytest.fixture
+    def store(self, pg_database_url: str) -> PostgresStore:
+        s = PostgresStore(pg_database_url)
+        assert s.setup().success
+        return s
+
+    def _two_tier_config(self) -> PricingConfigData:
+        return PricingConfigData(
+            models={"_default": "input_tokens * 1"},
+            min_balance=Decimal("0"),
+            tiers={
+                "gifted": TierDefinition(name="Gifted", priority=10, expires=True, default_ttl_days=30),
+                "purchased": TierDefinition(name="Purchased", priority=30, is_default=True),
+            },
+        )
+
+    def test_no_tiers_configured_uses_synthetic_default(self, store: PostgresStore) -> None:
+        user = _new_uuid(9101)
+        store.add_credits(user, Decimal("50"), "purchase")
+
+        tiers = store.get_credit_tiers(user)
+        assert len(tiers.tiers) == 1
+        assert tiers.tiers[0].tier_key == "default"
+        assert tiers.tiers[0].balance == Decimal("50")
+        assert tiers.total_balance == Decimal("50")
+
+    def test_add_credits_resolves_explicit_and_default_tier(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9102)
+
+        gifted = store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
+        assert gifted.tier == "gifted"
+
+        omitted = store.add_credits(user, Decimal("20"), "purchase")
+        assert omitted.tier == "purchased"
+
+        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        assert by_key == {"gifted": Decimal("10"), "purchased": Decimal("20")}
+
+    def test_add_credits_unknown_tier_raises(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9103)
+        with pytest.raises(StoreError, match="tier_not_found"):
+            store.add_credits(user, Decimal("10"), "purchase", tier="nonexistent")
+
+    def test_priority_ordered_deduct_and_tier_breakdown(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9104)
+        future = datetime.now(UTC) + timedelta(days=1)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+
+        result = store.deduct_with_allowance(user, Decimal("15"))
+        assert result.error is None
+        assert result.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+
+        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        assert by_key == {"gifted": Decimal("0"), "purchased": Decimal("95")}
+
+    def test_settle_lease_applies_same_tier_walk(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9105)
+        future = datetime.now(UTC) + timedelta(days=1)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+
+        lease = store.create_lease(user, Decimal("20"), "usage", floor=Decimal("0"))
+        assert lease.error is None
+        settled = store.settle_lease(user, lease.lease_id, Decimal("15"))
+        assert settled.error is None
+        assert settled.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+
+    def test_idempotent_replay_echoes_original_tier_breakdown(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9106)
+        future = datetime.now(UTC) + timedelta(days=1)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+
+        first = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
+        assert first.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+
+        # Mutate state after the fact — the replay must not recompute.
+        store.add_credits(user, Decimal("1000"), "purchase", tier="gifted")
+
+        second = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
+        assert second.idempotent is True
+        assert second.tier_breakdown == first.tier_breakdown
+
+    def test_lifo_refund_restores_reverse_priority_order(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9107)
+        future = datetime.now(UTC) + timedelta(days=1)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+
+        ded = store.deduct_with_allowance(user, Decimal("15"))
+        assert ded.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+
+        refund = store.refund_credits(ded.transaction_id)
+        assert refund.error is None
+        # LIFO: last-drained (purchased) restored first.
+        assert refund.tier_breakdown == {"purchased": Decimal("5"), "gifted": Decimal("10")}
+
+        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        assert by_key == {"gifted": Decimal("10"), "purchased": Decimal("100")}
+
+    def test_overdraft_routes_excess_to_allow_overdraft_tier(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "input_tokens * 1"},
+                tiers={
+                    "gifted": TierDefinition(name="Gifted", priority=10),
+                    "purchased": TierDefinition(
+                        name="Purchased", priority=30, is_default=True, allow_overdraft=True
+                    ),
+                },
+            )
+        )
+        user = _new_uuid(9108)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
+        store.add_credits(user, Decimal("5"), "purchase", tier="purchased")
+
+        result = store.deduct_with_allowance(user, Decimal("40"), min_balance=Decimal("-50"))
+        assert result.error is None
+        assert result.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
+
+        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        assert by_key["purchased"] == Decimal("-25")
+
+    def test_get_credit_tiers_sorted_by_priority_ascending(self, store: PostgresStore) -> None:
+        store.set_active_pricing(self._two_tier_config())
+        user = _new_uuid(9109)
+        future = datetime.now(UTC) + timedelta(days=1)
+        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+
+        result = store.get_credit_tiers(user)
+        assert [t.tier_key for t in result.tiers] == ["gifted", "purchased"]
+        assert result.total_balance == Decimal("110")
+        assert result.total_balance == store.get_balance(user).balance
+
+    def test_manager_publish_pricing_from_dict_rejects_invalid_tiers_pg(self, store: PostgresStore) -> None:
+        """Client-side config validation (config.py) rejects invalid tiers
+        before ever reaching Postgres — same guarantee as MemoryStore, since
+        this validation is entirely in the Python layer."""
+        manager = CreditManager(store=store)
+        with pytest.raises(ConfigError):
+            manager.publish_pricing_from_dict(
+                {
+                    "models": {"_default": "input_tokens * 1"},
+                    "tiers": {
+                        "a": {"name": "A", "priority": 1, "is_default": True},
+                        "b": {"name": "B", "priority": 2, "is_default": True},
+                    },
+                }
+            )

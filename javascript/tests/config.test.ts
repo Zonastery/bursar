@@ -296,4 +296,167 @@ describe("loadConfigFromDict", () => {
       expect(config.plans!.pro.allowancePeriod).toBe("calendar_month");
     });
   });
+
+  // ── Credit tiers: config-parsing-level validation and defaults ─────────
+  // (store-level runtime resolution/expiry checks live in tests/tiers.test.ts)
+  describe("tiers", () => {
+    const models = { "gpt-4": "input_tokens * 0.001" };
+
+    it("is absent by default (no tiers section)", () => {
+      const config = loadConfigFromDict({ models });
+      expect(config.tiers).toBeUndefined();
+    });
+
+    it("loads a single tier with all fields set", () => {
+      const config = loadConfigFromDict({
+        models,
+        tiers: {
+          gifted: {
+            name: "Gifted Credits",
+            priority: 10,
+            expires: true,
+            defaultTtlDays: 30,
+          },
+        },
+      });
+      expect(config.tiers!.gifted).toEqual({
+        name: "Gifted Credits",
+        priority: 10,
+        expires: true,
+        defaultTtlDays: 30,
+        allowOverdraft: false,
+        isDefault: false,
+      });
+    });
+
+    it("defaults name to the config key, priority to 0, expires/allowOverdraft/isDefault to false", () => {
+      const config = loadConfigFromDict({
+        models,
+        tiers: { basic: {} },
+      });
+      expect(config.tiers!.basic).toEqual({
+        name: "basic",
+        priority: 0,
+        expires: false,
+        defaultTtlDays: null,
+        allowOverdraft: false,
+        isDefault: false,
+      });
+    });
+
+    it("accepts snake_case tier fields (default_ttl_days / allow_overdraft / is_default)", () => {
+      const config = loadConfigFromDict({
+        models,
+        tiers: {
+          gifted: {
+            name: "Gifted",
+            priority: 10,
+            expires: true,
+            default_ttl_days: 14,
+          },
+          purchased: {
+            name: "Purchased",
+            priority: 20,
+            expires: false,
+            is_default: true,
+            allow_overdraft: true,
+          },
+        },
+      });
+      expect(config.tiers!.gifted.defaultTtlDays).toBe(14);
+      expect(config.tiers!.purchased.isDefault).toBe(true);
+      expect(config.tiers!.purchased.allowOverdraft).toBe(true);
+    });
+
+    it("rejects an explicit empty tiers object (ambiguous — omit the key instead)", () => {
+      expect(() => loadConfigFromDict({ models, tiers: {} })).toThrow(ConfigError);
+    });
+
+    it("rejects tiers that is not a dict (e.g. an array)", () => {
+      expect(() => loadConfigFromDict({ models, tiers: [] })).toThrow(ConfigError);
+    });
+
+    it("rejects more than one tier with allowOverdraft: true", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: {
+            a: { name: "A", priority: 10, allowOverdraft: true },
+            b: { name: "B", priority: 20, allowOverdraft: true },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects more than one tier with isDefault: true", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: {
+            a: { name: "A", priority: 10, isDefault: true },
+            b: { name: "B", priority: 20, isDefault: true },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("accepts exactly one allowOverdraft tier and one isDefault tier (may be the same or different tiers)", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: {
+            a: { name: "A", priority: 10, allowOverdraft: true },
+            b: { name: "B", priority: 20, isDefault: true },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it("rejects defaultTtlDays: 0", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: { a: { name: "A", priority: 10, expires: true, defaultTtlDays: 0 } },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects a negative defaultTtlDays", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: { a: { name: "A", priority: 10, expires: true, defaultTtlDays: -1 } },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("accepts a positive defaultTtlDays", () => {
+      const config = loadConfigFromDict({
+        models,
+        tiers: { a: { name: "A", priority: 10, expires: true, defaultTtlDays: 1 } },
+      });
+      expect(config.tiers!.a.defaultTtlDays).toBe(1);
+    });
+
+    it("does not require defaultTtlDays on a non-expiring tier", () => {
+      expect(() =>
+        loadConfigFromDict({
+          models,
+          tiers: { a: { name: "A", priority: 10, expires: false } },
+        }),
+      ).not.toThrow();
+    });
+
+    it("preserves insertion order of multiple tiers (sorting is a store-level concern)", () => {
+      const config = loadConfigFromDict({
+        models,
+        tiers: {
+          c: { name: "C", priority: 5 },
+          a: { name: "A", priority: 1 },
+          b: { name: "B", priority: 3 },
+        },
+      });
+      expect(Object.keys(config.tiers!)).toEqual(["c", "a", "b"]);
+    });
+  });
 });
