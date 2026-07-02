@@ -7,6 +7,8 @@ import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditManager } from "../src/manager.js";
+import { CreditEventEmitter } from "../src/stores/events.js";
+import type { CreditEvent } from "../src/stores/events.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
 import type { AllowancePeriod } from "../src/allowance.js";
 import type { PricingConfigData } from "../src/types.js";
@@ -1468,5 +1470,206 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     expect(tiers.tiers[0]).toMatchObject({ tierKey: "default", name: "default", priority: 0 });
     expect(tiers.tiers[0].balance.toString()).toBe("50");
     expect(tiers.totalBalance.toString()).toBe("50");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// CreditManager end-to-end — credit tiers through the public manager API,
+// real Postgres. The "Credit tiers — real Postgres" block above drives
+// PostgresStore directly to pin down SQL/RPC behavior; this block is the
+// manager-level counterpart: publishPricingFromDict, addCredits, the
+// pricing-engine-driven deduct, the reserve/settle lease lifecycle,
+// refundCredits, getCreditTiers, and sweepExpiredCredits exactly as an
+// integrator would call them, asserting on both the returned results and the
+// CreditEventEmitter events they fire. Nothing else in this suite drives
+// CreditManager against a real store (every other manager test uses
+// MemoryStore).
+// ───────────────────────────────────────────────────────────────────────────
+describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Postgres", () => {
+  let pool: pg.Pool;
+
+  const MGR_USER1 = "00000000-0000-0000-0000-000000000301";
+  const MGR_USER2 = "00000000-0000-0000-0000-000000000302";
+  const MGR_USER3 = "00000000-0000-0000-0000-000000000303";
+  const MGR_USER4 = "00000000-0000-0000-0000-000000000304";
+
+  const TIER_CONFIG: PricingConfigData = {
+    models: { _default: "input_tokens * 1" },
+    minBalance: 0,
+    tiers: {
+      gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
+      purchased: { name: "Purchased", priority: 30, expires: false, isDefault: true },
+    },
+  };
+
+  function record(emitter: CreditEventEmitter, types: string[]): CreditEvent[] {
+    const events: CreditEvent[] = [];
+    for (const t of types) {
+      emitter.on(t as CreditEvent["type"], (e) => events.push(e));
+    }
+    return events;
+  }
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    await pool.query(BOOTSTRAP_SQL);
+    await applyMigrations(pool);
+    await pool.query(
+      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
+      [[MGR_USER1, MGR_USER2, MGR_USER3, MGR_USER4]],
+    );
+    // These UUIDs are new to this describe block: the INSERT above fires
+    // grant_signup_bonus() (021_signup_bonus_config.sql) for the first time,
+    // crediting a real balance (defaults to 50 if unset) before the first
+    // test runs. Wipe it (transactions first — FK from credit_transactions to
+    // user_credits) so every test starts from a true zero balance — mirrors
+    // the afterEach cleanup below, just run once up front too.
+    await pool.query("DELETE FROM public.credit_transactions");
+    await pool.query("DELETE FROM public.user_credits");
+  }, 60000);
+
+  afterEach(async () => {
+    if (pool) {
+      await pool.query("DELETE FROM public.credit_reservations");
+      await pool.query("DELETE FROM public.credit_transactions");
+      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
+      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
+      await pool.query("DELETE FROM public.user_credits");
+      await pool.query("DELETE FROM public.credit_plans");
+      await pool.query("DELETE FROM public.user_credit_tiers");
+      await pool.query("DELETE FROM public.credit_tiers");
+    }
+  });
+
+  afterAll(async () => {
+    if (pool) await pool.end();
+  });
+
+  it("full lifecycle: publish tiers, addCredits, deduct, refund — results and events agree with getCreditTiers at each step", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const emitter = new CreditEventEmitter();
+    const events = record(emitter, ["credits.added", "credits.deducted", "credits.refunded"]);
+    const mgr = new CreditManager(store, undefined, emitter);
+    await mgr.publishPricingFromDict(TIER_CONFIG);
+
+    const gifted = await mgr.addCredits(MGR_USER1, D(20), { type: "purchase", tier: "gifted" });
+    expect(gifted.tier).toBe("gifted");
+    const purchased = await mgr.addCredits(MGR_USER1, D(50), { type: "purchase" }); // omitted -> isDefault
+    expect(purchased.tier).toBe("purchased");
+    expect(events.map((e) => e.type)).toEqual(["credits.added", "credits.added"]);
+
+    const tiers = await mgr.getCreditTiers(MGR_USER1);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("50");
+    expect(tiers.totalBalance.toString()).toBe("70");
+
+    // Cost computed by the real pricing engine (not a raw amount) crosses the
+    // tier boundary: 25 tokens @ 1/token drains gifted (20) then 5 from
+    // purchased.
+    events.length = 0;
+    const result = await mgr.deduct(MGR_USER1, { inputTokens: 25 }, "mgr-e2e-1");
+    expect(result.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(result.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(result.balanceAfter.toString()).toBe("45");
+    expect(events.map((e) => e.type)).toContain("credits.deducted");
+
+    const tiersAfterDeduct = await mgr.getCreditTiers(MGR_USER1);
+    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("45");
+
+    events.length = 0;
+    const refund = await mgr.refundCredits(result.transactionId);
+    expect(refund.error).toBeFalsy();
+    // LIFO: purchased (last drained) is restored first, then gifted.
+    expect(refund.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(refund.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(events.map((e) => e.type)).toContain("credits.refunded");
+
+    const tiersAfterRefund = await mgr.getCreditTiers(MGR_USER1);
+    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("50");
+  });
+
+  it("reserve/settle lease lifecycle applies the same tier walk as direct deduct", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const emitter = new CreditEventEmitter();
+    const events = record(emitter, ["credits.reserved", "credits.deducted"]);
+    const mgr = new CreditManager(store, undefined, emitter);
+    await mgr.publishPricingFromDict(TIER_CONFIG);
+
+    const future = new Date(Date.now() + 86_400_000);
+    await mgr.addCredits(MGR_USER2, D(10), { type: "purchase", tier: "gifted", expiresAt: future });
+    await mgr.addCredits(MGR_USER2, D(100), { type: "purchase" });
+
+    const lease = await mgr.reserve(MGR_USER2, { inputTokens: 15 });
+    expect(events.map((e) => e.type)).toContain("credits.reserved");
+
+    const settled = await mgr.settle(MGR_USER2, lease.leaseId, { inputTokens: 15 });
+    expect(settled.tierBreakdown?.gifted?.toString()).toBe("10");
+    expect(settled.tierBreakdown?.purchased?.toString()).toBe("5");
+
+    const tiers = await mgr.getCreditTiers(MGR_USER2);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("95");
+  });
+
+  it("sweepExpiredCredits through the manager scopes per tier and emits credits.expired", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const emitter = new CreditEventEmitter();
+    const events = record(emitter, ["credits.expired"]);
+    const mgr = new CreditManager(store, undefined, emitter);
+    await mgr.publishPricingFromDict(TIER_CONFIG);
+
+    // Must be in the future at grant time (invalid_expires_at) but elapsed by
+    // the time we sweep — real wall-clock wait, no injectable clock over a
+    // live RPC.
+    await mgr.addCredits(MGR_USER3, D(15), {
+      type: "purchase",
+      tier: "gifted",
+      expiresAt: new Date(Date.now() + 500),
+    });
+    await mgr.addCredits(MGR_USER3, D(10), { type: "purchase" }); // purchased — never expires
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const swept = await mgr.sweepExpiredCredits(false);
+    expect(swept.expiredByTier?.gifted?.toString()).toBe("15");
+    expect(events.map((e) => e.type)).toContain("credits.expired");
+
+    const tiers = await mgr.getCreditTiers(MGR_USER3);
+    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+  }, 10000);
+
+  it("settle() past the balance floor routes overdraft excess into the allowOverdraft tier and emits credits.overdraft", async () => {
+    // The client-side config schema rejects a negative minBalance outright, so
+    // overdraft can only be reached via the manager's `overdraft` policy
+    // (resolved into the lease admission floor), not via pricing config.
+    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const emitter = new CreditEventEmitter();
+    const events = record(emitter, ["credits.overdraft"]);
+    const mgr = new CreditManager(store, undefined, emitter, {
+      policy: "overdraft",
+      overdraftFloor: -50,
+    });
+    await mgr.publishPricingFromDict({
+      models: { _default: "input_tokens * 1" },
+      tiers: {
+        gifted: { name: "Gifted", priority: 10, expires: false, isDefault: true },
+        purchased: { name: "Purchased", priority: 20, expires: false, allowOverdraft: true },
+      },
+    });
+    await mgr.addCredits(MGR_USER4, D(10), { type: "purchase" }); // -> gifted (isDefault)
+    await mgr.addCredits(MGR_USER4, D(5), { type: "purchase", tier: "purchased" });
+
+    const lease = await mgr.reserve(MGR_USER4, { inputTokens: 40 });
+    const settled = await mgr.settle(MGR_USER4, lease.leaseId, { inputTokens: 40 });
+    expect(settled.tierBreakdown?.gifted?.toString()).toBe("10");
+    expect(settled.tierBreakdown?.purchased?.toString()).toBe("30");
+    expect(settled.balanceAfter.toString()).toBe("-25");
+    expect(events.map((e) => e.type)).toContain("credits.overdraft");
+
+    const tiers = await mgr.getCreditTiers(MGR_USER4);
+    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("-25");
   });
 });

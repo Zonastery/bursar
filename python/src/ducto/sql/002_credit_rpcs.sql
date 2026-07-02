@@ -323,7 +323,12 @@ $$;
 
 -- Defense-in-depth: revoke direct execute from user roles.
 -- Only service_role RPC calls (via Supabase client with service key) should succeed.
-REVOKE EXECUTE ON FUNCTION public.credits_add FROM anon, authenticated;
+-- credits_add is qualified with its exact signature (023_credit_tiers.sql adds a
+-- 5th p_tier param): an unqualified REVOKE is ambiguous once both overloads
+-- transiently coexist mid-re-run of the full migration set (023 hasn't dropped
+-- this 4-arg signature yet when this line runs), which broke `setup()`'s
+-- idempotency on an already-migrated database.
+REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB) FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.reserve_credits FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.deduct_credits FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.get_credits_balance FROM anon, authenticated;
