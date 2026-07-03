@@ -95,12 +95,20 @@ describe("CreditManager", () => {
       await manager.publishPricingFromDict(TEST_CONFIG);
       await manager.addCredits("user-1", 500);
 
-      const result1 = await manager.deduct("user-1", { model: "gpt-4", inputTokens: 100 }, "idem-1");
+      const result1 = await manager.deduct(
+        "user-1",
+        { model: "gpt-4", inputTokens: 100 },
+        "idem-1",
+      );
       expect(result1.idempotent).toBe(false);
       expectDecimal(result1.amount, "1"); // 100 * 0.01
       expectDecimal(result1.balanceAfter, "499");
 
-      const result2 = await manager.deduct("user-1", { model: "gpt-4", inputTokens: 100 }, "idem-1");
+      const result2 = await manager.deduct(
+        "user-1",
+        { model: "gpt-4", inputTokens: 100 },
+        "idem-1",
+      );
       expect(result2.idempotent).toBe(true);
       expectDecimal(result2.amount, "1");
 
@@ -272,7 +280,9 @@ describe("CreditManager", () => {
     it("partially covers cost with plan allowance, deducts remainder from balance", async () => {
       const config: PricingConfigData = {
         models: { _default: "input_tokens * 1" },
-        plans: { "plan-starter": { id: "plan-starter", name: "Starter", freeAllowance: new Decimal(10) } },
+        plans: {
+          "plan-starter": { id: "plan-starter", name: "Starter", freeAllowance: new Decimal(10) },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-starter");
@@ -584,7 +594,12 @@ describe("CreditManager", () => {
       const team = await store.createTeam("Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
 
-      const first = await mgr.deductTeam(team.teamId, "user-1", { inputTokens: 100 }, "team-idem-1");
+      const first = await mgr.deductTeam(
+        team.teamId,
+        "user-1",
+        { inputTokens: 100 },
+        "team-idem-1",
+      );
       expectDecimal(first.teamBalanceAfter, "400");
 
       const replay = await mgr.deductTeam(
@@ -648,12 +663,19 @@ describe("CreditManager", () => {
       const mgr = new CreditManager(store, undefined, emitter);
       await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 1000);
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: new Decimal(10), action: "deny" });
+      store.setSpendCap({
+        userId: "user-1",
+        type: "daily",
+        limit: new Decimal(10),
+        action: "deny",
+      });
 
       const events = record(emitter, ["credits.deducted", "credits.deduct_failed"]);
 
       // 11 credits exceed cap of 10 → deny.
-      await expect(() => mgr.deduct("user-1", { inputTokens: 11 })).rejects.toThrow(CapReachedError);
+      await expect(() => mgr.deduct("user-1", { inputTokens: 11 })).rejects.toThrow(
+        CapReachedError,
+      );
 
       expect(events).toHaveLength(1);
       expect(events[0].type).toBe("credits.deduct_failed");
@@ -668,7 +690,12 @@ describe("CreditManager", () => {
       const mgr = new CreditManager(store, undefined, emitter);
       await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
       await mgr.addCredits("user-1", 1000);
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: new Decimal(10), action: "warn" });
+      store.setSpendCap({
+        userId: "user-1",
+        type: "daily",
+        limit: new Decimal(10),
+        action: "warn",
+      });
 
       const events = record(emitter, ["credits.deducted", "credits.cap_warning"]);
 
@@ -925,6 +952,32 @@ describe("CreditManager", () => {
       expect(typeof events[0].data?.timestamp).toBe("string");
     });
 
+    it("MG2: credits.plan_changed fires on unsetUserPlan with null planKey", async () => {
+      const config: PricingConfigData = {
+        models: { _default: "input_tokens * 1" },
+        plans: {
+          pro: { id: "pro", name: "Pro", freeAllowance: new Decimal(100) },
+        },
+      };
+      await store.setActivePricing(config);
+      const emitter = new CreditEventEmitter();
+      const mgr = new CreditManager(store, undefined, emitter);
+      await mgr.publishPricingFromDict(config);
+      await store.addCredits("user-1", new Decimal(100));
+      await store.setUserPlan("user-1", "pro");
+
+      const events = record(emitter, ["credits.plan_changed"]);
+
+      await mgr.unsetUserPlan("user-1");
+
+      const plan = await mgr.getUserPlan("user-1");
+      expect(plan.planId).toBeNull();
+
+      expect(events).toHaveLength(1);
+      expect(events[0].type).toBe("credits.plan_changed");
+      expect(events[0].data?.planKey).toBeNull();
+    });
+
     // MG3 — cap_warning AND credits.deducted both fire
     it("MG3: cap_warning and credits.deducted both fire on a warn-capped deduction", async () => {
       const emitter = new CreditEventEmitter();
@@ -1004,9 +1057,9 @@ describe("CreditManager", () => {
       await manager.publishPricingFromDict(config);
       await manager.addCredits("user-1", 100);
 
-      await expect(() =>
-        manager.deductFixed("user-1", "nonexistent_job_xyz"),
-      ).rejects.toThrow(ConfigError);
+      await expect(() => manager.deductFixed("user-1", "nonexistent_job_xyz")).rejects.toThrow(
+        ConfigError,
+      );
 
       // Balance untouched
       expectDecimal((await manager.getBalance("user-1")).balance, "100");
@@ -1181,11 +1234,7 @@ describe("CreditManager", () => {
       const SHARED_KEY = "key-1";
 
       // Personal deduction with key-1.
-      const personalResult = await manager.deduct(
-        "user-1",
-        { inputTokens: 10 },
-        SHARED_KEY,
-      );
+      const personalResult = await manager.deduct("user-1", { inputTokens: 10 }, SHARED_KEY);
       expect(personalResult.idempotent).toBe(false);
       expectDecimal(personalResult.amount, "10");
 
@@ -1568,9 +1617,9 @@ describe("CreditManager — feature limits", () => {
     const r2 = await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
     expect(r2.error).toBeUndefined();
 
-    await expect(manager.deduct("user-1", { inputTokens: 1 }, null, null, "export")).rejects.toThrow(
-      FeatureLimitReachedError,
-    );
+    await expect(
+      manager.deduct("user-1", { inputTokens: 1 }, null, null, "export"),
+    ).rejects.toThrow(FeatureLimitReachedError);
   });
 
   it("deduct(feature=...) emits credits.feature_limit_reached on breach", async () => {
@@ -1584,9 +1633,9 @@ describe("CreditManager — feature limits", () => {
 
     await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
     await manager.deduct("user-1", { inputTokens: 1 }, null, null, "export");
-    await expect(manager.deduct("user-1", { inputTokens: 1 }, null, null, "export")).rejects.toThrow(
-      FeatureLimitReachedError,
-    );
+    await expect(
+      manager.deduct("user-1", { inputTokens: 1 }, null, null, "export"),
+    ).rejects.toThrow(FeatureLimitReachedError);
 
     const reached = events.filter((e) => e.type === "credits.feature_limit_reached");
     expect(reached).toHaveLength(1);

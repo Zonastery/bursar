@@ -238,7 +238,33 @@ BEGIN
 END;
 $$;
 
+-- unset_user_plan: Clear a user's plan (pauses the allowance period).
+-- plan_assigned_at is cleared so rolling_30d / anniversary windows don't advance.
+-- Call set_user_plan again to re-assign and re-anchor.
+CREATE OR REPLACE FUNCTION public.unset_user_plan(p_user_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    UPDATE public.user_credits
+    SET plan_id = NULL,
+        plan_assigned_at = NULL,
+        updated_at = now()
+    WHERE user_id = p_user_id;
+
+    RETURN jsonb_build_object('user_id', p_user_id);
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.unset_user_plan(UUID) FROM anon, authenticated;
 
 -- check_plan_allowance gained a trailing p_period_start DATE parameter. Drop
 -- every overload by name first so the current signature is unambiguous.

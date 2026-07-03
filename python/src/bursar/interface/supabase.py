@@ -659,6 +659,10 @@ class HttpxSupabaseStore(CreditStore):
             plan_id=str(row.get("plan_id", plan_id)),
         )
 
+    def unset_user_plan(self, user_id: str) -> dict:
+        row = self._rpc("unset_user_plan", {"p_user_id": user_id})
+        return {"user_id": str(row.get("user_id", user_id))}
+
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         row = self._rpc(
             "check_plan_allowance",

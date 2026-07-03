@@ -372,6 +372,20 @@ export class CreditManager {
   }
 
   /**
+   * Unset a user's subscription plan. Clears `plan_id` and `plan_assigned_at`
+   * so the allowance period is effectively paused. Call {@link setUserPlan} to
+   * re-assign and re-anchor the allowance window.
+   */
+  async unsetUserPlan(userId: string): Promise<void> {
+    await this.store.unsetUserPlan(userId);
+    this.emit("credits.plan_changed", userId, {
+      userId,
+      planKey: null,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Check whether a user's plan has a specific feature entitlement.
    *
    * Passthrough to the store, which distinguishes *presence* from *truthiness*

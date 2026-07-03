@@ -266,6 +266,37 @@ class TestPlanManagement:
         assert allowance.allowance_remaining == 200
         assert allowance.plan_id == "basic"
 
+    def test_unset_user_plan_clears_plan_and_assigned_at(self) -> None:
+        store = MemoryStore()
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={
+                    "basic": PlanDefinition(
+                        id="basic",
+                        name="Basic",
+                        free_allowance=Decimal(100),
+                    )
+                },
+            )
+        )
+        store.set_user_plan("u", "basic")
+        plan = store.get_user_plan("u")
+        assert plan.plan_id == "basic"
+        assert plan.plan_assigned_at is not None
+
+        store.unset_user_plan("u")
+        plan = store.get_user_plan("u")
+        assert plan.plan_id is None
+        assert plan.plan_assigned_at is None
+
+    def test_unset_user_plan_idempotent_for_planless_user(self) -> None:
+        store = MemoryStore()
+        result = store.unset_user_plan("no-plan-user")
+        assert result == {"user_id": "no-plan-user"}
+        plan = store.get_user_plan("no-plan-user")
+        assert plan.plan_id is None
+
     def test_increment_usage_window_reduces_allowance(self) -> None:
         store = MemoryStore()
         v2 = PricingConfigData(
@@ -1579,6 +1610,9 @@ class _MinimalCoreStore(CreditStore):
 
     def set_user_plan(self, user_id: str, plan_id: str):
         return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
+
+    def unset_user_plan(self, user_id: str) -> dict:
+        return {"user_id": user_id}
 
     def check_allowance(self, user_id: str):
         return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")

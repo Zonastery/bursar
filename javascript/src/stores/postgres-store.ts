@@ -660,6 +660,12 @@ export class PostgresStore extends CreditStore {
     };
   }
 
+  async unsetUserPlan(userId: string): Promise<{ userId: string }> {
+    const rows = await this.callproc("unset_user_plan", [userId]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    return { userId: String(row.user_id ?? userId) };
+  }
+
   async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
     const rows = await this.callproc("check_plan_allowance", [
       userId,

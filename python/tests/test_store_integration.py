@@ -2052,6 +2052,31 @@ class TestAllowanceWindowPg:
         assert first_assigned_at is not None
         assert second_assigned_at > first_assigned_at
 
+    def test_unset_user_plan_clears_plan_and_assigned_at_pg(self, store: PostgresStore) -> None:
+        store.set_active_pricing(
+            PricingConfigData(
+                models={"_default": "1"},
+                plans={"pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100))},
+            )
+        )
+        user = _new_uuid(9015)
+        store.set_user_plan(user, "pro")
+        plan = store.get_user_plan(user)
+        assert plan.plan_id is not None
+        assert plan.plan_assigned_at is not None
+
+        store.unset_user_plan(user)
+        plan = store.get_user_plan(user)
+        assert plan.plan_id is None
+        assert plan.plan_assigned_at is None
+
+    def test_unset_user_plan_idempotent_when_no_plan_pg(self, store: PostgresStore) -> None:
+        user = _new_uuid(9016)
+        result = store.unset_user_plan(user)
+        assert result == {"user_id": user}
+        plan = store.get_user_plan(user)
+        assert plan.plan_id is None
+
     # ── 10. WS3: fractional fixed job cost round-trips through Postgres ────
 
     def test_fractional_fixed_cost_round_trips_pg(self, store: PostgresStore) -> None:

@@ -656,6 +656,19 @@ class PostgresStore(CreditStore):
             plan_id=str(result_dict.get("plan_id", plan_id)),
         )
 
+    def unset_user_plan(self, user_id: str) -> dict:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("unset_user_plan", [user_id])
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        return {"user_id": str(result_dict.get("user_id", user_id))}
+
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         conn = self._conn()
         try:

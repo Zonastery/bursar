@@ -472,6 +472,11 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
+    def unset_user_plan(self, user_id: str) -> dict:
+        """Clear the user's plan (pauses allowance period)."""
+        ...
+
+    @abstractmethod
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         """Get remaining free allowance for current billing period.
 

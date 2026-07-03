@@ -1324,6 +1324,39 @@ class TestPlanChanged:
         assert "timestamp" in events[0].data
 
 
+class TestPlanUnset:
+    """MG2 — credits.plan_changed fires on unset_user_plan with null plan_key."""
+
+    def test_unset_user_plan_clears_plan_and_emits_event(self) -> None:
+        store = MemoryStore()
+        emitter = CreditEventEmitter()
+        mgr = CreditManager(store=store, emitter=emitter)
+        mgr.publish_pricing_from_dict(
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "plans": {
+                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                },
+            }
+        )
+        mgr.set_user_plan("user-1", "pro")
+
+        events: list[CreditEvent] = []
+        emitter.on("credits.plan_changed", events.append)
+
+        mgr.unset_user_plan("user-1")
+
+        # (a) Store reflects cleared plan.
+        plan = mgr.get_user_plan("user-1")
+        assert plan.plan_id is None
+
+        # (b) Event emitted with null plan_key.
+        assert len(events) == 1
+        assert events[0].type == "credits.plan_changed"
+        assert events[0].data is not None
+        assert events[0].data["plan_key"] is None
+
+
 class TestTeamIdempotencyUserScoped:
     """MG2 — team idempotency key is user-scoped, not team-scoped."""
 

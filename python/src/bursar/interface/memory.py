@@ -1272,6 +1272,12 @@ class MemoryStore(CreditStore):
             self._user_plan_assigned_at[user_id] = self._utcnow()
             return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
 
+    def unset_user_plan(self, user_id: str) -> dict:
+        with self._lock:
+            self._user_plan_map.pop(user_id, None)
+            self._user_plan_assigned_at.pop(user_id, None)
+            return {"user_id": user_id}
+
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         # period_start is unused here: MemoryStore already has direct access to
         # plan_assigned_at and its own (injectable, test-controllable) clock, so

@@ -634,6 +634,11 @@ export class HttpxSupabaseStore extends CreditStore {
     };
   }
 
+  async unsetUserPlan(userId: string): Promise<{ userId: string }> {
+    const row = await this.rpc("unset_user_plan", { p_user_id: userId });
+    return { userId: String(row?.user_id ?? userId) };
+  }
+
   async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
     const row = await this.rpc("check_plan_allowance", {
       p_user_id: userId,

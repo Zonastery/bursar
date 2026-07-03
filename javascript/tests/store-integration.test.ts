@@ -1471,6 +1471,34 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     expect(second.getTime()).toBeGreaterThan(first.getTime());
   });
 
+  it("unsetUserPlan clears plan_id and plan_assigned_at in Postgres", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pool);
+    const PURGE_PLAN = "00000000-0000-0000-0000-0000000000f1";
+    await pool.query(
+      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key)
+       VALUES ($1, 'purge-test', 100, $2)
+       ON CONFLICT (id) DO NOTHING`,
+      [PURGE_PLAN, "purge-plan"],
+    );
+    await store.setUserPlan(PG_USER10, "purge-plan");
+    let plan = await store.getUserPlan(PG_USER10);
+    expect(plan.planId).toBeTruthy();
+    expect(plan.planAssignedAt).not.toBeNull();
+
+    await store.unsetUserPlan(PG_USER10);
+    plan = await store.getUserPlan(PG_USER10);
+    expect(plan.planId).toBeNull();
+    expect(plan.planAssignedAt).toBeNull();
+  });
+
+  it("unsetUserPlan is idempotent when plan already cleared", async () => {
+    const store = new PostgresStore(DATABASE_URL!, pool);
+    const result = await store.unsetUserPlan(PG_USER10);
+    expect(result.userId).toBe(PG_USER10);
+    const plan = await store.getUserPlan(PG_USER10);
+    expect(plan.planId).toBeNull();
+  });
+
   // ── 11: WS3 — fractional fixed job cost round-trips through Postgres JSONB ──
   it("WS3 — fractional fixed job cost round-trips through real Postgres JSONB and charges exactly", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);

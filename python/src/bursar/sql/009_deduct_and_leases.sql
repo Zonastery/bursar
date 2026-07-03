@@ -839,8 +839,8 @@ BEGIN
     UPDATE public.user_credits SET balance = balance - v_net, updated_at = now()
     WHERE user_id = p_user_id RETURNING balance INTO v_new_balance;
 
-    INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
-    VALUES (p_user_id, -v_net, 'usage', v_metadata) RETURNING id INTO v_tx_id;
+    INSERT INTO public.credit_transactions (user_id, amount, type, reference_type, metadata)
+    VALUES (p_user_id, -v_net, 'usage', p_metadata->>'reference_type', v_metadata) RETURNING id INTO v_tx_id;
 
     UPDATE public.credit_reservations SET status = 'settled', settle_tx_id = v_tx_id WHERE id = p_lease_id;
 

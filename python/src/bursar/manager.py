@@ -459,6 +459,26 @@ class CreditManager:
         )
         return result
 
+    def unset_user_plan(self, user_id: str) -> None:
+        """Clear a user's plan (pauses the allowance period).
+
+        Re-assign a plan via :meth:`set_user_plan` to re-anchor the allowance
+        window.
+
+        Args:
+            user_id: The user whose plan to clear.
+        """
+        self._store.unset_user_plan(user_id)
+        self._emit(
+            "credits.plan_changed",
+            user_id,
+            {
+                "user_id": user_id,
+                "plan_key": None,
+                "timestamp": datetime.now(UTC),
+            },
+        )
+
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         """Fetch user's current plan (including feature entitlements)."""
         return self._store.get_user_plan(user_id)

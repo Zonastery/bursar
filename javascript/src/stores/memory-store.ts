@@ -1354,6 +1354,12 @@ export class MemoryStore extends CreditStore {
     return { userId, planId };
   }
 
+  async unsetUserPlan(userId: string): Promise<{ userId: string }> {
+    this.userPlanMap.delete(userId);
+    this.userPlanAssignedAt.delete(userId);
+    return { userId };
+  }
+
   async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
     // periodStart is unused here: MemoryStore already has direct access to
     // planAssignedAt and its own (injectable, test-controllable) clock, so it
