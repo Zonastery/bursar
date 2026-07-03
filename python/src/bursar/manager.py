@@ -1552,6 +1552,8 @@ class CreditManager:
         metadata: CreditMetadata | None = None,
         *,
         use_allowance: bool = False,
+        required_feature: str | None = None,
+        feature: str | None = None,
     ) -> DeductionResult:
         """Shortcut for fixed-cost batch jobs (roadmap gen, topic gen, etc.).
 
@@ -1565,9 +1567,17 @@ class CreditManager:
         ``use_allowance=True`` to bill fixed-cost jobs against the allowance
         pool first instead.
 
+        ``required_feature`` checks the user's plan for boolean entitlement
+        (the plan's ``features`` dict), raising :exc:`FeatureNotEntitledError`
+        if absent. ``feature`` names a per-feature invocation-count limit
+        (the plan's ``features_limits`` dict) — passed through to :meth:`deduct`
+        for enforcement.
+
         Raises:
             PricingNotLoadedError: If pricing hasn't been loaded.
             ValueError: If ``job_name`` is not a configured fixed-cost job.
+            FeatureNotEntitledError: If ``required_feature`` is not in the
+                user's plan.
         """
         self._maybe_lazy_expire(user_id)
         if not self._engine:
@@ -1577,10 +1587,16 @@ class CreditManager:
         if self._engine.get_fixed_cost(job_name) is None:
             raise ValueError(f"Unknown fixed-cost job: {job_name!r}")
 
+        if required_feature is not None:
+            check = self.check_feature(user_id, required_feature)
+            if not check.has_feature:
+                raise FeatureNotEntitledError(f"Feature {required_feature!r} is not entitled for user={user_id}")
+
         return self.deduct(
             user_id=user_id,
             metrics=UsageMetrics(fixed_job=job_name),
             idempotency_key=idempotency_key,
             metadata=metadata,
             skip_allowance=not use_allowance,
+            feature=feature,
         )

@@ -41,6 +41,7 @@ import type {
   TeamDeductionResult,
   TierBalancesResult,
   TopUserRow,
+  UserTransactionRow,
 } from "./types.js";
 import type {
   ListTransactionsOptions,
@@ -449,6 +450,11 @@ export class CreditManager {
   async getBalance(userId: string): Promise<BalanceResult> {
     await this.maybeLazyExpire(userId);
     return await this.store.getBalance(userId);
+  }
+
+  /** Fetch a single credit transaction by ID. Returns null when not found. */
+  async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
+    return await this.store.getTransaction(userId, transactionId);
   }
 
   /** Add credits to a user's account. */
@@ -1440,6 +1446,7 @@ export class CreditManager {
     jobName: string,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
+    feature?: string | null,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
     if (!this.engine)
@@ -1451,7 +1458,7 @@ export class CreditManager {
         `unknown fixed job '${jobName}': not configured in pricing 'fixed' section`,
       );
     }
-    return await this.deduct(userId, { fixedJob: jobName }, idempotencyKey, metadata);
+    return await this.deduct(userId, { fixedJob: jobName }, idempotencyKey, metadata, feature);
   }
 
   /**

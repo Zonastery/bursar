@@ -37,6 +37,7 @@ import type {
   TeamMember,
   TierBalancesResult,
   TopUserRow,
+  UserTransactionRow,
 } from "../types.js";
 
 /**
@@ -292,6 +293,18 @@ export abstract class CreditStore {
     userId: string,
     options?: ListUsageEventsOptions,
   ): Promise<PaginatedTransactions>;
+
+  // ── Transaction listing (optional capability — WS8) ──────────────────
+  /**
+   * Fetch a single transaction by ID. Returns `null` when the transaction
+   * does not exist or belongs to a different user.
+   */
+  async getTransaction(
+    _userId: string,
+    _transactionId: string,
+  ): Promise<UserTransactionRow | null> {
+    throw new CapabilityNotSupportedError("getTransaction is not supported by this store");
+  }
 
   // ── Team/shared balance pools (optional capability — WS8) ────────────
   async createTeam(_name: string, _initialBalance?: Decimal): Promise<CreateTeamResult> {

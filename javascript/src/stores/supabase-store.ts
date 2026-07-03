@@ -41,6 +41,7 @@ import type {
   TierBalance,
   TierBalancesResult,
   TopUserRow,
+  UserTransactionRow,
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
 import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
@@ -196,6 +197,49 @@ export class HttpxSupabaseStore extends CreditStore {
     } catch (err) {
       throw new StoreError(
         `Supabase RPC ${fn} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * GET a table row from the Supabase REST API.
+   * Uses URL query params for filtering (Supabase REST-style syntax).
+   */
+  private async restGet(
+    table: string,
+    params: Record<string, string>,
+  ): Promise<Record<string, unknown>[]> {
+    const qs = new URLSearchParams(params).toString();
+    let resp: Response;
+    try {
+      resp = await fetch(`${this.url}/rest/v1/${table}?${qs}`, {
+        method: "GET",
+        headers: {
+          apikey: this.key,
+          authorization: `Bearer ${this.key}`,
+        },
+      });
+    } catch (err) {
+      throw new StoreError(
+        `Supabase GET ${table} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (!resp.ok) {
+      let text = "";
+      try {
+        text = await resp.text();
+      } catch {
+        // ignore
+      }
+      throw new StoreError(`Supabase GET ${table} failed (${resp.status}): ${text}`);
+    }
+
+    try {
+      return (await resp.json()) as Record<string, unknown>[];
+    } catch (err) {
+      throw new StoreError(
+        `Supabase GET ${table} returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -1006,6 +1050,29 @@ export class HttpxSupabaseStore extends CreditStore {
   }
 
   // ── Credit tiers ─────────────────────────────────────────────────────
+
+  // ── Transaction lookup ────────────────────────────────────────────────
+
+  async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
+    const rows = await this.restGet("credit_transactions", {
+      id: `eq.${transactionId}`,
+      user_id: `eq.${userId}`,
+      select: "*",
+      limit: "1",
+    });
+    if (!rows || rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      id: String(r.id ?? ""),
+      userId: String(r.user_id ?? userId),
+      amount: dec(r.amount),
+      type: String(r.type ?? ""),
+      referenceType: r.reference_type != null ? String(r.reference_type) : null,
+      referenceId: r.reference_id != null ? String(r.reference_id) : null,
+      metadata: (r.metadata as Record<string, unknown> | null) ?? null,
+      createdAt: String(r.created_at ?? ""),
+    };
+  }
 
   async getCreditTiers(userId: string): Promise<TierBalancesResult> {
     // get_user_credit_tiers returns one JSONB envelope object (not a rowset):
