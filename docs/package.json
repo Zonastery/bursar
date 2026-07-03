@@ -3,8 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "prebuild": "bash scripts/gen-api-docs.sh && bash scripts/gen-notebook-docs.sh",
-    "prestart": "bash scripts/gen-api-docs.sh && bash scripts/gen-notebook-docs.sh",
+    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py",
+    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py",
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
     "build": "docusaurus build",
