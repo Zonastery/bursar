@@ -149,22 +149,32 @@ export interface PgPoolConstructor {
 /**
  * Credit store backed by a raw Postgres connection.
  *
- * Uses dependency injection for the PG pool constructor — supply a real ``pg.Pool``
- * for production, or a mock for tests.
+ * Uses dependency injection for the PG pool — supply a real ``pg.Pool`` class
+ * for production, a mock constructor for tests, or a pre-created pool instance
+ * to share across stores (avoids exhausting Postgres connections).
  *
  * Args:
  *   databaseUrl: Postgres connection string.
- *   poolCtor: Optional PG Pool constructor (default: loads ``pg`` on first use).
+ *   poolOrCtor: A pre-created PgPool instance, a PgPoolConstructor, or omitted
+ *     (loads ``pg`` on first use).
  */
 export class PostgresStore extends CreditStore {
   private databaseUrl: string;
-  private poolCtor: PgPoolConstructor;
+  private poolCtor: PgPoolConstructor | null = null;
   private pool: PgPool | null = null;
+  private ownsPool: boolean;
 
-  constructor(databaseUrl: string, poolCtor?: PgPoolConstructor) {
+  constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
     super();
     this.databaseUrl = databaseUrl;
-    this.poolCtor = poolCtor ?? null!; // lazy-loaded
+    if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
+      // Pre-created pool instance — share, don't own.
+      this.pool = poolOrCtor as PgPool;
+      this.ownsPool = false;
+    } else {
+      this.poolCtor = (poolOrCtor as PgPoolConstructor | undefined) ?? null;
+      this.ownsPool = true;
+    }
   }
 
   private async getPool(): Promise<PgPool> {
@@ -189,7 +199,7 @@ export class PostgresStore extends CreditStore {
   }
 
   async close(): Promise<void> {
-    if (this.pool) {
+    if (this.pool && this.ownsPool) {
       await this.pool.end();
       this.pool = null;
     }
@@ -354,7 +364,8 @@ export class PostgresStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
-      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
+      featureLimitWarning:
+        row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -500,7 +511,8 @@ export class PostgresStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
-      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
+      featureLimitWarning:
+        row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }

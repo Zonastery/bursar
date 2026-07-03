@@ -189,13 +189,13 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("PostgresStore.setup() refuses to fake success (H17)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await expect(store.setup()).rejects.toThrow(/migrat/i);
   });
 
   // ── deductWithAllowance basics ──────────────────────────────────────
   it("charges net amount and parses NUMERIC as exact Decimal", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
 
     const r = await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "ded-1" });
@@ -209,7 +209,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("sub-credit charge is not truncated to zero (H1)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     const r = await store.deductWithAllowance(PG_USER, D("0.4"), { idempotencyKey: "sub-1" });
     expect(r.amount.toString()).toBe("0.4");
@@ -217,7 +217,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("insufficient credits returns error envelope (no throw)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1), "purchase");
     const r = await store.deductWithAllowance(PG_USER, D(50), { minBalance: D(0) });
     expect(r.error).toBe("insufficient_credits");
@@ -226,7 +226,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Idempotency replay ──────────────────────────────────────────────
   it("deductWithAllowance with same key replays original (one debit)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
 
     const r1 = await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "idem-x" });
@@ -237,7 +237,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("different keys produce separate deductions", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "a" });
     const r2 = await store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "b" });
@@ -247,7 +247,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Concurrency / double-spend (THE acceptance-gating test) ─────────
   it("N concurrent deductWithAllowance never over-spends (C2)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     // Balance covers only 5 of 20 one-credit charges, floor 0.
     await store.addCredits(PG_USER, D(5), "purchase");
 
@@ -274,7 +274,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   }, 30000);
 
   it("idempotency replay under concurrency → one debit (C2 + H16)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
 
     const results = await Promise.all(
@@ -289,7 +289,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Allowance + cap semantics through the RPC ───────────────────────
   it("plan allowance fully covers cost, no balance debit; window incremented", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Free', 100, $2)`,
       [PLAN_UUID, PLAN_UUID],
@@ -306,7 +306,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("plan allowance partial, remainder charged to balance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Starter', 10, $2)`,
       [PLAN_UUID, PLAN_UUID],
@@ -321,7 +321,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("deny spend cap aborts with cap_reached (allowance not consumed)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
       `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
@@ -333,7 +333,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("cap accumulates across prior window spend", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
       `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 30, 'deny')`,
@@ -363,7 +363,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     );
 
     it("deny action: under limit succeeds, at limit blocks with feature_limit_reached", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
       const featureLimit = { maxCalls: 2, period: "monthly" as const, action: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
@@ -388,7 +388,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     });
 
     it("warn action: breach surfaces featureLimitWarning, never blocks", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
@@ -403,7 +403,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     });
 
     it("createLease: deny-only admission blocks once the limit is reached", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
@@ -413,7 +413,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     });
 
     it("release_lease and refund_credits do NOT restore quota", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
@@ -438,7 +438,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     });
 
     it("checkFeatureLimit: advisory count, no side effects", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
       await store.deductWithAllowance(PG_USER, D(1), {
         feature: "export",
@@ -455,7 +455,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     });
 
     it("concurrency: exactly N succeed under limit N", async () => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(1000), "purchase");
       const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
 
@@ -478,7 +478,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Refunds ─────────────────────────────────────────────────────────
   it("full refund restores balance; over-refund and duplicate rejected", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     const deduct = await store.deductWithAllowance(PG_USER, D(30), { idempotencyKey: "ref-1" });
 
@@ -495,7 +495,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("cumulative partial refunds, then over-refund rejected", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     const deduct = await store.deductWithAllowance(PG_USER, D(50), { idempotencyKey: "ref-2" });
 
@@ -506,7 +506,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("refund of a purchase (non-debit) is rejected", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const add = await store.addCredits(PG_USER, D(100), "purchase");
     const refund = await store.refundCredits(add.transactionId);
     expect(refund.error).toBe("over_refund");
@@ -514,7 +514,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Expiry double-sweep (H4) ────────────────────────────────────────
   it("expired credits sweep once; second sweep reports zero (H4)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase", null, new Date(Date.now() - 1000));
 
     const first = await store.sweepExpiredCredits();
@@ -530,7 +530,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Team pools + idempotency (H12) ──────────────────────────────────
   it("deductTeam idempotency key prevents double-charge (H12)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     // credit_team_members.user_id FKs into user_credits — ensure the row exists.
     await store.addCredits(PG_USER, D(10), "adjustment");
     const team = await store.createTeam("Pool", D(500));
@@ -546,7 +546,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Analytics list RPCs return all rows ─────────────────────────────
   it("listUserTransactions returns all rows with NUMERIC parsed as Decimal", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1000), "purchase");
     await store.deductWithAllowance(PG_USER, D("2.5"), {
       idempotencyKey: "list-1",
@@ -569,7 +569,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   });
 
   it("spendByUser returns all rows as exact Decimal", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(500), "purchase");
     await store.addCredits(PG_USER2, D(500), "purchase");
     await store.deductWithAllowance(PG_USER, D("2.5"), { idempotencyKey: "sbu-1", model: "gpt-4" });
@@ -591,7 +591,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI1: Analytics — spendByModel ──────────────────────────────────
   it("JI1 — spendByModel returns both models with exact Decimal totals", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(500), "purchase");
     await store.deductWithAllowance(PG_USER, D("1.5"), { idempotencyKey: "sbm-1", model: "gpt-4" });
     await store.deductWithAllowance(PG_USER, D("2.5"), {
@@ -617,7 +617,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // Need 3 users — seed PG_USER3 into auth.users first
     const PG_USER3 = "00000000-0000-0000-0000-000000000003";
     await pool.query(`INSERT INTO auth.users (id) VALUES ($1) ON CONFLICT DO NOTHING`, [PG_USER3]);
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(500), "purchase");
     await store.addCredits(PG_USER2, D(500), "purchase");
     await store.addCredits(PG_USER3, D(500), "purchase");
@@ -642,7 +642,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI3: Analytics — dailySpend ────────────────────────────────────
   it("JI3 — dailySpend returns at least one entry with non-zero spend", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D("5"), { idempotencyKey: "ds-1" });
 
@@ -660,7 +660,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI4: Analytics — aggregateStats ────────────────────────────────
   it("JI4 — aggregateStats returns non-zero totalCreditsConsumed and activeUsers", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D("7"), { idempotencyKey: "as-1" });
 
@@ -675,7 +675,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI5: Analytics — listUsageEvents ───────────────────────────────
   it("JI5 — listUsageEvents returns events for the correct userId and amount", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D("3.5"), { idempotencyKey: "lue-1" });
 
@@ -693,7 +693,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI6: Cap deny does NOT consume allowance ────────────────────────
   it("JI6 — cap deny does not consume allowance window usage", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const PLAN_JI6 = "00000000-0000-0000-0000-0000000000b1";
     // Plan allowance of 5: cost=20, so v_consume=5, v_net=15.
     // Cap limit of 10: 0 (prior spend) + 15 (net) > 10 → cap fires.
@@ -721,7 +721,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI7: Refund does NOT restore allowance ──────────────────────────
   it("JI7 — refund does not restore plan allowance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const PLAN_JI7 = "00000000-0000-0000-0000-0000000000b2";
     // Plan allowance of 5 — cost of 20 will consume the 5 from allowance then
     // take 15 from balance. This ensures the transaction has a real balance debit
@@ -760,7 +760,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI8: Sweep when balance < total expired ─────────────────────────
   it("JI8 — sweep with partially-used expired credits leaves non-negative balance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     // 100 credits already expired
     await store.addCredits(PG_USER, D(100), "purchase", null, new Date(Date.now() - 1000));
     // 50 credits with no expiry
@@ -777,7 +777,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI9: listUserTransactions — type filter ─────────────────────────
   it("JI9 — listUserTransactions type filter isolates usage vs purchase", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D("5"), { idempotencyKey: "ji9-usage" });
 
@@ -792,7 +792,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── JI10: aggregateStats Decimal precision ─────────────────────────
   it("JI10 — aggregateStats totalCreditsConsumed exact Decimal precision", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
     await store.deductWithAllowance(PG_USER, D("0.1000"), { idempotencyKey: "ji10-a" });
     await store.deductWithAllowance(PG_USER, D("0.2000"), { idempotencyKey: "ji10-b" });
@@ -808,7 +808,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── H4: RPC atomicity — cap-deny must NOT consume allowance ─────────
   it("H4 — deductWithAllowance cap deny does not consume allowance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const PLAN_H4 = "00000000-0000-0000-0000-0000000000c1";
     // Plan with monthly allowance of 10.
     await pool.query(
@@ -839,7 +839,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── H6: Decimal round-trip precision ────────────────────────────────
   it("H6 — decimal amounts survive Postgres round-trip with 4dp precision", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
 
     await store.addCredits(PG_USER, D("0.0001"), "purchase");
     let bal = await store.getBalance(PG_USER);
@@ -866,7 +866,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     await expect(applyMigrations(pool)).resolves.toBeUndefined();
     await expect(applyMigrations(pool)).resolves.toBeUndefined();
 
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(10), "purchase");
     const bal = await store.getBalance(PG_USER);
     expect(bal.balance.gte(D(10))).toBe(true);
@@ -894,7 +894,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     await pool.query(`DELETE FROM public.credit_transactions WHERE user_id = $1`, [USER_H10]);
     await pool.query(`DELETE FROM public.user_credits WHERE user_id = $1`, [USER_H10]);
 
-    const pgStore = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const pgStore = new PostgresStore(DATABASE_URL!, pool);
     const memStore = new MemoryStore();
 
     // Run the same sequence on both stores and capture the idempotent-replay result.
@@ -926,7 +926,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── H12: TOCTOU — concurrent cap check + deduct ─────────────────────
   it("H12 — concurrent deductions cannot bypass spend cap", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(50), "purchase");
 
     // Daily deny cap of 10.
@@ -955,7 +955,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── M10: Concurrent team deductions ─────────────────────────────────
   it("M10 — concurrent team deductions from different users do not over-spend", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
 
     // Seed 20 distinct users.
     const teamUsers: string[] = [];
@@ -994,7 +994,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── Lazy expiry: scoped sweep isolation via the real expire_credits RPC ──
   it("sweepExpiredCredits(dryRun, userId) scopes to exactly that user, leaving other users' expired grants untouched", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     // A short-lived FUTURE expiresAt, real wall-clock wait — this database is
     // shared with other suites/tests (possibly a concurrently-running Python
     // integration run against the same cluster) that may have tiers
@@ -1026,7 +1026,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── addCredits idempotency via the real credits_add RPC ──────────────
   it("addCredits with the same idempotencyKey replays the original grant exactly once (credits_add RPC)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
 
     const r1 = await store.addCredits(
       PG_USER16,
@@ -1061,7 +1061,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
   // ── lazyExpiry: true end-to-end via CreditManager + real PostgresStore ──
   it("lazyExpiry: true transparently sweeps a user's own expired credits before every read/spend call, no explicit sweep anywhere", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store, undefined, undefined, { lazyExpiry: true });
 
     // 50 permanent + 100 that expires shortly. A short-lived FUTURE
@@ -1161,7 +1161,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 1/2: getUserPlan + plan-sync round-trip allowance_period ────────
   it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
        VALUES ($1, 'Rolling', 20, $2, 'rolling_30d')`,
@@ -1181,7 +1181,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it.each(ALLOWANCE_PERIODS)(
     "plan-sync persists allowance_period=%s to credit_plans via setActivePricing",
     async (allowancePeriod) => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       const planKey = `sync-${allowancePeriod}`;
       const config: PricingConfigData = {
         models: { _default: "1" },
@@ -1204,15 +1204,13 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
         `SELECT allowance_period FROM public.credit_plans WHERE plan_key = $1`,
         [planKey],
       );
-      expect((raw.rows[0] as { allowance_period: string }).allowance_period).toBe(
-        allowancePeriod,
-      );
+      expect((raw.rows[0] as { allowance_period: string }).allowance_period).toBe(allowancePeriod);
     },
   );
 
   // ── 3: deductWithAllowance periodStart isolates usage windows ───────
   it("deductWithAllowance with explicit periodStart isolates usage into that window", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
        VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d')`,
@@ -1246,7 +1244,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 4: createLease/settleLease periodStart isolates usage windows ───
   it("createLease/settleLease with explicit periodStart isolates usage into that window", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
        VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d')`,
@@ -1273,7 +1271,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 5: rolling_30d plan through manager.deduct(), backdated anchor ───
   it("manager.deduct() on a rolling_30d plan resolves the window from a backdated plan_assigned_at", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     const config: PricingConfigData = {
       models: { _default: "input_tokens * 1" },
@@ -1314,7 +1312,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 6: anniversary plan through manager.reserve()/settle() ──────────
   it("manager.reserve()/settle() on an anniversary plan resolves the window from a backdated plan_assigned_at", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     const config: PricingConfigData = {
       models: { _default: "input_tokens * 1" },
@@ -1350,7 +1348,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it.each(["rolling_30d", "anniversary"] as const satisfies readonly AllowancePeriod[])(
     "manager.checkAllowance() for a %s plan matches resolveAllowanceWindow and reflects partial usage",
     async (allowancePeriod) => {
-      const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+      const store = new PostgresStore(DATABASE_URL!, pool);
       const manager = new CreditManager(store);
       const planKey = `ca-${allowancePeriod}`;
       const config: PricingConfigData = {
@@ -1387,7 +1385,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 8: manager.checkAllowance() fast path (calendar_month / planless) ──
   it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a calendar_month plan", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
@@ -1404,7 +1402,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   });
 
   it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a planless user", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     await store.addCredits(PG_USER7, D(10), "purchase");
 
@@ -1415,7 +1413,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 9: positional-argument regression guard against REAL Postgres ───
   it("deductWithAllowance with a non-null periodStart does not throw a Postgres type-cast error (positional-arg regression guard)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER8, D(100), "purchase");
 
     // Before the fix, a missing p_skip_allowance positional placeholder shifted
@@ -1439,7 +1437,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   });
 
   it("settleLease with a non-null periodStart does not throw a Postgres type-cast error (positional-arg regression guard)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER9, D(100), "purchase");
     const periodStart = new Date("2026-03-01T00:00:00.000Z");
 
@@ -1451,7 +1449,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 10: plan-switch re-anchoring via real Postgres ───────────────────
   it("setUserPlan re-anchors plan_assigned_at on every (re-)assignment", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const PLAN_X = "00000000-0000-0000-0000-0000000000d1";
     const PLAN_Y = "00000000-0000-0000-0000-0000000000d2";
     await pool.query(
@@ -1475,7 +1473,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 11: WS3 — fractional fixed job cost round-trips through Postgres JSONB ──
   it("WS3 — fractional fixed job cost round-trips through real Postgres JSONB and charges exactly", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     const config: PricingConfigData = {
       models: { _default: "input_tokens * 1" },
@@ -1495,7 +1493,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 12: WS10 — manager.addCredits options-object form persists expiresAt ──
   it("WS10 — manager.addCredits options-object form persists expiresAt and sweepExpiredCredits reclaims exactly that grant", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
 
     await manager.addCredits(PG_USER12, D(30), {
@@ -1515,7 +1513,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   // ── 13: settle_lease canonical-signature joint regression guard ─────
   it("settleLease jointly exercises floor-clamp (C1) and periodStart (WS9) against the canonical single signature", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
       `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
        VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d')`,
@@ -1614,7 +1612,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   });
 
   it("addCredits into an explicit tier is reflected by getCreditTiers, sorted by priority", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
 
     const add = await store.addCredits(PG_USER, D(20), "adjustment", null, null, "gifted");
@@ -1629,7 +1627,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   });
 
   it("deductWithAllowance drains tiers in priority order and returns an exact tierBreakdown", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
     await store.addCredits(PG_USER2, D(20), "adjustment", null, null, "gifted");
     await store.addCredits(PG_USER2, D(10)); // omitted → default "purchased"
@@ -1645,7 +1643,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   });
 
   it("settleLease applies the same tier walk as deductWithAllowance", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
     await store.addCredits(PG_USER3, D(20), "adjustment", null, null, "gifted");
     await store.addCredits(PG_USER3, D(10)); // omitted → default "purchased"
@@ -1662,7 +1660,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   });
 
   it("refundCredits restores tiers LIFO (reverse priority order)", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
     await store.addCredits(PG_USER4, D(20), "adjustment", null, null, "gifted");
     await store.addCredits(PG_USER4, D(20)); // omitted → default "purchased"
@@ -1684,7 +1682,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   });
 
   it("sweepExpiredCredits expires only the expiring tier's grant, leaving the non-expiring tier untouched", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
     // Already-imminent expiresAt (must be in the future at grant time — see
     // invalid_expires_at — but elapsed by the time we sweep).
@@ -1710,7 +1708,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   }, 10000);
 
   it("addCredits / getCreditTiers synthesize the 'default' tier when no tiers are configured", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     // No setActivePricing call in this test — no tiers configured at all.
     const add = await store.addCredits(PG_USER6, D(50), "purchase");
     expect(add.tier).toBe("default");
@@ -1796,7 +1794,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
   });
 
   it("full lifecycle: publish tiers, addCredits, deduct, refund — results and events agree with getCreditTiers at each step", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.added", "credits.deducted", "credits.refunded"]);
     const mgr = new CreditManager(store, undefined, emitter);
@@ -1824,8 +1822,12 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     expect(events.map((e) => e.type)).toContain("credits.deducted");
 
     const tiersAfterDeduct = await mgr.getCreditTiers(MGR_USER1);
-    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
-    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("45");
+    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe(
+      "0",
+    );
+    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe(
+      "45",
+    );
 
     events.length = 0;
     const refund = await mgr.refundCredits(result.transactionId);
@@ -1836,12 +1838,16 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     expect(events.map((e) => e.type)).toContain("credits.refunded");
 
     const tiersAfterRefund = await mgr.getCreditTiers(MGR_USER1);
-    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
-    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("50");
+    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe(
+      "20",
+    );
+    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe(
+      "50",
+    );
   });
 
   it("reserve/settle lease lifecycle applies the same tier walk as direct deduct", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.reserved", "credits.deducted"]);
     const mgr = new CreditManager(store, undefined, emitter);
@@ -1864,7 +1870,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
   });
 
   it("sweepExpiredCredits through the manager scopes per tier and emits credits.expired", async () => {
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.expired"]);
     const mgr = new CreditManager(store, undefined, emitter);
@@ -1895,7 +1901,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     // The client-side config schema rejects a negative minBalance outright, so
     // overdraft can only be reached via the manager's `overdraft` policy
     // (resolved into the lease admission floor), not via pricing config.
-    const store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.overdraft"]);
     const mgr = new CreditManager(store, undefined, emitter, {
@@ -1986,7 +1992,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   }, 60000);
 
   beforeEach(() => {
-    store = new PostgresStore(DATABASE_URL!, pg.Pool);
+    store = new PostgresStore(DATABASE_URL!, pool);
   });
 
   afterEach(async () => {
