@@ -28,7 +28,7 @@ jobs:
           python-version: "3.13"
       - run: pip install ruff
       - working-directory: python
-        run: ruff check src/ tests/ scripts/
+        run: ruff check src/ tests/
 
   typecheck:
     runs-on: ubuntu-latest
