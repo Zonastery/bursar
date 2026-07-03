@@ -22,7 +22,7 @@ import re
 from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
 from typing import Any
 
-ALLOWED_FUNCTIONS = {"ceil", "floor", "min", "max", "round", "if", "tier", "clamp", "percentile", "_ducto_if"}
+ALLOWED_FUNCTIONS = {"ceil", "floor", "min", "max", "round", "if", "tier", "clamp", "percentile", "_bursar_if"}
 
 # Note: ``ast.Pow`` is deliberately NOT in this set -- exponentiation is rejected
 # entirely (DoS hardening, C5). Rejection therefore surfaces as a "disallowed
@@ -199,7 +199,7 @@ def _dmax(*args: Any) -> Decimal:
 
 
 CUSTOM_FUNCTIONS: dict[str, Any] = {
-    "_ducto_if": _if,
+    "_bursar_if": _if,
     "tier": _tier,
     "clamp": _clamp,
     "percentile": _percentile,
@@ -213,7 +213,7 @@ CUSTOM_FUNCTIONS: dict[str, Any] = {
 # Name of the namespace helper that builds an exact Decimal from a literal's
 # source text. Underscore-prefixed and not in ALLOWED_FUNCTIONS, so an author
 # cannot call it directly (it is injected only by the transformer).
-_DECIMAL_CTOR = "_ducto_dec"
+_DECIMAL_CTOR = "_bursar_dec"
 
 # Names exempt from variable checks (functions + eval utilities + injected
 # Decimal constructor).
@@ -241,7 +241,7 @@ def _make_decimal(literal: str) -> Decimal:
 
 
 class _DecimalLiteralTransformer(ast.NodeTransformer):
-    """Rewrite numeric ``Constant`` nodes to ``_ducto_dec("<literal-text>")``.
+    """Rewrite numeric ``Constant`` nodes to ``_bursar_dec("<literal-text>")``.
 
     ``ast.Constant`` stores the value already parsed as a binary ``float``, and
     ``compile()`` forbids a ``Decimal`` inside a ``Constant``. So instead we
@@ -381,7 +381,7 @@ def _fix_not_precedence(tree: ast.AST) -> ast.AST:
 
 
 # Anchor the ``if(`` rewrite with ``\b`` so identifiers ending in ``if`` (e.g.
-# ``qualif(x)``) are not mangled into ``qual_ducto_if(x)`` (M4).
+# ``qualif(x)``) are not mangled into ``qual_bursar_if(x)`` (M4).
 _IF_RE = re.compile(r"\bif\s*\(")
 
 
@@ -406,8 +406,8 @@ def validate_expression(expr: str, known_variables: set[str] | None = None) -> N
 def _validate_expression_tree(expr: str, known_variables: set[str] | None = None) -> tuple[ast.Expression, str]:
     """Parse and validate an expression string, returning (AST, processed source)."""
     try:
-        # 'if' is a Python keyword; rewrite to _ducto_if for parsing.
-        processed = _IF_RE.sub("_ducto_if(", expr)
+        # 'if' is a Python keyword; rewrite to _bursar_if for parsing.
+        processed = _IF_RE.sub("_bursar_if(", expr)
         tree = ast.parse(processed, mode="eval")
     except SyntaxError as e:
         raise ExpressionError(f"syntax error: {e}") from e

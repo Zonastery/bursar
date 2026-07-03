@@ -215,7 +215,7 @@ class CreditStore(ABC):
                 transaction is still tagged with ``feature`` when given).
             feature_period_start: The calendar-aligned window start for
                 ``feature_limit.period``, resolved by the manager via
-                :func:`ducto.allowance.resolve_calendar_window`.
+                :func:`bursar.allowance.resolve_calendar_window`.
 
         Enforcement (inserted between the spend-cap step and the balance floor):
         counting is **ledger-derived**, exactly like spend caps — no separate
@@ -476,7 +476,7 @@ class CreditStore(ABC):
         """Get remaining free allowance for current billing period.
 
         ``period_start`` overrides the window key for ``rolling_30d``/``anniversary``
-        plans (resolved by the manager via :func:`ducto.allowance.resolve_allowance_window`);
+        plans (resolved by the manager via :func:`bursar.allowance.resolve_allowance_window`);
         ``None`` keeps the calendar-month default (WS9).
         """
         ...
@@ -499,7 +499,7 @@ class CreditStore(ABC):
 
         Mirrors :meth:`check_spend_cap`/:meth:`check_allowance`: the caller (the
         manager) has already resolved the ``FeatureLimit`` from the user's plan
-        and the calendar window via :func:`ducto.allowance.resolve_calendar_window`
+        and the calendar window via :func:`bursar.allowance.resolve_calendar_window`
         — this method only counts. Counting is ledger-derived (see
         :meth:`deduct_with_allowance`): the number of committed ``usage``
         transactions with ``metadata.feature == feature`` in ``[period_start,
@@ -572,7 +572,7 @@ class CreditStore(ABC):
     ) -> SweepResult:
         """Sweep expired credits from all users' balances, or a single user's.
 
-        Credit expiry is the one time-based mechanism in ducto that isn't
+        Credit expiry is the one time-based mechanism in bursar that isn't
         already lazy-on-read (allowance windows and lease TTLs need no cron).
         ``user_id`` lets a caller (typically the manager layer, before a
         balance-affecting operation) scope the sweep to just that user so it

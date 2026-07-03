@@ -1095,7 +1095,7 @@ class MemoryStore(CreditStore):
         """Resolve the exclusive window end for a calendar-aligned feature-limit period.
 
         ``period_start`` is already the aligned window start (resolved by the
-        caller via :func:`ducto.allowance.resolve_calendar_window`), so
+        caller via :func:`bursar.allowance.resolve_calendar_window`), so
         re-resolving the window for a ``now`` constructed from that same start
         date returns the exact ``(period_start, period_end)`` pair unchanged —
         this avoids duplicating the daily/weekly/monthly/yearly length logic.

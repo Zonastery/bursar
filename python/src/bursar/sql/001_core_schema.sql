@@ -135,12 +135,7 @@ BEGIN
     50
   ) INTO v_bonus;
 
-  INSERT INTO public.user_credits (user_id, balance, lifetime_purchased)
-  VALUES (NEW.id, v_bonus, 0)
-  ON CONFLICT (user_id) DO NOTHING;
-
-  INSERT INTO public.credit_transactions (user_id, amount, type)
-  VALUES (NEW.id, v_bonus, 'signup_bonus');
+  PERFORM public.credits_add(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
 
   RETURN NEW;
 END;

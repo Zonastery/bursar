@@ -379,7 +379,7 @@ class HttpxSupabaseStore(CreditStore):
         ``feature``/``feature_limit``/``feature_period_start`` are forwarded as
         ``p_feature``/``p_feature_max_calls``/``p_feature_action``/
         ``p_feature_period_start``; the exclusive window end is derived here
-        (via :func:`ducto.allowance.resolve_calendar_window`) and forwarded as
+        (via :func:`bursar.allowance.resolve_calendar_window`) and forwarded as
         ``p_feature_period_end``. ``feature_limit=None`` skips enforcement
         (the RPC still tags ``metadata.feature`` when ``feature`` is given).
         """

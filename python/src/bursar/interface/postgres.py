@@ -249,7 +249,7 @@ class PostgresStore(CreditStore):
         the RPC's trailing ``p_feature*`` params; the RPC derives the window end
         itself from ``feature_limit.period`` is NOT possible server-side (the
         cadence lives in Python), so the exclusive window end is computed here
-        via :func:`ducto.allowance.resolve_calendar_window` and passed as
+        via :func:`bursar.allowance.resolve_calendar_window` and passed as
         ``p_feature_period_end``. ``feature_limit=None`` skips enforcement
         entirely (the RPC still tags ``metadata.feature`` when ``feature`` is
         given).

@@ -12,7 +12,7 @@ Use one of these **private** channels:
    repository's **Security** tab → **Report a vulnerability**
    (<https://github.com/Zonastery/bursar/security/advisories/new>). This opens a
    private security advisory visible only to you and the maintainers.
-2. **Email:** <apoorwv@gmail.com> with the subject line `bursar security`.
+2. **Email:** <security@zonastery.com> with the subject line `bursar security`.
 
 Please include a description of the issue, the affected version(s), and a
 minimal reproduction (e.g. the pricing expression or API call that triggers it).

@@ -243,7 +243,7 @@ class FeatureLimit(BaseModel):
 
     ``max_calls`` bounds how many times a feature may be invoked within one
     ``period`` window. Windows are calendar-aligned (see
-    :func:`ducto.allowance.resolve_calendar_window`): ``daily`` resets at UTC
+    :func:`bursar.allowance.resolve_calendar_window`): ``daily`` resets at UTC
     midnight, ``weekly`` on Monday (ISO week), ``monthly`` on the 1st,
     ``yearly`` on Jan 1 — every user resets together, no per-user anchor.
 

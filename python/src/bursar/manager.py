@@ -76,7 +76,7 @@ from bursar.metrics import UsageMetrics
 
 
 class CreditError(Exception):
-    """Coherent base for ducto credit-domain errors raised by the manager.
+    """Coherent base for bursar credit-domain errors raised by the manager.
 
     Lets callers ``except CreditError`` to catch any admission/settle failure
     (interface plan §3 / M2), while still distinguishing specific subclasses.
