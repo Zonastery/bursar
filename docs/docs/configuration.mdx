@@ -310,12 +310,12 @@ The same config as JSON:
 | `is_default` | boolean | no | Marks this tier as the destination for untagged `add_credits()`/`addCredits()` calls. Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
 
 :::note Tier names are independent of `free_allowance`
-A tier named `"allowance"` is unrelated to `PlanDefinition.free_allowance` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; ducto doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
+A tier named `"allowance"` is unrelated to `PlanDefinition.free_allowance` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; bursar doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
 :::
 
 ### No-tiers fallback
 
-Omitting `tiers` entirely preserves 100% of today's single-balance behavior: internally, ducto routes everything through a synthetic `"default"` tier, so every existing config keeps working with zero changes. An explicit empty `tiers: {}` is a config validation error — it's ambiguous whether you meant "no tiers configured" or "tiers not set up yet" — omit the key instead.
+Omitting `tiers` entirely preserves 100% of today's single-balance behavior: internally, bursar routes everything through a synthetic `"default"` tier, so every existing config keeps working with zero changes. An explicit empty `tiers: {}` is a config validation error — it's ambiguous whether you meant "no tiers configured" or "tiers not set up yet" — omit the key instead.
 
 ### Deduction order
 
@@ -351,7 +351,7 @@ search: "search_queries * 0.5 + search_results * 0.05"
 
 ### `cache` (optional)
 
-Cache read discounts — a **single expression string**, not a dict. This should typically evaluate to `<= 0` (a rebate/discount taken off the total); ducto does not enforce the sign, so a positive `cache` expression is valid syntax but will silently *increase* the total cost — treat the non-positive convention as a config-authoring rule you must follow yourself. Cross-reference [Expressions](/docs/expressions) for available cache variables.
+Cache read discounts — a **single expression string**, not a dict. This should typically evaluate to `<= 0` (a rebate/discount taken off the total); bursar does not enforce the sign, so a positive `cache` expression is valid syntax but will silently *increase* the total cost — treat the non-positive convention as a config-authoring rule you must follow yourself. Cross-reference [Expressions](/docs/expressions) for available cache variables.
 
 ```yaml
 cache: "-cache_read_tokens * 0.0045"
@@ -372,7 +372,7 @@ The **balance floor** — the minimum balance a user must keep. Default `0`, mea
 Use `PricingEngine.from_dict` / `PricingEngine.fromDict` when you only need cost calculation and don't need a store.
 
 ```python
-from ducto import PricingEngine
+from bursar import PricingEngine
 
 # From dict
 engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 1"}})
@@ -384,9 +384,9 @@ with open("pricing.yaml") as f:
 ```
 
 ```typescript
-import { PricingEngine } from "@apoorwv/ducto";
+import { PricingEngine } from "@zonastery/bursar";
 // loadPricingFile reads from disk, so it lives in the Node-only subpath:
-import { loadPricingFile } from "@apoorwv/ducto/node";
+import { loadPricingFile } from "@zonastery/bursar/node";
 
 const engine = PricingEngine.fromDict({ models: { _default: "input_tokens * 1" } });
 
@@ -426,7 +426,7 @@ await manager.loadPricingFromStore();
 Pricing stored in `credit_pricing_config` table. Update via CLI or RPC — no redeploy needed.
 
 ```bash
-ducto pricing set config.json
+bursar pricing set config.json
 ```
 
 `CreditManager.load_pricing_from_store()` fetches the latest active config.

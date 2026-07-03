@@ -66,38 +66,25 @@ function featurePresent(value: unknown): boolean {
 function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition {
   const p = raw as Record<string, unknown>;
   const freeAllowanceRaw = (p["freeAllowance"] ?? p["free_allowance"]) as
-    | number
-    | string
-    | undefined;
+    number | string | undefined;
   const defaultBillingModeRaw = (p["defaultBillingMode"] ??
     p["billingMode"] ??
     p["default_billing_mode"] ??
     p["billing_mode"]) as string | undefined;
   const overdraftFloorRaw = (p["overdraftFloor"] ?? p["overdraft_floor"]) as
-    | number
-    | string
-    | null
-    | undefined;
+    number | string | null | undefined;
   const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as
-    | Record<string, string>
-    | null
-    | undefined;
+    Record<string, string> | null | undefined;
   const perOperationRaw = (p["perOperation"] ?? p["per_operation"]) as
-    | Record<string, unknown>
-    | null
-    | undefined;
+    Record<string, unknown> | null | undefined;
   const maxConcurrentRaw = (p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
   const allowancePeriodRaw = (p["allowancePeriod"] ?? p["allowance_period"]) as
-    | AllowancePeriod
-    | undefined;
+    AllowancePeriod | undefined;
   const featureLimitsRaw = (p["featureLimits"] ?? p["feature_limits"]) as
-    | Record<string, unknown>
-    | null
-    | undefined;
+    Record<string, unknown> | null | undefined;
 
   const billingMode = (defaultBillingModeRaw === "overdraft" ? "overdraft" : "strict") as
-    | "strict"
-    | "overdraft";
+    "strict" | "overdraft";
   return {
     id: (p["id"] as string | undefined) ?? planKey,
     name: (p["name"] as string | undefined) ?? planKey,
@@ -143,10 +130,7 @@ function normaliseFeatureLimitsMap(
 function normaliseTierDefinition(tierKey: string, raw: unknown): TierDefinition {
   const t = raw as Record<string, unknown>;
   const defaultTtlDaysRaw = (t["defaultTtlDays"] ?? t["default_ttl_days"]) as
-    | number
-    | string
-    | null
-    | undefined;
+    number | string | null | undefined;
   const allowOverdraftRaw = (t["allowOverdraft"] ?? t["allow_overdraft"]) as boolean | undefined;
   const isDefaultRaw = (t["isDefault"] ?? t["is_default"]) as boolean | undefined;
   return {
@@ -425,7 +409,7 @@ export class MemoryStore extends CreditStore {
         "010_credit_tiers.sql",
         // NOTE: the contract doc for this feature named this migration
         // "011_feature_limits.sql", but "011_lazy_expiry.sql" already occupies
-        // that slot in python/src/ducto/sql/ (a numbering collision between two
+        // that slot in python/src/bursar/sql/ (a numbering collision between two
         // parallel work tracks) — using the next free number here instead.
         "012_feature_limits.sql",
       ],
@@ -1510,8 +1494,7 @@ export class MemoryStore extends CreditStore {
     // breakdown drives allocation; legacy debits without a stored breakdown
     // (pre-tiers) fall back to the whole amount landing in "default".
     const originalBreakdown = (origTx.metadata?.["tierBreakdown"] as
-      | Record<string, Decimal>
-      | undefined) ?? { default: originalDebit };
+      Record<string, Decimal> | undefined) ?? { default: originalDebit };
 
     // tierRemaining[t] = original[t] - Σ(all PRIOR refunds' own breakdown[t]) —
     // derived fresh each time so repeated partial refunds compose correctly

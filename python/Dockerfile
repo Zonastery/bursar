@@ -26,13 +26,13 @@ RUN pip install --no-cache-dir build \
 FROM python:3.12.7-slim-bookworm AS runtime
 
 # Run as a non-root user (H8).
-RUN useradd --create-home --uid 10001 ducto
+RUN useradd --create-home --uid 10001 bursar
 COPY --from=build /install /usr/local
 
-USER ducto
-WORKDIR /home/ducto
+USER bursar
+WORKDIR /home/bursar
 
-# `ducto migrate` / `ducto pricing …` read secrets from the environment
+# `bursar migrate` / `bursar pricing …` read secrets from the environment
 # (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) — never bake them in.
-ENTRYPOINT ["ducto"]
+ENTRYPOINT ["bursar"]
 CMD ["--help"]

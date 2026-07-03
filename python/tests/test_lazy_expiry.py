@@ -20,10 +20,10 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import CreditManager, UsageMetrics
-from ducto.events import CreditEventEmitter
-from ducto.interface.memory import MemoryStore
-from ducto.manager import InsufficientCreditsError
+from bursar import CreditManager, UsageMetrics
+from bursar.events import CreditEventEmitter
+from bursar.interface.memory import MemoryStore
+from bursar.manager import InsufficientCreditsError
 
 # Fixed store clock: grants below use `expires_at=FIXED_NOW - timedelta(...)`,
 # i.e. already expired relative to the store's "now", with no sleeping needed.

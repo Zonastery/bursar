@@ -1,4 +1,4 @@
--- ducto: per-user spend caps and rate limiting.
+-- bursar: per-user spend caps and rate limiting.
 -- credit_spend_caps table and check_spend_cap RPC.
 
 CREATE TABLE IF NOT EXISTS public.credit_spend_caps (

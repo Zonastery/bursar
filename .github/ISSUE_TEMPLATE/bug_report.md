@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in ducto's credit calculation or CLI
+about: Report a bug in bursar's credit calculation or CLI
 title: ''
 labels: bug
 assignees: ''
@@ -19,7 +19,7 @@ assignees: ''
 
 **Environment:**
 - Python version:
-- ducto version:
+- bursar version:
 - Storage backend (none / Supabase / Postgres):
 
 **Additional context**

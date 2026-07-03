@@ -1,5 +1,5 @@
 {
-  "name": "@apoorwv/ducto",
+  "name": "@zonastery/bursar",
   "version": "3.0.0",
   "description": "Declarative credit calculation engine for AI SaaS platforms",
   "type": "module",
@@ -43,12 +43,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/apoorwv/ducto.git"
+    "url": "git+https://github.com/Zonastery/bursar.git"
   },
   "bugs": {
     "url": "https://github.com/apoorwv/ducto/issues"
   },
-  "homepage": "https://apoorwv.github.io/ducto/",
+  "homepage": "https://zonastery.github.io/bursar/",
   "license": "MIT",
   "dependencies": {
     "decimal.js": "^10.6.0"

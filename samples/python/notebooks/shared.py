@@ -1,6 +1,6 @@
-"""Shared helper for ducto notebooks.
+"""Shared helper for bursar notebooks.
 
-Starts a temporary Postgres cluster, runs ducto schema setup, and returns a
+Starts a temporary Postgres cluster, runs bursar schema setup, and returns a
 configured ``PostgresStore``.  Requires Postgres binaries on PATH.
 
 Usage::
@@ -8,7 +8,7 @@ Usage::
     from shared import start_postgres_store, cleanup
     store, pgdata = start_postgres_store()
     try:
-        # ... ducto operations ...
+        # ... bursar operations ...
     finally:
         cleanup(pgdata)
 """
@@ -40,7 +40,7 @@ def _free_port() -> int:
 
 
 def start_postgres_store(pgdata: str | None = None) -> tuple:
-    """Start a temporary Postgres cluster, run ducto schema setup.
+    """Start a temporary Postgres cluster, run bursar schema setup.
 
     Returns
     -------
@@ -48,10 +48,10 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         ``(store, pgdata_path)``.  Caller **must** call ``cleanup(pgdata_path)``
         when done (e.g. in a ``finally`` block or final notebook cell).
     """
-    from ducto.interface.postgres import PostgresStore
+    from bursar.interface.postgres import PostgresStore
 
     pg_bin = _find_pg()
-    pgdata = pgdata or tempfile.mkdtemp(prefix="ducto_demo_")
+    pgdata = pgdata or tempfile.mkdtemp(prefix="bursar_demo_")
     port = str(_free_port())
     user = os.environ.get("USER", os.environ.get("USERNAME", "postgres"))
     pg_ctl = os.path.join(pg_bin, "pg_ctl")
@@ -75,12 +75,12 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
     )
 
     subprocess.run(
-        [os.path.join(pg_bin, "createdb"), "-h", "localhost", "-p", port, "ducto_demo"],
+        [os.path.join(pg_bin, "createdb"), "-h", "localhost", "-p", port, "bursar_demo"],
         check=True,
         capture_output=True,
     )
 
-    dsn = f"host=localhost port={port} dbname=ducto_demo user={user}"
+    dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
     store = PostgresStore(dsn)
     store.setup()
     return store, pgdata

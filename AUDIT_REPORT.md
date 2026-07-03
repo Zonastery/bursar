@@ -1,7 +1,7 @@
-# ducto — Codebase Audit Report
+# bursar — Codebase Audit Report
 
 **Scope:** Python SDK, TypeScript/JavaScript SDK, SQL migrations, test suites, docs site, CI/CD, and repo hygiene.
-**Method:** 7 parallel reviewers, one per coherent slice; the highest-impact findings were independently re-verified against the source. ducto is a usage-based **credit/billing engine**, so *money-safety, atomicity, and sandbox security* are weighted highest.
+**Method:** 7 parallel reviewers, one per coherent slice; the highest-impact findings were independently re-verified against the source. bursar is a usage-based **credit/billing engine**, so *money-safety, atomicity, and sandbox security* are weighted highest.
 
 > **Bottom line:** The library is well-structured and the AST sandbox's *structural* defenses are mostly sound, but the credit-deduction pipeline is **not transactionally safe**, the in-memory store has **no locking**, the two SDKs **diverge in ways that produce different bills**, one team-attribution SQL function is **outright broken**, and there are **no concurrency / parity / sandbox-escape tests** to catch any of it. Several are direct revenue-leak or double-spend paths.
 
@@ -73,7 +73,7 @@
 ## CRITICAL
 
 ### C1 — Non-atomic deduct pipeline; idempotency checked too late
-**`python/src/ducto/manager.py:240–343`** (JS mirrors at `javascript/src/manager.ts:174–274`)
+**`python/src/bursar/manager.py:240–343`** (JS mirrors at `javascript/src/manager.ts:174–274`)
 `deduct()` is four independent store round-trips with no spanning transaction:
 `check_allowance`/`increment_usage_window` (244) → `check_spend_cap` (269) → `reserve_credits` (318) → `deduct_credits` (332). Idempotency is only honored *inside* `deduct_credits` (key passed at 336). Consequences:
 - **Allowance double-spend on retry:** a retried request with the same `idempotency_key` re-runs `increment_usage_window` (244) and burns free allowance again before the replay is recognized at 332.
@@ -83,25 +83,25 @@
 **Fix:** Push calculate→allowance→cap→reserve→deduct into a single server-side transactional RPC, idempotency-keyed end-to-end; or add compensation (restore the usage window, release the reservation) on every failure path. Check idempotency *first*.
 
 ### C2 — MemoryStore has no locking → races / double-spend
-**`python/src/ducto/interface/memory.py`** (e.g. `reserve_credits:187`, `deduct_credits:236`, `deduct_team:790`); **`javascript/src/stores/memory-store.ts:178`**
+**`python/src/bursar/interface/memory.py`** (e.g. `reserve_credits:187`, `deduct_credits:236`, `deduct_team:790`); **`javascript/src/stores/memory-store.ts:178`**
 Every mutation is a plain read-modify-write on a dict (`self._balances[user_id] = current - amount`) with **no lock of any kind**. The SQL stores rely on `SELECT … FOR UPDATE`; MemoryStore has no equivalent, so under concurrency it can go negative / double-spend, and it does **not** match the SQL stores' guarantees. There are also **no concurrency tests** to catch this (the "concurrent" tests are sequential `await`s).
 
 **Fix:** Guard all mutating/reading methods with a `threading.RLock` (Python) / serialize (JS), or loudly document single-threaded-only. Add concurrent-deduct tests asserting total debited never exceeds starting balance.
 
 ### C3 — `deduct_credits` ignores the reservation amount → guard defeated
-**`python/src/ducto/sql/002_credit_rpcs.sql:128–223`**, mirrored in `memory.py:236–271`
+**`python/src/bursar/sql/002_credit_rpcs.sql:128–223`**, mirrored in `memory.py:236–271`
 `reserve_credits` locks the row and caps the reservation to available balance, but `deduct_credits` never validates `p_amount` against the reserved amount, nor that the reservation exists/is unexpired — it only checks raw balance and deletes the reservation row by id. So `reserve_credits(10)` then `deduct_credits(1000)` succeeds; and two concurrent reserve/deduct flows each pass their independent balance check and **over-deduct** the same credits. The reservation provides no real spend ceiling.
 
 **Fix:** In `deduct_credits`, lock and validate the reservation (`p_amount <= reservation.amount`, unexpired), or deduct against `balance − active_reservations`. The reservation row must be the authority on the maximum deductible amount.
 
 ### C4 — `get_team_members` references a non-existent column
-**`python/src/ducto/sql/008_team_balances.sql:153`**
+**`python/src/bursar/sql/008_team_balances.sql:153`**
 `LEFT JOIN public.credit_transactions ct ON ct.user_id = tm.user_id AND ct.team_id = p_team_id` — but `credit_transactions` (`001_credit_tables.sql`) has **no `team_id` column** (the team id lives in `metadata`). *Verified:* `grep team_id 001_credit_tables.sql` → no match. The function raises `column ct.team_id does not exist` on every call, breaking team spend attribution.
 
 **Fix:** Either add a real `team_id UUID` column (and index) to `credit_transactions`, or change the predicate to `ct.metadata->>'team_id' = p_team_id::text`. Reconcile with the `credit_team_members.total_spent` counter (see M2).
 
 ### C5 — Expression DoS via `**` and uncaught `OverflowError`
-**`python/src/ducto/expr.py:27` (`ast.Pow` allowlisted), `319–324`**
+**`python/src/bursar/expr.py:27` (`ast.Pow` allowlisted), `319–324`**
 Only `ZeroDivisionError` is caught around `eval`; `ast.Pow` is unbounded. *Verified:* `9 ** 9 ** 9` allocates a multi-GB integer and hangs/OOMs; `input_tokens ** 400.0` raises an **uncaught `OverflowError`** that escapes the engine. Pricing expressions come from the DB `credit_pricing_config` table — a real trust boundary.
 
 **Fix:** Remove `**` or require a small constant exponent; catch `OverflowError`/`ValueError` and convert to `ExpressionError`; reject non-finite results.
@@ -113,14 +113,14 @@ The `in` operator walks the prototype chain, so `__proto__`, `constructor`, `toS
 **Fix:** Use `Object.prototype.hasOwnProperty.call(variables, n.name)` (or a null-prototype object / `Map`); reject any non-own key. Apply the same in `validateVariables` (414).
 
 ### C7 — `NaN`/`Infinity` flow into charges unguarded
-**`javascript/src/expr.ts:522–528`, `engine.ts:10–12`, `manager.ts`; `python/src/ducto/expr.py:322–323`**
+**`javascript/src/expr.ts:522–528`, `engine.ts:10–12`, `manager.ts`; `python/src/bursar/expr.py:322–323`**
 JS division-by-zero → `Infinity`, modulo-by-zero → `NaN`; `safeTotal(NaN)` stays `NaN`, `safeTotal(Infinity)` stays `Infinity`. In the manager, `NaN > 0` is false (silent free usage) but **`Infinity > 0` is true → `Math.trunc(Infinity)` = `Infinity` is charged**. No `isFinite` guard anywhere. Python maps div-by-zero to `inf` (`expr.py:323`), which flows through `_safe_total` as an infinite cost. The two SDKs also disagree on `% 0` (Python `inf` vs JS `NaN`).
 
 **Fix:** Assert `Number.isFinite`/`math.isfinite` on each evaluated expression and on `total`; raise `ExpressionError` otherwise. Don't map div-by-zero to `inf`.
 
 ### C8 — DB credentials on the command line
-**`python/README.md:89`, `python/src/ducto/__main__.py:72–91`, root `Makefile:9,32`**
-`ducto migrate "postgresql://user:pass@host/db"` passes the password as a positional CLI arg → visible in `ps`/`/proc/<pid>/cmdline`, recorded in shell history, and leaked into CI logs. The root Makefile likewise interpolates `PG_PASS` onto the command line.
+**`python/README.md:89`, `python/src/bursar/__main__.py:72–91`, root `Makefile:9,32`**
+`bursar migrate "postgresql://user:pass@host/db"` passes the password as a positional CLI arg → visible in `ps`/`/proc/<pid>/cmdline`, recorded in shell history, and leaked into CI logs. The root Makefile likewise interpolates `PG_PASS` onto the command line.
 
 **Fix:** Read the connection string from an env var (like the `SUPABASE_*` path already does) or stdin/file; document env-var as primary; pass URLs via environment in Make, not on the command line.
 
@@ -144,12 +144,12 @@ All cost math is float. *Verified:* `input_tokens*0.1 + output_tokens*0.2` (both
 **Fix:** Guard all success emits on `!result.error`; add failure events; make `deduct_team` consistent with `deduct`.
 
 ### H4 — `expire_credits` re-sweeps already-expired grants
-**`python/src/ducto/sql/006_credit_expiry.sql:25–66`**
+**`python/src/bursar/sql/006_credit_expiry.sql:25–66`**
 The sweep sums all transactions with `expires_at <= now()` and debits, but **never marks grants as swept**. Next run re-sums them; if fresh credits were added meanwhile, they're clawed back again. MemoryStore *does* null `expires_at` on sweep (`memory.py:512`), so the backends diverge and the SQL one is wrong (financial over-charge).
 **Fix:** Mark swept grants (drop `expires_at` / add `swept_at`) so they're excluded next run, matching MemoryStore.
 
 ### H5 — Migration runner commits per-file and continues past failures
-**`python/src/ducto/interface/postgres.py:65–105`; `supabase.py:46–102`; `sql/008:4`**
+**`python/src/bursar/interface/postgres.py:65–105`; `supabase.py:46–102`; `sql/008:4`**
 `PostgresStore.setup` does `execute; commit` per file and on error appends to a list and **continues** — later files commit onto a half-built schema, with no overall transaction and an easily-ignored error list. `supabase.run_migrations` has no per-file handling but also no spanning transaction. Separately, `008` runs `ALTER TYPE … ADD VALUE 'team_usage'` in the same file that references it (Postgres forbids using a new enum value in the same transaction).
 **Fix:** Run all migrations in one transaction (or stop on first error and roll back). Move enum `ADD VALUE IF NOT EXISTS` to its own migration committed before any use.
 
@@ -160,16 +160,16 @@ The sweep sums all transactions with `expires_at <= now()` and debits, but **nev
 **Fix:** Validate arities (`if`/`clamp`==3, `tier`>=3 odd, `percentile` range 0–100, `min`/`max`>=1) and raise `ExpressionError` in both SDKs so config-load catches it.
 
 ### H7 — `pricing set` retries any exception 15× → duplicate immutable versions
-**`python/src/ducto/__main__.py:156–167`**
+**`python/src/bursar/__main__.py:156–167`**
 The retry loop catches bare `Exception` and retries 15× with 2 s sleeps "for PostgREST cache" — but also retries auth/validation/network errors (30 s waits), and because `pricing set` always creates a new immutable version, a write that committed server-side but timed out on the client gets retried and **creates a duplicate version**. Same pattern duplicated across all `pricing` subcommands.
 **Fix:** Retry only the specific transient PostgREST/connection error; never blind-retry a non-idempotent write; use bounded backoff.
 
 ### H8 — Dockerfile bakes secrets, runs as root, unpinned
 **`python/Dockerfile:1–4`** — `FROM python:3.12-slim` (unpinned), `COPY . .` with **no `.dockerignore`** → any local `.env` (Supabase service-role key, publish token) is copied into a layer permanently; runs as **root**; no `USER`/`ENTRYPOINT`; single stage.
-**Fix:** Pin base by digest, add `.dockerignore` (`.env`, `.venv`, `dist`, `tests`, `.git`), add non-root `USER` and `ENTRYPOINT ["ducto"]`, consider multi-stage.
+**Fix:** Pin base by digest, add `.dockerignore` (`.env`, `.venv`, `dist`, `tests`, `.git`), add non-root `USER` and `ENTRYPOINT ["bursar"]`, consider multi-stage.
 
 ### H9 — Version mismatch breaks release tagging
-**`python/src/ducto/__init__.py:3` (`0.1.2`) vs `python/pyproject.toml:3` (`1.0.3`)** — *verified.* `python/Makefile:3` derives the release tag from `ducto.__version__`, so `make release` tags `v0.1.2` while PyPI publishes `1.0.3`; `ducto.__version__` reports the wrong number at runtime.
+**`python/src/bursar/__init__.py:3` (`0.1.2`) vs `python/pyproject.toml:3` (`1.0.3`)** — *verified.* `python/Makefile:3` derives the release tag from `bursar.__version__`, so `make release` tags `v0.1.2` while PyPI publishes `1.0.3`; `bursar.__version__` reports the wrong number at runtime.
 **Fix:** Single-source the version (`importlib.metadata.version` or `[tool.setuptools.dynamic]`).
 
 ### H10 — JS `publishPricing` still fire-and-forget
@@ -197,7 +197,7 @@ The retry loop catches bare `Exception` and retries 15× with 2 s sleeps "for Po
 **Fix:** Add Python/Node matrices matching the support claim; pin actions to commit SHAs; make versions consistent across workflows.
 
 ### H16 — Idempotency check+insert not atomic / not user-scoped
-**`python/src/ducto/sql/002_credit_rpcs.sql:154–210`** — `SELECT … WHERE metadata->>'idempotency_key' = …` then update/insert is read-then-write; two concurrent same-key calls both pass the SELECT, both deduct, and the second hits the (uncaught) unique-violation. The lookup has **no `user_id` predicate**, so a key collision across users returns another user's transaction.
+**`python/src/bursar/sql/002_credit_rpcs.sql:154–210`** — `SELECT … WHERE metadata->>'idempotency_key' = …` then update/insert is read-then-write; two concurrent same-key calls both pass the SELECT, both deduct, and the second hits the (uncaught) unique-violation. The lookup has **no `user_id` predicate**, so a key collision across users returns another user's transaction.
 **Fix:** Wrap insert in `EXCEPTION WHEN unique_violation THEN <return original>`; scope the key/index by `user_id`; take the row lock before the idempotency check.
 
 ### H17 — JS `PostgresStore.setup()` is a no-op reporting success
@@ -205,7 +205,7 @@ The retry loop catches bare `Exception` and retries 15× with 2 s sleeps "for Po
 **Fix:** Implement migration execution or return `success:false`/throw.
 
 ### H18 — `list_*` RPCs lack `REVOKE` → data exposure on Supabase
-**`python/src/ducto/sql/012_list_transactions.sql`, `013_list_usage_events.sql`** — unlike 001–011, these `SECURITY DEFINER` functions have no `REVOKE EXECUTE … FROM anon, authenticated` and no `auth.uid()` guard, so on a Supabase deployment any authenticated client can read **arbitrary users'** transaction/usage history by passing a `p_user_id`.
+**`python/src/bursar/sql/012_list_transactions.sql`, `013_list_usage_events.sql`** — unlike 001–011, these `SECURITY DEFINER` functions have no `REVOKE EXECUTE … FROM anon, authenticated` and no `auth.uid()` guard, so on a Supabase deployment any authenticated client can read **arbitrary users'** transaction/usage history by passing a `p_user_id`.
 **Fix:** Add `REVOKE EXECUTE … FROM anon, authenticated;` and an `auth.uid()`/role guard consistent with the other RPCs.
 
 ---
@@ -227,7 +227,7 @@ The retry loop catches bare `Exception` and retries 15× with 2 s sleeps "for Po
 - **M13 — pyproject hygiene.** `supabase` extra pulls `psycopg2-binary` (only `httpx` is needed); dev deps duplicated across `test` extra and `[dependency-groups].dev` with version skew (`pytest-testmon` 2.0 vs 2.2, `httpx` 0.27 vs 0.28.1); `requires-python` unbounded vs the 3.11–3.13 claim. `pyproject.toml:40–104`.
 - **M14 — Pricing version assignment race.** `SELECT MAX(version)+1` then `INSERT` without locking (`sql/003:88–97`). Add a unique constraint on `version` and/or advisory-lock during publish.
 - **M15 — lefthook autofix.** `stage_fixed:true` silently stages tool-modified files into the commit; real checks only run pre-push and both are bypassable — CI must be the source of truth. `lefthook.yml:5–13`.
-- **M16 — Stale/broken docs.** "18 abstract methods / 10 migrations" everywhere (actual **28 / 13** — verified); `configuration.mdx:123` imports `loadPricingFile` from `@apoorwv/ducto` but it's only exported from `/node`; `docs/scripts/gen-api-docs.sh:18` has a malformed `printf` that produces an invalid Sphinx `index.rst`. CONTRIBUTING says "8 abstract methods".
+- **M16 — Stale/broken docs.** "18 abstract methods / 10 migrations" everywhere (actual **28 / 13** — verified); `configuration.mdx:123` imports `loadPricingFile` from `@zonastery/bursar` but it's only exported from `/node`; `docs/scripts/gen-api-docs.sh:18` has a malformed `printf` that produces an invalid Sphinx `index.rst`. CONTRIBUTING says "8 abstract methods".
 - **M17 — Committed generated/temp files.** `docs/docs/notebooks/01_pricing_basics.mdx.tmp` is tracked; all generated notebook `.mdx` are committed despite being regenerated by `prebuild`. `git rm` the temp file; gitignore generated output.
 - **M18 — `low_balance` magic threshold + spam.** `manager.py:364` emits on every deduct at/below `min_balance * 2` (undocumented constant, level-triggered → repeated alerts). Make configurable and edge-triggered.
 
@@ -244,7 +244,7 @@ The retry loop catches bare `Exception` and retries 15× with 2 s sleeps "for Po
 - **L7 — Supabase `httpx.Client` never closed; no retry.** `supabase.py:116`. Add `close()`/context-manager + bounded retry for idempotent RPCs. Postgres opens a connection per call (no pooling).
 - **L8 — Makefile portability.** Root Makefile relies on `.ONESHELL:` (silently ignored by macOS's GNU make 3.81) so the multi-line `test-js-integration` recipe breaks there; no `help`/`.DEFAULT_GOAL`. Document/require modern `gmake`.
 - **L9 — `.gitignore` gaps.** Missing `.venv/`, `.pytest_cache/`, `.coverage`/`htmlcov/`, `.testmondata`, `.env.*` — easy to commit a venv/coverage/secret file.
-- **L10 — Repo placeholders/typos.** `CODE_OF_CONDUCT.md:49` `[INSERT CONTACT METHOD]`; bug-report template `about: … ductor's …` (should be "ducto"); FUNDING placeholder lines; default Docusaurus social card. Confirm `apoorwv` is the intended canonical handle across LICENSE/URLs/package scope.
+- **L10 — Repo placeholders/typos.** `CODE_OF_CONDUCT.md:49` `[INSERT CONTACT METHOD]`; bug-report template `about: … bursarr's …` (should be "bursar"); FUNDING placeholder lines; default Docusaurus social card. Confirm `apoorwv` is the intended canonical handle across LICENSE/URLs/package scope.
 - **L11 — `package.json` (JS) hygiene.** `exports` lists `import` before `types`; no `require`/CJS condition; `pg`/`js-yaml` are dynamic-imported but not declared as optional `peerDependencies`; no `engines.node`.
 - **L12 — Pervasive `as`/`any` casts at the JS DB/config boundary** defeat type safety (`config.ts:55`, stores' `row as Record<string, unknown>`, `Number(undefined)`→`NaN`). Validate config value types (zod-style) to match Pydantic; treat DB rows as `unknown` and validate.
 - **L13 — Test-suite weaknesses (quality, not gaps already listed):** truthiness-only assertions (`toBeTruthy`, `> 0`, `is not None`) where exact values are deterministic; CLI tests assert substrings, not exit codes/parsed JSON; expiry tests are clock-fragile (`now().replace(second=0)`, `Date.now()+1` + `setTimeout(10)`); shared `user_1` fixture + lower-bound asserts hide state bleed; `supabase-store.test.ts` only asserts network rejects (no URL/header/payload checks); `test_set_active_pricing` is an empty `pass`; no coverage gate or `integration` marker in either suite. **Most dangerous missing tests:** concurrency/double-spend, sandbox-escape table (incl. `**` DoS and JS `__proto__`), NaN/Inf/`%0`, over-refund & cumulative partial refund, expiry double-sweep, cap accumulation, idempotency cross-user/different-amount, and a **cross-SDK parity harness**.

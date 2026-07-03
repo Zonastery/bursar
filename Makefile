@@ -1,4 +1,4 @@
-# ducto root Makefile.
+# bursar root Makefile.
 #
 # Portability (L8): the `test-js-integration` recipe is multi-line and relies on
 # GNU make's `.ONESHELL:`, which is IGNORED by GNU make < 3.82 (notably the
@@ -14,13 +14,13 @@ SHELL := /bin/bash
 
 PG_IMG ?= postgres:16
 PG_PORT ?= 5434
-PG_DB  ?= ducto_test
-PG_USER?= ducto
+PG_DB  ?= bursar_test
+PG_USER?= bursar
 # Test-only password for an ephemeral local/CI Postgres container. Override via
 # the environment for anything non-disposable; it is passed to Docker and the
 # test runner through the environment, never interpolated onto a command line.
-PG_PASS?= ducto
-PG_NAME?= ducto-pg-js
+PG_PASS?= bursar
+PG_NAME?= bursar-pg-js
 # Exported so child recipes inherit it from the environment (C8) instead of it
 # appearing as a CLI argument (where it would leak via `ps`/history/CI logs).
 export DATABASE_URL ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)

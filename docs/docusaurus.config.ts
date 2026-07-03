@@ -3,15 +3,15 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'ducto',
+  title: 'bursar',
   tagline: 'Declarative Credit Calculation Engine for AI SaaS',
   favicon: 'img/favicon.ico',
 
-  url: 'https://apoorwv.github.io',
-  baseUrl: '/ducto/',
+  url: 'https://zonastery.github.io',
+  baseUrl: '/bursar/',
 
-  organizationName: 'apoorwv',
-  projectName: 'ducto',
+  organizationName: 'zonastery',
+  projectName: 'bursar',
 
   onBrokenLinks: 'throw',
   markdown: {
@@ -45,7 +45,7 @@ const config: Config = {
         docs: {
           sidebarPath: './sidebars.ts',
           editUrl:
-            'https://github.com/apoorwv/ducto/tree/main/docs/',
+            'https://github.com/zonastery/bursar/tree/main/docs/',
         },
         blog: false,
         theme: {
@@ -61,9 +61,9 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'ducto',
+      title: 'bursar',
       logo: {
-        alt: 'ducto',
+        alt: 'bursar',
         src: 'img/logo.svg',
       },
       items: [
@@ -74,7 +74,7 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/apoorwv/ducto',
+          href: 'https://github.com/zonastery/bursar',
           label: 'GitHub',
           position: 'right',
         },
@@ -105,11 +105,11 @@ const config: Config = {
           items: [
             {
               label: 'GitHub Issues',
-              href: 'https://github.com/apoorwv/ducto/issues',
+              href: 'https://github.com/zonastery/bursar/issues',
             },
             {
               label: 'GitHub Discussions',
-              href: 'https://github.com/apoorwv/ducto/discussions',
+              href: 'https://github.com/zonastery/bursar/discussions',
             },
           ],
         },
@@ -118,20 +118,20 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/apoorwv/ducto',
+              href: 'https://github.com/zonastery/bursar',
             },
             {
               label: 'PyPI',
-              href: 'https://pypi.org/project/ducto/',
+              href: 'https://pypi.org/project/bursar/',
             },
             {
               label: 'npm',
-              href: 'https://www.npmjs.com/package/@apoorwv/ducto',
+              href: 'https://www.npmjs.com/package/@zonastery/bursar',
             },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} ducto. MIT License.`,
+      copyright: `Copyright © ${new Date().getFullYear()} bursar. MIT License.`,
     },
     prism: {
       theme: prismThemes.github,

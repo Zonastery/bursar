@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # Financial Safety (Leases)
 
-ducto charges **after** an AI operation completes. That is the natural shape — you don't know the real token count until the model returns — but it is also where money leaks. A naive "check balance, do work, debit" flow has two failure modes:
+bursar charges **after** an AI operation completes. That is the natural shape — you don't know the real token count until the model returns — but it is also where money leaks. A naive "check balance, do work, debit" flow has two failure modes:
 
 1. **Races.** Between the balance check and the debit, other concurrent operations also pass the check. Several expensive calls commit against the same headroom and the balance goes negative.
 2. **Runaway cost.** A single agentic or long-context call can finish costing far more than you estimated, debiting into **unrecoverable debt** for work that is already done.
@@ -29,7 +29,7 @@ Size the hold at the **worst case** you might bill, do the work, then settle the
 
 ```python
 from decimal import Decimal
-from ducto import CreditManager, UsageMetrics
+from bursar import CreditManager, UsageMetrics
 
 manager = CreditManager(store=store, policy="strict_prepaid")  # default
 manager.load_pricing_from_store()
@@ -57,7 +57,7 @@ print(deduction.amount, deduction.balance_after)
 
 ```typescript
 import Decimal from "decimal.js";
-import { CreditManager } from "@apoorwv/ducto";
+import { CreditManager } from "@zonastery/bursar";
 
 const manager = new CreditManager(store, null, null, { policy: "strict_prepaid" });
 await manager.loadPricingFromStore();
@@ -146,7 +146,7 @@ A plan carries a `default_billing_mode`, plan-wide `max_concurrent` / `overdraft
 `maxConcurrent` bounds the number of **simultaneously-active leases per operation type** — the durable defense against a double-submit (impatient user, client retry). The second admission of the same type is rejected with `ConcurrencyLimitError`; releasing or settling the first frees the slot.
 
 ```python
-from ducto.interface.models import PlanDefinition, OperationPolicy
+from bursar.interface.models import PlanDefinition, OperationPolicy
 
 PlanDefinition(
     id="pro", name="Pro",
@@ -259,7 +259,7 @@ Pass a single `low_balance` / `lowBalance` config object with `thresholds` (sort
 
 ```python
 from decimal import Decimal
-from ducto import CreditManager, LowBalanceConfig
+from bursar import CreditManager, LowBalanceConfig
 
 def reload_hook(event):
     # provider-agnostic: charge a saved card, enqueue a job, send an email, page on-call …
@@ -275,7 +275,7 @@ manager = CreditManager(
 ```
 
 ```typescript
-import { CreditManager, LowBalanceConfig } from "@apoorwv/ducto";
+import { CreditManager, LowBalanceConfig } from "@zonastery/bursar";
 
 const manager = new CreditManager(store, undefined, undefined, {
   lowBalance: {

@@ -1,4 +1,4 @@
-"""Tests for the ducto CLI (argparse interface, error handling, retries)."""
+"""Tests for the bursar CLI (argparse interface, error handling, retries)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from ducto.interface.base import StoreError
-from ducto.interface.memory import MemoryStore
+from bursar.interface.base import StoreError
+from bursar.interface.memory import MemoryStore
 
 
 def _run(*args: str) -> None:
-    """Invoke the ducto CLI ``main()`` with explicit argv (no sys.argv mutation)."""
-    from ducto.__main__ import main
+    """Invoke the bursar CLI ``main()`` with explicit argv (no sys.argv mutation)."""
+    from bursar.__main__ import main
 
     main(list(args))
 
@@ -33,7 +33,7 @@ def mem_store(monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
     monkeypatch.setenv("SUPABASE_URL", "http://localhost")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 
-    import ducto.__main__ as cli_mod
+    import bursar.__main__ as cli_mod
 
     monkeypatch.setattr(cli_mod, "_store_from_env", lambda: store)
     return store
@@ -49,7 +49,7 @@ def sample_config(tmp_path: Path) -> str:
 
 class TestMigrate:
     # The only connection env var `migrate` honors is DATABASE_URL (see
-    # ducto.__main__._cmd_migrate). CI sets DATABASE_URL for the real-Postgres
+    # bursar.__main__._cmd_migrate). CI sets DATABASE_URL for the real-Postgres
     # integration tests, so these tests must control it explicitly via
     # monkeypatch rather than relying on the ambient environment — otherwise
     # the "no config → error" cases pass locally but fail in CI.
@@ -66,7 +66,7 @@ class TestMigrate:
         pytest.importorskip("psycopg2")
         captured: dict[str, str] = {}
 
-        import ducto.interface.supabase as sb
+        import bursar.interface.supabase as sb
 
         class _Res:
             tables_created = ["001_core_schema.sql"]
@@ -93,7 +93,7 @@ class TestMigrate:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         captured: dict[str, str] = {}
 
-        import ducto.interface.supabase as sb
+        import bursar.interface.supabase as sb
 
         class _Res:
             tables_created: list[str] = []
@@ -111,7 +111,7 @@ class TestMigrate:
         pytest.importorskip("psycopg2")
         captured: dict[str, str] = {}
 
-        import ducto.interface.supabase as sb
+        import bursar.interface.supabase as sb
 
         class _Res:
             tables_created: list[str] = []
@@ -229,7 +229,7 @@ class TestPricingStore:
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
         # Force supabase extra present so we reach the env-var check, not the extra check.
-        import ducto.__main__ as cli_mod
+        import bursar.__main__ as cli_mod
 
         monkeypatch.setattr(cli_mod, "_require_extra", lambda _extra: None)
         assert _exit_code("pricing", "get") == 1
@@ -350,8 +350,8 @@ class TestRetryNarrowing:
     def test_transient_error_is_retried_then_succeeds(
         self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, sample_config: str
     ) -> None:
-        monkeypatch.setattr("ducto.__main__._RETRY_INITIAL_DELAY", 0.0)
-        monkeypatch.setattr("ducto.__main__._RETRY_MAX_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_INITIAL_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_MAX_DELAY", 0.0)
         calls = {"n": 0}
 
         def _flaky(_version: int) -> str:
@@ -368,8 +368,8 @@ class TestRetryNarrowing:
     def test_transient_error_exhausts_retries_exits_1(
         self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
-        monkeypatch.setattr("ducto.__main__._RETRY_INITIAL_DELAY", 0.0)
-        monkeypatch.setattr("ducto.__main__._RETRY_MAX_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_INITIAL_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_MAX_DELAY", 0.0)
 
         def _always(_version: int) -> str:
             raise StoreError("schema cache reload pending")
@@ -450,14 +450,14 @@ class TestRetryBackoff:
         self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, sample_config: str
     ) -> None:
         """'connection refused' in the message is a transient marker → retried."""
-        monkeypatch.setattr("ducto.__main__._RETRY_INITIAL_DELAY", 0.0)
-        monkeypatch.setattr("ducto.__main__._RETRY_MAX_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_INITIAL_DELAY", 0.0)
+        monkeypatch.setattr("bursar.__main__._RETRY_MAX_DELAY", 0.0)
         calls = {"n": 0}
 
         def _flaky(_version: int) -> str:
             calls["n"] += 1
             if calls["n"] < 2:
-                from ducto.interface.base import StoreError
+                from bursar.interface.base import StoreError
 
                 raise StoreError("connection refused")
             return "ok-id"
@@ -473,7 +473,7 @@ class TestRetryBackoff:
 
         def _boom(_version: int) -> str:
             calls["n"] += 1
-            from ducto.interface.base import StoreError
+            from bursar.interface.base import StoreError
 
             raise StoreError("invalid config for user")
 
@@ -518,8 +518,8 @@ class TestValidateThenUseEngine:
         assert "valid" in out.lower()
 
         # Step 2: Load the same config into a PricingEngine and calculate a cost.
-        from ducto import UsageMetrics
-        from ducto.engine import PricingEngine
+        from bursar import UsageMetrics
+        from bursar.engine import PricingEngine
 
         engine = PricingEngine.from_dict(config_data)
         result = engine.calculate(UsageMetrics(input_tokens=10, output_tokens=5))

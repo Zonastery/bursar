@@ -17,7 +17,7 @@ import type { PricingConfigData } from "../src/types.js";
 const ALLOWANCE_PERIODS: AllowancePeriod[] = ["calendar_month", "rolling_30d", "anniversary"];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SQL_DIR = join(__dirname, "../../python/src/ducto/sql");
+const SQL_DIR = join(__dirname, "../../python/src/bursar/sql");
 const DATABASE_URL = process.env.DATABASE_URL;
 
 const D = (n: number | string) => new Decimal(n);
@@ -83,9 +83,9 @@ describe("MemoryStore concurrency (double-spend guard, C2)", () => {
 // ───────────────────────────────────────────────────────────────────────────
 // Real Postgres integration. Runs only when DATABASE_URL is present, but when
 // it IS present it RUNS (not skips). When absent we log a visible skip notice.
-// Run a local pg16: `docker run -d -e POSTGRES_PASSWORD=ducto -e POSTGRES_DB=ducto
+// Run a local pg16: `docker run -d -e POSTGRES_PASSWORD=bursar -e POSTGRES_DB=bursar
 //   -p 55432:5432 postgres:16` then
-//   DATABASE_URL=postgresql://postgres:ducto@localhost:55432/ducto npx vitest run
+//   DATABASE_URL=postgresql://postgres:bursar@localhost:55432/bursar npx vitest run
 // ───────────────────────────────────────────────────────────────────────────
 if (!DATABASE_URL) {
   console.warn(

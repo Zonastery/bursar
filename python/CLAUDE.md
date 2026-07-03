@@ -1,4 +1,4 @@
-# ducto Python SDK
+# bursar Python SDK
 
 Credit billing engine for AI SaaS. Calculates usage costs from expressions, manages user balances, and enforces financial-safety policy via an atomic lease lifecycle.
 
@@ -9,19 +9,19 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 
 | File | Purpose |
 |------|---------|
-| `src/ducto/manager.py` | `CreditManager` — the main public API. All business logic lives here. |
-| `src/ducto/interface/base.py` | `CreditStore` ABC — the interface every store must implement. |
-| `src/ducto/interface/memory.py` | `MemoryStore` — reference implementation; the parity baseline for all stores. |
-| `src/ducto/interface/postgres.py` | `PostgresStore` — production store; all mutations call SQL RPCs via `psycopg2`. |
-| `src/ducto/interface/supabase.py` | `SupabaseStore` / `HttpxSupabaseStore` — Supabase-backed store. |
-| `src/ducto/interface/models.py` | All Pydantic result types, `PlanDefinition`, `OperationPolicy`. |
-| `src/ducto/engine.py` | `PricingEngine` — evaluates expression strings against `UsageMetrics`. |
-| `src/ducto/manager.py` | `CreditManager` — full lifecycle: add/deduct/refund/lease/analytics. |
-| `src/ducto/events.py` | `CreditEventEmitter` — typed pub/sub, 14 event types. |
-| `src/ducto/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
-| `src/ducto/config.py` | `PricingConfig` — validates expression strings at load time. |
-| `src/ducto/sql/` | Numbered SQL migrations, one per feature domain (`001_core_schema.sql` → `012_feature_limits.sql`). `009_deduct_and_leases.sql` has the atomic deduct + full lease lifecycle; `010_credit_tiers.sql` adds configurable credit tiers (priority-ordered balance buckets); `011_lazy_expiry.sql` adds lazy per-user credit expiry + idempotent `add_credits`; `012_feature_limits.sql` adds the `check_feature_limit` RPC for per-feature invocation-count limits (ledger-derived count over `credit_transactions`, no new table — `011_feature_limits.sql` was unavailable since `011_lazy_expiry.sql` already claimed that slot). All idempotent — `setup()` re-applies every file on every run. |
-| `src/ducto/__init__.py` | Package exports — everything users `import from ducto`. |
+| `src/bursar/manager.py` | `CreditManager` — the main public API. All business logic lives here. |
+| `src/bursar/interface/base.py` | `CreditStore` ABC — the interface every store must implement. |
+| `src/bursar/interface/memory.py` | `MemoryStore` — reference implementation; the parity baseline for all stores. |
+| `src/bursar/interface/postgres.py` | `PostgresStore` — production store; all mutations call SQL RPCs via `psycopg2`. |
+| `src/bursar/interface/supabase.py` | `SupabaseStore` / `HttpxSupabaseStore` — Supabase-backed store. |
+| `src/bursar/interface/models.py` | All Pydantic result types, `PlanDefinition`, `OperationPolicy`. |
+| `src/bursar/engine.py` | `PricingEngine` — evaluates expression strings against `UsageMetrics`. |
+| `src/bursar/manager.py` | `CreditManager` — full lifecycle: add/deduct/refund/lease/analytics. |
+| `src/bursar/events.py` | `CreditEventEmitter` — typed pub/sub, 14 event types. |
+| `src/bursar/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
+| `src/bursar/config.py` | `PricingConfig` — validates expression strings at load time. |
+| `src/bursar/sql/` | Numbered SQL migrations, one per feature domain (`001_core_schema.sql` → `012_feature_limits.sql`). `009_deduct_and_leases.sql` has the atomic deduct + full lease lifecycle; `010_credit_tiers.sql` adds configurable credit tiers (priority-ordered balance buckets); `011_lazy_expiry.sql` adds lazy per-user credit expiry + idempotent `add_credits`; `012_feature_limits.sql` adds the `check_feature_limit` RPC for per-feature invocation-count limits (ledger-derived count over `credit_transactions`, no new table — `011_feature_limits.sql` was unavailable since `011_lazy_expiry.sql` already claimed that slot). All idempotent — `setup()` re-applies every file on every run. |
+| `src/bursar/__init__.py` | Package exports — everything users `import from bursar`. |
 
 ## Architecture
 

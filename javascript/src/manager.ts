@@ -482,7 +482,7 @@ export class CreditManager {
 
   /**
    * Grant one billing-cycle's worth of credits — idempotent-safe for a
-   * payment-provider webhook handler (Stripe, etc. — ducto stays
+   * payment-provider webhook handler (Stripe, etc. — bursar stays
    * provider-agnostic) to call even on webhook redelivery.
    *
    * 1. At most one of ``expiresAt``/``ttlDays`` may be given (throws
@@ -1258,7 +1258,9 @@ export class CreditManager {
           amount: cost,
           model: metrics.model ?? null,
         });
-        throw new FeatureLimitReachedError(`Feature limit exceeded for '${feature}'. user=${userId}`);
+        throw new FeatureLimitReachedError(
+          `Feature limit exceeded for '${feature}'. user=${userId}`,
+        );
       }
       // insufficient_credits, invalid_amount, and any other business error.
       throw new InsufficientCreditsError(

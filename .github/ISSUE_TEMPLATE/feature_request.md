@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an improvement to ducto
+about: Suggest an improvement to bursar
 title: ''
 labels: enhancement
 assignees: ''

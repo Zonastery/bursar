@@ -5,9 +5,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ducto.expr import ExpressionError, validate_expression
-from ducto.interface.models import PlanDefinition, TierDefinition
-from ducto.metrics import METRIC_VARIABLES
+from bursar.expr import ExpressionError, validate_expression
+from bursar.interface.models import PlanDefinition, TierDefinition
+from bursar.metrics import METRIC_VARIABLES
 
 
 class ConfigError(Exception):

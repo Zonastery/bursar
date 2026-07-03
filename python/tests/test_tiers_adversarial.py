@@ -27,8 +27,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import PricingConfigData, TierDefinition
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import PricingConfigData, TierDefinition
 
 
 def _tiers_store(tiers: dict[str, TierDefinition], min_balance: Decimal = Decimal(0)) -> MemoryStore:

@@ -7,10 +7,10 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import ConfigError, CreditManager, MemoryStore
-from ducto.allowance import resolve_calendar_window
-from ducto.interface.base import CapabilityNotSupportedError, CreditStore, StoreError
-from ducto.interface.models import (
+from bursar import ConfigError, CreditManager, MemoryStore
+from bursar.allowance import resolve_calendar_window
+from bursar.interface.base import CapabilityNotSupportedError, CreditStore, StoreError
+from bursar.interface.models import (
     AddCreditsResult,
     AllowanceResult,
     AvailableResult,
@@ -156,7 +156,7 @@ def test_publish_pricing_from_dict_invalid_data() -> None:
 
 def test_load_pricing_file_yaml(tmp_path) -> None:
     """Load a YAML pricing file via _load_pricing_file."""
-    from ducto.__main__ import _load_pricing_file
+    from bursar.__main__ import _load_pricing_file
 
     f = tmp_path / "pricing.yaml"
     f.write_text("models:\n  _default: input_tokens * 1\n")
@@ -622,7 +622,7 @@ class TestUsageAnalytics:
     # ── Transaction listing ─────────────────────────────────────────────────
 
     def test_list_transactions_returns_all_for_user(self) -> None:
-        from ducto.interface.models import CreditMetadata
+        from bursar.interface.models import CreditMetadata
 
         store = MemoryStore()
         store.add_credits("user_1", Decimal("1000"), "purchase", CreditMetadata(reference_id="purchase-1"))
@@ -669,7 +669,7 @@ class TestUsageAnalytics:
 
 def test_load_pricing_file_json(tmp_path) -> None:
     """Load a JSON pricing file via _load_pricing_file."""
-    from ducto.__main__ import _load_pricing_file
+    from bursar.__main__ import _load_pricing_file
 
     f = tmp_path / "pricing.json"
     f.write_text('{"models": {"_default": "input_tokens * 1"}}')
@@ -1450,7 +1450,7 @@ class TestListUserTransactionsPagination:
 
 class TestCheckFeatureZeroValues:
     def _make_store_with_features(self, features: dict) -> MemoryStore:
-        from ducto.interface.models import PlanDefinition, PricingConfigData
+        from bursar.interface.models import PlanDefinition, PricingConfigData
 
         store = MemoryStore()
         store.set_active_pricing(

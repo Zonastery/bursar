@@ -1,7 +1,7 @@
 """Vanilla PostgreSQL-backed credit store adapter.
 
 Connects directly via ``psycopg2``. No Supabase dependency — works with any
-Postgres database that has the ducto schema installed.
+Postgres database that has the bursar schema installed.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from typing import Any
 
 import psycopg2
 
-from ducto.allowance import resolve_calendar_window
-from ducto.interface.base import CreditStore, StoreError
-from ducto.interface.models import (
+from bursar.allowance import resolve_calendar_window
+from bursar.interface.base import CreditStore, StoreError
+from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -50,7 +50,7 @@ from ducto.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from ducto.sql import _get_sql_files
+from bursar.sql import _get_sql_files
 
 
 def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:

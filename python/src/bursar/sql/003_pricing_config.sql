@@ -1,4 +1,4 @@
--- ducto: versioned pricing configuration storage.
+-- bursar: versioned pricing configuration storage.
 -- Enables live pricing updates without redeploys.
 
 CREATE TABLE IF NOT EXISTS public.credit_pricing_config (
@@ -94,7 +94,7 @@ BEGIN
     END IF;
 
     -- Serialize concurrent publishers so version assignment can't race.
-    PERFORM pg_advisory_xact_lock(hashtext('ducto_pricing_version'));
+    PERFORM pg_advisory_xact_lock(hashtext('bursa_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
     FROM public.credit_pricing_config;

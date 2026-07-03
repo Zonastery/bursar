@@ -1,26 +1,26 @@
-"""ducto — declarative credit calculation engine for AI SaaS platforms."""
+"""bursar — declarative credit calculation engine for AI SaaS platforms."""
 
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("ducto")
+    __version__ = version("bursar")
 except PackageNotFoundError:  # pragma: no cover - source checkout without install
     __version__ = "0.0.0+unknown"
 
-from ducto.breakdown import CostBreakdown
-from ducto.config import ConfigError, PricingConfig
-from ducto.engine import PricingEngine
-from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.expr import ExpressionError, evaluate_expression, validate_expression
-from ducto.interface.base import (
+from bursar.breakdown import CostBreakdown
+from bursar.config import ConfigError, PricingConfig
+from bursar.engine import PricingEngine
+from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.expr import ExpressionError, evaluate_expression, validate_expression
+from bursar.interface.base import (
     CapabilityNotSupportedError,
     CapReachedError,
     FeatureLimitReachedError,
     RefundError,
     StoreError,
 )
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import (
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -60,7 +60,7 @@ from ducto.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from ducto.manager import (
+from bursar.manager import (
     ConcurrencyLimitError,
     CreditError,
     CreditManager,
@@ -71,7 +71,7 @@ from ducto.manager import (
     LowBalanceConfig,
     PricingNotLoadedError,
 )
-from ducto.metrics import ToolCall, UsageMetrics
+from bursar.metrics import ToolCall, UsageMetrics
 
 __all__ = [
     "AddCreditsResult",

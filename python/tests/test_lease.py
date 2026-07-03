@@ -15,7 +15,7 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import (
+from bursar import (
     ConcurrencyLimitError,
     CreditManager,
     FeatureNotEntitledError,
@@ -25,9 +25,9 @@ from ducto import (
     LowBalanceConfig,
     UsageMetrics,
 )
-from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import OperationPolicy, PlanDefinition, PricingConfigData
+from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import OperationPolicy, PlanDefinition, PricingConfigData
 
 
 @pytest.fixture
@@ -510,9 +510,7 @@ class TestAllowanceAwareAdmission:
         lease = m.reserve("u1", Decimal(80))
         assert lease.amount == Decimal(80)
 
-    def test_admission_fails_when_allowance_plus_balance_still_insufficient(
-        self, store: MemoryStore
-    ) -> None:
+    def test_admission_fails_when_allowance_plus_balance_still_insufficient(self, store: MemoryStore) -> None:
         """Balance 10, allowance 20 → cannot hold 50 (10 + 20 = 30 < 50)."""
         m = self._manager_with_allowance(store, Decimal(20))
         store.add_credits("u1", Decimal(10))

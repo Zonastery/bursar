@@ -20,7 +20,7 @@ function Hero(): ReactNode {
           </Link>
           <Link
             className="button button--secondary button--lg"
-            to="https://github.com/apoorwv/ducto"
+            to="https://github.com/zonastery/bursar"
             style={{marginLeft: '1rem'}}>
             GitHub
           </Link>
@@ -42,7 +42,7 @@ function Feature({title, description}: {title: string; description: string}): Re
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="ducto — Declarative Credit Calculation Engine"
+      title="bursar — Declarative Credit Calculation Engine"
       description="Add usage-based credits to your AI SaaS in minutes. Multi-language, database-backed pricing with a safe expression engine.">
       <Hero />
       <main className={styles.featuresSection}>
@@ -70,7 +70,7 @@ export default function Home(): ReactNode {
             />
             <Feature
               title="Open Source"
-              description="MIT license. Use it, fork it, contribute. <code>pip install ducto</code> or <code>npm install @apoorwv/ducto</code>."
+              description="MIT license. Use it, fork it, contribute. <code>pip install bursar</code> or <code>npm install @zonastery/bursar</code>."
             />
           </div>
         </div>

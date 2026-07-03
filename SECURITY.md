@@ -1,6 +1,6 @@
 # Security Policy
 
-ducto is a credit/billing engine with a sandboxed expression evaluator. We take
+bursar is a credit/billing engine with a sandboxed expression evaluator. We take
 security reports — especially sandbox escapes and money-safety issues —
 seriously. **Please do not open a public issue for a vulnerability.**
 
@@ -10,9 +10,9 @@ Use one of these **private** channels:
 
 1. **GitHub Private Vulnerability Reporting (preferred).** Go to the
    repository's **Security** tab → **Report a vulnerability**
-   (<https://github.com/apoorwv/ducto/security/advisories/new>). This opens a
+   (<https://github.com/Zonastery/bursar/security/advisories/new>). This opens a
    private security advisory visible only to you and the maintainers.
-2. **Email:** <apoorwv@gmail.com> with the subject line `ducto security`.
+2. **Email:** <apoorwv@gmail.com> with the subject line `bursar security`.
 
 Please include a description of the issue, the affected version(s), and a
 minimal reproduction (e.g. the pricing expression or API call that triggers it).
@@ -33,7 +33,7 @@ release notes unless you prefer to remain anonymous.
 This is a billing and sandbox-security-sensitive library. We are particularly
 interested in:
 
-- **Expression sandbox escapes** — the evaluator (`python/src/ducto/expr.py`,
+- **Expression sandbox escapes** — the evaluator (`python/src/bursar/expr.py`,
   `javascript/src/expr.ts`) is designed to reject arbitrary code execution via
   an AST allowlist. Pricing expressions are loaded from the database, so they
   are a real trust boundary. Any bypass that allows unauthorized computation,

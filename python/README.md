@@ -1,19 +1,19 @@
-# ducto
+# bursar
 
-[![CI](https://github.com/apoorwv/ducto/actions/workflows/ci.yml/badge.svg)](https://github.com/apoorwv/ducto/actions/workflows/ci.yml)
+[![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 
-ducto is a drop-in credit calculation engine. Define pricing as math expressions
+bursar is a drop-in credit calculation engine. Define pricing as math expressions
 (per-model, per-tool, search/RAG, cache, fixed jobs), connect a database, and
 start deducting credits. No billing infrastructure to build. Pricing lives in
 your DB — update it live without redeploys.
 
 ```python
-from ducto import CreditManager, UsageMetrics
-from ducto.interface.supabase import HttpxSupabaseStore
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.supabase import HttpxSupabaseStore
 
 store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
 manager = CreditManager(store=store)
@@ -48,30 +48,30 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 ## Installation
 
 ```bash
-pip install ducto
+pip install bursar
 
 # With Supabase store
-pip install "ducto[supabase]"
+pip install "bursar[supabase]"
 
 # With PostgreSQL store
-pip install "ducto[postgres]"
+pip install "bursar[postgres]"
 
 # Development & testing
-pip install "ducto[test]"
+pip install "bursar[test]"
 ```
 
 Requires Python 3.11+.
 
 ## Full docs
 
-**[apoorwv.github.io/ducto](https://apoorwv.github.io/ducto/)** — Python API reference, expressions, configuration, examples.
+**[zonastery.github.io/bursar](https://zonastery.github.io/bursar/)** — Python API reference, expressions, configuration, examples.
 
 ## Quick Start
 
 ### 0. Stateless calculation (no database)
 
 ```python
-from ducto import PricingEngine, UsageMetrics
+from bursar import PricingEngine, UsageMetrics
 
 engine = PricingEngine.from_dict({
     "version": 1,
@@ -85,15 +85,15 @@ print(f"Total credits: {result.total}")
 ### 1. Install and migrate
 
 ```bash
-pip install "ducto[postgres]"
+pip install "bursar[postgres]"
 
 # The connection string is read from DATABASE_URL (recommended) — keeping the
 # password out of your shell history, `ps` output and CI logs.
 export DATABASE_URL="postgresql://user:pass@host:5432/db"
-ducto migrate
+bursar migrate
 ```
 
-> A positional URL (`ducto migrate "postgresql://…"`) still works for convenience
+> A positional URL (`bursar migrate "postgresql://…"`) still works for convenience
 > but is discouraged and prints a warning, since it leaks the password via the
 > process list, shell history and CI logs.
 
@@ -105,7 +105,7 @@ Creates all tables (`user_credits`, `credit_transactions`, `credit_reservations`
 
 ```bash
 # Apply new pricing (creates v1)
-ducto pricing set - <<'JSON'
+bursar pricing set - <<'JSON'
 {
   "version": 1,
   "models": { "_default": "input_tokens * 0.01 + output_tokens * 0.03" },
@@ -117,22 +117,22 @@ ducto pricing set - <<'JSON'
 JSON
 
 # Apply with a label
-ducto pricing set pricing.yaml --label "deploy-42"
+bursar pricing set pricing.yaml --label "deploy-42"
 
 # List all versions  (* = active)
-ducto pricing list
+bursar pricing list
 
 # Switch active pricing
-ducto pricing activate 1
+bursar pricing activate 1
 
 # Diff two versions
-ducto pricing diff 1 2
+bursar pricing diff 1 2
 
 # Export a version as JSON
-ducto pricing export 2
+bursar pricing export 2
 
 # Validate without applying
-ducto pricing validate pricing.yaml
+bursar pricing validate pricing.yaml
 ```
 
 Each `pricing set` creates a new immutable version. Roll back with `pricing activate <version>`.
@@ -150,8 +150,8 @@ Each `pricing set` creates a new immutable version. Roll back with `pricing acti
 ### 3. Deduct credits
 
 ```python
-from ducto import CreditManager, UsageMetrics
-from ducto.interface.postgres import PostgresStore
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.postgres import PostgresStore
 
 store = PostgresStore("postgresql://user:pass@host:5432/db")
 manager = CreditManager(store=store)
@@ -240,13 +240,13 @@ result = manager.deduct_team(team.team_id, "user_abc", UsageMetrics(model="gpt-4
 ### Spend caps
 
 ```python
-from ducto.interface.models import SpendCap
+from bursar.interface.models import SpendCap
 store.set_spend_cap(SpendCap(user_id="user_abc", cap_type="daily", limit=100, action="deny"))
 ```
 
 ### Financial safety (leases)
 
-Because ducto charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload).
+Because bursar charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload).
 
 ```python
 from decimal import Decimal
@@ -272,7 +272,7 @@ stats = manager.aggregate_stats(now - timedelta(days=30), now)           # aggre
 ### Events
 
 ```python
-from ducto.events import CreditEventEmitter
+from bursar.events import CreditEventEmitter
 emitter = CreditEventEmitter()
 manager = CreditManager(store=store, emitter=emitter)
 emitter.on("credits.deducted", lambda e: print(f"User {e.user_id} spent credits"))
@@ -307,13 +307,13 @@ emitter.on("credits.low_balance", lambda e: send_alert(e.user_id, e.data["balanc
 
 | Store | Import | Deps | Use case |
 |-------|--------|------|----------|
-| `MemoryStore` | `ducto.interface.memory.MemoryStore` | None | Testing, dev |
-| `HttpxSupabaseStore` | `ducto.interface.supabase.HttpxSupabaseStore` | `httpx` | Supabase production |
-| `PostgresStore` | `ducto.interface.postgres.PostgresStore` | `psycopg2` | Direct PostgreSQL |
+| `MemoryStore` | `bursar.interface.memory.MemoryStore` | None | Testing, dev |
+| `HttpxSupabaseStore` | `bursar.interface.supabase.HttpxSupabaseStore` | `httpx` | Supabase production |
+| `PostgresStore` | `bursar.interface.postgres.PostgresStore` | `psycopg2` | Direct PostgreSQL |
 
 ### Custom stores
 
-Implement `ducto.interface.base.CreditStore` (ABC with 29 abstract methods).
+Implement `bursar.interface.base.CreditStore` (ABC with 29 abstract methods).
 
 ## Credit Lifecycle
 
@@ -338,7 +338,7 @@ for callers that need a reservation step.
 
 ## SQL Migrations
 
-10 bundled migrations (`DATABASE_URL=… ducto migrate`):
+10 bundled migrations (`DATABASE_URL=… bursar migrate`):
 
 | File | Contents |
 |------|----------|
@@ -356,7 +356,7 @@ for callers that need a reservation step.
 ## Architecture
 
 ```
-ducto/
+bursar/
   expr.py              # Safe AST expression evaluator
   config.py            # PricingConfig loading + validation
   engine.py            # PricingEngine — calculate, calculateBatch
@@ -386,7 +386,7 @@ ducto/
 ## Development
 
 ```bash
-pip install "ducto[test]"
+pip install "bursar[test]"
 pytest
 ruff check .
 ruff format .

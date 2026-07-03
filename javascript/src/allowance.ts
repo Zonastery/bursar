@@ -12,7 +12,7 @@
  * supports `"daily"`/`"weekly"`/`"monthly"`/`"yearly"` cadences, all
  * calendar-aligned (every user resets at the same instant) rather than
  * anchored to a per-user timestamp — MUST exactly match
- * `ducto.allowance.resolve_calendar_window` in the Python SDK.
+ * `bursar.allowance.resolve_calendar_window` in the Python SDK.
  */
 
 /** Supported free-allowance reset window modes. */
@@ -151,7 +151,7 @@ function yearWindow(now: Date): { start: Date; end: Date } {
  * user resets at the same UTC instant. `start`/`end` are UTC-midnight `Date`s
  * at DATE granularity; `end` is EXCLUSIVE (the window is `[start, end)`).
  *
- * MUST exactly match `ducto.allowance.resolve_calendar_window` in Python
+ * MUST exactly match `bursar.allowance.resolve_calendar_window` in Python
  * (same Monday-start ISO week, same year boundary).
  */
 export function resolveCalendarWindow(

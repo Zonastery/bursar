@@ -13,9 +13,9 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import CreditManager
-from ducto.events import CreditEventEmitter
-from ducto.interface.memory import MemoryStore
+from bursar import CreditManager
+from bursar.events import CreditEventEmitter
+from bursar.interface.memory import MemoryStore
 
 
 @pytest.fixture
@@ -76,17 +76,13 @@ class TestIdempotency:
 class TestReplacePrior:
     def test_replace_prior_true_zeroes_leftover_before_new_grant(self, manager: CreditManager) -> None:
         manager.grant_subscription_cycle("user_1", 100, ttl_days=30, idempotency_key="evt_1")
-        manager.grant_subscription_cycle(
-            "user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=True
-        )
+        manager.grant_subscription_cycle("user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=True)
 
         assert _tier_balance(manager, "user_1", "subscription") == Decimal(40)
 
     def test_replace_prior_false_adds_on_top_of_leftover(self, manager: CreditManager) -> None:
         manager.grant_subscription_cycle("user_1", 100, ttl_days=30, idempotency_key="evt_1")
-        manager.grant_subscription_cycle(
-            "user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=False
-        )
+        manager.grant_subscription_cycle("user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=False)
 
         assert _tier_balance(manager, "user_1", "subscription") == Decimal(140)
 
@@ -101,9 +97,7 @@ class TestReplacePrior:
 
 
 class TestExpiry:
-    def test_ttl_days_matches_equivalent_explicit_expires_at(
-        self, manager: CreditManager, store: MemoryStore
-    ) -> None:
+    def test_ttl_days_matches_equivalent_explicit_expires_at(self, manager: CreditManager, store: MemoryStore) -> None:
         before = datetime.now(UTC)
         manager.grant_subscription_cycle("user_ttl", 100, ttl_days=30, idempotency_key="evt_ttl")
         after = datetime.now(UTC)

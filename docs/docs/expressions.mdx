@@ -1,6 +1,6 @@
 # Expression Reference
 
-ducto uses a safe expression language for pricing formulas. Same syntax works identically in Python and JavaScript.
+bursar uses a safe expression language for pricing formulas. Same syntax works identically in Python and JavaScript.
 
 All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 4 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
 

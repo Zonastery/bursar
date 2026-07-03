@@ -38,7 +38,7 @@ publish: build  ## Publish to PyPI
 	. ./.env && uv publish
 
 release: publish  ## Publish, then print the released version (tag = pyproject version)
-	@echo "Released ducto v$(VERSION)"
+	@echo "Released bursar v$(VERSION)"
 
 release-ci:  ## Print the git tag commands for a CI-driven release
 	@echo "Release via CI: git tag v$(VERSION) && git push origin v$(VERSION)"

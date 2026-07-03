@@ -1,6 +1,6 @@
 """Core engine that loads config and calculates credit costs.
 
-The ``PricingEngine`` class is the main entry point for the ducto
+The ``PricingEngine`` class is the main entry point for the bursar
 package. It loads a validated ``PricingConfig`` from a dict or DB,
 then calculates credit costs from ``UsageMetrics``.
 
@@ -14,11 +14,11 @@ costs anywhere -- a 0.4-credit operation costs 0.4, not 0.
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from ducto.breakdown import CostBreakdown
-from ducto.config import PricingConfig, load_config_from_dict
-from ducto.expr import evaluate_expression
-from ducto.interface.models import PricingConfigData
-from ducto.metrics import METRIC_VARIABLES, UsageMetrics
+from bursar.breakdown import CostBreakdown
+from bursar.config import PricingConfig, load_config_from_dict
+from bursar.expr import evaluate_expression
+from bursar.interface.models import PricingConfigData
+from bursar.metrics import METRIC_VARIABLES, UsageMetrics
 
 __all__ = ["METRIC_VARIABLES", "PricingEngine"]
 

@@ -1,4 +1,4 @@
--- ducto: credit refund and expiry/TTL support.
+-- bursar: credit refund and expiry/TTL support.
 -- Idempotent — safe to run multiple times (CREATE OR REPLACE).
 
 -- refund_credits: reverse a credit deduction (full or partial), atomically.

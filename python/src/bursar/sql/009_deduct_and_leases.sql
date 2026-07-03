@@ -1,4 +1,4 @@
--- ducto: atomic deduction and lease lifecycle — the financial-safety API.
+-- bursar: atomic deduction and lease lifecycle — the financial-safety API.
 --
 -- Two admission/charge primitives:
 --   deduct_with_allowance — atomic "calculate-then-charge": lock balance ->
@@ -214,7 +214,7 @@ BEGIN
               AND (v_cap.model IS NULL OR ct.metadata->>'model' = v_cap.model);
             IF v_cap_spend + v_net > v_cap.cap_limit THEN
                 IF v_cap.action = 'deny' THEN
-                    RAISE EXCEPTION 'ducto_cap_reached' USING ERRCODE = 'DU001';
+                    RAISE EXCEPTION 'bursa_cap_reached' USING ERRCODE = 'DU001';
                 ELSE
                     IF v_cap_warning IS NULL THEN v_cap_warning := v_cap.action; END IF;
                 END IF;
@@ -240,7 +240,7 @@ BEGIN
 
             IF v_feature_count >= p_feature_max_calls THEN
                 IF p_feature_action = 'deny' THEN
-                    RAISE EXCEPTION 'ducto_feature_limit_reached' USING ERRCODE = 'DU003';
+                    RAISE EXCEPTION 'bursa_feature_limit_reached' USING ERRCODE = 'DU003';
                 ELSE
                     v_feature_limit_warning := p_feature_action;
                 END IF;
@@ -248,7 +248,7 @@ BEGIN
         END IF;
 
         IF v_balance - v_net < p_min_balance THEN
-            RAISE EXCEPTION 'ducto_insufficient_credits' USING ERRCODE = 'DU002';
+            RAISE EXCEPTION 'bursa_insufficient_credits' USING ERRCODE = 'DU002';
         END IF;
 
         -- ── Tier walk: decide WHICH tier balance(s) fund this debit. The

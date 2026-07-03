@@ -1,43 +1,43 @@
 # CLI Reference
 
-ducto ships an `argparse`-based CLI for database migrations and pricing management. Connection secrets are read from the **environment**, never passed on the command line (which would leak via `ps`, shell history and CI logs).
+bursar ships an `argparse`-based CLI for database migrations and pricing management. Connection secrets are read from the **environment**, never passed on the command line (which would leak via `ps`, shell history and CI logs).
 
 ```bash
-ducto <command> [options]
+bursar <command> [options]
 ```
 
-Run `ducto --help`, `ducto migrate --help`, or `ducto pricing --help` for the full, generated usage.
+Run `bursar --help`, `bursar migrate --help`, or `bursar pricing --help` for the full, generated usage.
 
 ## Commands
 
-### `ducto migrate`
+### `bursar migrate`
 
 Create tables, indexes, and RPC functions. Reads the connection string from the **`DATABASE_URL`** environment variable.
 
 ```bash
-DATABASE_URL="postgresql://user:pass@host:5432/db" ducto migrate
+DATABASE_URL="postgresql://user:pass@host:5432/db" bursar migrate
 ```
 
-Idempotent — safe to run on every deploy. Requires the `postgres` extra (`pip install "ducto[postgres]"`).
+Idempotent — safe to run on every deploy. Requires the `postgres` extra (`pip install "bursar[postgres]"`).
 
 :::note
-A positional URL (`ducto migrate "postgresql://…"`) is still accepted as a fallback, but it is **discouraged** and prints a warning, because the password is then visible in the process list and shell history. Prefer `DATABASE_URL`.
+A positional URL (`bursar migrate "postgresql://…"`) is still accepted as a fallback, but it is **discouraged** and prints a warning, because the password is then visible in the process list and shell history. Prefer `DATABASE_URL`.
 :::
 
-### `ducto pricing get`
+### `bursar pricing get`
 
 Print the active pricing config as JSON.
 
-### `ducto pricing set <file>`
+### `bursar pricing set <file>`
 
 Apply a pricing config from a JSON or YAML file (always creates a new immutable version). `--label` attaches an optional message.
 
 ```bash
 # From file
-ducto pricing set config.yaml --label "Q3 rates"
+bursar pricing set config.yaml --label "Q3 rates"
 
 # From stdin
-ducto pricing set - <<'JSON'
+bursar pricing set - <<'JSON'
 {
   "version": 1,
   "models": {"_default": "input_tokens * 0.001"}
@@ -47,27 +47,27 @@ JSON
 
 Only transient PostgREST schema-cache/connection errors are retried; a write that may have committed is never blind-retried, so duplicate versions are not created.
 
-### `ducto pricing list`
+### `bursar pricing list`
 
 List all pricing versions; the active version is marked with `*`.
 
-### `ducto pricing activate <version>`
+### `bursar pricing activate <version>`
 
 Switch the active version to the given version number.
 
 ```bash
-ducto pricing activate 3
+bursar pricing activate 3
 ```
 
-### `ducto pricing validate <file>`
+### `bursar pricing validate <file>`
 
 Validate a pricing file (JSON/YAML, or `-` for stdin) without applying it.
 
-### `ducto pricing export <version>`
+### `bursar pricing export <version>`
 
 Dump a specific version as JSON.
 
-### `ducto pricing diff <version_a> <version_b>`
+### `bursar pricing diff <version_a> <version_b>`
 
 Print a unified diff between two pricing versions.
 

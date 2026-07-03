@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from ducto.engine import _q
-from ducto.expr import ExpressionError, evaluate_expression, validate_expression
+from bursar.engine import _q
+from bursar.expr import ExpressionError, evaluate_expression, validate_expression
 
 # ── Parity fixture ─────────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ class TestVariableValidation:
 
 class TestIfRewriteAnchor:
     def test_identifier_ending_in_if_not_mangled(self) -> None:
-        # 'qualif' must stay a variable, not become 'qual_ducto_if('.
+        # 'qualif' must stay a variable, not become 'qual_bursar_if('.
         with pytest.raises(ExpressionError, match="unknown variable"):
             validate_expression("qualif * 2", known_variables={"input_tokens"})
 
@@ -635,8 +635,8 @@ _PRICING_CASES_FOR_EXPR = _PARITY["pricing_cases"]
 def test_parity_pricing_cases_via_engine(case: dict) -> None:
     """E11 — every pricing_cases entry in the parity fixture passes through
     PricingEngine.from_dict() and produces the expected total (byte-identical string)."""
-    from ducto.engine import PricingEngine
-    from ducto.metrics import UsageMetrics
+    from bursar.engine import PricingEngine
+    from bursar.metrics import UsageMetrics
 
     engine = PricingEngine.from_dict(case["config"])
     breakdown = engine.calculate(UsageMetrics(**case["metrics"]))

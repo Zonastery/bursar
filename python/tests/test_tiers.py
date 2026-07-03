@@ -6,7 +6,7 @@ testing manager pass-through behavior. Money is exact ``Decimal`` everywhere
 (contract §1) — never truthiness or plain ``int``/``float`` for amounts.
 
 Behavior verified against the actual implementation in
-``ducto.interface.memory.MemoryStore`` (``_resolve_add_credits_tier``,
+``bursar.interface.memory.MemoryStore`` (``_resolve_add_credits_tier``,
 ``_reconcile_add_credits_expiry``, ``_walk_tiers``, ``_overdraft_sink``,
 ``_reverse_priority_order``, ``get_credit_tiers``, ``sweep_expired_credits``)
 rather than assumed from the plan — see inline notes for the couple of places
@@ -30,11 +30,11 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import ConfigError, CreditManager, MemoryStore
-from ducto.config import PricingConfig
-from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
-from ducto.interface.base import StoreError
-from ducto.interface.models import PricingConfigData, TierDefinition
+from bursar import ConfigError, CreditManager, MemoryStore
+from bursar.config import PricingConfig
+from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
+from bursar.interface.base import StoreError
+from bursar.interface.models import PricingConfigData, TierDefinition
 
 
 def _tiers_store(
@@ -268,9 +268,7 @@ class TestAddCreditsTierResolution:
         assert tiers["purchased"] == Decimal("20")
 
     def test_omitted_tier_with_no_configured_default_raises_tier_required(self) -> None:
-        store = _tiers_store(
-            {"gifted": TierDefinition(name="Gifted", priority=10, expires=True, default_ttl_days=30)}
-        )
+        store = _tiers_store({"gifted": TierDefinition(name="Gifted", priority=10, expires=True, default_ttl_days=30)})
         with pytest.raises(StoreError, match="tier_required"):
             store.add_credits("u1", Decimal("20"), "purchase")
 

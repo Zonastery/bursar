@@ -1,4 +1,4 @@
--- ducto: per-feature invocation-count limits (cadence-based rate limiting).
+-- bursar: per-feature invocation-count limits (cadence-based rate limiting).
 --
 -- Ledger-derived, exactly like spend caps (005_spend_caps.sql): there is NO
 -- new counter table. A feature invocation is counted by counting

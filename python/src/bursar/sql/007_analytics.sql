@@ -1,4 +1,4 @@
--- ducto: usage analytics queries.
+-- bursar: usage analytics queries.
 -- Idempotent — safe to run multiple times (CREATE OR REPLACE).
 --
 -- Money is NUMERIC(18,4): spend totals are summed and returned as NUMERIC

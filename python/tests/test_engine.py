@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from ducto.engine import PricingEngine
-from ducto.metrics import ToolCall, UsageMetrics
+from bursar.engine import PricingEngine
+from bursar.metrics import ToolCall, UsageMetrics
 
 FULL_PRICING = {
     "models": {

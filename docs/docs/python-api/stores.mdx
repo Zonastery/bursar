@@ -7,13 +7,13 @@ Store adapters implement the `CreditStore` ABC for different backends.
 In-memory store. Data lost on restart. Perfect for testing.
 
 ```python
-from ducto.interface.memory import MemoryStore
+from bursar.interface.memory import MemoryStore
 
 store = MemoryStore()
 manager = CreditManager(store=store)
 ```
 
-No dependencies beyond `ducto`.
+No dependencies beyond `bursar`.
 
 Full `CreditStore` interface. All money arguments and result fields are `Decimal`:
 
@@ -41,7 +41,7 @@ Rows marked *(optional)* — Analytics and Teams, along with `list_user_transact
 Production store backed by Supabase. Uses HTTPX for HTTP requests.
 
 ```python
-from ducto.interface.supabase import HttpxSupabaseStore
+from bursar.interface.supabase import HttpxSupabaseStore
 
 store = HttpxSupabaseStore(
     url="https://your-project.supabase.co",
@@ -49,7 +49,7 @@ store = HttpxSupabaseStore(
 )
 ```
 
-Requires `pip install ducto[supabase]` (installs `httpx`).
+Requires `pip install bursar[supabase]` (installs `httpx`).
 
 ### `run_migrations(database_url: str) -> SetupResult`
 
@@ -57,7 +57,7 @@ Run all 15 bundled SQL migrations (idempotent). Pass the connection string from 
 
 ```python
 import os
-from ducto.interface.supabase import run_migrations
+from bursar.interface.supabase import run_migrations
 
 result = run_migrations(os.environ["DATABASE_URL"])
 assert result.success, result.errors
@@ -68,23 +68,23 @@ assert result.success, result.errors
 Direct PostgreSQL connection. Uses `psycopg2`.
 
 ```python
-from ducto.interface.postgres import PostgresStore
+from bursar.interface.postgres import PostgresStore
 
 store = PostgresStore("postgresql://user:pass@host:5432/db")
 ```
 
-Requires `pip install ducto[postgres]`.
+Requires `pip install bursar[postgres]`.
 
 ## Custom Adapter
 
-Implement `ducto.interface.base.CreditStore`:
+Implement `bursar.interface.base.CreditStore`:
 
 Store methods are synchronous and money is `Decimal`:
 
 ```python
 from decimal import Decimal
-from ducto.interface.base import CreditStore
-from ducto.interface.models import DeductionResult, BalanceResult, AddCreditsResult
+from bursar.interface.base import CreditStore
+from bursar.interface.models import DeductionResult, BalanceResult, AddCreditsResult
 
 class MyStore(CreditStore):
     def get_balance(self, user_id: str) -> BalanceResult: ...

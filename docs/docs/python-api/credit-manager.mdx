@@ -30,7 +30,7 @@ CreditManager(
 | `default_ttl_seconds` | `int` | `600` | Default lease TTL for `reserve()` and `run_billed()`. |
 
 ```python
-from ducto import CreditManager, LowBalanceConfig
+from bursar import CreditManager, LowBalanceConfig
 from decimal import Decimal
 
 manager = CreditManager(
@@ -43,8 +43,8 @@ manager = CreditManager(
 ```
 
 ```python
-from ducto import CreditManager
-from ducto.interface.memory import MemoryStore
+from bursar import CreditManager
+from bursar.interface.memory import MemoryStore
 from decimal import Decimal
 
 store = MemoryStore()
@@ -249,7 +249,7 @@ assert dry_run.dry_run is True  # balance unchanged
 Per-user daily/monthly spend limits configured at the store level.
 
 ```python
-from ducto.interface.models import SpendCap
+from bursar.interface.models import SpendCap
 
 store.set_spend_cap(SpendCap(
     user_id="user-1",
@@ -294,7 +294,7 @@ assert result.team_balance_after == Decimal("900")
 Optional pub/sub event system for credit lifecycle events.
 
 ```python
-from ducto.events import CreditEvent, CreditEventEmitter
+from bursar.events import CreditEvent, CreditEventEmitter
 
 emitter = CreditEventEmitter()
 manager = CreditManager(store=store, emitter=emitter)

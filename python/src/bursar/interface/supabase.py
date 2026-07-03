@@ -14,9 +14,9 @@ from typing import Any
 
 import httpx
 
-from ducto.allowance import resolve_calendar_window
-from ducto.interface.base import CreditStore, StoreError
-from ducto.interface.models import (
+from bursar.allowance import resolve_calendar_window
+from bursar.interface.base import CreditStore, StoreError
+from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -51,7 +51,7 @@ from ducto.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from ducto.sql import _get_sql_files
+from bursar.sql import _get_sql_files
 
 # Business-failure codes a caller may want to inspect on the result model rather
 # than have raised as a StoreError (contract §4). Any OTHER `"error"` envelope is
@@ -641,9 +641,7 @@ class HttpxSupabaseStore(CreditStore):
             plan_name=row.get("plan_name") or None,
             free_allowance=_dec(row.get("free_allowance")),
             features=row.get("features") or {},
-            feature_limits={
-                k: FeatureLimit.model_validate(v) for k, v in (row.get("feature_limits") or {}).items()
-            },
+            feature_limits={k: FeatureLimit.model_validate(v) for k, v in (row.get("feature_limits") or {}).items()},
             default_billing_mode=str(row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
             max_concurrent=row.get("max_concurrent"),

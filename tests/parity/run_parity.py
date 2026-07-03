@@ -31,8 +31,8 @@ def _load_scenarios() -> dict:
 
 def _make_manager(pricing_cfg: dict, billing_mode: str = "strict", overdraft_floor: Decimal | None = None, min_balance: Decimal | None = None):
     """Build a CreditManager with MemoryStore pre-loaded with pricing."""
-    from ducto import CreditManager
-    from ducto.interface.memory import MemoryStore
+    from bursar import CreditManager
+    from bursar.interface.memory import MemoryStore
 
     store = MemoryStore()
     kwargs: dict = {"store": store}
@@ -49,7 +49,7 @@ def _make_manager(pricing_cfg: dict, billing_mode: str = "strict", overdraft_flo
 
 
 def _run_setup(store, manager, steps: list[dict]) -> None:
-    from ducto.interface.models import CreditMetadata
+    from bursar.interface.models import CreditMetadata
 
     for step in steps:
         op = step["op"]
@@ -76,9 +76,9 @@ def _run_setup(store, manager, steps: list[dict]) -> None:
 
 def _run_action(scenario: dict, pricing_cfg: dict) -> dict:
     """Execute the scenario action and return a normalised result dict."""
-    from ducto import CreditManager, UsageMetrics
-    from ducto.expr import evaluate_expression
-    from ducto.interface.memory import MemoryStore
+    from bursar import CreditManager, UsageMetrics
+    from bursar.expr import evaluate_expression
+    from bursar.interface.memory import MemoryStore
 
     action = scenario["action"]
     op = action["op"]
@@ -212,8 +212,8 @@ def _run_action(scenario: dict, pricing_cfg: dict) -> dict:
             return {"error": _error_code(e)}
 
     elif op == "evaluate_expr":
-        from ducto.expr import evaluate_expression
-        from ducto.engine import _q
+        from bursar.expr import evaluate_expression
+        from bursar.engine import _q
         try:
             result = evaluate_expression(action["expr"], action["vars"])
             return {"result": str(_q(result)), "error": None}

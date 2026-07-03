@@ -1,4 +1,4 @@
--- ducto: core credit tables.
+-- bursar: core credit tables.
 -- Idempotent — safe to run multiple times (CREATE IF NOT EXISTS).
 
 -- Utility trigger function: sets updated_at on row modification.

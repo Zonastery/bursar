@@ -4,12 +4,12 @@ sidebar_position: 2
 
 # JavaScript API
 
-ducto for TypeScript/JavaScript is published as [`@apoorwv/ducto`](https://www.npmjs.com/package/@apoorwv/ducto) on npm. Requires Node.js 18+.
+bursar for TypeScript/JavaScript is published as [`@zonastery/bursar`](https://www.npmjs.com/package/@zonastery/bursar) on npm. Requires Node.js 18+.
 
 ## Installation
 
 ```bash
-npm install @apoorwv/ducto
+npm install @zonastery/bursar
 
 # PostgreSQL store (optional)
 npm install pg
@@ -22,33 +22,33 @@ npm install js-yaml
 
 | Class / Type | Exported from | Description |
 |---|---|---|
-| [`PricingEngine`](/docs/javascript-api/pricing-engine) | `@apoorwv/ducto` | Pure calculation layer — no DB dependency |
-| [`CreditManager`](/docs/javascript-api/credit-manager) | `@apoorwv/ducto` | Orchestrates credit lifecycle |
-| [`HttpxSupabaseStore`](/docs/javascript-api/stores) | `@apoorwv/ducto` | Supabase-backed store (native `fetch`, no extra deps) |
-| [`PostgresStore`](/docs/javascript-api/stores) | `@apoorwv/ducto` | Direct PostgreSQL via `pg` |
-| [`MemoryStore`](/docs/javascript-api/stores) | `@apoorwv/ducto/node` | In-memory store for testing (Node.js only) |
-| `CreditEventEmitter` | `@apoorwv/ducto` | Typed pub/sub for credit lifecycle events |
-| `UsageMetrics` | `@apoorwv/ducto` | Input interface for `calculate()` / `deduct()` |
-| `CostBreakdown` | `@apoorwv/ducto` | Structured cost breakdown (all fields `Decimal`) |
-| `CreditManagerOptions` | `@apoorwv/ducto` | Constructor options (policy, thresholds, TTL, …) |
-| `PricingConfigData` | `@apoorwv/ducto` | Schema for a pricing config dict |
-| `DeductionResult` | `@apoorwv/ducto` | Return type of `deduct()` / `settle()` |
-| `LeaseResult` | `@apoorwv/ducto` | Return type of `reserve()` / `renew()` |
-| `BalanceResult` | `@apoorwv/ducto` | Return type of `getBalance()` |
-| `CanAffordResult` | `@apoorwv/ducto` | Return type of `canAfford()` — includes `.spendable` (effective spending power) |
-| `TierBalancesResult` | `@apoorwv/ducto` | Return type of `getCreditTiers()` — per-tier balance breakdown |
-| `TierDefinition` | `@apoorwv/ducto` | [Credit tier](/docs/configuration#credit-tiers) definition (priority, expiry, default/overdraft flags) |
-| `LowBalanceConfig` | `@apoorwv/ducto` | `CreditManagerOptions.lowBalance` shape: `{ thresholds, onTrigger }` |
-| `CapabilityNotSupportedError` | `@apoorwv/ducto` | Thrown by a store's default implementation of an optional capability (analytics, transaction listing, teams) that wasn't overridden |
+| [`PricingEngine`](/docs/javascript-api/pricing-engine) | `@zonastery/bursar` | Pure calculation layer — no DB dependency |
+| [`CreditManager`](/docs/javascript-api/credit-manager) | `@zonastery/bursar` | Orchestrates credit lifecycle |
+| [`HttpxSupabaseStore`](/docs/javascript-api/stores) | `@zonastery/bursar` | Supabase-backed store (native `fetch`, no extra deps) |
+| [`PostgresStore`](/docs/javascript-api/stores) | `@zonastery/bursar` | Direct PostgreSQL via `pg` |
+| [`MemoryStore`](/docs/javascript-api/stores) | `@zonastery/bursar/node` | In-memory store for testing (Node.js only) |
+| `CreditEventEmitter` | `@zonastery/bursar` | Typed pub/sub for credit lifecycle events |
+| `UsageMetrics` | `@zonastery/bursar` | Input interface for `calculate()` / `deduct()` |
+| `CostBreakdown` | `@zonastery/bursar` | Structured cost breakdown (all fields `Decimal`) |
+| `CreditManagerOptions` | `@zonastery/bursar` | Constructor options (policy, thresholds, TTL, …) |
+| `PricingConfigData` | `@zonastery/bursar` | Schema for a pricing config dict |
+| `DeductionResult` | `@zonastery/bursar` | Return type of `deduct()` / `settle()` |
+| `LeaseResult` | `@zonastery/bursar` | Return type of `reserve()` / `renew()` |
+| `BalanceResult` | `@zonastery/bursar` | Return type of `getBalance()` |
+| `CanAffordResult` | `@zonastery/bursar` | Return type of `canAfford()` — includes `.spendable` (effective spending power) |
+| `TierBalancesResult` | `@zonastery/bursar` | Return type of `getCreditTiers()` — per-tier balance breakdown |
+| `TierDefinition` | `@zonastery/bursar` | [Credit tier](/docs/configuration#credit-tiers) definition (priority, expiry, default/overdraft flags) |
+| `LowBalanceConfig` | `@zonastery/bursar` | `CreditManagerOptions.lowBalance` shape: `{ thresholds, onTrigger }` |
+| `CapabilityNotSupportedError` | `@zonastery/bursar` | Thrown by a store's default implementation of an optional capability (analytics, transaction listing, teams) that wasn't overridden |
 
 All money values (balances, amounts, costs) are `Decimal` from `decimal.js`, never binary `number`.
 
 ## Quick Example
 
 ```typescript
-import { CreditManager, PostgresStore } from "@apoorwv/ducto";
+import { CreditManager, PostgresStore } from "@zonastery/bursar";
 // For tests / local dev, use MemoryStore from the Node subpath:
-import { MemoryStore } from "@apoorwv/ducto/node";
+import { MemoryStore } from "@zonastery/bursar/node";
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);

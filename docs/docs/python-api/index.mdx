@@ -4,17 +4,17 @@ sidebar_position: 1
 
 # Python API
 
-ducto for Python is published as the [`ducto`](https://pypi.org/project/ducto/) package on PyPI. Requires Python 3.11+.
+bursar for Python is published as the [`bursar`](https://pypi.org/project/bursar/) package on PyPI. Requires Python 3.11+.
 
 ## Installation
 
 ```bash
-pip install ducto
+pip install bursar
 
 # With store backends
-pip install "ducto[supabase]"
-pip install "ducto[postgres]"
-pip install "ducto[test]"     # dev + testing
+pip install "bursar[supabase]"
+pip install "bursar[postgres]"
+pip install "bursar[test]"     # dev + testing
 ```
 
 ## Core Classes
@@ -31,7 +31,7 @@ pip install "ducto[test]"     # dev + testing
 
 ## Errors
 
-All importable from `ducto`:
+All importable from `bursar`:
 
 | Exception | Raised when |
 |-----------|-------------|
@@ -50,7 +50,7 @@ All importable from `ducto`:
 
 ## Result Types
 
-All result models are importable from `ducto`:
+All result models are importable from `bursar`:
 
 | Model | Returned by |
 |-------|-------------|
@@ -91,8 +91,8 @@ All result models are importable from `ducto`:
 ## Quick Example
 
 ```python
-from ducto import CreditManager, UsageMetrics
-from ducto.interface.supabase import HttpxSupabaseStore
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.supabase import HttpxSupabaseStore
 
 store = HttpxSupabaseStore(url="https://project.supabase.co", key="service_role_key")
 manager = CreditManager(store=store)

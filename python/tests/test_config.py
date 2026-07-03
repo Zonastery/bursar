@@ -5,12 +5,12 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from ducto.config import (
+from bursar.config import (
     ConfigError,
     PricingConfig,
     load_config_from_dict,
 )
-from ducto.interface.models import PricingConfigData
+from bursar.interface.models import PricingConfigData
 
 
 class TestConfigValidation:
@@ -343,8 +343,8 @@ class TestConfigValidation:
         assert plan.features is None
 
         # Verify that get_user_plan returns empty features (not None) for such a plan.
-        from ducto import MemoryStore
-        from ducto.interface.models import PlanDefinition, PricingConfigData
+        from bursar import MemoryStore
+        from bursar.interface.models import PlanDefinition, PricingConfigData
 
         store = MemoryStore()
         store.set_active_pricing(
@@ -434,8 +434,8 @@ class TestConfigValidation:
         assert "ceil" in config.models["_default"]
 
         # Verify at evaluation time the builtin is used correctly.
-        from ducto.engine import PricingEngine
-        from ducto.metrics import UsageMetrics
+        from bursar.engine import PricingEngine
+        from bursar.metrics import UsageMetrics
 
         engine = PricingEngine.from_dict({"models": {"_default": "ceil(input_tokens * 0.5)"}})
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=11))

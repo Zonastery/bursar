@@ -5,7 +5,7 @@
 In-memory, data lost on restart. Exported from the **Node.js subpath** (uses Node built-ins).
 
 ```typescript
-import { MemoryStore } from "@apoorwv/ducto/node";
+import { MemoryStore } from "@zonastery/bursar/node";
 
 const store = new MemoryStore();
 ```
@@ -36,7 +36,7 @@ Rows marked *(optional)* — Analytics and Teams, along with `listUserTransactio
 Supabase-backed store using native `fetch` (Node 18+).
 
 ```typescript
-import { HttpxSupabaseStore } from "@apoorwv/ducto";
+import { HttpxSupabaseStore } from "@zonastery/bursar";
 
 const store = new HttpxSupabaseStore(
   "https://your-project.supabase.co",
@@ -51,7 +51,7 @@ Delegates all operations to Postgres RPC functions via HTTP.
 Direct PostgreSQL store. Requires `pg` package.
 
 ```typescript
-import { PostgresStore } from "@apoorwv/ducto";
+import { PostgresStore } from "@zonastery/bursar";
 
 const store = new PostgresStore("postgresql://user:pass@host:5432/db");
 ```
@@ -72,7 +72,7 @@ import type {
   DeductionResult,
   BalanceResult,
   AddCreditsResult,
-} from "@apoorwv/ducto";
+} from "@zonastery/bursar";
 
 class MyStore implements CreditStore {
   async getBalance(userId: string): Promise<BalanceResult> { ... }

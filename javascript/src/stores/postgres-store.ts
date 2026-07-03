@@ -208,7 +208,7 @@ export class PostgresStore extends CreditStore {
   /**
    * Call a SQL function and return its result rows.
    *
-   * ducto's RPCs come in two shapes:
+   * bursar's RPCs come in two shapes:
    *   1. **Scalar JSONB** (`RETURNS JSONB`) — `pg` returns one row whose single
    *      column holds the parsed object. We unwrap that to `[object]`.
    *   2. **Set-returning** (`RETURNS TABLE/SETOF`) — many rows of named columns.
@@ -238,14 +238,14 @@ export class PostgresStore extends CreditStore {
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    // H17: do NOT silently report success for a no-op. ducto's schema is managed
+    // H17: do NOT silently report success for a no-op. bursar's schema is managed
     // as a set of ordered SQL migrations bundled with the Python package; this
     // store does not embed them. Surface that clearly instead of green-lighting
     // a missing schema (which would only fail later as missing-RPC errors).
     throw new StoreError(
       "PostgresStore.setup() does not run migrations. Apply the bundled SQL " +
-        "migrations first — run `ducto migrate` via the Python CLI, or execute the " +
-        "files in `python/src/ducto/sql/*.sql` (in filename order) against your " +
+        "migrations first — run `bursar migrate` via the Python CLI, or execute the " +
+        "files in `python/src/bursar/sql/*.sql` (in filename order) against your " +
         "database. This store assumes the schema already exists.",
     );
   }

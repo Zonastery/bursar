@@ -6,30 +6,30 @@ sidebar_position: 1
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 
-ducto is a drop-in credit calculation engine. Define pricing as math expressions (per-model, per-tool, search/RAG, cache, fixed jobs), connect a database, and start deducting credits. For streaming and agentic workloads, the lease pattern (`reserve → settle / release`) lets you hold credits during execution and bill the actual cost at the end — with atomic admission control and no double-charges.
+bursar is a drop-in credit calculation engine. Define pricing as math expressions (per-model, per-tool, search/RAG, cache, fixed jobs), connect a database, and start deducting credits. For streaming and agentic workloads, the lease pattern (`reserve → settle / release`) lets you hold credits during execution and bill the actual cost at the end — with atomic admission control and no double-charges.
 
 ## Installation
 
 **Python:**
 ```bash
-pip install ducto
+pip install bursar
 
 # With Supabase store
-pip install "ducto[supabase]"
+pip install "bursar[supabase]"
 
 # With PostgreSQL store
-pip install "ducto[postgres]"
+pip install "bursar[postgres]"
 ```
 
 **TypeScript:**
 ```bash
-npm install @apoorwv/ducto
+npm install @zonastery/bursar
 ```
 
 ## Quick Start — Calculation Only
 
 ```python
-from ducto import PricingEngine, UsageMetrics
+from bursar import PricingEngine, UsageMetrics
 
 engine = PricingEngine.from_dict({
     "version": 1,
@@ -43,7 +43,7 @@ print(f"Total credits: {result.total}")
 ```
 
 ```typescript
-import { PricingEngine } from "@apoorwv/ducto";
+import { PricingEngine } from "@zonastery/bursar";
 
 const engine = PricingEngine.fromDict({
   version: 1,
@@ -63,7 +63,7 @@ console.log(`Total: ${cost.total}`);
 ### 1. Migrate the database
 
 ```bash
-DATABASE_URL="postgresql://user:pass@host:5432/db" ducto migrate
+DATABASE_URL="postgresql://user:pass@host:5432/db" bursar migrate
 ```
 
 Creates `user_credits`, `credit_transactions`, `credit_reservations` tables (and the pricing, plan, team, cap and analytics objects) — idempotent, safe to run on every deploy. The connection string comes from `DATABASE_URL`, not the command line.
@@ -71,7 +71,7 @@ Creates `user_credits`, `credit_transactions`, `credit_reservations` tables (and
 ### 2. Seed pricing
 
 ```bash
-ducto pricing set - <<'JSON'
+bursar pricing set - <<'JSON'
 {
   "version": 1,
   "models": {
@@ -85,8 +85,8 @@ JSON
 ### 3. Deduct credits
 
 ```python
-from ducto import CreditManager, UsageMetrics
-from ducto.interface.postgres import PostgresStore
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.postgres import PostgresStore
 
 store = PostgresStore("postgresql://user:pass@host:5432/db")
 manager = CreditManager(store=store)
@@ -102,7 +102,7 @@ print(f"Deducted {result.amount} credits. Balance: {result.balance_after}")
 ```
 
 ```typescript
-import { CreditManager, UsageMetrics, HttpxSupabaseStore } from "@apoorwv/ducto";
+import { CreditManager, UsageMetrics, HttpxSupabaseStore } from "@zonastery/bursar";
 
 const store = new HttpxSupabaseStore(url, serviceRoleKey);
 const manager = new CreditManager(store);
@@ -128,4 +128,4 @@ const result = await manager.deduct(
 - [Financial Safety (Leases)](/docs/financial-safety) — atomic reserve → settle lifecycle, presets, and zero-debt guarantees
 - [Storage Backends](/docs/storage-backends) — Supabase, PostgreSQL, or in-memory
 - [CLI Reference](/docs/cli) — migration and pricing commands
-- [Architecture](/docs/architecture) — how ducto works under the hood
+- [Architecture](/docs/architecture) — how bursar works under the hood

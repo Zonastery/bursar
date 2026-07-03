@@ -1,4 +1,4 @@
--- ducto: configurable credit tiers.
+-- bursar: configurable credit tiers.
 --
 -- Adds priority-ordered credit "tiers" (e.g. gifted / allowance / purchased)
 -- on top of the existing single-scalar `user_credits.balance`. The aggregate

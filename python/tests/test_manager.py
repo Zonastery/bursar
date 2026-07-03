@@ -19,12 +19,12 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import CreditManager, UsageMetrics
-from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
-from ducto.interface.base import CapReachedError, FeatureLimitReachedError
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import AllowanceResult, FeatureLimit, PlanDefinition, PricingConfigData, SpendCap
-from ducto.manager import InsufficientCreditsError, LowBalanceConfig, PricingNotLoadedError
+from bursar import CreditManager, UsageMetrics
+from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
+from bursar.interface.base import CapReachedError, FeatureLimitReachedError
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import AllowanceResult, FeatureLimit, PlanDefinition, PricingConfigData, SpendCap
+from bursar.manager import InsufficientCreditsError, LowBalanceConfig, PricingNotLoadedError
 
 # ──────────────────────────────────────────────────────────────────────────
 # TZ FIXES (Phase-2a follow-up): the 7 pre-existing failures were tests that
@@ -344,7 +344,7 @@ class TestCreditTiersPassThrough:
         assert tiers.tiers[0].balance == Decimal("50")
 
     def test_add_credits_unknown_tier_propagates_store_error(self, store: MemoryStore) -> None:
-        from ducto.interface.base import StoreError
+        from bursar.interface.base import StoreError
 
         m = self._manager_with_tiers(store)
         with pytest.raises(StoreError, match="tier_not_found"):
@@ -1248,7 +1248,7 @@ class TestMetadataMerge:
     """System fields win over caller metadata (M7/§5)."""
 
     def test_system_fields_win_over_caller(self, store: MemoryStore) -> None:
-        from ducto.interface.models import CreditMetadata
+        from bursar.interface.models import CreditMetadata
 
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
@@ -1687,9 +1687,7 @@ class TestManagerCheckAllowanceWindowOverride:
         v2 = PricingConfigData(
             models={"_default": "input_tokens * 1"},
             plans={
-                "basic": PlanDefinition(
-                    id="basic", name="Basic", free_allowance=allowance, allowance_period=period
-                )
+                "basic": PlanDefinition(id="basic", name="Basic", free_allowance=allowance, allowance_period=period)
             },
             min_balance=Decimal(0),
         )
@@ -1700,7 +1698,7 @@ class TestManagerCheckAllowanceWindowOverride:
         return mgr, store
 
     def test_rolling_30d_overrides_period_start_and_end(self) -> None:
-        from ducto.allowance import resolve_allowance_window
+        from bursar.allowance import resolve_allowance_window
 
         assigned_at = datetime(2024, 1, 1, tzinfo=UTC)
         mgr, store = self._mgr_with_plan("rolling_30d", Decimal(100), assigned_at)
@@ -1709,15 +1707,19 @@ class TestManagerCheckAllowanceWindowOverride:
         now = datetime.now(UTC)
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "rolling_30d", assigned_at)
         expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
-        assert result.period_start == datetime(
-            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
-        ).isoformat()
-        assert result.period_end == datetime(
-            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-        ).isoformat()
+        assert (
+            result.period_start
+            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
+        )
+        assert (
+            result.period_end
+            == datetime(
+                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+            ).isoformat()
+        )
 
     def test_anniversary_overrides_period_start_and_end(self) -> None:
-        from ducto.allowance import resolve_allowance_window
+        from bursar.allowance import resolve_allowance_window
 
         assigned_at = datetime(2024, 1, 15, tzinfo=UTC)
         mgr, store = self._mgr_with_plan("anniversary", Decimal(100), assigned_at)
@@ -1726,12 +1728,16 @@ class TestManagerCheckAllowanceWindowOverride:
         now = datetime.now(UTC)
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "anniversary", assigned_at)
         expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
-        assert result.period_start == datetime(
-            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
-        ).isoformat()
-        assert result.period_end == datetime(
-            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-        ).isoformat()
+        assert (
+            result.period_start
+            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
+        )
+        assert (
+            result.period_end
+            == datetime(
+                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+            ).isoformat()
+        )
 
     def test_rolling_30d_reports_correct_allowance_remaining_after_partial_deduct(self) -> None:
         # MemoryStore.check_allowance self-resolves its window from its OWN clock

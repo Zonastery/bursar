@@ -1,15 +1,15 @@
-# ducto — Declarative Credit Calculation Engine
+# bursar — Declarative Credit Calculation Engine
 
-[![CI](https://github.com/apoorwv/ducto/actions/workflows/ci.yml/badge.svg)](https://github.com/apoorwv/ducto/actions/workflows/ci.yml)
+[![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
-[![npm](https://img.shields.io/npm/v/@apoorwv/ducto)](https://www.npmjs.com/package/@apoorwv/ducto)
+[![npm](https://img.shields.io/npm/v/@zonastery/bursar)](https://www.npmjs.com/package/@zonastery/bursar)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 
 ```python
-from ducto import CreditManager, UsageMetrics
-from ducto.interface.supabase import HttpxSupabaseStore
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.supabase import HttpxSupabaseStore
 
 store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
 manager = CreditManager(store=store)
@@ -24,7 +24,7 @@ manager.deduct("user_abc", UsageMetrics(model="gpt-4", input_tokens=500, output_
 ```
 
 ```typescript
-import { CreditManager, MemoryStore } from "@apoorwv/ducto";
+import { CreditManager, MemoryStore } from "@zonastery/bursar";
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
@@ -62,26 +62,26 @@ await manager.deduct("user_abc", { model: "gpt-4", inputTokens: 500, outputToken
 
 ## Documentation
 
-Full docs at **[apoorwv.github.io/ducto](https://apoorwv.github.io/ducto/)**.
+Full docs at **[zonastery.github.io/bursar](https://zonastery.github.io/bursar/)**.
 
 | Language | Package | Path |
 |----------|---------|------|
-| Python | `ducto` (PyPI) | [`python/`](/python) — [README](python/README.md) |
-| TypeScript | `@apoorwv/ducto` (npm) | [`javascript/`](/javascript) — [README](javascript/README.md) |
+| Python | `bursar` (PyPI) | [`python/`](/python) — [README](python/README.md) |
+| TypeScript | `@zonastery/bursar` (npm) | [`javascript/`](/javascript) — [README](javascript/README.md) |
 
 ## Quick Start
 
 ```bash
-pip install ducto           # Python
-npm install @apoorwv/ducto  # TypeScript
+pip install bursar           # Python
+npm install @zonastery/bursar  # TypeScript
 ```
 
-> **CLI availability:** The `ducto` CLI commands below are Python-only (`pip install ducto`). The JavaScript SDK provides equivalent library APIs without a CLI.
+> **CLI availability:** The `bursar` CLI commands below are Python-only (`pip install bursar`). The JavaScript SDK provides equivalent library APIs without a CLI.
 
 ### 1. Migrate database
 
 ```bash
-ducto migrate "postgresql://user:pass@host:5432/db"
+bursar migrate "postgresql://user:pass@host:5432/db"
 ```
 
 Applies 15 SQL migrations — tables and RPCs for credits (including the atomic
@@ -91,29 +91,29 @@ and `NUMERIC` (fractional) money columns.
 
 ### 2. Pricing version management
 
-Each `ducto pricing set` creates a new immutable version. Roll back anytime with `pricing activate`.
+Each `bursar pricing set` creates a new immutable version. Roll back anytime with `pricing activate`.
 
 ```bash
 # Apply new pricing (creates v1)
-ducto pricing set pricing.json
+bursar pricing set pricing.json
 
 # Apply with a label
-ducto pricing set pricing.json --label "deploy-42"
+bursar pricing set pricing.json --label "deploy-42"
 
 # List all versions  (* = active)
-ducto pricing list
+bursar pricing list
 
 # Switch active pricing
-ducto pricing activate 1
+bursar pricing activate 1
 
 # Diff two versions
-ducto pricing diff 1 2
+bursar pricing diff 1 2
 
 # Export a version as JSON
-ducto pricing export 2
+bursar pricing export 2
 
 # Validate without applying
-ducto pricing validate pricing.json
+bursar pricing validate pricing.json
 ```
 
 ### 3. Deduct credits
@@ -131,7 +131,7 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
 ### Calculation only (no database)
 
 ```python
-from ducto import PricingEngine, UsageMetrics
+from bursar import PricingEngine, UsageMetrics
 engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 0.001"}})
 cost = engine.calculate(UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200))
 ```
@@ -183,7 +183,7 @@ const result = await manager.deductTeam(team.teamId, "user_abc", { model: "gpt-4
 ### Spend caps
 
 ```python
-from ducto.interface.models import SpendCap
+from bursar.interface.models import SpendCap
 store.set_spend_cap(SpendCap(user_id="user_abc", cap_type="daily", limit=100, action="deny"))
 ```
 
@@ -193,7 +193,7 @@ store.setSpendCap({ userId: "user_abc", type: "daily", limit: 100, action: "deny
 
 ### Financial safety (leases)
 
-Because ducto charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload). See the [Financial Safety](https://github.com/apoorwv/ducto/blob/main/docs/docs/financial-safety.mdx) guide.
+Because bursar charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload). See the [Financial Safety](https://github.com/Zonastery/bursar/blob/main/docs/docs/financial-safety.mdx) guide.
 
 ```python
 lease = manager.reserve("user_abc", Decimal("40"))                 # worst-case hold
@@ -232,7 +232,7 @@ await manager.aggregateStats(start, now);                                // aggr
 ### Events
 
 ```python
-from ducto.events import CreditEvent, CreditEventEmitter
+from bursar.events import CreditEvent, CreditEventEmitter
 emitter = CreditEventEmitter()
 manager = CreditManager(store=store, emitter=emitter)
 emitter.on("credits.deducted", lambda e: print(f"User {e.user_id} spent credits"))
@@ -240,7 +240,7 @@ emitter.on("credits.low_balance", lambda e: send_alert(e.user_id, e.data["balanc
 ```
 
 ```typescript
-import { CreditEventEmitter } from "@apoorwv/ducto";
+import { CreditEventEmitter } from "@zonastery/bursar";
 const emitter = new CreditEventEmitter();
 const manager = new CreditManager(store, null, emitter);
 emitter.on("credits.deducted", (e) => console.log(`User ${e.userId} spent credits`));

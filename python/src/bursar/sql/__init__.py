@@ -1,4 +1,4 @@
-"""Bundled SQL migrations for ducto."""
+"""Bundled SQL migrations for bursar."""
 
 from pathlib import Path
 

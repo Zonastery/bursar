@@ -1,5 +1,5 @@
 [project]
-name = "ducto"
+name = "bursar"
 version = "3.0.0"
 description = "Declarative credit calculation engine for AI SaaS platforms"
 readme = "README.md"
@@ -24,17 +24,17 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://apoorwv.github.io/ducto/"
-Source = "https://github.com/apoorwv/ducto"
-Documentation = "https://apoorwv.github.io/ducto/"
-Issues = "https://github.com/apoorwv/ducto/issues"
+Homepage = "https://zonastery.github.io/bursar/"
+Source = "https://github.com/Zonastery/bursar"
+Documentation = "https://zonastery.github.io/bursar/"
+Issues = "https://github.com/Zonastery/bursar/issues"
 
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-ducto = "ducto.__main__:main"
+bursar = "bursar.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -62,7 +62,7 @@ test = [
 ]
 
 [tool.setuptools.package-data]
-ducto = ["sql/*.sql"]
+bursar = ["sql/*.sql"]
 
 [tool.ruff]
 target-version = "py311"
@@ -97,7 +97,7 @@ reportMissingModuleSource = "none"
 reportOptionalMemberAccess = "none"
 
 [tool.coverage.run]
-source = ["ducto"]
+source = ["bursar"]
 branch = true
 
 [tool.coverage.report]

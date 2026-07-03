@@ -1,17 +1,17 @@
 # Contributing
 
-ducto is a **monorepo** with two independently published SDKs that must stay
+bursar is a **monorepo** with two independently published SDKs that must stay
 behaviorally in sync:
 
-- `python/` — the `ducto` package on PyPI (Pydantic models, `ast`-based safe
+- `python/` — the `bursar` package on PyPI (Pydantic models, `ast`-based safe
   expression engine, Supabase/Postgres/in-memory stores).
-- `javascript/` — the `@apoorwv/ducto` package on npm (TypeScript mirror using
+- `javascript/` — the `@zonastery/bursar` package on npm (TypeScript mirror using
   `decimal.js`).
 - `tests/parity/expression_cases.json` (repo root) — a shared fixture loaded by
   **both** SDK test suites so a cross-SDK divergence fails CI.
 - `docs/` — the Docusaurus + Sphinx/TypeDoc documentation site.
 
-The SQL migrations bundled in `python/src/ducto/sql/*.sql` are the single source
+The SQL migrations bundled in `python/src/bursar/sql/*.sql` are the single source
 of truth for the database schema; the JS integration tests apply the same files.
 
 ## Development Setup
@@ -19,8 +19,8 @@ of truth for the database schema; the JS integration tests apply the same files.
 ### Python (`python/`)
 
 ```bash
-git clone https://github.com/apoorwv/ducto.git
-cd ducto/python
+git clone https://github.com/Zonastery/bursar.git
+cd bursar/python
 uv sync                       # runtime deps
 uv sync --extra test          # ruff, pyright, pytest, pytest-postgresql
 # or, for the full dev group (notebooks, psycopg2, etc.):
@@ -30,7 +30,7 @@ uv sync --group dev
 ### JavaScript (`javascript/`)
 
 ```bash
-cd ducto/javascript
+cd bursar/javascript
 npm install
 ```
 
@@ -46,17 +46,17 @@ uv run pytest -q              # quiet
 
 Store/manager/SQL **integration tests run against a real Postgres**. They read
 the connection string from `DATABASE_URL` (falling back to the legacy
-`DUCTO_TEST_PG_URL`); without one, the Postgres-backed tests *skip* but the
+`BURSAR_TEST_PG_URL`); without one, the Postgres-backed tests *skip* but the
 MemoryStore concurrency/double-spend tests still run. To run everything locally:
 
 ```bash
-docker run -d --name ducto-pg -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_DB=ducto -p 5432:5432 postgres:16
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ducto uv run pytest
+docker run -d --name bursar-pg -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=bursar -p 5432:5432 postgres:16
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar uv run pytest
 ```
 
 The test fixtures bootstrap the Supabase `auth` stubs/roles and apply
-`python/src/ducto/sql/*.sql` themselves, so a bare `postgres:16` is enough. CI
+`python/src/bursar/sql/*.sql` themselves, so a bare `postgres:16` is enough. CI
 runs this matrix on Python 3.11, 3.12, and 3.13.
 
 ### JavaScript
@@ -64,7 +64,7 @@ runs this matrix on Python 3.11, 3.12, and 3.13.
 ```bash
 cd javascript
 npx vitest run                # MemoryStore + parity always run
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ducto npx vitest run
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar npx vitest run
                               # also runs the PostgresStore integration tests
 npx tsc --noEmit              # typecheck
 ```
@@ -124,15 +124,15 @@ authoritative gate.** Install them with `lefthook install`.
 
 ## Adding Storage Backends (Python)
 
-Implement the `CreditStore` ABC in `python/src/ducto/interface/`:
+Implement the `CreditStore` ABC in `python/src/bursar/interface/`:
 
 - All **29** abstract methods declared in
-  `python/src/ducto/interface/base.py` must be implemented (balance/credit ops,
+  `python/src/bursar/interface/base.py` must be implemented (balance/credit ops,
   the atomic `deduct_with_allowance`, the two-phase
   `reserve_credits`/`deduct_credits`, pricing/version management, plans,
   allowance/spend-cap checks, refunds, expiry sweep, analytics, transaction/
   usage listing, and teams).
-- Return the typed Pydantic models from `python/src/ducto/interface/models.py`.
+- Return the typed Pydantic models from `python/src/bursar/interface/models.py`.
 - Mirror the implementation in `javascript/src/stores/` against the
   `CreditStore` interface in `javascript/src/stores/credit-store.ts`.
 - Add unit tests and, for DB-backed stores, integration tests (see
@@ -167,8 +167,8 @@ in the workflow concurrency config so a publish cannot be killed mid-flight.
 
   | Field | Value |
   |---|---|
-  | PyPI Project | `ducto` |
-  | Owner / Repository | `apoorwv/ducto` |
+  | PyPI Project | `bursar` |
+  | Owner / Repository | `Zonastery/bursar` |
   | Workflow name | `ci.yml` |
   | Environment | `release` |
 

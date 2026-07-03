@@ -5,8 +5,8 @@ Orchestrates the credit lifecycle. The hot path (`deduct()`) calculates the cost
 ## Constructor
 
 ```typescript
-import { CreditManager } from "@apoorwv/ducto";
-import { MemoryStore } from "@apoorwv/ducto/node"; // Node.js only; use PostgresStore / HttpxSupabaseStore in production
+import { CreditManager } from "@zonastery/bursar";
+import { MemoryStore } from "@zonastery/bursar/node"; // Node.js only; use PostgresStore / HttpxSupabaseStore in production
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
@@ -26,7 +26,7 @@ const manager = new CreditManager(store);
 
 ```typescript
 import Decimal from "decimal.js";
-import { CreditManager, CreditEventEmitter } from "@apoorwv/ducto";
+import { CreditManager, CreditEventEmitter } from "@zonastery/bursar";
 
 const emitter = new CreditEventEmitter();
 const manager = new CreditManager(store, engine, emitter, {
@@ -279,7 +279,7 @@ const result = await manager.deductTeam(team.teamId, "user-1", { inputTokens: 10
 Optional pub/sub event system for credit lifecycle events.
 
 ```typescript
-import { CreditEventEmitter } from "@apoorwv/ducto";
+import { CreditEventEmitter } from "@zonastery/bursar";
 
 const emitter = new CreditEventEmitter();
 const manager = new CreditManager(store, null, emitter);

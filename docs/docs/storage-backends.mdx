@@ -1,6 +1,6 @@
 # Storage Backends
 
-ducto abstracts storage behind the `CreditStore` interface. All three built-in stores implement exactly the same interface, so you can swap between them — for example, use `MemoryStore` in tests and `HttpxSupabaseStore` in production — without changing any calling code.
+bursar abstracts storage behind the `CreditStore` interface. All three built-in stores implement exactly the same interface, so you can swap between them — for example, use `MemoryStore` in tests and `HttpxSupabaseStore` in production — without changing any calling code.
 
 ## Comparison
 
@@ -38,14 +38,14 @@ Rows marked *(optional)* have default implementations that raise `CapabilityNotS
 Zero dependencies. Thread-safe (Python uses a reentrant lock; JavaScript relies on single-threaded execution with no awaits between read and write).
 
 ```python
-from ducto.interface.memory import MemoryStore
+from bursar.interface.memory import MemoryStore
 
 store = MemoryStore()
 # No setup() call needed
 ```
 
 ```typescript
-import { MemoryStore } from "@apoorwv/ducto";
+import { MemoryStore } from "@zonastery/bursar";
 
 const store = new MemoryStore();
 // No setup() call needed
@@ -60,7 +60,7 @@ Backed by Supabase RPCs via HTTP. The Python implementation uses `httpx`; the Ja
 **Requirements:** Supabase project URL and service role key. The service role key has full database access — do not expose it to clients.
 
 ```python
-from ducto.interface.supabase import HttpxSupabaseStore
+from bursar.interface.supabase import HttpxSupabaseStore
 
 store = HttpxSupabaseStore(
     url="https://<project>.supabase.co",
@@ -70,7 +70,7 @@ store = HttpxSupabaseStore(
 ```
 
 ```typescript
-import { HttpxSupabaseStore } from "@apoorwv/ducto";
+import { HttpxSupabaseStore } from "@zonastery/bursar";
 
 const store = new HttpxSupabaseStore(
   "https://<project>.supabase.co",
@@ -81,14 +81,14 @@ const store = new HttpxSupabaseStore(
 **First-time setup (run once):** `HttpxSupabaseStore.setup()` cannot run migrations over the REST API. Apply the bundled SQL migrations via the Python CLI or directly against your database:
 
 ```bash
-DATABASE_URL="postgresql://..." ducto migrate
+DATABASE_URL="postgresql://..." bursar migrate
 ```
 
 Or from Python:
 
 ```python
 import os
-from ducto.interface.supabase import run_migrations
+from bursar.interface.supabase import run_migrations
 result = run_migrations(os.environ["DATABASE_URL"])
 print(result.tables_created, result.errors)
 ```
@@ -97,16 +97,16 @@ print(result.tables_created, result.errors)
 
 Backed by a direct Postgres connection. The Python implementation uses `psycopg2`; the JavaScript implementation uses the `pg` package (lazy-loaded on first query, so the package is optional until the store is actually used).
 
-**Requirements:** A Postgres connection string (any Postgres database that has the ducto schema installed).
+**Requirements:** A Postgres connection string (any Postgres database that has the bursar schema installed).
 
 ```python
-from ducto.interface.postgres import PostgresStore
+from bursar.interface.postgres import PostgresStore
 
 store = PostgresStore(database_url="postgresql://user:pass@host:5432/db")
 ```
 
 ```typescript
-import { PostgresStore } from "@apoorwv/ducto";
+import { PostgresStore } from "@zonastery/bursar";
 
 const store = new PostgresStore("postgresql://user:pass@host:5432/db");
 // Optional: inject a custom pool constructor for testing
@@ -127,7 +127,7 @@ print(result.tables_created, result.errors)
 Or via CLI:
 
 ```bash
-DATABASE_URL="postgresql://user:pass@host:5432/db" ducto migrate
+DATABASE_URL="postgresql://user:pass@host:5432/db" bursar migrate
 ```
 
 The connection string is read from `DATABASE_URL` by the CLI; it is never passed on the command line.

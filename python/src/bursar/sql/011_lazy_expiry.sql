@@ -1,4 +1,4 @@
--- ducto: lazy per-user credit expiry + idempotent add_credits.
+-- bursar: lazy per-user credit expiry + idempotent add_credits.
 --
 -- Allowance windows and lease TTLs are already lazy-on-read (no cron needed).
 -- Credit expiry (expire_credits/sweep_expired_credits) was the odd one out: a

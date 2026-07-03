@@ -7,15 +7,15 @@ Postgres 16** from a single, consistent mechanism (resolution order):
    (see ``.github/workflows/ci.yml`` and ``javascript/tests/store-integration.test.ts``).
    Preferred so the Python and JS suites point at the same DB::
 
-       DATABASE_URL=postgres://ducto:ducto@localhost:5432/ducto_test uv run pytest
+       DATABASE_URL=postgres://bursar:bursar@localhost:5432/bursar_test uv run pytest
 
-2. ``DUCTO_TEST_PG_URL`` — legacy override for an already-running Postgres
+2. ``BURSAR_TEST_PG_URL`` — legacy override for an already-running Postgres
    (e.g. a ``postgres:16`` Docker container on a non-default port). Folded in
    here so there is one mechanism; ``DATABASE_URL`` wins when both are set::
 
-       docker run -d --name ducto-pg-test -e POSTGRES_PASSWORD=ducto \
-           -e POSTGRES_DB=ducto -p 55432:5432 postgres:16
-       DUCTO_TEST_PG_URL=postgresql://postgres:ducto@localhost:55432/ducto uv run pytest
+       docker run -d --name bursar-pg-test -e POSTGRES_PASSWORD=bursar \
+           -e POSTGRES_DB=bursar -p 55432:5432 postgres:16
+       BURSAR_TEST_PG_URL=postgresql://postgres:bursar@localhost:55432/bursar uv run pytest
 
 3. ``pg_tmp`` (ephemeralpg) — a disposable Postgres spun up per session if the
    binary is installed (``brew install ephemeralpg``).
@@ -24,10 +24,10 @@ If none is available the Postgres/Supabase-setup tests **skip** with a visible
 reason (a DB is optional in a bare sandbox).
 
 For every source the fixture bootstraps the Supabase ``auth`` schema stubs +
-standard roles so ducto's bundled SQL migrations apply cleanly on a bare
+standard roles so bursar's bundled SQL migrations apply cleanly on a bare
 ``postgres:16`` (migrations themselves are applied by ``store.setup()`` in the
 per-store fixtures). When pointed at a persistent DB (``DATABASE_URL`` /
-``DUCTO_TEST_PG_URL``) it TRUNCATEs ducto's tables before each test so
+``BURSAR_TEST_PG_URL``) it TRUNCATEs bursar's tables before each test so
 cross-test state never bleeds.
 """
 
@@ -46,7 +46,7 @@ PG_TMP: str | None = shutil.which("pg_tmp")
 
 def _preseed_supabase_objects(dsn: str) -> None:
     """Create minimal Supabase objects (auth schema, roles, functions) in a
-    plain Postgres so ducto's bundled SQL migrations can run without error.
+    plain Postgres so bursar's bundled SQL migrations can run without error.
 
     This mirrors what Supabase provides automatically in its hosted Postgres:
     the ``auth`` schema with ``uid()``/``role()`` (role defaults to
@@ -109,7 +109,7 @@ def _preseed_supabase_objects(dsn: str) -> None:
         conn.close()
 
 
-def _truncate_ducto_tables(dsn: str) -> None:
+def _truncate_bursar_tables(dsn: str) -> None:
     """Give each test a clean slate on a persistent DB so state never bleeds.
 
     No-op the first time (tables don't exist yet); safe to call before
@@ -161,16 +161,16 @@ def _wait_until_ready(dsn: str, timeout: float = 30.0) -> None:
 def _resolve_persistent_dsn() -> str | None:
     """Return the already-running-Postgres DSN, preferring DATABASE_URL.
 
-    DATABASE_URL (CI / JS suite) → DUCTO_TEST_PG_URL (legacy override) → None.
+    DATABASE_URL (CI / JS suite) → BURSAR_TEST_PG_URL (legacy override) → None.
     """
-    return os.environ.get("DATABASE_URL") or os.environ.get("DUCTO_TEST_PG_URL")
+    return os.environ.get("DATABASE_URL") or os.environ.get("BURSAR_TEST_PG_URL")
 
 
 @pytest.fixture(scope="function")
 def pg_database_url() -> Iterator[str]:
     """Yield a connection URL to a real Postgres, or skip if none is available.
 
-    Resolution order: ``DATABASE_URL`` → ``DUCTO_TEST_PG_URL`` → ``pg_tmp`` → skip.
+    Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` → ``pg_tmp`` → skip.
     """
     # 1 & 2: a persistent, already-running Postgres (DATABASE_URL or legacy override).
     persistent = _resolve_persistent_dsn()
@@ -179,7 +179,7 @@ def pg_database_url() -> Iterator[str]:
         _preseed_supabase_objects(persistent)
         # Clean slate per test so cross-test state never bleeds (store.setup()
         # in the per-store fixtures then applies all migrations idempotently).
-        _truncate_ducto_tables(persistent)
+        _truncate_bursar_tables(persistent)
         yield persistent
         return
 
@@ -187,7 +187,7 @@ def pg_database_url() -> Iterator[str]:
     if PG_TMP is None:
         pytest.skip(
             "No real Postgres available: set DATABASE_URL (e.g. postgres:16 on "
-            "localhost:5432, as CI and the JS suite use) or DUCTO_TEST_PG_URL, "
+            "localhost:5432, as CI and the JS suite use) or BURSAR_TEST_PG_URL, "
             "or install pg_tmp (brew install ephemeralpg)."
         )
 
@@ -207,7 +207,7 @@ def pg_database_url() -> Iterator[str]:
     # pg_tmp backgrounds itself and exits. Wait for Postgres to accept connections.
     _wait_until_ready(dsn)
 
-    # Create Supabase-like objects that ducto SQL migrations depend on.
+    # Create Supabase-like objects that bursar SQL migrations depend on.
     _preseed_supabase_objects(dsn)
 
     yield dsn

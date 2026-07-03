@@ -1,4 +1,4 @@
--- ducto: core credit management RPCs.
+-- bursar: core credit management RPCs.
 -- All functions use OR REPLACE for idempotent setup.
 -- All mutation functions require service_role (backend-only).
 

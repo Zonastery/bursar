@@ -3,7 +3,7 @@
 Postgres is provided via a **real Postgres 16** instance. The single
 ``pg_database_url`` fixture lives in ``conftest.py`` and resolves a connection
 string in this order: ``DATABASE_URL`` (what CI and the JS suite use) →
-``DUCTO_TEST_PG_URL`` (legacy override) → ``pg_tmp`` (disposable) → skip.
+``BURSAR_TEST_PG_URL`` (legacy override) → ``pg_tmp`` (disposable) → skip.
 
 If none is available the Postgres/Supabase-setup tests **skip** with a visible
 reason (a DB is optional in a bare sandbox); they are correct and CI-runnable
@@ -30,12 +30,12 @@ except ModuleNotFoundError:
 
 import pytest
 
-from ducto import ConfigError, CreditManager, UsageMetrics
-from ducto.allowance import resolve_allowance_window, resolve_calendar_window
-from ducto.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
-from ducto.interface.base import StoreError
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import (
+from bursar import ConfigError, CreditManager, UsageMetrics
+from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
+from bursar.interface.base import StoreError
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import (
     CreditMetadata,
     FeatureLimit,
     PlanDefinition,
@@ -43,9 +43,9 @@ from ducto.interface.models import (
     SpendCap,
     TierDefinition,
 )
-from ducto.interface.postgres import PostgresStore
-from ducto.interface.supabase import HttpxSupabaseStore
-from ducto.manager import InsufficientCreditsError
+from bursar.interface.postgres import PostgresStore
+from bursar.interface.supabase import HttpxSupabaseStore
+from bursar.manager import InsufficientCreditsError
 
 # ---------------------------------------------------------------------------
 # Shared pricing config used across all tests
@@ -87,7 +87,7 @@ def _add_and_deduct(manager: CreditManager, user_id: str = "u1") -> None:
 
 # ---------------------------------------------------------------------------
 # The real-Postgres ``pg_database_url`` fixture lives in conftest.py (single
-# mechanism: DATABASE_URL → DUCTO_TEST_PG_URL → pg_tmp → skip).
+# mechanism: DATABASE_URL → BURSAR_TEST_PG_URL → pg_tmp → skip).
 # ---------------------------------------------------------------------------
 
 
@@ -126,14 +126,14 @@ class TestMemoryStoreIntegration:
     def test_insufficient_credits(self, manager: CreditManager) -> None:
         # deduct() no longer reserves; the atomic deduct_with_allowance flow
         # raises InsufficientCreditsError when the balance floor would be breached.
-        from ducto.manager import InsufficientCreditsError
+        from bursar.manager import InsufficientCreditsError
 
         with pytest.raises(InsufficientCreditsError, match="Insufficient credits"):
             manager.deduct("user_1", _METRICS)
 
     def test_setup_lists_all_bundled_migrations(self) -> None:
         """setup() derives its file list from the SQL glob, not a hardcode (L5)."""
-        from ducto.sql import _get_sql_files
+        from bursar.sql import _get_sql_files
 
         store = MemoryStore()
         result = store.setup()
@@ -1206,9 +1206,7 @@ class TestHttpxSupabaseStoreContract:
             headers=self._EXPECTED_HEADERS,
         )
 
-    def test_sweep_expired_credits_request_body_global_when_user_id_omitted(
-        self, store: HttpxSupabaseStore
-    ) -> None:
+    def test_sweep_expired_credits_request_body_global_when_user_id_omitted(self, store: HttpxSupabaseStore) -> None:
         """Omitting ``user_id`` must send ``p_user_id: null`` -- preserving the
         original global-sweep behavior (the periodic cron path) unchanged."""
         mock = self._mock_post(store, {"expired_count": 0, "expired_amount": 0, "expired_by_tier": {}})
@@ -1880,8 +1878,7 @@ class TestAllowanceWindowPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '40 days' "
-                    "WHERE user_id = %s",
+                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '40 days' WHERE user_id = %s",
                     [user],
                 )
             conn.commit()
@@ -1930,12 +1927,16 @@ class TestAllowanceWindowPg:
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "rolling_30d", plan.plan_assigned_at)
         expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
 
-        assert result.period_start == datetime(
-            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
-        ).isoformat()
-        assert result.period_end == datetime(
-            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-        ).isoformat()
+        assert (
+            result.period_start
+            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
+        )
+        assert (
+            result.period_end
+            == datetime(
+                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+            ).isoformat()
+        )
         assert result.allowance_remaining == Decimal("12")
 
     def test_manager_check_allowance_anniversary_matches_resolver(self, store: PostgresStore) -> None:
@@ -1966,12 +1967,16 @@ class TestAllowanceWindowPg:
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "anniversary", plan.plan_assigned_at)
         expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
 
-        assert result.period_start == datetime(
-            expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC
-        ).isoformat()
-        assert result.period_end == datetime(
-            expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-        ).isoformat()
+        assert (
+            result.period_start
+            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
+        )
+        assert (
+            result.period_end
+            == datetime(
+                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
+            ).isoformat()
+        )
         assert result.allowance_remaining == Decimal("10")
 
     # ── 8. manager.check_allowance() regression guard for calendar_month ───
@@ -2267,9 +2272,7 @@ class TestCreditTiersPg:
                 models={"_default": "input_tokens * 1"},
                 tiers={
                     "gifted": TierDefinition(name="Gifted", priority=10),
-                    "purchased": TierDefinition(
-                        name="Purchased", priority=30, is_default=True, allow_overdraft=True
-                    ),
+                    "purchased": TierDefinition(name="Purchased", priority=30, is_default=True, allow_overdraft=True),
                 },
             )
         )
@@ -2467,9 +2470,7 @@ class TestCreditManagerTiersPg:
             "purchased": Decimal("10"),
         }
 
-    def test_settle_overdraft_routes_excess_to_allow_overdraft_tier_through_manager(
-        self, store: PostgresStore
-    ) -> None:
+    def test_settle_overdraft_routes_excess_to_allow_overdraft_tier_through_manager(self, store: PostgresStore) -> None:
         """Settling a lease admitted under the ``overdraft`` policy (negative
         ``overdraft_floor``, resolved via the manager's policy machinery — the
         client-side config schema rejects a negative ``min_balance`` outright,
@@ -2680,16 +2681,12 @@ class TestSubscriptionCyclePg:
         assert mgr.get_balance(user).balance == Decimal("300")
 
         for _ in range(3):
-            replay = mgr.grant_subscription_cycle(
-                user, Decimal("300"), ttl_days=30, idempotency_key="evt-redeliver"
-            )
+            replay = mgr.grant_subscription_cycle(user, Decimal("300"), ttl_days=30, idempotency_key="evt-redeliver")
             assert replay.transaction_id == first.transaction_id
             # Not zero (wiped), not 600/900 (double-granted) -- unchanged.
             assert mgr.get_balance(user).balance == Decimal("300")
 
-    def test_new_cycle_with_replace_prior_expires_leftover_instead_of_stacking(
-        self, store: PostgresStore
-    ) -> None:
+    def test_new_cycle_with_replace_prior_expires_leftover_instead_of_stacking(self, store: PostgresStore) -> None:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(self._subscription_config())
         user = _new_uuid(9407)
@@ -2715,9 +2712,7 @@ class TestSubscriptionCyclePg:
         mgr.grant_subscription_cycle(user, Decimal("100"), ttl_days=30, idempotency_key="evt-a")
         assert mgr.get_balance(user).balance == Decimal("100")
 
-        mgr.grant_subscription_cycle(
-            user, Decimal("40"), ttl_days=30, idempotency_key="evt-b", replace_prior=False
-        )
+        mgr.grant_subscription_cycle(user, Decimal("40"), ttl_days=30, idempotency_key="evt-b", replace_prior=False)
         assert mgr.get_balance(user).balance == Decimal("140")
 
 

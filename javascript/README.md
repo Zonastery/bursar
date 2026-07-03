@@ -1,18 +1,18 @@
-# @apoorwv/ducto
+# @zonastery/bursar
 
-[![CI](https://github.com/apoorwv/ducto/actions/workflows/ci.yml/badge.svg)](https://github.com/apoorwv/ducto/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@apoorwv/ducto)](https://www.npmjs.com/package/@apoorwv/ducto)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/apoorwv/ducto/blob/main/LICENSE)
+[![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@zonastery/bursar)](https://www.npmjs.com/package/@zonastery/bursar)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 
-ducto is a drop-in credit calculation engine. Define pricing as math expressions
+bursar is a drop-in credit calculation engine. Define pricing as math expressions
 (per-model, per-tool, search/RAG, cache, fixed jobs), connect a database, and
 start deducting credits. Pricing lives in your DB — update it live without redeploys.
 
 ```typescript
-import { CreditManager } from "@apoorwv/ducto";
-import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
+import { CreditManager } from "@zonastery/bursar";
+import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
@@ -51,7 +51,7 @@ Works in Node.js 18+, Bun, and Deno. ESM-only.
 ## Installation
 
 ```bash
-npm install @apoorwv/ducto
+npm install @zonastery/bursar
 
 # PostgreSQL store (optional)
 npm install pg
@@ -64,14 +64,14 @@ Requires Node.js 18+ (native `fetch` for Supabase store).
 
 ## Full docs
 
-**[apoorwv.github.io/ducto](https://apoorwv.github.io/ducto/)** — JS API reference, expressions, configuration, examples.
+**[zonastery.github.io/bursar](https://zonastery.github.io/bursar/)** — JS API reference, expressions, configuration, examples.
 
 ## Quick Start
 
 ### Calculation only (no database)
 
 ```typescript
-import { PricingEngine } from "@apoorwv/ducto";
+import { PricingEngine } from "@zonastery/bursar";
 
 const engine = PricingEngine.fromDict({
   version: 1,
@@ -93,8 +93,8 @@ console.log(`Total: ${cost.total.toString()}`); // 0.0110
 ### Full credit lifecycle (in-memory)
 
 ```typescript
-import { CreditManager } from "@apoorwv/ducto";
-import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
+import { CreditManager } from "@zonastery/bursar";
+import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
 import Decimal from "decimal.js";
 
 const store = new MemoryStore();
@@ -124,8 +124,8 @@ console.log(`Remaining balance: ${(await manager.getBalance("user_abc")).balance
 ### Production with Supabase
 
 ```typescript
-import { CreditManager } from "@apoorwv/ducto";
-import { HttpxSupabaseStore } from "@apoorwv/ducto";
+import { CreditManager } from "@zonastery/bursar";
+import { HttpxSupabaseStore } from "@zonastery/bursar";
 
 const store = new HttpxSupabaseStore(
   "https://your-project.supabase.co",
@@ -139,8 +139,8 @@ await manager.addCredits("user_abc", 5000);
 ### Plan-based pricing
 
 ```typescript
-import { CreditManager } from "@apoorwv/ducto";
-import { MemoryStore } from "@apoorwv/ducto/node"; // Node-only (uses `crypto`)
+import { CreditManager } from "@zonastery/bursar";
+import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
 
 const store = new MemoryStore();
 const manager = new CreditManager(store);
@@ -194,7 +194,7 @@ store.setSpendCap({ userId: "user-1", type: "daily", limit: 100, action: "deny" 
 
 ### Financial safety (leases)
 
-Because ducto charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload).
+Because bursar charges *after* the AI call, the safe pattern is an atomic **lease** taken *before* the work: `reserve` a worst-case hold against `available = balance − Σ(active holds)`, do the work, then `settle` the **actual** cost (de-clamped) or `release` to cancel. `reserve` is the only admission gate. Two presets: `strict_prepaid` (default; floor ≥ 0, structurally zero debt) and `overdraft` (negative floor; bills full actual; for paid users with auto-reload).
 
 ```typescript
 import Decimal from "decimal.js";
@@ -220,7 +220,7 @@ await manager.aggregateStats(start, now);                                   // a
 ### Events
 
 ```typescript
-import { CreditEventEmitter } from "@apoorwv/ducto";
+import { CreditEventEmitter } from "@zonastery/bursar";
 const emitter = new CreditEventEmitter();
 const manager = new CreditManager(store, null, emitter);
 emitter.on("credits.deducted", (e) => console.log(`User ${e.userId} spent credits`));
@@ -262,13 +262,13 @@ Basic example:
 
 ### Loading from file
 
-`loadPricingFile` reads Node's filesystem, so it ships from the `@apoorwv/ducto/node`
+`loadPricingFile` reads Node's filesystem, so it ships from the `@zonastery/bursar/node`
 subpath (not the root entry point). YAML files require the optional `js-yaml` peer
 dependency; if it is missing, an `ImportError` is thrown.
 
 ```typescript
-import { PricingEngine } from "@apoorwv/ducto";
-import { loadPricingFile } from "@apoorwv/ducto/node";
+import { PricingEngine } from "@zonastery/bursar";
+import { loadPricingFile } from "@zonastery/bursar/node";
 
 const data = await loadPricingFile("./pricing.yaml");
 const engine = PricingEngine.fromDict(data);
@@ -292,9 +292,9 @@ const engine = PricingEngine.fromDict(data);
 
 | Store | Import | Deps | Use case |
 |-------|--------|------|----------|
-| `MemoryStore` | `@apoorwv/ducto/node` | None (uses Node `crypto`) | Testing, development |
-| `HttpxSupabaseStore` | `@apoorwv/ducto` | Node 18+ (`fetch`) | Supabase production |
-| `PostgresStore` | `@apoorwv/ducto` | `pg` (optional peer) | Direct PostgreSQL |
+| `MemoryStore` | `@zonastery/bursar/node` | None (uses Node `crypto`) | Testing, development |
+| `HttpxSupabaseStore` | `@zonastery/bursar` | Node 18+ (`fetch`) | Supabase production |
+| `PostgresStore` | `@zonastery/bursar` | `pg` (optional peer) | Direct PostgreSQL |
 
 `PostgresStore` requires the optional `pg` peer dependency (`npm install pg`); it
 is dynamically imported and throws if missing.

@@ -3,7 +3,7 @@
 ## Module Layout
 
 ```
-ducto/
+bursar/
 ├── expr.py              # Safe AST expression evaluator (exact Decimal math)
 ├── config.py            # Pydantic model + dict loading for PricingConfig
 ├── engine.py            # PricingEngine — core calculation logic (Decimal)
@@ -136,9 +136,9 @@ A minimal custom store can skip all three optional groups entirely and still sat
 
 ## Scope & boundaries
 
-A few things ducto deliberately does **not** do:
+A few things bursar deliberately does **not** do:
 
-- **No credit-pack purchasing or currency conversion.** ducto tracks and enforces credit balances; it does not talk to a payment provider or convert currency to credits. Call `add_credits` / `addCredits` yourself after a successful payment (Stripe, etc.) completes.
+- **No credit-pack purchasing or currency conversion.** bursar tracks and enforces credit balances; it does not talk to a payment provider or convert currency to credits. Call `add_credits` / `addCredits` yourself after a successful payment (Stripe, etc.) completes.
 - **`CreditEventEmitter` is in-process and synchronous only.** It is not a durable message bus — handlers run inline, in-process, and are not retried or persisted. If you need durable delivery (webhooks, a queue, at-least-once semantics), bridge to it yourself from an event handler.
 - **Plans are immutable per pricing version.** Editing a plan's `free_allowance` or rate overrides means publishing a new pricing version (`publish_pricing_from_dict` / `publishPricingFromDict` or `publish_pricing` / `publishPricing`) — plans are never edited in place on an already-published version.
 

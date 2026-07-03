@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate ducto example notebooks using nbformat.
+"""Generate bursar example notebooks using nbformat.
 
 Usage: uv run python scripts/generate_notebooks.py
 """
@@ -41,11 +41,11 @@ def save(name: str, cells: list[dict]) -> None:
 def pg_setup(extra_imports: str = "") -> dict:
     return code(f"""\
 from datetime import datetime, timedelta
-from ducto.interface.postgres import PostgresStore
-from ducto.manager import CreditManager
-from ducto.engine import PricingEngine
-from ducto.metrics import UsageMetrics, ToolCall
-from ducto.interface.models import (
+from bursar.interface.postgres import PostgresStore
+from bursar.manager import CreditManager
+from bursar.engine import PricingEngine
+from bursar.metrics import UsageMetrics, ToolCall
+from bursar.interface.models import (
     PricingConfigData, PlanDefinition,
     CreditMetadata,
 )
@@ -64,11 +64,11 @@ def memory_setup() -> dict:
     return code("""\
 import uuid
 from datetime import datetime, timedelta
-from ducto.interface.memory import MemoryStore
-from ducto.manager import CreditManager
-from ducto.engine import PricingEngine
-from ducto.metrics import UsageMetrics, ToolCall
-from ducto.interface.models import (
+from bursar.interface.memory import MemoryStore
+from bursar.manager import CreditManager
+from bursar.engine import PricingEngine
+from bursar.metrics import UsageMetrics, ToolCall
+from bursar.interface.models import (
     PricingConfigData, PlanDefinition,
     CreditMetadata, SpendCap,
 )
@@ -87,19 +87,19 @@ def n_concepts():
     return [
         md("""# 00 - Concepts & Setup
 
-Before diving into any single feature, it helps to see the whole shape of ducto: four pieces that compose into a full credit-billing system for an AI product. This notebook introduces them, runs the smallest possible example against each, and explains the setup code that every later notebook relies on — so those notebooks can skip straight to the feature being taught instead of re-explaining their own scaffolding.
+Before diving into any single feature, it helps to see the whole shape of bursar: four pieces that compose into a full credit-billing system for an AI product. This notebook introduces them, runs the smallest possible example against each, and explains the setup code that every later notebook relies on — so those notebooks can skip straight to the feature being taught instead of re-explaining their own scaffolding.
 
 - **`PricingEngine`** — a stateless calculator. Give it usage metrics (input/output tokens, tool calls, search queries, …) and a set of formulas, and it returns a cost. It never touches a database and produces the same answer every time for the same inputs.
 - **`CreditStore`** — the persistence layer. An abstract interface with three shipped implementations: `MemoryStore` (in-process, for tests and these notebooks), `PostgresStore` (production), and `SupabaseStore`. It owns balances, leases, plans, spend caps, and analytics.
 - **`CreditManager`** — the object your application code actually calls. It wires a `PricingEngine` and a `CreditStore` together and adds the operational layer on top: the lease lifecycle, allowance tracking, spend caps, and an event system.
-- **A credit** — an opaque unit of value that you define. Most SaaS platforms map credits to a currency at the UI layer (for example, 1 credit = $0.001); ducto itself is currency-agnostic.
+- **A credit** — an opaque unit of value that you define. Most SaaS platforms map credits to a currency at the UI layer (for example, 1 credit = $0.001); bursar itself is currency-agnostic.
 
 Everything in this series builds on these four pieces, one capability at a time — starting with `PricingEngine` (Notebooks 01–02), then `CreditStore`/`CreditManager` operations (Notebooks 03 onward)."""),
         md("""## The smallest possible example
 
 You don't need a pricing engine or a database to start experimenting with balances — `MemoryStore` runs entirely in-process and needs no setup beyond `store.setup()`. It's the same store every later notebook falls back to whenever a feature doesn't specifically require Postgres."""),
         code("""from decimal import Decimal
-from ducto.interface.memory import MemoryStore
+from bursar.interface.memory import MemoryStore
 
 store = MemoryStore()
 store.setup()
@@ -118,7 +118,7 @@ assert ded.balance_after == Decimal("850")"""),
 
 From here on, most notebooks use `PostgresStore` instead of `MemoryStore`, because several features (analytics, teams, and the RPC-backed atomicity guarantees) are demonstrated against the real production store. Spinning up a real Postgres server isn't something you want to explain in every notebook, so it's factored into two helpers in `shared.py`, next to these notebooks:
 
-- **`start_postgres_store()`** initializes a throwaway Postgres data directory (`initdb`), starts a `postgres` process on a free local port, creates a database, and calls `store.setup()` — which runs every numbered SQL migration in `ducto/sql/` (the tables and RPC functions every `CreditStore` method calls into). It returns `(store, pgdata)`.
+- **`start_postgres_store()`** initializes a throwaway Postgres data directory (`initdb`), starts a `postgres` process on a free local port, creates a database, and calls `store.setup()` — which runs every numbered SQL migration in `bursar/sql/` (the tables and RPC functions every `CreditStore` method calls into). It returns `(store, pgdata)`.
 - **`cleanup(pgdata)`** stops that process and deletes the temporary data directory.
 
 You'll see this pair open and close nearly every remaining notebook:
@@ -130,7 +130,7 @@ store, pgdata = start_postgres_store()
 cleanup(pgdata)
 ```
 
-None of this exists in a real deployment. In production you point `PostgresStore` at your actual database URL and run migrations once (`ducto migrate <dsn>`, covered in Notebook 12), not per session."""),
+None of this exists in a real deployment. In production you point `PostgresStore` at your actual database URL and run migrations once (`bursar migrate <dsn>`, covered in Notebook 12), not per session."""),
         md("""## Store capability differences
 
 | Capability | `MemoryStore` | `PostgresStore` |
@@ -144,7 +144,7 @@ None of this exists in a real deployment. In production you point `PostgresStore
 Two of these are worth stating precisely, because it's easy to read them as store *limitations* when they're really just where a piece of configuration lives:
 
 - **Writing a spend cap is not part of the portable `CreditStore` interface.** `MemoryStore.set_spend_cap()` is a convenience specific to that store, meant for tests and these notebooks. `PostgresStore` implements the *read* side (`check_spend_cap`, which `deduct_with_allowance` also calls internally) against a `credit_spend_caps` table, but there's no writer method — in production you insert a row into that table yourself (via a migration or your own admin tooling). Notebook 07 shows both sides.
-- **Plans need no separate seeding step.** Publishing a pricing config that includes a `plans` section — via `store.set_active_pricing()` or `ducto pricing set` — automatically upserts those plans into Postgres's `credit_plans` table as part of the same call. Notebook 04 shows this end to end.
+- **Plans need no separate seeding step.** Publishing a pricing config that includes a `plans` section — via `store.set_active_pricing()` or `bursar pricing set` — automatically upserts those plans into Postgres's `credit_plans` table as part of the same call. Notebook 04 shows this end to end.
 
 With the shared vocabulary and setup out of the way, Notebook 01 starts with the first concrete piece: turning usage metrics into a cost."""),
     ]
@@ -161,7 +161,7 @@ def n_pricing_basics():
 
 Every AI-powered application needs to answer the same fundamental question: how many credits does this request cost? Without a consistent pricing foundation, costs become opaque - different engineers hard-code different rates in different places, audit trails vanish, and changing your pricing requires a code deployment.
 
-ducto's `PricingEngine` solves this by letting you define pricing formulas as simple math expressions in configuration, completely separate from your application code. Think of it like a restaurant bill: each item on the meal - tokens, tools, search queries - has its own line-item cost, and the total is simply the sum of those items. The `UsageMetrics` class bundles all the ingredients (token counts, tool calls, etc.) into a single object that the engine evaluates against your configured formulas.
+bursar's `PricingEngine` solves this by letting you define pricing formulas as simple math expressions in configuration, completely separate from your application code. Think of it like a restaurant bill: each item on the meal - tokens, tools, search queries - has its own line-item cost, and the total is simply the sum of those items. The `UsageMetrics` class bundles all the ingredients (token counts, tool calls, etc.) into a single object that the engine evaluates against your configured formulas.
 
 This separation of concerns is a core design principle. Formulas live in a database table or a Python dictionary, not scattered across your codebase. Changing how `gpt-4o` is priced means updating one formula string, not hunting down every place that calculates costs. This makes your pricing auditable, testable, and adjustable.
 
@@ -170,16 +170,16 @@ The `PricingEngine` is also completely stateless - it performs pure computation 
 In this notebook, we will walk through four common pricing scenarios: a basic token-only call (the most common pattern), a call with tool invocations, a call with search or RAG operations, and a call that benefits from the LLM provider's context caching discount. Each scenario demonstrates how the same engine handles different metric combinations."""),
         md("""## Setup
 
-Before we can calculate any costs, we need to import the core ducto classes that make up the pricing pipeline. Each import serves a distinct purpose.
+Before we can calculate any costs, we need to import the core bursar classes that make up the pricing pipeline. Each import serves a distinct purpose.
 
 `PricingEngine` is the calculator - it takes input variables (token counts, tool calls, search queries) and evaluates them against formulas defined in configuration. `UsageMetrics` is the data object that bundles all those input variables together. `ToolCall` is a simple named type used when the engine needs to include per-tool costs in its calculation."""),
         code("""# PricingEngine: the core calculator that evaluates math expressions against usage metrics.
 # It parses formula strings into safe AST trees at construction time.
-from ducto.engine import PricingEngine
+from bursar.engine import PricingEngine
 
 # UsageMetrics: bundles all input variables that pricing formulas reference.
 # Each field maps to a variable name available in the expression syntax.
-from ducto.metrics import UsageMetrics, ToolCall"""),
+from bursar.metrics import UsageMetrics, ToolCall"""),
         md("""### Static config via `from_dict`
 
 The `PricingEngine` accepts configuration as a Python dictionary with four optional sections. Each section targets a different dimension of AI application costs.
@@ -282,7 +282,7 @@ print(f"  Model: {cost.model_credits}  Search: {cost.search_credits}  Total: {co
 assert cost.total == 1825"""),
         md("""### With cache discount
 
-LLM providers offer context caching to reduce costs when the same conversation prefix is reused across multiple requests. ducto models this as a separate `cache` section in the pricing config, which produces a discount (a reduction in total credits).
+LLM providers offer context caching to reduce costs when the same conversation prefix is reused across multiple requests. bursar models this as a separate `cache` section in the pricing config, which produces a discount (a reduction in total credits).
 
 In this scenario, we use `claude-haiku-3.5` with 300 input tokens and 100 output tokens, plus 200 cache read tokens and 50 cache write tokens. The cache savings are calculated from the cache formula and subtracted from the total."""),
         code("""# Cache discount: the engine applies savings (negative cost) based on cache usage.
@@ -310,13 +310,13 @@ def n_expression_language():
 
 Notebook 01 used plain arithmetic inside pricing formulas — enough for simple per-token rates. This notebook covers everything else the formula language supports: floors, caps, conditionals, volume tiers, clamping, rounding, and percentiles — plus the safety model that makes it safe to let formulas be user-editable strings stored in a database.
 
-Pricing formulas in ducto are plain strings: `input_tokens * 5 + output_tokens * 15`. But executing arbitrary strings as code is dangerous -- that is how injection attacks happen. A naive approach would use `eval()` to turn a string into a number, but `eval()` can execute any Python expression, including calls to `__import__` (to import the `os` module), `open()` (to read files), or `globals()` (to inspect runtime state). This is like giving a stranger the keys to every room in your house.
+Pricing formulas in bursar are plain strings: `input_tokens * 5 + output_tokens * 15`. But executing arbitrary strings as code is dangerous -- that is how injection attacks happen. A naive approach would use `eval()` to turn a string into a number, but `eval()` can execute any Python expression, including calls to `__import__` (to import the `os` module), `open()` (to read files), or `globals()` (to inspect runtime state). This is like giving a stranger the keys to every room in your house.
 
-ducto's `evaluate_expression` uses Python's `ast` module, not `eval()`. It parses the expression into an abstract syntax tree, then validates every node against an explicit whitelist. Only allowed operations pass through. Think of it like airport security: every item is inspected before it gets on the plane. If a passenger tries to bring a banned item, security stops it before it reaches the gate. Similarly, if an expression contains an operation that is not on the whitelist, the evaluator raises a `ValueError` before any code is executed.
+bursar's `evaluate_expression` uses Python's `ast` module, not `eval()`. It parses the expression into an abstract syntax tree, then validates every node against an explicit whitelist. Only allowed operations pass through. Think of it like airport security: every item is inspected before it gets on the plane. If a passenger tries to bring a banned item, security stops it before it reaches the gate. Similarly, if an expression contains an operation that is not on the whitelist, the evaluator raises a `ValueError` before any code is executed.
 
 The whitelist includes standard arithmetic operators (addition, subtraction, multiplication, division, exponentiation, modulo), comparison operators (less than, greater than, equal to), Boolean operators (and, or, not), and a curated set of function names: `min`, `max`, `if`, `tier`, `clamp`, `percentile`, `ceil`, `floor`, `round`, `sum`, `abs`. Everything else -- `__import__`, `exec`, `eval`, `open`, `lambda`, attribute access, function calls on objects -- is blocked.
 
-The expression variables map directly to usage metrics that ducto collects during inference: `input_tokens` and `output_tokens` for token-based pricing, `cache_read_tokens` and `cache_write_tokens` for cache discounts, `tool_calls` for tool usage pricing, `search_queries` and `search_results` for search/RAG operations, `web_search_calls` and `code_exec_calls` for agentic workflows, and `fixed_job` for flat-rate operations.
+The expression variables map directly to usage metrics that bursar collects during inference: `input_tokens` and `output_tokens` for token-based pricing, `cache_read_tokens` and `cache_write_tokens` for cache discounts, `tool_calls` for tool usage pricing, `search_queries` and `search_results` for search/RAG operations, `web_search_calls` and `code_exec_calls` for agentic workflows, and `fixed_job` for flat-rate operations.
 
 This design has a practical benefit: because pricing formulas are stored as strings in the database (in the `credit_pricing_config` table), you can update pricing without deploying new code. Change a formula in the database, and the next request uses the new price. Combined with the AST safety guarantees, this gives you both agility and security.
 
@@ -328,10 +328,10 @@ The simplest use of the expression evaluator is basic arithmetic. This is the fo
 In a real pricing config, each model gets its own formula string. For example, GPT-4o might cost 5 credits per 1 000 input tokens plus 15 credits per 1 000 output tokens, while Claude Haiku costs 1 and 4 credits respectively. The expression evaluator turns these strings into concrete numbers.
 
 What we will do in this section: calculate the cost of a GPT-4o inference with 500 input tokens and 200 output tokens using a simple arithmetic expression."""),
-        code("""# Step 1: Import the evaluate_expression function from ducto's
+        code("""# Step 1: Import the evaluate_expression function from bursar's
 # expression evaluation module. This function takes a formula string
 # and a dictionary of variable values, and returns the computed result.
-from ducto.expr import evaluate_expression
+from bursar.expr import evaluate_expression
 
 # Step 2: Calculate the credit cost for a GPT-4o inference.
 # The formula "input_tokens * 5 + output_tokens * 15" means:
@@ -474,7 +474,7 @@ r = evaluate_expression("clamp(input_tokens, 100, 500)",
 print(f"  clamp(300, 100, 500) = {r}  (expected: 300) -- within range, unchanged")"""),
         md("""### Rounding functions
 
-ducto provides three rounding functions for whole-number credit billing: `ceil` (round up to the nearest integer), `floor` (round down to the nearest integer), and `round(x, ndigits)` (round to the nearest value with `ndigits` decimal places).
+bursar provides three rounding functions for whole-number credit billing: `ceil` (round up to the nearest integer), `floor` (round down to the nearest integer), and `round(x, ndigits)` (round to the nearest value with `ndigits` decimal places).
 
 Real-world use case: "Round up all credit charges to the nearest whole credit." Ceil rounding ensures the provider always collects at least the computed cost, never less. Floor rounding provides a small discount to the user. Standard rounding to 2 decimal places is useful for fractional credit billing where sub-cent precision is acceptable.
 
@@ -565,12 +565,12 @@ def n_credit_lifecycle():
 
 Credits flow through a lifecycle: they are added, charged, and sometimes refunded. Understanding this lifecycle is critical to building reliable credit systems.
 
-ducto's core operations are simple:
+bursar's core operations are simple:
 - `add_credits()` deposits credits into a user's account.
 - `deduct_with_allowance()` charges atomically — calculates against a fixed cost you already know, then debits in one transaction.
 - `refund_credits()` reverses a completed deduction.
 
-Everything in this notebook assumes you already know (or can easily compute) the cost before charging — the common case for most operations. When the cost isn't known until the work finishes (a chat call with unpredictable token counts) or several concurrent operations need to see each other's in-flight holds, ducto provides a separate **lease lifecycle** (`reserve` → `settle`/`release`) — that's substantial enough to get its own notebook: see Notebook 06 - Financial Safety."""),
+Everything in this notebook assumes you already know (or can easily compute) the cost before charging — the common case for most operations. When the cost isn't known until the work finishes (a chat call with unpredictable token counts) or several concurrent operations need to see each other's in-flight holds, bursar provides a separate **lease lifecycle** (`reserve` → `settle`/`release`) — that's substantial enough to get its own notebook: see Notebook 06 - Financial Safety."""),
         pg_setup("import uuid"),
         md("""### Add credits
 
@@ -590,7 +590,7 @@ print(f"  Tx:        {r.transaction_id}")  # Unique reference for this deposit
 print(f"  Balance:   {r.new_balance}")  # User now has 10,000 credits available to spend"""),
         md("""### Creating a user record without funding it
 
-Sometimes you need a user to exist in ducto's ledger before they have any credits of their own — for example, before adding them to a team (Notebook 08), which requires every member to already have a user record. The idiom is to add zero credits with a descriptive `type`:
+Sometimes you need a user to exist in bursar's ledger before they have any credits of their own — for example, before adding them to a team (Notebook 08), which requires every member to already have a user record. The idiom is to add zero credits with a descriptive `type`:
 
 ```python
 store.add_credits(user_id, 0, type="adjustment")
@@ -603,7 +603,7 @@ print(f"  User initialized with balance: {r0.new_balance}")
 assert r0.new_balance == 0"""),
         md("""### Deduct credits (atomic charge)
 
-Most operations simply **charge** credits directly with `store.deduct_with_allowance()` — ducto's atomic "calculate cost, then charge" primitive. It locks the user's row, applies free allowance, enforces the balance floor, and debits, all in one server-side transaction — no separate reservation step needed for a single-shot charge.
+Most operations simply **charge** credits directly with `store.deduct_with_allowance()` — bursar's atomic "calculate cost, then charge" primitive. It locks the user's row, applies free allowance, enforces the balance floor, and debits, all in one server-side transaction — no separate reservation step needed for a single-shot charge.
 
 This is the same call `CreditManager.deduct()` makes internally after computing the cost from `UsageMetrics`. Calling it directly here keeps this section store-only, with no pricing engine required. It also accepts an optional `model=` keyword — see the next section."""),
         code("""from decimal import Decimal
@@ -658,7 +658,7 @@ def n_plans_and_allowances():
     return [
         md("""# 04 - Plans and Allowances
 
-Most SaaS products offer pricing tiers - Free, Pro, Enterprise - each with a free monthly allowance of credits. ducto tracks per-user plan assignments and monthly usage windows, automatically falling back to the user's credit balance when the free allowance is consumed.
+Most SaaS products offer pricing tiers - Free, Pro, Enterprise - each with a free monthly allowance of credits. bursar tracks per-user plan assignments and monthly usage windows, automatically falling back to the user's credit balance when the free allowance is consumed.
 
 Think of the **allowance** as a monthly prepaid bucket. Every Pro user gets 50,000 free credits each month. Every Free user gets 5,000. These buckets reset automatically at the start of each billing period. In contrast, the **credit balance** (managed via `add_credits` and `deduct_with_allowance` from the previous notebook) is permanent - it only changes when credits are manually added or deducted.
 
@@ -668,7 +668,7 @@ This notebook uses `MemoryStore` purely to avoid the Postgres startup overhead f
         memory_setup(),
         md("""### Persist plan definitions in pricing config
 
-In ducto, plan definitions live inside the pricing configuration, right alongside the model pricing formulas. This keeps all pricing logic - both per-unit costs and subscription allowances - in a single place for easy maintenance.
+In bursar, plan definitions live inside the pricing configuration, right alongside the model pricing formulas. This keeps all pricing logic - both per-unit costs and subscription allowances - in a single place for easy maintenance.
 
 Each plan has three key properties: an `id` (used to reference the plan when assigning users), a human-readable `name`, and a `free_allowance` (the number of free credits the user gets each billing period). By default the billing period is a monthly window that resets on calendar-month UTC boundaries (`allowance_period="calendar_month"`). Two other modes are available: `"rolling_30d"` (a rolling 30-day window) and `"anniversary"` (resets on the same day-of-month the user was assigned the plan). For both non-calendar modes, the window is anchored to when `set_user_plan()` was called for that user — not their account signup date — so re-assigning a plan re-anchors the cycle. When a user is assigned to a plan, the system records the `period_start` and `period_end`. The allowance resets automatically when the period ends.
 
@@ -755,7 +755,7 @@ Calendar-month resets are simple but can feel arbitrary to a user who signs up o
 You never compute the window yourself: `CreditManager.check_allowance()` resolves `period_start`/`period_end` for whichever mode the plan uses and returns them directly. (Internally, the store layer keys usage rows by an explicit date so a `PostgresStore`/`SupabaseStore` restart doesn't lose track of which window is current — but that's plumbing, not something you need to think about.)
 
 One boundary case worth knowing: if a user's allowance period ends mid-session — say they have 4,000 credits remaining and the window rolls over between one request and the next — the very next `check_allowance()` call already reflects the new period: a full, fresh allowance, not the stale 4,000. There is no partial carryover between periods in either direction."""),
-        code("""from ducto.manager import CreditManager
+        code("""from bursar.manager import CreditManager
 
 store.set_active_pricing(
     PricingConfigData(
@@ -792,7 +792,7 @@ def n_credit_expiry():
     return [
         md("""# 05 - Credit Expiry
 
-Free trial credits should expire after 14 days. Purchased credits might expire in 12 months. Promotional bonuses may expire in 60 days. ducto's credit expiry feature handles all of these scenarios with a single `sweep_expired_credits()` function. The pattern is simple: when you add credits to a user's balance, you can set an optional `expires_at` timestamp. If you set it, a background sweep job finds all expired grants and deducts them from the user's available balance.
+Free trial credits should expire after 14 days. Purchased credits might expire in 12 months. Promotional bonuses may expire in 60 days. bursar's credit expiry feature handles all of these scenarios with a single `sweep_expired_credits()` function. The pattern is simple: when you add credits to a user's balance, you can set an optional `expires_at` timestamp. If you set it, a background sweep job finds all expired grants and deducts them from the user's available balance.
 
 The sweep is a safe, transactional operation. It only removes grants whose `expires_at` is in the past. Permanent credits (those added without an `expires_at`) are never touched. This means you can mix expiring and permanent credits in the same user balance: free trial credits expire, purchased credits persist. The sweep also supports a dry-run mode that lets you preview what would be removed before making any changes. This is essential for production deployments where you want to verify the sweep logic before executing it.
 
@@ -800,9 +800,9 @@ Think of the sweep like a refrigerator cleanout: you check the expiration dates 
 
 One scope note: the sweep only touches `add_credits` grants sitting in the balance waiting to expire — it has nothing to do with `deduct_with_allowance`, `settle`, or any other spend-side operation from Notebooks 03 and 06. Expiring credits and spending credits are two independent mechanisms that both happen to adjust the same balance.
 
-ducto does not ship a built-in scheduler for the sweep. In production, you would run `sweep_expired_credits()` on a cron schedule (for example, once per hour via a Celery beat task or a cron job). The sweep is idempotent: running it multiple times only removes newly expired grants each time. Already-expired grants are only removed once.
+bursar does not ship a built-in scheduler for the sweep. In production, you would run `sweep_expired_credits()` on a cron schedule (for example, once per hour via a Celery beat task or a cron job). The sweep is idempotent: running it multiple times only removes newly expired grants each time. Already-expired grants are only removed once.
 
-The expiry feature integrates with the rest of the ducto credit system. When expired credits are swept, the balance is updated atomically. If you use events, the sweep emits standard lifecycle events so your monitoring and alerting pipelines can track credit expiry as a normal credit operation. This makes expiry auditable and visible in your existing dashboards.
+The expiry feature integrates with the rest of the bursar credit system. When expired credits are swept, the balance is updated atomically. If you use events, the sweep emits standard lifecycle events so your monitoring and alerting pipelines can track credit expiry as a normal credit operation. This makes expiry auditable and visible in your existing dashboards.
 
 What we will do in this section: create a mix of expiring and permanent credits for a test user, preview the sweep with `dry_run=True`, execute the real sweep, and confirm that only expired credits were removed."""),
         pg_setup("import uuid\nfrom datetime import timedelta"),
@@ -900,7 +900,7 @@ def n_financial_safety():
     return [
         md("""# 06 - Financial Safety
 
-ducto charges **after** an AI operation completes — but that is exactly when things can go wrong. If you only check the balance *before* the call and debit *after* it returns, you have a race: between the check and the debit, other concurrent operations can also pass the check, and a single expensive (or runaway agentic) call can finish costing far more than you estimated. Once the AI work has run, its cost is real regardless of what your ledger says — you cannot un-deliver a response.
+bursar charges **after** an AI operation completes — but that is exactly when things can go wrong. If you only check the balance *before* the call and debit *after* it returns, you have a race: between the check and the debit, other concurrent operations can also pass the check, and a single expensive (or runaway agentic) call can finish costing far more than you estimated. Once the AI work has run, its cost is real regardless of what your ledger says — you cannot un-deliver a response.
 
 The fix is an atomic **lease** taken *before* the work. A lease holds credits against `available = balance − Σ(active holds)`, so concurrent operations actually see each other. Every operation follows the same shape: **`reserve`** (place a hold) → **do the work** → **`settle`** (charge the actual cost) or **`release`** (cancel, charging nothing). Admission is the *only* place limits are enforced; `settle` is **de-clamped** — it always bills the real cost, even if that exceeds the hold.
 
@@ -909,7 +909,7 @@ This notebook covers the whole model: the two billing shapes (dynamic inference 
 import uuid
 from decimal import Decimal
 
-from ducto import (
+from bursar import (
     CreditManager,
     UsageMetrics,
     LowBalanceConfig,
@@ -919,11 +919,11 @@ from ducto import (
     LeaseExpiredError,
     LeaseNotFoundError,
 )
-from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.interface.models import PricingConfigData, PlanDefinition, OperationPolicy
+from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.interface.models import PricingConfigData, PlanDefinition, OperationPolicy
 from shared import start_postgres_store, cleanup
 
-# A temporary Postgres cluster with the ducto schema already applied.
+# A temporary Postgres cluster with the bursar schema already applied.
 # PostgresStore uses UUID user ids, so every demo user below is a fresh uuid4().
 store, pgdata = start_postgres_store()
 print("✔ PostgresStore ready.")"""),
@@ -1203,7 +1203,7 @@ od_mgr.release(paid_user, new_lease.lease_id)
 print("New request admitted successfully.")"""),
         md("""## 6. Feature gating
 
-Expensive or risky operations (autonomous agentic runs, bulk exports, higher-context models) should be restricted to plans that include them. Pass `required_feature` to `reserve` — ducto checks the user's plan and raises `FeatureNotEntitledError` before any work starts or credits are held."""),
+Expensive or risky operations (autonomous agentic runs, bulk exports, higher-context models) should be restricted to plans that include them. Pass `required_feature` to `reserve` — bursar checks the user's plan and raises `FeatureNotEntitledError` before any work starts or credits are held."""),
         code("""free_gated = str(uuid.uuid4())
 pro_user   = str(uuid.uuid4())
 saas_mgr.add_credits(free_gated, Decimal("500"), "signup_bonus")
@@ -1432,11 +1432,11 @@ def n_spend_caps():
 
 Without spend caps, a single bug or runaway loop can drain a user's entire credit balance in seconds. Spend caps act as safety valves — they limit how many credits a user can consume in a given period, protecting both the user and the platform operator from unexpected costs.
 
-ducto supports three cap behaviors: **deny** (hard block — the operation is rejected when the cap is exceeded), **warn** (soft alert — the operation proceeds but the overage is flagged), and **notify** (passive monitoring — the operation proceeds and the overage is recorded the same way). The deny action is the most common choice for production deployments, while warn and notify are useful for gradual rollouts or monitoring-only scenarios.
+bursar supports three cap behaviors: **deny** (hard block — the operation is rejected when the cap is exceeded), **warn** (soft alert — the operation proceeds but the overage is flagged), and **notify** (passive monitoring — the operation proceeds and the overage is recorded the same way). The deny action is the most common choice for production deployments, while warn and notify are useful for gradual rollouts or monitoring-only scenarios.
 
-Caps can be configured per user and per period type. ducto supports **daily** caps, which reset every calendar day, and **monthly** caps, which reset every calendar month. You can set different limits for different users — for example, a 5,000-credit daily cap for free-tier users and a 50,000-credit daily cap for enterprise customers.
+Caps can be configured per user and per period type. bursar supports **daily** caps, which reset every calendar day, and **monthly** caps, which reset every calendar month. You can set different limits for different users — for example, a 5,000-credit daily cap for free-tier users and a 50,000-credit daily cap for enterprise customers.
 
-In this notebook we will use the `MemoryStore` implementation and walk through each cap action type. You will see what happens when a deduction stays under the cap, when it exceeds a deny cap, when it exceeds a warn cap, and when it exceeds a notify cap. By the end of this notebook you will understand how to configure and enforce spend controls in your own ducto deployment."""),
+In this notebook we will use the `MemoryStore` implementation and walk through each cap action type. You will see what happens when a deduction stays under the cap, when it exceeds a deny cap, when it exceeds a warn cap, and when it exceeds a notify cap. By the end of this notebook you will understand how to configure and enforce spend controls in your own bursar deployment."""),
         md("""### Setup
 
 This notebook uses `MemoryStore` because writing a spend cap (`set_spend_cap`) is a `MemoryStore`-only convenience, not part of the portable `CreditStore` interface (see Notebook 00). `PostgresStore` ships the same `credit_spend_caps` schema and implements the read side (`check_spend_cap`, which `deduct_with_allowance` also calls internally) — but there is no writer method. In production you configure a cap by inserting a row into `credit_spend_caps` directly (via your own admin tooling or a migration); Postgres then enforces it exactly like `MemoryStore` does below.
@@ -1520,7 +1520,7 @@ print(f"  Current spend: {check2.current_spend}  Cap limit: {check2.cap_limit}  
 print(f"  Key insight: warn action allows the deduction but flags the overage")"""),
         md("""### Cap with notify action
 
-The **notify** action behaves identically to **warn** at the deduction level — the charge still proceeds, and `check_spend_cap()` still reports the overage. ducto doesn't treat the two differently in the store; the distinction is a labeling convention for *your* application to interpret. A common split: surface `warn` inline (e.g. a banner in the product UI), and route `notify` to an out-of-band channel your users don't see directly (e.g. an email digest or a Slack alert to the account team) — both read the same `action` field from `check_spend_cap()` to decide which path to take."""),
+The **notify** action behaves identically to **warn** at the deduction level — the charge still proceeds, and `check_spend_cap()` still reports the overage. bursar doesn't treat the two differently in the store; the distinction is a labeling convention for *your* application to interpret. A common split: surface `warn` inline (e.g. a banner in the product UI), and route `notify` to an out-of-band channel your users don't see directly (e.g. an email digest or a Slack alert to the account team) — both read the same `action` field from `check_spend_cap()` to decide which path to take."""),
         code("""# Create a third user for the notify cap demonstration
 user3 = str(uuid.uuid4())
 store.add_credits(user3, 50_000, type="seed")
@@ -1545,7 +1545,7 @@ def n_teams():
     return [
         md("""# 08 - Teams
 
-Individual user balances work well for B2C products where each user pays for themselves. But B2B SaaS needs team accounts — one company with multiple users sharing a single credit pool. ducto's team feature lets you create shared balances, add members, enforce per-user spend caps, and track who spent what. Think of it like a shared bank account with individual debit card limits.
+Individual user balances work well for B2C products where each user pays for themselves. But B2B SaaS needs team accounts — one company with multiple users sharing a single credit pool. bursar's team feature lets you create shared balances, add members, enforce per-user spend caps, and track who spent what. Think of it like a shared bank account with individual debit card limits.
 
 In a typical B2B scenario, a company purchases a block of credits and then distributes access to its employees or departments. Rather than managing individual balances for each employee, you create a single team pool. Every team member draws from that shared pool, and you can optionally cap how much each individual can spend. This mirrors the real-world pattern of a corporate card with per-employee spending limits.
 
@@ -1555,7 +1555,7 @@ What we will do in this section: create a team with an initial balance, add thre
         pg_setup("import uuid"),
         md("""### Create team with initial balance
 
-When you create a team, ducto establishes a separate credit balance that belongs to the team entity, not to any individual user. This is fundamentally different from the user-level `add_credits` calls we have seen in earlier notebooks: the team balance lives in its own ledger and is only accessible through team-specific API methods like `deduct_team` and `get_team_balance`.
+When you create a team, bursar establishes a separate credit balance that belongs to the team entity, not to any individual user. This is fundamentally different from the user-level `add_credits` calls we have seen in earlier notebooks: the team balance lives in its own ledger and is only accessible through team-specific API methods like `deduct_team` and `get_team_balance`.
 
 Think of it as opening a joint bank account. The initial deposit of 100 000 credits is the team's working capital. Individual user balances still exist independently (they may have their own personal credits too), but team operations draw exclusively from the team pool. The two ledgers — personal and team — are separate and do not intermix.
 
@@ -1570,7 +1570,7 @@ team = store.create_team(name="Engineering", initial_balance=100_000)
 print(f"  Team created: name='{team.name}', id={team.team_id}, initial_balance=100000")"""),
         md("""### Add members
 
-Before a user can join a team, they must already exist in the `user_credits` table. This is an intentional design choice: ducto requires every team member to have a user record, even if that record has a zero balance. The team does not create user accounts — it only associates existing users with a shared pool. This ensures that all credit operations, including team deductions, are always attributed to a real user identity. Below we use the zero-balance `add_credits(uid, 0, type="adjustment")` idiom introduced in Notebook 03 to create bare user records before adding them to the team.
+Before a user can join a team, they must already exist in the `user_credits` table. This is an intentional design choice: bursar requires every team member to have a user record, even if that record has a zero balance. The team does not create user accounts — it only associates existing users with a shared pool. This ensures that all credit operations, including team deductions, are always attributed to a real user identity. Below we use the zero-balance `add_credits(uid, 0, type="adjustment")` idiom introduced in Notebook 03 to create bare user records before adding them to the team.
 
 In practice, you will typically create user records during your application's signup flow and add them to teams later via an admin dashboard or an org-management workflow. The `add_team_member` call assigns a role (`"member"` by default) and optionally a per-user spend cap, which we will explore in the final section.
 
@@ -1615,9 +1615,9 @@ for m in members_after:
     print(f"  {m.user_id[:8]}…  role={m.role}  total_spent={m.total_spent}")"""),
         md("""### Exceed team balance (rejected)
 
-What happens when a team tries to spend more credits than the pool contains? Just like overdraft protection on a bank account, ducto rejects the transaction. The `deduct_team` call returns an error code (`"insufficient_credits"` on `PostgresStore`; `MemoryStore` returns the more specific `"insufficient_team_balance"`) rather than allowing the balance to go negative. This is a safety mechanism: it prevents the team from accruing debt and ensures that credits are consumed only when they are available.
+What happens when a team tries to spend more credits than the pool contains? Just like overdraft protection on a bank account, bursar rejects the transaction. The `deduct_team` call returns an error code (`"insufficient_credits"` on `PostgresStore`; `MemoryStore` returns the more specific `"insufficient_team_balance"`) rather than allowing the balance to go negative. This is a safety mechanism: it prevents the team from accruing debt and ensures that credits are consumed only when they are available.
 
-This behavior is by design. In a production SaaS application, an overdrawn team pool could mean a user receives service they cannot pay for, creating a billing gap. By rejecting insufficient-balance transactions upfront, ducto lets you surface the error to the team admin, who can then top up the pool before the user experiences a service disruption.
+This behavior is by design. In a production SaaS application, an overdrawn team pool could mean a user receives service they cannot pay for, creating a billing gap. By rejecting insufficient-balance transactions upfront, bursar lets you surface the error to the team admin, who can then top up the pool before the user experiences a service disruption.
 
 What we will do in this section: attempt to deduct 999 999 credits from the team pool (far exceeding the remaining 95 000), observe the error response, and verify the assertion that enforces the rejection."""),
         code("""# Attempt to deduct 999 999 credits, far more than the 95 000
@@ -1668,13 +1668,13 @@ def n_analytics():
     return [
         md("""# 09 - Analytics
 
-Raw credit transactions are a stream of individual events — user X deducted Y credits at time Z. That is hard to read at a glance. ducto's analytics queries aggregate these events into meaningful summaries: total spend per user, breakdown by model, daily trends, and overall statistics. These queries are the foundation for customer-facing dashboards, internal cost analysis, and anomaly detection.
+Raw credit transactions are a stream of individual events — user X deducted Y credits at time Z. That is hard to read at a glance. bursar's analytics queries aggregate these events into meaningful summaries: total spend per user, breakdown by model, daily trends, and overall statistics. These queries are the foundation for customer-facing dashboards, internal cost analysis, and anomaly detection.
 
-ducto provides five built-in analytics methods through every `CreditStore` implementation. `spend_by_user()` groups deductions by user and returns each user's total spend and transaction count. `spend_by_model()` breaks down credits consumed by AI model name — this is what the `model=` tag from Notebook 03's `deduct_with_allowance()` calls feeds into. `top_users()` returns the highest-spending users, sorted by total consumption. `daily_spend()` groups transactions by calendar date to reveal trends over time. Finally, `aggregate_stats()` computes a single summary row with total credits, active user count, average daily spend, top model, and top user.
+bursar provides five built-in analytics methods through every `CreditStore` implementation. `spend_by_user()` groups deductions by user and returns each user's total spend and transaction count. `spend_by_model()` breaks down credits consumed by AI model name — this is what the `model=` tag from Notebook 03's `deduct_with_allowance()` calls feeds into. `top_users()` returns the highest-spending users, sorted by total consumption. `daily_spend()` groups transactions by calendar date to reveal trends over time. Finally, `aggregate_stats()` computes a single summary row with total credits, active user count, average daily spend, top model, and top user.
 
 These queries are designed to be efficient against Postgres backends but work equally well with in-memory stores for testing and development. Together they form a complete analytics toolkit that answers the most common questions any platform operator needs: who is spending, what are they spending on, and how does spending evolve over time.
 
-In this notebook we will seed a realistic dataset and then run each analytics query to see what it reveals. By the end you will understand how to extract actionable insights from raw credit event data using ducto's analytics layer."""),
+In this notebook we will seed a realistic dataset and then run each analytics query to see what it reveals. By the end you will understand how to extract actionable insights from raw credit event data using bursar's analytics layer."""),
         md("""### Setup
 
 Before we can query analytics, we need a running PostgresStore instance with a seeded database. The `start_postgres_store()` helper handles the connection lifecycle for us, initializing the schema and returning a ready-to-use store object — see Notebook 00 for exactly what that setup does.
@@ -1802,21 +1802,21 @@ def n_events():
     return [
         md("""# 10 - Events
 
-Credit operations are useful on their own, but often you need to react to them — send a Slack alert when a user's balance runs low, update an analytics dashboard on each deduction, or trigger an auto top-up. ducto's event system follows the observer pattern: you emit events when operations happen, and registered handlers react asynchronously.
+Credit operations are useful on their own, but often you need to react to them — send a Slack alert when a user's balance runs low, update an analytics dashboard on each deduction, or trigger an auto top-up. bursar's event system follows the observer pattern: you emit events when operations happen, and registered handlers react asynchronously.
 
-The observer pattern is a software design pattern where an object (the subject) maintains a list of dependents (observers) and notifies them automatically of state changes. In ducto, every credit operation — adding credits, deducting, refunding, hitting a cap — generates a typed event that can be observed by any number of handlers. This decouples the core credit logic from the integrations that react to it.
+The observer pattern is a software design pattern where an object (the subject) maintains a list of dependents (observers) and notifies them automatically of state changes. In bursar, every credit operation — adding credits, deducting, refunding, hitting a cap — generates a typed event that can be observed by any number of handlers. This decouples the core credit logic from the integrations that react to it.
 
 Without events, you would need to add notification logic directly inside every credit operation call site: after `add_credits`, check the balance and send a Slack message; after `deduct`, update the dashboard. This approach is fragile, tightly coupled, and hard to maintain as your integration surface grows. Events solve this by letting you register handlers once, after which all relevant operations automatically trigger them.
 
-ducto defines a standard set of event types: `credits.added`, `credits.deducted`, `credits.refunded`, `credits.low_balance`, `credits.cap_reached`, and `credits.cap_warning`. Each event carries structured data — the user ID, the amount, the new balance, a timestamp, and any operation-specific fields — so your handlers have full context without needing to query the store again.
+bursar defines a standard set of event types: `credits.added`, `credits.deducted`, `credits.refunded`, `credits.low_balance`, `credits.cap_reached`, and `credits.cap_warning`. Each event carries structured data — the user ID, the amount, the new balance, a timestamp, and any operation-specific fields — so your handlers have full context without needing to query the store again.
 
 What we will do in this section: create a `CreditEventEmitter`, register handler functions for multiple event types, wire the emitter to a `CreditManager`, trigger real operations that produce events, inspect the captured event data, and demonstrate type-specific subscriptions that only react to refund events."""),
         pg_setup("""\
 import uuid
-from ducto.events import CreditEvent, CreditEventEmitter"""),
+from bursar.events import CreditEvent, CreditEventEmitter"""),
         md("""### Create emitter and register handlers
 
-The `CreditEventEmitter` is the central hub of ducto's event system. You create one instance, register handler functions for the event types you care about, and then pass the emitter to a `CreditManager`. From that point on, every relevant credit operation on that manager automatically dispatches events to the registered handlers.
+The `CreditEventEmitter` is the central hub of bursar's event system. You create one instance, register handler functions for the event types you care about, and then pass the emitter to a `CreditManager`. From that point on, every relevant credit operation on that manager automatically dispatches events to the registered handlers.
 
 Handler functions have a simple signature: they receive a `CreditEvent` object and return nothing. In our example, the `logger` function appends each event to a `captured` list for later inspection and prints a summary. This pattern — collect events in a list for assertions or post-hoc analysis — is especially useful in testing and monitoring scenarios.
 
@@ -1942,13 +1942,13 @@ def n_custom_store():
     return [
         md("""# 11 - Custom Store
 
-ducto ships with two store implementations: PostgresStore (production-ready, persistent) and MemoryStore (development, ephemeral). But your application might use a different backend -- Redis for speed, DynamoDB for scalability, SQLite for embedded deployments. The CreditStore abstract base class (ABC) defines the contract that every store must fulfill.
+bursar ships with two store implementations: PostgresStore (production-ready, persistent) and MemoryStore (development, ephemeral). But your application might use a different backend -- Redis for speed, DynamoDB for scalability, SQLite for embedded deployments. The CreditStore abstract base class (ABC) defines the contract that every store must fulfill.
 
 Think of the CreditStore ABC as a standardized electrical outlet. The shape of the outlet (the abstract methods) is the same everywhere, but what happens behind the wall (the implementation) can be anything -- Postgres, Redis, DynamoDB, or a plain Python dictionary. As long as the outlet fits, any appliance (CreditManager, PricingEngine, event emitter) works with any store. This is the dependency inversion principle in action: high-level modules depend on abstractions, not concrete implementations.
 
 The ABC is split into a **core** surface and an **optional-capability** surface. The core surface -- balance and atomic charging (get_balance, add_credits, deduct_with_allowance, refund_credits), the lease lifecycle (create_lease, settle_lease, release_lease, renew_lease, get_available), pricing config (get_active_pricing, set_active_pricing, get_pricing_history, get_pricing_config, activate_pricing), plans (get_user_plan, set_user_plan, check_allowance, increment_usage_window), spend-cap checks (check_spend_cap), and expiry sweeps (sweep_expired_credits) -- is `@abstractmethod`, so Python enforces it at instantiation time. The optional groups -- analytics (spend_by_user, spend_by_model, top_users, daily_spend, aggregate_stats), transaction listing (list_user_transactions), and shared team pools (create_team, get_team_balance, add_team_member, get_team_members, deduct_team) -- are concrete on the ABC with a default body that raises `CapabilityNotSupportedError`. A minimal custom store does not need to implement (or even think about) those groups at all; it only pays for them if it opts in by overriding the method.
 
-This split matters for adopters: implementing "pluggable storage" against ducto means implementing roughly 20 core methods, not the full ~35-method surface. If a caller reaches for a capability your store does not support, they get a clear, typed `CapabilityNotSupportedError` instead of a confusing `AttributeError` or silently wrong data.
+This split matters for adopters: implementing "pluggable storage" against bursar means implementing roughly 20 core methods, not the full ~35-method surface. If a caller reaches for a capability your store does not support, they get a clear, typed `CapabilityNotSupportedError` instead of a confusing `AttributeError` or silently wrong data.
 
 What we will do in this section: implement a minimal MyCustomStore that satisfies only the core ABC, wire it to a CreditManager, run it through a charge and a lease, and then show what happens when we call an optional capability it never implemented."""),
         md("""### Implement the core ABC
@@ -1959,8 +1959,8 @@ What we will do in this section: walk through the imports and the class definiti
         code("""import uuid
 import threading
 from decimal import Decimal
-from ducto.interface.base import CreditStore
-from ducto.interface.models import (
+from bursar.interface.base import CreditStore
+from bursar.interface.models import (
     BalanceResult, AddCreditsResult, DeductionResult, LeaseResult,
     ReleaseResult, AvailableResult, RefundResult, GetUserPlanResult,
     SetUserPlanResult, AllowanceResult, CapCheckResult, SetupResult,
@@ -2117,7 +2117,7 @@ print("MyCustomStore implements the CreditStore core ABC.")"""),
 Implementing the core ABC is enough to plug straight into `CreditManager`. The manager does not care whether the store persists to Postgres, Redis, DynamoDB, or a Python dictionary -- it only relies on the core contract. Below we add credits, then run both charging patterns from earlier notebooks (an atomic charge via `deduct_with_allowance`, Notebook 03, and a `reserve` → `settle` lease, Notebook 06) against our custom store.
 
 What we will do in this section: create a CreditManager backed by our custom store, add credits, run an atomic charge and a reserve/settle lease, then confirm that this minimal store still works correctly for every core operation."""),
-        code("""from ducto.manager import CreditManager
+        code("""from bursar.manager import CreditManager
 
 # Create a CreditManager using our custom store as the backend. It needs no
 # pricing engine here since we charge raw Decimal amounts directly.
@@ -2144,7 +2144,7 @@ Our store never overrode any of the optional-capability groups. Calling one -- f
 
 What we will do in this section: call `spend_by_user` on our custom store and catch the resulting `CapabilityNotSupportedError`."""),
         code("""from datetime import datetime, timezone
-from ducto.interface.base import CapabilityNotSupportedError
+from bursar.interface.base import CapabilityNotSupportedError
 
 try:
     custom_store.spend_by_user(datetime.now(timezone.utc), datetime.now(timezone.utc))
@@ -2160,11 +2160,11 @@ except CapabilityNotSupportedError as e:
 
 def n_cli() -> list[dict]:
     return [
-        md("""# 12 - Using the ducto CLI
+        md("""# 12 - Using the bursar CLI
 
-Every previous notebook drove ducto through Python. In production, publishing and rolling back pricing changes is usually a deploy-pipeline or on-call operation, not a Python script — that's what the CLI is for.
+Every previous notebook drove bursar through Python. In production, publishing and rolling back pricing changes is usually a deploy-pipeline or on-call operation, not a Python script — that's what the CLI is for.
 
-The `ducto` command-line tool lets you manage your credit pricing configuration
+The `bursar` command-line tool lets you manage your credit pricing configuration
 directly from the terminal. It connects to your Supabase project via environment
 variables, validates pricing config files, and supports versioned rollouts with
 full history tracking.
@@ -2173,9 +2173,9 @@ full history tracking.
 
 Before using the CLI, make sure you have:
 
-1. **ducto installed** with the Supabase extra:
+1. **bursar installed** with the Supabase extra:
    ```bash
-   pip install "ducto[supabase]"
+   pip install "bursar[supabase]"
    ```
 2. **Environment variables** set:
    ```bash
@@ -2184,7 +2184,7 @@ Before using the CLI, make sure you have:
    ```
 3. **Database migrated** (tables and RPCs created):
    ```bash
-   ducto migrate "postgresql://user:pass@host:5432/db"
+   bursar migrate "postgresql://user:pass@host:5432/db"
    ```
 
 The CLI reads `.env` from your current working directory if available (via `python-dotenv`) and loads any variables it defines — but variables already set in your shell environment always take precedence over the `.env` file, so `export SUPABASE_URL=...` in your shell always wins over a `.env` entry of the same name.
@@ -2192,18 +2192,18 @@ The CLI reads `.env` from your current working directory if available (via `pyth
 ## Available Commands
 
 ```
-ducto pricing set <file> [--label <msg>]    # Apply new pricing (always creates version)
-ducto pricing get                            # Show current active config
-ducto pricing list                           # List all versions (* = active)
-ducto pricing activate <version>             # Switch to any historical version
-ducto pricing validate <file>                # Dry-run validate without applying
-ducto pricing diff <v1> <v2>                 # Show changes between versions
-ducto pricing export <version>               # Dump a specific version as JSON
+bursar pricing set <file> [--label <msg>]    # Apply new pricing (always creates version)
+bursar pricing get                            # Show current active config
+bursar pricing list                           # List all versions (* = active)
+bursar pricing activate <version>             # Switch to any historical version
+bursar pricing validate <file>                # Dry-run validate without applying
+bursar pricing diff <v1> <v2>                 # Show changes between versions
+bursar pricing export <version>               # Dump a specific version as JSON
 ```
 
-Each command is a separate subcommand under `ducto pricing`. Let's explore each one.
+Each command is a separate subcommand under `bursar pricing`. Let's explore each one.
 """),
-        md("""## 1. Setting pricing — `ducto pricing set`
+        md("""## 1. Setting pricing — `bursar pricing set`
 
 The `set` command reads a JSON or YAML file, validates it, and publishes it as
 a **new version** in the database. Previous versions are preserved — nothing is
@@ -2214,10 +2214,10 @@ There is no "upsert" or "skip if exists" — each set is an atomic publish.
 
 ```bash
 # Set pricing from a JSON file
-ducto pricing set pricing.json
+bursar pricing set pricing.json
 
 # Set pricing from a YAML file with a descriptive label
-ducto pricing set pricing.prod.yaml --label "deploy-42: reduced haiku pricing"
+bursar pricing set pricing.prod.yaml --label "deploy-42: reduced haiku pricing"
 ```
 
 The `--label` flag adds a human-readable message to the version, making it
@@ -2233,12 +2233,12 @@ easier to identify in `list` and `diff` outputs later.
    a new one with `version = max(version) + 1`.
 4. The full config history is preserved in the `credit_pricing_config` table.
 """),
-        md("""## 2. Reading active pricing — `ducto pricing get`
+        md("""## 2. Reading active pricing — `bursar pricing get`
 
 Displays the currently active pricing configuration as formatted JSON.
 
 ```bash
-ducto pricing get
+bursar pricing get
 ```
 
 Example output:
@@ -2258,13 +2258,13 @@ Example output:
 
 If no pricing has been configured yet, the command exits with an error.
 """),
-        md("""## 3. Version history — `ducto pricing list`
+        md("""## 3. Version history — `bursar pricing list`
 
 Lists every pricing version that has ever been published, newest first.
 The active version is marked with `*`.
 
 ```bash
-ducto pricing list
+bursar pricing list
 ```
 
 Example output:
@@ -2283,7 +2283,7 @@ Each row shows:
 
 This historical record lets you audit all pricing changes over time.
 """),
-        md("""## 4. Switching versions — `ducto pricing activate`
+        md("""## 4. Switching versions — `bursar pricing activate`
 
 Activates a specific historical version. This is a **rollback** when you go
 to an older version, or a **restore** when you go forward. No new version
@@ -2291,10 +2291,10 @@ is created — the existing version's config is re-activated.
 
 ```bash
 # Switch to version 1 (rollback to initial pricing)
-ducto pricing activate 1
+bursar pricing activate 1
 
 # Switch back to version 3 (latest)
-ducto pricing activate 3
+bursar pricing activate 3
 ```
 
 **How it works:**
@@ -2308,16 +2308,16 @@ ducto pricing activate 3
 model expression bug that overcharges users), you can roll back to a known-good
 version instantly — no redeploy needed.
 """),
-        md("""## 5. Validating configs — `ducto pricing validate`
+        md("""## 5. Validating configs — `bursar pricing validate`
 
 Dry-runs validation against a pricing file **without** publishing it.
 
 ```bash
 # Validate a JSON file
-ducto pricing validate pricing.json
+bursar pricing validate pricing.json
 
 # Validate a YAML file
-ducto pricing validate pricing.prod.yaml
+bursar pricing validate pricing.prod.yaml
 ```
 
 On success:
@@ -2334,13 +2334,13 @@ Validation failed: 1 validation error for PricingConfigData
 
 Use this in CI/CD pipelines to catch pricing errors before deployment.
 """),
-        md("""## 6. Comparing versions — `ducto pricing diff`
+        md("""## 6. Comparing versions — `bursar pricing diff`
 
 Shows a unified diff between two pricing versions. Useful for review before
 activating a rolled-back version.
 
 ```bash
-ducto pricing diff 1 3
+bursar pricing diff 1 3
 ```
 
 Example output:
@@ -2366,23 +2366,23 @@ Example output:
 The diff tells you exactly what changed — model rates, added plans, tool
 pricing, everything. No guessing.
 """),
-        md("""## 7. Exporting versions — `ducto pricing export`
+        md("""## 7. Exporting versions — `bursar pricing export`
 
 Exports a specific version's config as JSON. Combine with `validate` for a
 safe edit-publish workflow:
 
 ```bash
 # 1. Export the active config
-ducto pricing export 3 > current.json
+bursar pricing export 3 > current.json
 
 # 2. Edit the file
 vim current.json
 
 # 3. Validate the edited file
-ducto pricing validate current.json
+bursar pricing validate current.json
 
 # 4. Publish the new version
-ducto pricing set current.json --label "tweaked haiku rates"
+bursar pricing set current.json --label "tweaked haiku rates"
 ```
 
 This workflow ensures you never accidentally deploy broken pricing.
@@ -2393,16 +2393,16 @@ Here's the full CI/CD pipeline for pricing updates:
 
 ```bash
 # 1. Validate first
-ducto pricing validate pricing.new.yaml
+bursar pricing validate pricing.new.yaml
 
 # 2. Publish with a descriptive label
-ducto pricing set pricing.new.yaml --label "$(git rev-parse --short HEAD): reduce opus rate"
+bursar pricing set pricing.new.yaml --label "$(git rev-parse --short HEAD): reduce opus rate"
 
 # 3. Verify the active config
-ducto pricing get
+bursar pricing get
 
 # 4. If something goes wrong within minutes, roll back instantly
-ducto pricing activate 2
+bursar pricing activate 2
 ```
 
 **Key design principles:**
@@ -2434,7 +2434,7 @@ Not all credits are equal. A signup bonus, a monthly subscription grant, and a c
 
 **Credit tiers** solve this by splitting the balance into named, priority-ordered buckets. Each tier has a `priority` (ascending — lower number drains first), an `expires` flag, and can optionally be marked `is_default` (where untagged grants land) or `allow_overdraft` (the one tier permitted to go negative). Deduction always walks tiers in ascending priority order, refunds restore them LIFO (last-drained-first), and expiry sweeps operate per tier instead of per user.
 
-If you never configure `tiers` at all — as every prior notebook did — nothing changes: ducto routes everything through a single synthetic `"default"` tier internally. Tiers are purely additive, and this notebook uses `MemoryStore` (as Notebook 04 did) since none of this behavior is Postgres-specific."""),
+If you never configure `tiers` at all — as every prior notebook did — nothing changes: bursar routes everything through a single synthetic `"default"` tier internally. Tiers are purely additive, and this notebook uses `MemoryStore` (as Notebook 04 did) since none of this behavior is Postgres-specific."""),
         memory_setup(),
         md("""### Configure tiers alongside model pricing
 
@@ -2442,7 +2442,7 @@ If you never configure `tiers` at all — as every prior notebook did — nothin
 
 Priority is ascending: `gifted` at 10 drains before `purchased` at 30. Think of priority as a queue position, not a percentage or weight — the tier walk always fully exhausts one tier before touching the next."""),
         code("""from datetime import UTC
-from ducto.interface.models import TierDefinition
+from bursar.interface.models import TierDefinition
 
 store.set_active_pricing(
     PricingConfigData(
@@ -2483,7 +2483,7 @@ print(f"  Total balance: {store.get_balance(user).balance}")  # 70 — same bala
         md("""### A non-expiring tier rejects `expires_at`
 
 The `expires` flag on a tier isn't just a hint — it's enforced. Trying to set an `expires_at` on a grant into `purchased` (configured with `expires=False`) raises immediately, before anything is written. This stops "permanent" credits from silently gaining a fuse."""),
-        code("""from ducto import StoreError
+        code("""from bursar import StoreError
 
 try:
     store.add_credits(user, 5, type="purchase", tier="purchased", expires_at=datetime.now(UTC) + timedelta(days=1))

@@ -5,7 +5,7 @@ import { join } from "path";
 import { ConfigError } from "../src/errors.js";
 import { PricingEngine } from "../src/engine.js";
 
-const tmpDir = join(tmpdir(), "ducto-js-test-" + Date.now());
+const tmpDir = join(tmpdir(), "bursar-js-test-" + Date.now());
 
 beforeAll(() => {
   mkdirSync(tmpDir, { recursive: true });

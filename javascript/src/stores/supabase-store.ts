@@ -238,8 +238,8 @@ export class HttpxSupabaseStore extends CreditStore {
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
     throw new StoreError(
       "HttpxSupabaseStore.setup() cannot run migrations over the REST API. Apply the " +
-        "bundled SQL migrations via the Python CLI (`ducto migrate`) or by executing " +
-        "`python/src/ducto/sql/*.sql` (in filename order) against your database.",
+        "bundled SQL migrations via the Python CLI (`bursar migrate`) or by executing " +
+        "`python/src/bursar/sql/*.sql` (in filename order) against your database.",
     );
   }
 
@@ -350,7 +350,8 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
-      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
+      featureLimitWarning:
+        row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }
@@ -474,7 +475,8 @@ export class HttpxSupabaseStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
-      featureLimitWarning: row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
+      featureLimitWarning:
+        row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
       tierBreakdown: decRecord(row.tier_breakdown),
     };
   }

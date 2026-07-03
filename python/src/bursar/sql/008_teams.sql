@@ -1,4 +1,4 @@
--- ducto: team/shared balance pools.
+-- bursar: team/shared balance pools.
 -- credit_teams, credit_team_members tables, RPCs for team credit operations.
 --
 -- Money columns are NUMERIC(18,4): team balance, member spend_cap/total_spent.

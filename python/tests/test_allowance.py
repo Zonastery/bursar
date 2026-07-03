@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from ducto.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 
 
 def _utc(*args: int) -> datetime:

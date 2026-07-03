@@ -1,4 +1,4 @@
-"""ducto CLI — database migrations and pricing-version management.
+"""bursar CLI — database migrations and pricing-version management.
 
 Built on :mod:`argparse` so flags, ``--help``, exit codes and type coercion are
 handled by the stdlib rather than hand-rolled ``argv`` slicing.
@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 _T = TypeVar("_T")
 
 if TYPE_CHECKING:
-    from ducto.interface.models import PricingConfigResult
-    from ducto.interface.supabase import HttpxSupabaseStore
+    from bursar.interface.models import PricingConfigResult
+    from bursar.interface.supabase import HttpxSupabaseStore
 
 try:
     from dotenv import load_dotenv
@@ -77,7 +77,7 @@ def _require_extra(extra: str) -> None:
             __import__(mod)
         except ImportError:
             print(
-                f"ducto[{extra}] extra required (missing: {mod}). pip install ducto[{extra}]",
+                f"bursar[{extra}] extra required (missing: {mod}). pip install bursar[{extra}]",
                 file=sys.stderr,
             )
             raise SystemExit(1) from None
@@ -85,7 +85,7 @@ def _require_extra(extra: str) -> None:
 
 def _is_transient(exc: Exception) -> bool:
     """True only for the PostgREST schema-cache / connection errors worth retrying."""
-    from ducto.interface.base import StoreError
+    from bursar.interface.base import StoreError
 
     if not isinstance(exc, StoreError):
         return False
@@ -110,7 +110,7 @@ def _retry_transient(op: Callable[[], _T], *, what: str) -> _T:
                 print(f"Failed to {what}: {exc}", file=sys.stderr)
                 if _is_transient(exc):
                     print(
-                        "Tip: run 'ducto migrate' and wait for the PostgREST schema cache to refresh.",
+                        "Tip: run 'bursar migrate' and wait for the PostgREST schema cache to refresh.",
                         file=sys.stderr,
                     )
                 raise SystemExit(1) from exc
@@ -132,7 +132,7 @@ def _store_from_env() -> HttpxSupabaseStore:
         print("SUPABASE_SERVICE_ROLE_KEY required", file=sys.stderr)
         raise SystemExit(1)
 
-    from ducto.interface.supabase import HttpxSupabaseStore
+    from bursar.interface.supabase import HttpxSupabaseStore
 
     return HttpxSupabaseStore(url=url, key=key)
 
@@ -185,7 +185,7 @@ def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
         try:
             import yaml
         except ImportError:
-            print("PyYAML required for .yaml files: pip install ducto[supabase]", file=sys.stderr)
+            print("PyYAML required for .yaml files: pip install bursar[supabase]", file=sys.stderr)
             raise SystemExit(1) from None
         try:
             return yaml.safe_load(raw)
@@ -216,12 +216,12 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
     if not database_url:
         print(
             "No database URL. Set DATABASE_URL (recommended) or pass it positionally:\n"
-            "  DATABASE_URL=postgresql://… ducto migrate",
+            "  DATABASE_URL=postgresql://… bursar migrate",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
-    from ducto.interface.supabase import run_migrations
+    from bursar.interface.supabase import run_migrations
 
     result = run_migrations(database_url)
     for t in result.tables_created:
@@ -237,8 +237,8 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
 
 
 def _cmd_pricing_validate(args: argparse.Namespace) -> None:
-    from ducto.config import PricingConfig
-    from ducto.interface.models import PricingConfigData
+    from bursar.config import PricingConfig
+    from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
     try:
@@ -251,7 +251,7 @@ def _cmd_pricing_validate(args: argparse.Namespace) -> None:
 
 
 def _cmd_pricing_set(args: argparse.Namespace) -> None:
-    from ducto.interface.models import PricingConfigData
+    from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
     try:
@@ -332,15 +332,15 @@ def _cmd_pricing_diff(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
-        prog="ducto",
-        description="ducto — credit calculation engine: migrations & pricing management.",
+        prog="bursar",
+        description="bursar — credit calculation engine: migrations & pricing management.",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     # migrate
     p_migrate = sub.add_parser(
         "migrate",
-        help="Run database migrations (ducto[postgres])",
+        help="Run database migrations (bursar[postgres])",
         description=(
             "Run bundled SQL migrations. The connection string is read from the "
             "DATABASE_URL environment variable (recommended). A positional URL is "
@@ -360,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
     # pricing
     p_pricing = sub.add_parser(
         "pricing",
-        help="Manage pricing config (ducto[supabase])",
+        help="Manage pricing config (bursar[supabase])",
         description="Manage immutable pricing-config versions via the Supabase store.",
     )
     psub = p_pricing.add_subparsers(dest="subcommand", metavar="<subcommand>")

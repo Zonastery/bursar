@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime
 from decimal import Decimal
 
-from ducto.interface.models import (
+from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,

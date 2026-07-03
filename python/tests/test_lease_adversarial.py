@@ -20,16 +20,16 @@ from decimal import Decimal
 
 import pytest
 
-from ducto import (
+from bursar import (
     CapReachedError,
     ConcurrencyLimitError,
     CreditManager,
     InsufficientCreditsError,
     LowBalanceConfig,
 )
-from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.interface.memory import MemoryStore
-from ducto.interface.models import OperationPolicy, PlanDefinition, PricingConfigData, SpendCap
+from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.interface.memory import MemoryStore
+from bursar.interface.models import OperationPolicy, PlanDefinition, PricingConfigData, SpendCap
 
 
 @pytest.fixture

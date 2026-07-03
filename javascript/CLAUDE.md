@@ -1,9 +1,9 @@
-# ducto JavaScript SDK
+# bursar JavaScript SDK
 
 Credit billing engine for AI SaaS — TypeScript-first mirror of the Python SDK. Same public API surface, same money semantics, same lease lifecycle; all async, all `Decimal` (decimal.js).
 
 ## Stack
-TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests. Three store backends: `MemoryStore` (testing), `PostgresStore` (`pg`), `HttpxSupabaseStore` (native fetch, zero extra deps). Exports: `@apoorwv/ducto` (main), `@apoorwv/ducto/node` (Node-only: `MemoryStore`, `PostgresStore`, `loadPricingFile`).
+TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests. Three store backends: `MemoryStore` (testing), `PostgresStore` (`pg`), `HttpxSupabaseStore` (native fetch, zero extra deps). Exports: `@zonastery/bursar` (main), `@zonastery/bursar/node` (Node-only: `MemoryStore`, `PostgresStore`, `loadPricingFile`).
 
 ## Key source files
 
@@ -19,7 +19,7 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 | `src/errors.ts` | All error classes: `InsufficientCreditsError`, `ConcurrencyLimitError`, `FeatureNotEntitledError`, `LeaseExpiredError`, `LeaseNotFoundError`, etc. |
 | `src/events.ts` (re-exported from `stores/`) | `CreditEventEmitter`, `CreditEvent`, 14 event types. |
 | `src/metrics.ts` | `UsageMetrics`, `ToolCall`. |
-| `src/index.ts` | Package exports — everything users `import from "@apoorwv/ducto"`. |
+| `src/index.ts` | Package exports — everything users `import from "@zonastery/bursar"`. |
 | `src/node.ts` | Node-only subpath exports. |
 
 ## Architecture

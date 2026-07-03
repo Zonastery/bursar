@@ -6,7 +6,7 @@ no-op if omitted.
 
 Usage::
 
-    from ducto.events import CreditEventEmitter
+    from bursar.events import CreditEventEmitter
 
     emitter = CreditEventEmitter()
     emitter.on("credits.deducted", lambda event: print(event))

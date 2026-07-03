@@ -11,9 +11,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ducto.allowance import resolve_allowance_window, resolve_calendar_window
-from ducto.interface.base import CreditStore, StoreError
-from ducto.interface.models import (
+from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.interface.base import CreditStore, StoreError
+from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -50,7 +50,7 @@ from ducto.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from ducto.sql import _get_sql_files
+from bursar.sql import _get_sql_files
 
 
 def _utcnow() -> datetime:

@@ -7,8 +7,8 @@ commit (or roll back) together inside the store (contract §2, C1).
 
 Example::
 
-    from ducto import CreditManager, UsageMetrics
-    from ducto.interface.supabase import HttpxSupabaseStore
+    from bursar import CreditManager, UsageMetrics
+    from bursar.interface.supabase import HttpxSupabaseStore
 
     store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
     manager = CreditManager(store=store)
@@ -38,11 +38,11 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from ducto.allowance import resolve_allowance_window, resolve_calendar_window
-from ducto.engine import PricingEngine
-from ducto.events import CreditEvent, CreditEventEmitter
-from ducto.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
-from ducto.interface.models import (
+from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.engine import PricingEngine
+from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
+from bursar.interface.models import (
     AddCreditsResult,
     AggregateStatsRow,
     AllowanceResult,
@@ -72,7 +72,7 @@ from ducto.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from ducto.metrics import UsageMetrics
+from bursar.metrics import UsageMetrics
 
 
 class CreditError(Exception):

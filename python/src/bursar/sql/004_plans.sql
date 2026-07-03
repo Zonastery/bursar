@@ -1,4 +1,4 @@
--- ducto: subscription plan support.
+-- bursar: subscription plan support.
 -- credit_plans table, plan_id/plan_assigned_at on user_credits, usage window
 -- for allowance tracking, and financial-safety policy columns
 -- (default_billing_mode / per_operation / max_concurrent / overdraft_floor)
