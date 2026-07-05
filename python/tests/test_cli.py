@@ -214,10 +214,29 @@ class TestPricingValidate:
 
 
 class TestPricingStore:
-    def test_set_always_creates_new_version(self, mem_store: MemoryStore, sample_config: str) -> None:
-        for _ in range(3):
-            _run("pricing", "set", sample_config)
-        assert len(mem_store.get_pricing_history()) == 3
+    def test_set_identical_config_aborts(self, mem_store: MemoryStore, sample_config: str) -> None:
+        """Setting the same config twice should not create a new version."""
+        _run("pricing", "set", sample_config)
+        _run("pricing", "set", sample_config)
+        assert len(mem_store.get_pricing_history()) == 1
+
+    def test_set_different_config_creates_new_version(
+        self,
+        tmp_path: Path,
+        mem_store: MemoryStore,
+        sample_config: str,
+    ) -> None:
+        """Setting a different config should create a new version."""
+        _run("pricing", "set", sample_config)
+        p2 = tmp_path / "other.json"
+        p2.write_text('{"models": {"_default": "input_tokens * 2"}}')
+        _run("pricing", "set", str(p2))
+        assert len(mem_store.get_pricing_history()) == 2
+
+    def test_set_first_config_always_works(self, mem_store: MemoryStore, sample_config: str) -> None:
+        """First-time setup (no active version) always proceeds even if there is no diff."""
+        _run("pricing", "set", sample_config)
+        assert len(mem_store.get_pricing_history()) == 1
 
     def test_set_with_label(self, mem_store: MemoryStore, sample_config: str) -> None:
         _run("pricing", "set", sample_config, "--label", "deploy-42")

@@ -261,6 +261,15 @@ def _cmd_pricing_set(args: argparse.Namespace) -> None:
         raise SystemExit(1) from None
 
     store = _store_from_env()
+
+    # Abort if identical to the currently active version — avoids pointless
+    # version churn and noisy diffs.  Only applies when an active version exists;
+    # first-time setup always proceeds.
+    active = store.get_active_pricing()
+    if active is not None and config == active.config:
+        print("No changes — config is identical to the active version.")
+        return
+
     _retry_transient(lambda: store.set_active_pricing(config, label=args.label), what="set pricing")
     print("Pricing config set successfully.")
 
