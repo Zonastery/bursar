@@ -236,7 +236,7 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def _cmd_pricing_validate(args: argparse.Namespace) -> None:
+def _cmd_config_validate(args: argparse.Namespace) -> None:
     from bursar.config import PricingConfig
     from bursar.interface.models import PricingConfigData
 
@@ -250,7 +250,7 @@ def _cmd_pricing_validate(args: argparse.Namespace) -> None:
     print("Pricing config is valid.")
 
 
-def _cmd_pricing_set(args: argparse.Namespace) -> None:
+def _cmd_config_set(args: argparse.Namespace) -> None:
     from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
@@ -274,7 +274,7 @@ def _cmd_pricing_set(args: argparse.Namespace) -> None:
     print("Pricing config set successfully.")
 
 
-def _cmd_pricing_get(_args: argparse.Namespace) -> None:
+def _cmd_config_get(_args: argparse.Namespace) -> None:
     store = _store_from_env()
     result = _retry_transient(store.get_active_pricing, what="get pricing")
     if result is None:
@@ -283,7 +283,7 @@ def _cmd_pricing_get(_args: argparse.Namespace) -> None:
     print(json.dumps(result.model_dump(mode="json"), indent=2))
 
 
-def _cmd_pricing_list(_args: argparse.Namespace) -> None:
+def _cmd_config_list(_args: argparse.Namespace) -> None:
     store = _store_from_env()
     rows = _retry_transient(store.get_pricing_history, what="list pricing")
     if not rows:
@@ -295,13 +295,13 @@ def _cmd_pricing_list(_args: argparse.Namespace) -> None:
         print(f"  {marker} v{r.version}  (id={r.id[:8]}...){label}  {r.created_at[:19]}")
 
 
-def _cmd_pricing_activate(args: argparse.Namespace) -> None:
+def _cmd_config_activate(args: argparse.Namespace) -> None:
     store = _store_from_env()
     _retry_transient(lambda: store.activate_pricing(args.version), what="activate pricing")
     print(f"Pricing v{args.version} activated.")
 
 
-def _cmd_pricing_export(args: argparse.Namespace) -> None:
+def _cmd_config_export(args: argparse.Namespace) -> None:
     store = _store_from_env()
     result = _retry_transient(lambda: store.get_pricing_config(args.version), what="fetch pricing")
     if result is None:
@@ -310,7 +310,7 @@ def _cmd_pricing_export(args: argparse.Namespace) -> None:
     print(json.dumps(result.config.model_dump(mode="json", exclude_none=True), indent=2))
 
 
-def _cmd_pricing_diff(args: argparse.Namespace) -> None:
+def _cmd_config_diff(args: argparse.Namespace) -> None:
     store = _store_from_env()
 
     def _fetch() -> tuple[PricingConfigResult | None, PricingConfigResult | None]:
@@ -367,42 +367,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate.set_defaults(func=_cmd_migrate)
 
     # pricing
-    p_pricing = sub.add_parser(
-        "pricing",
+    p_config = sub.add_parser(
+        "config",
         help="Manage pricing config (bursar[supabase])",
         description="Manage immutable pricing-config versions via the Supabase store.",
     )
-    psub = p_pricing.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
 
     p_set = psub.add_parser("set", help="Apply config (always creates a new version)")
     p_set.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
     p_set.add_argument("--label", default=None, help="Optional label/message for this version")
-    p_set.set_defaults(func=_cmd_pricing_set)
+    p_set.set_defaults(func=_cmd_config_set)
 
     p_get = psub.add_parser("get", help="Show the active pricing config as JSON")
-    p_get.set_defaults(func=_cmd_pricing_get)
+    p_get.set_defaults(func=_cmd_config_get)
 
     p_list = psub.add_parser("list", help="List all pricing versions (* = active)")
-    p_list.set_defaults(func=_cmd_pricing_list)
+    p_list.set_defaults(func=_cmd_config_list)
 
     p_activate = psub.add_parser("activate", help="Switch the active version")
     p_activate.add_argument("version", type=int, help="Version number to activate")
-    p_activate.set_defaults(func=_cmd_pricing_activate)
+    p_activate.set_defaults(func=_cmd_config_activate)
 
     p_validate = psub.add_parser("validate", help="Validate a pricing file without applying it")
     p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
-    p_validate.set_defaults(func=_cmd_pricing_validate)
+    p_validate.set_defaults(func=_cmd_config_validate)
 
     p_diff = psub.add_parser("diff", help="Unified diff between two versions")
     p_diff.add_argument("version_a", type=int, help="First version")
     p_diff.add_argument("version_b", type=int, help="Second version")
-    p_diff.set_defaults(func=_cmd_pricing_diff)
+    p_diff.set_defaults(func=_cmd_config_diff)
 
     p_export = psub.add_parser("export", help="Dump a version as JSON")
     p_export.add_argument("version", type=int, help="Version number to export")
-    p_export.set_defaults(func=_cmd_pricing_export)
+    p_export.set_defaults(func=_cmd_config_export)
 
-    p_pricing.set_defaults(_pricing_parser=p_pricing)
+    p_config.set_defaults(_pricing_parser=p_config)
     return parser
 
 
@@ -415,7 +415,7 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         raise SystemExit(1)
 
-    # `pricing` with no subcommand: show its help and exit non-zero.
+    # `config` with no subcommand: show its help and exit non-zero.
     if not hasattr(args, "func"):
         sub_parser = getattr(args, "_pricing_parser", parser)
         sub_parser.print_help(sys.stderr)

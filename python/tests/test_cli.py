@@ -136,88 +136,88 @@ class TestArgparse:
     def test_unknown_command_exits_2(self) -> None:
         assert _exit_code("blarg") == 2
 
-    def test_pricing_no_subcommand_exits_1(self) -> None:
-        assert _exit_code("pricing") == 1
+    def test_config_no_subcommand_exits_1(self) -> None:
+        assert _exit_code("config") == 1
 
-    def test_pricing_unknown_subcommand_exits_2(self) -> None:
-        assert _exit_code("pricing", "fly") == 2
+    def test_config_unknown_subcommand_exits_2(self) -> None:
+        assert _exit_code("config", "fly") == 2
 
     def test_activate_non_integer_version_exits_2_no_traceback(self, capsys: pytest.CaptureFixture) -> None:
         # type=int turns a bad version into a clean argparse error, not a ValueError traceback.
-        code = _exit_code("pricing", "activate", "notanumber")
+        code = _exit_code("config", "activate", "notanumber")
         assert code == 2
         err = capsys.readouterr().err
         assert "invalid int value" in err
 
     def test_diff_non_integer_version_exits_2(self) -> None:
-        assert _exit_code("pricing", "diff", "1", "x") == 2
+        assert _exit_code("config", "diff", "1", "x") == 2
 
     def test_unknown_flag_exits_2(self) -> None:
-        assert _exit_code("pricing", "set", "f.json", "--bogus") == 2
+        assert _exit_code("config", "set", "f.json", "--bogus") == 2
 
 
 class TestFileLoading:
     def test_set_no_file_exits_2(self) -> None:
         # argparse: required positional missing.
-        assert _exit_code("pricing", "set") == 2
+        assert _exit_code("config", "set") == 2
 
     def test_file_not_found_exits_1_clean(self, capsys: pytest.CaptureFixture) -> None:
-        code = _exit_code("pricing", "set", "/nonexistent/file.json")
+        code = _exit_code("config", "set", "/nonexistent/file.json")
         assert code == 1
         assert "File not found" in capsys.readouterr().err
 
     def test_directory_path_exits_1_clean(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-        code = _exit_code("pricing", "validate", str(tmp_path))
+        code = _exit_code("config", "validate", str(tmp_path))
         assert code == 1
         assert "directory" in capsys.readouterr().err.lower()
 
     def test_invalid_json_exits_1_clean(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "bad.json"
         p.write_text("{not valid json")
-        code = _exit_code("pricing", "validate", str(p))
+        code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "Invalid JSON" in capsys.readouterr().err
 
     def test_invalid_yaml_exits_1_clean(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "bad.yaml"
         p.write_text("key: : :\n  - bad\n: indent")
-        code = _exit_code("pricing", "validate", str(p))
+        code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "Invalid YAML" in capsys.readouterr().err
 
     def test_empty_object_exits_1(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "empty.json"
         p.write_text("{}")
-        code = _exit_code("pricing", "validate", str(p))
+        code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "empty" in capsys.readouterr().err.lower()
 
     def test_non_object_json_exits_1(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "list.json"
         p.write_text("[1, 2, 3]")
-        code = _exit_code("pricing", "validate", str(p))
+        code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "object" in capsys.readouterr().err.lower()
 
 
-class TestPricingValidate:
+class TestConfigValidate:
     def test_valid(self, capsys: pytest.CaptureFixture, sample_config: str) -> None:
-        _run("pricing", "validate", sample_config)
+        _run("config", "validate", sample_config)
         assert "valid" in capsys.readouterr().out
 
     def test_invalid_schema_exits_1(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "bad.json"
         p.write_text('{"models": []}')
-        code = _exit_code("pricing", "validate", str(p))
+        code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "Validation failed" in capsys.readouterr().err
 
 
-class TestPricingStore:
+class TestConfigStore:
     def test_set_identical_config_aborts(self, mem_store: MemoryStore, sample_config: str) -> None:
         """Setting the same config twice should not create a new version."""
-        _run("pricing", "set", sample_config)
-        _run("pricing", "set", sample_config)
+        _run("config", "set", sample_config)
+        _run("config", "set", sample_config)
         assert len(mem_store.get_pricing_history()) == 1
 
     def test_set_different_config_creates_new_version(
@@ -227,19 +227,19 @@ class TestPricingStore:
         sample_config: str,
     ) -> None:
         """Setting a different config should create a new version."""
-        _run("pricing", "set", sample_config)
+        _run("config", "set", sample_config)
         p2 = tmp_path / "other.json"
         p2.write_text('{"models": {"_default": "input_tokens * 2"}}')
-        _run("pricing", "set", str(p2))
+        _run("config", "set", str(p2))
         assert len(mem_store.get_pricing_history()) == 2
 
     def test_set_first_config_always_works(self, mem_store: MemoryStore, sample_config: str) -> None:
         """First-time setup (no active version) always proceeds even if there is no diff."""
-        _run("pricing", "set", sample_config)
+        _run("config", "set", sample_config)
         assert len(mem_store.get_pricing_history()) == 1
 
     def test_set_with_label(self, mem_store: MemoryStore, sample_config: str) -> None:
-        _run("pricing", "set", sample_config, "--label", "deploy-42")
+        _run("config", "set", sample_config, "--label", "deploy-42")
         active = mem_store.get_active_pricing()
         assert active is not None
         assert active.label == "deploy-42"
@@ -251,28 +251,28 @@ class TestPricingStore:
         import bursar.__main__ as cli_mod
 
         monkeypatch.setattr(cli_mod, "_require_extra", lambda _extra: None)
-        assert _exit_code("pricing", "get") == 1
+        assert _exit_code("config", "get") == 1
 
     def test_get_emits_parseable_json(
         self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, sample_config: str
     ) -> None:
-        _run("pricing", "set", sample_config)
+        _run("config", "set", sample_config)
         capsys.readouterr()  # drain the "set" output
-        _run("pricing", "get")
+        _run("config", "get")
         payload = json.loads(capsys.readouterr().out)
         assert payload["config"]["models"]["_default"] == "input_tokens * 1"
         assert payload["version"] == 1
 
     def test_get_no_active_exits_1(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture) -> None:
-        code = _exit_code("pricing", "get")
+        code = _exit_code("config", "get")
         assert code == 1
         assert "No active pricing config" in capsys.readouterr().err
 
     def test_list_shows_version(
         self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, sample_config: str
     ) -> None:
-        _run("pricing", "set", sample_config)
-        _run("pricing", "list")
+        _run("config", "set", sample_config)
+        _run("config", "list")
         assert "v1" in capsys.readouterr().out
 
     def test_list_marks_active(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, tmp_path: Path) -> None:
@@ -281,15 +281,15 @@ class TestPricingStore:
             p.write_text(json.dumps({"models": {"_default": f"input_tokens * {val}"}}))
             return str(p)
 
-        _run("pricing", "set", _conf("1"), "--label", "v1")
-        _run("pricing", "set", _conf("2"), "--label", "v2")
-        _run("pricing", "list")
+        _run("config", "set", _conf("1"), "--label", "v1")
+        _run("config", "set", _conf("2"), "--label", "v2")
+        _run("config", "list")
         out = capsys.readouterr().out
         assert "* v2" in out
         assert "  v1" in out
 
     def test_list_no_configs_exits_1(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture) -> None:
-        code = _exit_code("pricing", "list")
+        code = _exit_code("config", "list")
         assert code == 1
         assert "No pricing configs found" in capsys.readouterr().err
 
@@ -299,45 +299,45 @@ class TestPricingStore:
             p.write_text(json.dumps({"models": {"_default": f"input_tokens * {val}"}}))
             return str(p)
 
-        _run("pricing", "set", _conf("1"), "--label", "v1")
-        _run("pricing", "set", _conf("2"), "--label", "v2")
+        _run("config", "set", _conf("1"), "--label", "v1")
+        _run("config", "set", _conf("2"), "--label", "v2")
 
-        _run("pricing", "activate", "1")
+        _run("config", "activate", "1")
         active = mem_store.get_active_pricing()
         assert active is not None
         assert active.version == 1
         assert active.label == "v1"
 
-        _run("pricing", "activate", "2")
+        _run("config", "activate", "2")
         active = mem_store.get_active_pricing()
         assert active is not None
         assert active.version == 2
 
     def test_activate_missing_version_exits_1(self, mem_store: MemoryStore, sample_config: str) -> None:
-        _run("pricing", "set", sample_config)
-        assert _exit_code("pricing", "activate", "99") == 1
+        _run("config", "set", sample_config)
+        assert _exit_code("config", "activate", "99") == 1
 
     def test_export_emits_parseable_json(
         self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, sample_config: str
     ) -> None:
-        _run("pricing", "set", sample_config)
+        _run("config", "set", sample_config)
         capsys.readouterr()  # drain the "set" output
-        _run("pricing", "export", "1")
+        _run("config", "export", "1")
         payload = json.loads(capsys.readouterr().out)
         assert payload["models"]["_default"] == "input_tokens * 1"
 
     def test_export_missing_version_exits_1(self, mem_store: MemoryStore, sample_config: str) -> None:
-        _run("pricing", "set", sample_config)
-        assert _exit_code("pricing", "export", "99") == 1
+        _run("config", "set", sample_config)
+        assert _exit_code("config", "export", "99") == 1
 
     def test_diff_shows_changes(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, tmp_path: Path) -> None:
         p1 = tmp_path / "a.json"
         p1.write_text(json.dumps({"models": {"a": "1"}}))
         p2 = tmp_path / "b.json"
         p2.write_text(json.dumps({"models": {"b": "1"}}))
-        _run("pricing", "set", str(p1))
-        _run("pricing", "set", str(p2))
-        _run("pricing", "diff", "1", "2")
+        _run("config", "set", str(p1))
+        _run("config", "set", str(p2))
+        _run("config", "diff", "1", "2")
         out = capsys.readouterr().out
         assert "v1" in out
         assert "v2" in out
@@ -345,11 +345,11 @@ class TestPricingStore:
         assert '"b"' in out  # added key shown in diff
 
     def test_diff_no_args_exits_2(self) -> None:
-        assert _exit_code("pricing", "diff") == 2
+        assert _exit_code("config", "diff") == 2
 
     def test_diff_missing_version_exits_1(self, mem_store: MemoryStore, sample_config: str) -> None:
-        _run("pricing", "set", sample_config)
-        assert _exit_code("pricing", "diff", "1", "99") == 1
+        _run("config", "set", sample_config)
+        assert _exit_code("config", "diff", "1", "99") == 1
 
 
 class TestRetryNarrowing:
@@ -363,7 +363,7 @@ class TestRetryNarrowing:
             raise StoreError("permission denied for function activate_pricing_config")
 
         monkeypatch.setattr(mem_store, "activate_pricing", _boom)
-        assert _exit_code("pricing", "activate", "1") == 1
+        assert _exit_code("config", "activate", "1") == 1
         assert calls["n"] == 1  # exactly one attempt — no blind retry of a write
 
     def test_transient_error_is_retried_then_succeeds(
@@ -380,8 +380,8 @@ class TestRetryNarrowing:
             return "ok-id"
 
         monkeypatch.setattr(mem_store, "activate_pricing", _flaky)
-        _run("pricing", "set", sample_config)  # need a version to exist
-        _run("pricing", "activate", "1")
+        _run("config", "set", sample_config)  # need a version to exist
+        _run("config", "activate", "1")
         assert calls["n"] == 3  # retried twice, then succeeded
 
     def test_transient_error_exhausts_retries_exits_1(
@@ -394,13 +394,13 @@ class TestRetryNarrowing:
             raise StoreError("schema cache reload pending")
 
         monkeypatch.setattr(mem_store, "activate_pricing", _always)
-        code = _exit_code("pricing", "activate", "1")
+        code = _exit_code("config", "activate", "1")
         assert code == 1
         err = capsys.readouterr().err
         assert "schema cache" in err.lower()
 
 
-class TestPricingValidationSchemas:
+class TestConfigValidationSchemas:
     """Schema regression tests — validate realistic configs with all features."""
 
     def test_realistic_config_with_search_plans(self, tmp_path: Path) -> None:
@@ -430,7 +430,7 @@ class TestPricingValidationSchemas:
         import yaml
 
         p.write_text(yaml.dump(config))
-        _run("pricing", "validate", str(p))
+        _run("config", "validate", str(p))
 
     def test_features_bool_and_int(self, tmp_path: Path) -> None:
         config = {
@@ -447,7 +447,7 @@ class TestPricingValidationSchemas:
         import yaml
 
         p.write_text(yaml.dump(config))
-        _run("pricing", "validate", str(p))
+        _run("config", "validate", str(p))
 
     def test_search_as_dict_fails(self, tmp_path: Path) -> None:
         """search/cache are single expression strings (WS1), not dicts."""
@@ -459,7 +459,7 @@ class TestPricingValidationSchemas:
         import yaml
 
         p.write_text(yaml.dump(config))
-        assert _exit_code("pricing", "validate", str(p)) == 1
+        assert _exit_code("config", "validate", str(p)) == 1
 
 
 class TestRetryBackoff:
@@ -482,8 +482,8 @@ class TestRetryBackoff:
             return "ok-id"
 
         monkeypatch.setattr(mem_store, "activate_pricing", _flaky)
-        _run("pricing", "set", sample_config)
-        _run("pricing", "activate", "1")
+        _run("config", "set", sample_config)
+        _run("config", "activate", "1")
         assert calls["n"] >= 2  # at least one retry before success
 
     def test_non_transient_error_not_retried(self, mem_store: MemoryStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -497,7 +497,7 @@ class TestRetryBackoff:
             raise StoreError("invalid config for user")
 
         monkeypatch.setattr(mem_store, "activate_pricing", _boom)
-        assert _exit_code("pricing", "activate", "1") == 1
+        assert _exit_code("config", "activate", "1") == 1
         assert calls["n"] == 1
 
 
@@ -532,7 +532,7 @@ class TestValidateThenUseEngine:
         p.write_text(json.dumps(config_data))
 
         # Step 1: CLI validate must succeed (exit 0, print "valid").
-        _run("pricing", "validate", str(p))
+        _run("config", "validate", str(p))
         out = capsys.readouterr().out
         assert "valid" in out.lower()
 
