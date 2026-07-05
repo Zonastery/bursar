@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING, Any, TypeVar
 _T = TypeVar("_T")
 
 if TYPE_CHECKING:
+    from bursar.interface.base import CreditStore
     from bursar.interface.models import PricingConfigResult
-    from bursar.interface.supabase import HttpxSupabaseStore
 
 try:
     from dotenv import load_dotenv
@@ -119,22 +119,41 @@ def _retry_transient(op: Callable[[], _T], *, what: str) -> _T:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _store_from_env() -> HttpxSupabaseStore:
-    """Create an :class:`HttpxSupabaseStore` from ``SUPABASE_*`` env vars."""
-    _require_extra("supabase")
+def _store_from_env(store_type: str | None = None) -> CreditStore:
+    """Create a store from env vars (``SUPABASE_*`` or ``DATABASE_URL``).
 
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if not url:
-        print("SUPABASE_URL required", file=sys.stderr)
-        raise SystemExit(1)
-    if not key:
-        print("SUPABASE_SERVICE_ROLE_KEY required", file=sys.stderr)
-        raise SystemExit(1)
+    Args:
+        store_type: ``"supabase"`` or ``"postgres"``. Falls back to the
+            ``BURSAR_STORE`` env var, then ``"supabase"``.
+    """
+    kind = store_type or os.environ.get("BURSAR_STORE", "supabase")
 
-    from bursar.interface.supabase import HttpxSupabaseStore
+    if kind == "supabase":
+        _require_extra("supabase")
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url:
+            print("SUPABASE_URL required", file=sys.stderr)
+            raise SystemExit(1)
+        if not key:
+            print("SUPABASE_SERVICE_ROLE_KEY required", file=sys.stderr)
+            raise SystemExit(1)
+        from bursar.interface.supabase import HttpxSupabaseStore
 
-    return HttpxSupabaseStore(url=url, key=key)
+        return HttpxSupabaseStore(url=url, key=key)
+
+    if kind == "postgres":
+        _require_extra("postgres")
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            print("DATABASE_URL required for postgres store", file=sys.stderr)
+            raise SystemExit(1)
+        from bursar.interface.postgres import PostgresStore
+
+        return PostgresStore(database_url=database_url)
+
+    print(f"Unknown store: {kind}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
@@ -260,7 +279,7 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
 
-    store = _store_from_env()
+    store = _store_from_env(args.store)
 
     # Abort if identical to the currently active version — avoids pointless
     # version churn and noisy diffs.  Only applies when an active version exists;
@@ -274,8 +293,8 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
     print("Pricing config set successfully.")
 
 
-def _cmd_config_get(_args: argparse.Namespace) -> None:
-    store = _store_from_env()
+def _cmd_config_get(args: argparse.Namespace) -> None:
+    store = _store_from_env(args.store)
     result = _retry_transient(store.get_active_pricing, what="get pricing")
     if result is None:
         print("No active pricing config.", file=sys.stderr)
@@ -283,8 +302,8 @@ def _cmd_config_get(_args: argparse.Namespace) -> None:
     print(json.dumps(result.model_dump(mode="json"), indent=2))
 
 
-def _cmd_config_list(_args: argparse.Namespace) -> None:
-    store = _store_from_env()
+def _cmd_config_list(args: argparse.Namespace) -> None:
+    store = _store_from_env(args.store)
     rows = _retry_transient(store.get_pricing_history, what="list pricing")
     if not rows:
         print("No pricing configs found.", file=sys.stderr)
@@ -296,13 +315,13 @@ def _cmd_config_list(_args: argparse.Namespace) -> None:
 
 
 def _cmd_config_activate(args: argparse.Namespace) -> None:
-    store = _store_from_env()
+    store = _store_from_env(args.store)
     _retry_transient(lambda: store.activate_pricing(args.version), what="activate pricing")
     print(f"Pricing v{args.version} activated.")
 
 
 def _cmd_config_export(args: argparse.Namespace) -> None:
-    store = _store_from_env()
+    store = _store_from_env(args.store)
     result = _retry_transient(lambda: store.get_pricing_config(args.version), what="fetch pricing")
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
@@ -311,7 +330,7 @@ def _cmd_config_export(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_diff(args: argparse.Namespace) -> None:
-    store = _store_from_env()
+    store = _store_from_env(args.store)
 
     def _fetch() -> tuple[PricingConfigResult | None, PricingConfigResult | None]:
         return store.get_pricing_config(args.version_a), store.get_pricing_config(args.version_b)
@@ -343,6 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bursar",
         description="bursar — credit calculation engine: migrations & pricing management.",
+    )
+    parser.add_argument(
+        "--store",
+        choices=["supabase", "postgres"],
+        default=os.environ.get("BURSAR_STORE", "supabase"),
+        help="Store backend (env: BURSAR_STORE, default: supabase)",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 

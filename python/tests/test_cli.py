@@ -35,7 +35,7 @@ def mem_store(monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
 
     import bursar.__main__ as cli_mod
 
-    monkeypatch.setattr(cli_mod, "_store_from_env", lambda: store)
+    monkeypatch.setattr(cli_mod, "_store_from_env", lambda _store=None: store)
     return store
 
 
