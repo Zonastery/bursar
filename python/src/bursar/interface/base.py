@@ -7,7 +7,10 @@ stores for testing.
 
 from __future__ import annotations
 
+import threading
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -94,6 +97,47 @@ class CreditStore(ABC):
     Implementors provide concrete adapters for Supabase, raw PostgreSQL,
     or in-memory stores.
     """
+
+    def __init__(self, pricing_cache_ttl: int = 300) -> None:
+        """Initialize the store.
+
+        Args:
+            pricing_cache_ttl: Seconds to cache ``get_active_pricing()``
+                results. Set to ``0`` to disable caching. Default 300.
+        """
+        self._pricing_cache_ttl = pricing_cache_ttl
+        self._pricing_cache_result: PricingConfigResult | None = None
+        self._pricing_cache_time: float = 0.0
+        self._pricing_cache_lock = threading.Lock()
+
+    # ── Pricing cache ──────────────────────────────────────────────────
+
+    def _get_cached_pricing(
+        self,
+        loader: Callable[[], PricingConfigResult | None],
+    ) -> PricingConfigResult | None:
+        """Return cached pricing if within TTL, else call *loader* and cache.
+
+        Thread-safe. ``None`` results are **not** cached — a missing config
+        triggers a backend call on every invocation so that newly-published
+        pricing is picked up immediately.
+        """
+        now = time.monotonic()
+        with self._pricing_cache_lock:
+            if self._pricing_cache_result is not None and (now - self._pricing_cache_time) < self._pricing_cache_ttl:
+                return self._pricing_cache_result
+        result = loader()
+        now = time.monotonic()  # re-read after loader to avoid TTL erosion
+        with self._pricing_cache_lock:
+            self._pricing_cache_result = result
+            self._pricing_cache_time = now
+        return result
+
+    def invalidate_pricing_cache(self) -> None:
+        """Force the next ``get_active_pricing()`` call to reload from the backend."""
+        with self._pricing_cache_lock:
+            self._pricing_cache_result = None
+            self._pricing_cache_time = 0.0
 
     # ── Schema management ──────────────────────────────────────────────
 

@@ -108,7 +108,8 @@ class PostgresStore(CreditStore):
             (e.g. ``postgresql://user:pass@host:5432/db``).
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, pricing_cache_ttl: int = 300) -> None:
+        super().__init__(pricing_cache_ttl=pricing_cache_ttl)
         self._database_url = database_url
 
     def _conn(self):
@@ -522,6 +523,9 @@ class PostgresStore(CreditStore):
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
+        return self._get_cached_pricing(self._load_active_pricing)
+
+    def _load_active_pricing(self) -> PricingConfigResult | None:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -557,6 +561,7 @@ class PostgresStore(CreditStore):
             conn.close()
 
         result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        self.invalidate_pricing_cache()
         return str(result_dict.get("id", ""))
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -598,6 +603,7 @@ class PostgresStore(CreditStore):
         if row is None:
             msg = f"Version {version} not found"
             raise StoreError(msg)
+        self.invalidate_pricing_cache()
         return str(row[0].get("id", "")) if isinstance(row[0], dict) else str(row[0])
 
     # ── Plan management ────────────────────────────────────────────────

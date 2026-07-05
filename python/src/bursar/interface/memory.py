@@ -157,7 +157,13 @@ class MemoryStore(CreditStore):
             billing-period rollover) without any wall-clock sleep (WS9f).
     """
 
-    def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], datetime] | None = None,
+        *,
+        pricing_cache_ttl: int = 300,
+    ) -> None:
+        super().__init__(pricing_cache_ttl=pricing_cache_ttl)
         self._clock: Callable[[], datetime] = clock if clock is not None else _utcnow
         self._lock = threading.RLock()
         self._balances: dict[str, Decimal] = {}
@@ -1155,6 +1161,9 @@ class MemoryStore(CreditStore):
 
     # ── Pricing configuration ──────────────────────────────────────────
 
+    # No cache wrapper here — iterating in-memory _pricing_history is already
+    # cheap enough that the same-instance TTL cache in the base class would
+    # only add lock overhead. Other stores (postgres, supabase) use the cache.
     def get_active_pricing(self) -> PricingConfigResult | None:
         with self._lock:
             for h in reversed(self._pricing_history):

@@ -156,8 +156,8 @@ export class HttpxSupabaseStore extends CreditStore {
   private url: string;
   private key: string;
 
-  constructor(url: string, key: string) {
-    super();
+  constructor(url: string, key: string, pricingCacheTtl: number = 300) {
+    super(pricingCacheTtl);
     this.url = url.replace(/\/+$/, "");
     this.key = key;
   }
@@ -576,6 +576,10 @@ export class HttpxSupabaseStore extends CreditStore {
   }
 
   async getActivePricing(): Promise<PricingConfigResult | null> {
+    return this._getCachedPricing(() => this._loadActivePricing());
+  }
+
+  private async _loadActivePricing(): Promise<PricingConfigResult | null> {
     const row = await this.rpc("get_active_pricing_config", {});
     if (!row || Object.keys(row).length === 0) return null;
     const code = this.errorCode(row);
@@ -590,6 +594,7 @@ export class HttpxSupabaseStore extends CreditStore {
     });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`set_active_pricing_config: ${code}`);
+    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 
@@ -624,6 +629,7 @@ export class HttpxSupabaseStore extends CreditStore {
     const row = await this.rpc("activate_pricing", { p_version: version });
     const code = this.errorCode(row);
     if (code) throw new StoreError(`activate_pricing: ${code}`);
+    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 

@@ -198,7 +198,8 @@ class HttpxSupabaseStore(CreditStore):
         key: Supabase ``service_role`` key.
     """
 
-    def __init__(self, url: str, key: str) -> None:
+    def __init__(self, url: str, key: str, *, pricing_cache_ttl: int = 300) -> None:
+        super().__init__(pricing_cache_ttl=pricing_cache_ttl)
         self._url = url.rstrip("/")
         self._key = key
         self._http = httpx.Client(timeout=30.0)
@@ -593,6 +594,9 @@ class HttpxSupabaseStore(CreditStore):
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
+        return self._get_cached_pricing(self._load_active_pricing)
+
+    def _load_active_pricing(self) -> PricingConfigResult | None:
         row = self._rpc("get_active_pricing_config", {})
         # No active config: PostgREST returns null/{} (or an error envelope that
         # _rpc would already have raised for non-business codes). Guard against
@@ -610,6 +614,7 @@ class HttpxSupabaseStore(CreditStore):
             "set_active_pricing_config",
             {"p_config": config.model_dump(mode="json"), "p_label": label},
         )
+        self.invalidate_pricing_cache()
         return str(row.get("id", ""))
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -627,6 +632,7 @@ class HttpxSupabaseStore(CreditStore):
         err = row.get("error")
         if err:
             raise StoreError(f"Cannot activate pricing: {err}")
+        self.invalidate_pricing_cache()
         return str(row.get("id", ""))
 
     # ── Plan management ────────────────────────────────────────────────

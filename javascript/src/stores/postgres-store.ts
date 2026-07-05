@@ -164,8 +164,12 @@ export class PostgresStore extends CreditStore {
   private pool: PgPool | null = null;
   private ownsPool: boolean;
 
-  constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
-    super();
+  constructor(
+    databaseUrl: string,
+    poolOrCtor?: PgPool | PgPoolConstructor,
+    pricingCacheTtl: number = 300,
+  ) {
+    super(pricingCacheTtl);
     this.databaseUrl = databaseUrl;
     if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
       // Pre-created pool instance — share, don't own.
@@ -566,6 +570,10 @@ export class PostgresStore extends CreditStore {
   }
 
   async getActivePricing(): Promise<PricingConfigResult | null> {
+    return this._getCachedPricing(() => this._loadActivePricing());
+  }
+
+  private async _loadActivePricing(): Promise<PricingConfigResult | null> {
     const rows = await this.callproc("get_active_pricing_config", []);
     if (!rows || rows.length === 0) return null;
     const row = rows[0] as Record<string, unknown> | undefined;
@@ -579,6 +587,7 @@ export class PostgresStore extends CreditStore {
       label ?? null,
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 
@@ -611,6 +620,7 @@ export class PostgresStore extends CreditStore {
   async activatePricing(version: number): Promise<string> {
     const rows = await this.callproc("activate_pricing", [version]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 

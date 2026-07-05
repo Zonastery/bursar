@@ -1,4 +1,5 @@
 import type { Decimal } from "decimal.js";
+import { performance } from "node:perf_hooks";
 import { CapabilityNotSupportedError } from "../errors.js";
 import type {
   AddCreditsResult,
@@ -98,6 +99,49 @@ export interface SettleLeaseOptions extends FeatureLimitOptions {
  *    throws {@link CapabilityNotSupportedError} instead of forcing a stub.
  */
 export abstract class CreditStore {
+  // ── Pricing config TTL cache ─────────────────────────────────────────
+  private _pricingCacheTtl: number;
+  private _pricingCacheResult: PricingConfigResult | null = null;
+  private _pricingCacheTime: number = 0;
+
+  /**
+   * @param pricingCacheTtl Seconds to cache [[getActivePricing]] results.
+   *   Set to 0 to disable caching. Default 300.
+   */
+  constructor(pricingCacheTtl: number = 300) {
+    this._pricingCacheTtl = pricingCacheTtl;
+  }
+
+  /**
+   * Return cached pricing if within TTL, else call *loader* and cache.
+   * Thread-safe by virtue of JS single-threaded event loop.
+   * ``null`` results are **not** cached — missing config triggers a
+   * backend call on every invocation so newly-published pricing is
+   * picked up immediately.
+   */
+  protected async _getCachedPricing(
+    loader: () => Promise<PricingConfigResult | null>,
+  ): Promise<PricingConfigResult | null> {
+    let now = performance.now();
+    if (
+      this._pricingCacheResult != null &&
+      now - this._pricingCacheTime < this._pricingCacheTtl * 1000
+    ) {
+      return this._pricingCacheResult;
+    }
+    const result = await loader();
+    now = performance.now(); // re-read after loader to avoid TTL erosion
+    this._pricingCacheResult = result;
+    this._pricingCacheTime = now;
+    return result;
+  }
+
+  /** Force the next [[getActivePricing]] call to reload from the backend. */
+  invalidatePricingCache(): void {
+    this._pricingCacheResult = null;
+    this._pricingCacheTime = 0;
+  }
+
   abstract setup(databaseUrl?: string | null): Promise<SetupResult>;
   abstract getBalance(userId: string): Promise<BalanceResult>;
   abstract addCredits(
