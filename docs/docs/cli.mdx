@@ -71,7 +71,7 @@ Dump a specific version as JSON.
 
 Print a unified diff between two pricing versions.
 
-All `pricing` subcommands require the `supabase` extra and the `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` environment variables.
+All `pricing` subcommands require the `supabase` extra and the `SUPABASE_URL` + `SUPABASE_SECRET_KEY` environment variables.
 
 ## Environment Variables
 
@@ -79,6 +79,6 @@ All `pricing` subcommands require the `supabase` extra and the `SUPABASE_URL` + 
 |----------|-------------|-------------|
 | `DATABASE_URL` | `migrate` | PostgreSQL connection string (primary; never put it on the command line) |
 | `SUPABASE_URL` | `pricing` commands | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | `pricing` commands | Supabase `service_role` key |
+| `SUPABASE_SECRET_KEY` | `pricing` commands | Supabase `service_role` key |
 
 A `.env` file in the current directory is loaded automatically (existing environment variables take precedence).

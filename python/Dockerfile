@@ -33,6 +33,6 @@ USER bursar
 WORKDIR /home/bursar
 
 # `bursar migrate` / `bursar pricing …` read secrets from the environment
-# (DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) — never bake them in.
+# (DATABASE_URL, SUPABASE_URL, SUPABASE_SECRET_KEY) — never bake them in.
 ENTRYPOINT ["bursar"]
 CMD ["--help"]

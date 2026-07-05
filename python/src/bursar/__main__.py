@@ -7,7 +7,7 @@ Connection secrets are taken from the environment, never the command line:
 
 * ``migrate`` reads ``DATABASE_URL`` (primary). A positional URL is accepted for
   convenience but is discouraged — it leaks via ``ps``/shell history/CI logs.
-* ``pricing`` reads ``SUPABASE_URL`` + ``SUPABASE_SERVICE_ROLE_KEY``.
+* ``pricing`` reads ``SUPABASE_URL`` + ``SUPABASE_SECRET_KEY``.
 """
 
 from __future__ import annotations
@@ -131,12 +131,12 @@ def _store_from_env(store_type: str | None = None) -> CreditStore:
     if kind == "supabase":
         _require_extra("supabase")
         url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        key = os.environ.get("SUPABASE_SECRET_KEY")
         if not url:
             print("SUPABASE_URL required", file=sys.stderr)
             raise SystemExit(1)
         if not key:
-            print("SUPABASE_SERVICE_ROLE_KEY required", file=sys.stderr)
+            print("SUPABASE_SECRET_KEY required", file=sys.stderr)
             raise SystemExit(1)
         from bursar.interface.supabase import HttpxSupabaseStore
 

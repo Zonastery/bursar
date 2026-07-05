@@ -31,7 +31,7 @@ def mem_store(monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
     """Replace _store_from_env with an in-memory store."""
     store = MemoryStore()
     monkeypatch.setenv("SUPABASE_URL", "http://localhost")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "test-key")
 
     import bursar.__main__ as cli_mod
 
@@ -246,7 +246,7 @@ class TestConfigStore:
 
     def test_get_no_env_exits_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("SUPABASE_URL", raising=False)
-        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
         # Force supabase extra present so we reach the env-var check, not the extra check.
         import bursar.__main__ as cli_mod
 
