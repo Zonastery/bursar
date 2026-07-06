@@ -127,7 +127,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.sync_plans_from_config(JSONB) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.sync_plans_from_config(JSONB) FROM PUBLIC, anon, authenticated;
 
 -- get_user_plan: Fetch user's current plan, including policy + allowance-window fields.
 CREATE OR REPLACE FUNCTION public.get_user_plan(p_user_id UUID)
@@ -180,7 +180,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.get_user_plan(UUID) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_user_plan(UUID) FROM PUBLIC, anon, authenticated;
 
 -- set_user_plan gained a plan_key (TEXT) parameter in place of the original
 -- UUID param. Drop every overload by name first so the current signature is
@@ -263,8 +263,8 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.unset_user_plan(UUID) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.unset_user_plan(UUID) FROM PUBLIC, anon, authenticated;
 
 -- check_plan_allowance gained a trailing p_period_start DATE parameter. Drop
 -- every overload by name first so the current signature is unambiguous.
@@ -338,7 +338,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.check_plan_allowance(UUID, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.check_plan_allowance(UUID, DATE) FROM PUBLIC, anon, authenticated;
 
 -- increment_usage_window gained a trailing p_period_start DATE parameter.
 -- Drop every overload by name first so the current signature is unambiguous.
@@ -374,12 +374,12 @@ DECLARE
     v_period_start DATE;
     v_new_usage NUMERIC;
 BEGIN
-    IF p_amount <= 0 THEN
-        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
-    END IF;
-
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    IF p_amount <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
     v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
@@ -398,6 +398,6 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.increment_usage_window(UUID, UUID, NUMERIC, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.increment_usage_window(UUID, UUID, NUMERIC, DATE) FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

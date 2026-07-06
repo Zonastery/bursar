@@ -94,7 +94,7 @@ BEGIN
     END IF;
 
     -- Serialize concurrent publishers so version assignment can't race.
-    PERFORM pg_advisory_xact_lock(hashtext('bursa_pricing_version'));
+    PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
     FROM public.credit_pricing_config;
@@ -197,6 +197,12 @@ BEGIN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
+    -- Serialize concurrent activations (same lock/key as set_active_pricing_config)
+    -- so two racing activate_pricing_config calls can't both pass the
+    -- version_not_found check and then both try to flip `active`, tripping the
+    -- partial-unique index as a raw unique_violation instead of a clean error.
+    PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
+
     -- Verify the target version exists
     SELECT id INTO v_target_id
     FROM public.credit_pricing_config
@@ -222,10 +228,10 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.get_active_pricing_config FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.set_active_pricing_config FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_pricing_configs FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_pricing_config FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.activate_pricing_config FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_active_pricing_config FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_active_pricing_config FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_pricing_configs FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_pricing_config FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.activate_pricing_config FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

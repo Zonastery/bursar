@@ -14,6 +14,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
@@ -29,7 +33,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.spend_by_user FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.spend_by_user FROM PUBLIC, anon, authenticated;
 
 -- spend_by_model: aggregate spend by model in a time window.
 CREATE OR REPLACE FUNCTION public.spend_by_model(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
@@ -39,6 +43,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
     SELECT
         COALESCE(ct.metadata->>'model', 'unknown')::TEXT AS model,
@@ -54,7 +62,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.spend_by_model FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.spend_by_model FROM PUBLIC, anon, authenticated;
 
 -- top_users: top users by spend in a time window.
 CREATE OR REPLACE FUNCTION public.top_users(p_limit INTEGER, p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
@@ -64,6 +72,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
@@ -79,7 +91,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.top_users FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.top_users FROM PUBLIC, anon, authenticated;
 
 -- daily_spend: daily spend aggregation in a time window.
 -- Day buckets are computed in UTC for deterministic results.
@@ -90,6 +102,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN;
+    END IF;
+
     RETURN QUERY
     SELECT
         (ct.created_at AT TIME ZONE 'UTC')::DATE::TEXT AS date,
@@ -105,7 +121,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.daily_spend FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.daily_spend FROM PUBLIC, anon, authenticated;
 
 -- aggregate_stats: aggregate statistics across all users.
 CREATE OR REPLACE FUNCTION public.aggregate_stats(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
@@ -175,7 +191,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.aggregate_stats FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.aggregate_stats FROM PUBLIC, anon, authenticated;
 
 -- list_user_transactions: list a user's transactions with pagination.
 --
@@ -248,7 +264,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.list_user_transactions(UUID, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.list_user_transactions(UUID, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated;
 
 -- list_usage_events: dedicated RPC to list usage-type credit transactions for
 -- a user. Separate from list_user_transactions to avoid passing a types
@@ -318,7 +334,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.list_usage_events(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.list_usage_events(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) FROM PUBLIC, anon, authenticated;
 
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_created_at ON public.credit_transactions (created_at);
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_id_created_at ON public.credit_transactions (user_id, created_at);

@@ -160,6 +160,7 @@ BEGIN
         INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
         FROM public.credit_tiers
         WHERE is_default = true
+        ORDER BY priority ASC, tier_key ASC
         LIMIT 1;
 
         IF NOT FOUND THEN
@@ -239,7 +240,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── 2. expire_credits: add p_user_id (lazy per-user sweep) ──────────────
 -- Evolves expire_credits() (defined in 006_refunds_and_expiry.sql) with a
@@ -373,7 +374,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.expire_credits(BOOLEAN, UUID) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.expire_credits(BOOLEAN, UUID) FROM PUBLIC, anon, authenticated;
 
 -- ── 3. Index for the per-user scoped sweep ───────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_expires

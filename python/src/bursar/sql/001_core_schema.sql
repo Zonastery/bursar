@@ -135,7 +135,12 @@ BEGIN
     50
   ) INTO v_bonus;
 
-  PERFORM public.credits_add(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
+  -- p_tier = NULL (not a hardcoded 'gifted'): credits_add then resolves the
+  -- configured default tier (is_default), or the synthetic 'default' tier when
+  -- no tiers are configured. A hardcoded 'gifted' would make credits_add return
+  -- tier_not_found — silently swallowed by PERFORM — whenever that tier isn't
+  -- defined (e.g. every tier-less install), dropping the bonus entirely.
+  PERFORM public.credits_add(NEW.id, v_bonus, 'signup_bonus', NULL, NULL);
 
   RETURN NEW;
 END;

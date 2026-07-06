@@ -103,6 +103,7 @@ BEGIN
         INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
         FROM public.credit_tiers
         WHERE is_default = true
+        ORDER BY priority ASC, tier_key ASC
         LIMIT 1;
 
         IF NOT FOUND THEN
@@ -210,8 +211,8 @@ $$;
 
 -- Defense-in-depth: revoke direct execute from user roles.
 -- Only service_role RPC calls (via Supabase client with service key) should succeed.
-REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_credits_balance FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_credits_balance FROM PUBLIC, anon, authenticated;
 
 -- Refresh PostgREST schema cache so REST API can resolve the new RPCs.
 NOTIFY pgrst, 'reload schema';

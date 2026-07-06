@@ -100,6 +100,6 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.check_spend_cap FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.check_spend_cap FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

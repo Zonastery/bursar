@@ -292,7 +292,7 @@ BEGIN
         -- v_balance - v_net >= p_min_balance, so configured-tier balances,
         -- which sum to v_balance, always fully cover v_net in strict mode).
         IF v_tier_remaining > 0 THEN
-            SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true LIMIT 1;
+            SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true ORDER BY priority DESC, tier_key DESC LIMIT 1;
             IF v_sink_tier IS NULL THEN
                 SELECT tier_key INTO v_sink_tier FROM public.credit_tiers ORDER BY priority DESC, tier_key DESC LIMIT 1;
             END IF;
@@ -369,7 +369,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.deduct_with_allowance(UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.deduct_with_allowance(UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
 -- create_lease gained trailing params across its history. Drop every overload
 -- by name first so the current signature is unambiguous.
@@ -545,7 +545,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.create_lease(UUID, NUMERIC, TEXT, TEXT, NUMERIC, INTEGER, INTEGER, TEXT, NUMERIC, JSONB, DATE, TEXT, INT, TEXT, DATE, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.create_lease(UUID, NUMERIC, TEXT, TEXT, NUMERIC, INTEGER, INTEGER, TEXT, NUMERIC, JSONB, DATE, TEXT, INT, TEXT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
 -- settle_lease gained trailing params across its history. Drop every overload
 -- by name first so the current signature is unambiguous — this specifically
@@ -808,7 +808,7 @@ BEGIN
     END LOOP;
 
     IF v_tier_remaining > 0 THEN
-        SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true LIMIT 1;
+        SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true ORDER BY priority DESC, tier_key DESC LIMIT 1;
         IF v_sink_tier IS NULL THEN
             SELECT tier_key INTO v_sink_tier FROM public.credit_tiers ORDER BY priority DESC, tier_key DESC LIMIT 1;
         END IF;
@@ -853,7 +853,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.settle_lease(UUID, UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.settle_lease(UUID, UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
 -- release_lease: idempotent release without charge.
 CREATE OR REPLACE FUNCTION public.release_lease(p_user_id UUID, p_lease_id UUID)
@@ -985,9 +985,9 @@ END;
 $$;
 
 -- Defense-in-depth: all lease RPCs are backend-only.
-REVOKE EXECUTE ON FUNCTION public.release_lease(UUID, UUID) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.renew_lease(UUID, UUID, INTEGER) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_available_credits(UUID) FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.expire_due_leases() FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.release_lease(UUID, UUID) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.renew_lease(UUID, UUID, INTEGER) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_available_credits(UUID) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.expire_due_leases() FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

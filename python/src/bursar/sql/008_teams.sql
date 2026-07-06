@@ -205,12 +205,12 @@ DECLARE
   v_idempotency_key TEXT;
   v_window TIMESTAMPTZ;
 BEGIN
-  IF p_amount IS NULL OR p_amount <= 0 THEN
-    RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
-  END IF;
-
   IF auth.role() IS DISTINCT FROM 'service_role' THEN
     RETURN jsonb_build_object('error', 'unauthorized');
+  END IF;
+
+  IF p_amount IS NULL OR p_amount <= 0 THEN
+    RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
   END IF;
 
   v_idempotency_key := p_metadata->>'idempotency_key';
@@ -231,6 +231,22 @@ BEGIN
         'idempotent', true
       );
     END IF;
+  END IF;
+
+  -- Get current team balance (locked to prevent concurrent deductions).
+  -- Locked BEFORE the per-user spend-cap check below: two concurrent
+  -- deduct_team calls for the same (user, team) both compute v_month_spent
+  -- against the same committed rows only if they serialize first — taking
+  -- this lock up front means the second caller blocks here until the first
+  -- commits its team_usage ledger row, so its own cap re-check then sees the
+  -- first debit and cannot also pass a cap that only room for one of them.
+  SELECT balance INTO v_balance
+  FROM public.credit_teams
+  WHERE id = p_team_id
+  FOR UPDATE;
+
+  IF v_balance IS NULL THEN
+    RETURN jsonb_build_object('error', 'team_not_found');
   END IF;
 
   -- Check user is a member and get spend cap
@@ -255,16 +271,6 @@ BEGIN
     IF (v_month_spent + p_amount) > v_spend_cap THEN
       RETURN jsonb_build_object('error', 'cap_reached', 'current_spend', v_month_spent, 'cap_limit', v_spend_cap);
     END IF;
-  END IF;
-
-  -- Get current team balance (locked to prevent concurrent deductions)
-  SELECT balance INTO v_balance
-  FROM public.credit_teams
-  WHERE id = p_team_id
-  FOR UPDATE;
-
-  IF v_balance IS NULL THEN
-    RETURN jsonb_build_object('error', 'team_not_found');
   END IF;
 
   IF v_balance < p_amount THEN
@@ -315,10 +321,10 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.create_team FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_team_balance FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.add_team_member FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.get_team_members FROM anon, authenticated;
-REVOKE EXECUTE ON FUNCTION public.deduct_team FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.create_team FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_team_balance FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.add_team_member FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_team_members FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.deduct_team FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

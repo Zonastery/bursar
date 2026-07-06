@@ -1302,12 +1302,24 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const allowance = await manager.checkAllowance(PG_USER3);
     expect(allowance.allowanceRemaining.toString()).toBe("6");
 
-    // Cross-check: the window manager.deduct() actually used is anchored 35 days
-    // ago, NOT the current calendar month a calendar_month plan would use.
+    // Cross-check: the window manager.deduct() actually used is anchored on
+    // plan_assigned_at (a 35-day backdate puts "now" 5 days into the SECOND
+    // 30-day window), not on the current calendar month. Asserted as the
+    // exact expected boundary rather than `resolved.start !== calendarMonth
+    // .start`: that inequality is only usually true — it coincidentally
+    // collides once a month (whenever today's UTC day-of-month equals
+    // `1 + (35 % 30)`, i.e. the 6th), since a rolling window anchored 5 days
+    // before "now" lands exactly on the calendar month's start on that one
+    // day. This exact-value form can never coincidentally pass or fail.
     const plan = await store.getUserPlan(PG_USER3);
     const resolved = resolveAllowanceWindow(new Date(), "rolling_30d", plan.planAssignedAt);
-    const calendarWindow = resolveAllowanceWindow(new Date(), "calendar_month", null);
-    expect(resolved.start.toISOString()).not.toBe(calendarWindow.start.toISOString());
+    const anchorMidnight = Date.UTC(
+      plan.planAssignedAt!.getUTCFullYear(),
+      plan.planAssignedAt!.getUTCMonth(),
+      plan.planAssignedAt!.getUTCDate(),
+    );
+    const expectedStart = new Date(anchorMidnight + 30 * 86_400_000);
+    expect(resolved.start.toISOString()).toBe(expectedStart.toISOString());
   });
 
   // ── 6: anniversary plan through manager.reserve()/settle() ──────────

@@ -57,12 +57,12 @@ DECLARE
     v_tier_remaining NUMERIC;
     v_give NUMERIC;
 BEGIN
-    -- Prevent concurrent refund on same transaction (advisory + row locks below).
-    PERFORM pg_advisory_xact_lock(hashtext('refund_' || p_transaction_id));
-
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
+
+    -- Prevent concurrent refund on same transaction (advisory + row locks below).
+    PERFORM pg_advisory_xact_lock(hashtext('refund_' || p_transaction_id));
 
     -- Fetch + lock the original transaction row so its refund total cannot move
     -- under us while we compute the over-refund check. metadata is selected so
@@ -229,7 +229,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.refund_credits FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.refund_credits FROM PUBLIC, anon, authenticated;
 
 -- expire_credits: sweep expired credits from all users' balances, grouped
 -- per-(user_id, tier). Returns count, amount, and per-tier breakdown of
@@ -350,11 +350,18 @@ CREATE INDEX IF NOT EXISTS idx_credit_transactions_expires_at
     ON public.credit_transactions ((metadata ->> 'expires_at'))
     WHERE metadata ? 'expires_at' AND NOT (metadata ? 'swept_at');
 
+-- Index for refund_credits' reference_id lookups (duplicate detection, prior-
+-- refund sum, prior tier_breakdown) — otherwise each is a seq scan over the
+-- ever-growing ledger.
+CREATE INDEX IF NOT EXISTS idx_credit_transactions_reference_id
+    ON public.credit_transactions (reference_id)
+    WHERE reference_id IS NOT NULL;
+
 -- Qualified with the exact signature defined above (011_lazy_expiry.sql adds a
 -- p_user_id-scoped overload; an unqualified REVOKE here would become ambiguous
 -- ("function name is not unique") the moment that second overload exists,
 -- breaking idempotent re-migration exactly like the credits_add bug fixed in
 -- 002_credit_rpcs.sql — see 011_lazy_expiry.sql for the full explanation).
-REVOKE EXECUTE ON FUNCTION public.expire_credits(BOOLEAN) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.expire_credits(BOOLEAN) FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

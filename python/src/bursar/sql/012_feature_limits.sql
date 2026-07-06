@@ -69,6 +69,6 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.check_feature_limit(UUID, TEXT, INT, DATE, DATE) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.check_feature_limit(UUID, TEXT, INT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';

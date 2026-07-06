@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS public.user_credit_tiers (
 );
 CREATE INDEX IF NOT EXISTS idx_user_credit_tiers_user ON public.user_credit_tiers (user_id);
 
+-- At most one default tier: credits_add/grant_signup_bonus resolve the
+-- default tier via `WHERE is_default = true LIMIT 1`, which is
+-- nondeterministic if config drift ever flags two tiers as default. Make
+-- that config state impossible to persist instead of silently picking an
+-- arbitrary winner.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_tiers_single_default
+    ON public.credit_tiers (is_default)
+    WHERE is_default;
+
 -- updated_at triggers (reuse the shared handle_updated_at() from 001_core_schema.sql).
 DO $$
 BEGIN
@@ -129,7 +138,7 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.sync_tiers_from_config(JSONB) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.sync_tiers_from_config(JSONB) FROM PUBLIC, anon, authenticated;
 
 -- ── Backfill (idempotent) ────────────────────────────────────────────────
 -- Stamp all pre-existing grant/deduction rows with tier = "default", and
@@ -207,6 +216,6 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.get_user_credit_tiers(UUID) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.get_user_credit_tiers(UUID) FROM PUBLIC, anon, authenticated;
 
 NOTIFY pgrst, 'reload schema';
