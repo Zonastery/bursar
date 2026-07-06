@@ -22,7 +22,7 @@ of truth for the database schema; the JS integration tests apply the same files.
 git clone https://github.com/Zonastery/bursar.git
 cd bursar/python
 uv sync                       # runtime deps
-uv sync --extra test          # ruff, pyright, pytest, pytest-postgresql
+uv sync --extra test          # ruff, pyright, pytest, testcontainers
 # or, for the full dev group (notebooks, psycopg2, etc.):
 uv sync --group dev
 ```

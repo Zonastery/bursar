@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, inject } from "vitest";
 import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -18,7 +18,11 @@ const ALLOWANCE_PERIODS: AllowancePeriod[] = ["calendar_month", "rolling_30d", "
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = join(__dirname, "../../python/src/bursar/sql");
-const DATABASE_URL = process.env.DATABASE_URL;
+// CI sets DATABASE_URL directly (its own service container, fast path);
+// locally, tests/global-setup.ts starts a disposable testcontainer and hands
+// its connection string down via `inject` (see that file for why not
+// `process.env` directly).
+const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
 const D = (n: number | string) => new Decimal(n);
 

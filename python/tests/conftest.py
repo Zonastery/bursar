@@ -17,31 +17,33 @@ Postgres 16** from a single, consistent mechanism (resolution order):
            -e POSTGRES_DB=bursar -p 55432:5432 postgres:16
        BURSAR_TEST_PG_URL=postgresql://postgres:bursar@localhost:55432/bursar uv run pytest
 
-3. ``pg_tmp`` (ephemeralpg) — a disposable Postgres spun up per session if the
-   binary is installed (``brew install ephemeralpg``).
+3. **testcontainers** — a disposable ``postgres:16`` container, started once
+   per test session (requires only a reachable Docker daemon; no manual setup,
+   no ``ephemeralpg``/``pg_tmp`` install). This is the default local path: a
+   bare ``pytest`` run with Docker available exercises the real SQL RPCs
+   instead of silently skipping them, so a green run without a DB is no longer
+   possible when Docker is present.
 
-If none is available the Postgres/Supabase-setup tests **skip** with a visible
-reason (a DB is optional in a bare sandbox).
+Only if Docker itself is unreachable do the Postgres/Supabase-setup tests
+**skip** with a visible reason.
 
 For every source the fixture bootstraps the Supabase ``auth`` schema stubs +
 standard roles so bursar's bundled SQL migrations apply cleanly on a bare
 ``postgres:16`` (migrations themselves are applied by ``store.setup()`` in the
-per-store fixtures). When pointed at a persistent DB (``DATABASE_URL`` /
-``BURSAR_TEST_PG_URL``) it TRUNCATEs bursar's tables before each test so
-cross-test state never bleeds.
+per-store fixtures). Every test gets a clean slate: bursar's tables are
+TRUNCATEd before each test so cross-test state never bleeds, whether the
+underlying Postgres is a persistent DB or the session-scoped container.
 """
 
 from __future__ import annotations
 
+import atexit
 import os
-import shutil
-import subprocess
 import time
+import warnings
 from collections.abc import Iterator
 
 import pytest
-
-PG_TMP: str | None = shutil.which("pg_tmp")
 
 
 def _preseed_supabase_objects(dsn: str) -> None:
@@ -105,6 +107,43 @@ def _preseed_supabase_objects(dsn: str) -> None:
                     conn.rollback()
                 else:
                     conn.commit()
+
+            # 4. Platform-level privilege defaults a real hosted Supabase project
+            # grants automatically (via its own bootstrap migrations, not
+            # bursar's). Bursar's SQL only ever REVOKEs from PUBLIC/anon/
+            # authenticated on individual RPCs (see e.g. 002_credit_rpcs.sql) —
+            # it never explicitly re-GRANTs to service_role, because on real
+            # Supabase service_role already has broad schema-wide access and
+            # BYPASSRLS. Without reproducing that here, `SET ROLE service_role`
+            # would (correctly, but misleadingly) fail on every RPC — not
+            # because bursar's lockdown is broken, but because this bare
+            # Postgres never gave service_role the platform privileges it has
+            # in production. anon/authenticated get the same broad table
+            # access Supabase grants them by default; bursar's RLS policies
+            # (not the absence of a GRANT) are what's supposed to restrict
+            # their rows to `auth.uid() = user_id`.
+            cur.execute("ALTER ROLE service_role BYPASSRLS")
+            cur.execute("GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role")
+            # Real Supabase also grants schema access on `auth` to these roles
+            # (app/RPC code calls `auth.uid()`/`auth.jwt()` directly, not just
+            # from within RLS policy predicates — those are resolved at
+            # policy-definition time and don't need this, but a direct
+            # `SELECT auth.uid()` from application code does).
+            cur.execute("GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role")
+            cur.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated"
+            )
+            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role")
+            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role")
+            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role")
+            # Also apply to any tables/functions that already exist (a persistent
+            # DATABASE_URL may already have bursar's schema from a prior run;
+            # ALTER DEFAULT PRIVILEGES only covers objects created afterwards).
+            cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated")
+            cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role")
+            cur.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role")
+            cur.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role")
     finally:
         conn.close()
 
@@ -166,50 +205,77 @@ def _resolve_persistent_dsn() -> str | None:
     return os.environ.get("DATABASE_URL") or os.environ.get("BURSAR_TEST_PG_URL")
 
 
+# Session-scoped testcontainers Postgres, started lazily on first use and
+# reused for the rest of the run (starting a fresh container per test would
+# dominate wall time). ``None`` means "not yet attempted"; the sentinel
+# ``_UNAVAILABLE`` means "attempted and failed" (e.g. no Docker daemon) so we
+# only try once and skip cleanly for every subsequent test.
+_UNAVAILABLE = object()
+_container_dsn: str | object | None = None
+
+
+def _testcontainers_dsn() -> str | None:
+    """Return a DSN for a session-scoped ``postgres:16`` testcontainer.
+
+    Returns ``None`` if Docker itself is unavailable (e.g. no daemon
+    reachable) so the caller can skip with a clear reason instead of erroring.
+    """
+    global _container_dsn
+    if _container_dsn is _UNAVAILABLE:
+        return None
+    if _container_dsn is not None:
+        return _container_dsn  # type: ignore[return-value]
+
+    try:
+        from testcontainers.postgres import PostgresContainer
+    except ModuleNotFoundError:
+        _container_dsn = _UNAVAILABLE
+        return None
+
+    try:
+        container = PostgresContainer("postgres:16", driver=None)
+        container.start()
+    except Exception as exc:  # Docker daemon unreachable, image pull failed, etc.
+        warnings.warn(
+            f"testcontainers could not start postgres:16 ({exc}); "
+            "DB integration tests will skip. Set DATABASE_URL to point at an "
+            "already-running Postgres instead.",
+            stacklevel=2,
+        )
+        _container_dsn = _UNAVAILABLE
+        return None
+
+    atexit.register(container.stop)
+    dsn = container.get_connection_url()
+    _preseed_supabase_objects(dsn)
+    _container_dsn = dsn
+    return dsn
+
+
 @pytest.fixture(scope="function")
 def pg_database_url() -> Iterator[str]:
     """Yield a connection URL to a real Postgres, or skip if none is available.
 
-    Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` → ``pg_tmp`` → skip.
+    Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` →
+    testcontainers-managed ``postgres:16`` → skip.
     """
     # 1 & 2: a persistent, already-running Postgres (DATABASE_URL or legacy override).
     persistent = _resolve_persistent_dsn()
-    if persistent:
-        _wait_until_ready(persistent)
-        _preseed_supabase_objects(persistent)
-        # Clean slate per test so cross-test state never bleeds (store.setup()
-        # in the per-store fixtures then applies all migrations idempotently).
-        _truncate_bursar_tables(persistent)
-        yield persistent
-        return
+    dsn = persistent
+    if dsn:
+        _wait_until_ready(dsn)
+        _preseed_supabase_objects(dsn)
+    else:
+        # 3: disposable Postgres via testcontainers (session-scoped, lazy).
+        dsn = _testcontainers_dsn()
+        if dsn is None:
+            pytest.skip(
+                "No real Postgres available: set DATABASE_URL (e.g. postgres:16 "
+                "on localhost:5432, as CI and the JS suite use) or "
+                "BURSAR_TEST_PG_URL, or make Docker available for testcontainers."
+            )
 
-    # 3: disposable Postgres via pg_tmp.
-    if PG_TMP is None:
-        pytest.skip(
-            "No real Postgres available: set DATABASE_URL (e.g. postgres:16 on "
-            "localhost:5432, as CI and the JS suite use) or BURSAR_TEST_PG_URL, "
-            "or install pg_tmp (brew install ephemeralpg)."
-        )
-
-    proc = subprocess.Popen(
-        [PG_TMP, "-w", "120"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    dsn = proc.stdout.readline().strip() if proc.stdout else ""
-    if not dsn:
-        stderr = proc.stderr.read() if proc.stderr else ""
-        proc.kill()
-        raise RuntimeError(f"pg_tmp failed to start: {stderr}")
-
-    # pg_tmp backgrounds itself and exits. Wait for Postgres to accept connections.
-    _wait_until_ready(dsn)
-
-    # Create Supabase-like objects that bursar SQL migrations depend on.
-    _preseed_supabase_objects(dsn)
-
+    # Clean slate per test so cross-test state never bleeds (store.setup() in
+    # the per-store fixtures then applies all migrations idempotently).
+    _truncate_bursar_tables(dsn)
     yield dsn
-
-    # pg_tmp -w N schedules auto-stop; no explicit teardown needed.

@@ -63,14 +63,19 @@ new CreditManager(store, engine?, emitter?, options?)
 | `tests/memory-store.test.ts` | MemoryStore unit tests |
 | `tests/credit-manager.test.ts` | CreditManager happy-path |
 | `tests/lease.test.ts` | Lease lifecycle (27 tests, mirrors Python) |
-| `tests/lease-adversarial.test.ts` | Concurrency invariants, fuzz (31 tests) |
+| `tests/lease-adversarial.test.ts` | Concurrency invariants (30 tests) |
 | `tests/tiers.test.ts` | Credit tiers — happy-path priority walk, refund LIFO, expiry, overdraft sink |
 | `tests/tiers-adversarial.test.ts` | Credit tiers — concurrency, idempotent replay, config drift |
-| `tests/postgres-store.test.ts` | Real Postgres tests (skipped without `PG_TEST_DSN`) |
+| `tests/postgres-store.test.ts` | `PostgresStore` unit tests against a mocked `pg.Pool` (no real DB) |
 | `tests/store-integration.test.ts` | Real Postgres tests incl. `CreditManager` end-to-end tier coverage |
+| `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks `store-integration.test.ts` bypasses by connecting as a superuser |
+| `tests/invariants.property.test.ts` | fast-check model-based property test — ledger conservation across grant/deduct/lease/refund sequences |
 | `tests/engine.test.ts` | PricingEngine expression evaluation |
 
-Run: `npm test` (all, skips DB tests without env var).
+Run: `npm test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
+service container) or, failing that, a testcontainers-managed `postgres:16`
+(Docker permitting) started automatically in `tests/global-setup.ts` — so a
+bare `npm test` with Docker available exercises them too, not just CI.
 Typecheck: `npm run typecheck`.
 Lint: `npm run lint`.
 

@@ -503,6 +503,7 @@ class TestPostgresStoreIntegration:
         assert second.expired_amount == Decimal("0")
         assert store.get_balance(_PG_USER).balance == Decimal("0")
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_deduct_no_double_spend_pg(self, store: PostgresStore) -> None:
         """N concurrent deduct_with_allowance against a real Postgres row.
         SELECT ... FOR UPDATE must serialize them: exactly 10 of 30 succeed,
@@ -525,6 +526,7 @@ class TestPostgresStoreIntegration:
         assert balance == Decimal("0")
         assert balance >= 0
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_same_idempotency_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
 
@@ -1588,6 +1590,7 @@ class TestLeaseAdversarialPg:
         assert s.setup().success
         return s
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_create_lease_no_over_admission_pg(self, store: PostgresStore) -> None:
         """N concurrent create_lease on one row. FOR UPDATE serializes them:
         with balance 100 / floor 0 / hold 30, exactly 3 leases admit and the
@@ -1609,6 +1612,7 @@ class TestLeaseAdversarialPg:
         assert avail.available == Decimal("10")
         assert avail.balance == Decimal("100")  # held, not yet charged
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_max_concurrent_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("10000"), "purchase")
 
@@ -1620,6 +1624,7 @@ class TestLeaseAdversarialPg:
             results = list(ex.map(one, range(40)))
         assert sum(1 for r in results if r.error is None) == 5  # type: ignore[attr-defined]
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_settle_same_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
@@ -1632,6 +1637,7 @@ class TestLeaseAdversarialPg:
             list(ex.map(one, range(12)))
         assert store.get_balance(_PG_USER).balance == Decimal("50")  # charged exactly once
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_settle_same_lease_no_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
@@ -3188,6 +3194,7 @@ class TestFeatureLimitsPg:
         assert check_today.used == 1
         assert check_today.remaining == 0
 
+    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_deduct_exactly_n_succeed_under_limit_n_pg(self, store: PostgresStore) -> None:
         """N concurrent ``deduct_with_allowance`` calls against the same
         ``(user, feature, window)``, limit N -- ``deduct_with_allowance``

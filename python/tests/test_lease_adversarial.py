@@ -37,6 +37,18 @@ def store() -> MemoryStore:
     return MemoryStore()
 
 
+class _FakeClock:
+    """Deterministic, manually-advanced clock for MemoryStore's injectable
+    ``clock`` seam — avoids both real `sleep()` waits and reaching into
+    private reservation state to force an expiry."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
 def _manager(store: MemoryStore, min_balance: Decimal = Decimal(0), **kwargs) -> CreditManager:
     m = CreditManager(store=store, **kwargs)
     m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
@@ -214,9 +226,13 @@ class TestStateMachine:
         assert store.renew_lease("u1", lease.lease_id, 600).error == "lease_not_found"
 
     def test_expired_lease_can_be_released(self, store: MemoryStore) -> None:
+        clock = _FakeClock(datetime(2024, 1, 1, tzinfo=UTC))
+        store._clock = clock
         store.add_credits("u1", Decimal(100))
-        lease = store.create_lease("u1", Decimal(20), "usage", floor=Decimal(0))
-        store._reservations[lease.lease_id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        lease = store.create_lease("u1", Decimal(20), "usage", floor=Decimal(0), ttl_seconds=1)
+        # Advance the injectable clock past the lease's TTL — deterministic,
+        # no real sleep and no reaching into private reservation state.
+        clock.now += timedelta(seconds=2)
         r = store.release_lease("u1", lease.lease_id)
         assert r.released is True
 
@@ -390,54 +406,11 @@ class TestMixedOperations:
             m.reserve("u1", Decimal(1), operation_type="chat")
 
 
-# ── Randomized property invariant ──────────────────────────────────────────
-
-
-class TestPropertyInvariant:
-    """Fuzz interleaved reserve/settle/release and assert the money ledger
-    invariant holds at every step: ``balance == initial − Σ settled actuals``,
-    ``reserved == Σ active holds``, ``available == balance − reserved``, and (in
-    strict mode, with actual ≤ hold) ``balance`` never drops below the floor."""
-
-    def test_randomized_ledger_invariant(self, store: MemoryStore) -> None:
-        import random
-
-        rng = random.Random(1729)  # fixed seed → deterministic
-        initial = Decimal(10_000)
-        store.add_credits("u1", initial)
-
-        open_holds: dict[str, Decimal] = {}  # lease_id → hold amount (active only)
-        expected_balance = initial
-
-        for _ in range(400):
-            roll = rng.random()
-            if roll < 0.5 or not open_holds:
-                # Reserve a fresh worst-case hold (strict, floor 0).
-                amount = Decimal(rng.randint(1, 40))
-                res = store.create_lease("u1", amount, "usage", floor=Decimal(0))
-                if res.error is None:
-                    open_holds[res.lease_id] = amount
-                # else: legitimately rejected (would breach floor) — no state change.
-            elif roll < 0.8:
-                # Settle a random open lease with actual ≤ hold (strict discipline).
-                lease_id = rng.choice(list(open_holds))
-                hold = open_holds.pop(lease_id)
-                actual = Decimal(rng.randint(0, int(hold)))
-                ded = store.settle_lease("u1", lease_id, actual)
-                assert ded.error is None
-                expected_balance -= actual
-            else:
-                # Release a random open lease (no charge).
-                lease_id = rng.choice(list(open_holds))
-                open_holds.pop(lease_id)
-                store.release_lease("u1", lease_id)
-
-            avail = store.get_available("u1")
-            expected_reserved = sum(open_holds.values(), Decimal(0))
-            assert avail.balance == expected_balance
-            assert avail.reserved == expected_reserved
-            assert avail.available == expected_balance - expected_reserved
-            assert avail.balance >= Decimal(0)  # strict floor never breached
+# Randomized property invariant: moved to test_invariants_property.py
+# (Hypothesis stateful RuleBasedStateMachine) — replaces this fixed-seed
+# random.Random(1729) loop with proper property-based testing that explores
+# many distinct sequences and shrinks failures to a minimal repro, which a
+# single fixed seed can't do.
 
 
 # ── Fix 1: create_lease allowance-aware admission ───────────────────────────

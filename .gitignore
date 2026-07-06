@@ -13,7 +13,8 @@ dist/
 python/build/
 *.egg-info/
 .coverage
+coverage.xml
 htmlcov/
-.testmondata
+javascript/coverage/
 .claude/
 .serena/

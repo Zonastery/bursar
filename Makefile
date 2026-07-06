@@ -12,50 +12,22 @@ endif
 .ONESHELL:
 SHELL := /bin/bash
 
-PG_IMG ?= postgres:16
-PG_PORT ?= 5434
-PG_DB  ?= bursar_test
-PG_USER?= bursar
-# Test-only password for an ephemeral local/CI Postgres container. Override via
-# the environment for anything non-disposable; it is passed to Docker and the
-# test runner through the environment, never interpolated onto a command line.
-PG_PASS?= bursar
-PG_NAME?= bursar-pg-js
-# Exported so child recipes inherit it from the environment (C8) instead of it
-# appearing as a CLI argument (where it would leak via `ps`/history/CI logs).
-export DATABASE_URL ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)
-
-.PHONY: help test test-python test-js test-js-mock test-js-integration clean-db
+.PHONY: help test test-python test-js
 .DEFAULT_GOAL := help
 
-help:                               ## Show this help
+help:                                ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-test: test-python test-js           ## All tests (Python + JS mock + JS integration)
+test: test-python test-js            ## All tests (Python + JS, incl. real-Postgres integration)
 
-test-python:                        ## Python tests (mock + postgres via pg_tmp)
+# Both suites resolve a real Postgres via DATABASE_URL (CI's service
+# container / an already-running instance) or, failing that, via
+# testcontainers — a disposable postgres:16 spun up automatically for the
+# duration of the run (Docker permitting). No manual container orchestration
+# needed; see python/tests/conftest.py and javascript/tests/global-setup.ts.
+test-python:                         ## Python tests (mock + postgres via DATABASE_URL/testcontainers)
 	cd python && pytest
 
-test-js: test-js-mock test-js-integration  ## All JS tests
-
-test-js-mock:                       ## JS mock tests (no infra needed)
+test-js:                             ## JS tests (mock + postgres via DATABASE_URL/testcontainers)
 	cd javascript && npx vitest run
-
-test-js-integration:                ## JS postgres integration tests (docker)
-	docker rm -f $(PG_NAME) 2>/dev/null; true
-	docker run -d --name $(PG_NAME) \
-		-e POSTGRES_DB=$(PG_DB) \
-		-e POSTGRES_USER=$(PG_USER) \
-		-e POSTGRES_PASSWORD=$(PG_PASS) \
-		-p $(PG_PORT):5432 \
-		$(PG_IMG)
-	until docker exec $(PG_NAME) pg_isready -U $(PG_USER) 2>/dev/null; do sleep 1; done
-	# DATABASE_URL is exported above, so vitest inherits it from the environment.
-	cd javascript && npx vitest run tests/store-integration.test.ts; \
-		rc=$$?; \
-		docker stop $(PG_NAME) >/dev/null && docker rm $(PG_NAME) >/dev/null; \
-		exit $$rc
-
-clean-db:                           ## Cleanup leftover test pg container
-	docker rm -f $(PG_NAME) 2>/dev/null; true

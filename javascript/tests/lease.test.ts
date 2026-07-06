@@ -7,7 +7,8 @@
  * and presets / planless defaults.
  *
  * Money is exact `Decimal` everywhere (contract §1). Lease expiry is forced
- * white-box (mutating the store's reservation `expiresAt`) rather than sleeping.
+ * via `MemoryStore.setClock()` (a manually-advanced fake clock) rather than
+ * sleeping or reaching into private reservation state.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -45,13 +46,19 @@ async function strictManager(
   return m;
 }
 
-/** White-box: force a lease past its TTL without sleeping. */
-function expireLease(store: MemoryStore, leaseId: string, when: Date): void {
-  // Reach into the private reservation map (mirrors Python's store._reservations).
-  const reservations = (store as unknown as { reservations: Map<string, { expiresAt: Date }> })
-    .reservations;
-  const rec = reservations.get(leaseId);
-  if (rec) rec.expiresAt = when;
+/**
+ * Deterministic, manually-advanced clock wired into `MemoryStore.setClock()`
+ * — advances lease expiry without a real sleep and without reaching into
+ * private reservation state.
+ */
+function fakeClock(start: Date): { advance: (ms: number) => void; fn: () => Date } {
+  let now = start;
+  return {
+    advance: (ms: number) => {
+      now = new Date(now.getTime() + ms);
+    },
+    fn: () => now,
+  };
 }
 
 // ── 1. Lease admission / double-submit (maxConcurrent) ─────────────────────
@@ -246,23 +253,27 @@ describe("ttl / renewal", () => {
   });
 
   it("settle on an expired lease raises", async () => {
+    const clock = fakeClock(new Date("2024-01-01T00:00:00Z"));
+    store.setClock(clock.fn);
     const m = await strictManager(store, D(0));
     await store.addCredits("u1", D(100));
-    const lease = await m.reserve("u1", D(20));
-    // Force expiry (white-box) rather than sleeping.
-    expireLease(store, lease.leaseId, new Date(Date.now() - 1000));
+    const lease = await m.reserve("u1", D(20), { ttl: 1 });
+    // Advance the fake clock past the lease's TTL — deterministic, no real
+    // sleep and no reaching into private reservation state.
+    clock.advance(2000);
     await expect(m.settle("u1", lease.leaseId, D(20))).rejects.toThrow(LeaseExpiredError);
     // The expired hold no longer counts against available.
     expect((await m.getAvailable("u1")).available.eq(D(100))).toBe(true);
   });
 
   it("renew extends the TTL and allows settle", async () => {
+    const clock = fakeClock(new Date("2024-01-01T00:00:00Z"));
+    store.setClock(clock.fn);
     const m = await strictManager(store, D(0));
     await store.addCredits("u1", D(100));
     const lease = await m.reserve("u1", D(20), { ttl: 1 });
-    // Almost-expired → renew pushes it out, then settle succeeds.
-    // Use a generous margin (60s) so a fast CI runner doesn't race past 1ms (Node 22).
-    expireLease(store, lease.leaseId, new Date(Date.now() + 60000));
+    // Almost-expired (still valid) → renew pushes it out, then settle succeeds.
+    clock.advance(999);
     const renewed = await m.renew("u1", lease.leaseId, 600);
     expect(renewed.error == null).toBe(true);
     const ded = await m.settle("u1", lease.leaseId, D(20));
@@ -270,10 +281,12 @@ describe("ttl / renewal", () => {
   });
 
   it("renew on an expired lease raises", async () => {
+    const clock = fakeClock(new Date("2024-01-01T00:00:00Z"));
+    store.setClock(clock.fn);
     const m = await strictManager(store, D(0));
     await store.addCredits("u1", D(100));
-    const lease = await m.reserve("u1", D(20));
-    expireLease(store, lease.leaseId, new Date(Date.now() - 1000));
+    const lease = await m.reserve("u1", D(20), { ttl: 1 });
+    clock.advance(2000);
     await expect(m.renew("u1", lease.leaseId, 600)).rejects.toThrow(LeaseExpiredError);
   });
 });

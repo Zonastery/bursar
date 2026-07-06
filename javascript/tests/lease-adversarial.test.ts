@@ -47,12 +47,19 @@ async function manager(
   return m;
 }
 
-/** White-box: force a lease past its TTL without sleeping (mirrors Python's `_reservations`). */
-function expireLease(store: MemoryStore, leaseId: string, when: Date): void {
-  const reservations = (store as unknown as { reservations: Map<string, { expiresAt: Date }> })
-    .reservations;
-  const rec = reservations.get(leaseId);
-  if (rec) rec.expiresAt = when;
+/**
+ * Deterministic, manually-advanced clock wired into `MemoryStore.setClock()`
+ * — advances lease expiry without a real sleep and without reaching into
+ * private reservation state (mirrors Python's `_FakeClock`).
+ */
+function fakeClock(start: Date): { advance: (ms: number) => void; fn: () => Date } {
+  let now = start;
+  return {
+    advance: (ms: number) => {
+      now = new Date(now.getTime() + ms);
+    },
+    fn: () => now,
+  };
 }
 
 // ── Concurrency: atomic admission never over-admits ────────────────────────
@@ -284,9 +291,13 @@ describe("state machine", () => {
   });
 
   it("an expired lease can still be released", async () => {
+    const clock = fakeClock(new Date("2024-01-01T00:00:00Z"));
+    store.setClock(clock.fn);
     await store.addCredits("u1", D(100));
-    const lease = await store.createLease("u1", D(20), "usage", { floor: D(0) });
-    expireLease(store, lease.leaseId, new Date(Date.now() - 1000));
+    const lease = await store.createLease("u1", D(20), "usage", { floor: D(0), ttlSeconds: 1 });
+    // Advance the fake clock past the lease's TTL — deterministic, no real
+    // sleep and no reaching into private reservation state.
+    clock.advance(2000);
     const r = await store.releaseLease("u1", lease.leaseId);
     expect(r.released).toBe(true);
   });
@@ -488,52 +499,8 @@ describe("mixed operations", () => {
   });
 });
 
-// ── Randomized property invariant ──────────────────────────────────────────
-
-describe("randomized ledger invariant", () => {
-  it("balance/reserved/available stay exact across fuzzed reserve/settle/release", async () => {
-    // Deterministic LCG so the fuzz is reproducible (JS Math.random isn't seedable).
-    let seed = 1729;
-    const rand = (): number => {
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      return seed / 0x7fffffff;
-    };
-    const randInt = (lo: number, hi: number): number => lo + Math.floor(rand() * (hi - lo + 1));
-
-    const store = new MemoryStore();
-    const initial = D(10_000);
-    await store.addCredits("u1", initial);
-
-    const openHolds = new Map<string, Decimal>();
-    let expectedBalance = initial;
-
-    for (let i = 0; i < 400; i++) {
-      const roll = rand();
-      if (roll < 0.5 || openHolds.size === 0) {
-        const amount = D(randInt(1, 40)); // worst-case hold, strict floor 0
-        const res = await store.createLease("u1", amount, "usage", { floor: D(0) });
-        if (!res.error) openHolds.set(res.leaseId, amount);
-      } else if (roll < 0.8) {
-        const leaseId = [...openHolds.keys()][randInt(0, openHolds.size - 1)];
-        const hold = openHolds.get(leaseId)!;
-        openHolds.delete(leaseId);
-        const actual = D(randInt(0, hold.toNumber())); // actual ≤ hold (strict discipline)
-        const ded = await store.settleLease("u1", leaseId, actual);
-        expect(ded.error).toBeUndefined();
-        expectedBalance = expectedBalance.minus(actual);
-      } else {
-        const leaseId = [...openHolds.keys()][randInt(0, openHolds.size - 1)];
-        openHolds.delete(leaseId);
-        await store.releaseLease("u1", leaseId);
-      }
-
-      let expectedReserved = D(0);
-      for (const h of openHolds.values()) expectedReserved = expectedReserved.plus(h);
-      const avail = await store.getAvailable("u1");
-      expect(avail.balance.eq(expectedBalance)).toBe(true);
-      expect(avail.reserved.eq(expectedReserved)).toBe(true);
-      expect(avail.available.eq(expectedBalance.minus(expectedReserved))).toBe(true);
-      expect(avail.balance.gte(D(0))).toBe(true); // strict floor never breached
-    }
-  });
-});
+// Randomized property invariant: moved to invariants.property.test.ts
+// (fast-check model-based/stateful testing) — replaces this fixed-seed
+// deterministic-LCG loop with proper property-based testing that explores
+// many distinct sequences and shrinks failures to a minimal repro, which a
+// single fixed seed can't do.

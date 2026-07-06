@@ -52,10 +52,13 @@ postgres = [
 # `[dependency-groups].dev` block was removed to end the version skew.
 test = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",
+    "pytest-repeat>=0.9",
     "ruff>=0.15.0",
     "pyright>=1.1.390",
-    "pytest-testmon>=2.2.0",
-    "pytest-postgresql>=7.0",
+    "testcontainers[postgres]>=4.8",
+    "hypothesis>=6.112",
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
@@ -96,12 +99,27 @@ reportMissingImports = "none"
 reportMissingModuleSource = "none"
 reportOptionalMemberAccess = "none"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires a real Postgres (real DSN or a testcontainers-managed one)",
+    "concurrency: exercises thread/connection races; slower, may be timeout-sensitive",
+    "security: RLS / privilege-lockdown checks against real Postgres roles",
+    "property: Hypothesis-driven property/invariant tests",
+    "slow: long-running (property, high-repeat concurrency, migrations)",
+]
+addopts = "--timeout=120"
+
 [tool.coverage.run]
 source = ["bursar"]
 branch = true
 
 [tool.coverage.report]
 exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "def __repr__", "raise NotImplementedError"]
+# Measured baseline (no DB, unit tests only) was 79.27% at the time this gate
+# was introduced; the CI job additionally runs with a real Postgres so its
+# effective coverage is higher. Ratchet this up as coverage improves — never
+# lower it without a documented reason.
+fail_under = 79
 
 # Dev group: the editable workflow installs the `test` extra plus the
 # notebook/docs tooling below. Test/runtime deps (httpx, psycopg2, testmon) are
@@ -118,10 +136,13 @@ dev = [
 # resolver (extras and groups are separate namespaces in uv).
 test-deps = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-timeout>=2.3",
+    "pytest-repeat>=0.9",
     "ruff>=0.15.0",
     "pyright>=1.1.390",
-    "pytest-testmon>=2.2.0",
-    "pytest-postgresql>=7.0",
+    "testcontainers[postgres]>=4.8",
+    "hypothesis>=6.112",
     "httpx>=0.28.1",
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",

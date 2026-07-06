@@ -35,6 +35,18 @@ def store() -> MemoryStore:
     return MemoryStore()
 
 
+class _FakeClock:
+    """Deterministic, manually-advanced clock for MemoryStore's injectable
+    ``clock`` seam — avoids both real `sleep()` waits and reaching into
+    private reservation state to force an expiry."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
 def _strict_manager(store: MemoryStore, min_balance: Decimal = Decimal(5), **kwargs) -> CreditManager:
     m = CreditManager(store=store, policy="strict_prepaid", **kwargs)
     m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
@@ -226,32 +238,39 @@ class TestStrictPrepaidFloor:
 
 class TestTtlRenewal:
     def test_settle_on_expired_lease_raises(self, store: MemoryStore) -> None:
+        clock = _FakeClock(datetime(2024, 1, 1, tzinfo=UTC))
+        store._clock = clock
         m = _strict_manager(store, min_balance=Decimal(0))
         store.add_credits("u1", Decimal(100))
-        lease = m.reserve("u1", Decimal(20))
-        # Force expiry (white-box) rather than sleeping.
-        store._reservations[lease.lease_id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        lease = m.reserve("u1", Decimal(20), ttl=1)
+        # Advance the injectable clock past the lease's TTL — deterministic,
+        # no real sleep and no reaching into private reservation state.
+        clock.now += timedelta(seconds=2)
         with pytest.raises(LeaseExpiredError):
             m.settle("u1", lease.lease_id, Decimal(20))
         # The expired hold no longer counts against available.
         assert m.get_available("u1").available == Decimal(100)
 
     def test_renew_extends_ttl_and_allows_settle(self, store: MemoryStore) -> None:
+        clock = _FakeClock(datetime(2024, 1, 1, tzinfo=UTC))
+        store._clock = clock
         m = _strict_manager(store, min_balance=Decimal(0))
         store.add_credits("u1", Decimal(100))
         lease = m.reserve("u1", Decimal(20), ttl=1)
-        # Almost-expired → renew pushes it out, then settle succeeds.
-        store._reservations[lease.lease_id].expires_at = datetime.now(UTC) + timedelta(milliseconds=1)
+        # Almost-expired (still valid) → renew pushes it out, then settle succeeds.
+        clock.now += timedelta(milliseconds=999)
         renewed = m.renew("u1", lease.lease_id, ttl=600)
         assert renewed.error is None
         ded = m.settle("u1", lease.lease_id, Decimal(20))
         assert ded.balance_after == Decimal(80)
 
     def test_renew_expired_lease_raises(self, store: MemoryStore) -> None:
+        clock = _FakeClock(datetime(2024, 1, 1, tzinfo=UTC))
+        store._clock = clock
         m = _strict_manager(store, min_balance=Decimal(0))
         store.add_credits("u1", Decimal(100))
-        lease = m.reserve("u1", Decimal(20))
-        store._reservations[lease.lease_id].expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        lease = m.reserve("u1", Decimal(20), ttl=1)
+        clock.now += timedelta(seconds=2)
         with pytest.raises(LeaseExpiredError):
             m.renew("u1", lease.lease_id, ttl=600)
 

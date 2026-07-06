@@ -80,8 +80,14 @@ jobs:
       - run: pip install -e "python/[test,postgres,supabase]"
       # Loads tests/parity/expression_cases.json (parity gate, §7) AND runs the
       # real-Postgres concurrency/double-spend suite via the DATABASE_URL above.
+      # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).
       - working-directory: python
-        run: pytest
+        run: pytest --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.python-version == '3.13'
+        with:
+          name: python-coverage-report
+          path: python/coverage.xml
 
   js-test:
     runs-on: ubuntu-latest
@@ -114,10 +120,16 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       # Also loads tests/parity/expression_cases.json (parity gate, §7).
+      # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
         run: |
           npm install
-          npx vitest run
+          npx vitest run --coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.node-version == '22'
+        with:
+          name: js-coverage-report
+          path: javascript/coverage/
 
   js-typecheck:
     runs-on: ubuntu-latest

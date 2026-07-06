@@ -57,13 +57,15 @@ CreditManager
 | `tests/test_store.py` | MemoryStore unit tests (parity baseline) |
 | `tests/test_manager.py` | CreditManager happy-path and error cases |
 | `tests/test_lease.py` | Lease lifecycle (27 tests) |
-| `tests/test_lease_adversarial.py` | Concurrency, fuzz, idempotency (31 tests) |
+| `tests/test_lease_adversarial.py` | Concurrency, idempotency (31 tests) |
 | `tests/test_tiers.py` | Credit tiers — happy-path priority walk, refund LIFO, expiry, overdraft sink |
 | `tests/test_tiers_adversarial.py` | Credit tiers — concurrency, idempotent replay, config drift |
-| `tests/test_store_integration.py` | Real Postgres tests (requires `PG_TEST_DSN`), incl. `CreditManager` end-to-end tier coverage |
+| `tests/test_store_integration.py` | Real Postgres tests, incl. `CreditManager` end-to-end tier coverage. The 7 real-Postgres concurrency tests are `@pytest.mark.repeat(5)` — money-critical races, rerun to surface rare interleavings |
+| `tests/test_security_rls.py` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks the rest of the suite bypasses by connecting as a superuser |
+| `tests/test_invariants_property.py` | Hypothesis stateful property test — ledger conservation across grant/deduct/lease/refund sequences, run once strict-prepaid and once overdraft |
 | `tests/test_engine.py` | PricingEngine expression evaluation |
 
-Run: `pytest python/tests/` (unit) or `PG_TEST_DSN=... pytest python/tests/test_store_integration.py` (integration).
+Run: `pytest python/tests/`. Real-Postgres tests resolve a DSN from `DATABASE_URL` → `BURSAR_TEST_PG_URL` → a testcontainers-managed `postgres:16` (Docker permitting) → skip; see `tests/conftest.py`.
 
 Linting: `ruff check python/src/ python/tests/` — max line length 120, complexity ≤ 15.
 Types: `pyright python/src/`.
