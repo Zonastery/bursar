@@ -495,6 +495,18 @@ BEGIN
     -- (warn/notify are not checked here: nothing has been charged yet, so
     -- there is nothing to warn about). Skipped when no feature/limit was
     -- resolved by the caller (manager).
+    --
+    -- Best-effort, not exact: unlike deduct_with_allowance (which counts AND
+    -- inserts the counted `usage` row under the same `user_credits FOR
+    -- UPDATE` lock, making the count-then-charge atomic), create_lease counts
+    -- committed `usage` rows but inserts none itself — a lease is a hold, not
+    -- a charge; the `usage` row lands later at settle_lease. Two concurrent
+    -- create_lease calls at the deny boundary can therefore both read the
+    -- same count and both be admitted, exceeding p_feature_max_calls by one.
+    -- This mirrors the existing spend-cap admission check three blocks above
+    -- (also a pre-check, not a lock), and is judged acceptable for the same
+    -- reason: settle_lease still enforces the limit (advisory, via
+    -- v_feature_limit_warning) on the actual charge.
     IF p_feature IS NOT NULL AND p_feature_max_calls IS NOT NULL AND p_feature_action = 'deny' THEN
         -- Deliberately no `amount < 0` filter — see deduct_with_allowance's 4b
         -- block for why (zero-net calls still count as invocations).

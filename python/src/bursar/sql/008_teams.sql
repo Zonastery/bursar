@@ -118,6 +118,14 @@ BEGIN
     RETURN jsonb_build_object('error', 'unauthorized');
   END IF;
 
+  -- Existence check up front: without it, a nonexistent p_team_id surfaces as
+  -- a raw FK unique_violation/foreign_key_violation exception instead of the
+  -- structured {"error": "team_not_found"} envelope deduct_team already
+  -- returns for the same condition.
+  IF NOT EXISTS (SELECT 1 FROM public.credit_teams WHERE id = p_team_id) THEN
+    RETURN jsonb_build_object('error', 'team_not_found');
+  END IF;
+
   INSERT INTO public.credit_team_members (team_id, user_id, role, spend_cap, total_spent)
   VALUES (p_team_id, p_user_id, p_role, p_spend_cap, 0)
   ON CONFLICT (team_id, user_id) DO UPDATE SET

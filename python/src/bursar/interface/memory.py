@@ -1510,7 +1510,11 @@ class MemoryStore(CreditStore):
                     continue
                 if user_id is not None and tx.user_id != user_id:
                     continue
-                if tx.expires_at and tx.type in ("purchase", "adjustment") and tx.expires_at <= now:
+                if (
+                    tx.expires_at
+                    and tx.type in ("purchase", "subscription", "signup_bonus", "adjustment")
+                    and tx.expires_at <= now
+                ):
                     tier_key = tx.metadata.get("tier", "default")
                     key = (tx.user_id, tier_key)
                     expired_by_tier_key[key] = expired_by_tier_key.get(key, Decimal(0)) + tx.amount
@@ -1568,14 +1572,17 @@ class MemoryStore(CreditStore):
         """Filter transactions to usage records in the time window.
 
         Compares timezone-aware datetimes (M9), not ISO strings. Naive bounds
-        are assumed to be UTC.
+        are assumed to be UTC. Window is half-open [start, end) — matches the
+        SQL analytics RPCs (007_analytics.sql) and the allowance/feature-limit
+        windows elsewhere, so a transaction lands in exactly one of two
+        adjacent windows, never both.
         """
         start = self._ensure_aware(start)
         end = self._ensure_aware(end)
         return [
             t
             for t in self._transactions
-            if t.type == "usage" and t.amount < 0 and t.created_at is not None and start <= t.created_at <= end
+            if t.type == "usage" and t.amount < 0 and t.created_at is not None and start <= t.created_at < end
         ]
 
     @staticmethod

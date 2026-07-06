@@ -58,18 +58,36 @@
 -- transaction untouched — no second grant, no second ledger row — reporting
 -- the CURRENT balance/lifetime (not a frozen snapshot; a plain credit grant
 -- has no floor/cap check tied to the original call the way a debit does).
+--
+-- credits_add_internal / credits_add split: the actual grant logic lives in
+-- credits_add_internal, which has NO auth.role() guard. credits_add is a
+-- thin wrapper that guards then delegates. This exists because
+-- grant_signup_bonus() (001_core_schema.sql, a SECURITY DEFINER trigger on
+-- auth.users) needs to grant credits from a context with no JWT — on real
+-- Supabase, a GoTrue signup INSERT has no PostgREST/JWT request context, so
+-- auth.role() reads NULL there (SECURITY DEFINER changes the executing
+-- privileges, not the JWT-derived auth.role() GUC). Calling the guarded
+-- credits_add from that trigger made auth.role() IS DISTINCT FROM
+-- 'service_role' evaluate to TRUE, so the guard fired and returned
+-- {"error":"unauthorized"} — swallowed by the trigger's PERFORM, dropping
+-- every signup bonus on real Supabase (masked in tests only because the test
+-- harness's auth.role() stub defaults to 'service_role'). Calling
+-- credits_add_internal directly from the trigger bypasses that guard while
+-- credits_add itself (reachable via PostgREST) remains guarded exactly as
+-- before. credits_add_internal is REVOKEd from PUBLIC/anon/authenticated so
+-- it is not independently callable over the API.
 DO $$
 DECLARE r RECORD;
 BEGIN
     FOR r IN
         SELECT oid::regprocedure::text AS sig FROM pg_proc
-        WHERE proname = 'credits_add' AND pronamespace = 'public'::regnamespace
+        WHERE proname IN ('credits_add', 'credits_add_internal') AND pronamespace = 'public'::regnamespace
     LOOP
         EXECUTE 'DROP FUNCTION ' || r.sig;
     END LOOP;
 END $$;
 
-CREATE OR REPLACE FUNCTION public.credits_add(
+CREATE OR REPLACE FUNCTION public.credits_add_internal(
     p_user_id UUID,
     p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
@@ -96,9 +114,10 @@ DECLARE
     v_existing_amount NUMERIC;
     v_existing_tier TEXT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
+    -- No auth.role() guard here by design — see the header comment above.
+    -- Callable only from within the database (this function, credits_add
+    -- below, and grant_signup_bonus); EXECUTE is REVOKEd from
+    -- PUBLIC/anon/authenticated below.
 
     -- Reject non-finite amounts (NaN / +-Infinity) outright.
     IF p_amount IS NULL OR NOT (p_amount = p_amount) OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric THEN
@@ -240,6 +259,32 @@ BEGIN
 END;
 $$;
 
+REVOKE EXECUTE ON FUNCTION public.credits_add_internal(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- credits_add: the guarded, PostgREST-reachable RPC. Thin wrapper — all
+-- logic lives in credits_add_internal (see header comment above).
+CREATE OR REPLACE FUNCTION public.credits_add(
+    p_user_id UUID,
+    p_amount NUMERIC,
+    p_type public.credit_tx_type DEFAULT 'adjustment',
+    p_metadata JSONB DEFAULT NULL,
+    p_tier TEXT DEFAULT NULL,
+    p_idempotency_key TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    RETURN public.credits_add_internal(p_user_id, p_amount, p_type, p_metadata, p_tier, p_idempotency_key);
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── 2. expire_credits: add p_user_id (lazy per-user sweep) ──────────────
@@ -289,10 +334,16 @@ BEGIN
     -- fate is fixed regardless of later config changes).
     -- p_user_id (lazy per-user sweep): when given, only that user's rows are
     -- ever considered; every other user's expired grants are left untouched.
+    --
+    -- Type filter covers every grant type credits_add can stamp expires_at
+    -- onto (matches the tier backfill's type set in 010_credit_tiers.sql
+    -- L151) — not just purchase/adjustment. A signup_bonus or subscription
+    -- grant into an expiring tier gets an expires_at too, and must be
+    -- sweepable like any other grant, or it never expires.
     FOR v_group IN
         SELECT DISTINCT user_id, COALESCE(metadata->>'tier', 'default') AS tier_key
         FROM public.credit_transactions
-        WHERE type IN ('purchase', 'adjustment')
+        WHERE type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
           AND NOT (metadata ? 'swept_at')
           AND (metadata->>'expires_at')::timestamptz <= now()
@@ -303,7 +354,7 @@ BEGIN
         FROM public.credit_transactions
         WHERE user_id = v_group.user_id
           AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
-          AND type IN ('purchase', 'adjustment')
+          AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
           AND NOT (metadata ? 'swept_at')
           AND (metadata->>'expires_at')::timestamptz <= now();
@@ -358,7 +409,7 @@ BEGIN
             SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
             WHERE user_id = v_group.user_id
               AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
-              AND type IN ('purchase', 'adjustment')
+              AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
               AND metadata ? 'expires_at'
               AND NOT (metadata ? 'swept_at')
               AND (metadata->>'expires_at')::timestamptz <= now();

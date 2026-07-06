@@ -1582,7 +1582,10 @@ export class MemoryStore extends CreditStore {
       if (
         tx.expiresAt &&
         !tx.sweptAt && // H4: never re-sweep a previously swept grant
-        (tx.type === "purchase" || tx.type === "adjustment")
+        (tx.type === "purchase" ||
+          tx.type === "subscription" ||
+          tx.type === "signup_bonus" ||
+          tx.type === "adjustment")
       ) {
         if (tx.expiresAt <= now) {
           const tierKey = (tx.metadata?.["tier"] as string | undefined) ?? "default";
@@ -1681,10 +1684,15 @@ export class MemoryStore extends CreditStore {
 
   // ── Usage analytics ──────────────────────────────────────────────────
 
-  /** Filter transactions to usage records in the time window. */
+  /**
+   * Filter transactions to usage records in the time window. Half-open
+   * [start, end) — matches the SQL analytics RPCs (007_analytics.sql) and the
+   * allowance/feature-limit windows elsewhere, so a transaction lands in
+   * exactly one of two adjacent windows, never both.
+   */
   private _usageInWindow(start: Date, end: Date): TransactionRecord[] {
     return this.transactions.filter(
-      (t) => t.type === "usage" && t.amount.lt(0) && t.createdAt >= start && t.createdAt <= end,
+      (t) => t.type === "usage" && t.amount.lt(0) && t.createdAt >= start && t.createdAt < end,
     );
   }
 

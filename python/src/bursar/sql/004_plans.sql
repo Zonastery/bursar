@@ -283,8 +283,11 @@ END $$;
 -- (falls back to the current UTC calendar month when p_period_start is NULL —
 -- the regression-safety baseline for plans still on allowance_period =
 -- "calendar_month"). When supplied (rolling_30d/anniversary, resolved by the
--- manager/store layer), usage is keyed on it directly; period_end here is
--- generic "not this period" display only.
+-- manager/store layer), usage is keyed on it directly; period_end is derived
+-- from v_period_start per the plan's own allowance_period so it isn't a
+-- calendar-month value for rolling_30d/anniversary plans. Still "not this
+-- period" display only (inclusive end-of-period date, not authoritative for
+-- window resolution — that lives in allowance.py's resolve_allowance_window).
 CREATE OR REPLACE FUNCTION public.check_plan_allowance(
     p_user_id UUID,
     p_period_start DATE DEFAULT NULL
@@ -297,6 +300,7 @@ AS $$
 DECLARE
     v_plan_id UUID;
     v_free_allowance NUMERIC;
+    v_allowance_period TEXT;
     v_current_usage NUMERIC;
     v_period_start DATE;
     v_period_end DATE;
@@ -305,8 +309,8 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT uc.plan_id, cp.free_allowance
-    INTO v_plan_id, v_free_allowance
+    SELECT uc.plan_id, cp.free_allowance, cp.allowance_period
+    INTO v_plan_id, v_free_allowance, v_allowance_period
     FROM public.user_credits uc
     LEFT JOIN public.credit_plans cp ON cp.id = uc.plan_id
     WHERE uc.user_id = p_user_id;
@@ -321,7 +325,20 @@ BEGIN
     END IF;
 
     v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
-    v_period_end := (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month' - interval '1 day')::DATE;
+
+    -- Inclusive end-of-period date, derived from v_period_start (not `now()`,
+    -- so a call for a past period reports that period's own end, not the
+    -- current month's) per allowance_period:
+    --   rolling_30d  -> a fixed 30-day window: start + 29.
+    --   calendar_month / anniversary -> last day of the month starting at
+    --     v_period_start. Exact for calendar_month; an approximation for
+    --     anniversary (the true reset day, clamped per month, needs the
+    --     plan-assignment anchor that this RPC doesn't receive — resolved
+    --     precisely by allowance.py's resolve_allowance_window instead).
+    v_period_end := CASE v_allowance_period
+        WHEN 'rolling_30d' THEN v_period_start + 29
+        ELSE (date_trunc('month', v_period_start) + interval '1 month' - interval '1 day')::DATE
+    END;
 
     SELECT COALESCE(SUM(usage), 0) INTO v_current_usage
     FROM public.credit_usage_window

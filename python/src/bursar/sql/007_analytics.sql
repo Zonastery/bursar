@@ -5,6 +5,22 @@
 -- (not BIGINT) so fractional credit usage is reported without truncation.
 -- Day buckets are pinned to UTC so they are deterministic regardless of the
 -- session time zone.
+--
+-- Window bounds are HALF-OPEN [p_start, p_end): `created_at >= p_start AND
+-- created_at < p_end`. This matches the feature-limit/allowance windows
+-- elsewhere (see allowance.py's resolve_allowance_window) and means a
+-- transaction lands in exactly one of two adjacent windows, never both.
+--
+-- "Spend" here is deliberately `type = 'usage'` only — it excludes
+-- `team_usage` (credits drawn from a shared team pool, see 008_teams.sql).
+-- This is a narrower definition than the spend-CAP enforcement in
+-- check_spend_cap/deduct_with_allowance/settle_lease, which counts
+-- `type IN ('usage', 'team_usage')` because a cap is a per-user ceiling
+-- regardless of which balance funded the debit. These analytics report
+-- personal-balance consumption; team-pool spend is analyzed separately via
+-- get_team_members' total_spent. If a future dashboard needs a single
+-- "all spend" figure, include 'team_usage' explicitly rather than assuming
+-- these functions already do.
 
 -- spend_by_user: aggregate spend by user in a time window.
 CREATE OR REPLACE FUNCTION public.spend_by_user(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
@@ -27,7 +43,7 @@ BEGIN
     WHERE ct.type = 'usage'
       AND ct.amount < 0
       AND ct.created_at >= p_start
-      AND ct.created_at <= p_end
+      AND ct.created_at < p_end
     GROUP BY ct.user_id
     ORDER BY total_spend DESC;
 END;
@@ -56,7 +72,7 @@ BEGIN
     WHERE ct.type = 'usage'
       AND ct.amount < 0
       AND ct.created_at >= p_start
-      AND ct.created_at <= p_end
+      AND ct.created_at < p_end
     GROUP BY ct.metadata->>'model'
     ORDER BY total_spend DESC;
 END;
@@ -84,7 +100,7 @@ BEGIN
     WHERE ct.type = 'usage'
       AND ct.amount < 0
       AND ct.created_at >= p_start
-      AND ct.created_at <= p_end
+      AND ct.created_at < p_end
     GROUP BY ct.user_id
     ORDER BY total_spend DESC
     LIMIT p_limit;
@@ -115,7 +131,7 @@ BEGIN
     WHERE ct.type = 'usage'
       AND ct.amount < 0
       AND ct.created_at >= p_start
-      AND ct.created_at <= p_end
+      AND ct.created_at < p_end
     GROUP BY (ct.created_at AT TIME ZONE 'UTC')::DATE
     ORDER BY (ct.created_at AT TIME ZONE 'UTC')::DATE;
 END;
@@ -144,7 +160,7 @@ BEGIN
     WHERE type = 'usage'
       AND amount < 0
       AND created_at >= p_start
-      AND created_at <= p_end;
+      AND created_at < p_end;
 
     -- Money is NUMERIC(18,4): consumed total and the average stay NUMERIC.
     -- avg_daily_spend uses NUMERIC division (not integer division) so sub-credit
@@ -162,7 +178,7 @@ BEGIN
              WHERE type = 'usage'
                AND amount < 0
                AND created_at >= p_start
-               AND created_at <= p_end
+               AND created_at < p_end
              GROUP BY metadata->>'model'
              ORDER BY SUM(ABS(amount)) DESC
              LIMIT 1),
@@ -174,7 +190,7 @@ BEGIN
              WHERE type = 'usage'
                AND amount < 0
                AND created_at >= p_start
-               AND created_at <= p_end
+               AND created_at < p_end
              GROUP BY user_id
              ORDER BY SUM(ABS(amount)) DESC
              LIMIT 1),
@@ -185,7 +201,7 @@ BEGIN
     WHERE type = 'usage'
       AND amount < 0
       AND created_at >= p_start
-      AND created_at <= p_end;
+      AND created_at < p_end;
 
     RETURN result;
 END;

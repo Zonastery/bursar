@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS public.credit_transactions (
 
 -- Idempotency guarantee: unique on (user_id, idempotency_key) inside metadata JSONB.
 -- User-scoped so the same key from two different users never collides.
+--
+-- NOTE: the key is NOT namespaced by operation type, so it is shared across
+-- every RPC that accepts p_idempotency_key (credits_add, deduct_with_allowance,
+-- settle_lease, grant_subscription_cycle's underlying add_credits call, ...).
+-- If a caller ever reused the same key across two different operation types
+-- for the same user (e.g. a credits_add and a deduct_with_allowance both
+-- keyed "evt_123"), the second call hits this unique index as a genuine
+-- collision and is misinterpreted as a replay of the first, returning the
+-- wrong result rather than raising. Callers must mint idempotency keys that
+-- are unique per (user, operation), e.g. by prefixing with the operation name
+-- or using the upstream event id verbatim only when it is already
+-- operation-specific (the common case: payment-provider webhook event ids).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency_user
     ON public.credit_transactions (user_id, (metadata ->> 'idempotency_key'))
     WHERE metadata ->> 'idempotency_key' IS NOT NULL;
@@ -135,12 +147,22 @@ BEGIN
     50
   ) INTO v_bonus;
 
-  -- p_tier = NULL (not a hardcoded 'gifted'): credits_add then resolves the
-  -- configured default tier (is_default), or the synthetic 'default' tier when
-  -- no tiers are configured. A hardcoded 'gifted' would make credits_add return
-  -- tier_not_found — silently swallowed by PERFORM — whenever that tier isn't
-  -- defined (e.g. every tier-less install), dropping the bonus entirely.
-  PERFORM public.credits_add(NEW.id, v_bonus, 'signup_bonus', NULL, NULL);
+  -- p_tier = NULL (not a hardcoded 'gifted'): credits_add_internal then
+  -- resolves the configured default tier (is_default), or the synthetic
+  -- 'default' tier when no tiers are configured. A hardcoded 'gifted' would
+  -- make it return tier_not_found — silently swallowed by PERFORM — whenever
+  -- that tier isn't defined (e.g. every tier-less install), dropping the
+  -- bonus entirely.
+  --
+  -- Calls credits_add_internal (defined in 011_lazy_expiry.sql), NOT the
+  -- guarded credits_add: a real Supabase GoTrue signup INSERT runs with no
+  -- PostgREST/JWT request context, so auth.role() reads NULL here — the
+  -- guarded credits_add would reject with {"error":"unauthorized"},
+  -- silently dropping every signup bonus in production (masked in tests only
+  -- because the test harness's auth.role() stub defaults to 'service_role').
+  -- credits_add_internal has no such guard and is not independently
+  -- reachable over the API (REVOKEd from PUBLIC/anon/authenticated).
+  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, NULL);
 
   RETURN NEW;
 END;

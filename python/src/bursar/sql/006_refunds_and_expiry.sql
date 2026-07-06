@@ -264,7 +264,7 @@ BEGIN
     FOR v_group IN
         SELECT DISTINCT user_id, COALESCE(metadata->>'tier', 'default') AS tier_key
         FROM public.credit_transactions
-        WHERE type IN ('purchase', 'adjustment')
+        WHERE type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
           AND NOT (metadata ? 'swept_at')
           AND (metadata->>'expires_at')::timestamptz <= now()
@@ -274,7 +274,7 @@ BEGIN
         FROM public.credit_transactions
         WHERE user_id = v_group.user_id
           AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
-          AND type IN ('purchase', 'adjustment')
+          AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
           AND NOT (metadata ? 'swept_at')
           AND (metadata->>'expires_at')::timestamptz <= now();
@@ -329,7 +329,7 @@ BEGIN
             SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
             WHERE user_id = v_group.user_id
               AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
-              AND type IN ('purchase', 'adjustment')
+              AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
               AND metadata ? 'expires_at'
               AND NOT (metadata ? 'swept_at')
               AND (metadata->>'expires_at')::timestamptz <= now();

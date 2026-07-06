@@ -407,6 +407,41 @@ class TestPostgresStoreIntegration:
     def test_full_flow_pg(self, manager: CreditManager) -> None:
         _add_and_deduct(manager, _PG_USER)
 
+    def test_signup_bonus_granted_when_auth_role_is_not_service_role_pg(self, store: PostgresStore) -> None:
+        """Regression test for a production-only bug: grant_signup_bonus()
+        (the constraint trigger on auth.users) must call credits_add_internal,
+        NOT the guarded credits_add. On real Supabase, a GoTrue signup INSERT
+        into auth.users runs with no PostgREST/JWT request context, so
+        auth.role() reads NULL there — the guarded credits_add would reject
+        with {"error": "unauthorized"} (silently swallowed by the trigger's
+        PERFORM), dropping every signup bonus. The bundled test harness's
+        auth.role() stub (see conftest._preseed_supabase_objects) defaults to
+        'service_role' when unset, which would mask this regression — so this
+        test explicitly sets a non-service_role JWT role for the transaction
+        that inserts the auth.users row, reproducing the real-Supabase
+        condition instead of relying on the stub's fallback.
+        """
+        conn = psycopg2.connect(store._database_url)
+        try:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                # Scoped to this transaction only (SET LOCAL): the deferred
+                # constraint trigger (on_signup_credit_bonus is DEFERRABLE
+                # INITIALLY DEFERRED) fires during COMMIT processing, still
+                # inside this same transaction, so it sees this setting.
+                cur.execute("SET LOCAL request.jwt.claim.role = 'anon'")
+                cur.execute("INSERT INTO auth.users DEFAULT VALUES RETURNING id")
+                new_user_id = cur.fetchone()[0]
+            conn.commit()
+        finally:
+            conn.close()
+
+        balance = store.get_balance(str(new_user_id))
+        assert balance.balance > Decimal("0")
+
+        tiers = store.get_credit_tiers(str(new_user_id))
+        assert sum((t.balance for t in tiers.tiers), Decimal(0)) == balance.balance
+
     def test_deduct_with_allowance_fractional_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         r = store.deduct_with_allowance(_PG_USER, Decimal("2.5"), idempotency_key="k1", model="gpt-4")
