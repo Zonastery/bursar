@@ -71,4 +71,13 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.check_feature_limit(UUID, TEXT, INT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
+-- Grant EXECUTE on all bursar functions to service_role. Bursar revokes EXECUTE
+-- from PUBLIC/anon/authenticated so regular users can't call these via the
+-- Supabase REST API (PostgREST), but service_role (the backend role that web
+-- and agent-py use) must have explicit EXECUTE to invoke them through PostgREST.
+-- A schema-level GRANT is used rather than per-function to avoid missing any
+-- RPC as new migrations are added — SECURITY DEFINER + auth.role() checks in
+-- each function body provide defense-in-depth.
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+
 NOTIFY pgrst, 'reload schema';
