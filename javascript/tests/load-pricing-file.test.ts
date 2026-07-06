@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { writeFileSync, unlinkSync, mkdirSync, rmdirSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ConfigError } from "../src/errors.js";
@@ -18,15 +18,32 @@ beforeAll(() => {
   );
   // LPF2: valid JSON but not a pricing config (missing version and models)
   writeFileSync(join(tmpDir, "notconfig.json"), JSON.stringify({ hello: "world" }));
+  writeFileSync(join(tmpDir, "empty.json"), "");
+  writeFileSync(join(tmpDir, "empty.yaml"), "");
+  writeFileSync(join(tmpDir, "empty-object.json"), "{}");
+  mkdirSync(join(tmpDir, "a-directory.json"), { recursive: true });
 });
 
 afterAll(() => {
-  for (const name of ["test.json", "test.yaml", "unicode.yaml", "notconfig.json"]) {
+  for (const name of [
+    "test.json",
+    "test.yaml",
+    "unicode.yaml",
+    "notconfig.json",
+    "empty.json",
+    "empty.yaml",
+    "empty-object.json",
+  ]) {
     try {
       unlinkSync(join(tmpDir, name));
     } catch {
       /* ignore */
     }
+  }
+  try {
+    rmdirSync(join(tmpDir, "a-directory.json"));
+  } catch {
+    /* ignore */
   }
 });
 
@@ -43,9 +60,33 @@ describe("loadPricingFile", () => {
     expect(result.models).toEqual({ a: "1" });
   });
 
-  it("throws on missing file", async () => {
+  it("throws a clean ConfigError on missing file", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
-    await expect(loadPricingFile(join(tmpDir, "nope.json"))).rejects.toThrow();
+    await expect(loadPricingFile(join(tmpDir, "nope.json"))).rejects.toThrow(ConfigError);
+    await expect(loadPricingFile(join(tmpDir, "nope.json"))).rejects.toThrow(/File not found/);
+  });
+
+  it("throws a clean ConfigError when the path is a directory", async () => {
+    const { loadPricingFile } = await import("../src/load-pricing-file.js");
+    await expect(loadPricingFile(join(tmpDir, "a-directory.json"))).rejects.toThrow(
+      /is a directory/,
+    );
+  });
+
+  it("throws a clean ConfigError on an empty JSON file", async () => {
+    const { loadPricingFile } = await import("../src/load-pricing-file.js");
+    await expect(loadPricingFile(join(tmpDir, "empty.json"))).rejects.toThrow(ConfigError);
+  });
+
+  it("throws a clean ConfigError on an empty YAML file", async () => {
+    // An empty YAML document parses to `undefined` via js-yaml, not an object.
+    const { loadPricingFile } = await import("../src/load-pricing-file.js");
+    await expect(loadPricingFile(join(tmpDir, "empty.yaml"))).rejects.toThrow(ConfigError);
+  });
+
+  it("throws a clean ConfigError on an empty JSON object", async () => {
+    const { loadPricingFile } = await import("../src/load-pricing-file.js");
+    await expect(loadPricingFile(join(tmpDir, "empty-object.json"))).rejects.toThrow(ConfigError);
   });
 
   // LPF1 — YAML file with unicode content in model names

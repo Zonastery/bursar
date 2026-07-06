@@ -270,10 +270,15 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
+    from bursar.config import PricingConfig
     from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
     try:
+        # Run the same two validators as `config validate` (PricingConfig is the
+        # strict gate: expressions, tier rules, signup_bonus sign, etc.) — `set`
+        # must never persist a config that `validate` would reject.
+        PricingConfig.model_validate(data)
         config = PricingConfigData.model_validate(data)
     except Exception as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
@@ -354,6 +359,13 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
     sys.stdout.writelines(diff)
 
 
+def _cmd_config_schema(_args: argparse.Namespace) -> None:
+    """Print the pricing config JSON Schema (for editor autocompletion/validation)."""
+    from bursar.config import PricingConfig
+
+    print(json.dumps(PricingConfig.model_json_schema(), indent=2))
+
+
 # ── Parser construction ──────────────────────────────────────────────────────
 
 
@@ -417,6 +429,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate = psub.add_parser("validate", help="Validate a pricing file without applying it")
     p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
     p_validate.set_defaults(func=_cmd_config_validate)
+
+    p_schema = psub.add_parser("schema", help="Print the pricing config JSON Schema")
+    p_schema.set_defaults(func=_cmd_config_schema)
 
     p_diff = psub.add_parser("diff", help="Unified diff between two versions")
     p_diff.add_argument("version_a", type=int, help="First version")

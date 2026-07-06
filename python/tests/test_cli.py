@@ -212,6 +212,47 @@ class TestConfigValidate:
         assert code == 1
         assert "Validation failed" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "bad_config",
+        [
+            {"models": {"_default": "1"}},  # expression references no variables
+            {"models": {"_default": "input_tokens * 1"}, "signup_bonus": -1},
+            {
+                "models": {"_default": "input_tokens * 1"},
+                "tiers": {
+                    "a": {"name": "A", "priority": 1, "allow_overdraft": True},
+                    "b": {"name": "B", "priority": 2, "allow_overdraft": True},
+                },
+            },
+            {"models": {"_default": "input_tokens * 1"}, "min_balnce": 5},  # typo'd key
+        ],
+        ids=["no-variables", "negative-signup-bonus", "conflicting-tiers", "unknown-key"],
+    )
+    def test_set_rejects_everything_validate_rejects(
+        self,
+        mem_store: MemoryStore,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+        bad_config: dict,
+    ) -> None:
+        """`config set` must never persist a config that `config validate` rejects.
+
+        Regression test: `set` used to validate only against the looser
+        `PricingConfigData` model, so a config with an invalid expression, a
+        negative `signup_bonus`, conflicting tiers, or a typo'd key would pass
+        `set` while `validate` correctly rejected it.
+        """
+        p = tmp_path / "bad.json"
+        p.write_text(json.dumps(bad_config))
+
+        validate_code = _exit_code("config", "validate", str(p))
+        capsys.readouterr()
+        set_code = _exit_code("config", "set", str(p))
+
+        assert validate_code == 1
+        assert set_code == 1
+        assert mem_store.get_active_pricing() is None
+
 
 class TestConfigStore:
     def test_set_identical_config_aborts(self, mem_store: MemoryStore, sample_config: str) -> None:
@@ -332,9 +373,9 @@ class TestConfigStore:
 
     def test_diff_shows_changes(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, tmp_path: Path) -> None:
         p1 = tmp_path / "a.json"
-        p1.write_text(json.dumps({"models": {"a": "1"}}))
+        p1.write_text(json.dumps({"models": {"a": "input_tokens * 1"}}))
         p2 = tmp_path / "b.json"
-        p2.write_text(json.dumps({"models": {"b": "1"}}))
+        p2.write_text(json.dumps({"models": {"b": "input_tokens * 1"}}))
         _run("config", "set", str(p1))
         _run("config", "set", str(p2))
         _run("config", "diff", "1", "2")
@@ -350,6 +391,16 @@ class TestConfigStore:
     def test_diff_missing_version_exits_1(self, mem_store: MemoryStore, sample_config: str) -> None:
         _run("config", "set", sample_config)
         assert _exit_code("config", "diff", "1", "99") == 1
+
+
+class TestConfigSchema:
+    def test_schema_is_valid_json_with_additional_properties_false(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        _run("config", "schema")
+        schema = json.loads(capsys.readouterr().out)
+        assert schema["additionalProperties"] is False
+        assert "models" in schema["properties"]
 
 
 class TestRetryNarrowing:

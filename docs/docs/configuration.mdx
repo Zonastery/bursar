@@ -426,7 +426,7 @@ await manager.loadPricingFromStore();
 Pricing stored in `credit_pricing_config` table. Update via CLI or RPC — no redeploy needed.
 
 ```bash
-bursar pricing set config.json
+bursar config set config.json
 ```
 
 `CreditManager.load_pricing_from_store()` fetches the latest active config.
@@ -438,7 +438,17 @@ At load time the engine validates:
 1. `models` is non-empty
 2. All expression strings parse and are safe
 3. Only allowed functions used
-4. Plan names are unique
+4. Plan names are unique (and every plan has a `name`)
 5. Plan `rate_overrides` expressions are valid
-6. No unknown sections
+6. No unknown keys, at any level (top-level, `plans.*`, `tiers.*`, `plans.*.feature_limits.*`, `plans.*.per_operation.*`) — a typo like `min_balnce` is rejected rather than silently falling back to a default
 7. `this_tool_calls` is used only inside `tools.*` expressions — referencing it in `models`, `search`, or `cache` raises a config-load-time error
+8. `version`, if present, must be `1`
+9. `min_balance`, `signup_bonus`, `fixed.*`, and `plans.*.free_allowance` must be `>= 0`
+
+Both the Python and JS SDKs enforce the same rules — see `tests/parity/config_validation_cases.json` for the shared fixture both test suites run against.
+
+Retrieve the full JSON Schema for editor autocompletion/validation with:
+
+```bash
+bursar config schema
+```

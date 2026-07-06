@@ -27,8 +27,9 @@ export interface PricingConfigData {
   tools?: Record<string, string> | null;
   search?: string | null;
   cache?: string | null;
-  fixed?: Record<string, number> | null;
-  minBalance?: number | null;
+  // Money fields: Decimal, never a binary `number` (contract §1).
+  fixed?: Record<string, Decimal> | null;
+  minBalance?: Decimal | null;
   signupBonus?: number | null;
   plans?: Record<string, PlanDefinition> | null;
   tiers?: Record<string, TierDefinition> | null;

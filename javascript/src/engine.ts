@@ -71,7 +71,7 @@ export class PricingEngine {
   }
 
   /** Minimum balance users must keep. */
-  get minBalance(): number {
+  get minBalance(): Decimal {
     return this.config.minBalance;
   }
 
@@ -102,7 +102,7 @@ export class PricingEngine {
    */
   getFixedCost(jobName: string): Decimal | null {
     if (Object.prototype.hasOwnProperty.call(this.config.fixed, jobName)) {
-      return new Decimal(this.config.fixed[jobName]);
+      return this.config.fixed[jobName];
     }
     return null;
   }
@@ -192,7 +192,7 @@ export class PricingEngine {
       metrics.fixedJob &&
       Object.prototype.hasOwnProperty.call(this.config.fixed, metrics.fixedJob)
     ) {
-      return new Decimal(this.config.fixed[metrics.fixedJob]);
+      return this.config.fixed[metrics.fixedJob];
     }
     return new Decimal(0);
   }

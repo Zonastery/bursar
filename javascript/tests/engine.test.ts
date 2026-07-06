@@ -26,7 +26,7 @@ const TEST_CONFIG = {
 describe("PricingEngine", () => {
   it("creates from dict", () => {
     const engine = PricingEngine.fromDict(TEST_CONFIG);
-    expect(engine.minBalance).toBe(5);
+    expect(engine.minBalance.toString()).toBe("5");
   });
 
   it("rejects invalid config", () => {

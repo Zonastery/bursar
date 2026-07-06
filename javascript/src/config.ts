@@ -2,7 +2,7 @@ import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
-import type { FeatureLimit, PlanDefinition, TierDefinition } from "./types.js";
+import type { BillingMode, FeatureLimit, OperationPolicy, PlanDefinition, TierDefinition } from "./types.js";
 
 /** Valid `allowancePeriod` values (WS9b). */
 const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
@@ -46,11 +46,71 @@ export interface PricingConfig {
   tools: Record<string, string>;
   search?: string | null;
   cache?: string | null;
-  minBalance: number;
+  // Money field: fractional credits, never a binary `number` (contract §1) — mirrors Python's `Decimal`.
+  minBalance: Decimal;
   signupBonus?: number | null;
-  fixed: Record<string, number>;
+  fixed: Record<string, Decimal>;
   plans?: Record<string, PlanDefinition> | null;
   tiers?: Record<string, TierDefinition> | null;
+}
+
+/** Known top-level config keys, checked after snake→camel normalisation. */
+const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
+  "version",
+  "models",
+  "tools",
+  "search",
+  "cache",
+  "minBalance",
+  "signupBonus",
+  "fixed",
+  "plans",
+  "tiers",
+]);
+
+/** Known plan-definition keys (`billingMode` is the short-form alias for `defaultBillingMode`). */
+const PLAN_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "name",
+  "freeAllowance",
+  "rateOverrides",
+  "features",
+  "featureLimits",
+  "defaultBillingMode",
+  "billingMode",
+  "perOperation",
+  "maxConcurrent",
+  "overdraftFloor",
+  "allowancePeriod",
+]);
+
+/** Known `FeatureLimit` keys. */
+const FEATURE_LIMIT_KEYS: ReadonlySet<string> = new Set(["maxCalls", "period", "action"]);
+
+/** Known `OperationPolicy` keys (entries of a plan's `perOperation` map). */
+const OPERATION_POLICY_KEYS: ReadonlySet<string> = new Set([
+  "billingMode",
+  "maxConcurrent",
+  "overdraftFloor",
+]);
+
+/** Known tier-definition keys. */
+const TIER_KEYS: ReadonlySet<string> = new Set([
+  "name",
+  "priority",
+  "expires",
+  "defaultTtlDays",
+  "allowOverdraft",
+  "isDefault",
+]);
+
+/** Reject any key not in `known` — catches typos (`min_balnce`) that would otherwise silently fall back to a default. */
+function assertKnownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, context: string): void {
+  for (const key of Object.keys(obj)) {
+    if (!known.has(key)) {
+      throw new ConfigError(`unknown config key in ${context}: ${key}`);
+    }
+  }
 }
 
 /** Variable set for validating `tools` expressions: base set + `this_tool_calls` (WS2). */
@@ -144,6 +204,7 @@ function normaliseFeatureLimits(
   const out: Record<string, FeatureLimit> = {};
   for (const [featureKey, rawLimit] of Object.entries(raw)) {
     const limit = normaliseKeys((rawLimit ?? {}) as Record<string, unknown>);
+    assertKnownKeys(limit, FEATURE_LIMIT_KEYS, `plans.${planKey}.featureLimits.${featureKey}`);
     const maxCalls = Number(limit.maxCalls ?? 0);
     const period = (limit.period as string | undefined) ?? "monthly";
     const action = (limit.action as string | undefined) ?? "deny";
@@ -173,10 +234,49 @@ function normaliseFeatureLimits(
   return out;
 }
 
+/**
+ * Normalise + validate a plan's `perOperation` map (per-operation
+ * financial-safety policy overrides, mirrors Python's `OperationPolicy`).
+ * Each entry's own keys are snake/camel-normalised since, unlike top-level
+ * plan fields, these nested objects are not otherwise touched by
+ * `normaliseKeys`.
+ */
+function normalisePerOperation(
+  planKey: string,
+  raw: Record<string, unknown>,
+): Record<string, OperationPolicy> {
+  const out: Record<string, OperationPolicy> = {};
+  for (const [opType, rawPolicy] of Object.entries(raw)) {
+    const policy = normaliseKeys((rawPolicy ?? {}) as Record<string, unknown>);
+    assertKnownKeys(policy, OPERATION_POLICY_KEYS, `plans.${planKey}.perOperation.${opType}`);
+    const billingMode = (policy.billingMode as string | undefined) ?? "strict";
+    if (billingMode !== "strict" && billingMode !== "overdraft") {
+      throw new ConfigError(
+        `invalid billingMode in plans.${planKey}.perOperation.${opType}: '${billingMode}' ` +
+          `(expected 'strict' or 'overdraft')`,
+      );
+    }
+    out[opType] = {
+      billingMode: billingMode as BillingMode,
+      maxConcurrent: (policy.maxConcurrent as number | null) ?? null,
+      overdraftFloor:
+        policy.overdraftFloor != null ? new Decimal(policy.overdraftFloor as number | string) : null,
+    };
+  }
+  return out;
+}
+
 /** Load and validate a pricing config from a raw dictionary. */
 export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig {
   // H6: normalise top-level keys from snake_case to camelCase first.
   const d = normaliseKeys(data);
+  assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
+
+  // Only `1` is a valid version (mirrors Python's `Literal[1]`); JS previously
+  // never inspected this field at all.
+  if (d.version !== undefined && d.version !== 1) {
+    throw new ConfigError(`version must be 1, got ${JSON.stringify(d.version)}`);
+  }
 
   if (d.models == null) throw new ConfigError("missing required section: models");
   if (typeof d.models !== "object" || Object.keys(d.models as object).length === 0) {
@@ -192,6 +292,12 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
 
   if (plans) {
     for (const [planKey, plan] of Object.entries(plans)) {
+      assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
+      // A plan definition must carry a `name` (mirrors Python's `config.py:62`);
+      // JS previously left this unchecked and silently produced `undefined`.
+      if (plan.name == null) {
+        throw new ConfigError(`plan definition is missing required 'name' field: plans.${planKey}`);
+      }
       const overrides = plan.rateOverrides as Record<string, string> | undefined;
       if (overrides) {
         for (const [modelKey, expr] of Object.entries(overrides)) {
@@ -220,6 +326,13 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
           planKey,
           plan.featureLimits as Record<string, unknown>,
         );
+      }
+      // Per-operation financial-safety policy overrides: validate shape here;
+      // normalised into `OperationPolicy` objects when `planDefs` is built below.
+      if (plan.perOperation != null) {
+        if (typeof plan.perOperation !== "object" || Array.isArray(plan.perOperation)) {
+          throw new ConfigError(`plans.${planKey}.perOperation must be a dict`);
+        }
       }
     }
     const planNames = Object.values(plans).map((p) => p.name as string);
@@ -250,6 +363,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
     let overdraftCount = 0;
     let defaultCount = 0;
     for (const [tierKey, t] of Object.entries(tiers)) {
+      assertKnownKeys(t, TIER_KEYS, `tiers.${tierKey}`);
       if (t.allowOverdraft === true) overdraftCount++;
       if (t.isDefault === true) defaultCount++;
       if (t.defaultTtlDays != null && (t.defaultTtlDays as number) <= 0) {
@@ -268,30 +382,48 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
 
   const config: PricingConfig = {
     models: d.models as Record<string, string>,
-    tools: { _default: "tool_calls * 0", ...(d.tools as Record<string, string> | undefined) },
+    // Only default `tools` when the key is entirely absent (mirrors Python's
+    // pydantic `default_factory`); a user-supplied `tools` map — even one
+    // without `_default` — is used as-is. `PricingEngine.calcTools` already
+    // falls back to `"tool_calls * 0"` at evaluation time when `_default` is
+    // missing, so behavior is unaffected either way.
+    tools: (d.tools as Record<string, string> | undefined) ?? { _default: "tool_calls * 0" },
     search: (d.search as string | null | undefined) ?? null,
     cache: (d.cache as string | null | undefined) ?? null,
-    minBalance: (d.minBalance as number) ?? 0,
+    // Money fields: Decimal, never a binary `number` (contract §1).
+    minBalance: new Decimal((d.minBalance as number | string | undefined) ?? 0),
     signupBonus: d.signupBonus as number | undefined,
-    fixed: (d.fixed as Record<string, number>) ?? {},
+    fixed: Object.fromEntries(
+      Object.entries((d.fixed as Record<string, number | string> | undefined) ?? {}).map(
+        ([job, cost]) => [job, new Decimal(cost)],
+      ),
+    ),
   };
-  if (config.minBalance < 0) throw new ConfigError("min_balance must be >= 0");
+  if (config.minBalance.isNegative()) throw new ConfigError("min_balance must be >= 0");
+
+  if (config.signupBonus != null && config.signupBonus < 0) {
+    throw new ConfigError(`signup_bonus must be >= 0, got ${config.signupBonus}`);
+  }
 
   // WS3: fixed job costs may be fractional (Decimal-compatible) — only non-negative
   // is enforced. Was: Number.isInteger check (contradicted docs).
   for (const [job, cost] of Object.entries(config.fixed)) {
-    if (cost < 0) {
-      throw new ConfigError(`fixed.${job} must be non-negative, got ${cost}`);
+    if (cost.isNegative()) {
+      throw new ConfigError(`fixed.${job} must be non-negative, got ${cost.toString()}`);
     }
   }
 
   if (plans) {
     const planDefs: Record<string, PlanDefinition> = {};
     for (const [key, p] of Object.entries(plans)) {
+      const freeAllowance = new Decimal((p.freeAllowance as number | string | undefined) ?? 0);
+      if (freeAllowance.isNegative()) {
+        throw new ConfigError(`plans.${key}.freeAllowance must be >= 0, got ${freeAllowance.toString()}`);
+      }
       planDefs[key] = {
         id: (p.id as string) ?? key,
         name: p.name as string,
-        freeAllowance: new Decimal((p.freeAllowance as number | string | undefined) ?? 0),
+        freeAllowance,
         rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
         features: (p.features as Record<string, unknown>) ?? null,
         featureLimits: (p.featureLimits as Record<string, FeatureLimit>) ?? null,
@@ -300,6 +432,13 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
           p.overdraftFloor != null ? new Decimal(p.overdraftFloor as number | string) : null,
         maxConcurrent: (p.maxConcurrent as number | null) ?? null,
         allowancePeriod: ((p.allowancePeriod as AllowancePeriod) ?? "calendar_month") as AllowancePeriod,
+        // Was silently dropped: `PlanDefinition.perOperation` was declared in
+        // types.ts but never populated here, so per-operation billing policy
+        // from config was ignored by the JS SDK.
+        perOperation:
+          p.perOperation != null
+            ? normalisePerOperation(key, p.perOperation as Record<string, unknown>)
+            : undefined,
       };
     }
     config.plans = planDefs;

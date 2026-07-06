@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bursar.expr import ExpressionError, validate_expression
 from bursar.interface.models import PlanDefinition, TierDefinition
@@ -20,6 +20,10 @@ class PricingConfig(BaseModel):
     ``version`` must be ``1`` (current/latest).  Optional ``plans`` key carries
     subscription-plan definitions for allowance-based features.
     """
+
+    # Unknown top-level keys (typos like `min_balnce`) fail loudly instead of
+    # silently falling back to a default.
+    model_config = ConfigDict(extra="forbid")
 
     version: Literal[1] = 1
     models: dict[str, str]

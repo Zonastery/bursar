@@ -58,6 +58,10 @@ class PricingConfigData(BaseModel):
     Unified format with optional plan definitions.
     """
 
+    # Unknown top-level keys (typos like `min_balnce`) fail loudly instead of
+    # silently falling back to a default — mirrors ``PricingConfig`` (config.py).
+    model_config = ConfigDict(extra="forbid")
+
     version: Literal[1] = 1
     models: dict[str, str]
     tools: dict[str, str] = Field(default_factory=lambda: {"_default": "tool_calls * 0"})
@@ -233,6 +237,8 @@ class OperationPolicy(BaseModel):
     floor admission is allowed down to.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     billing_mode: BillingMode = "strict"
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
@@ -255,6 +261,8 @@ class FeatureLimit(BaseModel):
     elsewhere).
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     max_calls: int = Field(ge=0)
     period: Literal["daily", "weekly", "monthly", "yearly"] = "monthly"
     action: Literal["deny", "warn", "notify"] = "deny"
@@ -271,6 +279,8 @@ class PlanDefinition(BaseModel):
     Accepts ``billing_mode`` as a short-form alias for ``default_billing_mode``
     so configs written with the shorter key work without changes.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str
@@ -312,6 +322,8 @@ class TierDefinition(BaseModel):
     debt) and at most one may set ``is_default=True`` (untagged
     ``add_credits()`` calls land here) — enforced by config validation.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
     priority: int

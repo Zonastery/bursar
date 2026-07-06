@@ -15,9 +15,9 @@ describe("loadConfigFromDict", () => {
   it("loads a valid config", () => {
     const config = loadConfigFromDict(VALID_CONFIG);
     expect(config.models["gpt-4"]).toBeTruthy();
-    expect(config.minBalance).toBe(10);
+    expect(config.minBalance.toString()).toBe("10");
     expect(config.tools["_default"]).toBe("tool_calls * 5 / 1000");
-    expect(config.fixed["batch_process"]).toBe(50);
+    expect(config.fixed["batch_process"].toString()).toBe("50");
   });
 
   it("rejects missing models", () => {
@@ -53,7 +53,7 @@ describe("loadConfigFromDict", () => {
   it("applies defaults for missing optional fields", () => {
     const config = loadConfigFromDict({ models: { a: "input_tokens * 1" } });
     // WS6: minBalance defaults to 0 (was 5).
-    expect(config.minBalance).toBe(0);
+    expect(config.minBalance.toString()).toBe("0");
     // WS1: search/cache are a single expression string (or null), not a Record.
     expect(config.search).toBeNull();
     expect(config.cache).toBeNull();
@@ -169,9 +169,8 @@ describe("loadConfigFromDict", () => {
     ).not.toThrow();
   });
 
-  // ── CF2: Plan freeAllowance negative — no validation, stored as-is ──
-  it("accepts plan with negative freeAllowance (no config-level validation)", () => {
-    // config.ts does not validate freeAllowance sign; it stores new Decimal(value).
+  // ── CF2: Plan freeAllowance negative is rejected (parity with Python's ge=0) ──
+  it("rejects plan with negative freeAllowance", () => {
     expect(() =>
       loadConfigFromDict({
         models: { "gpt-4": "input_tokens * 0.001" },
@@ -179,7 +178,7 @@ describe("loadConfigFromDict", () => {
           basic: { id: "b1", name: "Basic", freeAllowance: -10 },
         },
       }),
-    ).not.toThrow();
+    ).toThrow(ConfigError);
   });
 
   // ── CF3: Empty sections are allowed ──
@@ -196,16 +195,13 @@ describe("loadConfigFromDict", () => {
     ).not.toThrow();
   });
 
-  // ── CF4: minBalance as string "10" — coerced to number via JS loose comparison ──
-  it("accepts minBalance as string (coerced, not rejected)", () => {
-    // config.ts: config.minBalance = data.minBalance ?? 5 (no type coercion/rejection).
-    // "10" < 0 evaluates to false (JS coerces "10" → 10 for comparison), so no throw.
+  // ── CF4: minBalance as string "10" — coerced to Decimal (parity with Python) ──
+  it("coerces minBalance string to Decimal", () => {
     const config = loadConfigFromDict({
       models: { "gpt-4": "input_tokens * 0.001" },
       minBalance: "10" as unknown as number,
     });
-    // The value is accepted; minBalance is stored as-is ("10").
-    expect(config.minBalance).toBe("10");
+    expect(config.minBalance.toString()).toBe("10");
   });
 
   // ── C1: minBalance type coercion / boundary ──
@@ -216,7 +212,7 @@ describe("loadConfigFromDict", () => {
       models: { "gpt-4": "input_tokens * 0.001" },
       minBalance: 0,
     });
-    expect(config.minBalance).toBe(0);
+    expect(config.minBalance.toString()).toBe("0");
   });
 
   // C1b: minBalance: -1 is already covered by "rejects negative minBalance" above.
@@ -258,7 +254,128 @@ describe("loadConfigFromDict", () => {
       models: { "gpt-4": "input_tokens * 0.001" },
       fixed: { batch_job: 2.5 },
     });
-    expect(config.fixed["batch_job"]).toBe(2.5);
+    expect(config.fixed["batch_job"].toString()).toBe("2.5");
+  });
+
+  // ── Cross-language parity fixes ──
+
+  it("rejects an unknown top-level config key (typo)", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        min_balnce: 5,
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an unknown key in a plan definition", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: { pro: { id: "p1", name: "Pro", free_allownce: 5 } },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects an unknown key in a tier definition", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        tiers: { gifted: { name: "Gifted", priority: 1, expres: true } },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects a plan definition missing the required 'name' field", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: { pro: { id: "p1" } },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects version !== 1", () => {
+    expect(() =>
+      loadConfigFromDict({
+        version: 2,
+        models: { "gpt-4": "input_tokens * 0.001" },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("accepts version: 1", () => {
+    expect(() =>
+      loadConfigFromDict({
+        version: 1,
+        models: { "gpt-4": "input_tokens * 0.001" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a negative signupBonus", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        signupBonus: -1,
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("does not inject a default _default tool when tools is explicitly provided without one", () => {
+    // Mirrors Python: `tools` only gets its default_factory value when the key
+    // is entirely absent; a user-supplied map (even without `_default`) is used as-is.
+    const config = loadConfigFromDict({
+      models: { "gpt-4": "input_tokens * 0.001" },
+      tools: { code_exec: "this_tool_calls * 10 / 1000" },
+    });
+    expect(config.tools).toEqual({ code_exec: "this_tool_calls * 10 / 1000" });
+  });
+
+  it("populates perOperation on a plan (was silently dropped)", () => {
+    const config = loadConfigFromDict({
+      models: { "gpt-4": "input_tokens * 0.001" },
+      plans: {
+        pro: {
+          id: "p1",
+          name: "Pro",
+          perOperation: {
+            agent: { billingMode: "overdraft", overdraftFloor: -30, maxConcurrent: 1 },
+          },
+        },
+      },
+    });
+    const policy = config.plans!.pro.perOperation!.agent;
+    expect(policy.billingMode).toBe("overdraft");
+    expect(policy.overdraftFloor!.toString()).toBe("-30");
+    expect(policy.maxConcurrent).toBe(1);
+  });
+
+  it("accepts snake_case per_operation with nested snake_case keys", () => {
+    const config = loadConfigFromDict({
+      models: { "gpt-4": "input_tokens * 0.001" },
+      plans: {
+        pro: {
+          id: "p1",
+          name: "Pro",
+          per_operation: {
+            agent: { billing_mode: "overdraft", overdraft_floor: -30 },
+          },
+        },
+      },
+    });
+    expect(config.plans!.pro.perOperation!.agent.billingMode).toBe("overdraft");
+  });
+
+  it("rejects an invalid billingMode in perOperation", () => {
+    expect(() =>
+      loadConfigFromDict({
+        models: { "gpt-4": "input_tokens * 0.001" },
+        plans: {
+          pro: { id: "p1", name: "Pro", perOperation: { agent: { billingMode: "bogus" } } },
+        },
+      }),
+    ).toThrow(ConfigError);
   });
 
   // ── WS9b: allowancePeriod on plan definitions ──
