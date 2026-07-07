@@ -18,7 +18,7 @@ class MemoryBillingStore(BillingStore):
         self._topups: dict[str, dict] = {}
         self._provider_refs_by: dict[tuple[str, str], str] = {}
 
-    def sync_billing_from_config(self, config: BillingConfig) -> None:
+    async def sync_billing_from_config(self, config: BillingConfig) -> None:
         self._offers.clear()
         self._provider_refs.clear()
         self._topups.clear()
@@ -62,14 +62,11 @@ class MemoryBillingStore(BillingStore):
                             self._provider_refs_by.setdefault(key, offer_key)
                             self._provider_refs.setdefault(key, "offer")
 
-    def resolve_billing_offer(
+    async def resolve_billing_offer(
         self,
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-        variant_id: str | None = None,
-        interval: str | None = None,
-        interval_count: int | None = None,
     ) -> dict | None:
         if price_id:
             key = (provider, "price_id", price_id)
@@ -87,7 +84,7 @@ class MemoryBillingStore(BillingStore):
                     return {**raw, "offer_key": offer_key}
         return None
 
-    def claim_billing_event(
+    async def claim_billing_event(
         self,
         provider: str,
         event_id: str,
@@ -102,17 +99,17 @@ class MemoryBillingStore(BillingStore):
             return BillingEventClaim(status="duplicate")
         return BillingEventClaim(status="duplicate")
 
-    def complete_billing_event(self, provider: str, event_id: str) -> None:
+    async def complete_billing_event(self, provider: str, event_id: str) -> None:
         key = (provider, event_id)
         if key in self._events:
             self._events[key] = "completed"
 
-    def fail_billing_event(self, provider: str, event_id: str) -> None:
+    async def fail_billing_event(self, provider: str, event_id: str) -> None:
         key = (provider, event_id)
         if key in self._events:
             self._events[key] = "failed"
 
-    def upsert_billing_customer(
+    async def upsert_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
@@ -122,11 +119,11 @@ class MemoryBillingStore(BillingStore):
         key = (provider, provider_customer_id)
         self._customers[key] = user_id
 
-    def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
+    async def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
         key = (state.provider, state.provider_subscription_id)
         self._subscriptions[key] = state
 
-    def get_billing_customer(
+    async def get_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
@@ -134,7 +131,7 @@ class MemoryBillingStore(BillingStore):
         key = (provider, provider_customer_id)
         return self._customers.get(key)
 
-    def get_billing_subscription(
+    async def get_billing_subscription(
         self,
         provider: str,
         provider_subscription_id: str,
@@ -142,7 +139,7 @@ class MemoryBillingStore(BillingStore):
         key = (provider, provider_subscription_id)
         return self._subscriptions.get(key)
 
-    def resolve_credit_topup(
+    async def resolve_credit_topup(
         self,
         provider: str,
         product_id: str | None = None,
@@ -164,7 +161,7 @@ class MemoryBillingStore(BillingStore):
                     return {**raw, "topup_key": topup_key}
         return None
 
-    def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
+    async def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
         major_amount = amount_minor / 100
         credits_per = topup_config.get("credits_per_major_unit", 1000)
         return int(major_amount * credits_per)

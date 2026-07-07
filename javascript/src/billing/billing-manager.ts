@@ -140,253 +140,260 @@ export class BillingManager {
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId && event.customer?.providerCustomerId) {
-      const uid = await this.resolveUserId(event);
-      if (uid) {
-        const offer = await this.resolveOffer(event);
-        await this.store.upsertBillingSubscription({
-          userId: uid,
-          provider: event.provider,
-          providerSubscriptionId: event.subscription.providerSubscriptionId,
-          providerCustomerId: event.customer.providerCustomerId,
-          offerKey: offer?.offerKey ?? null,
-          planKey: offer?.planKey ?? event.subscription.planKey ?? null,
-          status: event.subscription.status ?? "incomplete",
-          currentPeriodStart: event.subscription.currentPeriodStart ?? null,
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? null,
-          cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
-          interval: event.subscription.interval ?? null,
-          intervalCount: event.subscription.intervalCount ?? null,
-        });
-        if (
-          this.cm &&
-          event.subscription.status &&
-          ["active", "trialing"].includes(event.subscription.status)
-        ) {
-          await this.provisionSubscription(uid, offer, event);
-        }
-      }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    if (!event.customer?.providerCustomerId) return { handled: false, error: "no_customer_data" };
+    const offer = await this.resolveOffer(event);
+    await this.store.upsertBillingSubscription({
+      userId: uid,
+      provider: event.provider,
+      providerSubscriptionId: event.subscription.providerSubscriptionId,
+      providerCustomerId: event.customer.providerCustomerId,
+      offerKey: (offer?.offerKey as string | undefined) ?? null,
+      planKey: (offer?.planKey as string | undefined) ?? null,
+      status: event.subscription.status ?? "incomplete",
+      currentPeriodStart: event.subscription.periodStart ?? null,
+      currentPeriodEnd: event.subscription.periodEnd ?? null,
+      cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
+      interval: event.subscription.interval ?? null,
+      intervalCount: event.subscription.intervalCount ?? null,
+    });
+    if (
+      this.cm &&
+      event.subscription.status &&
+      ["active", "trialing"].includes(event.subscription.status)
+    ) {
+      await this.provisionSubscription(uid, offer, event);
     }
     return { handled: true, action: "subscription_created" };
   }
 
   private async handleSubscriptionUpdated(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        const offer = await this.resolveOffer(event);
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          offerKey: offer?.offerKey ?? existing.offerKey,
-          planKey: offer?.planKey ?? existing.planKey,
-          status: event.subscription.status ?? existing.status,
-          currentPeriodStart: event.subscription.currentPeriodStart ?? existing.currentPeriodStart,
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? existing.currentPeriodEnd,
-          cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? existing.cancelAtPeriodEnd,
-          interval: event.subscription.interval ?? existing.interval,
-          intervalCount: event.subscription.intervalCount ?? existing.intervalCount,
-        });
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      const offer = await this.resolveOffer(event);
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
+        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
+        status: event.subscription.status ?? existing.status,
+        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
+        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
+        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? existing.cancelAtPeriodEnd,
+        interval: event.subscription.interval ?? existing.interval,
+        intervalCount: event.subscription.intervalCount ?? existing.intervalCount,
+      });
+      if (this.cm) {
+        await this.reEvaluateAccess(uid, event);
       }
     }
     return { handled: true, action: "subscription_updated" };
   }
 
   private async handleSubscriptionActivated(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "active",
-          currentPeriodStart: event.subscription.currentPeriodStart ?? existing.currentPeriodStart,
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? existing.currentPeriodEnd,
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            const offer = await this.resolveOffer(event);
-            await this.provisionSubscription(uid, offer, event);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "active",
+        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
+        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
+      });
+      if (this.cm) {
+        const offer = await this.resolveOffer(event);
+        await this.provisionSubscription(uid, offer, event);
       }
     }
     return { handled: true, action: "subscription_activated" };
   }
 
   private async handleSubscriptionRenewed(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        const offer = await this.resolveOffer(event);
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "active",
-          offerKey: offer?.offerKey ?? existing.offerKey,
-          planKey: offer?.planKey ?? existing.planKey,
-          currentPeriodStart: event.subscription.currentPeriodStart ?? existing.currentPeriodStart,
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? existing.currentPeriodEnd,
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            await this.provisionSubscription(uid, offer, event);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      const offer = await this.resolveOffer(event);
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "active",
+        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
+        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
+        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
+        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
+      });
+      if (this.cm) {
+        await this.provisionSubscription(uid, offer, event);
       }
     }
     return { handled: true, action: "subscription_renewed" };
   }
 
   private async handleSubscriptionPlanChanged(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        const offer = await this.resolveOffer(event);
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          offerKey: offer?.offerKey ?? existing.offerKey,
-          planKey: offer?.planKey ?? event.subscription.planKey ?? existing.planKey,
-          status: "active",
-          currentPeriodStart: event.subscription.currentPeriodStart ?? existing.currentPeriodStart,
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? existing.currentPeriodEnd,
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            await this.provisionSubscription(uid, offer, event);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      const offer = await this.resolveOffer(event);
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
+        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
+        status: "active",
+        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
+        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
+      });
+      if (this.cm) {
+        await this.provisionSubscription(uid, offer, event);
       }
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
 
   private async handleCancellationScheduled(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "active",
-          cancelAtPeriodEnd: true,
-        });
-      }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "active",
+        cancelAtPeriodEnd: true,
+      });
     }
     return { handled: true, action: "cancellation_scheduled" };
   }
 
   private async handleCancellationUnscheduled(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "active",
-          cancelAtPeriodEnd: false,
-        });
-      }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "active",
+        cancelAtPeriodEnd: false,
+      });
     }
     return { handled: true, action: "cancellation_unscheduled" };
   }
 
   private async handleSubscriptionCanceled(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "canceled",
-          cancelAtPeriodEnd: true,
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            await this.revokeSubscription(uid);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "canceled",
+        cancelAtPeriodEnd: true,
+      });
+      if (this.cm) {
+        await this.revokeSubscription(uid);
       }
     }
     return { handled: true, action: "subscription_canceled" };
   }
 
   private async handleSubscriptionExpired(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "expired",
-        });
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "expired",
+      });
+      if (this.cm) {
+        await this.revokeSubscription(uid);
       }
     }
     return { handled: true, action: "subscription_expired" };
   }
 
   private async handleSubscriptionPaused(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "paused",
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            await this.revokeSubscription(uid);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "paused",
+      });
+      if (this.cm) {
+        await this.revokeSubscription(uid);
       }
     }
     return { handled: true, action: "subscription_paused" };
   }
 
   private async handleSubscriptionResumed(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription?.providerSubscriptionId) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
-      if (existing) {
-        await this.store.upsertBillingSubscription({
-          ...existing,
-          status: "active",
-          currentPeriodEnd: event.subscription.currentPeriodEnd ?? existing.currentPeriodEnd,
-        });
-        if (this.cm) {
-          const uid = await this.resolveUserId(event);
-          if (uid) {
-            const offer = await this.resolveOffer(event);
-            await this.provisionSubscription(uid, offer, event);
-          }
-        }
+    const uid = await this.resolveUserId(event);
+    if (!uid) return { handled: false, error: "user_not_found" };
+    if (!event.subscription?.providerSubscriptionId)
+      return { handled: false, error: "no_subscription_data" };
+    const existing = await this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (existing) {
+      await this.store.upsertBillingSubscription({
+        ...existing,
+        status: "active",
+        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
+      });
+      if (this.cm) {
+        await this.reEvaluateAccess(uid, event);
       }
     }
     return { handled: true, action: "subscription_resumed" };
@@ -396,7 +403,10 @@ export class BillingManager {
     return { handled: true, action: "trial_will_end" };
   }
 
-  private async handleInvoicePaid(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleInvoicePaid(event: BillingEvent): Promise<BillingEventResult> {
+    if (event.subscription) {
+      return this.handleSubscriptionRenewed(event);
+    }
     return { handled: true, action: "invoice_paid" };
   }
 
@@ -456,12 +466,31 @@ export class BillingManager {
     if (!offer || !this.cm) return;
     const planKey = offer.planKey as string | undefined;
     if (!planKey) return;
-    await this.cm.setUserPlan(uid, planKey);
+    const planAssignedAt = event.subscription?.periodStart
+      ? new Date(event.subscription.periodStart)
+      : undefined;
+    await this.cm.setUserPlan(uid, planKey, planAssignedAt);
   }
 
   private async revokeSubscription(uid: string): Promise<void> {
     if (!this.cm) return;
     await this.cm.unsetUserPlan(uid);
+  }
+
+  private async reEvaluateAccess(uid: string, event: BillingEvent): Promise<void> {
+    if (!this.cm || !event.subscription) return;
+    const status = event.subscription.status;
+    if (status && ["active", "trialing"].includes(status)) {
+      const offer = await this.resolveOffer(event);
+      if (offer) {
+        await this.provisionSubscription(uid, offer, event);
+      }
+    } else if (
+      status &&
+      ["canceled", "expired", "unpaid", "paused", "incomplete_expired"].includes(status)
+    ) {
+      await this.revokeSubscription(uid);
+    }
   }
 
   private async resolveOffer(event: BillingEvent): Promise<Record<string, unknown> | null> {

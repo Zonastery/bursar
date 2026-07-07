@@ -11,21 +11,18 @@ from bursar.billing.models import (
 
 class BillingStore(ABC):
     @abstractmethod
-    def sync_billing_from_config(self, config: BillingConfig) -> None: ...
+    async def sync_billing_from_config(self, config: BillingConfig) -> None: ...
 
     @abstractmethod
-    def resolve_billing_offer(
+    async def resolve_billing_offer(
         self,
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-        variant_id: str | None = None,
-        interval: str | None = None,
-        interval_count: int | None = None,
     ) -> dict | None: ...
 
     @abstractmethod
-    def claim_billing_event(
+    async def claim_billing_event(
         self,
         provider: str,
         event_id: str,
@@ -33,13 +30,13 @@ class BillingStore(ABC):
     ) -> BillingEventClaim: ...
 
     @abstractmethod
-    def complete_billing_event(self, provider: str, event_id: str) -> None: ...
+    async def complete_billing_event(self, provider: str, event_id: str) -> None: ...
 
     @abstractmethod
-    def fail_billing_event(self, provider: str, event_id: str) -> None: ...
+    async def fail_billing_event(self, provider: str, event_id: str) -> None: ...
 
     @abstractmethod
-    def upsert_billing_customer(
+    async def upsert_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
@@ -48,27 +45,27 @@ class BillingStore(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def upsert_billing_subscription(
+    async def upsert_billing_subscription(
         self,
         state: BillingSubscriptionState,
     ) -> None: ...
 
     @abstractmethod
-    def get_billing_customer(
+    async def get_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
     ) -> str | None: ...
 
     @abstractmethod
-    def get_billing_subscription(
+    async def get_billing_subscription(
         self,
         provider: str,
         provider_subscription_id: str,
     ) -> BillingSubscriptionState | None: ...
 
     @abstractmethod
-    def resolve_credit_topup(
+    async def resolve_credit_topup(
         self,
         provider: str,
         product_id: str | None = None,
@@ -76,7 +73,7 @@ class BillingStore(ABC):
     ) -> dict | None: ...
 
     @abstractmethod
-    def compute_topup_credits(
+    async def compute_topup_credits(
         self,
         amount_minor: int,
         topup_config: dict,

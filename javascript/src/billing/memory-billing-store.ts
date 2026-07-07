@@ -62,9 +62,6 @@ export class MemoryBillingStore extends BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
-    _variantId?: string | null,
-    _interval?: string | null,
-    _intervalCount?: number | null,
   ): Promise<Record<string, unknown> | null> {
     let resourceKey: string | undefined;
     if (priceId) {
@@ -159,6 +156,6 @@ export class MemoryBillingStore extends BillingStore {
   ): Promise<number> {
     const majorAmount = amountMinor / 100;
     const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
-    return Math.floor(majorAmount * creditsPer);
+    return Math.trunc(majorAmount * creditsPer);
   }
 }

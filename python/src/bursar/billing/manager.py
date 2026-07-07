@@ -36,8 +36,8 @@ class BillingManager:
         if config is not None:
             self._store.sync_billing_from_config(config)
 
-    def handle_event(self, event: BillingEvent) -> BillingEventResult:
-        claim = self._store.claim_billing_event(
+    async def handle_event(self, event: BillingEvent) -> BillingEventResult:
+        claim = await self._store.claim_billing_event(
             event.provider,
             event.event_id,
             event.event_type,
@@ -47,15 +47,15 @@ class BillingManager:
             return BillingEventResult(handled=True, action="duplicate")
 
         try:
-            result = self._route_event(event)
-            self._store.complete_billing_event(event.provider, event.event_id)
+            result = await self._route_event(event)
+            await self._store.complete_billing_event(event.provider, event.event_id)
             return result
         except Exception as exc:
             logger.exception("failed to handle billing event %s/%s", event.provider, event.event_id)
-            self._store.fail_billing_event(event.provider, event.event_id)
+            await self._store.fail_billing_event(event.provider, event.event_id)
             return BillingEventResult(handled=False, error=str(exc))
 
-    def _route_event(self, event: BillingEvent) -> BillingEventResult:
+    async def _route_event(self, event: BillingEvent) -> BillingEventResult:
         handlers = {
             "customer.created": self._handle_customer_created,
             "customer.updated": self._handle_customer_updated,
@@ -84,13 +84,13 @@ class BillingManager:
         if handler is None:
             logger.debug("unhandled billing event type %s", event.event_type)
             return BillingEventResult(handled=True, action="ignored")
-        return handler(event)
+        return await handler(event)
 
-    def _resolve_user_id(self, event: BillingEvent) -> str | None:
+    async def _resolve_user_id(self, event: BillingEvent) -> str | None:
         if event.user_id:
             return event.user_id
         if event.customer and event.customer.provider_customer_id:
-            uid = self._store.get_billing_customer(
+            uid = await self._store.get_billing_customer(
                 event.provider,
                 event.customer.provider_customer_id,
             )
@@ -101,9 +101,9 @@ class BillingManager:
             return self._resolve_user(event.provider, cid, event.customer.email)
         return None
 
-    def _handle_customer_created(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_customer_created(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
-            self._store.upsert_billing_customer(
+            await self._store.upsert_billing_customer(
                 event.provider,
                 event.customer.provider_customer_id,
                 event.user_id or "",
@@ -111,17 +111,24 @@ class BillingManager:
             )
         return BillingEventResult(handled=True, action="customer_created")
 
-    def _handle_customer_updated(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_customer_updated(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="customer_updated")
 
-    def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="customer_deleted")
 
-    def _handle_checkout_completed(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_checkout_completed(self, event: BillingEvent) -> BillingEventResult:
+        if event.customer and event.customer.provider_customer_id and event.user_id:
+            await self._store.upsert_billing_customer(
+                event.provider,
+                event.customer.provider_customer_id,
+                event.user_id,
+                event.customer.email,
+            )
         return BillingEventResult(handled=True, action="checkout_recorded")
 
-    def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
@@ -130,16 +137,13 @@ class BillingManager:
         refs = event.subscription.refs
         offer = None
         if refs:
-            offer = self._store.resolve_billing_offer(
+            offer = await self._store.resolve_billing_offer(
                 event.provider,
                 product_id=refs.product_id,
                 price_id=refs.price_id,
-                variant_id=refs.variant_id,
-                interval=event.subscription.interval,
-                interval_count=event.subscription.interval_count,
             )
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -158,7 +162,7 @@ class BillingManager:
         )
 
         if self._cm and event.subscription.status in ("active", "trialing"):
-            self._provision_subscription(uid, offer, event)
+            await self._provision_subscription(uid, offer, event)
 
         return BillingEventResult(
             handled=True,
@@ -166,14 +170,14 @@ class BillingManager:
             subscription_id=event.subscription.provider_subscription_id,
         )
 
-    def _handle_subscription_updated(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_updated(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -187,12 +191,12 @@ class BillingManager:
         )
 
         if self._cm:
-            self._re_evaluate_access(uid, event)
+            await self._re_evaluate_access(uid, event)
 
         return BillingEventResult(handled=True, action="subscription_updated")
 
-    def _handle_subscription_activated(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_activated(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
@@ -201,16 +205,13 @@ class BillingManager:
         refs = event.subscription.refs
         offer = None
         if refs:
-            offer = self._store.resolve_billing_offer(
+            offer = await self._store.resolve_billing_offer(
                 event.provider,
                 product_id=refs.product_id,
                 price_id=refs.price_id,
-                variant_id=refs.variant_id,
-                interval=event.subscription.interval,
-                interval_count=event.subscription.interval_count,
             )
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -227,12 +228,12 @@ class BillingManager:
         )
 
         if self._cm:
-            self._provision_subscription(uid, offer, event)
+            await self._provision_subscription(uid, offer, event)
 
         return BillingEventResult(handled=True, action="subscription_activated")
 
-    def _handle_subscription_renewed(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_renewed(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
@@ -241,16 +242,13 @@ class BillingManager:
         refs = event.subscription.refs
         offer = None
         if refs:
-            offer = self._store.resolve_billing_offer(
+            offer = await self._store.resolve_billing_offer(
                 event.provider,
                 product_id=refs.product_id,
                 price_id=refs.price_id,
-                variant_id=refs.variant_id,
-                interval=event.subscription.interval,
-                interval_count=event.subscription.interval_count,
             )
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -268,7 +266,7 @@ class BillingManager:
             plan_key = offer.get("plan_key") if offer else None
             period_start = event.subscription.period_start
             if plan_key:
-                self._cm.set_user_plan(
+                await self._cm.set_user_plan(
                     uid,
                     plan_key,
                     plan_assigned_at=(datetime.fromisoformat(period_start) if period_start else None),
@@ -277,8 +275,8 @@ class BillingManager:
 
         return BillingEventResult(handled=True, action="subscription_renewed")
 
-    def _handle_subscription_plan_changed(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_plan_changed(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
@@ -287,14 +285,13 @@ class BillingManager:
         refs = event.subscription.refs
         offer = None
         if refs:
-            offer = self._store.resolve_billing_offer(
+            offer = await self._store.resolve_billing_offer(
                 event.provider,
                 product_id=refs.product_id,
                 price_id=refs.price_id,
-                variant_id=refs.variant_id,
             )
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -309,7 +306,7 @@ class BillingManager:
         if self._cm:
             plan_key = offer.get("plan_key") if offer else None
             if plan_key:
-                self._cm.set_user_plan(
+                await self._cm.set_user_plan(
                     uid,
                     plan_key,
                     plan_assigned_at=(
@@ -322,14 +319,14 @@ class BillingManager:
 
         return BillingEventResult(handled=True, action="plan_changed")
 
-    def _handle_cancellation_scheduled(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_cancellation_scheduled(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -340,14 +337,14 @@ class BillingManager:
         )
         return BillingEventResult(handled=True, action="cancellation_scheduled")
 
-    def _handle_cancellation_unscheduled(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_cancellation_unscheduled(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -358,14 +355,14 @@ class BillingManager:
         )
         return BillingEventResult(handled=True, action="cancellation_unscheduled")
 
-    def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -376,18 +373,18 @@ class BillingManager:
         )
 
         if self._cm:
-            self._revoke_subscription(uid)
+            await self._revoke_subscription(uid)
 
         return BillingEventResult(handled=True, action="subscription_canceled")
 
-    def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -398,18 +395,18 @@ class BillingManager:
         )
 
         if self._cm:
-            self._revoke_subscription(uid)
+            await self._revoke_subscription(uid)
 
         return BillingEventResult(handled=True, action="subscription_expired")
 
-    def _handle_subscription_paused(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_paused(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -420,18 +417,18 @@ class BillingManager:
         )
 
         if self._cm:
-            self._revoke_subscription(uid)
+            await self._revoke_subscription(uid)
 
         return BillingEventResult(handled=True, action="subscription_paused")
 
-    def _handle_subscription_resumed(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
+    async def _handle_subscription_resumed(self, event: BillingEvent) -> BillingEventResult:
+        uid = await self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
         if not event.subscription:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
-        self._store.upsert_billing_subscription(
+        await self._store.upsert_billing_subscription(
             BillingSubscriptionState(
                 user_id=uid,
                 provider=event.provider,
@@ -442,40 +439,40 @@ class BillingManager:
         )
 
         if self._cm:
-            self._re_evaluate_access(uid, event)
+            await self._re_evaluate_access(uid, event)
 
         return BillingEventResult(handled=True, action="subscription_resumed")
 
-    def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
-    def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
         if event.subscription:
-            return self._handle_subscription_renewed(event)
+            return await self._handle_subscription_renewed(event)
         return BillingEventResult(handled=True, action="invoice_paid")
 
-    def _handle_payment_succeeded(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_payment_succeeded(self, event: BillingEvent) -> BillingEventResult:
         if not event.payment:
             return BillingEventResult(handled=False, error="no_payment_data")
 
         refs = event.payment.refs
         topup_config = None
         if refs:
-            topup_config = self._store.resolve_credit_topup(
+            topup_config = await self._store.resolve_credit_topup(
                 event.provider,
                 product_id=refs.product_id,
                 price_id=refs.price_id,
             )
 
         if topup_config and self._cm:
-            uid = self._resolve_user_id(event)
+            uid = await self._resolve_user_id(event)
             if uid:
-                credits = self._store.compute_topup_credits(
+                credits = await self._store.compute_topup_credits(
                     event.payment.amount_minor,
                     topup_config,
                 )
                 if credits > 0:
-                    self._cm.add_credits(
+                    await self._cm.add_credits(
                         uid,
                         Decimal(credits),
                         tx_type="purchase",
@@ -490,19 +487,19 @@ class BillingManager:
 
         return BillingEventResult(handled=True, action="payment_succeeded")
 
-    def _handle_payment_failed(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_payment_failed(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="payment_failed_recorded")
 
-    def _handle_refund_created(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_refund_created(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="refund_recorded")
 
-    def _handle_dispute_created(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_dispute_created(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="dispute_recorded")
 
-    def _handle_dispute_closed(self, event: BillingEvent) -> BillingEventResult:
+    async def _handle_dispute_closed(self, event: BillingEvent) -> BillingEventResult:
         return BillingEventResult(handled=True, action="dispute_closed")
 
-    def _provision_subscription(
+    async def _provision_subscription(
         self,
         uid: str,
         offer: dict | None,
@@ -520,16 +517,16 @@ class BillingManager:
             ps = event.subscription.period_start
             period_start = datetime.fromisoformat(ps) if ps else None
 
-        self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
+        await self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
         logger.info("provisioned plan %s for user %s", plan_key, uid)
 
-    def _revoke_subscription(self, uid: str) -> None:
+    async def _revoke_subscription(self, uid: str) -> None:
         if not self._cm:
             return
-        self._cm.unset_user_plan(uid)
+        await self._cm.unset_user_plan(uid)
         logger.info("revoked plan for user %s", uid)
 
-    def _re_evaluate_access(self, uid: str, event: BillingEvent) -> None:
+    async def _re_evaluate_access(self, uid: str, event: BillingEvent) -> None:
         if not self._cm or not event.subscription:
             return
 
@@ -538,13 +535,12 @@ class BillingManager:
             refs = event.subscription.refs
             offer = None
             if refs:
-                offer = self._store.resolve_billing_offer(
+                offer = await self._store.resolve_billing_offer(
                     event.provider,
                     product_id=refs.product_id,
                     price_id=refs.price_id,
-                    variant_id=refs.variant_id,
                 )
             if offer:
-                self._provision_subscription(uid, offer, event)
+                await self._provision_subscription(uid, offer, event)
         elif status in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
-            self._revoke_subscription(uid)
+            await self._revoke_subscription(uid)

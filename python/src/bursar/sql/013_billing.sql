@@ -726,7 +726,11 @@ BEGIN
 
     PERFORM public.sync_plans_from_config(p_config);
     PERFORM public.sync_tiers_from_config(p_config);
-    PERFORM public.sync_billing_from_config(p_config);
+    BEGIN
+        PERFORM public.sync_billing_from_config(p_config);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'billing config sync failed (pricing update still applied): %', SQLERRM;
+    END;
 
     RETURN jsonb_build_object(
         'id', v_new_id,

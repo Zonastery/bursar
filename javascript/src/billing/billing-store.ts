@@ -17,9 +17,6 @@ export abstract class BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
-    variantId?: string | null,
-    interval?: string | null,
-    intervalCount?: number | null,
   ): Promise<Record<string, unknown> | null>;
 
   abstract claimBillingEvent(

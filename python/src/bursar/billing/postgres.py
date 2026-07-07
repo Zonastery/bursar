@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 from bursar.billing.models import (
     BillingConfig,
@@ -23,14 +25,14 @@ def _to_utc_iso(dt_str: str | None) -> str | None:
 
 
 class PostgresBillingStore(BillingStore):
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, pool: psycopg2.pool.ThreadedConnectionPool | None = None) -> None:
         self._database_url = database_url
+        self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
 
-    def _conn(self):
-        return psycopg2.connect(self._database_url)
+    # ── Synchronous helpers (run via asyncio.to_thread) ─────────────────
 
-    def _call_rpc_json(self, rpc_name: str, params: list) -> dict | None:
-        conn = self._conn()
+    def _call_rpc_json_sync(self, rpc_name: str, params: list) -> dict | None:
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.callproc(rpc_name, params)
@@ -40,13 +42,13 @@ class PostgresBillingStore(BillingStore):
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.putconn(conn)
         if row and isinstance(row[0], dict):
             return row[0]
         return None
 
-    def _call_rpc_void(self, rpc_name: str, params: list) -> None:
-        conn = self._conn()
+    def _call_rpc_void_sync(self, rpc_name: str, params: list) -> None:
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.callproc(rpc_name, params)
@@ -55,12 +57,14 @@ class PostgresBillingStore(BillingStore):
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def sync_billing_from_config(self, config: BillingConfig) -> None:
+    # ── Async public API ────────────────────────────────────────────────
+
+    async def sync_billing_from_config(self, config: BillingConfig) -> None:
         raw = config.model_dump()
         config_json = json.dumps(raw, default=str)
-        conn = self._conn()
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT public.sync_billing_from_config(%s::jsonb)", [config_json])
@@ -69,18 +73,21 @@ class PostgresBillingStore(BillingStore):
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def resolve_billing_offer(
+    async def _call_rpc_json(self, rpc_name: str, params: list) -> dict | None:
+        return await asyncio.to_thread(self._call_rpc_json_sync, rpc_name, params)
+
+    async def _call_rpc_void(self, rpc_name: str, params: list) -> None:
+        return await asyncio.to_thread(self._call_rpc_void_sync, rpc_name, params)
+
+    async def resolve_billing_offer(
         self,
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-        variant_id: str | None = None,
-        interval: str | None = None,
-        interval_count: int | None = None,
     ) -> dict | None:
-        result = self._call_rpc_json(
+        result = await self._call_rpc_json(
             "public.resolve_billing_offer_by_price",
             [
                 provider,
@@ -92,13 +99,13 @@ class PostgresBillingStore(BillingStore):
             return result
         return None
 
-    def claim_billing_event(
+    async def claim_billing_event(
         self,
         provider: str,
         event_id: str,
         event_type: str,
     ) -> BillingEventClaim:
-        result = self._call_rpc_json(
+        result = await self._call_rpc_json(
             "public.claim_billing_event",
             [
                 provider,
@@ -112,20 +119,23 @@ class PostgresBillingStore(BillingStore):
         status = result.get("status", "retry")
         return BillingEventClaim(status=status)
 
-    def complete_billing_event(self, provider: str, event_id: str) -> None:
-        self._call_rpc_void("public.complete_billing_event", [provider, event_id])
+    async def complete_billing_event(self, provider: str, event_id: str) -> None:
+        await self._call_rpc_void("public.complete_billing_event", [provider, event_id])
 
-    def fail_billing_event(self, provider: str, event_id: str) -> None:
-        self._call_rpc_void("public.fail_billing_event", [provider, event_id])
+    async def fail_billing_event(self, provider: str, event_id: str) -> None:
+        await self._call_rpc_void("public.fail_billing_event", [provider, event_id])
 
-    def upsert_billing_customer(
+    async def _run_sync(self, fn, *args):
+        return await asyncio.to_thread(fn, *args)
+
+    def _upsert_billing_customer_sync(
         self,
         provider: str,
         provider_customer_id: str,
         user_id: str,
         email: str | None = None,
     ) -> None:
-        conn = self._conn()
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -144,10 +154,25 @@ class PostgresBillingStore(BillingStore):
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
-        conn = self._conn()
+    async def upsert_billing_customer(
+        self,
+        provider: str,
+        provider_customer_id: str,
+        user_id: str,
+        email: str | None = None,
+    ) -> None:
+        return await asyncio.to_thread(
+            self._upsert_billing_customer_sync,
+            provider,
+            provider_customer_id,
+            user_id,
+            email,
+        )
+
+    def _upsert_billing_subscription_sync(self, state: BillingSubscriptionState) -> None:
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -200,14 +225,17 @@ class PostgresBillingStore(BillingStore):
             conn.rollback()
             raise
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def get_billing_customer(
+    async def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
+        return await asyncio.to_thread(self._upsert_billing_subscription_sync, state)
+
+    def _get_billing_customer_sync(
         self,
         provider: str,
         provider_customer_id: str,
     ) -> str | None:
-        conn = self._conn()
+        conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -217,14 +245,21 @@ class PostgresBillingStore(BillingStore):
                 row = cur.fetchone()
             return str(row[0]) if row else None
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def get_billing_subscription(
+    async def get_billing_customer(
+        self,
+        provider: str,
+        provider_customer_id: str,
+    ) -> str | None:
+        return await asyncio.to_thread(self._get_billing_customer_sync, provider, provider_customer_id)
+
+    def _get_billing_subscription_sync(
         self,
         provider: str,
         provider_subscription_id: str,
     ) -> BillingSubscriptionState | None:
-        conn = self._conn()
+        conn = self._pool.getconn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -258,15 +293,22 @@ class PostgresBillingStore(BillingStore):
                 metadata=meta if isinstance(meta, dict) else None,
             )
         finally:
-            conn.close()
+            self._pool.putconn(conn)
 
-    def resolve_credit_topup(
+    async def get_billing_subscription(
+        self,
+        provider: str,
+        provider_subscription_id: str,
+    ) -> BillingSubscriptionState | None:
+        return await asyncio.to_thread(self._get_billing_subscription_sync, provider, provider_subscription_id)
+
+    async def resolve_credit_topup(
         self,
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
     ) -> dict | None:
-        result = self._call_rpc_json(
+        result = await self._call_rpc_json(
             "public.resolve_credit_topup_by_price",
             [
                 provider,
@@ -278,7 +320,7 @@ class PostgresBillingStore(BillingStore):
             return result
         return None
 
-    def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
+    async def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
         major_amount = amount_minor / 100
         credits_per = topup_config.get("credits_per_major_unit", 1000)
         return int(major_amount * credits_per)

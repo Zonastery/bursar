@@ -584,6 +584,12 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
         intervalCount: 1,
       },
     });
+    const storedSub = await bs.getBillingSubscription(PROVIDER, SUB_ID);
+    expect(storedSub).not.toBeNull();
+    expect(storedSub!.currentPeriodStart).toBe("2025-06-01T00:00:00.000Z");
+    expect(storedSub!.currentPeriodEnd).toBe("2025-07-01T00:00:00.000Z");
+    expect(storedSub!.interval).toBe("month");
+    expect(storedSub!.intervalCount).toBe(1);
     const plan = await cm.getUserPlan(USER_ID);
     expect(plan.planId).not.toBeNull();
     expect(plan.planAssignedAt).not.toBeNull();
