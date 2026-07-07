@@ -17,6 +17,10 @@ class MemoryBillingStore(BillingStore):
         self._subscriptions: dict[tuple[str, str], BillingSubscriptionState] = {}
         self._topups: dict[str, dict] = {}
         self._provider_refs_by: dict[tuple[str, str, str], str] = {}
+        self._payments: dict[tuple[str, str], dict] = {}
+        self._refunds: dict[tuple[str, str], dict] = {}
+        self._invoices: dict[tuple[str, str], dict] = {}
+        self._disputes: dict[tuple[str, str], dict] = {}
 
     def sync_billing_from_config(self, config: BillingConfig) -> None:
         self._offers.clear()
@@ -140,6 +144,22 @@ class MemoryBillingStore(BillingStore):
         key = (provider, provider_subscription_id)
         return self._subscriptions.get(key)
 
+    def get_user_subscription(
+        self,
+        user_id: str,
+    ) -> BillingSubscriptionState | None:
+        latest: BillingSubscriptionState | None = None
+        for sub in self._subscriptions.values():
+            if sub.user_id == user_id and (
+                latest is None
+                or (
+                    sub.current_period_start
+                    and (latest.current_period_start is None or sub.current_period_start > latest.current_period_start)
+                )
+            ):
+                latest = sub
+        return latest
+
     def resolve_credit_topup(
         self,
         provider: str,
@@ -165,3 +185,133 @@ class MemoryBillingStore(BillingStore):
     def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
         credits_per = topup_config.get("credits_per_major_unit", 1000)
         return (amount_minor * credits_per) // 100
+
+    def upsert_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        tax_minor: int | None = None,
+        currency: str = "USD",
+        purpose: str = "unknown",
+        metadata: dict | None = None,
+    ) -> None:
+        key = (provider, provider_payment_id)
+        self._payments[key] = {
+            "provider": provider,
+            "provider_payment_id": provider_payment_id,
+            "provider_invoice_id": provider_invoice_id,
+            "user_id": user_id,
+            "amount_minor": amount_minor,
+            "tax_minor": tax_minor,
+            "currency": currency,
+            "purpose": purpose,
+            "metadata": metadata,
+        }
+
+    def upsert_billing_refund(
+        self,
+        provider: str,
+        provider_refund_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        currency: str = "USD",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        key = (provider, provider_refund_id)
+        self._refunds[key] = {
+            "provider": provider,
+            "provider_refund_id": provider_refund_id,
+            "provider_payment_id": provider_payment_id,
+            "user_id": user_id,
+            "amount_minor": amount_minor,
+            "currency": currency,
+            "reason": reason,
+            "metadata": metadata,
+        }
+
+    def upsert_billing_invoice(
+        self,
+        provider: str,
+        provider_invoice_id: str,
+        provider_subscription_id: str | None = None,
+        user_id: str | None = None,
+        status: str | None = None,
+        amount_paid_minor: int | None = None,
+        amount_due_minor: int | None = None,
+        currency: str = "USD",
+        period_start: str | None = None,
+        period_end: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        key = (provider, provider_invoice_id)
+        self._invoices[key] = {
+            "provider": provider,
+            "provider_invoice_id": provider_invoice_id,
+            "provider_subscription_id": provider_subscription_id,
+            "user_id": user_id,
+            "status": status,
+            "amount_paid_minor": amount_paid_minor,
+            "amount_due_minor": amount_due_minor,
+            "currency": currency,
+            "period_start": period_start,
+            "period_end": period_end,
+            "metadata": metadata,
+        }
+
+    def upsert_billing_dispute(
+        self,
+        provider: str,
+        provider_dispute_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        status: str = "needs_response",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        key = (provider, provider_dispute_id)
+        self._disputes[key] = {
+            "provider": provider,
+            "provider_dispute_id": provider_dispute_id,
+            "provider_payment_id": provider_payment_id,
+            "user_id": user_id,
+            "status": status,
+            "reason": reason,
+            "metadata": metadata,
+        }
+
+    def get_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+    ) -> dict | None:
+        key = (provider, provider_payment_id)
+        return self._payments.get(key)
+
+    def get_billing_refund(
+        self,
+        provider: str,
+        provider_refund_id: str,
+    ) -> dict | None:
+        key = (provider, provider_refund_id)
+        return self._refunds.get(key)
+
+    def get_billing_invoice(
+        self,
+        provider: str,
+        provider_invoice_id: str,
+    ) -> dict | None:
+        key = (provider, provider_invoice_id)
+        return self._invoices.get(key)
+
+    def get_billing_dispute(
+        self,
+        provider: str,
+        provider_dispute_id: str,
+    ) -> dict | None:
+        key = (provider, provider_dispute_id)
+        return self._disputes.get(key)

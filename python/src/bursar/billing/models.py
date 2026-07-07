@@ -112,6 +112,13 @@ class BillingRefundInfo(BaseModel):
     reason: str | None = None
 
 
+class BillingDisputeInfo(BaseModel):
+    provider_dispute_id: str
+    provider_payment_id: str | None = None
+    status: str = "needs_response"
+    reason: str | None = None
+
+
 class BillingEvent(BaseModel):
     provider: str
     event_id: str
@@ -124,6 +131,7 @@ class BillingEvent(BaseModel):
     invoice: BillingInvoiceInfo | None = None
     payment: BillingPaymentInfo | None = None
     refund: BillingRefundInfo | None = None
+    dispute: BillingDisputeInfo | None = None
     metadata: dict[str, Any] | None = None
     raw: Any = None
 

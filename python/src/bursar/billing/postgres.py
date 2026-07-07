@@ -286,6 +286,48 @@ class PostgresBillingStore(BillingStore):
     ) -> BillingSubscriptionState | None:
         return self._get_billing_subscription_sync(provider, provider_subscription_id)
 
+    def get_user_subscription(
+        self,
+        user_id: str,
+    ) -> BillingSubscriptionState | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, provider, provider_subscription_id, provider_customer_id,
+                           offer_key, plan_key, status, current_period_start,
+                           current_period_end, cancel_at_period_end, interval, interval_count, metadata
+                    FROM public.billing_subscriptions
+                    WHERE user_id = %s
+                    ORDER BY current_period_start DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    [user_id],
+                )
+                row = cur.fetchone()
+            if not row:
+                return None
+
+            meta = row["metadata"]
+            return BillingSubscriptionState(
+                user_id=str(row["user_id"]),
+                provider=str(row["provider"]),
+                provider_subscription_id=str(row["provider_subscription_id"]),
+                provider_customer_id=str(row["provider_customer_id"]) if row["provider_customer_id"] else None,
+                offer_key=str(row["offer_key"]) if row["offer_key"] else None,
+                plan_key=str(row["plan_key"]) if row["plan_key"] else None,
+                status=str(row["status"]) if row["status"] else "incomplete",
+                current_period_start=str(row["current_period_start"]) if row["current_period_start"] else None,
+                current_period_end=str(row["current_period_end"]) if row["current_period_end"] else None,
+                cancel_at_period_end=bool(row["cancel_at_period_end"]),
+                interval=str(row["interval"]) if row["interval"] else None,
+                interval_count=int(row["interval_count"]) if row["interval_count"] else None,
+                metadata=meta if isinstance(meta, dict) else None,
+            )
+        finally:
+            self._pool.putconn(conn)
+
     def resolve_credit_topup(
         self,
         provider: str,
@@ -307,3 +349,119 @@ class PostgresBillingStore(BillingStore):
     def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
         credits_per = topup_config.get("credits_per_major_unit", 1000)
         return (amount_minor * credits_per) // 100
+
+    def upsert_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        tax_minor: int | None = None,
+        currency: str = "USD",
+        purpose: str = "unknown",
+        metadata: dict | None = None,
+    ) -> None:
+        self._call_rpc_void_sync(
+            "public.upsert_billing_payment",
+            [
+                provider,
+                provider_payment_id,
+                provider_invoice_id,
+                user_id,
+                amount_minor,
+                tax_minor,
+                currency,
+                purpose,
+                json.dumps(metadata) if metadata else None,
+            ],
+        )
+
+    def upsert_billing_refund(
+        self,
+        provider: str,
+        provider_refund_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        currency: str = "USD",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._call_rpc_void_sync(
+            "public.upsert_billing_refund",
+            [
+                provider,
+                provider_refund_id,
+                provider_payment_id,
+                user_id,
+                amount_minor,
+                currency,
+                reason,
+                json.dumps(metadata) if metadata else None,
+            ],
+        )
+
+    def upsert_billing_invoice(
+        self,
+        provider: str,
+        provider_invoice_id: str,
+        provider_subscription_id: str | None = None,
+        user_id: str | None = None,
+        status: str | None = None,
+        amount_paid_minor: int | None = None,
+        amount_due_minor: int | None = None,
+        currency: str = "USD",
+        period_start: str | None = None,
+        period_end: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._call_rpc_void_sync(
+            "public.upsert_billing_invoice",
+            [
+                provider,
+                provider_invoice_id,
+                provider_subscription_id,
+                user_id,
+                status,
+                amount_paid_minor,
+                amount_due_minor,
+                currency,
+                period_start,
+                period_end,
+                json.dumps(metadata) if metadata else None,
+            ],
+        )
+
+    def upsert_billing_dispute(
+        self,
+        provider: str,
+        provider_dispute_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        status: str = "needs_response",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._call_rpc_void_sync(
+            "public.upsert_billing_dispute",
+            [
+                provider,
+                provider_dispute_id,
+                provider_payment_id,
+                user_id,
+                status,
+                reason,
+                json.dumps(metadata) if metadata else None,
+            ],
+        )
+
+    def get_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+    ) -> dict | None:
+        return self._call_rpc_json_sync(
+            "public.get_billing_payment_for_refund",
+            [provider, provider_payment_id],
+        )

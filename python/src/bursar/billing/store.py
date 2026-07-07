@@ -65,6 +65,12 @@ class BillingStore(ABC):
     ) -> BillingSubscriptionState | None: ...
 
     @abstractmethod
+    def get_user_subscription(
+        self,
+        user_id: str,
+    ) -> BillingSubscriptionState | None: ...
+
+    @abstractmethod
     def resolve_credit_topup(
         self,
         provider: str,
@@ -80,3 +86,65 @@ class BillingStore(ABC):
     ) -> int:
         """Convert paid amount to credits based on topup config."""
         ...
+
+    @abstractmethod
+    def upsert_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+        provider_invoice_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        tax_minor: int | None = None,
+        currency: str = "USD",
+        purpose: str = "unknown",
+        metadata: dict | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def upsert_billing_refund(
+        self,
+        provider: str,
+        provider_refund_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        amount_minor: int = 0,
+        currency: str = "USD",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def upsert_billing_invoice(
+        self,
+        provider: str,
+        provider_invoice_id: str,
+        provider_subscription_id: str | None = None,
+        user_id: str | None = None,
+        status: str | None = None,
+        amount_paid_minor: int | None = None,
+        amount_due_minor: int | None = None,
+        currency: str = "USD",
+        period_start: str | None = None,
+        period_end: str | None = None,
+        metadata: dict | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def upsert_billing_dispute(
+        self,
+        provider: str,
+        provider_dispute_id: str,
+        provider_payment_id: str | None = None,
+        user_id: str | None = None,
+        status: str = "needs_response",
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def get_billing_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+    ) -> dict | None: ...
