@@ -13,10 +13,10 @@ class MemoryBillingStore(BillingStore):
         self._offers: dict[str, dict] = {}
         self._provider_refs: dict[tuple[str, str, str], str] = {}
         self._events: dict[tuple[str, str], str] = {}
-        self._customers: dict[str, str] = {}
-        self._subscriptions: dict[str, BillingSubscriptionState] = {}
+        self._customers: dict[tuple[str, str], str] = {}
+        self._subscriptions: dict[tuple[str, str], BillingSubscriptionState] = {}
         self._topups: dict[str, dict] = {}
-        self._provider_refs_by: dict[tuple[str, str], str] = {}
+        self._provider_refs_by: dict[tuple[str, str, str], str] = {}
 
     def sync_billing_from_config(self, config: BillingConfig) -> None:
         self._offers.clear()
