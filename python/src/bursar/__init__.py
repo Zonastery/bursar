@@ -29,6 +29,7 @@ from bursar.billing import (
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     MemoryBillingStore,
+    PostgresBillingStore,
 )
 from bursar.breakdown import CostBreakdown
 from bursar.config import ConfigError, PricingConfig
@@ -125,6 +126,7 @@ __all__ = [
     "BillingSubscriptionStatus",
     "CanAffordResult",
     "MemoryBillingStore",
+    "PostgresBillingStore",
     "CapCheckResult",
     "CapabilityNotSupportedError",
     "CapReachedError",

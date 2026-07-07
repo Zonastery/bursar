@@ -231,8 +231,7 @@ export class PostgresBillingStore extends BillingStore {
     amountMinor: number,
     topupConfig: Record<string, unknown>,
   ): Promise<number> {
-    const majorAmount = amountMinor / 100;
     const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
-    return Math.trunc(majorAmount * creditsPer);
+    return Math.trunc((amountMinor * creditsPer) / 100);
   }
 }

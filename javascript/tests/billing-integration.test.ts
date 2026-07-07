@@ -193,7 +193,7 @@ describe("MemoryBillingStore integration", () => {
     const { bs } = await makeComponents();
     expect((await bs.claimBillingEvent(PROVIDER, EVENT_ID, "test.event")).status).toBe("claimed");
     await bs.failBillingEvent(PROVIDER, EVENT_ID);
-    expect((await bs.claimBillingEvent(PROVIDER, EVENT_ID, "test.event")).status).toBe("duplicate");
+    expect((await bs.claimBillingEvent(PROVIDER, EVENT_ID, "test.event")).status).toBe("retry");
   });
 
   it("multiple_providers_same_customer_id", async () => {
@@ -539,7 +539,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(c1.status).toBe("claimed");
     await bs.failBillingEvent(PROVIDER, "evt_fail_retry");
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
-    expect(c2.status).toBe("duplicate");
+    expect(c2.status).toBe("retry");
   });
 
   // ── Topup credits ────────────────────────────────────────────────────

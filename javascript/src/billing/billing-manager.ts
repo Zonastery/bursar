@@ -1,7 +1,11 @@
 import Decimal from "decimal.js";
 import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
-import type { BillingConfig, BillingEvent, BillingEventResult } from "./billing-types.js";
+import type {
+  BillingEvent,
+  BillingEventResult,
+  BillingSubscriptionState,
+} from "./billing-types.js";
 
 type ResolveUserFn = (
   provider: string,
@@ -23,15 +27,11 @@ export class BillingManager {
     options?: {
       creditManager?: CreditManager | null;
       resolveUser?: ResolveUserFn | null;
-      config?: BillingConfig | null;
     },
   ) {
     this.store = store;
     this.cm = options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
-    if (options?.config) {
-      this.store.syncBillingFromConfig(options.config);
-    }
   }
 
   async handleEvent(event: BillingEvent): Promise<BillingEventResult> {
@@ -109,12 +109,15 @@ export class BillingManager {
 
   private async handleCustomerCreated(event: BillingEvent): Promise<BillingEventResult> {
     if (event.customer?.providerCustomerId) {
-      await this.store.upsertBillingCustomer(
-        event.provider,
-        event.customer.providerCustomerId,
-        event.userId ?? "",
-        event.customer.email ?? null,
-      );
+      const uid = await this.resolveUserId(event);
+      if (uid) {
+        await this.store.upsertBillingCustomer(
+          event.provider,
+          event.customer.providerCustomerId,
+          uid,
+          event.customer.email ?? null,
+        );
+      }
     }
     return { handled: true, action: "customer_created" };
   }
@@ -128,15 +131,86 @@ export class BillingManager {
   }
 
   private async handleCheckoutCompleted(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.customer?.providerCustomerId && event.userId) {
-      await this.store.upsertBillingCustomer(
-        event.provider,
-        event.customer.providerCustomerId,
-        event.userId,
-        event.customer.email ?? null,
-      );
+    if (event.customer?.providerCustomerId) {
+      const uid = await this.resolveUserId(event);
+      if (uid) {
+        await this.store.upsertBillingCustomer(
+          event.provider,
+          event.customer.providerCustomerId,
+          uid,
+          event.customer.email ?? null,
+        );
+      }
     }
     return { handled: true, action: "checkout_completed" };
+  }
+
+  private async getExistingSubscription(
+    event: BillingEvent,
+  ): Promise<BillingSubscriptionState | null> {
+    if (!event.subscription?.providerSubscriptionId) return null;
+    return this.store.getBillingSubscription(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+  }
+
+  private buildSubscriptionState(
+    event: BillingEvent,
+    userId: string,
+    existing: BillingSubscriptionState | null,
+    overrides?: {
+      status?: string | null;
+      cancelAtPeriodEnd?: boolean | null;
+      offerKey?: string | null;
+      planKey?: string | null;
+    },
+  ): BillingSubscriptionState {
+    if (!event.subscription) {
+      throw new Error("no_subscription_data");
+    }
+    const sub = event.subscription;
+    return {
+      userId,
+      provider: event.provider,
+      providerSubscriptionId: sub.providerSubscriptionId,
+      providerCustomerId:
+        event.customer?.providerCustomerId ?? existing?.providerCustomerId ?? null,
+      offerKey: overrides?.offerKey ?? existing?.offerKey ?? null,
+      planKey: overrides?.planKey ?? existing?.planKey ?? null,
+      status: overrides?.status ?? sub.status ?? existing?.status ?? "incomplete",
+      currentPeriodStart: sub.periodStart ?? existing?.currentPeriodStart ?? null,
+      currentPeriodEnd: sub.periodEnd ?? existing?.currentPeriodEnd ?? null,
+      cancelAtPeriodEnd:
+        overrides?.cancelAtPeriodEnd ??
+        sub.cancelAtPeriodEnd ??
+        existing?.cancelAtPeriodEnd ??
+        false,
+      interval: sub.interval ?? existing?.interval ?? null,
+      intervalCount: sub.intervalCount ?? existing?.intervalCount ?? null,
+      metadata: event.metadata ?? existing?.metadata ?? null,
+    };
+  }
+
+  private async resolveOfferAndKeys(
+    event: BillingEvent,
+  ): Promise<{
+    offer: Record<string, unknown> | null;
+    offerKey: string | null;
+    planKey: string | null;
+  }> {
+    const refs = event.subscription?.refs;
+    if (!refs) return { offer: null, offerKey: null, planKey: null };
+    const offer = await this.store.resolveBillingOffer(
+      event.provider,
+      refs.productId ?? null,
+      refs.priceId ?? null,
+    );
+    return {
+      offer,
+      offerKey: (offer?.offerKey as string | null) ?? null,
+      planKey: (offer?.planKey as string | null) ?? null,
+    };
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
@@ -144,28 +218,26 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    if (!event.customer?.providerCustomerId) return { handled: false, error: "no_customer_data" };
-    const offer = await this.resolveOffer(event);
-    await this.store.upsertBillingSubscription({
-      userId: uid,
-      provider: event.provider,
-      providerSubscriptionId: event.subscription.providerSubscriptionId,
-      providerCustomerId: event.customer.providerCustomerId,
-      offerKey: (offer?.offerKey as string | undefined) ?? null,
-      planKey: (offer?.planKey as string | undefined) ?? null,
-      status: event.subscription.status ?? "incomplete",
-      currentPeriodStart: event.subscription.periodStart ?? null,
-      currentPeriodEnd: event.subscription.periodEnd ?? null,
-      cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
-      interval: event.subscription.interval ?? null,
-      intervalCount: event.subscription.intervalCount ?? null,
-    });
+    const existing = await this.getExistingSubscription(event);
+    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
+        status: event.subscription.status ?? "incomplete",
+        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: planKey ?? existing?.planKey ?? null,
+      }),
+    );
     if (
       this.cm &&
       event.subscription.status &&
       ["active", "trialing"].includes(event.subscription.status)
     ) {
-      await this.provisionSubscription(uid, offer, event);
+      await this.provisionSubscription(
+        uid,
+        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        event,
+      );
     }
     return { handled: true, action: "subscription_created" };
   }
@@ -175,26 +247,19 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
+    const existing = await this.getExistingSubscription(event);
+    const { offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
+        status: event.subscription.status ?? existing?.status ?? "incomplete",
+        cancelAtPeriodEnd:
+          event.subscription.cancelAtPeriodEnd ?? existing?.cancelAtPeriodEnd ?? false,
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: planKey ?? existing?.planKey ?? null,
+      }),
     );
-    if (existing) {
-      const offer = await this.resolveOffer(event);
-      await this.store.upsertBillingSubscription({
-        ...existing,
-        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
-        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
-        status: event.subscription.status ?? existing.status,
-        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
-        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
-        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? existing.cancelAtPeriodEnd,
-        interval: event.subscription.interval ?? existing.interval,
-        intervalCount: event.subscription.intervalCount ?? existing.intervalCount,
-      });
-      if (this.cm) {
-        await this.reEvaluateAccess(uid, event);
-      }
+    if (this.cm) {
+      await this.reEvaluateAccess(uid, event);
     }
     return { handled: true, action: "subscription_updated" };
   }
@@ -204,21 +269,21 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "active",
-        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
-        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
-      });
-      if (this.cm) {
-        const offer = await this.resolveOffer(event);
-        await this.provisionSubscription(uid, offer, event);
-      }
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: planKey ?? existing?.planKey ?? null,
+      }),
+    );
+    if (this.cm) {
+      await this.provisionSubscription(
+        uid,
+        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        event,
+      );
     }
     return { handled: true, action: "subscription_activated" };
   }
@@ -228,23 +293,23 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      const offer = await this.resolveOffer(event);
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    const { offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const resolvedPlanKey = planKey ?? existing?.planKey ?? null;
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "active",
-        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
-        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
-        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
-        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
-      });
-      if (this.cm) {
-        await this.provisionSubscription(uid, offer, event);
-      }
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: resolvedPlanKey,
+      }),
+    );
+    if (this.cm && resolvedPlanKey) {
+      const periodStart = event.subscription.periodStart;
+      await this.cm.setUserPlan(
+        uid,
+        resolvedPlanKey,
+        periodStart ? new Date(periodStart) : undefined,
+      );
     }
     return { handled: true, action: "subscription_renewed" };
   }
@@ -254,23 +319,21 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
+    const existing = await this.getExistingSubscription(event);
+    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
+        status: event.subscription.status ?? "active",
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: planKey ?? existing?.planKey ?? null,
+      }),
     );
-    if (existing) {
-      const offer = await this.resolveOffer(event);
-      await this.store.upsertBillingSubscription({
-        ...existing,
-        offerKey: (offer?.offerKey as string | undefined) ?? existing.offerKey,
-        planKey: (offer?.planKey as string | undefined) ?? existing.planKey,
-        status: "active",
-        currentPeriodStart: event.subscription.periodStart ?? existing.currentPeriodStart,
-        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
-      });
-      if (this.cm) {
-        await this.provisionSubscription(uid, offer, event);
-      }
+    if (this.cm && (planKey ?? existing?.planKey)) {
+      await this.provisionSubscription(
+        uid,
+        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        event,
+      );
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
@@ -280,17 +343,13 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
-        status: "active",
+    const existing = await this.getExistingSubscription(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
+        status: existing?.status ?? event.subscription.status ?? "active",
         cancelAtPeriodEnd: true,
-      });
-    }
+      }),
+    );
     return { handled: true, action: "cancellation_scheduled" };
   }
 
@@ -299,17 +358,13 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
-        status: "active",
+    const existing = await this.getExistingSubscription(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
+        status: existing?.status ?? event.subscription.status ?? "active",
         cancelAtPeriodEnd: false,
-      });
-    }
+      }),
+    );
     return { handled: true, action: "cancellation_unscheduled" };
   }
 
@@ -318,19 +373,15 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "canceled",
-        cancelAtPeriodEnd: true,
-      });
-      if (this.cm) {
-        await this.revokeSubscription(uid);
-      }
+        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
+      }),
+    );
+    if (this.cm) {
+      await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_canceled" };
   }
@@ -340,18 +391,15 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "expired",
-      });
-      if (this.cm) {
-        await this.revokeSubscription(uid);
-      }
+        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
+      }),
+    );
+    if (this.cm) {
+      await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_expired" };
   }
@@ -361,18 +409,15 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "paused",
-      });
-      if (this.cm) {
-        await this.revokeSubscription(uid);
-      }
+        cancelAtPeriodEnd: existing?.cancelAtPeriodEnd ?? false,
+      }),
+    );
+    if (this.cm) {
+      await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_paused" };
   }
@@ -382,19 +427,22 @@ export class BillingManager {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
-    const existing = await this.store.getBillingSubscription(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (existing) {
-      await this.store.upsertBillingSubscription({
-        ...existing,
+    const existing = await this.getExistingSubscription(event);
+    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    await this.store.upsertBillingSubscription(
+      this.buildSubscriptionState(event, uid, existing, {
         status: "active",
-        currentPeriodEnd: event.subscription.periodEnd ?? existing.currentPeriodEnd,
-      });
-      if (this.cm) {
-        await this.reEvaluateAccess(uid, event);
-      }
+        cancelAtPeriodEnd: false,
+        offerKey: offerKey ?? existing?.offerKey ?? null,
+        planKey: planKey ?? existing?.planKey ?? null,
+      }),
+    );
+    if (this.cm) {
+      await this.provisionSubscription(
+        uid,
+        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        event,
+      );
     }
     return { handled: true, action: "subscription_resumed" };
   }
@@ -423,18 +471,25 @@ export class BillingManager {
       );
     }
 
-    if (topupConfig && this.cm) {
+    if (topupConfig && this.cm && event.payment.purpose === "credit_topup") {
       const uid = await this.resolveUserId(event);
       if (uid) {
-        const credits = await this.store.computeTopupCredits(
-          event.payment.amountMinor,
-          topupConfig,
-        );
-        if (credits > 0) {
-          await this.cm.addCredits(uid, new Decimal(credits), {
-            type: "purchase",
-            tier: (topupConfig.tier as string) ?? "purchased",
-          });
+        const currency = String(topupConfig.currency ?? "USD");
+        if (event.payment.currency.toUpperCase() === currency.toUpperCase()) {
+          const minAmount = Number(topupConfig.minAmountMinor ?? 0);
+          const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
+          if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
+            const credits = await this.store.computeTopupCredits(
+              event.payment.amountMinor,
+              topupConfig,
+            );
+            if (credits > 0) {
+              await this.cm.addCredits(uid, new Decimal(credits), {
+                type: "purchase",
+                tier: (topupConfig.tier as string) ?? "purchased",
+              });
+            }
+          }
         }
       }
     }
@@ -481,9 +536,15 @@ export class BillingManager {
     if (!this.cm || !event.subscription) return;
     const status = event.subscription.status;
     if (status && ["active", "trialing"].includes(status)) {
+      const existing = await this.store.getBillingSubscription(
+        event.provider,
+        event.subscription.providerSubscriptionId,
+      );
       const offer = await this.resolveOffer(event);
       if (offer) {
         await this.provisionSubscription(uid, offer, event);
+      } else if (existing?.planKey) {
+        await this.provisionSubscription(uid, { planKey: existing.planKey }, event);
       }
     } else if (
       status &&

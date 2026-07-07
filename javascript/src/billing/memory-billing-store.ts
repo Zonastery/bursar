@@ -88,6 +88,10 @@ export class MemoryBillingStore extends BillingStore {
       this.events.set(key, "processing");
       return { status: "claimed" };
     }
+    if (existing === "failed") {
+      this.events.set(key, "processing");
+      return { status: "retry" };
+    }
     return { status: "duplicate" };
   }
 
@@ -154,8 +158,7 @@ export class MemoryBillingStore extends BillingStore {
     amountMinor: number,
     topupConfig: Record<string, unknown>,
   ): Promise<number> {
-    const majorAmount = amountMinor / 100;
     const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
-    return Math.trunc(majorAmount * creditsPer);
+    return Math.trunc((amountMinor * creditsPer) / 100);
   }
 }

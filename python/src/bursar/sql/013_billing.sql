@@ -386,6 +386,9 @@ DECLARE
     v_provider TEXT;
 BEGIN
     -- Sync billing offers (subscription plans)
+    DELETE FROM public.billing_provider_refs
+    WHERE resource_type = 'offer';
+
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
@@ -431,17 +434,16 @@ BEGIN
                         'offer',
                         v_key
                     )
-                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
-                    DO UPDATE SET
-                        product_id = EXCLUDED.product_id,
-                        variant_id = EXCLUDED.variant_id,
-                        lookup_key = EXCLUDED.lookup_key;
+                    ;
                 END LOOP;
             END IF;
         END LOOP;
     END IF;
 
     -- Sync credit topups
+    DELETE FROM public.billing_provider_refs
+    WHERE resource_type = 'topup';
+
     IF p_config ? 'credit_topups' AND jsonb_typeof(p_config->'credit_topups') = 'object' THEN
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'credit_topups')
         LOOP
@@ -484,11 +486,7 @@ BEGIN
                         'topup',
                         v_key
                     )
-                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
-                    DO UPDATE SET
-                        product_id = EXCLUDED.product_id,
-                        variant_id = EXCLUDED.variant_id,
-                        lookup_key = EXCLUDED.lookup_key;
+                    ;
                 END LOOP;
             END IF;
         END LOOP;
@@ -621,24 +619,55 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_existing TEXT;
+    v_existing_id UUID;
+    v_existing_status TEXT;
     v_new_id UUID;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    SELECT status INTO v_existing
+    SELECT id, status INTO v_existing_id, v_existing_status
     FROM public.billing_events
-    WHERE provider = p_provider AND provider_event_id = p_event_id;
+    WHERE provider = p_provider AND provider_event_id = p_event_id
+    FOR UPDATE;
 
-    IF v_existing IS NOT NULL THEN
+    IF v_existing_id IS NOT NULL THEN
+        IF v_existing_status = 'failed' THEN
+            UPDATE public.billing_events
+            SET status = 'processing',
+                event_type = p_event_type,
+                payload = p_payload,
+                updated_at = now()
+            WHERE id = v_existing_id;
+            RETURN jsonb_build_object('status', 'retry', 'event_id', v_existing_id);
+        END IF;
         RETURN jsonb_build_object('status', 'duplicate');
     END IF;
 
-    INSERT INTO public.billing_events (provider, provider_event_id, event_type, status, payload)
-    VALUES (p_provider, p_event_id, p_event_type, 'processing', p_payload)
-    RETURNING id INTO v_new_id;
+    BEGIN
+        INSERT INTO public.billing_events (provider, provider_event_id, event_type, status, payload)
+        VALUES (p_provider, p_event_id, p_event_type, 'processing', p_payload)
+        RETURNING id INTO v_new_id;
+    EXCEPTION
+        WHEN unique_violation THEN
+            SELECT id, status INTO v_existing_id, v_existing_status
+            FROM public.billing_events
+            WHERE provider = p_provider AND provider_event_id = p_event_id
+            FOR UPDATE;
+
+            IF v_existing_status = 'failed' THEN
+                UPDATE public.billing_events
+                SET status = 'processing',
+                    event_type = p_event_type,
+                    payload = p_payload,
+                    updated_at = now()
+                WHERE id = v_existing_id;
+                RETURN jsonb_build_object('status', 'retry', 'event_id', v_existing_id);
+            END IF;
+
+            RETURN jsonb_build_object('status', 'duplicate');
+    END;
 
     RETURN jsonb_build_object('status', 'claimed', 'event_id', v_new_id);
 END;

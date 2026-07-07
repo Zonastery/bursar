@@ -252,9 +252,8 @@ class TestMemoryBillingStoreIntegration:
         claim1 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
         assert claim1.status == "claimed"
         bs.fail_billing_event(_PROVIDER, _EVENT_ID)
-        # After fail, a new claim with same ID returns duplicate (failed is terminal)
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
-        assert claim2.status == "duplicate"
+        assert claim2.status == "retry"
 
     def test_multiple_providers_same_customer_id(self, components):
         _, _, bs, _ = components
@@ -503,7 +502,7 @@ class TestPostgresBillingStoreIntegration:
         assert claim1.status == "claimed"
         bs.fail_billing_event(_PROVIDER, _EVENT_ID)
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
-        assert claim2.status == "duplicate"
+        assert claim2.status == "retry"
 
     # ── Topup credits ────────────────────────────────────────────────────
 
