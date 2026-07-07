@@ -94,3 +94,32 @@ export { PostgresStore } from "./stores/postgres-store.js";
 // Events
 export type { CreditEvent, CreditEventType } from "./stores/events.js";
 export { CreditEventEmitter } from "./stores/events.js";
+
+// Billing
+export {
+  BillingStore,
+  MemoryBillingStore,
+  PostgresBillingStore,
+  BillingManager,
+} from "./billing/index.js";
+export type {
+  BillingConfig,
+  BillingCreditTopup,
+  BillingCustomerInfo,
+  BillingEvent,
+  BillingEventClaim,
+  BillingEventResult,
+  BillingEventType,
+  BillingInvoiceInfo,
+  BillingOffer,
+  BillingOfferInterval,
+  BillingPaymentInfo,
+  BillingProvider,
+  BillingProviderRefs,
+  BillingRefundInfo,
+  BillingSubscriptionInfo,
+  BillingSubscriptionOfferRef,
+  BillingSubscriptionState,
+  BillingSubscriptionStatus,
+  EntitlementMode,
+} from "./billing/index.js";

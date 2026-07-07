@@ -345,6 +345,7 @@ export interface FeatureLimitResult {
 export interface SetUserPlanResult {
   userId: string;
   planId: string;
+  planAssignedAt?: string | null;
 }
 
 /** Result of refunding a credit deduction. */

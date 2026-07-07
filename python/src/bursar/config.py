@@ -36,6 +36,8 @@ class PricingConfig(BaseModel):
     fixed: dict[str, Decimal] = Field(default_factory=dict)
     plans: dict[str, PlanDefinition] | None = None
     tiers: dict[str, TierDefinition] | None = None
+    subscriptions: dict[str, dict] | None = None
+    credit_topups: dict[str, dict] | None = None
 
     @field_validator("fixed")
     @classmethod

@@ -246,7 +246,11 @@ export abstract class CreditStore {
 
   // ── Plan management ────────────────────────────────────────────────
   abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;
-  abstract setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult>;
+  abstract setUserPlan(
+    userId: string,
+    planId: string,
+    planAssignedAt?: Date | null,
+  ): Promise<SetUserPlanResult>;
   abstract unsetUserPlan(userId: string): Promise<{ userId: string }>;
   abstract checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
   // periodStart overrides the window key for rolling_30d/anniversary plans

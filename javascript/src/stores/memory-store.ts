@@ -1345,13 +1345,15 @@ export class MemoryStore extends CreditStore {
     };
   }
 
-  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
+  async setUserPlan(
+    userId: string,
+    planId: string,
+    planAssignedAt?: Date | null,
+  ): Promise<SetUserPlanResult> {
     this.userPlanMap.set(userId, planId);
-    // WS9: record the assignment time as the anchor for non-calendar-month
-    // allowance periods. Uses the SAME injectable clock as everything else so
-    // tests can control it deterministically.
-    this.userPlanAssignedAt.set(userId, this.now());
-    return { userId, planId };
+    const assigned = planAssignedAt ?? this.now();
+    this.userPlanAssignedAt.set(userId, assigned);
+    return { userId, planId, planAssignedAt: assigned.toISOString() };
   }
 
   async unsetUserPlan(userId: string): Promise<{ userId: string }> {

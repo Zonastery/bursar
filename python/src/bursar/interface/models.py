@@ -72,6 +72,8 @@ class PricingConfigData(BaseModel):
     signup_bonus: int = 50
     plans: dict[str, PlanDefinition] | None = None
     tiers: dict[str, TierDefinition] | None = None
+    subscriptions: dict[str, dict] | None = None
+    credit_topups: dict[str, dict] | None = None
 
 
 # ── Runtime results ───────────────────────────────────────────────────
@@ -403,6 +405,7 @@ class SetUserPlanResult(BaseModel):
 
     user_id: str
     plan_id: str
+    plan_assigned_at: str | None = None
 
 
 class RefundResult(BaseModel):

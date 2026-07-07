@@ -363,11 +363,12 @@ export class CreditManager {
    * The store call is awaited so a persistence failure surfaces to the caller.
    * The event is emitted only after the store write succeeds (contract §6).
    */
-  async setUserPlan(userId: string, planKey: string): Promise<void> {
-    await this.store.setUserPlan(userId, planKey);
+  async setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void> {
+    const result = await this.store.setUserPlan(userId, planKey, planAssignedAt);
     this.emit("credits.plan_changed", userId, {
       userId,
       planKey,
+      planAssignedAt: result.planAssignedAt ?? null,
       timestamp: new Date().toISOString(),
     });
   }

@@ -437,23 +437,32 @@ class CreditManager:
 
     # -- Plan management ------------------------------------------------
 
-    def set_user_plan(self, user_id: str, plan_key: str) -> SetUserPlanResult:
+    def set_user_plan(
+        self,
+        user_id: str,
+        plan_key: str,
+        plan_assigned_at: datetime | None = None,
+    ) -> SetUserPlanResult:
         """Assign a plan to a user and emit a ``credits.plan_changed`` event.
 
         Args:
             user_id: The user to assign the plan to.
             plan_key: The plan key to assign (e.g. ``"pro"``).
+            plan_assigned_at: Anchors the allowance window for
+                ``rolling_30d``/``anniversary`` plans. When omitted, the
+                store anchors to the current time (backwards-compatible).
 
         Returns:
             ``SetUserPlanResult`` confirming the assignment.
         """
-        result = self._store.set_user_plan(user_id, plan_key)
+        result = self._store.set_user_plan(user_id, plan_key, plan_assigned_at=plan_assigned_at)
         self._emit(
             "credits.plan_changed",
             user_id,
             {
                 "user_id": user_id,
                 "plan_key": plan_key,
+                "plan_assigned_at": (plan_assigned_at.isoformat() if plan_assigned_at else None),
                 "timestamp": datetime.now(UTC),
             },
         )

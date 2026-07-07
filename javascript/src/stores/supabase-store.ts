@@ -671,16 +671,25 @@ export class HttpxSupabaseStore extends CreditStore {
     };
   }
 
-  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
-    const row = await this.rpc("set_user_plan", {
+  async setUserPlan(
+    userId: string,
+    planId: string,
+    planAssignedAt?: Date | null,
+  ): Promise<SetUserPlanResult> {
+    const params: Record<string, unknown> = {
       p_user_id: userId,
       p_plan_key: planId,
-    });
+    };
+    if (planAssignedAt != null) {
+      params.p_plan_assigned_at = planAssignedAt.toISOString();
+    }
+    const row = await this.rpc("set_user_plan", params);
     const code = this.errorCode(row);
     if (code) throw new StoreError(`set_user_plan: ${code}`);
     return {
       userId: String(row.user_id ?? userId),
       planId: String(row.plan_id ?? planId),
+      planAssignedAt: row.plan_assigned_at != null ? String(row.plan_assigned_at) : null,
     };
   }
 

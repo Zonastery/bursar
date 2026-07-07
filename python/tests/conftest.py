@@ -168,7 +168,8 @@ def _truncate_bursar_tables(dsn: str) -> None:
                     FOR t IN
                         SELECT tablename FROM pg_tables
                         WHERE schemaname = 'public'
-                          AND (tablename LIKE 'credit_%' OR tablename = 'user_credits')
+                          AND (tablename LIKE 'credit_%' OR tablename = 'user_credits'
+                               OR tablename LIKE 'billing_%')
                     LOOP
                         EXECUTE format('TRUNCATE TABLE public.%I CASCADE', t);
                     END LOOP;

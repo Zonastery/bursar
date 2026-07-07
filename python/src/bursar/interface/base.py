@@ -511,8 +511,18 @@ class CreditStore(ABC):
         )
 
     @abstractmethod
-    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
-        """Assign a plan to a user."""
+    def set_user_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        plan_assigned_at: datetime | None = None,
+    ) -> SetUserPlanResult:
+        """Assign a plan to a user.
+
+        ``plan_assigned_at`` anchors the allowance window for
+        ``rolling_30d``/``anniversary`` plans. When omitted, the store sets
+        the anchor to the current time (backwards-compatible default).
+        """
         ...
 
     @abstractmethod

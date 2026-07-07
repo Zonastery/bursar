@@ -661,12 +661,20 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
-    const rows = await this.callproc("set_user_plan", [userId, planId]);
+  async setUserPlan(
+    userId: string,
+    planId: string,
+    planAssignedAt?: Date | null,
+  ): Promise<SetUserPlanResult> {
+    const params = planAssignedAt
+      ? [userId, planId, planAssignedAt.toISOString()]
+      : [userId, planId];
+    const rows = await this.callproc("set_user_plan", params);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
       planId: String(row.plan_id ?? planId),
+      planAssignedAt: row.plan_assigned_at != null ? String(row.plan_assigned_at) : null,
     };
   }
 

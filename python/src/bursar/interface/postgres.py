@@ -646,11 +646,23 @@ class PostgresStore(CreditStore):
             ),
         )
 
-    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+    def set_user_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        plan_assigned_at: datetime | None = None,
+    ) -> SetUserPlanResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("set_user_plan", [user_id, plan_id])
+                cur.callproc(
+                    "set_user_plan",
+                    [
+                        user_id,
+                        plan_id,
+                        plan_assigned_at.isoformat() if plan_assigned_at else None,
+                    ],
+                )
                 row = cur.fetchone()
             conn.commit()
         finally:
@@ -660,6 +672,7 @@ class PostgresStore(CreditStore):
         return SetUserPlanResult(
             user_id=str(result_dict.get("user_id", user_id)),
             plan_id=str(result_dict.get("plan_id", plan_id)),
+            plan_assigned_at=str(result_dict.get("plan_assigned_at") or ""),
         )
 
     def unset_user_plan(self, user_id: str) -> dict:

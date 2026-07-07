@@ -658,11 +658,20 @@ class HttpxSupabaseStore(CreditStore):
             ),
         )
 
-    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
-        row = self._rpc("set_user_plan", {"p_user_id": user_id, "p_plan_key": plan_id})
+    def set_user_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        plan_assigned_at: datetime | None = None,
+    ) -> SetUserPlanResult:
+        params: dict = {"p_user_id": user_id, "p_plan_key": plan_id}
+        if plan_assigned_at is not None:
+            params["p_plan_assigned_at"] = plan_assigned_at.isoformat()
+        row = self._rpc("set_user_plan", params)
         return SetUserPlanResult(
             user_id=str(row.get("user_id", user_id)),
             plan_id=str(row.get("plan_id", plan_id)),
+            plan_assigned_at=str(row.get("plan_assigned_at") or ""),
         )
 
     def unset_user_plan(self, user_id: str) -> dict:

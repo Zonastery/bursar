@@ -1212,6 +1212,9 @@ class MemoryStore(CreditStore):
             if tiers:
                 for tier_key, tier in tiers.items():
                     self._tier_definitions[tier_key] = tier
+            # Extract billing config for MemoryBillingStore to consume.
+            self._billing_config_offers = dict(getattr(config, "subscriptions", None) or {})
+            self._billing_config_topups = dict(getattr(config, "credit_topups", None) or {})
             return record_id
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -1271,15 +1274,27 @@ class MemoryStore(CreditStore):
                 plan_assigned_at=self._user_plan_assigned_at.get(user_id) if plan_key else None,
             )
 
-    def set_user_plan(self, user_id: str, plan_id: str) -> SetUserPlanResult:
+    def set_user_plan(
+        self,
+        user_id: str,
+        plan_id: str,
+        plan_assigned_at: datetime | None = None,
+    ) -> SetUserPlanResult:
         # ``plan_id`` is the plan_key (matches SQL set_user_plan(UUID, TEXT); L6).
         # Re-anchors the allowance window (WS9): every (re-)assignment records a
         # fresh plan_assigned_at, using the injectable clock so tests can
-        # time-travel (WS9f).
+        # time-travel (WS9f).  An explicit ``plan_assigned_at`` from the caller
+        # (e.g. anchored to a payment provider's period start) overrides the
+        # default clock value.
         with self._lock:
             self._user_plan_map[user_id] = plan_id
-            self._user_plan_assigned_at[user_id] = self._utcnow()
-            return SetUserPlanResult(user_id=user_id, plan_id=plan_id)
+            assigned = plan_assigned_at if plan_assigned_at is not None else self._utcnow()
+            self._user_plan_assigned_at[user_id] = assigned
+            return SetUserPlanResult(
+                user_id=user_id,
+                plan_id=plan_id,
+                plan_assigned_at=assigned.isoformat() if isinstance(assigned, datetime) else str(assigned),
+            )
 
     def unset_user_plan(self, user_id: str) -> dict:
         with self._lock:
