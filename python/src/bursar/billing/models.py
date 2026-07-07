@@ -142,6 +142,16 @@ class BillingOfferInterval(StrEnum):
     year = "year"
 
 
+class BillingSubscriptionOfferRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    product_id: str | None = None
+    price_id: str | None = None
+    variant_id: str | None = None
+    lookup_key: str | None = None
+
+
 class BillingOffer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -154,16 +164,6 @@ class BillingOffer(BaseModel):
     cycle_grant_tier: str | None = None
     cycle_grant_replace_prior: bool = True
     provider_refs: dict[str, BillingSubscriptionOfferRef] = Field(default_factory=dict)
-
-
-class BillingSubscriptionOfferRef(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider: str
-    product_id: str | None = None
-    price_id: str | None = None
-    variant_id: str | None = None
-    lookup_key: str | None = None
 
 
 class BillingCreditTopup(BaseModel):
