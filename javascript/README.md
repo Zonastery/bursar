@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar)](https://www.npmjs.com/package/@zonastery/bursar)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 

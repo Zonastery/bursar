@@ -3,7 +3,7 @@
 [![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar)](https://www.npmjs.com/package/@zonastery/bursar)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
 Add usage-based credits to your AI SaaS in minutes — not weeks.
 

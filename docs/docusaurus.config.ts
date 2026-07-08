@@ -131,7 +131,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} bursar. MIT License.`,
+      copyright: `Copyright © ${new Date().getFullYear()} bursar. GNU AGPL-3.0.`,
     },
     prism: {
       theme: prismThemes.github,

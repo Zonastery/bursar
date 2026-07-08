@@ -71,7 +71,7 @@
     "url": "https://github.com/Zonastery/bursar/issues"
   },
   "homepage": "https://zonastery.github.io/bursar/",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "decimal.js": "^10.6.0"
   },

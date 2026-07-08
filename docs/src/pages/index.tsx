@@ -70,7 +70,7 @@ export default function Home(): ReactNode {
             />
             <Feature
               title="Open Source"
-              description="MIT license. Use it, fork it, contribute. <code>pip install bursar</code> or <code>npm install @zonastery/bursar</code>."
+              description="AGPL-3.0 license. Use it, fork it, contribute. <code>pip install bursar</code> or <code>npm install @zonastery/bursar</code>."
             />
           </div>
         </div>
