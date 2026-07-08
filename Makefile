@@ -19,6 +19,16 @@ help:                                ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
+install-hooks:                       ## Install lefthook git hooks (requires npm or uv)
+	@if command -v npx &>/dev/null && npx --yes lefthook install 2>/dev/null; then \
+		echo "hooks installed via npx"; \
+	elif command -v uvx &>/dev/null && uvx lefthook install 2>/dev/null; then \
+		echo "hooks installed via uvx"; \
+	else \
+		echo "Install lefthook via npm install -g lefthook or brew install lefthook" >&2; \
+		exit 1; \
+	fi
+
 test: test-python test-js            ## All tests (Python + JS, incl. real-Postgres integration)
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
