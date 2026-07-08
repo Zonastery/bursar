@@ -1,0 +1,270 @@
+# Subscription Integration
+
+This page is a decision guide for wiring bursar to a payment provider's webhooks (Stripe, Paddle, Chargebee, or anything else that fires an event on signup and on subscription renewal). It does not cover leases or admission control — see [Financial Safety](/docs/financial-safety) for that — it is specifically about **when to grant credits, when to configure an allowance instead, and how to make both safe under webhook redelivery**.
+
+Read this alongside [Architecture: Scope & boundaries](/docs/architecture): **bursar has no payment-provider integration and never will.** It does not talk to Stripe, does not parse webhook signatures, and does not convert currency to credits. Every example below assumes you have already verified the webhook and decided what it means — bursar's job starts at "grant this many credits" or "assign this plan," not before.
+
+## The three canonical scenarios
+
+### 1. Signup bonus that expires
+
+A promotional grant at account creation that should not live forever. This is nothing new — it's `add_credits()` (Notebook 05), aimed at an expiring tier.
+
+```python
+from datetime import UTC, datetime, timedelta
+
+# Called once, from your signup handler / post-signup webhook.
+manager.add_credits(
+    user_id, 500,
+    tx_type="purchase",                               # required for the expiry sweep — see note below
+    tier="gifted",                                    # an expiring tier (see Pricing Configuration)
+    expires_at=datetime.now(UTC) + timedelta(days=30),
+)
+```
+
+```typescript
+// Called once, from your signup handler / post-signup webhook.
+await manager.addCredits(userId, 500, {
+  type: "purchase", // required for the expiry sweep — see note below
+  tier: "gifted",
+  expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+});
+```
+
+:::note `type`/`tx_type` must be `"purchase"` or `"adjustment"` to expire
+`sweep_expired_credits()` (lazy or periodic) only ever considers `"purchase"`/`"adjustment"` transactions eligible for expiry — an `expires_at` set on any other `type` string is silently never swept. A promotional signup grant is still logged as `type="purchase"` here (exactly as Notebook 05 does), even though it wasn't a literal purchase; use `metadata` if you need to distinguish "gifted" from "paid for" in your own records — the tier (`"gifted"` above) is normally the right place for that distinction anyway.
+:::
+
+Equivalently, configure the tier's own `default_ttl_days` and omit `expires_at` — every grant into that tier then expires 30 days out automatically (see [Pricing Configuration: Credit Tiers](/docs/configuration#credit-tiers)). Either way, the grant is only removed from the balance when something sweeps it: lazily, on the next balance-affecting call, if the manager was constructed with `lazy_expiry=True` / `lazyExpiry: true` — otherwise you need a periodic `sweep_expired_credits()` job. See [`lazy_expiry` vs. periodic sweep](#lazy_expiry-vs-periodic-sweep) below.
+
+### 2. Subscription renewal (expire last cycle, grant new)
+
+A recurring subscription grant should replace the previous cycle's leftover balance, not stack on top of it — "unused AI credits don't roll over" is the near-universal product decision here. `grant_subscription_cycle()` is a single call built for exactly this, meant to be invoked directly from your renewal webhook handler.
+
+It grants into a **credit tier** (default tier name: `"subscription"`), and that tier must already be declared in your pricing config's `tiers` section — this is deliberate, not optional: tiers are what let a subscription grant coexist with, and never clobber, credits from other sources (a purchase, a signup gift) in the same balance. Configure it once, alongside any other tiers:
+
+```python
+from bursar.interface.models import TierDefinition
+
+manager.publish_pricing_from_dict(PricingConfigData(
+    models={"_default": "input_tokens * 1"},
+    tiers={
+        "subscription": TierDefinition(name="Subscription Credits", priority=20),
+        # ... your other tiers (e.g. "gifted", "purchased") ...
+    },
+))
+```
+
+```typescript
+await manager.publishPricingFromDict({
+  models: { _default: "input_tokens * 1" },
+  tiers: {
+    subscription: { name: "Subscription Credits", priority: 20 },
+    // ... your other tiers (e.g. "gifted", "purchased") ...
+  },
+});
+```
+
+Then, on every renewal webhook:
+
+```python
+def on_invoice_payment_succeeded(event: dict) -> None:
+    """event is your payment provider's webhook payload, already verified."""
+    manager.grant_subscription_cycle(
+        event["data"]["object"]["customer"],   # your user_id
+        5_000,                                  # your own price -> credits mapping
+        plan_key="pro",
+        idempotency_key=event["id"],            # the provider's webhook event id
+    )
+```
+
+```typescript
+async function onInvoicePaymentSucceeded(event: Record<string, any>): Promise<void> {
+  // event is your payment provider's webhook payload, already verified.
+  await manager.grantSubscriptionCycle(event.data.object.customer, 5000, {
+    planKey: "pro",
+    idempotencyKey: event.id, // the provider's webhook event id
+  });
+}
+```
+
+By default (`replace_prior=True` / `replacePrior: true`), the call first expires whatever is left in `tier` from the previous cycle, then grants the new amount — a single call replacing what would otherwise be a manual "expire, then add" sequence (internally this is a couple of sequential store calls, not one atomic transaction, but it's idempotent end-to-end: a redelivered webhook replays the original grant and skips the replace-prior step, rather than expiring or granting a second time). A `credits.cycle_renewed` event is emitted on success. If you also pass `plan_key` / `planKey`, it assigns that plan via `set_user_plan()` / `setUserPlan()` as part of the same call — useful when the renewal should also (re-)anchor an `"anniversary"`-style allowance window (see scenario 3) to the actual renewal date.
+
+### 3. Yearly subscription, monthly reset
+
+This is the scenario that's easy to over-engineer. A customer pays once a year, but the product should still feel like a monthly quota. **Do not** model this as a granted balance that you top up every month with a scheduler — reuse the allowance engine that already exists for exactly this shape (Notebook 04):
+
+```python
+from bursar.interface.models import PlanDefinition, PricingConfigData
+
+manager.publish_pricing_from_dict(PricingConfigData(
+    models={"_default": "input_tokens * 1"},
+    plans={
+        "pro-annual": PlanDefinition(
+            id="pro-annual", name="Pro (Annual)",
+            free_allowance=50_000,
+            allowance_period="calendar_month",   # or "anniversary" — see below
+        ),
+    },
+))
+
+# Called ONCE, when the yearly subscription webhook fires (signup or renewal).
+manager.set_user_plan(user_id, "pro-annual")
+```
+
+```typescript
+await manager.publishPricingFromDict({
+  models: { _default: "input_tokens * 1" },
+  plans: {
+    "pro-annual": {
+      id: "pro-annual", name: "Pro (Annual)",
+      freeAllowance: 50000,
+      allowancePeriod: "calendar_month", // or "anniversary" — see below
+    },
+  },
+});
+
+// Called ONCE, when the yearly subscription webhook fires (signup or renewal).
+await manager.setUserPlan(userId, "pro-annual");
+```
+
+From that single call onward, every `check_allowance()` / `checkAllowance()` (and every `deduct()`/`settle()`/`reserve()` that consumes the allowance) resolves the correct monthly window on its own, forever, with zero additional code — `resolve_allowance_window` is lazy-on-read, exactly like the lease-TTL and (optionally) credit-expiry mechanisms below. Use `allowance_period: "anniversary"` instead of the default `"calendar_month"` if you want the monthly reset to land on the day-of-month the subscription actually started, rather than the 1st of every calendar month (see [`allowance_period`](/docs/configuration#allowance_period)). There is nothing to schedule, and nothing to re-run when the yearly renewal webhook fires again next year — the plan assignment doesn't need to change unless the plan itself changes.
+
+## Decision table
+
+| You want... | Use |
+|---|---|
+| A quota that resets on a schedule, with no rollover | An **allowance** (`free_allowance` + `allowance_period` on a `PlanDefinition`, assigned via `set_user_plan()`) |
+| A "use-it-or-lose-it" balance granted on an event (signup, renewal) | An **expiring tier** + `add_credits()` (one-off) or `grant_subscription_cycle()` (recurring, idempotent, auto-replaces the prior cycle) |
+| A permanent purchase that should never disappear | A plain **non-expiring tier** (or the default tier, if you aren't using tiers) + `add_credits()` |
+
+If you're unsure which row applies: ask whether unused credits should carry over to the next period. If yes, it isn't a subscription cycle grant — it's a purchase (non-expiring tier). If no, and the cadence is "so much per month regardless of when you signed up," it's an allowance. If no, and it's specifically tied to a one-off provider event with an amount that isn't a flat recurring schedule, it's an expiring-tier grant.
+
+## Feature call limits
+
+Everything above shapes **credits** — a monetary quantity. Sometimes what a plan actually needs to bound is **invocation count** instead: "Free users get at most 5 background removals a month," independent of how many credits any single background-removal call costs. That's a distinct axis from allowances, spend caps, and boolean feature flags, and bursar has a distinct primitive for it: `feature_limits` (see [Pricing Configuration: `feature_limits`](/docs/configuration#feature_limits)).
+
+| Mechanism | Bounds | Typical reset | Use it when... |
+|---|---|---|---|
+| `features` (boolean/value) | Whether a feature exists at all | Never — it's an entitlement, not a counter | "Pro users can use the AI Chat feature; Free users can't." |
+| `free_allowance` | A pool of **credits**, shared across every operation | Per `allowance_period` (`calendar_month` / `rolling_30d` / `anniversary`) | "Every plan gets so many free credits a month." |
+| Spend caps | Total **credits spent**, optionally per model | Daily or monthly | "No user spends more than $X worth of credits per day, regardless of plan." |
+| `feature_limits` | **Invocation count** of one named feature | Per `period` (`daily` / `weekly` / `monthly` / `yearly`), calendar-aligned | "Free users get at most 5 background removals a month" — regardless of what each removal costs. |
+
+These aren't mutually exclusive — a single feature is commonly gated by more than one at once: `background_removal: true` in `features` (entitled) plus `feature_limits.background_removal` (rate-limited) on the same plan.
+
+### Wiring it up
+
+Name the feature via `feature=` on whichever charge path you use. On the immediate-charge path, a `deny` limit raises `FeatureLimitReachedError` and charges nothing:
+
+```python
+from bursar import FeatureLimitReachedError
+
+try:
+    result = manager.deduct(
+        user_id="user_abc",
+        metrics=UsageMetrics(fixed_job="background_removal"),
+        feature="background_removal",
+    )
+except FeatureLimitReachedError:
+    # action="deny" and max_calls reached for this period — nothing was charged.
+    ...
+```
+
+The lease path takes the same `feature=` kwarg on both `reserve()` and `settle()` — re-supply it at settle exactly as you already re-supply `model` for per-model spend-cap accuracy:
+
+```python
+lease = manager.reserve("user_abc", Decimal("2"), feature="background_removal")
+# ... do the work ...
+result = manager.settle("user_abc", lease.lease_id, Decimal("2"), feature="background_removal")
+```
+
+```typescript
+const lease = await manager.reserve("user_abc", new Decimal(2), { feature: "background_removal" });
+// ... do the work ...
+const result = await manager.settle("user_abc", lease.leaseId, new Decimal(2), { feature: "background_removal" });
+```
+
+`reserve()`/`create_lease` only ever enforce `deny` at admission (mirroring how admission only ever enforces `deny` spend caps) — `warn`/`notify` are checked on the charge/settle paths instead, where they set a non-blocking signal rather than raise:
+
+```python
+emitter.on("credits.feature_limit_warning", lambda e: alert_ops(e.user_id, e.data))
+```
+
+```typescript
+emitter.on("credits.feature_limit_warning", (e) => alertOps(e.userId, e.data));
+```
+
+For an advisory, non-blocking read — e.g. to render "3 of 5 background removals used this month" in a UI — call `manager.check_feature_limit(user_id, feature)` / `manager.checkFeatureLimit(userId, feature)`. Like `check_allowance()`, it is never the admission gate itself; the atomic check-and-increment inside `deduct`/`reserve` is.
+
+## Idempotency: webhooks are at-least-once
+
+Every mainstream payment provider documents webhook delivery as **at-least-once**, not exactly-once — a timeout, a 5xx, or an ambiguous response on your end can cause the same event to be redelivered, sometimes minutes or hours later. If your handler blindly calls `add_credits()` / `grant_subscription_cycle()` again, the user gets billed for AI usage they never had covered — a double grant, silently, in a system that's supposed to be strict about money.
+
+The fix is always the same: pass the provider's own webhook event id as `idempotency_key` / `idempotencyKey`.
+
+```python
+manager.grant_subscription_cycle(
+    user_id, 5_000,
+    plan_key="pro",
+    idempotency_key=event["id"],   # <-- redelivery-safe
+)
+```
+
+A redelivered event with a previously-seen `idempotency_key` for that user returns the original result instead of granting again — the second (and third, and Nth) delivery of the same event is a safe no-op. This applies equally to `add_credits()` for one-off signup-bonus grants if your signup flow is itself webhook-driven (e.g. a payment-provider "customer created" event) rather than triggered by your own application code directly.
+
+## `lazy_expiry` vs. periodic sweep
+
+Two ways to make an expiring grant (signup bonus, gifted tier, etc.) actually leave the balance once `expires_at` passes:
+
+- **`lazy_expiry=True`** (Python) / **`lazyExpiry: true`** (JS) on the `CreditManager` constructor makes expiry lazy-on-read, the same model allowance windows and lease TTLs already use: any balance-affecting call (`get_balance`, `deduct`, `add_credits`, …) that touches a user with an expired grant reaps it first, with no cron job anywhere. This guarantees correctness for **active** users — the moment they do anything, their balance is accurate.
+- **A periodic `sweep_expired_credits()`** is still worth running even with `lazy_expiry=True`, for two reasons: (1) a **dormant** user who never makes another call never triggers the lazy check, so their expired grant sits stale in storage (harmless for their own balance accuracy, but it means analytics/exports that read raw transaction rows won't reflect it, and `get_credit_tiers()`-style aggregations before a lazy touch may over-report); (2) the `credits.expired` event only fires when a sweep (lazy or explicit) actually removes something — if you rely on that event for alerting or reconciliation, a dormant account's expiry will only ever be observed by the periodic sweep, never by lazy expiry, because lazy expiry only touches users who are actively transacting.
+
+```python
+manager = CreditManager(store=store, lazy_expiry=True)
+```
+
+```typescript
+const manager = new CreditManager(store, null, null, { lazyExpiry: true });
+```
+
+In short: turn on `lazy_expiry` for correctness with zero cron, but keep a periodic sweep (hourly or daily, per Notebook 05) for cleanup and for the `credits.expired` event on accounts that have gone quiet.
+
+## Staying payment-provider-agnostic
+
+bursar deliberately has no Stripe (or any provider) SDK dependency and does not parse webhook payloads — see [Architecture: Scope & boundaries](/docs/architecture). Every snippet on this page treats the webhook payload as an already-verified plain object; signature verification, currency-to-credits conversion, and routing by event type are all your application's responsibility.
+
+The same boundary applies going the other direction. `grant_subscription_cycle()` emits `credits.cycle_renewed`, and expiry emits `credits.expired`, through the manager's `CreditEventEmitter` — but that emitter is **in-process and synchronous only**, not a durable message bus (see [Architecture](/docs/architecture)). If you need these events to reliably reach a downstream system — updating a billing dashboard, triggering a dunning email, writing to your own audit log — bridge them yourself from an event handler into whatever durable mechanism you already use (a queue, an outbox table, your own webhook fan-out):
+
+```python
+from bursar.events import CreditEventEmitter
+
+emitter = CreditEventEmitter()
+emitter.on("credits.cycle_renewed", lambda event: my_queue.publish("billing.cycle_renewed", event))
+emitter.on("credits.expired", lambda event: my_queue.publish("billing.credits_expired", event))
+
+manager = CreditManager(store=store, emitter=emitter, lazy_expiry=True)
+```
+
+```typescript
+import { CreditEventEmitter } from "@zonastery/bursar";
+
+const emitter = new CreditEventEmitter();
+emitter.on("credits.cycle_renewed", (event) => myQueue.publish("billing.cycle_renewed", event));
+emitter.on("credits.expired", (event) => myQueue.publish("billing.credits_expired", event));
+
+const manager = new CreditManager(store, null, emitter, { lazyExpiry: true });
+```
+
+A handler that throws is isolated and never breaks the underlying credit operation — but it also means a handler failure is silent unless you log it yourself. Durable delivery (retries, at-least-once guarantees to your queue) is on you, exactly as it is on the payment-provider side of this same integration.
+
+## See also
+
+- [Architecture](/docs/architecture) — the full non-goals list and event model
+- [Pricing Configuration](/docs/configuration#credit-tiers) — `TierDefinition` fields (`priority`, `expires`, `default_ttl_days`, `allow_overdraft`, `is_default`)
+- [Pricing Configuration: `allowance_period`](/docs/configuration#allowance_period) — `calendar_month` / `rolling_30d` / `anniversary`
+- [Pricing Configuration: `feature_limits`](/docs/configuration#feature_limits) — `FeatureLimit` fields (`max_calls`, `period`, `action`)
+- [Notebook 04: Plans and Allowances](/docs/notebooks/plans_and_allowances)
+- [Notebook 05: Credit Expiry](/docs/notebooks/credit_expiry)
+- [Notebook 13: Credit Tiers](/docs/notebooks/credit_tiers)
+- [Notebook 14: Subscription Billing](/docs/notebooks/subscription_billing) — a runnable-style walkthrough of every scenario on this page

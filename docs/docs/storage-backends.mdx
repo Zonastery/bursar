@@ -1,0 +1,152 @@
+# Storage Backends
+
+bursar abstracts storage behind the `CreditStore` interface. All three built-in stores implement exactly the same interface, so you can swap between them — for example, use `MemoryStore` in tests and `HttpxSupabaseStore` in production — without changing any calling code.
+
+## Comparison
+
+| Store | Dependencies | Persistent | Use case |
+|-------|-------------|------------|----------|
+| `MemoryStore` | None | No — lost on process exit | Unit tests, local dev, CI |
+| `HttpxSupabaseStore` | `httpx` (Python) / native `fetch` (JS) | Yes | Production (Supabase hosted) |
+| `PostgresStore` | `psycopg2` (Python) / `pg` (JS) | Yes | Production (self-hosted PostgreSQL) |
+
+`MemoryStore` is not persistent. All data is lost when the process exits. Do not use it in production.
+
+## CreditStore Interface
+
+Every store implements `CreditStore`. All money arguments and return fields are exact decimals (`decimal.Decimal` in Python, `Decimal` from `decimal.js` in JavaScript; stored as `NUMERIC(18,4)` in Postgres). The JavaScript interface uses camelCase and adds `listUsageEvents` alongside `listUserTransactions`.
+
+| Category | Methods |
+|----------|---------|
+| Balances | `get_balance`, `add_credits`, `deduct_with_allowance`, `get_credit_tiers` |
+| Leases | `create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available` |
+| Pricing | `get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing` |
+| Plans | `get_user_plan`, `check_feature`, `set_user_plan`, `check_allowance`, `increment_usage_window` |
+| Spend caps | `check_spend_cap` |
+| Refunds | `refund_credits` |
+| Expiry | `sweep_expired_credits` |
+| Analytics *(optional)* | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions` |
+| Teams *(optional)* | `create_team`, `get_team_balance`, `add_team_member`, `get_team_members`, `deduct_team` |
+| Setup | `setup` |
+
+`deduct_with_allowance` is the canonical atomic "calculate-then-charge" entry point — allowance, spend cap, balance floor, and debit all commit (or roll back) together in one transaction.
+
+Rows marked *(optional)* have default implementations that raise `CapabilityNotSupportedError` (exported from both SDKs) unless a custom store overrides them — everything else is **core** and required. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full breakdown.
+
+## MemoryStore
+
+Zero dependencies. Thread-safe (Python uses a reentrant lock; JavaScript relies on single-threaded execution with no awaits between read and write).
+
+```python
+from bursar.interface.memory import MemoryStore
+
+store = MemoryStore()
+# No setup() call needed
+```
+
+```typescript
+import { MemoryStore } from "@zonastery/bursar";
+
+const store = new MemoryStore();
+// No setup() call needed
+```
+
+Use it in tests by passing it directly to `CreditManager`. Because it is not persistent, each test process starts from a clean slate.
+
+## HttpxSupabaseStore
+
+Backed by Supabase RPCs via HTTP. The Python implementation uses `httpx`; the JavaScript implementation uses the built-in `fetch` API. Neither depends on the `supabase-py` or `supabase-js` client libraries.
+
+**Requirements:** Supabase project URL and service role key. The service role key has full database access — do not expose it to clients.
+
+```python
+from bursar.interface.supabase import HttpxSupabaseStore
+
+store = HttpxSupabaseStore(
+    url="https://<project>.supabase.co",
+    key="<service_role_key>",
+)
+# store is also a context manager: `with HttpxSupabaseStore(...) as store:`
+```
+
+```typescript
+import { HttpxSupabaseStore } from "@zonastery/bursar";
+
+const store = new HttpxSupabaseStore(
+  "https://<project>.supabase.co",
+  "<service_role_key>",
+);
+```
+
+**First-time setup (run once):** `HttpxSupabaseStore.setup()` cannot run migrations over the REST API. Apply the bundled SQL migrations via the Python CLI or directly against your database:
+
+```bash
+DATABASE_URL="postgresql://..." bursar migrate
+```
+
+Or from Python:
+
+```python
+import os
+from bursar.interface.supabase import run_migrations
+result = run_migrations(os.environ["DATABASE_URL"])
+print(result.tables_created, result.errors)
+```
+
+## PostgresStore
+
+Backed by a direct Postgres connection. The Python implementation uses `psycopg2`; the JavaScript implementation uses the `pg` package (lazy-loaded on first query, so the package is optional until the store is actually used).
+
+**Requirements:** A Postgres connection string (any Postgres database that has the bursar schema installed).
+
+```python
+from bursar.interface.postgres import PostgresStore
+
+store = PostgresStore(database_url="postgresql://user:pass@host:5432/db")
+```
+
+```typescript
+import { PostgresStore } from "@zonastery/bursar";
+
+const store = new PostgresStore("postgresql://user:pass@host:5432/db");
+// Optional: inject a custom pool constructor for testing
+// const store = new PostgresStore(url, MockPool);
+
+// Close the pool when done
+await store.close();
+```
+
+**Schema migration:** `PostgresStore.setup()` runs the bundled SQL migrations (Python). The JavaScript `PostgresStore.setup()` throws — run migrations via the Python CLI first, then point the JS store at the same database.
+
+```python
+store = PostgresStore(database_url=os.environ["DATABASE_URL"])
+result = store.setup()
+print(result.tables_created, result.errors)
+```
+
+Or via CLI:
+
+```bash
+DATABASE_URL="postgresql://user:pass@host:5432/db" bursar migrate
+```
+
+The connection string is read from `DATABASE_URL` by the CLI; it is never passed on the command line.
+
+## SQL Migrations
+
+The bundled SQL files create the required schema — 10 files, one per feature domain:
+
+| File | Creates |
+|------|---------|
+| `001_core_schema.sql` | `user_credits`, `credit_transactions`, `credit_reservations` tables, RLS policies, signup bonus trigger |
+| `002_credit_rpcs.sql` | Core RPCs: `credits_add`, `get_credits_balance` (user-scoped, atomic idempotency) |
+| `003_pricing_config.sql` | `credit_pricing_config` table, get/set/list/activate RPCs |
+| `004_plans.sql` | `credit_plans`, `credit_usage_window` tables, plan + allowance-window RPCs |
+| `005_spend_caps.sql` | `credit_spend_caps` table, `check_spend_cap` RPC |
+| `006_refunds_and_expiry.sql` | `refund_credits` (duplicate detection, partial refunds, tier LIFO restoration) and `expire_credits` (dry-run support; marks swept grants so it never double-sweeps) |
+| `007_analytics.sql` | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions`, `list_usage_events` |
+| `008_teams.sql` | `credit_teams`, `credit_team_members` tables, team RPCs |
+| `009_deduct_and_leases.sql` | `deduct_with_allowance` (atomic allowance + cap + floor + tier-aware debit) and the full lease lifecycle: `create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available_credits`, `expire_due_leases` |
+| `010_credit_tiers.sql` | `credit_tiers` config table, `user_credit_tiers` per-user-per-tier balances, `sync_tiers_from_config`, `get_user_credit_tiers` |
+
+All DDL is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE`, plus dynamic `DROP FUNCTION`-by-name guards for RPCs whose signature changed across releases). Migrations return a `SetupResult` with `tables_created` (list of applied files), `rpcs_created`, and `errors`. Check `result.success` (true when `errors` is empty) before going further.

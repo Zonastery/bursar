@@ -1,0 +1,306 @@
+# CreditManager — JavaScript
+
+Orchestrates the credit lifecycle. The hot path (`deduct()`) calculates the cost and charges it in **one atomic store transaction** (`deductWithAllowance`): allowance, spend cap, balance floor and debit all commit or roll back together. All money is `Decimal` (from `decimal.js`).
+
+## Constructor
+
+```typescript
+import { CreditManager } from "@zonastery/bursar";
+import { MemoryStore } from "@zonastery/bursar/node"; // Node.js only; use PostgresStore / HttpxSupabaseStore in production
+
+const store = new MemoryStore();
+const manager = new CreditManager(store);
+// Full signature:
+// new CreditManager(store, engine?, emitter?, options?)
+```
+
+### Constructor Options (`CreditManagerOptions`)
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `policy` | `"strict_prepaid" \| "overdraft"` | `"strict_prepaid"` | Financial-safety preset for planless users. `strict_prepaid` keeps balance ≥ floor; `overdraft` permits negative balance down to `overdraftFloor`. |
+| `overdraftFloor` | `Decimal \| number \| null` | `null` | Negative balance floor for the `overdraft` preset. |
+| `maxConcurrent` | `number \| null` | `null` | Default max simultaneously-active leases per operation type. |
+| `lowBalance` | `LowBalanceConfig \| null` | `null` | Low-balance alerting config: `{ thresholds, onTrigger }`. `thresholds` is a list (sorted internally high → low; supports single or multi-level) — each fires once per descent (edge-triggered) and re-arms after a top-up climbs back above it. `onTrigger` is a non-blocking hook invoked on each `credits.low_balance`; errors are swallowed — never breaks the deduction. When omitted, falls back to a single threshold of `minBalance * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#min_balance-optional) — so alerting is effectively opt-in unless you set `minBalance` or `lowBalance` explicitly). |
+| `defaultTtlSeconds` | `number` | `600` | Default lease TTL for `reserve()` / `runBilled()`. |
+
+```typescript
+import Decimal from "decimal.js";
+import { CreditManager, CreditEventEmitter } from "@zonastery/bursar";
+
+const emitter = new CreditEventEmitter();
+const manager = new CreditManager(store, engine, emitter, {
+  policy: "strict_prepaid",
+  lowBalance: {
+    thresholds: [new Decimal(50), new Decimal(20), new Decimal(10)],
+    onTrigger: (event) => triggerReload(event),
+  },
+  defaultTtlSeconds: 600,
+});
+```
+
+## Setup
+
+### `setup(): Promise<SetupResult>`
+
+Run bundled SQL migrations through the store. Call once on startup when using a database store.
+
+```typescript
+const result = await manager.setup();
+// result.tablesCreated, result.rpcsCreated, result.errors, result.success
+```
+
+## Pricing
+
+### `publishPricingFromDict(data: PricingConfigData | Record<string, unknown>): Promise<void>`
+
+Build a `PricingEngine` from a dict and persist it to the store in one call.
+
+```typescript
+await manager.publishPricingFromDict({
+  models: { "_default": "input_tokens * (0.001 / 1000)" },
+});
+```
+
+### `loadPricingFromStore(): Promise<void>`
+
+Load the active pricing config from the store and build the engine. Throws `PricingNotLoadedError` if no active config exists.
+
+### `publishPricing(config: PricingConfigData, label?: string | null): Promise<void>`
+
+Publish a typed `PricingConfigData` and update the in-memory engine. Awaits the store write so a persistence failure surfaces to the caller instead of becoming an unhandled rejection. Optional `label` tags the stored config version.
+
+## Balance Operations
+
+### `addCredits(userId: string, amount: Decimal | number, options?: AddCreditsOptions): Promise<AddCreditsResult>`
+
+Add credits to a user's account. `options` is `{ type?, metadata?, expiresAt?, tier? }` — `type` defaults to `"adjustment"`; `expiresAt` creates time-bounded credits swept by `sweepExpiredCredits()`. `tier` selects which configured [credit tier](/docs/configuration#credit-tiers) to grant into: an explicit `tier` must match a configured tier key, else throws with `tier_not_found`; omitted resolves to the tier with `isDefault: true`, or throws `tier_required` if none is marked default; when no `tiers` are configured, `tier` must be `null`/omitted or `"default"`. `expiresAt` is reconciled against the resolved tier's `expires` flag (non-expiring tier + `expiresAt` throws `tier_does_not_expire`; expiring tier + omitted `expiresAt` falls back to `defaultTtlDays`, or throws `expires_at_required`). Returns `{ transactionId, userId, amount, newBalance, lifetimePurchased, tier }` (money as `Decimal`). Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
+
+```typescript
+await manager.addCredits("user-1", 100, {
+  type: "purchase",
+  expiresAt: new Date("2025-01-01"),
+});
+```
+
+This replaces the old positional signature (`addCredits(userId, amount, type, metadata, expiresAt)`), which required threading `null` through unused positional params to reach `expiresAt`.
+
+### `getBalance(userId: string): Promise<BalanceResult>`
+
+Returns `{ userId, balance, lifetimePurchased }` (money as `Decimal`).
+
+### `getCreditTiers(userId: string): Promise<TierBalancesResult>`
+
+Returns the per-tier balance breakdown for a user: `{ userId, tiers: TierBalance[], totalBalance }` — `tiers` sorted by `priority` ascending, `totalBalance` equal to `BalanceResult.balance`. Each `TierBalance` is `{ tierKey, name, priority, expires, balance }`. When no `tiers` are configured, returns a single synthetic `"default"` entry so the shape is uniform either way.
+
+### `deduct(userId: string, metrics: UsageMetrics, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<DeductionResult>`
+
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deductWithAllowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Resolves to a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowanceConsumed`, `balanceAfter`, `idempotent`, `capWarning`, and `tierBreakdown` (`Record<string, Decimal> | null` — the exact per-tier split of the debit, present when tiers are configured). Throws `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap). A zero/negative cost short-circuits to a zero-amount result.
+
+### `deductFixed(userId: string, jobName: string, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<DeductionResult>`
+
+Deduct a fixed cost (configured in the pricing `fixed` section, which may be fractional). Throws `ConfigError` for an unknown/unconfigured `jobName` — never silently charges 0. Fixed-cost jobs do not consume free inference allowance (this has always been `deductFixed`'s behavior in JS and is unchanged).
+
+### `deductTeam(teamId: string, userId: string, metrics: UsageMetrics, idempotencyKey?: string | null, metadata?: CreditMetadata | null): Promise<TeamDeductionResult>`
+
+Price `metrics` via the engine and debit the team's shared balance pool. `idempotencyKey` prevents double-charging on retries. Returns `{ transactionId, teamId, userId, amount, teamBalanceAfter }` (money as `Decimal`). Throws `PricingNotLoadedError` if no engine is loaded.
+
+## Plan Management
+
+Plans provide free monthly allowances consumed before balance deductions, plus per-plan financial-safety policy (`defaultBillingMode`, `perOperation`, `maxConcurrent`, `overdraftFloor`).
+
+### `setUserPlan(userId: string, planKey: string): Promise<void>`
+
+Assign a plan to a user. Awaits the store write and emits `credits.plan_changed` on success.
+
+### `getUserPlan(userId: string): Promise<GetUserPlanResult>`
+
+Returns `{ userId, planId, planName, freeAllowance, features, defaultBillingMode?, perOperation?, maxConcurrent?, overdraftFloor? }`.
+
+### `checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>`
+
+Check whether a user's plan has a specific feature entitlement. Returns `{ userId, feature, value, hasFeature }`. `hasFeature` is `false` only when the value is `null`/`undefined`/`false`/absent — numeric `0` and `""` are considered present.
+
+`store.checkAllowance(userId)` is a store-only method (not on the manager) returning remaining free allowance for the current billing period: `{ planId, allowanceRemaining, periodStart, periodEnd }`.
+
+```typescript
+await manager.publishPricingFromDict({
+  models: { "_default": "input_tokens * 1" },
+  plans: { free: { id: "free", name: "Free", freeAllowance: 100 } },
+});
+await manager.setUserPlan("user-1", "free");
+await manager.addCredits("user-1", 10);
+const result = await manager.deduct("user-1", { inputTokens: 5 });
+// result.amount === 0, balance unchanged — fully covered by allowance
+```
+
+## Refunds
+
+### `refundCredits(transactionId: string, amount?: Decimal | number, reason?: string, metadata?: CreditMetadata | null): Promise<RefundResult>`
+
+Refund a previous deduction. Omit `amount` for a full refund; pass a partial `Decimal` or `number` for a partial refund. Returns `{ refundTransactionId, originalTransactionId, userId, amount, newBalance, error?, tierBreakdown }` (money as `Decimal`; `tierBreakdown` is `Record<string, Decimal> | null`, restoring tiers LIFO — highest-priority-number tier, the last one drained, first). On a business failure (`over_refund` / `already_refunded` / `not_found`) `result.error` is set, `credits.refund_failed` is emitted, and a `RefundError` is thrown — `credits.refunded` is never emitted on failure.
+
+Refunding into an expiring tier restores only the tier's aggregate balance; it does not re-attach the original grant's exact expiry date.
+
+```typescript
+const result = await manager.refundCredits(txId);
+// result.error is null; result.amount and result.newBalance are Decimals
+console.log(result.amount.toString(), result.newBalance.toString());
+```
+
+## Lease Lifecycle / Financial Safety
+
+The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the conceptual guide. Lease-related constructor options (`policy`, `overdraftFloor`, `maxConcurrent`, `lowBalance`, `defaultTtlSeconds`) are documented in the [Constructor](#constructor) section above.
+
+### `reserve(userId: string, metricsOrAmount: UsageMetrics | Decimal | number, options?: ReserveOptions): Promise<LeaseResult>`
+
+Atomically acquire a lease — the only admission control. `ReserveOptions`: `{ operationType?, billingMode?, requiredFeature?, ttl?, metadata? }`. Returns `{ leaseId, userId, amount, available, reservedTotal, billingMode, expiresAt }` (money as `Decimal`). Emits `credits.reserved`. Throws `InsufficientCreditsError`, `ConcurrencyLimitError`, `CapReachedError`, or `FeatureNotEntitledError`.
+
+### `settle(userId: string, leaseId: string, metricsOrAmount: UsageMetrics | Decimal | number, options?: SettleOptions): Promise<DeductionResult>`
+
+Charge the **actual** cost against a lease and finalize it. **De-clamped**: bills the full actual cost even if it exceeds the hold (overdraft). Never blocks on floor/cap at settle. `SettleOptions`: `{ idempotencyKey?, metadata? }`. Returns `DeductionResult`. Throws `LeaseExpiredError` / `LeaseNotFoundError`. Emits `credits.deducted`, then `credits.low_balance` / `credits.overdraft` as applicable. Idempotent on `idempotencyKey`.
+
+### `release(userId: string, leaseId: string): Promise<ReleaseResult>`
+
+Release a lease without charging (work failed/aborted). **Idempotent**: returns `{ leaseId, userId, released, reason }` where `reason` is one of `released` / `already_released` / `already_settled` / `not_found` — never throws on a missing or finalized lease. Emits `credits.reservation_released`.
+
+### `renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseResult>`
+
+Extend a lease's TTL for long batch/agentic jobs. Returns `LeaseResult`; throws `LeaseExpiredError` if the TTL already elapsed.
+
+### `canAfford(userId: string, metricsOrAmount: UsageMetrics | Decimal | number, options?: CanAffordOptions): Promise<CanAffordResult>`
+
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. `CanAffordOptions`: `{ requiredFeature?, billingMode?, operationType? }`. Returns `{ affordable, spendable, worstCase, reason }` (money as `Decimal`).
+
+`spendable` is the user's **effective spending power**: `balance − activeHolds + allowanceRemaining`. This is what actually determines whether `reserve()` will admit a given hold — use it to drive UI affordability checks (e.g. enabling a "Send" button). It is distinct from `AvailableResult.available` (see `getAvailable` below), which is cash-only and excludes allowance. (This field was renamed from `available` to `spendable` to remove the confusion with the unrelated `AvailableResult.available`.)
+
+### `getAvailable(userId: string): Promise<AvailableResult>`
+
+Advisory `available = balance − reserved` read (UI only) — **cash only**, excludes any free allowance. Returns `{ userId, balance, reserved, available }` (money as `Decimal`). Contrast with `CanAffordResult.spendable` above, which adds remaining allowance and reflects effective spending power.
+
+### `runBilled<T>(userId: string, options: RunBilledOptions<T>): Promise<{ result: T; deduction: DeductionResult }>`
+
+One-call shortcut wiring `reserve → doWork → settle`. `RunBilledOptions`: `{ estimate, doWork, operationType?, billingMode?, requiredFeature?, idempotencyKey?, ttl? }`. `doWork` must return `Promise<{ result: T; actual: UsageMetrics | Decimal | number }>`. On any exception from `doWork` the lease is auto-released and the error re-thrown.
+
+```typescript
+import Decimal from "decimal.js";
+
+const lease = await manager.reserve("user-1", new Decimal(40), { operationType: "chat" });
+const deduction = await manager.settle("user-1", lease.leaseId, new Decimal(11));
+console.log(deduction.balanceAfter.toString());
+
+// Or one-call shortcut:
+const out = await manager.runBilled("user-1", {
+  estimate: new Decimal(40),
+  doWork: async () => ({ result: await runModel(), actual: new Decimal(11) }),
+});
+console.log(out.deduction.balanceAfter.toString());
+```
+
+## Usage Analytics
+
+Time-windowed aggregation queries. All accept `start` / `end` `Date` range.
+
+| Method | Returns |
+|--------|---------|
+| `spendByUser(start, end)` | `SpendByUserRow[]` — per-user totals |
+| `spendByModel(start, end)` | `SpendByModelRow[]` — per-model spend |
+| `topUsers(limit, start, end)` | `TopUserRow[]` — sorted by spend desc |
+| `dailySpend(start, end)` | `DailySpendRow[]` — bucketed by day |
+| `aggregateStats(start, end)` | `AggregateStats` — total, active users, avg daily, top model, top user |
+| `listUserTransactions(userId, options?)` | `PaginatedTransactions` — all transaction types; `options` accepts `{ types?, fromDate?, toDate?, limit?, offset? }` |
+| `listUsageEvents(userId, options?)` | `PaginatedTransactions` — only `usage` / `team_usage` events; `options` is `{ fromDate?, toDate?, limit?, offset? }` (no `types` filter) |
+
+Both return `{ items: UserTransactionRow[], total: number }`. `listUsageEvents` is a focused view of AI spend; `listUserTransactions` covers the full ledger (purchases, adjustments, refunds, etc.) and can be filtered by `types`.
+
+## Credit Expiry
+
+### `sweepExpiredCredits(dryRun?: boolean): Promise<SweepResult>`
+
+Sweep expired credits from all users' balances. `dryRun=true` reports what would be expired without modifying any balances. Returns `{ expiredCount, expiredAmount, dryRun, expiredByTier }` (`expiredAmount` is `Decimal`; `expiredByTier` is `Record<string, Decimal> | null`, re-scoping the sweep from per-user to per-`(user, tier)` — a tier's `expires` flag is only consulted at `addCredits` time, so a grant's fate is fixed regardless of later config changes). Emits `credits.expired` (only on non-dry-run with `expiredCount > 0`).
+
+```typescript
+await manager.addCredits("user-1", 100, { type: "purchase", expiresAt: new Date("2024-01-01") });
+const result = await manager.sweepExpiredCredits();
+// result.expiredCount === 1, result.expiredAmount === 100
+const dryRun = await manager.sweepExpiredCredits(true);
+// dryRun === true, balance unchanged
+```
+
+## Spend Caps
+
+Per-user daily/monthly spend limits configured at the store level.
+
+```typescript
+import Decimal from "decimal.js";
+
+// MemoryStore only — use store-level SQL in production
+store.setSpendCap({
+  userId: "user-1",
+  type: "daily",
+  limit: new Decimal(50),
+  action: "deny",   // "deny" | "warn" | "notify"
+  model: "gpt-4",   // optional: per-model cap
+});
+```
+
+- **deny** — throws `CapReachedError` when exceeded (the deduction aborts atomically; no allowance is consumed)
+- **warn** — allows the deduction; the store returns `capWarning="warn"` and the manager emits `credits.cap_warning`
+- **notify** — allows the deduction; emits `credits.cap_warning` with `action="notify"`
+
+The cap is enforced **inside** the atomic `deductWithAllowance` transaction (accumulating prior spend in the same window), not as a separate racy pre-check.
+
+## Team / Shared Balances
+
+Teams have their own credit pool separate from individual user balances.
+
+| Method | Description |
+|--------|-------------|
+| `store.createTeam(name, initialBalance?)` | Create team with shared pool |
+| `store.getTeamBalance(teamId)` | Fetch team balance + member count |
+| `store.addTeamMember(teamId, userId, role?, spendCap?)` | Add member with optional per-user cap |
+| `store.getTeamMembers(teamId)` | List team members with spend + caps |
+| `store.deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` | Deduct a raw `Decimal` amount from team pool (user-attributed) |
+| `manager.deductTeam(teamId, userId, metrics, idempotencyKey?, metadata?)` | Price via engine and debit team pool; idempotency-keyed |
+
+`deductTeam` on the manager accepts `idempotencyKey` before `metadata` so retried calls return the original result instead of double-charging the shared pool.
+
+```typescript
+import Decimal from "decimal.js";
+
+const team = await store.createTeam("Engineering", new Decimal(1000));
+await store.addTeamMember(team.teamId, "user-1", "admin", new Decimal(500));
+const result = await manager.deductTeam(team.teamId, "user-1", { inputTokens: 100 });
+// result.amount and result.teamBalanceAfter are Decimals (e.g. "-100", "900")
+```
+
+## Events
+
+Optional pub/sub event system for credit lifecycle events.
+
+```typescript
+import { CreditEventEmitter } from "@zonastery/bursar";
+
+const emitter = new CreditEventEmitter();
+const manager = new CreditManager(store, null, emitter);
+
+emitter.on("credits.deducted", (event) => {
+  console.log(`${event.userId} spent ${event.data?.amount} credits`);
+});
+
+// Available events:
+// "credits.deducted" | "credits.deduct_failed" | "credits.added"
+// | "credits.refunded" | "credits.refund_failed" | "credits.expired"
+// | "credits.cap_reached" | "credits.cap_warning"
+// | "credits.low_balance" | "credits.plan_changed"
+// | "credits.reserved" | "credits.reservation_released"
+// | "credits.lease_expired" | "credits.overdraft"
+```
+
+Success events fire only after the operation completes; failures fire dedicated `*_failed` events. Handler exceptions are isolated and never break the deduction.
+
+## Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `pricingEngine` | `PricingEngine \| null` | Internal engine (null until loaded) |

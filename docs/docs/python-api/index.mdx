@@ -1,0 +1,109 @@
+---
+sidebar_position: 1
+---
+
+# Python API
+
+bursar for Python is published as the [`bursar`](https://pypi.org/project/bursar/) package on PyPI. Requires Python 3.11+.
+
+## Installation
+
+```bash
+pip install bursar
+
+# With store backends
+pip install "bursar[supabase]"
+pip install "bursar[postgres]"
+pip install "bursar[test]"     # dev + testing
+```
+
+## Core Classes
+
+| Class | Description |
+|-------|-------------|
+| [`PricingEngine`](/docs/python-api/pricing-engine) | Pure calculation layer — evaluates expressions against usage metrics |
+| [`CreditManager`](/docs/python-api/credit-manager) | Orchestrates the credit lifecycle (atomic calculate-then-charge) |
+| [`MemoryStore`](/docs/python-api/stores) | In-memory store for testing |
+| [`HttpxSupabaseStore`](/docs/python-api/stores) | Supabase-backed store (fetch-based) |
+| [`PostgresStore`](/docs/python-api/stores) | Direct PostgreSQL store |
+| [`UsageMetrics`](/docs/python-api/pricing-engine#usagemetrics) | Data class for usage dimensions |
+| [`CostBreakdown`](/docs/python-api/pricing-engine#costbreakdown) | Structured calculation result |
+
+## Errors
+
+All importable from `bursar`:
+
+| Exception | Raised when |
+|-----------|-------------|
+| `CreditError` | Base for all manager-domain errors |
+| `InsufficientCreditsError` | Balance floor would be breached |
+| `CapReachedError` | A `deny` spend cap would be exceeded |
+| `PricingNotLoadedError` | `deduct()` called before pricing is loaded |
+| `ConcurrencyLimitError` | `reserve()` would exceed `max_concurrent` leases |
+| `FeatureNotEntitledError` | Operation requires a plan feature the user lacks |
+| `LeaseExpiredError` | Settling/renewing an elapsed lease |
+| `LeaseNotFoundError` | Lease id is missing, belongs to another user, or was released |
+| `StoreError` | Base for store-level errors (connection, timeout) |
+| `ConfigError` | Invalid pricing config structure or expression |
+| `ExpressionError` | Expression evaluation failure (div by zero, overflow) |
+| `CapabilityNotSupportedError` | An optional `CreditStore` capability (analytics, transaction listing, or teams) was called on a store that didn't override its default implementation |
+
+## Result Types
+
+All result models are importable from `bursar`:
+
+| Model | Returned by |
+|-------|-------------|
+| `BalanceResult` | `get_balance()` |
+| `AddCreditsResult` | `add_credits()` |
+| `DeductionResult` | `deduct()`, `deduct_fixed()`, `settle()` |
+| `LeaseResult` | `reserve()`, `renew()` |
+| `ReleaseResult` | `release()` |
+| `CanAffordResult` | `can_afford()` |
+| `AvailableResult` | `get_available()` |
+| `RefundResult` | `refund_credits()` |
+| `SweepResult` | `sweep_expired_credits()` |
+| `TierBalancesResult` | `get_credit_tiers()` |
+| `SetUserPlanResult` | `set_user_plan()` |
+| `GetUserPlanResult` | `get_user_plan()` |
+| `CheckFeatureResult` | `check_feature()` |
+| `TeamDeductionResult` | `deduct_team()` |
+| `SetupResult` | `setup()` |
+| `SpendByUserRow` | `spend_by_user()` |
+| `SpendByModelRow` | `spend_by_model()` |
+| `TopUserRow` | `top_users()` |
+| `DailySpendRow` | `daily_spend()` |
+| `AggregateStatsRow` | `aggregate_stats()` |
+| `TransactionRow` | `list_user_transactions()` |
+
+## Input / Config Types
+
+| Model | Description |
+|-------|-------------|
+| `PricingConfigData` | Pricing config schema (models, tools, search, cache, fixed, plans) |
+| `PlanDefinition` | Subscription plan definition (allowance, `allowance_period`, features, billing policy) |
+| `OperationPolicy` | Per-operation financial-safety policy (billing mode, floors, concurrency) |
+| `TierDefinition` | [Credit tier](/docs/configuration#credit-tiers) definition (priority, expiry, default/overdraft flags) |
+| `LowBalanceConfig` | `CreditManager(low_balance=...)` config: `thresholds` + `on_trigger` |
+| `CreditMetadata` | Flexible metadata attached to transactions |
+| `SpendCap` | Per-user daily/monthly spend cap configuration |
+
+## Quick Example
+
+```python
+from bursar import CreditManager, UsageMetrics
+from bursar.interface.supabase import HttpxSupabaseStore
+
+store = HttpxSupabaseStore(url="https://project.supabase.co", key="service_role_key")
+manager = CreditManager(store=store)
+manager.load_pricing_from_store()
+
+manager.add_credits("user_abc", 1000)
+
+result = manager.deduct(
+    user_id="user_abc",
+    metrics=UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200),
+    idempotency_key="tx_001",
+)
+print(result.balance_after)  # remaining credits
+```

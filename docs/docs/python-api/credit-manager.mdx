@@ -1,0 +1,321 @@
+# CreditManager — Python
+
+Orchestrates the credit lifecycle. The hot path (`deduct()`) calculates the cost and charges it in **one atomic store transaction** (`deduct_with_allowance`): allowance, spend cap, balance floor and debit all commit or roll back together. All money is `Decimal`.
+
+## Constructor
+
+```python
+CreditManager(
+    store,
+    engine=None,
+    emitter=None,
+    *,
+    policy="strict_prepaid",
+    overdraft_floor=None,
+    max_concurrent=None,
+    low_balance=None,
+    default_ttl_seconds=600,
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `store` | `CreditStore` | required | Store adapter (MemoryStore, HttpxSupabaseStore, PostgresStore, etc.) |
+| `engine` | `PricingEngine \| None` | `None` | Pre-configured pricing engine. If omitted, call `load_pricing_from_store()` or `publish_pricing_from_dict()` before `deduct()`. |
+| `emitter` | `CreditEventEmitter \| None` | `None` | Event emitter for credit lifecycle events. |
+| `policy` | `str` | `"strict_prepaid"` | Financial-safety preset for planless users: `"strict_prepaid"` (floor ≥ 0, zero debt) or `"overdraft"` (admits to a negative floor). |
+| `overdraft_floor` | `Decimal \| None` | `None` | Negative admission floor when `policy="overdraft"`. |
+| `max_concurrent` | `int \| None` | `None` | Default maximum simultaneously-active leases per operation type. |
+| `low_balance` | `LowBalanceConfig \| None` | `None` | Low-balance alerting config: `thresholds` (a list, sorted internally high → low; supports single or multi-level) and `on_trigger` (a non-blocking callback invoked on each `credits.low_balance`). Each threshold is edge-triggered and re-arms only after the balance rises back above it. When `None`, falls back to a single threshold of `min_balance * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#min_balance-optional) — so alerting is effectively opt-in unless you set `min_balance` or `low_balance` explicitly). |
+| `default_ttl_seconds` | `int` | `600` | Default lease TTL for `reserve()` and `run_billed()`. |
+
+```python
+from bursar import CreditManager, LowBalanceConfig
+from decimal import Decimal
+
+manager = CreditManager(
+    store=store,
+    low_balance=LowBalanceConfig(
+        thresholds=[Decimal(100), Decimal(20)],   # multi-level, edge-triggered, high-to-low
+        on_trigger=lambda event: send_alert(event.user_id, event.data["balance"]),
+    ),
+)
+```
+
+```python
+from bursar import CreditManager
+from bursar.interface.memory import MemoryStore
+from decimal import Decimal
+
+store = MemoryStore()
+manager = CreditManager(store=store)
+```
+
+## Schema Setup
+
+### `setup() -> SetupResult`
+
+Run bundled SQL migrations through the store (creates tables, indexes, RPCs). Delegates to `store.setup()`. Idempotent — safe to call on every deploy.
+
+```python
+result = manager.setup()
+assert result.success, result.errors
+```
+
+Returns `SetupResult` with `tables_created`, `rpcs_created`, and `errors`. `result.success` is `True` when `errors` is empty.
+
+## Pricing
+
+### `publish_pricing_from_dict(data)`
+
+Load pricing from a raw `dict` or `PricingConfigData`, build the internal engine, and persist the config to the store via `set_active_pricing`.
+
+```python
+manager.publish_pricing_from_dict({
+    "version": 1,
+    "models": {"_default": "input_tokens * (0.001 / 1000)"},
+})
+```
+
+### `load_pricing_from_store()`
+
+Fetch the active pricing config from the store and build the internal `PricingEngine`. Raises `PricingNotLoadedError` if no active config exists in the store.
+
+### `publish_pricing(config, label=None)`
+
+Publish a `PricingConfigData` object as the active config and rebuild the internal engine. Optional `label` for version tagging.
+
+## Balance Operations
+
+### `add_credits(user_id, amount, tx_type="adjustment", metadata=None, expires_at=None, tier=None) -> AddCreditsResult`
+
+Add credits to a user's account. `amount` is a `Decimal` (or `int`). `tx_type` is the transaction label (e.g. `"purchase"`, `"adjustment"`). `expires_at` sets an expiry datetime for time-bound credits. Emits `credits.added`. Also re-arms any multi-level low-balance thresholds that the new balance rises above.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tier` | `str \| None` | `None` | Which configured [credit tier](/docs/configuration#credit-tiers) to grant into. Resolution: an explicit `tier` must match a configured tier key, else `StoreError("tier_not_found")`; when omitted, resolves to the tier with `is_default=true`, or raises `StoreError("tier_required")` if no tier is marked default. When no `tiers` are configured, `tier` must be `None` or `"default"`. |
+
+`expires_at` is reconciled against the resolved tier's `expires` flag: a non-expiring tier with an explicit `expires_at` raises `StoreError("tier_does_not_expire")`; an expiring tier with `expires_at` omitted falls back to the tier's `default_ttl_days`, or raises `StoreError("expires_at_required")` if that isn't configured either.
+
+Returns `AddCreditsResult` with `transaction_id`, `amount`, `new_balance`, `lifetime_purchased`, `tier`.
+
+### `get_balance(user_id) -> BalanceResult`
+
+Return `BalanceResult` with `balance` and `lifetime_purchased`.
+
+### `get_credit_tiers(user_id) -> TierBalancesResult`
+
+Return the per-tier balance breakdown for a user. `TierBalancesResult` has `user_id`, `tiers: list[TierBalance]` (sorted by `priority` ascending), and `total_balance` (equal to `BalanceResult.balance`). Each `TierBalance` has `tier_key`, `name`, `priority`, `expires`, `balance`. When no `tiers` are configured, returns a single synthetic `"default"` entry so the shape is uniform either way.
+
+### `deduct(user_id, metrics, idempotency_key=None, metadata=None)`
+
+Calculates the cost (`breakdown.total`, exact `Decimal`, no truncation) and charges it in one atomic `deduct_with_allowance` transaction: idempotency check first → consume free allowance → enforce spend caps on the net → balance-floor check → debit. Returns a `DeductionResult` whose `amount` is the **net** charge after allowance, with `allowance_consumed`, `balance_after`, `idempotent`, `cap_warning`, and `tier_breakdown` (`dict[str, Decimal] | None` — the exact per-tier split of the debit, present when tiers are configured). Raises `InsufficientCreditsError` (floor breached) or `CapReachedError` (deny cap) on failure. A zero/negative cost short-circuits to a zero-amount result.
+
+### `deduct_fixed(user_id, job_name, idempotency_key=None, metadata=None, use_allowance=False)`
+
+Deduct a fixed cost (configured in pricing `fixed` section, which may be fractional). Raises `ValueError` for an unknown/unconfigured `job_name` instead of charging 0.
+
+`use_allowance` defaults to `False`: fixed-cost jobs do **not** consume free inference allowance by default, so a batch job doesn't silently eat a user's monthly allowance meant for inference. Pass `use_allowance=True` to opt into the old allowance-first behavior (consume free allowance before the balance, same as `deduct()`).
+
+## Plan Management
+
+Plans provide free monthly allowances consumed before balance deductions.
+
+### `set_user_plan(user_id, plan_key) -> SetUserPlanResult`
+
+Assign a plan to a user. Emits `credits.plan_changed`. `plan_key` must match a plan `id` in the active pricing config (e.g. `"pro"`).
+
+### `get_user_plan(user_id) -> GetUserPlanResult`
+
+Fetch a user's current plan. Returns `GetUserPlanResult` with `plan_id`, `plan_name`, `free_allowance`, `features`, `default_billing_mode`, `per_operation`, `max_concurrent`, and `overdraft_floor`.
+
+### `check_feature(user_id, feature) -> CheckFeatureResult`
+
+Check whether a user's plan has a specific feature entitlement. Returns `CheckFeatureResult` with `.has_feature` (bool) and `.value`. Does **not** raise `FeatureNotEntitledError` — inspect `.has_feature` to gate functionality. (`reserve()` raises `FeatureNotEntitledError` when `required_feature` is set and the user lacks it.)
+
+Feature presence rules: `absent`/`None`/`False` → `has_feature=False`; `True`, any numeric (including `0`), any string (including `""`) → `has_feature=True`.
+
+### `store.check_allowance(user_id)`
+
+Get remaining free allowance for the current billing period (store-level, not on the manager).
+
+Example — full plan coverage skips balance deduction:
+
+```python
+config = PricingConfigData(
+    models={"_default": "input_tokens * 1"},
+    plans={"free": PlanDefinition(id="free", name="Free", free_allowance=100)},
+)
+store.set_active_pricing(config)
+store.set_user_plan("user_1", "free")
+store.add_credits("user_1", 10)
+
+result = manager.deduct("user_1", UsageMetrics(input_tokens=5))
+assert result.amount == 0       # fully covered by allowance
+assert result.balance_after == 10  # balance unchanged
+```
+
+## Refunds
+
+### `refund_credits(transaction_id, amount=None, reason=None, metadata=None)`
+
+Refund a previous deduction. Supports partial refunds. On a business failure (over-refund, duplicate, refunding a refund/purchase, not found) `result.error` is set (`over_refund` / `already_refunded` / `not_found`), `credits.refund_failed` is emitted, and **no** `credits.refunded` event fires. Inspect `result.error` before treating it as success.
+
+`RefundResult` gains `tier_breakdown: dict[str, Decimal] | None`, restoring tiers LIFO (highest-priority-number tier — the last one drained — first). Refunding into an expiring tier restores only the tier's aggregate balance; it does not re-attach the original grant's exact expiry date.
+
+```python
+result = manager.refund_credits(tx_id)
+assert result.error is None
+assert result.amount == Decimal("1")
+assert result.new_balance == Decimal("100")
+```
+
+## Lease Lifecycle / Financial Safety
+
+The recommended pattern for charge-after billing: an atomic **lease** (hold) is taken *before* the work against `available = balance − Σ(active holds)`, then the actual cost is **settled** (or the hold **released**). `reserve` is the only admission gate; `settle` is de-clamped (always bills the actual cost). See the [Financial Safety](/docs/financial-safety) page for the full conceptual guide.
+
+The `policy`, `overdraft_floor`, `max_concurrent`, `low_balance`, and `default_ttl_seconds` constructor params control the lease/financial-safety behavior. See the [Constructor](#constructor) section for the full parameter table.
+
+- **`strict_prepaid`** (default) — floor `≥ 0`, structurally zero debt; size holds at the worst case.
+- **`overdraft`** — admits down to a negative `overdraft_floor`; `settle` bills the full actual cost even past it (reconcile with `add_credits`).
+
+### `reserve(user_id, metrics_or_amount, *, operation_type="usage", billing_mode=None, required_feature=None, ttl=None, metadata=None)`
+
+Atomically acquire a lease (the only admission control). Sizes the hold from `metrics_or_amount` (worst-case in strict, estimate in overdraft). Returns a `LeaseResult` with `.lease_id`, `.amount`, `.available`, `.reserved_total`, `.billing_mode`, `.expires_at`. Raises `InsufficientCreditsError`, `ConcurrencyLimitError`, `CapReachedError`, or `FeatureNotEntitledError`. Emits `credits.reserved`.
+
+### `settle(user_id, lease_id, metrics_or_amount, *, idempotency_key=None, metadata=None)`
+
+Charge the **actual** cost against a lease and finalize it. **De-clamped**: bills the full actual cost even if it exceeds the hold (overdraft). Never blocks on floor/cap at settle. Returns a `DeductionResult`. Raises `LeaseExpiredError` / `LeaseNotFoundError`. Emits `credits.deducted`, then `credits.low_balance` / `credits.overdraft` as applicable. Idempotent on `idempotency_key`.
+
+### `release(user_id, lease_id)`
+
+Release a lease without charging (work failed/aborted). **Idempotent**: returns a `ReleaseResult` with `.released` and `.reason` (`released` / `already_released` / `already_settled` / `not_found`) — never raises on a missing/finalized lease.
+
+### `renew(user_id, lease_id, ttl=None)`
+
+Extend a lease's TTL for long batch/agentic jobs. Returns a `LeaseResult`; raises `LeaseExpiredError` if the lease already expired.
+
+### `can_afford(user_id, metrics_or_amount, *, required_feature=None, billing_mode=None, operation_type="usage")`
+
+Advisory affordability check — **UI only, non-locking, may be stale**. Never an admission gate. Returns a `CanAffordResult` with `.affordable`, `.spendable`, `.worst_case`, `.reason`.
+
+`.spendable` is the user's **effective spending power**: `balance − active_holds + allowance_remaining`. This is what actually determines whether `reserve()` will admit a given hold — use it to drive UI affordability checks (e.g. enabling a "Send" button). It is distinct from `AvailableResult.available` (see [`get_available`](#get_availableuser_id) below), which is cash-only and excludes allowance. (This field was renamed from `available` to `spendable` to remove the confusion with the unrelated `AvailableResult.available`.)
+
+### `get_available(user_id)`
+
+Advisory `available = balance − reserved` read (UI only) — **cash only**, excludes any free allowance. Returns an `AvailableResult` with `.balance`, `.reserved`, `.available`. Contrast with `CanAffordResult.spendable` (returned by [`can_afford`](#can_afforduser_id-metrics_or_amount--required_feature-none-billing_mode-none-operation_type-usage)), which adds remaining allowance on top and reflects effective spending power.
+
+### `run_billed(user_id, *, estimate, do_work, operation_type="usage", billing_mode=None, required_feature=None, idempotency_key=None, ttl=None)`
+
+One-call shortcut wiring `reserve → do_work → settle`. `do_work` is a zero-arg callable returning `(result, actual_metrics_or_amount)`; **on any exception the lease is auto-released** and the error re-raised. Returns `{"result": ..., "deduction": DeductionResult}`.
+
+```python
+lease = manager.reserve("user_1", Decimal("40"), operation_type="chat")  # worst-case hold
+deduction = manager.settle("user_1", lease.lease_id, Decimal("11"))      # actual cost
+assert deduction.balance_after == manager.get_balance("user_1").balance
+```
+
+## Usage Analytics
+
+Time-windowed aggregation queries. All accept `start` / `end` `datetime` range.
+
+| Method | Returns |
+|--------|---------|
+| `spend_by_user(start, end)` | `list[SpendByUserRow]` — per-user totals |
+| `spend_by_model(start, end)` | `list[SpendByModelRow]` — per-model spend |
+| `top_users(limit, start, end)` | `list[TopUserRow]` — sorted by spend desc |
+| `daily_spend(start, end)` | `list[DailySpendRow]` — bucketed by day |
+| `aggregate_stats(start, end)` | `AggregateStatsRow` — total, active users, avg daily, top model, top user |
+| `list_user_transactions(user_id, types=None, from_date=None, to_date=None, limit=50, offset=0)` | `list[TransactionRow]` — paginated transaction history (each row carries `total_count`) |
+
+## Credit Expiry
+
+### `sweep_expired_credits(dry_run=False)`
+
+Sweep expired credits from all users' balances. Dry-run reports without modifying. `SweepResult` gains `expired_by_tier: dict[str, Decimal] | None`, re-scoping the sweep from per-user to per-`(user, tier)` — a tier's `expires` flag is only consulted at `add_credits` time, so a grant's fate is fixed regardless of later config changes.
+
+```python
+manager.add_credits("user_1", 100, "purchase", expires_at=datetime(2024, 1, 1))
+result = manager.sweep_expired_credits()
+assert result.expired_count == 1
+assert result.expired_amount == 100
+
+dry_run = manager.sweep_expired_credits(dry_run=True)
+assert dry_run.dry_run is True  # balance unchanged
+```
+
+## Spend Caps
+
+Per-user daily/monthly spend limits configured at the store level.
+
+```python
+from bursar.interface.models import SpendCap
+
+store.set_spend_cap(SpendCap(
+    user_id="user-1",
+    cap_type="daily",
+    limit=50,
+    action="deny",       # "deny" | "warn" | "notify"
+    model="gpt-4",       # optional per-model cap
+))
+```
+
+- **deny** — raises `CapReachedError` when exceeded (the deduction aborts atomically; no allowance is consumed)
+- **warn** — allows the deduction; the store returns `cap_warning="warn"` and the manager emits `credits.cap_warning`
+- **notify** — allows the deduction; emits `credits.cap_warning` with `action="notify"`
+
+The cap is enforced **inside** the atomic `deduct_with_allowance` transaction (accumulating prior spend in the same window), not as a separate racy pre-check.
+
+## Team / Shared Balances
+
+Teams have their own credit pool separate from individual user balances.
+
+| Method | Description |
+|--------|-------------|
+| `store.create_team(name, initial_balance=0)` | Create team with shared pool |
+| `store.get_team_balance(team_id)` | Fetch team balance + member count |
+| `store.add_team_member(team_id, user_id, role="member", spend_cap=None)` | Add member with optional per-user cap |
+| `store.get_team_members(team_id)` | List team members with spend + caps |
+| `store.deduct_team(team_id, user_id, amount, metadata=None, idempotency_key=None)` | Deduct from team pool |
+| `manager.deduct_team(team_id, user_id, metrics, idempotency_key=None, metadata=None)` | Pricing-engine cost + team deduction |
+
+`deduct_team` threads an `idempotency_key` so a retried team deduction returns the original result instead of double-charging the shared pool.
+
+```python
+team = store.create_team("Engineering", Decimal("1000"))
+store.add_team_member(team.team_id, "user-1", role="admin", spend_cap=Decimal("500"))
+result = manager.deduct_team(team.team_id, "user-1", UsageMetrics(input_tokens=100))
+assert result.amount == Decimal("-100")
+assert result.team_balance_after == Decimal("900")
+```
+
+## Events
+
+Optional pub/sub event system for credit lifecycle events.
+
+```python
+from bursar.events import CreditEvent, CreditEventEmitter
+
+emitter = CreditEventEmitter()
+manager = CreditManager(store=store, emitter=emitter)
+
+@emitter.on("credits.deducted")
+def handle_deduct(event: CreditEvent):
+    print(f"{event.user_id} spent {event.data['amount']} credits")
+
+# Available event types:
+# "credits.deducted" | "credits.deduct_failed" | "credits.added"
+# | "credits.refunded" | "credits.refund_failed" | "credits.expired"
+# | "credits.cap_reached" | "credits.cap_warning"
+# | "credits.low_balance" | "credits.plan_changed"
+# | "credits.reserved" | "credits.reservation_released"
+# | "credits.lease_expired" | "credits.overdraft"
+```
+
+Success events fire only after the operation commits; failures fire dedicated `*_failed` events. Handler exceptions are isolated and never break the deduction. Event timestamps are timezone-aware UTC.
+
+## Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `engine` | `PricingEngine \| None` | Internal engine (None until loaded) |

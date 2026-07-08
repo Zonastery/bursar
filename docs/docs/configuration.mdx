@@ -1,0 +1,454 @@
+# Pricing Configuration
+
+The pricing config is stored in the `credit_pricing_config` table or loaded from a dict.
+
+:::info Credits are fractional decimals
+Every credit amount — balances, costs, allowances, caps — is a **fractional decimal**, stored as `NUMERIC(18,4)` in Postgres and as `decimal.Decimal` (Python) / `Decimal` from `decimal.js` (JavaScript) in code. Costs are quantized to 4 decimal places with `ROUND_HALF_UP` at the cost boundary and when persisting. There is **no** integer truncation: an operation that costs `0.4` credits charges `0.4`, not `0`. Both SDKs round identically, so the same config bills the same amount regardless of language.
+:::
+
+## Flat Pricing
+
+The config can be written as YAML or JSON — both are equivalent. YAML is easier to read and supports comments.
+
+```yaml
+version: 1
+
+models:
+  gpt-4: "input_tokens * 0.01 + output_tokens * 0.03"
+  _default: "input_tokens * 0.001 + output_tokens * 0.003"
+
+tools:
+  _default: "this_tool_calls * 5 / 1000"
+  code_exec: "this_tool_calls * 10 / 1000"
+
+search: "search_queries * 0.5 + search_results * 0.05"
+
+cache: "-cache_read_tokens * 0.0045"
+
+fixed:
+  batch_train: 100
+  quick_summary: 0.5
+
+min_balance: 0
+```
+
+The same config as JSON:
+
+```json
+{
+  "version": 1,
+  "models": {
+    "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+    "_default": "input_tokens * 0.001 + output_tokens * 0.003"
+  },
+  "tools": {
+    "_default": "this_tool_calls * 5 / 1000",
+    "code_exec": "this_tool_calls * 10 / 1000"
+  },
+  "search": "search_queries * 0.5 + search_results * 0.05",
+  "cache": "-cache_read_tokens * 0.0045",
+  "fixed": { "batch_train": 100, "quick_summary": 0.5 },
+  "min_balance": 0
+}
+```
+
+## Plan-Based Pricing
+
+Extends flat pricing with subscription plan definitions. Plans give users free monthly allowances, rate overrides, feature entitlements, and financial-safety policy (billing mode, concurrency caps, overdraft floor).
+
+The `plans` key is an optional field on the v1 schema — you can include or omit it within the same versioned config.
+
+```yaml
+version: 1
+
+models:
+  _default: "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)"
+
+plans:
+  free:
+    id: free
+    name: Free Tier
+    free_allowance: 50000
+    default_billing_mode: strict       # "strict" (default) or "overdraft"
+    max_concurrent: 1                  # max simultaneous leases per operation type
+    rate_overrides:
+      _default: "input_tokens * (0.02 / 1000) + output_tokens * (0.06 / 1000)"
+    features:
+      chat: true
+      # agentic: absent → FeatureNotEntitledError when required_feature="agentic"
+
+  pro:
+    id: pro
+    name: Pro Plan
+    free_allowance: 500000
+    allowance_period: anniversary      # "calendar_month" (default), "rolling_30d", or "anniversary"
+    default_billing_mode: strict
+    max_concurrent: 4
+    per_operation:
+      agent:
+        billing_mode: overdraft
+        overdraft_floor: -30           # negative: how far into debt this operation may go
+        max_concurrent: 1
+    rate_overrides:
+      gpt-4: "input_tokens * (0.005 / 1000) + output_tokens * (0.015 / 1000)"
+    features:
+      chat: true
+      agentic: true
+
+  paid:
+    id: paid
+    name: Paid (Auto-Reload)
+    free_allowance: 0
+    default_billing_mode: overdraft
+    overdraft_floor: -50               # plan-wide overdraft floor
+    max_concurrent: 8
+```
+
+The same config as JSON:
+
+```json
+{
+  "version": 1,
+  "models": {
+    "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)"
+  },
+  "plans": {
+    "free": {
+      "id": "free",
+      "name": "Free Tier",
+      "free_allowance": 50000,
+      "default_billing_mode": "strict",
+      "max_concurrent": 1,
+      "rate_overrides": {
+        "_default": "input_tokens * (0.02 / 1000) + output_tokens * (0.06 / 1000)"
+      },
+      "features": { "chat": true }
+    },
+    "pro": {
+      "id": "pro",
+      "name": "Pro Plan",
+      "free_allowance": 500000,
+      "allowance_period": "anniversary",
+      "default_billing_mode": "strict",
+      "max_concurrent": 4,
+      "per_operation": {
+        "agent": { "billing_mode": "overdraft", "overdraft_floor": -30, "max_concurrent": 1 }
+      },
+      "rate_overrides": {
+        "gpt-4": "input_tokens * (0.005 / 1000) + output_tokens * (0.015 / 1000)"
+      },
+      "features": { "chat": true, "agentic": true }
+    }
+  }
+}
+```
+
+### Plan fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | yes | Unique plan identifier |
+| `name` | string | yes | Human-readable name |
+| `free_allowance` | number | yes | Free credits per allowance period, fractional (`NUMERIC(18,4)`; 0 = none) |
+| `allowance_period` | `"calendar_month"` \| `"rolling_30d"` \| `"anniversary"` | no | How the free-allowance window resets. Default: `"calendar_month"`. See [`allowance_period`](#allowance_period) below. |
+| `rate_overrides` | object | no | Per-model expression overrides for this plan |
+| `features` | object | no | Arbitrary feature entitlements. Presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
+| `feature_limits` | object | no | Per-feature invocation-count limits, keyed by feature name. Independent of `features` — a feature can be entitled *and* rate-limited at the same time. See [`feature_limits`](#feature_limits) below. |
+| `default_billing_mode` | `"strict"` \| `"overdraft"` | no | Default billing mode for this plan's users. Default: `"strict"`. |
+| `max_concurrent` | integer | no | Plan-wide default maximum simultaneous active leases per operation type. `null` = unlimited. |
+| `overdraft_floor` | number | no | Plan-wide negative balance floor for overdraft mode (e.g. `-50`). Only applies when `default_billing_mode` is `"overdraft"`. |
+| `per_operation` | object | no | Per-operation-type policy overrides. Keys are operation type strings; values are [`OperationPolicy`](#operationpolicy-fields) objects. Overrides the plan defaults for that operation type. |
+
+### `allowance_period`
+
+Controls how a plan's `free_allowance` window resets. Three modes:
+
+- **`calendar_month`** (default) — resets on calendar-month UTC boundaries, the same for every user regardless of when they were assigned the plan. This is the original, unconditional behavior.
+- **`rolling_30d`** — a rolling 30-day window anchored to the timestamp the user was assigned this plan.
+- **`anniversary`** — a monthly window that resets on the same day-of-month the user was assigned the plan. For example, a user assigned on the 14th resets on the 14th of every subsequent month. If the assignment day doesn't exist in a given month (e.g. the 31st in February), the reset clamps to the last day of that month, then returns to the 31st in months that have one.
+
+The anchor for `rolling_30d` and `anniversary` is the timestamp of `set_user_plan()` / `setUserPlan()` — **not** the user's account signup date. This is intentional: your allowance cycle starts when you subscribe to a plan with a non-calendar period, so switching a user to a different plan re-anchors their cycle.
+
+```yaml
+plans:
+  pro:
+    id: pro
+    name: Pro Plan
+    free_allowance: 500000
+    allowance_period: anniversary   # or rolling_30d, or calendar_month (default)
+```
+
+### `OperationPolicy` fields
+
+Used inside `per_operation` to set different billing rules for specific operation types (e.g. `agent`, `batch`, `chat`).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `billing_mode` | `"strict"` \| `"overdraft"` | no | Billing mode for this operation type. Default: plan's `default_billing_mode`. |
+| `max_concurrent` | integer | no | Maximum simultaneous active leases for this operation type specifically. |
+| `overdraft_floor` | number | no | Negative balance floor for this operation type (e.g. `-30`). Overrides the plan-level `overdraft_floor`. |
+
+Policy resolution order (most specific wins): per-call `billing_mode` arg → `per_operation[type]` → plan `default_billing_mode` → manager constructor preset. See [Financial Safety](/docs/financial-safety) for how policies interact with `reserve`/`settle`.
+
+### `feature_limits`
+
+Per-feature **invocation-count** limits — e.g. "Free users get at most 5 background removals a month." This is a different axis than everything else on this page: `free_allowance`/spend caps bound *credits*, `feature_limits` bounds how many times a named feature is *called*, regardless of what any single call costs. Keyed by feature name inside a plan; each value is a `FeatureLimit`:
+
+```yaml
+plans:
+  free:
+    id: free
+    name: Free
+    features:
+      background_removal: true
+    feature_limits:
+      background_removal:
+        max_calls: 5
+        period: monthly
+        action: deny
+```
+
+The same config as JSON:
+
+```json
+{
+  "plans": {
+    "free": {
+      "id": "free",
+      "name": "Free",
+      "features": { "background_removal": true },
+      "feature_limits": {
+        "background_removal": { "max_calls": 5, "period": "monthly", "action": "deny" }
+      }
+    }
+  }
+}
+```
+
+#### `FeatureLimit` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_calls` | integer (`>= 0`) | yes | Maximum number of invocations allowed within one `period` window. |
+| `period` | `"daily"` \| `"weekly"` \| `"monthly"` \| `"yearly"` | no | Cadence of the reset window. Default: `"monthly"`. See cadences below. |
+| `action` | `"deny"` \| `"warn"` \| `"notify"` | no | What happens once `max_calls` is reached within the window. Default: `"deny"`. Mirrors `SpendCap.action` both in name and in semantics — see [Architecture: Credit Lifecycle](/docs/architecture#credit-lifecycle) for how `deny`/`warn`/`notify` work for spend caps. |
+
+**Cadences** — all four are **calendar-aligned** and **unconditional**: every user on every plan resets at the same instant, with no per-user anchor (unlike `allowance_period`'s `rolling_30d`/`anniversary`, which anchor to plan-assignment time):
+
+- **`daily`** — resets at UTC midnight.
+- **`weekly`** — resets Monday, ISO week (UTC).
+- **`monthly`** (default) — resets on the 1st of the calendar month (UTC).
+- **`yearly`** — resets January 1st (UTC).
+
+**`action` semantics** (mirrors spend-cap `action`):
+
+- **`deny`** (default) — blocks the call once `max_calls` is reached. Enforced both at admission (`reserve`/`create_lease` — deny-only, nothing to warn about before a charge exists) and at immediate charge (`deduct`/`settle`).
+- **`warn`** / **`notify`** — non-blocking: the call still succeeds, but the result carries a signal (`DeductionResult.feature_limit_warning`) and a `credits.feature_limit_warning` event fires. These are only ever checked on the charge/settle paths, never at admission.
+
+Counting is derived from the transaction ledger — there is no separate counter to go stale or leak. Only a **settled** call increments the count: a released lease (`release_lease`, work never happened) is never counted, and refunding a deduction (`refund_credits`) does **not** free up quota — the feature was still invoked even if the charge was later reversed. A feature can carry a limit without also being declared in `features`, but the common case (shown above) is both together: entitled *and* rate-limited.
+
+See [Subscription Integration: Feature call limits](/docs/subscription-integration#feature-call-limits) for the runtime API (`deduct(feature=...)`, `reserve(feature=...)`, `check_feature_limit()`, `FeatureLimitReachedError`, `credits.feature_limit_warning`).
+
+### How plans work
+
+1. **Assign a plan:** `store.set_user_plan(user_id, "pro")` (resolved by `plan_key`, consistently across all stores)
+2. **Deduct flow:** `CreditManager.deduct()` calculates the cost, then charges it in one atomic `deduct_with_allowance` transaction. Free allowance is consumed first; only the remaining **net** is debited from the balance. If allowance fully covers the cost, the balance is untouched. Allowance, spend cap, balance floor and debit all commit (or roll back) together — see [Architecture](/docs/architecture).
+3. **No plan:** With no plan assigned, allowance is `0` and the full cost is charged to the balance.
+
+By default (`allowance_period: calendar_month`) `free_allowance` is a monthly window: consumption resets at the start of each calendar month (UTC). See [`allowance_period`](#allowance_period) above for the `rolling_30d` and `anniversary` alternatives.
+
+## Credit Tiers
+
+Extends the balance model with named, priority-ordered credit buckets — e.g. gifted credits that drain before purchased credits, some tiers that expire and some that don't, plus per-tier balance queries. The `tiers` key is optional and is a sibling of `plans`.
+
+```yaml
+tiers:
+  gifted:
+    name: "Gifted Credits"
+    priority: 10          # ascending = drained first
+    expires: true
+    default_ttl_days: 30  # used when add_credits omits expires_at
+  purchased:
+    name: "Purchased Credits"
+    priority: 30
+    expires: false
+    is_default: true      # untagged add_credits() calls land here
+    allow_overdraft: true # only tier permitted to absorb overdraft debt
+```
+
+The same config as JSON:
+
+```json
+{
+  "tiers": {
+    "gifted": {
+      "name": "Gifted Credits",
+      "priority": 10,
+      "expires": true,
+      "default_ttl_days": 30
+    },
+    "purchased": {
+      "name": "Purchased Credits",
+      "priority": 30,
+      "expires": false,
+      "is_default": true,
+      "allow_overdraft": true
+    }
+  }
+}
+```
+
+### `TierDefinition` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Human-readable name |
+| `priority` | integer | no | Deduction order — ascending priority is drained first. Ties are broken by key name ascending, which is not a config error. |
+| `expires` | boolean | no | Whether credits granted into this tier can expire. Default: `false`. |
+| `default_ttl_days` | integer | no | TTL used when `add_credits`/`addCredits` omits `expires_at`/`expiresAt` for a grant into this tier. If absent on an expiring tier (`expires: true`), every `add_credits`/`addCredits` call into that tier must pass an explicit `expires_at`/`expiresAt`, or the call errors. |
+| `allow_overdraft` | boolean | no | Marks this tier as the sink for overdraft debt (only possible when a negative floor is configured). Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
+| `is_default` | boolean | no | Marks this tier as the destination for untagged `add_credits()`/`addCredits()` calls. Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
+
+:::note Tier names are independent of `free_allowance`
+A tier named `"allowance"` is unrelated to `PlanDefinition.free_allowance` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; bursar doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
+:::
+
+### No-tiers fallback
+
+Omitting `tiers` entirely preserves 100% of today's single-balance behavior: internally, bursar routes everything through a synthetic `"default"` tier, so every existing config keeps working with zero changes. An explicit empty `tiers: {}` is a config validation error — it's ambiguous whether you meant "no tiers configured" or "tiers not set up yet" — omit the key instead.
+
+### Deduction order
+
+On `deduct()`/`settle()`, today's existing free-allowance consumption and floor/cap checks run first and are unchanged — they stay purely aggregate, comparing against the summed balance across all tiers exactly as they compare against the single `balance` today. Only the debit step is tier-aware: once the net charge is known, it drains tiers in ascending `priority` order, exhausting each tier's balance before moving to the next.
+
+Overdraft — only reachable when a negative floor is configured — is absorbed by the tier marked `allow_overdraft`, falling back to the tier with the highest `priority` value (drained last) if none is marked, falling back to `"default"` if neither applies.
+
+## Sections
+
+### `version` (optional)
+
+Only `1` is valid. Defaults to `1` when omitted, so you rarely need to set it explicitly. `models` is the only field that's actually required on the config; `plans` is optional and can be included or omitted within the same versioned config.
+
+### `models` (required)
+
+Per-model pricing expressions. Non-empty dict.
+
+- Keys are model names (e.g. `gpt-4`, `claude-3-opus`)
+- `_default` used when no specific model matches
+- Each value is an expression string
+
+### `tools` (optional)
+
+Per-tool pricing overrides. `_default` applies to tool calls not individually configured. Each `tools.*` expression (including `_default`) can reference `this_tool_calls`, the count of calls matching that specific key (for `_default`, the count of calls not matched by any other key) — see [Expressions](/docs/expressions) for details. `tool_calls` remains available too and is always the total across every tool.
+
+### `search` (optional)
+
+Search/RAG query pricing — a **single expression string**, not a dict. Any variables available in pricing expressions (e.g. `search_queries`, `search_results`) can be referenced. Cross-reference [Expressions](/docs/expressions) for the full variable list.
+
+```yaml
+search: "search_queries * 0.5 + search_results * 0.05"
+```
+
+### `cache` (optional)
+
+Cache read discounts — a **single expression string**, not a dict. This should typically evaluate to `<= 0` (a rebate/discount taken off the total); bursar does not enforce the sign, so a positive `cache` expression is valid syntax but will silently *increase* the total cost — treat the non-positive convention as a config-authoring rule you must follow yourself. Cross-reference [Expressions](/docs/expressions) for available cache variables.
+
+```yaml
+cache: "-cache_read_tokens * 0.0045"
+```
+
+### `fixed` (optional)
+
+Fixed-cost jobs. Keys match `UsageMetrics.fixed_job`. Values are non-negative numbers (fractional amounts are allowed — they are charged exactly, like any other cost). An unknown/unconfigured job name is rejected by `deduct_fixed()` rather than charged as a free 0-credit deduction.
+
+### `min_balance` (optional)
+
+The **balance floor** — the minimum balance a user must keep. Default `0`, meaning users can spend down to exactly zero unless you configure a higher floor. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below `min_balance`; concretely, `deduct_with_allowance` aborts when `balance - net < min_balance` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`min_balance * 2`, configurable — see [Architecture](/docs/architecture)). Because the default is now `0`, that derived threshold is also `0` by default, which means **low-balance alerting is effectively opt-in** — set `min_balance` explicitly, or configure `low_balance` / `lowBalance` on the `CreditManager` constructor (see [Architecture](/docs/architecture) and the CreditManager API reference), if you want `credits.low_balance` to fire. Stored as a fractional decimal like all money.
+
+## Loading
+
+### Standalone engine (no store)
+
+Use `PricingEngine.from_dict` / `PricingEngine.fromDict` when you only need cost calculation and don't need a store.
+
+```python
+from bursar import PricingEngine
+
+# From dict
+engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 1"}})
+
+# From file (YAML/JSON)
+import yaml
+with open("pricing.yaml") as f:
+    engine = PricingEngine.from_dict(yaml.safe_load(f))
+```
+
+```typescript
+import { PricingEngine } from "@zonastery/bursar";
+// loadPricingFile reads from disk, so it lives in the Node-only subpath:
+import { loadPricingFile } from "@zonastery/bursar/node";
+
+const engine = PricingEngine.fromDict({ models: { _default: "input_tokens * 1" } });
+
+const data = await loadPricingFile("./pricing.yaml");
+const engine2 = PricingEngine.fromDict(data);
+```
+
+### Via CreditManager (with store)
+
+`CreditManager` exposes two loading methods:
+
+- **`publish_pricing_from_dict(data)`** — loads a dict (or `PricingConfigData`) into the engine **and** writes it to the store. Use this for initial setup or when you want to both configure and persist in one call.
+- **`load_pricing_from_store()`** — reads the currently-active config from the store. Use this at app startup once pricing has already been published.
+
+```python
+manager = CreditManager(store=store)
+
+# First-time setup: publish and persist
+manager.publish_pricing_from_dict({"version": 1, "models": {"_default": "input_tokens * 1"}})
+
+# Subsequent restarts: load from store
+manager.load_pricing_from_store()
+```
+
+```typescript
+const manager = new CreditManager(store);
+
+// First-time setup: publish and persist
+await manager.publishPricingFromDict({ version: 1, models: { _default: "input_tokens * 1" } });
+
+// Subsequent restarts: load from store
+await manager.loadPricingFromStore();
+```
+
+## Live Updates
+
+Pricing stored in `credit_pricing_config` table. Update via CLI or RPC — no redeploy needed.
+
+```bash
+bursar config set config.json
+```
+
+`CreditManager.load_pricing_from_store()` fetches the latest active config.
+
+## Validation
+
+At load time the engine validates:
+
+1. `models` is non-empty
+2. All expression strings parse and are safe
+3. Only allowed functions used
+4. Plan names are unique (and every plan has a `name`)
+5. Plan `rate_overrides` expressions are valid
+6. No unknown keys, at any level (top-level, `plans.*`, `tiers.*`, `plans.*.feature_limits.*`, `plans.*.per_operation.*`) — a typo like `min_balnce` is rejected rather than silently falling back to a default
+7. `this_tool_calls` is used only inside `tools.*` expressions — referencing it in `models`, `search`, or `cache` raises a config-load-time error
+8. `version`, if present, must be `1`
+9. `min_balance`, `signup_bonus`, `fixed.*`, and `plans.*.free_allowance` must be `>= 0`
+
+Both the Python and JS SDKs enforce the same rules — see `tests/parity/config_validation_cases.json` for the shared fixture both test suites run against.
+
+Retrieve the full JSON Schema for editor autocompletion/validation with:
+
+```bash
+bursar config schema
+```

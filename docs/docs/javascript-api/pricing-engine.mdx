@@ -1,0 +1,90 @@
+# PricingEngine — JavaScript
+
+The `PricingEngine` is the pure calculation core. No database dependency.
+
+## Creating an Engine
+
+```typescript
+import { PricingEngine } from "@zonastery/bursar";
+
+// From a dict (testing, stateless)
+const engine = PricingEngine.fromDict({
+  version: 1,
+  models: {
+    "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
+    "_default": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)",
+  },
+});
+```
+
+## Methods
+
+### `calculate(metrics: UsageMetrics): CostBreakdown`
+
+```typescript
+const cost = engine.calculate({
+  model: "gpt-4",
+  inputTokens: 500,
+  outputTokens: 200,
+});
+// cost.total is a decimal.js Decimal (quantized to 4dp), e.g. "0.0110"
+console.log(`Total: ${cost.total.toString()}`);
+console.log(`Model credits: ${cost.modelCredits.toString()}`);
+console.log(`Tool credits: ${cost.toolCredits.toString()}`);
+```
+
+### `calculateBatch(metrics: UsageMetrics[]): CostBreakdown[]`
+
+Evaluate multiple metrics at once.
+
+### `resolveModel(modelVersion: string): string | null`
+
+Resolve a model version string against configured model names.
+
+### `hasModel(modelName: string): boolean`
+
+Check if a specific model is configured.
+
+### `getFixedCost(jobName: string): Decimal | null`
+
+Get the fixed cost for a named job. Returns `null` for an unknown/unconfigured job.
+
+### `pricingSchema(): PricingConfigData`
+
+Get the raw pricing config dict.
+
+### `minBalance: number`
+
+The configured minimum balance floor.
+
+## CostBreakdown
+
+**All monetary fields are `Decimal`** (from `decimal.js`), quantized to 4 dp `ROUND_HALF_UP`. `total` is the single source of truth: recomputed from the components, clamped at `0`, quantized — never truncated to an integer:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total` | `Decimal` | Total credits |
+| `modelCredits` | `Decimal` | Credits from model expression |
+| `toolCredits` | `Decimal` | Credits from tool expressions |
+| `searchCredits` | `Decimal` | Credits from search expressions |
+| `cacheSavings` | `Decimal` | Cache result (negative = savings) |
+| `fixedCredits` | `Decimal` | Fixed job cost (`0` when not applicable) |
+| `breakdown` | `Record<string, unknown>` | Debug info |
+
+## UsageMetrics
+
+Input to `calculate()` (exported as `UsageMetrics` from `@zonastery/bursar`):
+
+| Field | Type | Default |
+|-------|------|---------|
+| `model` | `string` | `"_default"` |
+| `inputTokens` | `number` | `0` |
+| `outputTokens` | `number` | `0` |
+| `cacheReadTokens` | `number` | `0` |
+| `cacheWriteTokens` | `number` | `0` |
+| `toolCalls` | `ToolCall[]` (`{ name: string }[]`) | `[]` |
+| `searchQueries` | `number` | `0` |
+| `searchResults` | `number` | `0` |
+| `webSearchCalls` | `number` | `0` |
+| `codeExecCalls` | `number` | `0` |
+| `fixedJob` | `string` `|` `null` | `null` |

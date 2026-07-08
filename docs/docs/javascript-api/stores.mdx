@@ -1,0 +1,89 @@
+# Store Adapters — JavaScript
+
+## MemoryStore
+
+In-memory, data lost on restart. Exported from the **Node.js subpath** (uses Node built-ins).
+
+```typescript
+import { MemoryStore } from "@zonastery/bursar/node";
+
+const store = new MemoryStore();
+```
+
+Full `CreditStore` interface. All money arguments and result fields are `Decimal` (from `decimal.js`), never binary `number`:
+
+| Category | Methods |
+|----------|---------|
+| Setup | `setup(databaseUrl?)` |
+| Balances | `getBalance(userId)`, `addCredits(userId, amount, type?, metadata?, expiresAt?)`, `deductWithAllowance(userId, amount, options?)` |
+| Leases | `createLease(userId, amount, operationType, options?)`, `settleLease(userId, leaseId, amount, options?)`, `releaseLease(userId, leaseId)`, `renewLease(userId, leaseId, ttlSeconds)`, `getAvailable(userId)` |
+| Pricing | `getActivePricing()`, `setActivePricing(config, label?)` |
+| Plans | `getUserPlan(userId)`, `setUserPlan(userId, planId)`, `checkFeature(userId, feature)`, `checkAllowance(userId)`, `incrementUsageWindow(userId, planId, amount)` |
+| Spend caps | `checkSpendCap(userId, model?, amount?)` |
+| Refunds | `refundCredits(transactionId, amount?, reason?, metadata?)` |
+| Expiry | `sweepExpiredCredits(dryRun?)` |
+| Analytics *(optional)* | `spendByUser(start, end)`, `spendByModel(start, end)`, `topUsers(limit, start, end)`, `dailySpend(start, end)`, `aggregateStats(start, end)`, `listUserTransactions(userId, options?)`, `listUsageEvents(userId, options?)` |
+| Teams *(optional)* | `createTeam(name, initialBalance?)`, `getTeamBalance(teamId)`, `addTeamMember(teamId, userId, role?, spendCap?)`, `getTeamMembers(teamId)`, `deductTeam(teamId, userId, amount, metadata?, idempotencyKey?)` |
+
+`deductWithAllowance(userId, amount, options?)` is the atomic path used by `CreditManager.deduct()`; `options` is `{ idempotencyKey?, minBalance?, model?, metadata? }`. The lease methods (`createLease` / `settleLease` / `releaseLease` / `renewLease`) are used by `CreditManager.reserve()` / `settle()` / `release()` / `renew()`. These, together with balances, pricing, plans, and spend caps, form the **core** `CreditStore` interface every store must implement.
+
+Rows marked *(optional)* — Analytics and Teams, along with `listUserTransactions` — have default implementations that throw `CapabilityNotSupportedError` unless overridden, so a minimal custom store can skip them entirely. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full core-vs-optional breakdown.
+
+`MemoryStore` also exposes a synchronous `setSpendCap(cap: SpendCap)` helper (not on the `CreditStore` interface) for configuring per-user spend caps in tests: `store.setSpendCap({ userId, type: "daily", limit: new Decimal(50), action: "deny" })`.
+
+## HttpxSupabaseStore
+
+Supabase-backed store using native `fetch` (Node 18+).
+
+```typescript
+import { HttpxSupabaseStore } from "@zonastery/bursar";
+
+const store = new HttpxSupabaseStore(
+  "https://your-project.supabase.co",
+  "service_role_key", // service_role, not anon key
+);
+```
+
+Delegates all operations to Postgres RPC functions via HTTP.
+
+## PostgresStore
+
+Direct PostgreSQL store. Requires `pg` package.
+
+```typescript
+import { PostgresStore } from "@zonastery/bursar";
+
+const store = new PostgresStore("postgresql://user:pass@host:5432/db");
+```
+
+Delegates all operations to Postgres RPC functions via `callproc`.
+
+## Custom Adapter
+
+Implement the `CreditStore` interface:
+
+Money is `Decimal` (from `decimal.js`), not `number`:
+
+```typescript
+import Decimal from "decimal.js";
+import type {
+  CreditStore,
+  DeductWithAllowanceOptions,
+  DeductionResult,
+  BalanceResult,
+  AddCreditsResult,
+} from "@zonastery/bursar";
+
+class MyStore implements CreditStore {
+  async getBalance(userId: string): Promise<BalanceResult> { ... }
+  async addCredits(userId: string, amount: Decimal, ...): Promise<AddCreditsResult> { ... }
+  async deductWithAllowance(
+    userId: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<DeductionResult> { ... }
+  // ... the remaining core methods (see the CreditStore interface)
+  // Analytics, listUserTransactions/listUsageEvents, and team methods are optional:
+  // omit them and the default implementation throws CapabilityNotSupportedError.
+}
+```

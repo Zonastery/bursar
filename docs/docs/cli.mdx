@@ -1,0 +1,84 @@
+# CLI Reference
+
+bursar ships an `argparse`-based CLI for database migrations and pricing management. Connection secrets are read from the **environment**, never passed on the command line (which would leak via `ps`, shell history and CI logs).
+
+```bash
+bursar <command> [options]
+```
+
+Run `bursar --help`, `bursar migrate --help`, or `bursar pricing --help` for the full, generated usage.
+
+## Commands
+
+### `bursar migrate`
+
+Create tables, indexes, and RPC functions. Reads the connection string from the **`DATABASE_URL`** environment variable.
+
+```bash
+DATABASE_URL="postgresql://user:pass@host:5432/db" bursar migrate
+```
+
+Idempotent — safe to run on every deploy. Requires the `postgres` extra (`pip install "bursar[postgres]"`).
+
+:::note
+A positional URL (`bursar migrate "postgresql://…"`) is still accepted as a fallback, but it is **discouraged** and prints a warning, because the password is then visible in the process list and shell history. Prefer `DATABASE_URL`.
+:::
+
+### `bursar pricing get`
+
+Print the active pricing config as JSON.
+
+### `bursar pricing set <file>`
+
+Apply a pricing config from a JSON or YAML file (always creates a new immutable version). `--label` attaches an optional message.
+
+```bash
+# From file
+bursar pricing set config.yaml --label "Q3 rates"
+
+# From stdin
+bursar pricing set - <<'JSON'
+{
+  "version": 1,
+  "models": {"_default": "input_tokens * 0.001"}
+}
+JSON
+```
+
+Only transient PostgREST schema-cache/connection errors are retried; a write that may have committed is never blind-retried, so duplicate versions are not created.
+
+### `bursar pricing list`
+
+List all pricing versions; the active version is marked with `*`.
+
+### `bursar pricing activate <version>`
+
+Switch the active version to the given version number.
+
+```bash
+bursar pricing activate 3
+```
+
+### `bursar pricing validate <file>`
+
+Validate a pricing file (JSON/YAML, or `-` for stdin) without applying it.
+
+### `bursar pricing export <version>`
+
+Dump a specific version as JSON.
+
+### `bursar pricing diff <version_a> <version_b>`
+
+Print a unified diff between two pricing versions.
+
+All `pricing` subcommands require the `supabase` extra and the `SUPABASE_URL` + `SUPABASE_SECRET_KEY` environment variables.
+
+## Environment Variables
+
+| Variable | Required For | Description |
+|----------|-------------|-------------|
+| `DATABASE_URL` | `migrate` | PostgreSQL connection string (primary; never put it on the command line) |
+| `SUPABASE_URL` | `pricing` commands | Supabase project URL |
+| `SUPABASE_SECRET_KEY` | `pricing` commands | Supabase `service_role` key |
+
+A `.env` file in the current directory is loaded automatically (existing environment variables take precedence).

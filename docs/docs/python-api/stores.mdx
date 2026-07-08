@@ -1,0 +1,97 @@
+# Store Adapters — Python
+
+Store adapters implement the `CreditStore` ABC for different backends.
+
+## MemoryStore
+
+In-memory store. Data lost on restart. Perfect for testing.
+
+```python
+from bursar.interface.memory import MemoryStore
+
+store = MemoryStore()
+manager = CreditManager(store=store)
+```
+
+No dependencies beyond `bursar`.
+
+Full `CreditStore` interface. All money arguments and result fields are `Decimal`:
+
+| Category | Methods |
+|----------|---------|
+| Setup | `setup(database_url?)` |
+| Balances | `get_balance(user_id)`, `add_credits(user_id, amount, type?, metadata?, expires_at?)`, `deduct_with_allowance(user_id, amount, *, idempotency_key?, min_balance?, model?, metadata?)` |
+| Lease lifecycle | `create_lease(user_id, amount, operation_type, *, billing_mode?, floor?, max_concurrent?, ttl_seconds?, model?, overdraft_floor?, metadata?)`, `settle_lease(user_id, lease_id, amount, *, idempotency_key?, min_balance?, model?, metadata?)`, `release_lease(user_id, lease_id)`, `renew_lease(user_id, lease_id, ttl_seconds)`, `get_available(user_id)` |
+| Pricing | `get_active_pricing()`, `set_active_pricing(config, label?)`, `get_pricing_history()`, `get_pricing_config(version)`, `activate_pricing(version)` |
+| Plans | `get_user_plan(user_id)`, `check_feature(user_id, feature)`, `set_user_plan(user_id, plan_id)`, `check_allowance(user_id)`, `increment_usage_window(user_id, plan_id, amount)` |
+| Spend caps | `check_spend_cap(user_id, model?, amount?)` |
+| Refunds | `refund_credits(transaction_id, amount?, reason?, metadata?)` |
+| Expiry | `sweep_expired_credits(dry_run?)` |
+| Analytics *(optional)* | `spend_by_user(start, end)`, `spend_by_model(start, end)`, `top_users(limit, start, end)`, `daily_spend(start, end)`, `aggregate_stats(start, end)`, `list_user_transactions(user_id, types?, from_date?, to_date?, limit?, offset?)` |
+| Teams *(optional)* | `create_team(name, initial_balance?)`, `get_team_balance(team_id)`, `add_team_member(team_id, user_id, role?, spend_cap?)`, `get_team_members(team_id)`, `deduct_team(team_id, user_id, amount, metadata?, idempotency_key?)` |
+
+`deduct_with_allowance` is the atomic deduction path used by `CreditManager.deduct()`: it consumes free allowance, enforces spend caps and the balance floor, and debits the net — all in one transaction, idempotency-keyed. The `MemoryStore` guards every method with a re-entrant lock so this is atomic in-process too.
+
+The **lease lifecycle** methods (`create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available`) back the manager's `reserve()`/`settle()`/`release()`/`renew()`/`get_available()` API and are part of the **core** interface every store must implement.
+
+Rows marked *(optional)* — Analytics and Teams, along with `list_user_transactions` — have default implementations on `CreditStore` that raise `CapabilityNotSupportedError` unless overridden, so a minimal custom store can skip them entirely. `check_feature` also has a default implementation (calls `get_user_plan()` and inspects `features`) but is core, not optional — it's cheap to leave as-is and may be overridden purely for optimized queries. See [Architecture](/docs/architecture#storage-interface-core-vs-optional-capabilities) for the full core-vs-optional breakdown.
+
+## HttpxSupabaseStore
+
+Production store backed by Supabase. Uses HTTPX for HTTP requests.
+
+```python
+from bursar.interface.supabase import HttpxSupabaseStore
+
+store = HttpxSupabaseStore(
+    url="https://your-project.supabase.co",
+    key="service_role_key",  # service_role, not anon key
+)
+```
+
+Requires `pip install bursar[supabase]` (installs `httpx`).
+
+### `run_migrations(database_url: str) -> SetupResult`
+
+Run all 15 bundled SQL migrations (idempotent). Pass the connection string from the environment rather than hard-coding it.
+
+```python
+import os
+from bursar.interface.supabase import run_migrations
+
+result = run_migrations(os.environ["DATABASE_URL"])
+assert result.success, result.errors
+```
+
+## PostgresStore
+
+Direct PostgreSQL connection. Uses `psycopg2`.
+
+```python
+from bursar.interface.postgres import PostgresStore
+
+store = PostgresStore("postgresql://user:pass@host:5432/db")
+```
+
+Requires `pip install bursar[postgres]`.
+
+## Custom Adapter
+
+Implement `bursar.interface.base.CreditStore`:
+
+Store methods are synchronous and money is `Decimal`:
+
+```python
+from decimal import Decimal
+from bursar.interface.base import CreditStore
+from bursar.interface.models import DeductionResult, BalanceResult, AddCreditsResult
+
+class MyStore(CreditStore):
+    def get_balance(self, user_id: str) -> BalanceResult: ...
+    def add_credits(self, user_id: str, amount: Decimal, **kwargs) -> AddCreditsResult: ...
+    def deduct_with_allowance(self, user_id: str, amount: Decimal, **kwargs) -> DeductionResult: ...
+    # ... the remaining core methods (see the CreditStore base class)
+    # `check_feature` has a default implementation, so it is optional to override.
+    # Analytics, `list_user_transactions`, and team methods are also optional: skip them
+    # entirely and the base class raises CapabilityNotSupportedError if a caller invokes one.
+```

@@ -1,0 +1,124 @@
+{
+  "name": "@zonastery/bursar",
+  "version": "0.0.1",
+  "description": "Declarative credit calculation engine for AI SaaS platforms",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js",
+      "require": "./dist/node.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js",
+      "require": "./dist/providers/index.js"
+    },
+    "./providers/dodo": {
+      "types": "./dist/providers/dodo/index.d.ts",
+      "import": "./dist/providers/dodo/index.js",
+      "require": "./dist/providers/dodo/index.js"
+    },
+    "./providers/stripe": {
+      "types": "./dist/providers/stripe/index.d.ts",
+      "import": "./dist/providers/stripe/index.js",
+      "require": "./dist/providers/stripe/index.js"
+    },
+    "./providers/mock": {
+      "types": "./dist/providers/mock/index.d.ts",
+      "import": "./dist/providers/mock/index.js",
+      "require": "./dist/providers/mock/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "lint": "eslint src/ tests/",
+    "format": "prettier --check src/ tests/",
+    "format:fix": "prettier --write src/ tests/",
+    "knip": "knip",
+    "prepublishOnly": "npm run build && vitest run"
+  },
+  "keywords": [
+    "credits",
+    "billing",
+    "llm",
+    "usage-metering",
+    "pricing"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zonastery/bursar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Zonastery/bursar/issues"
+  },
+  "homepage": "https://zonastery.github.io/bursar/",
+  "license": "AGPL-3.0-only",
+  "dependencies": {
+    "decimal.js": "^10.6.0"
+  },
+  "peerDependencies": {
+    "js-yaml": "^4.0.0",
+    "pg": "^8.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "stripe": "^22.2.0",
+    "dodopayments": "^2.40.1"
+  },
+  "peerDependenciesMeta": {
+    "js-yaml": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "stripe": {
+      "optional": true
+    },
+    "dodopayments": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@dodopayments/core": "^0.3.0",
+    "@eslint/js": "^10.0.1",
+    "@supabase/supabase-js": "^2.0.0",
+    "@testcontainers/postgresql": "^12.0.4",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.20.0",
+    "@vitest/coverage-v8": "^3.2.6",
+    "dodopayments": "^2.40.1",
+    "eslint": "^10.5.0",
+    "fast-check": "^4.8.0",
+    "js-yaml": "^4.2.0",
+    "knip": "^6.18.0",
+    "lefthook": "^1.11.12",
+    "pg": "^8.22.0",
+    "prettier": "^3.8.4",
+    "stripe": "^22.2.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.62.0",
+    "vitest": "^3.2.6"
+  }
+}

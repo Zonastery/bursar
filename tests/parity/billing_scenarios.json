@@ -1,0 +1,286 @@
+{
+  "_comment": "Cross-SDK billing parity fixture. Python (MemoryStore) and JS (MemoryStore) MUST produce identical numeric results for every scenario. Both runners load this file; expected values are hand-verified. See plan Phase 2a.",
+  "pricing_config": {
+    "models": {
+      "_default": "input_tokens * 0.01 + output_tokens * 0.03",
+      "gpt-4": "input_tokens * 0.03 + output_tokens * 0.06"
+    },
+    "tools": {
+      "_default": "tool_calls * 1"
+    },
+    "fixed": {
+      "summarize": 5,
+      "embed": 2
+    },
+    "min_balance": 5,
+    "plans": {
+      "free": {
+        "id": "free",
+        "name": "Free",
+        "free_allowance": 10,
+        "billing_mode": "strict"
+      },
+      "pro": {
+        "id": "pro",
+        "name": "Pro",
+        "free_allowance": 50,
+        "billing_mode": "overdraft",
+        "overdraft_floor": -20
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "name": "basic_deduct_no_plan",
+      "description": "Plain deduct from a planless user; no allowance.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u1", "amount": "100"}
+      ],
+      "action": {"op": "deduct", "user_id": "u1", "input_tokens": 100, "output_tokens": 50},
+      "assert": {
+        "balance_after": "97.5000",
+        "allowance_consumed": "0",
+        "error": null
+      }
+    },
+    {
+      "name": "deduct_with_free_plan_allowance",
+      "description": "Deduct uses free-plan allowance first; net charge = cost - allowance (cost=1, allowance=10 covers all).",
+      "setup": [
+        {"op": "add_credits", "user_id": "u2", "amount": "100"},
+        {"op": "set_user_plan", "user_id": "u2", "plan_key": "free"}
+      ],
+      "action": {"op": "deduct", "user_id": "u2", "input_tokens": 100, "output_tokens": 0},
+      "assert": {
+        "balance_after": "100.0000",
+        "allowance_consumed": "1.0000",
+        "error": null
+      }
+    },
+    {
+      "name": "plan_lookup_by_key",
+      "description": "H1: setUserPlan and getUserPlan must resolve by dict key, not plan.id.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u3", "amount": "100"},
+        {"op": "set_user_plan", "user_id": "u3", "plan_key": "pro"}
+      ],
+      "action": {"op": "get_user_plan", "user_id": "u3"},
+      "assert": {
+        "plan_id": "pro",
+        "billing_mode": "overdraft"
+      }
+    },
+    {
+      "name": "insufficient_credits_strict",
+      "description": "Deduct fails when cost would push balance below min_balance floor.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u4", "amount": "10"}
+      ],
+      "action": {"op": "deduct", "user_id": "u4", "input_tokens": 600, "output_tokens": 0},
+      "assert": {
+        "error": "insufficient_credits"
+      }
+    },
+    {
+      "name": "idempotent_deduct",
+      "description": "Same idempotency key returns the same result on second call.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u5", "amount": "100"}
+      ],
+      "action": {
+        "op": "deduct_idempotent",
+        "user_id": "u5",
+        "input_tokens": 100,
+        "output_tokens": 0,
+        "idempotency_key": "idem-001"
+      },
+      "assert": {
+        "balance_after": "99.0000",
+        "idempotent_on_replay": true
+      }
+    },
+    {
+      "name": "lease_reserve_settle_strict",
+      "description": "Reserve then settle within hold; balance is debited exactly.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u6", "amount": "100"}
+      ],
+      "action": {
+        "op": "lease_reserve_settle",
+        "user_id": "u6",
+        "reserve_amount": "10",
+        "settle_amount": "6.5000",
+        "billing_mode": "strict"
+      },
+      "assert": {
+        "balance_after": "93.5000",
+        "error": null
+      }
+    },
+    {
+      "name": "lease_settle_clamps_to_floor_overdraft",
+      "description": "C1: settle clamps to overdraft_floor when actual > max debit.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u7", "amount": "0"}
+      ],
+      "action": {
+        "op": "lease_reserve_settle",
+        "user_id": "u7",
+        "reserve_amount": "10",
+        "settle_amount": "80",
+        "billing_mode": "overdraft",
+        "overdraft_floor": "-50"
+      },
+      "assert": {
+        "balance_after": "-50.0000",
+        "error": null
+      }
+    },
+    {
+      "name": "lease_settle_clamps_to_min_balance_strict",
+      "description": "C1: strict settle clamps to min_balance.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u8", "amount": "20"}
+      ],
+      "action": {
+        "op": "lease_reserve_settle",
+        "user_id": "u8",
+        "reserve_amount": "10",
+        "settle_amount": "80",
+        "billing_mode": "strict",
+        "min_balance": "5"
+      },
+      "assert": {
+        "balance_after": "5.0000",
+        "error": null
+      }
+    },
+    {
+      "name": "lease_release",
+      "description": "Released lease frees its hold; subsequent reserve sees full balance.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u9", "amount": "20"}
+      ],
+      "action": {
+        "op": "lease_reserve_release",
+        "user_id": "u9",
+        "reserve_amount": "15",
+        "billing_mode": "strict"
+      },
+      "assert": {
+        "available_after_release": "20.0000"
+      }
+    },
+    {
+      "name": "team_deduct_basic",
+      "description": "H3: team deduct charges team balance; monthly cap window enforced.",
+      "setup": [
+        {"op": "create_team", "team_id": "t1", "initial_balance": "100"},
+        {"op": "add_team_member", "team_id": "t1", "user_id": "u10", "spend_cap": "30"}
+      ],
+      "action": {
+        "op": "team_deduct",
+        "team_id": "t1",
+        "user_id": "u10",
+        "input_tokens": 500,
+        "output_tokens": 0
+      },
+      "assert": {
+        "team_balance_after": "95.0000",
+        "error": null
+      }
+    },
+    {
+      "name": "team_spend_cap_exceeded",
+      "description": "H3: second team deduct fails when monthly cap is exhausted.",
+      "setup": [
+        {"op": "create_team", "team_id": "t2", "initial_balance": "200"},
+        {"op": "add_team_member", "team_id": "t2", "user_id": "u11", "spend_cap": "10"}
+      ],
+      "action": {
+        "op": "team_deduct_twice",
+        "team_id": "t2",
+        "user_id": "u11",
+        "input_tokens_1": 600,
+        "output_tokens_1": 0,
+        "input_tokens_2": 600,
+        "output_tokens_2": 0
+      },
+      "assert": {
+        "second_deduct_error": "spend_cap_exceeded"
+      }
+    },
+    {
+      "name": "refund_basic",
+      "description": "Refund returns credits to balance.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u12", "amount": "100"}
+      ],
+      "action": {
+        "op": "deduct_then_refund",
+        "user_id": "u12",
+        "input_tokens": 500,
+        "output_tokens": 0
+      },
+      "assert": {
+        "balance_after_refund": "100.0000"
+      }
+    },
+    {
+      "name": "and_operator_returns_operand",
+      "description": "H4: 'and' returns right operand when left is truthy (Python semantics).",
+      "setup": [],
+      "action": {
+        "op": "evaluate_expr",
+        "expr": "(input_tokens and output_tokens) * 1",
+        "vars": {"input_tokens": 5, "output_tokens": 7}
+      },
+      "assert": {
+        "result": "7.0000"
+      }
+    },
+    {
+      "name": "or_operator_returns_operand",
+      "description": "H4: 'or' returns left operand when left is truthy (Python semantics).",
+      "setup": [],
+      "action": {
+        "op": "evaluate_expr",
+        "expr": "(input_tokens or output_tokens) * 1",
+        "vars": {"input_tokens": 5, "output_tokens": 7}
+      },
+      "assert": {
+        "result": "5.0000"
+      }
+    },
+    {
+      "name": "scientific_notation_accepted",
+      "description": "H5: 1e3 and 1e-3 parse in both SDKs.",
+      "setup": [],
+      "action": {
+        "op": "evaluate_expr",
+        "expr": "input_tokens * 1e-3",
+        "vars": {"input_tokens": 1000}
+      },
+      "assert": {
+        "result": "1.0000"
+      }
+    },
+    {
+      "name": "zero_cost_deduct_plan_covered",
+      "description": "Zero-cost deduct: plan_covered field parity.",
+      "setup": [
+        {"op": "add_credits", "user_id": "u13", "amount": "100"},
+        {"op": "set_user_plan", "user_id": "u13", "plan_key": "free"}
+      ],
+      "action": {
+        "op": "deduct",
+        "user_id": "u13",
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "assert": {
+        "balance_after": "100.0000"
+      }
+    }
+  ]
+}

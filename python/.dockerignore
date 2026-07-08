@@ -1,0 +1,27 @@
+# Keep secrets and build cruft out of the Docker build context (H8).
+.env
+.env.*
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Tests, caches and VCS metadata are not needed at runtime.
+tests/
+.git/
+.gitignore
+.pytest_cache/
+.ruff_cache/
+.testmondata
+.coverage
+htmlcov/
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# Local tooling / editor noise
+.DS_Store
+Dockerfile
+.dockerignore
+Makefile

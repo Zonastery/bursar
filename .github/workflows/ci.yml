@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded PR/branch runs, but NEVER cancel a release (tag) run — a
+# half-cancelled publish desyncs the PyPI/npm registries (audit H13).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Least-privilege default for every job. Jobs that need more (the publish jobs)
+# opt in explicitly.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - working-directory: python
+        run: ruff check src/ tests/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - run: pip install -e "python/[test,postgres,supabase]"
+      - working-directory: python
+        run: pyright src/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The advertised support window (README badge: 3.11 | 3.12 | 3.13).
+        python-version: ["3.11", "3.12", "3.13"]
+    # Real Postgres so the store/manager/SQL integration tests RUN (not skip).
+    # A bare container is enough: the conftest.py fixtures bootstrap the `auth`
+    # stubs/roles and apply python/src/bursar/sql/*.sql themselves.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bursar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # conftest.py resolves a real Postgres from DATABASE_URL first, then the
+      # legacy DUCTO_TEST_PG_URL. Setting it makes the integration tests
+      # (concurrency / double-spend / idempotency / migration idempotency)
+      # FAIL rather than skip when something regresses (acceptance §8).
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bursar
+      BURSAR_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/bursar
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e "python/[test,postgres,supabase]"
+      # Loads tests/parity/expression_cases.json (parity gate, §7) AND runs the
+      # real-Postgres concurrency/double-spend suite via the DATABASE_URL above.
+      # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).
+      - working-directory: python
+        run: pytest --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.python-version == '3.13'
+        with:
+          name: python-coverage-report
+          path: python/coverage.xml
+
+  js-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Supported window per javascript/README.md ("Works in Node.js 18+").
+        node-version: ["18", "20", "22"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bursar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # store-integration.test.ts runs under describe.runIf(DATABASE_URL); with
+      # this set the PostgresStore integration + concurrency tests RUN, not skip.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bursar
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+      # Also loads tests/parity/expression_cases.json (parity gate, §7).
+      # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
+      - working-directory: javascript
+        run: |
+          npm install
+          npx vitest run --coverage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.node-version == '22'
+        with:
+          name: js-coverage-report
+          path: javascript/coverage/
+
+  js-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+      - working-directory: javascript
+        run: |
+          npm install
+          npx tsc --noEmit
+
+  # Cross-SDK parity gate (§7): both SDK test suites load the SAME
+  # tests/parity/expression_cases.json fixture, so a divergence between the
+  # Python and JS engines fails one of them. This aggregating job makes that
+  # explicit and is a convenient single required status check.
+  parity-gate:
+    needs: [test, js-test]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Python and JS suites both passed against tests/parity/expression_cases.json — engines agree."
+
+  # ── Release ───────────────────────────────────────────────────────────────
+  # Split PyPI and npm into separate jobs so one registry failing does not leave
+  # the other half-published (audit H13). Both use OIDC trusted publishing (no
+  # long-lived tokens) and a protected `release` environment so only an approved
+  # tag push can publish.
+
+  release-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, typecheck, test, js-test, js-typecheck]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # PyPI OIDC trusted publishing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - run: pip install uv
+      - working-directory: python
+        run: |
+          uv build
+          uv publish # uses PyPI OIDC (id-token: write); no token needed
+
+  release-npm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, typecheck, test, js-test, js-typecheck]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # npm OIDC trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      # npm >= 11.5.1 supports OIDC trusted publishing; the npm CLI mints a
+      # short-lived token from the id-token, so no NODE_AUTH_TOKEN is required.
+      - run: npm install -g npm@latest
+      - working-directory: javascript
+        run: |
+          npm install
+          npm run build
+          npm publish --access public --provenance

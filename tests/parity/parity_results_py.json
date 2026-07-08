@@ -1,0 +1,71 @@
+{
+  "basic_deduct_no_plan": {
+    "balance_after": "97.5000",
+    "allowance_consumed": "0",
+    "plan_covered": null,
+    "error": null
+  },
+  "deduct_with_free_plan_allowance": {
+    "balance_after": "100.0000",
+    "allowance_consumed": "1.0000",
+    "plan_covered": null,
+    "error": null
+  },
+  "plan_lookup_by_key": {
+    "plan_id": "pro",
+    "billing_mode": "overdraft"
+  },
+  "insufficient_credits_strict": {
+    "error": "insufficient_credits"
+  },
+  "idempotent_deduct": {
+    "balance_after": "99.0000",
+    "idempotent_on_replay": true,
+    "error": null
+  },
+  "lease_reserve_settle_strict": {
+    "balance_after": "93.5000",
+    "error": null
+  },
+  "lease_settle_clamps_to_floor_overdraft": {
+    "balance_after": "-50",
+    "error": null
+  },
+  "lease_settle_clamps_to_min_balance_strict": {
+    "balance_after": "5",
+    "error": null
+  },
+  "lease_release": {
+    "available_after_release": "20",
+    "error": null
+  },
+  "team_deduct_basic": {
+    "team_balance_after": "95.0000",
+    "error": null
+  },
+  "team_spend_cap_exceeded": {
+    "second_deduct_error": "spend_cap_exceeded"
+  },
+  "refund_basic": {
+    "balance_after_refund": "100.0000",
+    "error": null
+  },
+  "and_operator_returns_operand": {
+    "result": "7.0000",
+    "error": null
+  },
+  "or_operator_returns_operand": {
+    "result": "5.0000",
+    "error": null
+  },
+  "scientific_notation_accepted": {
+    "result": "1.0000",
+    "error": null
+  },
+  "zero_cost_deduct_plan_covered": {
+    "balance_after": "100",
+    "allowance_consumed": "0",
+    "plan_covered": null,
+    "error": null
+  }
+}
