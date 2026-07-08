@@ -672,7 +672,7 @@ class PostgresStore(CreditStore):
         return SetUserPlanResult(
             user_id=str(result_dict.get("user_id", user_id)),
             plan_id=str(result_dict.get("plan_id", plan_id)),
-            plan_assigned_at=str(result_dict.get("plan_assigned_at") or ""),
+            plan_assigned_at=str(result_dict["plan_assigned_at"]) if result_dict.get("plan_assigned_at") else None,
         )
 
     def unset_user_plan(self, user_id: str) -> dict:
@@ -828,6 +828,23 @@ class PostgresStore(CreditStore):
             new_balance=_dec(result_dict.get("new_balance")),
             tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
         )
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc("revoke_credits_by_tx_type", [user_id, tx_type])
+                row = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        return {
+            "user_id": str(result_dict.get("user_id", user_id)),
+            "amount": result_dict.get("amount", 0),
+            "new_balance": result_dict.get("new_balance", ""),
+            "tier": result_dict.get("tier"),
+        }
 
     # ── Usage analytics ─────────────────────────────────────────────────
 

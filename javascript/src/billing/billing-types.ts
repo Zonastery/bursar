@@ -130,6 +130,15 @@ export interface BillingRefundInfo {
   reason?: string | null;
 }
 
+// ── Dispute info ────────────────────────────────────────────────────────
+
+export interface BillingDisputeInfo {
+  providerDisputeId: string;
+  providerPaymentId?: string | null;
+  status?: string | null;
+  reason?: string | null;
+}
+
 // ── Event ───────────────────────────────────────────────────────────────
 
 export interface BillingEvent {
@@ -144,6 +153,7 @@ export interface BillingEvent {
   invoice?: BillingInvoiceInfo | null;
   payment?: BillingPaymentInfo | null;
   refund?: BillingRefundInfo | null;
+  dispute?: BillingDisputeInfo | null;
   metadata?: Record<string, unknown> | null;
   raw?: unknown;
 }

@@ -320,6 +320,49 @@ class CreditManager:
                         below.discard(t)
         return result
 
+    def deduct_credits(
+        self,
+        user_id: str,
+        amount: Decimal | int,
+        *,
+        tx_type: str = "adjustment",
+        tier: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> AddCreditsResult:
+        """Deduct a raw credit amount from a user's account.
+
+        Uses the store's ``add_credits`` with ``type='adjustment'`` and a
+        negative amount — the existing validation path for negative/zero
+        adjustments. Use this for refund clawbacks and other administrative
+        deductions that bypass the usage-based ``deduct()`` flow.
+
+        Args:
+            user_id: The user to deduct from.
+            amount: The positive amount to deduct (internally negated).
+            tx_type: Semantic label for the emitted event (e.g. ``"refund_clawback"``).
+            tier: The tier to deduct from.
+            metadata: Extra metadata (Pydantic model, passed through to the store).
+        """
+        result = self._store.add_credits(
+            user_id,
+            -Decimal(amount),
+            "adjustment",
+            metadata,
+            None,
+            tier,
+        )
+        self._emit(
+            "credits.deducted",
+            user_id,
+            {
+                "transaction_id": result.transaction_id,
+                "amount": result.amount,
+                "new_balance": result.new_balance,
+                "tx_type": tx_type,
+            },
+        )
+        return result
+
     def grant_subscription_cycle(
         self,
         user_id: str,
@@ -462,7 +505,7 @@ class CreditManager:
             {
                 "user_id": user_id,
                 "plan_key": plan_key,
-                "plan_assigned_at": (plan_assigned_at.isoformat() if plan_assigned_at else None),
+                "plan_assigned_at": result.plan_assigned_at,
                 "timestamp": datetime.now(UTC),
             },
         )
@@ -525,6 +568,26 @@ class CreditManager:
         # `limited`/`action` from the resolved FeatureLimit (mirrors how
         # check_allowance overrides period_end after the store call).
         return result.model_copy(update={"limited": True, "action": limit.action})
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        """Revoke all credits of a given transaction type for a user (LIFO across tiers).
+
+        Used by the subscription lifecycle to replace cycle-grant credits on renewal.
+        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "tier": ...}``.
+        """
+        result = self._store.revoke_credits_by_tx_type(user_id, tx_type)
+        amount = abs(Decimal(str(result.get("amount", 0))))
+        if amount > 0:
+            self._emit(
+                "credits.revoked",
+                user_id,
+                {
+                    "user_id": user_id,
+                    "amount": str(amount),
+                    "tx_type": tx_type,
+                },
+            )
+        return result
 
     # ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
 

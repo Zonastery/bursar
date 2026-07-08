@@ -16,6 +16,26 @@
       "import": "./dist/node.js",
       "require": "./dist/node.js"
     },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js",
+      "require": "./dist/providers/index.js"
+    },
+    "./providers/dodo": {
+      "types": "./dist/providers/dodo/index.d.ts",
+      "import": "./dist/providers/dodo/index.js",
+      "require": "./dist/providers/dodo/index.js"
+    },
+    "./providers/stripe": {
+      "types": "./dist/providers/stripe/index.d.ts",
+      "import": "./dist/providers/stripe/index.js",
+      "require": "./dist/providers/stripe/index.js"
+    },
+    "./providers/mock": {
+      "types": "./dist/providers/mock/index.d.ts",
+      "import": "./dist/providers/mock/index.js",
+      "require": "./dist/providers/mock/index.js"
+    },
     "./package.json": "./package.json"
   },
   "engines": {
@@ -58,13 +78,25 @@
   },
   "peerDependencies": {
     "js-yaml": "^4.0.0",
-    "pg": "^8.0.0"
+    "pg": "^8.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "stripe": "^17.0.0",
+    "dodopayments": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "js-yaml": {
       "optional": true
     },
     "pg": {
+      "optional": true
+    },
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "stripe": {
+      "optional": true
+    },
+    "dodopayments": {
       "optional": true
     }
   },

@@ -100,12 +100,14 @@ export {
   BillingStore,
   MemoryBillingStore,
   PostgresBillingStore,
+  SupabaseBillingStore,
   BillingManager,
 } from "./billing/index.js";
 export type {
   BillingConfig,
   BillingCreditTopup,
   BillingCustomerInfo,
+  BillingDisputeInfo,
   BillingEvent,
   BillingEventClaim,
   BillingEventResult,

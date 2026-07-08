@@ -45,6 +45,8 @@ export abstract class BillingStore {
     providerSubscriptionId: string,
   ): Promise<BillingSubscriptionState | null>;
 
+  abstract getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
+
   abstract resolveCreditTopup(
     provider: string,
     productId?: string | null,
@@ -55,4 +57,56 @@ export abstract class BillingStore {
     amountMinor: number,
     topupConfig: Record<string, unknown>,
   ): Promise<number>;
+
+  abstract upsertBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+    providerInvoiceId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    taxMinor?: number | null,
+    currency?: string | null,
+    purpose?: string,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void>;
+
+  abstract upsertBillingRefund(
+    provider: string,
+    providerRefundId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    currency?: string | null,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void>;
+
+  abstract upsertBillingInvoice(
+    provider: string,
+    providerInvoiceId: string,
+    providerSubscriptionId?: string | null,
+    userId?: string | null,
+    status?: string | null,
+    amountPaidMinor?: number | null,
+    amountDueMinor?: number | null,
+    currency?: string | null,
+    periodStart?: string | null,
+    periodEnd?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void>;
+
+  abstract upsertBillingDispute(
+    provider: string,
+    providerDisputeId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    status?: string,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void>;
+
+  abstract getBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null>;
 }

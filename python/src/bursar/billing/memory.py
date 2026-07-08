@@ -30,6 +30,16 @@ class MemoryBillingStore(BillingStore):
 
         for offer_key, offer in (config.subscriptions or {}).items():
             self._offers[offer_key] = offer.model_dump()
+            for provider, ref in (offer.provider_refs or {}).items():
+                if ref.price_id:
+                    key = (provider, "price_id", ref.price_id)
+                    self._provider_refs_by[key] = offer_key
+                    self._provider_refs[key] = "offer"
+                if ref.product_id:
+                    key = (provider, "product_id", ref.product_id)
+                    self._provider_refs_by.setdefault(key, offer_key)
+                    self._provider_refs.setdefault(key, "offer")
+
         for topup_key, topup in (config.credit_topups or {}).items():
             self._topups[topup_key] = topup.model_dump()
             for provider, ref in (topup.provider_refs or {}).items():
@@ -41,30 +51,6 @@ class MemoryBillingStore(BillingStore):
                     key = (provider, "price_id", ref.price_id)
                     self._provider_refs_by[key] = topup_key
                     self._provider_refs[key] = "topup"
-
-        subscriptions = config.subscriptions or {}
-        for offer_key, offer in subscriptions.items():
-            refs = getattr(offer, "provider_refs", None)
-            if refs:
-                for provider, ref in refs.items():
-                    if isinstance(ref, dict):
-                        if ref.get("price_id"):
-                            key = (provider, "price_id", ref["price_id"])
-                            self._provider_refs_by[key] = offer_key
-                            self._provider_refs[key] = "offer"
-                        if ref.get("product_id"):
-                            key = (provider, "product_id", ref["product_id"])
-                            self._provider_refs_by.setdefault(key, offer_key)
-                            self._provider_refs.setdefault(key, "offer")
-                    else:
-                        if ref.price_id:
-                            key = (provider, "price_id", ref.price_id)
-                            self._provider_refs_by[key] = offer_key
-                            self._provider_refs[key] = "offer"
-                        if ref.product_id:
-                            key = (provider, "product_id", ref.product_id)
-                            self._provider_refs_by.setdefault(key, offer_key)
-                            self._provider_refs.setdefault(key, "offer")
 
     def resolve_billing_offer(
         self,

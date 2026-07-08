@@ -1212,9 +1212,6 @@ class MemoryStore(CreditStore):
             if tiers:
                 for tier_key, tier in tiers.items():
                     self._tier_definitions[tier_key] = tier
-            # Extract billing config for MemoryBillingStore to consume.
-            self._billing_config_offers = dict(getattr(config, "subscriptions", None) or {})
-            self._billing_config_topups = dict(getattr(config, "credit_topups", None) or {})
             return record_id
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -1580,6 +1577,51 @@ class MemoryStore(CreditStore):
                 dry_run=dry_run,
                 expired_by_tier=expired_by_tier,
             )
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        with self._lock:
+            balance = self._balances.get(user_id, Decimal(0))
+
+            grants = sum(
+                Decimal(t.amount)
+                for t in self._transactions
+                if t.user_id == user_id and t.type == tx_type and t.amount > 0
+            )
+            revokes = sum(
+                abs(Decimal(t.amount))
+                for t in self._transactions
+                if t.user_id == user_id and t.type == f"{tx_type}_revoke" and t.amount < 0
+            )
+            unrevoked = grants - revokes
+
+            if unrevoked <= 0:
+                return {"user_id": user_id, "amount": 0, "new_balance": str(balance), "tier": None}
+
+            to_revoke = _as_decimal(min(unrevoked, balance))
+            if to_revoke <= 0:
+                return {"user_id": user_id, "amount": 0, "new_balance": str(balance), "tier": None}
+
+            tier_breakdown = self._walk_tiers(user_id, to_revoke)
+            self._balances[user_id] = balance - to_revoke
+            revoked_tier = next(iter(tier_breakdown)) if tier_breakdown else None
+
+            self._transactions.append(
+                _TransactionRecord(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    amount=-to_revoke,
+                    type=f"{tx_type}_revoke",
+                    metadata={},
+                    created_at=self._utcnow(),
+                )
+            )
+
+            return {
+                "user_id": user_id,
+                "amount": str(-to_revoke),
+                "new_balance": str(self._balances[user_id]),
+                "tier": revoked_tier,
+            }
 
     # ── Usage analytics ─────────────────────────────────────────────────
 

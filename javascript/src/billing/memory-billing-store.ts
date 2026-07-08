@@ -16,6 +16,10 @@ export class MemoryBillingStore extends BillingStore {
   private customers = new Map<string, string>();
   private subscriptions = new Map<string, BillingSubscriptionState>();
   private providerRefsBy = new Map<string, string>();
+  private payments = new Map<string, Record<string, unknown>>();
+  private refunds = new Map<string, Record<string, unknown>>();
+  private invoices = new Map<string, Record<string, unknown>>();
+  private disputes = new Map<string, Record<string, unknown>>();
 
   private refKey(provider: string, field: string, value: string): string {
     return `${provider}:${field}:${value}`;
@@ -24,9 +28,6 @@ export class MemoryBillingStore extends BillingStore {
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     this.offers.clear();
     this.topups.clear();
-    this.events.clear();
-    this.customers.clear();
-    this.subscriptions.clear();
     this.providerRefsBy.clear();
 
     const subs = config.subscriptions ?? {};
@@ -135,6 +136,22 @@ export class MemoryBillingStore extends BillingStore {
     return this.subscriptions.get(key) ?? null;
   }
 
+  async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
+    let latest: BillingSubscriptionState | null = null;
+    for (const sub of this.subscriptions.values()) {
+      if (sub.userId === userId) {
+        if (
+          !latest ||
+          (sub.currentPeriodStart &&
+            (!latest.currentPeriodStart || sub.currentPeriodStart > latest.currentPeriodStart))
+        ) {
+          latest = sub;
+        }
+      }
+    }
+    return latest;
+  }
+
   async resolveCreditTopup(
     provider: string,
     productId?: string | null,
@@ -160,5 +177,111 @@ export class MemoryBillingStore extends BillingStore {
   ): Promise<number> {
     const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
     return Math.trunc((amountMinor * creditsPer) / 100);
+  }
+
+  async upsertBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+    providerInvoiceId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    taxMinor?: number | null,
+    currency?: string,
+    purpose?: string,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    const key = this.refKey(provider, "payment", providerPaymentId);
+    this.payments.set(key, {
+      provider,
+      providerPaymentId,
+      providerInvoiceId: providerInvoiceId ?? null,
+      userId: userId ?? null,
+      amountMinor: amountMinor ?? 0,
+      taxMinor: taxMinor ?? null,
+      currency: currency ?? "USD",
+      purpose: purpose ?? null,
+      metadata: metadata ?? null,
+    });
+  }
+
+  async upsertBillingRefund(
+    provider: string,
+    providerRefundId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    currency?: string,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    const key = this.refKey(provider, "refund", providerRefundId);
+    this.refunds.set(key, {
+      provider,
+      providerRefundId,
+      providerPaymentId: providerPaymentId ?? null,
+      userId: userId ?? null,
+      amountMinor: amountMinor ?? 0,
+      currency: currency ?? "USD",
+      reason: reason ?? null,
+      metadata: metadata ?? null,
+    });
+  }
+
+  async upsertBillingInvoice(
+    provider: string,
+    providerInvoiceId: string,
+    providerSubscriptionId?: string | null,
+    userId?: string | null,
+    status?: string | null,
+    amountPaidMinor?: number | null,
+    amountDueMinor?: number | null,
+    currency?: string,
+    periodStart?: string | null,
+    periodEnd?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    const key = this.refKey(provider, "invoice", providerInvoiceId);
+    this.invoices.set(key, {
+      provider,
+      providerInvoiceId,
+      providerSubscriptionId: providerSubscriptionId ?? null,
+      userId: userId ?? null,
+      status: status ?? null,
+      amountPaidMinor: amountPaidMinor ?? null,
+      amountDueMinor: amountDueMinor ?? null,
+      currency: currency ?? "USD",
+      periodStart: periodStart ?? null,
+      periodEnd: periodEnd ?? null,
+      metadata: metadata ?? null,
+    });
+  }
+
+  async upsertBillingDispute(
+    provider: string,
+    providerDisputeId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    status?: string,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    const key = this.refKey(provider, "dispute", providerDisputeId);
+    this.disputes.set(key, {
+      provider,
+      providerDisputeId,
+      providerPaymentId: providerPaymentId ?? null,
+      userId: userId ?? null,
+      status: status ?? "open",
+      reason: reason ?? null,
+      metadata: metadata ?? null,
+    });
+  }
+
+  async getBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const key = this.refKey(provider, "payment", providerPaymentId);
+    return this.payments.get(key) ?? null;
   }
 }

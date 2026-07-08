@@ -671,7 +671,7 @@ class HttpxSupabaseStore(CreditStore):
         return SetUserPlanResult(
             user_id=str(row.get("user_id", user_id)),
             plan_id=str(row.get("plan_id", plan_id)),
-            plan_assigned_at=str(row.get("plan_assigned_at") or ""),
+            plan_assigned_at=str(row["plan_assigned_at"]) if row.get("plan_assigned_at") else None,
         )
 
     def unset_user_plan(self, user_id: str) -> dict:
@@ -790,6 +790,15 @@ class HttpxSupabaseStore(CreditStore):
             new_balance=_dec(row.get("new_balance")),
             tier_breakdown=_dec_map(row.get("tier_breakdown")),
         )
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        row = self._rpc("revoke_credits_by_tx_type", {"p_user_id": user_id, "p_tx_type": tx_type})
+        return {
+            "user_id": str(row.get("user_id", user_id)),
+            "amount": row.get("amount", 0),
+            "new_balance": row.get("new_balance", ""),
+            "tier": row.get("tier"),
+        }
 
     # ── Usage analytics ─────────────────────────────────────────────────
 

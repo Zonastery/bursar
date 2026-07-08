@@ -297,27 +297,13 @@ class BillingManager:
         )
 
     def _handle_subscription_plan_changed(self, event: BillingEvent) -> BillingEventResult:
-        result = self._apply_subscription_event(
+        st = event.subscription.status.value if event.subscription and event.subscription.status else "active"
+        return self._apply_subscription_event(
             event,
-            status=event.subscription.status.value if event.subscription and event.subscription.status else "active",
+            status=st,
             action="plan_changed",
-            provision_on_positive=False,
+            provision_on_positive=True,
         )
-        if result.handled:
-            uid = self._resolve_user_id(event)
-            if uid:
-                existing = self._store.get_billing_subscription(
-                    event.provider, event.subscription.provider_subscription_id
-                )
-                _, _, plan_key = self._offer_for_event(event)
-                if self._cm and plan_key is not None:
-                    resolved_plan_key = plan_key if plan_key is not None else (existing.plan_key if existing else None)
-                    self._provision_subscription(
-                        uid,
-                        {"plan_key": resolved_plan_key},
-                        event,
-                    )
-        return result
 
     def _handle_cancellation_scheduled(self, event: BillingEvent) -> BillingEventResult:
         return self._apply_subscription_event(
@@ -339,9 +325,10 @@ class BillingManager:
 
     def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
         cot = (
-            True
-            if event.subscription and event.subscription.cancel_at_period_end is None
-            else event.subscription.cancel_at_period_end
+            _coalesce(
+                event.subscription.cancel_at_period_end if event.subscription else None,
+                True,
+            )
             if event.subscription
             else None
         )
@@ -361,9 +348,10 @@ class BillingManager:
 
     def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
         cot = (
-            True
-            if event.subscription and event.subscription.cancel_at_period_end is None
-            else event.subscription.cancel_at_period_end
+            _coalesce(
+                event.subscription.cancel_at_period_end if event.subscription else None,
+                True,
+            )
             if event.subscription
             else None
         )
@@ -432,6 +420,17 @@ class BillingManager:
 
         uid = self._resolve_user_id(event)
         if uid:
+            payment_metadata: dict | None = None
+            if event.payment.purpose == "credit_topup" and event.payment.refs:
+                topup_config = self._store.resolve_credit_topup(
+                    event.provider,
+                    product_id=event.payment.refs.product_id,
+                    price_id=event.payment.refs.price_id,
+                )
+                if topup_config:
+                    payment_metadata = {
+                        "credits_per_major_unit": int(topup_config.get("credits_per_major_unit", 1000)),
+                    }
             self._store.upsert_billing_payment(
                 event.provider,
                 event.payment.provider_payment_id,
@@ -441,6 +440,7 @@ class BillingManager:
                 tax_minor=event.payment.tax_minor,
                 currency=event.payment.currency,
                 purpose=event.payment.purpose,
+                metadata=payment_metadata,
             )
 
         refs = event.payment.refs
@@ -506,30 +506,34 @@ class BillingManager:
                 currency=refund.currency,
                 reason=refund.reason,
             )
-            if refund.provider_payment_id:
+            if refund.provider_payment_id and self._cm:
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
-                if payment and payment.get("purpose") == "credit_topup" and self._cm:
-                    self._cm.add_credits(
-                        uid,
-                        Decimal(str(refund.amount_minor)) * Decimal("-1"),
-                        tx_type="refund",
-                        tier="purchased",
-                    )
-                    logger.info(
-                        "clawed back %d credits from user %s for refund %s",
-                        refund.amount_minor,
-                        uid,
-                        refund.provider_refund_id,
-                    )
+                if payment and payment.get("purpose") == "credit_topup":
+                    pay_meta = payment.get("metadata") or {}
+                    credits_per_major = int(pay_meta.get("credits_per_major_unit", 1000))
+                    credits = (refund.amount_minor * credits_per_major) // 100
+                    if credits > 0:
+                        self._cm.deduct_credits(
+                            uid,
+                            Decimal(str(credits)),
+                            tx_type="refund_clawback",
+                            tier="purchased",
+                        )
+                        logger.info(
+                            "clawed back %d credits from user %s for refund %s",
+                            credits,
+                            uid,
+                            refund.provider_refund_id,
+                        )
         return BillingEventResult(handled=True, action="refund_recorded")
 
     def _handle_dispute_created(self, event: BillingEvent) -> BillingEventResult:
         uid = self._resolve_user_id(event)
-        if uid:
+        if uid and event.dispute:
             self._store.upsert_billing_dispute(
                 event.provider,
-                event.event_id,
-                provider_payment_id=event.refund.provider_payment_id if event.refund else None,
+                event.dispute.provider_dispute_id,
+                provider_payment_id=event.dispute.provider_payment_id,
                 user_id=uid,
                 status="needs_response",
             )
@@ -537,10 +541,10 @@ class BillingManager:
 
     def _handle_dispute_closed(self, event: BillingEvent) -> BillingEventResult:
         uid = self._resolve_user_id(event)
-        if uid:
+        if uid and event.dispute:
             self._store.upsert_billing_dispute(
                 event.provider,
-                event.event_id,
+                event.dispute.provider_dispute_id,
                 user_id=uid,
                 status="closed",
             )

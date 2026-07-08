@@ -1419,6 +1419,61 @@ export class MemoryStore extends CreditStore {
     this.incrementUsageWindowSync(userId, planId, amount);
   }
 
+  // ── Revoke credits by tx type ─────────────────────────────────────────
+
+  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
+    const userTxns = this.transactions.filter((t) => t.userId === userId);
+    let totalToRevoke = ZERO;
+    let revokeTier: string | null = null;
+
+    for (const txn of userTxns) {
+      if (txn.type === txType && txn.amount.gt(0)) {
+        const tier = (txn.metadata?.["tier"] as string | undefined) ?? "default";
+        const revokedAmount = userTxns
+          .filter(
+            (t) =>
+              t.type === txType + "_revoke" &&
+              (t.metadata?.["tier"] as string | undefined) === tier,
+          )
+          .reduce((sum, t) => sum.add(t.amount.abs()), ZERO);
+        const unrevoked = txn.amount.sub(revokedAmount);
+        if (unrevoked.gt(0)) {
+          totalToRevoke = unrevoked;
+          revokeTier = tier;
+          break;
+        }
+      }
+    }
+
+    if (totalToRevoke.gt(0) && revokeTier != null) {
+      const currentBalance = this.getTierBalance(userId, revokeTier);
+      const revokeAmt = Decimal.min(totalToRevoke, currentBalance);
+      if (revokeAmt.gt(0)) {
+        this.adjustTierBalance(userId, revokeTier, revokeAmt.negated());
+        this.balances.set(userId, (this.balances.get(userId) ?? ZERO).sub(revokeAmt));
+
+        const txId = randomUUID();
+        this.transactions.push({
+          id: txId,
+          userId,
+          amount: revokeAmt.negated(),
+          type: txType + "_revoke",
+          metadata: { tier: revokeTier },
+          createdAt: this.now(),
+        });
+
+        return {
+          userId,
+          amount: revokeAmt.negated().toString(),
+          newBalance: this.balance(userId).toString(),
+          tier: revokeTier,
+        };
+      }
+    }
+    const bal = this.balance(userId);
+    return { userId, amount: "0", newBalance: bal.toString(), tier: null };
+  }
+
   // ── Refunds ──────────────────────────────────────────────────────────
 
   async refundCredits(

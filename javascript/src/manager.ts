@@ -453,6 +453,11 @@ export class CreditManager {
     return await this.store.getBalance(userId);
   }
 
+  /** Revoke all un-revoked credits of a given type for a user. */
+  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
+    return this.store.revokeCreditsByTxType(userId, txType);
+  }
+
   /** Fetch a single credit transaction by ID. Returns null when not found. */
   async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
     return await this.store.getTransaction(userId, transactionId);
@@ -498,6 +503,42 @@ export class CreditManager {
         if (result.newBalance.gt(t)) below.delete(t.toString());
       }
     }
+    return result;
+  }
+
+  /**
+   * Deduct a raw credit amount from a user's account.
+   *
+   * Uses the store's `addCredits` with `type='adjustment'` and a negated
+   * amount — the existing validation path for negative/zero adjustments.
+   * Use this for refund clawbacks and other administrative deductions that
+   * bypass the usage-based `deduct()` flow.
+   */
+  async deductCredits(
+    userId: string,
+    amount: Decimal | number,
+    options?: {
+      txType?: string;
+      tier?: string | null;
+      metadata?: CreditMetadata | null;
+    },
+  ): Promise<AddCreditsResult> {
+    const txType = options?.txType ?? "adjustment";
+    const result = await this.store.addCredits(
+      userId,
+      toDecimal(amount).neg(),
+      "adjustment",
+      options?.metadata ?? null,
+      null,
+      options?.tier ?? undefined,
+      undefined,
+    );
+    this.emit("credits.deducted", userId, {
+      transactionId: result.transactionId,
+      amount: result.amount,
+      newBalance: result.newBalance,
+      txType,
+    });
     return result;
   }
 

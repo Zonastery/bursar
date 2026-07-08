@@ -1632,6 +1632,9 @@ class _MinimalCoreStore(CreditStore):
     def sweep_expired_credits(self, dry_run: bool = False):
         return SweepResult(dry_run=dry_run)
 
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        return {"user_id": user_id, "amount": 0, "new_balance": "0", "tier": None}
+
 
 class TestOptionalCapabilities:
     """WS8 — analytics/transaction-listing/teams raise CapabilityNotSupportedError

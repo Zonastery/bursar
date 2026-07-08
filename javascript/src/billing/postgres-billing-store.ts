@@ -57,6 +57,14 @@ export class PostgresBillingStore extends BillingStore {
     await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
   }
 
+  /**
+   * Recursively convert all object keys from camelCase to snake_case.
+   *
+   * WARNING: this converts ALL keys, including provider names and offer/topup
+   * keys. Provider names and config keys MUST be lowercase snake_case (e.g.
+   * "stripe", "pro_monthly") — uppercase letters in keys are silently
+   * lowercased (e.g. "Stripe" → "stripe", "proMonthly" → "pro_monthly").
+   */
   private camelToSnake(obj: unknown): unknown {
     if (Array.isArray(obj)) return obj.map((item) => this.camelToSnake(item));
     if (obj && typeof obj === "object" && obj !== null) {
@@ -196,6 +204,25 @@ export class PostgresBillingStore extends BillingStore {
     if (result.rows.length === 0) return null;
 
     const r = result.rows[0];
+    return this.rowToSubscriptionState(r);
+  }
+
+  async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
+    const result = await this.pool.query(
+      `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
+              offer_key, plan_key, status, current_period_start,
+              current_period_end, cancel_at_period_end, interval, interval_count, metadata
+       FROM public.billing_subscriptions
+       WHERE user_id = $1
+       ORDER BY current_period_start DESC NULLS LAST, created_at DESC
+       LIMIT 1`,
+      [userId],
+    );
+    if (result.rows.length === 0) return null;
+    return this.rowToSubscriptionState(result.rows[0]);
+  }
+
+  private rowToSubscriptionState(r: Record<string, unknown>): BillingSubscriptionState {
     return {
       userId: String(r.user_id),
       provider: String(r.provider),
@@ -204,12 +231,17 @@ export class PostgresBillingStore extends BillingStore {
       offerKey: r.offer_key ? String(r.offer_key) : null,
       planKey: r.plan_key ? String(r.plan_key) : null,
       status: r.status ? String(r.status) : "incomplete",
-      currentPeriodStart: r.current_period_start ? r.current_period_start.toISOString() : null,
-      currentPeriodEnd: r.current_period_end ? r.current_period_end.toISOString() : null,
+      currentPeriodStart: r.current_period_start
+        ? (r.current_period_start as Date).toISOString()
+        : null,
+      currentPeriodEnd: r.current_period_end ? (r.current_period_end as Date).toISOString() : null,
       cancelAtPeriodEnd: Boolean(r.cancel_at_period_end),
       interval: r.interval ? String(r.interval) : null,
       intervalCount: r.interval_count ? Number(r.interval_count) : null,
-      metadata: r.metadata && typeof r.metadata === "object" ? r.metadata : null,
+      metadata:
+        r.metadata && typeof r.metadata === "object"
+          ? (r.metadata as Record<string, unknown>)
+          : null,
     };
   }
 
@@ -233,5 +265,125 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<number> {
     const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
     return Math.trunc((amountMinor * creditsPer) / 100);
+  }
+
+  async upsertBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+    providerInvoiceId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    taxMinor?: number | null,
+    currency?: string,
+    purpose?: string,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    await this.pool.query(
+      `SELECT public.upsert_billing_payment($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        provider,
+        providerPaymentId,
+        providerInvoiceId ?? null,
+        userId ?? null,
+        amountMinor ?? 0,
+        taxMinor ?? null,
+        currency ?? "USD",
+        purpose ?? null,
+        metadata ? JSON.stringify(metadata) : null,
+      ],
+    );
+  }
+
+  async upsertBillingRefund(
+    provider: string,
+    providerRefundId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    amountMinor?: number,
+    currency?: string,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    await this.pool.query(`SELECT public.upsert_billing_refund($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      provider,
+      providerRefundId,
+      providerPaymentId ?? null,
+      userId ?? null,
+      amountMinor ?? 0,
+      currency ?? "USD",
+      reason ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+    ]);
+  }
+
+  async upsertBillingInvoice(
+    provider: string,
+    providerInvoiceId: string,
+    providerSubscriptionId?: string | null,
+    userId?: string | null,
+    status?: string | null,
+    amountPaidMinor?: number | null,
+    amountDueMinor?: number | null,
+    currency?: string,
+    periodStart?: string | null,
+    periodEnd?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    await this.pool.query(
+      `SELECT public.upsert_billing_invoice($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        provider,
+        providerInvoiceId,
+        providerSubscriptionId ?? null,
+        userId ?? null,
+        status ?? null,
+        amountPaidMinor ?? null,
+        amountDueMinor ?? null,
+        currency ?? "USD",
+        periodStart ?? null,
+        periodEnd ?? null,
+        metadata ? JSON.stringify(metadata) : null,
+      ],
+    );
+  }
+
+  async upsertBillingDispute(
+    provider: string,
+    providerDisputeId: string,
+    providerPaymentId?: string | null,
+    userId?: string | null,
+    status?: string,
+    reason?: string | null,
+    metadata?: Record<string, unknown> | null,
+  ): Promise<void> {
+    await this.pool.query(`SELECT public.upsert_billing_dispute($1, $2, $3, $4, $5, $6, $7)`, [
+      provider,
+      providerDisputeId,
+      providerPaymentId ?? null,
+      userId ?? null,
+      status ?? "open",
+      reason ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+    ]);
+  }
+
+  async getBillingPayment(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const result = await this.pool.query(
+      `SELECT * FROM public.get_billing_payment_for_refund($1, $2)`,
+      [provider, providerPaymentId],
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0] as Record<string, unknown>;
+    const keys = Object.keys(row);
+    if (keys.length === 1) {
+      const v = row[keys[0]];
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        return this.snakeToCamelKeys(v) as Record<string, unknown>;
+      }
+    }
+    return null;
   }
 }

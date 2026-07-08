@@ -284,6 +284,9 @@ export abstract class CreditStore {
     amount?: Decimal,
   ): Promise<CapCheckResult>;
 
+  // ── Revoke credits by tx type ──────────────────────────────────────
+  abstract revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>>;
+
   // ── Refunds ────────────────────────────────────────────────────────
   abstract refundCredits(
     transactionId: string,

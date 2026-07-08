@@ -58,7 +58,7 @@ class PostgresBillingStore(BillingStore):
         finally:
             self._pool.putconn(conn)
 
-    # ── Async public API ────────────────────────────────────────────────
+    # ── Public API ─────────────────────────────────────────────────────
 
     def sync_billing_from_config(self, config: BillingConfig) -> None:
         raw = config.model_dump()
@@ -118,7 +118,7 @@ class PostgresBillingStore(BillingStore):
     def fail_billing_event(self, provider: str, event_id: str) -> None:
         self._call_rpc_void_sync("public.fail_billing_event", [provider, event_id])
 
-    def _upsert_billing_customer_sync(
+    def upsert_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
@@ -146,16 +146,7 @@ class PostgresBillingStore(BillingStore):
         finally:
             self._pool.putconn(conn)
 
-    def upsert_billing_customer(
-        self,
-        provider: str,
-        provider_customer_id: str,
-        user_id: str,
-        email: str | None = None,
-    ) -> None:
-        self._upsert_billing_customer_sync(provider, provider_customer_id, user_id, email)
-
-    def _upsert_billing_subscription_sync(self, state: BillingSubscriptionState) -> None:
+    def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
         conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
@@ -211,10 +202,7 @@ class PostgresBillingStore(BillingStore):
         finally:
             self._pool.putconn(conn)
 
-    def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
-        self._upsert_billing_subscription_sync(state)
-
-    def _get_billing_customer_sync(
+    def get_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
@@ -231,14 +219,7 @@ class PostgresBillingStore(BillingStore):
         finally:
             self._pool.putconn(conn)
 
-    def get_billing_customer(
-        self,
-        provider: str,
-        provider_customer_id: str,
-    ) -> str | None:
-        return self._get_billing_customer_sync(provider, provider_customer_id)
-
-    def _get_billing_subscription_sync(
+    def get_billing_subscription(
         self,
         provider: str,
         provider_subscription_id: str,
@@ -278,13 +259,6 @@ class PostgresBillingStore(BillingStore):
             )
         finally:
             self._pool.putconn(conn)
-
-    def get_billing_subscription(
-        self,
-        provider: str,
-        provider_subscription_id: str,
-    ) -> BillingSubscriptionState | None:
-        return self._get_billing_subscription_sync(provider, provider_subscription_id)
 
     def get_user_subscription(
         self,

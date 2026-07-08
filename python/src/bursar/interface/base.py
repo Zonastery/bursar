@@ -651,6 +651,19 @@ class CreditStore(ABC):
         """
         ...
 
+    @abstractmethod
+    def revoke_credits_by_tx_type(
+        self,
+        user_id: str,
+        tx_type: str,
+    ) -> dict:
+        """Revoke all credits of a given transaction type for a user (LIFO across tiers).
+
+        Used by the subscription lifecycle to replace cycle-grant credits on renewal.
+        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "tier": ...}``.
+        """
+        ...
+
     # ── Usage analytics (optional capability — WS8) ──────────────────────
     #
     # These methods have a default implementation that raises

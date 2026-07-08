@@ -11,12 +11,15 @@ from bursar.billing import (
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
+    BillingDisputeInfo,
     BillingEvent,
+    BillingInvoiceInfo,
     BillingManager,
     BillingOffer,
     BillingOfferInterval,
     BillingPaymentInfo,
     BillingProviderRefs,
+    BillingRefundInfo,
     BillingSubscriptionInfo,
     BillingSubscriptionOfferRef,
     BillingSubscriptionStatus,
@@ -95,6 +98,21 @@ def billing_config() -> BillingConfig:
                 interval=BillingOfferInterval.year,
                 interval_count=1,
                 entitlement_mode="allowance",
+            ),
+            "pro_monthly_cycle_grant": BillingOffer(
+                offer_key="pro_monthly_cycle_grant",
+                plan_key="pro",
+                interval=BillingOfferInterval.month,
+                interval_count=1,
+                entitlement_mode="cycle_grant",
+                cycle_grant_credits=5000,
+                cycle_grant_tier="subscription",
+                provider_refs={
+                    "stripe": BillingSubscriptionOfferRef(
+                        provider="stripe",
+                        price_id="price_pro_monthly_cycle_grant",
+                    ),
+                },
             ),
         },
         credit_topups={
@@ -203,6 +221,87 @@ def _payment_event(
                 product_id=product_id,
             ),
             purpose="credit_topup",
+        ),
+    )
+
+
+def _invoice_event(
+    provider: str = "stripe",
+    event_id: str = "evt_inv_001",
+    user_id: str | None = "user_123",
+    provider_invoice_id: str = "in_001",
+    status: str = "paid",
+    amount_paid_minor: int = 2000,
+    amount_due_minor: int = 2000,
+    currency: str = "USD",
+    period_start: str | None = "2026-01-01T00:00:00Z",
+    period_end: str | None = "2026-02-01T00:00:00Z",
+) -> BillingEvent:
+    return BillingEvent(
+        provider=provider,
+        event_id=event_id,
+        event_type="invoice.paid",
+        occurred_at="2026-01-01T00:00:00Z",
+        user_id=user_id,
+        customer=BillingCustomerInfo(provider_customer_id="cus_xyz", email="user@example.com"),
+        invoice=BillingInvoiceInfo(
+            provider_invoice_id=provider_invoice_id,
+            status=status,
+            amount_paid_minor=amount_paid_minor,
+            amount_due_minor=amount_due_minor,
+            currency=currency,
+            period_start=period_start,
+            period_end=period_end,
+        ),
+    )
+
+
+def _refund_event(
+    provider: str = "stripe",
+    event_id: str = "evt_ref_001",
+    user_id: str | None = "user_123",
+    provider_refund_id: str = "rf_001",
+    provider_payment_id: str | None = "py_001",
+    amount_minor: int = 2000,
+    currency: str = "USD",
+    reason: str | None = "requested_by_customer",
+) -> BillingEvent:
+    return BillingEvent(
+        provider=provider,
+        event_id=event_id,
+        event_type="refund.created",
+        occurred_at="2026-01-01T00:00:00Z",
+        user_id=user_id,
+        customer=BillingCustomerInfo(provider_customer_id="cus_xyz", email="user@example.com"),
+        refund=BillingRefundInfo(
+            provider_refund_id=provider_refund_id,
+            provider_payment_id=provider_payment_id,
+            amount_minor=amount_minor,
+            currency=currency,
+            reason=reason,
+        ),
+    )
+
+
+def _dispute_event(
+    provider: str = "stripe",
+    event_id: str = "evt_disp_001",
+    user_id: str | None = "user_123",
+    provider_dispute_id: str = "dp_001",
+    provider_payment_id: str | None = "py_001",
+    reason: str | None = "fraudulent",
+) -> BillingEvent:
+    return BillingEvent(
+        provider=provider,
+        event_id=event_id,
+        event_type="dispute.created",
+        occurred_at="2026-01-01T00:00:00Z",
+        user_id=user_id,
+        customer=BillingCustomerInfo(provider_customer_id="cus_xyz", email="user@example.com"),
+        dispute=BillingDisputeInfo(
+            provider_dispute_id=provider_dispute_id,
+            provider_payment_id=provider_payment_id,
+            reason=reason,
         ),
     )
 
@@ -461,6 +560,39 @@ class TestSubscriptionLifecycle:
         plan = credit_store.get_user_plan("user_123")
         assert plan.plan_id is not None
 
+    def test_resumed_re_provisions_even_without_active_status(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+    ) -> None:
+        """A resumed event with no active status must still provision."""
+        create = _sub_event()
+        manager.handle_event(create)
+
+        manager.handle_event(
+            _sub_event(
+                event_id="evt_008",
+                event_type="subscription.paused",
+                status="paused",
+            )
+        )
+
+        resume = BillingEvent(
+            provider="stripe",
+            event_id="evt_009",
+            event_type="subscription.resumed",
+            occurred_at="2026-01-01T00:00:00Z",
+            user_id="user_123",
+            customer=BillingCustomerInfo(provider_customer_id="cus_xyz", email="user@example.com"),
+            subscription=BillingSubscriptionInfo(
+                provider_subscription_id="sub_abc",
+            ),
+        )
+        manager.handle_event(resume)
+
+        plan = credit_store.get_user_plan("user_123")
+        assert plan.plan_id is not None, "plan should be provisioned even without 'active' status in resumed event"
+
 
 # ── Payment / top-up ─────────────────────────────────────────────────────
 
@@ -670,3 +802,181 @@ class TestAnchoredPlanAssignment:
         assert second_assigned != first_assigned
         # Should be anchored to Feb 1
         assert second_assigned == datetime(2026, 2, 1, tzinfo=UTC)
+
+
+# ── Cycle grant ────────────────────────────────────────────────────────────
+
+
+class TestCycleGrant:
+    def test_cycle_grant_credits_granted(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+    ) -> None:
+        """cycle_grant entitlement grants credits on subscription activation."""
+        event = _sub_event(
+            event_id="evt_cg_001",
+            price_id="price_pro_monthly_cycle_grant",
+        )
+        manager.handle_event(event)
+
+        plan = credit_store.get_user_plan("user_123")
+        assert plan.plan_id is not None
+
+        balance = credit_store.get_balance("user_123")
+        # 5000 cycle_grant credits (free allowance is separate from balance)
+        assert balance.balance == 5000
+
+    def test_cycle_grant_replace_prior(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+    ) -> None:
+        """cycle_grant with replace_prior=True revokes old credits on renewal."""
+        event = _sub_event(
+            event_id="evt_cg_002",
+            price_id="price_pro_monthly_cycle_grant",
+        )
+        manager.handle_event(event)
+        balance_after_first = credit_store.get_balance("user_123")
+        assert balance_after_first.balance == 5000
+
+        renew = _sub_event(
+            event_id="evt_cg_003",
+            event_type="subscription.renewed",
+            price_id="price_pro_monthly_cycle_grant",
+            period_start="2026-02-01T00:00:00Z",
+        )
+        manager.handle_event(renew)
+
+        balance_after_renew = credit_store.get_balance("user_123")
+        # After renewal old cycle grant should be revoked and new one granted
+        assert balance_after_renew.balance == 5000
+
+    def test_cycle_grant_allowance_does_not_grant(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+    ) -> None:
+        """allowance mode (default) does NOT grant cycle credits."""
+        event = _sub_event(event_id="evt_al_001")
+        manager.handle_event(event)
+
+        plan = credit_store.get_user_plan("user_123")
+        assert plan.plan_id is not None
+
+        balance = credit_store.get_balance("user_123")
+        # No cycle_grant credits granted for allowance mode
+        assert balance.balance == 0
+
+
+# ── Payment / refund / dispute persistence ─────────────────────────────────
+
+
+class TestPaymentRefundDispute:
+    def test_payment_persisted(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+        billing_store: MemoryBillingStore,
+    ) -> None:
+        """payment.succeeded persists the payment record."""
+        event = _payment_event(amount_minor=2000)
+        manager.handle_event(event)
+
+        payment = billing_store.get_billing_payment("stripe", "py_001")
+        assert payment is not None
+        assert payment["amount_minor"] == 2000
+
+    def test_payment_failed_persists_and_revokes(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+        billing_store: MemoryBillingStore,
+    ) -> None:
+        """payment.failed persists the payment and marks subscription past_due."""
+        create = _sub_event()
+        manager.handle_event(create)
+        assert credit_store.get_user_plan("user_123").plan_id is not None
+
+        fail_event = BillingEvent(
+            provider="stripe",
+            event_id="evt_pay_fail_001",
+            event_type="payment.failed",
+            occurred_at="2026-01-01T00:00:00Z",
+            user_id="user_123",
+            customer=BillingCustomerInfo(
+                provider_customer_id="cus_xyz",
+                email="user@example.com",
+            ),
+            payment=BillingPaymentInfo(
+                provider_payment_id="py_fail_001",
+                amount_minor=1000,
+                currency="USD",
+            ),
+            subscription=BillingSubscriptionInfo(
+                provider_subscription_id="sub_abc",
+            ),
+        )
+        result = manager.handle_event(fail_event)
+        assert result.handled
+
+        payment = billing_store.get_billing_payment("stripe", "py_fail_001")
+        assert payment is not None
+
+        sub = billing_store.get_billing_subscription("stripe", "sub_abc")
+        assert sub is not None
+        assert sub.status == "past_due"
+
+    def test_refund_persisted_and_claws_back(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+        billing_store: MemoryBillingStore,
+    ) -> None:
+        """refund.created persists the refund and claws back topup credits."""
+        payment = _payment_event(amount_minor=2000)
+        manager.handle_event(payment)
+        balance_before = credit_store.get_balance("user_123").balance
+        assert balance_before == 20000
+
+        refund = _refund_event(amount_minor=2000, provider_payment_id="py_001")
+        result = manager.handle_event(refund)
+        assert result.handled
+
+        refund_record = billing_store.get_billing_refund("stripe", "rf_001")
+        assert refund_record is not None
+        assert refund_record["amount_minor"] == 2000
+
+        balance_after = credit_store.get_balance("user_123").balance
+        assert balance_after < 20000
+
+    def test_dispute_persisted(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+        billing_store: MemoryBillingStore,
+    ) -> None:
+        """dispute.created persists the dispute record."""
+        event = _dispute_event()
+        result = manager.handle_event(event)
+        assert result.handled
+
+        dispute = billing_store.get_billing_dispute("stripe", "dp_001")
+        assert dispute is not None
+        assert dispute["provider_dispute_id"] == "dp_001"
+
+    def test_invoice_persisted(
+        self,
+        credit_store: MemoryStore,
+        manager: BillingManager,
+        billing_store: MemoryBillingStore,
+    ) -> None:
+        """invoice.paid persists the invoice record."""
+        event = _invoice_event()
+        result = manager.handle_event(event)
+        assert result.handled
+
+        invoice = billing_store.get_billing_invoice("stripe", "in_001")
+        assert invoice is not None
+        assert invoice["amount_paid_minor"] == 2000

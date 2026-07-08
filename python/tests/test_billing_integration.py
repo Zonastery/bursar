@@ -729,3 +729,44 @@ class TestPostgresBillingStoreIntegration:
         new_offer = bs.resolve_billing_offer("stripe", price_id="price_new_offer")
         assert new_offer is not None
         assert new_offer["offer_key"] == "new_offer"
+
+
+class TestPricingConfigPreservesBillingRefs:
+    """Publishing pricing must NOT wipe billing provider refs (B1)."""
+
+    @pytest.fixture
+    def components(self, pg_database_url: str):
+        from psycopg2 import connect
+
+        from bursar.interface.postgres import PostgresStore
+
+        conn = connect(pg_database_url)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO auth.users (id) VALUES (%s) ON CONFLICT DO NOTHING", [_USER_ID])
+        conn.close()
+
+        cs = PostgresStore(pg_database_url)
+        cs.setup()
+        cm = CreditManager(store=cs)
+
+        bs = PostgresBillingStore(pg_database_url)
+        bs.sync_billing_from_config(_BILLING_CONFIG)
+
+        cm.publish_pricing_from_dict(_PRICING_DICT)
+
+        return cs, cm, bs
+
+    def test_offer_resolvable_after_pricing_publish(self, components):
+        """Verify billing offers survive publish_pricing_from_dict."""
+        _, _, bs = components
+        offer = bs.resolve_billing_offer(_PROVIDER, price_id=_PRICE_ID)
+        assert offer is not None
+        assert offer["offer_key"] == "pro_monthly"
+
+    def test_topup_resolvable_after_pricing_publish(self, components):
+        """Verify credit topups survive publish_pricing_from_dict."""
+        _, _, bs = components
+        topup = bs.resolve_credit_topup(_PROVIDER, price_id=_PRICE_ID_TOPUP)
+        assert topup is not None
+        assert topup["topup_key"] == "standard_topup"

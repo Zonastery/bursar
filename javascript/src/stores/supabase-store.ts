@@ -793,6 +793,18 @@ export class HttpxSupabaseStore extends CreditStore {
     };
   }
 
+  // ── Revoke credits by tx type ──────────────────────────────────────────
+
+  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
+    const row = await this.rpc("revoke_credits_by_tx_type", {
+      p_user_id: userId,
+      p_tx_type: txType,
+    });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`revoke_credits_by_tx_type: ${code}`);
+    return row as Record<string, unknown>;
+  }
+
   // ── Refunds ──────────────────────────────────────────────────────────
 
   async refundCredits(

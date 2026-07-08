@@ -4,6 +4,7 @@ from bursar.billing.models import (
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
+    BillingDisputeInfo,
     BillingEvent,
     BillingEventClaim,
     BillingEventResult,
@@ -22,11 +23,13 @@ from bursar.billing.models import (
 )
 from bursar.billing.postgres import PostgresBillingStore
 from bursar.billing.store import BillingStore
+from bursar.billing.supabase import SupabaseBillingStore
 
 __all__ = [
     "BillingConfig",
     "BillingCreditTopup",
     "BillingCustomerInfo",
+    "BillingDisputeInfo",
     "BillingEvent",
     "BillingEventClaim",
     "BillingEventResult",
@@ -46,4 +49,5 @@ __all__ = [
     "BillingSubscriptionStatus",
     "MemoryBillingStore",
     "PostgresBillingStore",
+    "SupabaseBillingStore",
 ]

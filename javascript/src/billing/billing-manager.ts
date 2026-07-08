@@ -34,6 +34,10 @@ export class BillingManager {
     this.resolveUser = options?.resolveUser ?? null;
   }
 
+  async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
+    return this.store.getUserSubscription(userId);
+  }
+
   async handleEvent(event: BillingEvent): Promise<BillingEventResult> {
     const claim = await this.store.claimBillingEvent(
       event.provider,
@@ -192,9 +196,7 @@ export class BillingManager {
     };
   }
 
-  private async resolveOfferAndKeys(
-    event: BillingEvent,
-  ): Promise<{
+  private async resolveOfferAndKeys(event: BillingEvent): Promise<{
     offer: Record<string, unknown> | null;
     offerKey: string | null;
     planKey: string | null;
@@ -452,15 +454,31 @@ export class BillingManager {
   }
 
   private async handleInvoicePaid(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.subscription) {
-      return this.handleSubscriptionRenewed(event);
+    if (event.invoice) {
+      const uid = await this.resolveUserId(event);
+      if (uid) {
+        await this.store.upsertBillingInvoice(
+          event.provider,
+          event.invoice.providerInvoiceId,
+          event.subscription?.providerSubscriptionId,
+          uid,
+          event.invoice.status,
+          event.invoice.amountPaidMinor,
+          event.invoice.amountDueMinor,
+          event.invoice.currency,
+          event.invoice.periodStart,
+          event.invoice.periodEnd,
+        );
+      }
     }
+    if (event.subscription) return this.handleSubscriptionRenewed(event);
     return { handled: true, action: "invoice_paid" };
   }
 
   private async handlePaymentSucceeded(event: BillingEvent): Promise<BillingEventResult> {
     if (!event.payment) return { handled: true, action: "payment_succeeded" };
 
+    const uid = await this.resolveUserId(event);
     const refs = event.payment.refs;
     let topupConfig: Record<string, unknown> | null = null;
     if (refs) {
@@ -471,24 +489,39 @@ export class BillingManager {
       );
     }
 
-    if (topupConfig && this.cm && event.payment.purpose === "credit_topup") {
-      const uid = await this.resolveUserId(event);
-      if (uid) {
-        const currency = String(topupConfig.currency ?? "USD");
-        if (event.payment.currency.toUpperCase() === currency.toUpperCase()) {
-          const minAmount = Number(topupConfig.minAmountMinor ?? 0);
-          const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
-          if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
-            const credits = await this.store.computeTopupCredits(
-              event.payment.amountMinor,
-              topupConfig,
-            );
-            if (credits > 0) {
-              await this.cm.addCredits(uid, new Decimal(credits), {
-                type: "purchase",
-                tier: (topupConfig.tier as string) ?? "purchased",
-              });
-            }
+    if (uid) {
+      const paymentMetadata: Record<string, unknown> | null =
+        topupConfig && event.payment.purpose === "credit_topup"
+          ? { creditsPerMajorUnit: Number(topupConfig.creditsPerMajorUnit ?? 1000) }
+          : null;
+      await this.store.upsertBillingPayment(
+        event.provider,
+        event.payment.providerPaymentId,
+        undefined,
+        uid,
+        event.payment.amountMinor,
+        event.payment.taxMinor,
+        event.payment.currency,
+        event.payment.purpose,
+        paymentMetadata,
+      );
+    }
+
+    if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
+      const currency = String(topupConfig.currency ?? "USD");
+      if (event.payment.currency.toUpperCase() === currency.toUpperCase()) {
+        const minAmount = Number(topupConfig.minAmountMinor ?? 0);
+        const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
+        if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
+          const credits = await this.store.computeTopupCredits(
+            event.payment.amountMinor,
+            topupConfig,
+          );
+          if (credits > 0) {
+            await this.cm.addCredits(uid, new Decimal(credits), {
+              type: "purchase",
+              tier: (topupConfig.tier as string) ?? "purchased",
+            });
           }
         }
       }
@@ -497,19 +530,90 @@ export class BillingManager {
     return { handled: true, action: "payment_succeeded" };
   }
 
-  private async handlePaymentFailed(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handlePaymentFailed(event: BillingEvent): Promise<BillingEventResult> {
+    const uid = await this.resolveUserId(event);
+    if (uid && event.payment) {
+      await this.store.upsertBillingPayment(
+        event.provider,
+        event.payment.providerPaymentId,
+        undefined,
+        uid,
+        event.payment.amountMinor,
+        undefined,
+        event.payment.currency,
+        event.payment.purpose,
+      );
+    }
+    if (uid && event.subscription && this.cm) {
+      const existing = await this.getExistingSubscription(event);
+      await this.store.upsertBillingSubscription(
+        this.buildSubscriptionState(event, uid, existing, { status: "past_due" }),
+      );
+      await this.revokeSubscription(uid);
+    }
     return { handled: true, action: "payment_failed_recorded" };
   }
 
-  private async handleRefundCreated(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleRefundCreated(event: BillingEvent): Promise<BillingEventResult> {
+    const uid = await this.resolveUserId(event);
+    if (uid && event.refund) {
+      await this.store.upsertBillingRefund(
+        event.provider,
+        event.refund.providerRefundId,
+        event.refund.providerPaymentId,
+        uid,
+        event.refund.amountMinor,
+        event.refund.currency,
+        event.refund.reason,
+      );
+      if (event.refund.providerPaymentId && this.cm) {
+        const payment = await this.store.getBillingPayment(
+          event.provider,
+          event.refund.providerPaymentId,
+        );
+        if (payment?.purpose === "credit_topup") {
+          const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
+          const creditsPerMajor = Number(payMeta.creditsPerMajorUnit ?? 1000);
+          const credits = Math.trunc((event.refund.amountMinor * creditsPerMajor) / 100);
+          if (credits > 0) {
+            await this.cm.deductCredits(uid, credits, {
+              txType: "refund_clawback",
+              tier: "purchased",
+            });
+          }
+        }
+      }
+    }
     return { handled: true, action: "refund_recorded" };
   }
 
-  private async handleDisputeCreated(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleDisputeCreated(event: BillingEvent): Promise<BillingEventResult> {
+    const uid = await this.resolveUserId(event);
+    if (uid && event.dispute) {
+      await this.store.upsertBillingDispute(
+        event.provider,
+        event.dispute.providerDisputeId,
+        event.dispute.providerPaymentId ?? undefined,
+        uid,
+        "needs_response",
+        event.dispute.reason ?? undefined,
+      );
+    }
     return { handled: true, action: "dispute_recorded" };
   }
 
-  private async handleDisputeClosed(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleDisputeClosed(event: BillingEvent): Promise<BillingEventResult> {
+    const uid = await this.resolveUserId(event);
+    if (uid && event.dispute) {
+      await this.store.upsertBillingDispute(
+        event.provider,
+        event.dispute.providerDisputeId,
+        event.dispute.providerPaymentId ?? undefined,
+        uid,
+        "closed",
+        event.dispute.reason ?? undefined,
+      );
+    }
     return { handled: true, action: "dispute_closed" };
   }
 
@@ -525,6 +629,22 @@ export class BillingManager {
       ? new Date(event.subscription.periodStart)
       : undefined;
     await this.cm.setUserPlan(uid, planKey, planAssignedAt);
+
+    const entitlementMode = offer?.entitlementMode as string | undefined;
+    if (entitlementMode === "cycle_grant" && this.cm) {
+      const cycleCredits = offer?.cycleGrantCredits as number | undefined;
+      if (cycleCredits && cycleCredits > 0) {
+        const cycleTier = (offer?.cycleGrantTier as string) ?? "purchased";
+        const replacePrior = (offer?.cycleGrantReplacePrior as boolean) ?? true;
+        if (replacePrior) {
+          await this.cm.revokeCreditsByTxType(uid, "cycle_grant");
+        }
+        await this.cm.addCredits(uid, new Decimal(cycleCredits), {
+          type: "cycle_grant",
+          tier: cycleTier,
+        });
+      }
+    }
   }
 
   private async revokeSubscription(uid: string): Promise<void> {
@@ -536,15 +656,17 @@ export class BillingManager {
     if (!this.cm || !event.subscription) return;
     const status = event.subscription.status;
     if (status && ["active", "trialing"].includes(status)) {
-      const existing = await this.store.getBillingSubscription(
-        event.provider,
-        event.subscription.providerSubscriptionId,
-      );
       const offer = await this.resolveOffer(event);
       if (offer) {
         await this.provisionSubscription(uid, offer, event);
-      } else if (existing?.planKey) {
-        await this.provisionSubscription(uid, { planKey: existing.planKey }, event);
+      } else {
+        const existing = await this.store.getBillingSubscription(
+          event.provider,
+          event.subscription.providerSubscriptionId,
+        );
+        if (existing?.planKey) {
+          await this.provisionSubscription(uid, { planKey: existing.planKey }, event);
+        }
       }
     } else if (
       status &&
@@ -555,16 +677,12 @@ export class BillingManager {
   }
 
   private async resolveOffer(event: BillingEvent): Promise<Record<string, unknown> | null> {
-    if (!event.subscription) return null;
-    const refs = event.subscription.refs;
-    if (refs?.priceId) {
-      const offer = await this.store.resolveBillingOffer(event.provider, null, refs.priceId);
-      if (offer) return offer;
-    }
-    if (refs?.productId) {
-      const offer = await this.store.resolveBillingOffer(event.provider, refs.productId);
-      if (offer) return offer;
-    }
-    return null;
+    const refs = event.subscription?.refs;
+    if (!refs) return null;
+    return this.store.resolveBillingOffer(
+      event.provider,
+      refs.productId ?? null,
+      refs.priceId ?? null,
+    );
   }
 }

@@ -39,6 +39,36 @@ class PricingConfig(BaseModel):
     subscriptions: dict[str, dict] | None = None
     credit_topups: dict[str, dict] | None = None
 
+    @field_validator("subscriptions")
+    @classmethod
+    def _validate_billing_subscriptions(cls, v: dict | None) -> dict | None:
+        if v is not None:
+            from bursar.billing.models import BillingOffer as _BillingOffer
+
+            for key, val in v.items():
+                if not isinstance(val, dict):
+                    raise ValueError(f"subscription '{key}' must be a dict")
+                try:
+                    _BillingOffer(offer_key=key, **val)
+                except Exception as e:
+                    raise ValueError(f"invalid subscription '{key}': {e}") from e
+        return v
+
+    @field_validator("credit_topups")
+    @classmethod
+    def _validate_billing_topups(cls, v: dict | None) -> dict | None:
+        if v is not None:
+            from bursar.billing.models import BillingCreditTopup as _BillingCreditTopup
+
+            for key, val in v.items():
+                if not isinstance(val, dict):
+                    raise ValueError(f"credit_topup '{key}' must be a dict")
+                try:
+                    _BillingCreditTopup(**val)
+                except Exception as e:
+                    raise ValueError(f"invalid credit_topup '{key}': {e}") from e
+        return v
+
     @field_validator("fixed")
     @classmethod
     def validate_fixed_non_negative(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:

@@ -385,11 +385,19 @@ DECLARE
     v_ref JSONB;
     v_provider TEXT;
 BEGIN
-    -- Sync billing offers (subscription plans)
-    DELETE FROM public.billing_provider_refs
-    WHERE resource_type = 'offer';
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN;
+    END IF;
 
+    -- Sync billing offers (subscription plans)
+    -- Note: offers are upserted, not deleted+rebuilt. Removing an offer from
+    -- the config leaves a stale row, but this is intentional — active
+    -- subscriptions reference offers via FK (billing_subscriptions.offer_key)
+    -- and deleting would break them. Use resolve_billing_offer_by_price to
+    -- find offers; absent keys simply won't resolve.
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
+        DELETE FROM public.billing_provider_refs
+        WHERE resource_type = 'offer';
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
             INSERT INTO public.billing_offers (
@@ -441,10 +449,9 @@ BEGIN
     END IF;
 
     -- Sync credit topups
-    DELETE FROM public.billing_provider_refs
-    WHERE resource_type = 'topup';
-
     IF p_config ? 'credit_topups' AND jsonb_typeof(p_config->'credit_topups') = 'object' THEN
+        DELETE FROM public.billing_provider_refs
+        WHERE resource_type = 'topup';
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'credit_topups')
         LOOP
             INSERT INTO public.billing_credit_topups (
@@ -512,6 +519,10 @@ DECLARE
     v_ref RECORD;
     v_offer RECORD;
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN NULL;
+    END IF;
+
     IF p_price_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM public.billing_provider_refs
@@ -567,6 +578,10 @@ DECLARE
     v_ref RECORD;
     v_topup RECORD;
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN NULL;
+    END IF;
+
     IF p_price_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM public.billing_provider_refs
@@ -722,6 +737,49 @@ END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.fail_billing_event(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- ── RPC: get_user_billing_subscription ────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.get_user_billing_subscription(
+    p_user_id UUID
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_row RECORD;
+BEGIN
+    SELECT * INTO v_row
+    FROM public.billing_subscriptions
+    WHERE user_id = p_user_id
+    ORDER BY current_period_start DESC NULLS LAST, created_at DESC
+    LIMIT 1;
+
+    IF v_row.id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'user_id', v_row.user_id,
+        'provider', v_row.provider,
+        'provider_subscription_id', v_row.provider_subscription_id,
+        'provider_customer_id', v_row.provider_customer_id,
+        'offer_key', v_row.offer_key,
+        'plan_key', v_row.plan_key,
+        'status', v_row.status,
+        'current_period_start', v_row.current_period_start,
+        'current_period_end', v_row.current_period_end,
+        'cancel_at_period_end', v_row.cancel_at_period_end,
+        'interval', v_row.interval,
+        'interval_count', v_row.interval_count,
+        'metadata', v_row.metadata
+    );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_user_billing_subscription(UUID) FROM PUBLIC, anon, authenticated;
 
 -- ── Extend set_active_pricing_config to also sync billing config ────────
 

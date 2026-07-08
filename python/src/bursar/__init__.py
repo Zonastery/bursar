@@ -30,6 +30,7 @@ from bursar.billing import (
     BillingSubscriptionStatus,
     MemoryBillingStore,
     PostgresBillingStore,
+    SupabaseBillingStore,
 )
 from bursar.breakdown import CostBreakdown
 from bursar.config import ConfigError, PricingConfig
@@ -96,6 +97,17 @@ from bursar.manager import (
     PricingNotLoadedError,
 )
 from bursar.metrics import ToolCall, UsageMetrics
+from bursar.providers.types import (
+    CheckoutParams,
+    CreateCustomerParams,
+    PaymentMethodInfo,
+    PaymentMethodSetupParams,
+    PaymentProvider,
+    PortalParams,
+    ProviderLogger,
+    UpdatePaymentMethodParams,
+    WebhookRequest,
+)
 
 __all__ = [
     "AddCreditsResult",
@@ -129,6 +141,8 @@ __all__ = [
     "PostgresBillingStore",
     "CapCheckResult",
     "CapabilityNotSupportedError",
+    "CheckoutParams",
+    "CreateCustomerParams",
     "CapReachedError",
     "CheckFeatureResult",
     "ConcurrencyLimitError",
@@ -181,7 +195,16 @@ __all__ = [
     "ToolCall",
     "TopUserRow",
     "TransactionRow",
+    "UpdatePaymentMethodParams",
     "UsageMetrics",
+    "WebhookRequest",
     "evaluate_expression",
     "validate_expression",
+    "PaymentMethodInfo",
+    "PaymentMethodSetupParams",
+    "PaymentProvider",
+    "PortalParams",
+    "PostgresBillingStore",
+    "ProviderLogger",
+    "SupabaseBillingStore",
 ]

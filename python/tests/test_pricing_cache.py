@@ -30,6 +30,9 @@ class _CountingStore(CreditStore):
 
     def set_pricing(self, result: PricingConfigResult | None) -> None:
         self._pricing_to_return = result
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+        return {"user_id": user_id, "amount": 0, "new_balance": "0", "tier": None, "transaction_id": None}
         self.invalidate_pricing_cache()
 
     @property

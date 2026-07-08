@@ -772,6 +772,13 @@ export class PostgresStore extends CreditStore {
     };
   }
 
+  // ── Revoke credits by tx type ──────────────────────────────────────────
+
+  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
+    const rows = await this.callproc("revoke_credits_by_tx_type", [userId, txType]);
+    return (rows?.[0] ?? {}) as Record<string, unknown>;
+  }
+
   // ── Refunds ──────────────────────────────────────────────────────────
 
   async refundCredits(

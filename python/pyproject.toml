@@ -46,6 +46,10 @@ where = ["src"]
 supabase = [
     "httpx>=0.28.1",
 ]
+providers = [
+    "stripe>=7.0.0",
+    "dodopayments>=1.0.0",
+]
 postgres = [
     "psycopg2-binary>=2.9.12",
 ]
