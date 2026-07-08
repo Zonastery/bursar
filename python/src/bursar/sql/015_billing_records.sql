@@ -81,7 +81,8 @@ BEGIN
         tax_minor = EXCLUDED.tax_minor,
         currency = EXCLUDED.currency,
         purpose = EXCLUDED.purpose,
-        metadata = EXCLUDED.metadata
+        metadata = EXCLUDED.metadata,
+        updated_at = now()
     RETURNING id INTO v_id;
 
     RETURN jsonb_build_object('id', v_id, 'provider_payment_id', p_provider_payment_id);
@@ -128,7 +129,8 @@ BEGIN
         amount_minor = EXCLUDED.amount_minor,
         currency = EXCLUDED.currency,
         reason = EXCLUDED.reason,
-        metadata = EXCLUDED.metadata
+        metadata = EXCLUDED.metadata,
+        updated_at = now()
     RETURNING id INTO v_id;
 
     RETURN jsonb_build_object('id', v_id, 'provider_refund_id', p_provider_refund_id);
@@ -278,7 +280,6 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_billing_payment_for_refund(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
--- GRANT EXECUTE on all functions to service_role is handled by the existing
--- schema-level grant in 012_feature_limits.sql:81.
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
 
 NOTIFY pgrst, 'reload schema';

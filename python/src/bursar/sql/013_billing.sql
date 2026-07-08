@@ -35,6 +35,21 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_offers_updated_at'
+        AND tgrelid = 'public.billing_offers'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_offers_updated_at
+            BEFORE UPDATE ON public.billing_offers
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── Provider references (maps provider IDs to billing offers / topups) ──
 
 CREATE TABLE IF NOT EXISTS public.billing_provider_refs (
@@ -106,6 +121,21 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_customers_updated_at'
+        AND tgrelid = 'public.billing_customers'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_customers_updated_at
+            BEFORE UPDATE ON public.billing_customers
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── Billing subscriptions ───────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.billing_subscriptions (
@@ -150,6 +180,21 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_subscriptions_updated_at'
+        AND tgrelid = 'public.billing_subscriptions'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_subscriptions_updated_at
+            BEFORE UPDATE ON public.billing_subscriptions
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── Billing events (idempotency log) ────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.billing_events (
@@ -188,12 +233,14 @@ $$;
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public'
-        AND table_name = 'billing_events'
-        AND column_name = 'retry_count'
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_events_updated_at'
+        AND tgrelid = 'public.billing_events'::regclass
     ) THEN
-        ALTER TABLE public.billing_events ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+        CREATE TRIGGER set_billing_events_updated_at
+            BEFORE UPDATE ON public.billing_events
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
     END IF;
 END;
 $$;
@@ -237,6 +284,21 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_invoices_updated_at'
+        AND tgrelid = 'public.billing_invoices'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_invoices_updated_at
+            BEFORE UPDATE ON public.billing_invoices
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── Billing payments ────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.billing_payments (
@@ -251,8 +313,22 @@ CREATE TABLE IF NOT EXISTS public.billing_payments (
     purpose TEXT NOT NULL DEFAULT 'unknown'
         CHECK (purpose IN ('subscription', 'credit_topup', 'unknown')),
     metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+        AND table_name = 'billing_payments'
+        AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE public.billing_payments ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    END IF;
+END;
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_payments_provider
     ON public.billing_payments (provider, provider_payment_id);
@@ -274,6 +350,21 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_payments_updated_at'
+        AND tgrelid = 'public.billing_payments'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_payments_updated_at
+            BEFORE UPDATE ON public.billing_payments
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── Billing refunds ─────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS public.billing_refunds (
@@ -286,8 +377,22 @@ CREATE TABLE IF NOT EXISTS public.billing_refunds (
     currency TEXT NOT NULL DEFAULT 'USD',
     reason TEXT,
     metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+        AND table_name = 'billing_refunds'
+        AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE public.billing_refunds ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    END IF;
+END;
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_refunds_provider
     ON public.billing_refunds (provider, provider_refund_id);
@@ -302,6 +407,21 @@ BEGIN
         AND schemaname = 'public'
     ) THEN
         CREATE POLICY "Server-only billing_refunds" ON public.billing_refunds USING (false);
+    END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_refunds_updated_at'
+        AND tgrelid = 'public.billing_refunds'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_refunds_updated_at
+            BEFORE UPDATE ON public.billing_refunds
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
     END IF;
 END;
 $$;
@@ -335,10 +455,32 @@ BEGIN
 END;
 $$;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'set_billing_credit_topups_updated_at'
+        AND tgrelid = 'public.billing_credit_topups'::regclass
+    ) THEN
+        CREATE TRIGGER set_billing_credit_topups_updated_at
+            BEFORE UPDATE ON public.billing_credit_topups
+            FOR EACH ROW
+            EXECUTE FUNCTION public.handle_updated_at();
+    END IF;
+END;
+$$;
+
 -- ── RPC: set_user_plan (updated — accepts anchored plan_assigned_at) ────
 
-DROP FUNCTION IF EXISTS public.set_user_plan(UUID, TEXT);
-DROP FUNCTION IF EXISTS public.set_user_plan(UUID, TEXT, TIMESTAMPTZ);
+DO $$ DECLARE r RECORD;
+BEGIN
+    FOR r IN
+        SELECT oid::regprocedure::text AS sig FROM pg_proc
+        WHERE proname = 'set_user_plan' AND pronamespace = 'public'::regnamespace
+    LOOP
+        EXECUTE 'DROP FUNCTION ' || r.sig;
+    END LOOP;
+END $$;
 
 CREATE OR REPLACE FUNCTION public.set_user_plan(
     p_user_id UUID,
@@ -410,8 +552,10 @@ BEGIN
     -- and deleting would break them. Use resolve_billing_offer_by_price to
     -- find offers; absent keys simply won't resolve.
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
-        DELETE FROM public.billing_provider_refs
-        WHERE resource_type = 'offer';
+        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'subscriptions')) > 0 THEN
+            DELETE FROM public.billing_provider_refs
+            WHERE resource_type = 'offer';
+        END IF;
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
             INSERT INTO public.billing_offers (
@@ -456,7 +600,13 @@ BEGIN
                         'offer',
                         v_key
                     )
-                    ;
+                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
+                    DO UPDATE SET
+                        product_id = EXCLUDED.product_id,
+                        variant_id = EXCLUDED.variant_id,
+                        lookup_key = EXCLUDED.lookup_key,
+                        resource_type = EXCLUDED.resource_type,
+                        resource_key = EXCLUDED.resource_key;
                 END LOOP;
             END IF;
         END LOOP;
@@ -464,8 +614,10 @@ BEGIN
 
     -- Sync credit topups
     IF p_config ? 'credit_topups' AND jsonb_typeof(p_config->'credit_topups') = 'object' THEN
-        DELETE FROM public.billing_provider_refs
-        WHERE resource_type = 'topup';
+        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'credit_topups')) > 0 THEN
+            DELETE FROM public.billing_provider_refs
+            WHERE resource_type = 'topup';
+        END IF;
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'credit_topups')
         LOOP
             INSERT INTO public.billing_credit_topups (
@@ -507,7 +659,13 @@ BEGIN
                         'topup',
                         v_key
                     )
-                    ;
+                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
+                    DO UPDATE SET
+                        product_id = EXCLUDED.product_id,
+                        variant_id = EXCLUDED.variant_id,
+                        lookup_key = EXCLUDED.lookup_key,
+                        resource_type = EXCLUDED.resource_type,
+                        resource_key = EXCLUDED.resource_key;
                 END LOOP;
             END IF;
         END LOOP;
@@ -642,6 +800,176 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.resolve_credit_topup_by_price(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
+-- ── RPC: upsert_billing_customer ──────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.upsert_billing_customer(
+    p_provider TEXT,
+    p_provider_customer_id TEXT,
+    p_user_id UUID,
+    p_email TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
+    VALUES (p_provider, p_provider_customer_id, p_user_id, p_email)
+    ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        email = COALESCE(EXCLUDED.email, billing_customers.email),
+        updated_at = now();
+
+    RETURN jsonb_build_object('status', 'ok');
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.upsert_billing_customer(TEXT, TEXT, UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- ── RPC: get_billing_customer ─────────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.get_billing_customer(
+    p_provider TEXT,
+    p_provider_customer_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_user_id UUID;
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT user_id INTO v_user_id
+    FROM public.billing_customers
+    WHERE provider = p_provider AND provider_customer_id = p_provider_customer_id
+    LIMIT 1;
+
+    IF v_user_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN jsonb_build_object('user_id', v_user_id);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_billing_customer(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- ── RPC: upsert_billing_subscription ───────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.upsert_billing_subscription(
+    p_state JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    INSERT INTO public.billing_subscriptions (
+        user_id, provider, provider_subscription_id, provider_customer_id,
+        offer_key, plan_key, status, current_period_start,
+        current_period_end, cancel_at_period_end, interval, interval_count, metadata
+    )
+    VALUES (
+        (p_state->>'user_id')::UUID,
+        p_state->>'provider',
+        p_state->>'provider_subscription_id',
+        p_state->>'provider_customer_id',
+        p_state->>'offer_key',
+        p_state->>'plan_key',
+        COALESCE(p_state->>'status', 'incomplete'),
+        (p_state->>'current_period_start')::TIMESTAMPTZ,
+        (p_state->>'current_period_end')::TIMESTAMPTZ,
+        COALESCE((p_state->>'cancel_at_period_end')::BOOLEAN, false),
+        p_state->>'interval',
+        (p_state->>'interval_count')::INTEGER,
+        (p_state->>'metadata')::JSONB
+    )
+    ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
+        user_id = EXCLUDED.user_id,
+        provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
+        offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
+        plan_key = COALESCE(EXCLUDED.plan_key, billing_subscriptions.plan_key),
+        status = EXCLUDED.status,
+        current_period_start = COALESCE(EXCLUDED.current_period_start, billing_subscriptions.current_period_start),
+        current_period_end = COALESCE(EXCLUDED.current_period_end, billing_subscriptions.current_period_end),
+        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+        interval = COALESCE(EXCLUDED.interval, billing_subscriptions.interval),
+        interval_count = COALESCE(EXCLUDED.interval_count, billing_subscriptions.interval_count),
+        metadata = CASE WHEN (p_state->>'metadata') IS NOT NULL THEN (p_state->>'metadata')::JSONB ELSE billing_subscriptions.metadata END,
+        updated_at = now();
+
+    RETURN jsonb_build_object('status', 'ok');
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.upsert_billing_subscription(JSONB) FROM PUBLIC, anon, authenticated;
+
+-- ── RPC: get_billing_subscription ──────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.get_billing_subscription(
+    p_provider TEXT,
+    p_provider_subscription_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_row RECORD;
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT
+        user_id, provider, provider_subscription_id, provider_customer_id,
+        offer_key, plan_key, status, current_period_start,
+        current_period_end, cancel_at_period_end, interval, interval_count, metadata
+    INTO v_row
+    FROM public.billing_subscriptions
+    WHERE provider = p_provider AND provider_subscription_id = p_provider_subscription_id
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'user_id', v_row.user_id,
+        'provider', v_row.provider,
+        'provider_subscription_id', v_row.provider_subscription_id,
+        'provider_customer_id', v_row.provider_customer_id,
+        'offer_key', v_row.offer_key,
+        'plan_key', v_row.plan_key,
+        'status', v_row.status,
+        'current_period_start', v_row.current_period_start,
+        'current_period_end', v_row.current_period_end,
+        'cancel_at_period_end', v_row.cancel_at_period_end,
+        'interval', v_row.interval,
+        'interval_count', v_row.interval_count,
+        'metadata', v_row.metadata
+    );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_billing_subscription(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
 -- ── RPC: claim_billing_event (idempotent claim) ─────────────────────────
 
 CREATE OR REPLACE FUNCTION public.claim_billing_event(
@@ -663,74 +991,54 @@ BEGIN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    SELECT * INTO v_existing
-    FROM public.billing_events
-    WHERE provider = p_provider AND provider_event_id = p_event_id
-    FOR UPDATE;
-
-    IF FOUND THEN
-        IF v_existing.status = 'completed' THEN
-            RETURN jsonb_build_object('status', 'duplicate');
-        END IF;
-
-        IF v_existing.status = 'processing' THEN
-            IF v_existing.created_at < now() - interval '5 minutes' THEN
-                UPDATE public.billing_events
-                SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
-                WHERE id = v_existing.id;
-                RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
-            ELSE
-                RETURN jsonb_build_object('status', 'retry');
-            END IF;
-        END IF;
-
-        IF v_existing.status = 'failed' THEN
-            UPDATE public.billing_events
-            SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
-            WHERE id = v_existing.id;
-            RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
-        END IF;
-    END IF;
-
     BEGIN
         INSERT INTO public.billing_events (provider, provider_event_id, event_type, status, payload)
         VALUES (p_provider, p_event_id, p_event_type, 'processing', p_payload)
         RETURNING id INTO v_new_id;
+
+        RETURN jsonb_build_object('status', 'claimed', 'event_id', v_new_id);
     EXCEPTION
         WHEN unique_violation THEN
+            -- A concurrent caller already inserted this event. Re-fetch with
+            -- FOR UPDATE (blocks until the inserter commits) and dispatch by
+            -- status. This single copy of the status-handling logic eliminates
+            -- the duplicate-code risk of the pre-INSERT SELECT pattern.
             SELECT * INTO v_existing
             FROM public.billing_events
             WHERE provider = p_provider AND provider_event_id = p_event_id
             FOR UPDATE;
 
-            IF FOUND THEN
-                IF v_existing.status = 'completed' THEN
-                    RETURN jsonb_build_object('status', 'duplicate');
-                END IF;
+            IF NOT FOUND THEN
+                RETURN jsonb_build_object('status', 'duplicate');
+            END IF;
 
-                IF v_existing.status = 'processing' THEN
-                    IF v_existing.created_at < now() - interval '5 minutes' THEN
-                        UPDATE public.billing_events
-                        SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
-                        WHERE id = v_existing.id;
-                        RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
-                    ELSE
-                        RETURN jsonb_build_object('status', 'retry');
-                    END IF;
-                END IF;
+            IF v_existing.status = 'completed' THEN
+                RETURN jsonb_build_object('status', 'duplicate');
+            END IF;
 
-                IF v_existing.status = 'failed' THEN
+            IF v_existing.status = 'processing' THEN
+                IF v_existing.updated_at < now() - interval '5 minutes' THEN
                     UPDATE public.billing_events
                     SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
                     WHERE id = v_existing.id;
                     RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
+                ELSE
+                    RETURN jsonb_build_object('status', 'retry');
                 END IF;
+            END IF;
+
+            IF v_existing.status = 'failed' THEN
+                IF v_existing.retry_count >= 3 THEN
+                    RETURN jsonb_build_object('status', 'max_retries_exceeded');
+                END IF;
+                UPDATE public.billing_events
+                SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+                WHERE id = v_existing.id;
+                RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
             END IF;
 
             RETURN jsonb_build_object('status', 'duplicate');
     END;
-
-    RETURN jsonb_build_object('status', 'claimed', 'event_id', v_new_id);
 END;
 $$;
 
@@ -762,7 +1070,11 @@ BEGIN
         RETURN jsonb_build_object('status', 'not_found');
     END IF;
 
-    IF v_existing.status IN ('completed', 'failed') AND v_existing.retry_count >= 3 THEN
+    IF v_existing.status = 'completed' THEN
+        RETURN jsonb_build_object('status', 'already_completed');
+    END IF;
+
+    IF v_existing.status = 'failed' AND v_existing.retry_count >= 3 THEN
         RETURN jsonb_build_object('status', 'max_retries_exceeded');
     END IF;
 
@@ -837,6 +1149,10 @@ AS $$
 DECLARE
     v_row RECORD;
 BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN NULL;
+    END IF;
+
     SELECT * INTO v_row
     FROM public.billing_subscriptions
     WHERE user_id = p_user_id
@@ -899,7 +1215,11 @@ BEGIN
 
     PERFORM public.sync_plans_from_config(p_config);
     PERFORM public.sync_tiers_from_config(p_config);
-    PERFORM public.sync_billing_from_config(p_config);
+    BEGIN
+        PERFORM public.sync_billing_from_config(p_config);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'billing config sync failed (pricing update still applied): %', SQLERRM;
+    END;
 
     RETURN jsonb_build_object(
         'id', v_new_id,
@@ -908,3 +1228,5 @@ BEGIN
     );
 END;
 $$;
+
+NOTIFY pgrst, 'reload schema';

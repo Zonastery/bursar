@@ -16,8 +16,10 @@ function toSnakeCase(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 export class SupabaseBillingStore extends BillingStore {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SupabaseClient generic varies per project
   private supabase: SupabaseClient<any>;
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SupabaseClient generic varies per project
   constructor(supabase: SupabaseClient<any>) {
     super();
     this.supabase = supabase;

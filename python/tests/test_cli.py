@@ -394,9 +394,7 @@ class TestConfigStore:
 
 
 class TestConfigSchema:
-    def test_schema_is_valid_json_with_additional_properties_false(
-        self, capsys: pytest.CaptureFixture
-    ) -> None:
+    def test_schema_is_valid_json_with_additional_properties_false(self, capsys: pytest.CaptureFixture) -> None:
         _run("config", "schema")
         schema = json.loads(capsys.readouterr().out)
         assert schema["additionalProperties"] is False

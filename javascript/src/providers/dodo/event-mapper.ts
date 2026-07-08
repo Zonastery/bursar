@@ -107,8 +107,8 @@ export async function handleDodoBillingEvent(
       if (!subId) return;
       await bm.handleEvent({
         ...baseEvent(rawId),
-        eventType: "subscription.paused",
-        subscription: { providerSubscriptionId: subId },
+        eventType: "subscription.updated",
+        subscription: { providerSubscriptionId: subId, status: "past_due" },
       });
       return;
     }

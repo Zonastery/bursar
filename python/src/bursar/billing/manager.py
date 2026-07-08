@@ -106,6 +106,15 @@ class BillingManager:
             logger.debug("duplicate billing event %s/%s", event.provider, event.event_id)
             return BillingEventResult(handled=True, action="duplicate")
 
+        if claim.status in ("retry", "max_retries_exceeded"):
+            logger.warning(
+                "billing event %s/%s %s — skipping",
+                event.provider,
+                event.event_id,
+                claim.status,
+            )
+            return BillingEventResult(handled=True, action=claim.status)
+
         try:
             result = self._route_event(event)
             self._store.complete_billing_event(event.provider, event.event_id)

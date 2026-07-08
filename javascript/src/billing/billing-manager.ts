@@ -139,6 +139,13 @@ export class BillingManager {
         event.customer.email ?? null,
       );
     }
+    if (event.subscription?.providerSubscriptionId) {
+      const existing = await this.store.getBillingSubscription(
+        event.provider,
+        event.subscription.providerSubscriptionId,
+      );
+      if (existing?.userId) return existing.userId;
+    }
     return null;
   }
 

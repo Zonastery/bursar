@@ -179,8 +179,7 @@ class LedgerInvariantMachine(RuleBasedStateMachine):
         # an accidental clamp-to-hold regression would be caught.
         expected_net = min(actual, max(Decimal(0), self.expected_balance - self.floor))
         assert result.amount == expected_net, (
-            f"settle not de-clamped correctly: actual={actual} hold={hold} "
-            f"got={result.amount} expected={expected_net}"
+            f"settle not de-clamped correctly: actual={actual} hold={hold} got={result.amount} expected={expected_net}"
         )
         self.expected_balance -= expected_net
         if expected_net > 0:
