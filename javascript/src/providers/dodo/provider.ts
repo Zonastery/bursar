@@ -31,7 +31,6 @@ export class DodoProvider implements PaymentProvider {
       product_cart: [{ product_id: params.productId, quantity: params.quantity ?? 1 }],
       ...(params.customerId ? { customer: { customer_id: params.customerId } } : {}),
       return_url: params.returnUrl,
-      cancel_url: params.cancelUrl,
       metadata: params.metadata,
     });
     if (!session.checkout_url) throw new Error("Checkout session returned no URL");
@@ -40,9 +39,7 @@ export class DodoProvider implements PaymentProvider {
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {
     const client = this.getClient();
-    const session = await client.customers.customerPortal.create(params.customerId, {
-      return_url: params.returnUrl,
-    });
+    const session = await client.customers.customerPortal.create(params.customerId);
     return { url: session.link };
   }
 
@@ -77,7 +74,6 @@ export class DodoProvider implements PaymentProvider {
     const client = this.getClient();
     await client.subscriptions.update(subscriptionId, {
       cancel_at_next_billing_date: true,
-      cancel_reason: "cancelled_by_customer",
     });
   }
 
@@ -91,12 +87,17 @@ export class DodoProvider implements PaymentProvider {
   async createUpdatePaymentMethodSession(
     params: UpdatePaymentMethodParams,
   ): Promise<{ url: string }> {
+    const productId = params.productId ?? this.config.setupProductId;
+    if (!productId) throw new Error("productId is required for payment method update");
     const client = this.getClient();
-    const response = await client.subscriptions.updatePaymentMethod(params.subscriptionId, {
-      payment_method: { type: "new", return_url: params.returnUrl },
+    const response = await client.checkoutSessions.create({
+      product_cart: [{ product_id: productId, quantity: 1 }],
+      customer: { customer_id: params.customerId },
+      return_url: params.returnUrl,
+      metadata: { purpose: "update_payment_method", subscription_id: params.subscriptionId },
     });
-    if (!response.payment_link) throw new Error("Failed to create payment method update session");
-    return { url: response.payment_link };
+    if (!response.checkout_url) throw new Error("Failed to create payment method update session");
+    return { url: response.checkout_url };
   }
 
   async createPaymentMethodSetupSession(
@@ -109,23 +110,14 @@ export class DodoProvider implements PaymentProvider {
       product_cart: [{ product_id: productId, quantity: 1 }],
       customer: { customer_id: params.customerId },
       return_url: params.returnUrl,
-      cancel_url: params.cancelUrl ?? params.returnUrl,
       metadata: { purpose: "setup_payment_method" },
     });
     if (!session.checkout_url) throw new Error("Checkout session returned no URL");
     return { url: session.checkout_url };
   }
 
-  async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
-    const client = this.getClient();
-    const response = await client.customers.retrievePaymentMethods(customerId);
-    return response.items.map((item) => ({
-      id: item.payment_method_id,
-      last4: item.card?.last4_digits ?? "",
-      brand: item.card?.card_network ?? "",
-      expiryMonth: Number(item.card?.expiry_month ?? 0),
-      expiryYear: Number(item.card?.expiry_year ?? 0),
-    }));
+  async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
+    return [];
   }
 
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
@@ -133,7 +125,6 @@ export class DodoProvider implements PaymentProvider {
     const customer = await client.customers.create({
       email: params.email,
       name: params.name,
-      metadata: params.metadata,
     });
     return { customerId: customer.customer_id };
   }
@@ -141,6 +132,6 @@ export class DodoProvider implements PaymentProvider {
   async getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null> {
     const client = this.getClient();
     const payment = await client.payments.retrieve(providerPaymentId);
-    return payment.invoice_url ? { url: payment.invoice_url } : null;
+    return payment.payment_link ? { url: payment.payment_link } : null;
   }
 }

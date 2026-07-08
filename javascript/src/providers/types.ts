@@ -24,6 +24,7 @@ export interface UpdatePaymentMethodParams {
   customerId: string;
   subscriptionId: string;
   returnUrl: string;
+  productId?: string;
 }
 
 export interface PaymentMethodSetupParams {
