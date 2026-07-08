@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS public.billing_events (
     status TEXT NOT NULL DEFAULT 'processing'
         CHECK (status IN ('processing', 'completed', 'failed')),
     payload JSONB,
+    retry_count INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -180,6 +181,19 @@ BEGIN
         AND schemaname = 'public'
     ) THEN
         CREATE POLICY "Server-only billing_events" ON public.billing_events USING (false);
+    END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+        AND table_name = 'billing_events'
+        AND column_name = 'retry_count'
+    ) THEN
+        ALTER TABLE public.billing_events ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
     END IF;
 END;
 $$;
@@ -520,6 +534,10 @@ DECLARE
     v_offer RECORD;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    IF p_price_id IS NULL AND p_product_id IS NULL THEN
         RETURN NULL;
     END IF;
 
@@ -582,6 +600,10 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    IF p_price_id IS NULL AND p_product_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
     IF p_price_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM public.billing_provider_refs
@@ -634,30 +656,40 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 DECLARE
-    v_existing_id UUID;
-    v_existing_status TEXT;
+    v_existing RECORD;
     v_new_id UUID;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    SELECT id, status INTO v_existing_id, v_existing_status
+    SELECT * INTO v_existing
     FROM public.billing_events
     WHERE provider = p_provider AND provider_event_id = p_event_id
     FOR UPDATE;
 
-    IF v_existing_id IS NOT NULL THEN
-        IF v_existing_status = 'failed' THEN
-            UPDATE public.billing_events
-            SET status = 'processing',
-                event_type = p_event_type,
-                payload = p_payload,
-                updated_at = now()
-            WHERE id = v_existing_id;
-            RETURN jsonb_build_object('status', 'retry', 'event_id', v_existing_id);
+    IF FOUND THEN
+        IF v_existing.status = 'completed' THEN
+            RETURN jsonb_build_object('status', 'duplicate');
         END IF;
-        RETURN jsonb_build_object('status', 'duplicate');
+
+        IF v_existing.status = 'processing' THEN
+            IF v_existing.created_at < now() - interval '5 minutes' THEN
+                UPDATE public.billing_events
+                SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+                WHERE id = v_existing.id;
+                RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
+            ELSE
+                RETURN jsonb_build_object('status', 'retry');
+            END IF;
+        END IF;
+
+        IF v_existing.status = 'failed' THEN
+            UPDATE public.billing_events
+            SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+            WHERE id = v_existing.id;
+            RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
+        END IF;
     END IF;
 
     BEGIN
@@ -666,19 +698,33 @@ BEGIN
         RETURNING id INTO v_new_id;
     EXCEPTION
         WHEN unique_violation THEN
-            SELECT id, status INTO v_existing_id, v_existing_status
+            SELECT * INTO v_existing
             FROM public.billing_events
             WHERE provider = p_provider AND provider_event_id = p_event_id
             FOR UPDATE;
 
-            IF v_existing_status = 'failed' THEN
-                UPDATE public.billing_events
-                SET status = 'processing',
-                    event_type = p_event_type,
-                    payload = p_payload,
-                    updated_at = now()
-                WHERE id = v_existing_id;
-                RETURN jsonb_build_object('status', 'retry', 'event_id', v_existing_id);
+            IF FOUND THEN
+                IF v_existing.status = 'completed' THEN
+                    RETURN jsonb_build_object('status', 'duplicate');
+                END IF;
+
+                IF v_existing.status = 'processing' THEN
+                    IF v_existing.created_at < now() - interval '5 minutes' THEN
+                        UPDATE public.billing_events
+                        SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+                        WHERE id = v_existing.id;
+                        RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
+                    ELSE
+                        RETURN jsonb_build_object('status', 'retry');
+                    END IF;
+                END IF;
+
+                IF v_existing.status = 'failed' THEN
+                    UPDATE public.billing_events
+                    SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+                    WHERE id = v_existing.id;
+                    RETURN jsonb_build_object('status', 'claimed', 'event_id', v_existing.id);
+                END IF;
             END IF;
 
             RETURN jsonb_build_object('status', 'duplicate');
@@ -689,6 +735,46 @@ END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.claim_billing_event(TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+
+-- ── RPC: reclaim_billing_event ──────────────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.reclaim_billing_event(
+    p_provider TEXT,
+    p_event_id TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_existing RECORD;
+BEGIN
+    IF auth.role() IS DISTINCT FROM 'service_role' THEN
+        RETURN jsonb_build_object('error', 'unauthorized');
+    END IF;
+
+    SELECT * INTO v_existing FROM public.billing_events
+    WHERE provider = p_provider AND provider_event_id = p_event_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'not_found');
+    END IF;
+
+    IF v_existing.status IN ('completed', 'failed') AND v_existing.retry_count >= 3 THEN
+        RETURN jsonb_build_object('status', 'max_retries_exceeded');
+    END IF;
+
+    UPDATE public.billing_events
+    SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+    WHERE id = v_existing.id;
+
+    RETURN jsonb_build_object('status', 'reclaimed', 'event_id', v_existing.id);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.reclaim_billing_event(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: complete_billing_event ─────────────────────────────────────────
 
@@ -757,7 +843,7 @@ BEGIN
     ORDER BY current_period_start DESC NULLS LAST, created_at DESC
     LIMIT 1;
 
-    IF v_row.id IS NULL THEN
+    IF NOT FOUND THEN
         RETURN NULL;
     END IF;
 
@@ -813,11 +899,7 @@ BEGIN
 
     PERFORM public.sync_plans_from_config(p_config);
     PERFORM public.sync_tiers_from_config(p_config);
-    BEGIN
-        PERFORM public.sync_billing_from_config(p_config);
-    EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'billing config sync failed (pricing update still applied): %', SQLERRM;
-    END;
+    PERFORM public.sync_billing_from_config(p_config);
 
     RETURN jsonb_build_object(
         'id', v_new_id,

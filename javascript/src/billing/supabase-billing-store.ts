@@ -6,6 +6,15 @@ import type {
   BillingSubscriptionState,
 } from "./billing-types.js";
 
+function toSnakeCase(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const snakeKey = key.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
+    result[snakeKey] = value;
+  }
+  return result;
+}
+
 export class SupabaseBillingStore extends BillingStore {
   private supabase: SupabaseClient<any>;
 
@@ -14,9 +23,37 @@ export class SupabaseBillingStore extends BillingStore {
     this.supabase = supabase;
   }
 
+  private snakeToCamel(str: string): string {
+    return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+  }
+
+  private snakeToCamelKeys(obj: unknown): unknown {
+    if (Array.isArray(obj)) return obj.map((item) => this.snakeToCamelKeys(item));
+    if (obj && typeof obj === "object" && obj !== null) {
+      const converted: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        converted[this.snakeToCamel(key)] = this.snakeToCamelKeys(value);
+      }
+      return converted;
+    }
+    return obj;
+  }
+
+  private stripUndefined<T>(obj: T): T {
+    const result = { ...obj } as Record<string, unknown>;
+    for (const key of Object.keys(result)) {
+      if (result[key] === undefined) {
+        delete result[key];
+      } else if (typeof result[key] === "object" && result[key] !== null) {
+        result[key] = this.stripUndefined(result[key] as Record<string, unknown>);
+      }
+    }
+    return result as unknown as T;
+  }
+
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     const { error } = await this.supabase.rpc("sync_billing_from_config", {
-      p_config: JSON.parse(JSON.stringify(config)),
+      p_config: this.stripUndefined(config),
     });
     if (error) throw error;
   }
@@ -32,7 +69,8 @@ export class SupabaseBillingStore extends BillingStore {
       p_product_id: productId ?? undefined,
     });
     if (error) throw error;
-    return data as Record<string, unknown> | null;
+    if (!data) return null;
+    return this.snakeToCamelKeys(data) as Record<string, unknown> | null;
   }
 
   async claimBillingEvent(
@@ -97,7 +135,7 @@ export class SupabaseBillingStore extends BillingStore {
 
   async upsertBillingSubscription(state: BillingSubscriptionState): Promise<void> {
     const { error } = await this.supabase.rpc("upsert_billing_subscription", {
-      p_state: state as unknown,
+      p_state: toSnakeCase(state as unknown as Record<string, unknown>),
     });
     if (error) throw error;
   }
@@ -156,7 +194,8 @@ export class SupabaseBillingStore extends BillingStore {
       p_product_id: productId ?? undefined,
     });
     if (error) throw error;
-    return data as Record<string, unknown> | null;
+    if (!data) return null;
+    return this.snakeToCamelKeys(data) as Record<string, unknown> | null;
   }
 
   async computeTopupCredits(

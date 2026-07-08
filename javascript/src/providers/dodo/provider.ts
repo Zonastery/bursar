@@ -39,7 +39,9 @@ export class DodoProvider implements PaymentProvider {
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {
     const client = this.getClient();
-    const session = await client.customers.customerPortal.create(params.customerId);
+    const session = await client.customers.customerPortal.create(params.customerId, {
+      return_url: params.returnUrl,
+    } as Record<string, unknown>);
     return { url: session.link };
   }
 
@@ -116,8 +118,23 @@ export class DodoProvider implements PaymentProvider {
     return { url: session.checkout_url };
   }
 
-  async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
-    return [];
+  async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
+    const client = this.getClient();
+    try {
+      const response = await client.customers.wallets.list(customerId);
+      return (response.items ?? []).map((w) => {
+        const wallet = w as unknown as Record<string, unknown>;
+        return {
+          id: String(wallet.payment_method_id ?? wallet.id ?? ""),
+          last4: String(wallet.last4 ?? ""),
+          brand: String(wallet.brand ?? "unknown"),
+          expiryMonth: Number(wallet.exp_month ?? wallet.expiry_month ?? 0),
+          expiryYear: Number(wallet.exp_year ?? wallet.expiry_year ?? 0),
+        };
+      });
+    } catch {
+      return [];
+    }
   }
 
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
@@ -125,6 +142,7 @@ export class DodoProvider implements PaymentProvider {
     const customer = await client.customers.create({
       email: params.email,
       name: params.name,
+      ...(params.metadata ? { metadata: params.metadata } : {}),
     });
     return { customerId: customer.customer_id };
   }

@@ -57,21 +57,19 @@ export class PostgresBillingStore extends BillingStore {
     await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
   }
 
-  /**
-   * Recursively convert all object keys from camelCase to snake_case.
-   *
-   * WARNING: this converts ALL keys, including provider names and offer/topup
-   * keys. Provider names and config keys MUST be lowercase snake_case (e.g.
-   * "stripe", "pro_monthly") — uppercase letters in keys are silently
-   * lowercased (e.g. "Stripe" → "stripe", "proMonthly" → "pro_monthly").
-   */
-  private camelToSnake(obj: unknown): unknown {
-    if (Array.isArray(obj)) return obj.map((item) => this.camelToSnake(item));
+  private camelToSnake(str: string): string {
+    return str
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      .toLowerCase();
+  }
+
+  private camelToSnakeKeys(obj: unknown): unknown {
+    if (Array.isArray(obj)) return obj.map((item) => this.camelToSnakeKeys(item));
     if (obj && typeof obj === "object" && obj !== null) {
       const converted: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-        const snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-        converted[snakeKey] = this.camelToSnake(value);
+        converted[this.camelToSnake(key)] = this.camelToSnakeKeys(value);
       }
       return converted;
     }
@@ -80,7 +78,7 @@ export class PostgresBillingStore extends BillingStore {
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     await this.pool.query("SELECT public.sync_billing_from_config($1::jsonb)", [
-      JSON.stringify(this.camelToSnake(config)),
+      JSON.stringify(this.camelToSnakeKeys(config)),
     ]);
   }
 

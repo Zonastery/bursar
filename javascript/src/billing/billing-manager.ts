@@ -2,6 +2,7 @@ import Decimal from "decimal.js";
 import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
 import type {
+  BillingConfig,
   BillingEvent,
   BillingEventResult,
   BillingSubscriptionState,
@@ -13,6 +14,12 @@ type ResolveUserFn = (
   email: string | null,
 ) => string | null;
 
+export interface BillingManagerOptions {
+  creditManager?: CreditManager | null;
+  resolveUser?: ResolveUserFn | null;
+  onTrialWillEnd?: (event: BillingEvent) => void | Promise<void>;
+}
+
 /**
  * Provider-agnostic billing lifecycle state machine.
  * Mirrors Python bursar/billing/manager.py.
@@ -21,21 +28,57 @@ export class BillingManager {
   private store: BillingStore;
   private cm: CreditManager | null;
   private resolveUser: ResolveUserFn | null;
+  private onTrialWillEnd: ((event: BillingEvent) => void | Promise<void>) | null;
+  private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
+  private offerCache = new Map<
+    string,
+    { offer: Record<string, unknown> | null; expires: number }
+  >();
+  private readonly OFFER_CACHE_TTL_MS = 60_000;
+  private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
 
-  constructor(
-    store: BillingStore,
-    options?: {
-      creditManager?: CreditManager | null;
-      resolveUser?: ResolveUserFn | null;
-    },
-  ) {
+  constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
     this.cm = options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
+    this.onTrialWillEnd = options?.onTrialWillEnd ?? null;
+    this.handlerMap = {
+      "customer.created": this.handleCustomerCreated.bind(this),
+      "customer.updated": this.handleCustomerUpdated.bind(this),
+      "customer.deleted": this.handleCustomerDeleted.bind(this),
+      "checkout.completed": this.handleCheckoutCompleted.bind(this),
+      "subscription.created": this.handleSubscriptionCreated.bind(this),
+      "subscription.updated": this.handleSubscriptionUpdated.bind(this),
+      "subscription.activated": this.handleSubscriptionActivated.bind(this),
+      "subscription.renewed": this.handleSubscriptionRenewed.bind(this),
+      "subscription.plan_changed": this.handleSubscriptionPlanChanged.bind(this),
+      "subscription.cancellation_scheduled": this.handleCancellationScheduled.bind(this),
+      "subscription.cancellation_unscheduled": this.handleCancellationUnscheduled.bind(this),
+      "subscription.canceled": this.handleSubscriptionCanceled.bind(this),
+      "subscription.expired": this.handleSubscriptionExpired.bind(this),
+      "subscription.paused": this.handleSubscriptionPaused.bind(this),
+      "subscription.resumed": this.handleSubscriptionResumed.bind(this),
+      "subscription.trial_will_end": this.handleTrialWillEnd.bind(this),
+      "invoice.paid": this.handleInvoicePaid.bind(this),
+      "payment.succeeded": this.handlePaymentSucceeded.bind(this),
+      "payment.failed": this.handlePaymentFailed.bind(this),
+      "refund.created": this.handleRefundCreated.bind(this),
+      "dispute.created": this.handleDisputeCreated.bind(this),
+      "dispute.closed": this.handleDisputeClosed.bind(this),
+    };
   }
 
   async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
     return this.store.getUserSubscription(userId);
+  }
+
+  /**
+   * Sync billing configuration (offers, topups, provider refs) from a config object.
+   * Delegates to the store's sync method. Idempotent — safe to call on every
+   * BillingManager initialization.
+   */
+  async syncBillingFromConfig(config: BillingConfig): Promise<void> {
+    await this.store.syncBillingFromConfig(config);
   }
 
   async handleEvent(event: BillingEvent): Promise<BillingEventResult> {
@@ -48,48 +91,36 @@ export class BillingManager {
     if (claim.status === "duplicate") {
       return { handled: true, action: "duplicate" };
     }
+    if (claim.status === "retry") {
+      return { handled: false, error: "claim_failed_retry" };
+    }
 
     try {
       const result = await this.routeEvent(event);
       await this.store.completeBillingEvent(event.provider, event.eventId);
       return result;
     } catch (err) {
+      console.error(
+        `[BillingManager] failed to handle billing event ${event.provider}/${event.eventId}`,
+        err,
+      );
       await this.store.failBillingEvent(event.provider, event.eventId);
-      return { handled: false, error: String(err) };
+      return {
+        handled: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
   private async routeEvent(event: BillingEvent): Promise<BillingEventResult> {
-    const handlerMap: Record<string, (e: BillingEvent) => Promise<BillingEventResult>> = {
-      "customer.created": this.handleCustomerCreated,
-      "customer.updated": this.handleCustomerUpdated,
-      "customer.deleted": this.handleCustomerDeleted,
-      "checkout.completed": this.handleCheckoutCompleted,
-      "subscription.created": this.handleSubscriptionCreated,
-      "subscription.updated": this.handleSubscriptionUpdated,
-      "subscription.activated": this.handleSubscriptionActivated,
-      "subscription.renewed": this.handleSubscriptionRenewed,
-      "subscription.plan_changed": this.handleSubscriptionPlanChanged,
-      "subscription.cancellation_scheduled": this.handleCancellationScheduled,
-      "subscription.cancellation_unscheduled": this.handleCancellationUnscheduled,
-      "subscription.canceled": this.handleSubscriptionCanceled,
-      "subscription.expired": this.handleSubscriptionExpired,
-      "subscription.paused": this.handleSubscriptionPaused,
-      "subscription.resumed": this.handleSubscriptionResumed,
-      "subscription.trial_will_end": this.handleTrialWillEnd,
-      "invoice.paid": this.handleInvoicePaid,
-      "payment.succeeded": this.handlePaymentSucceeded,
-      "payment.failed": this.handlePaymentFailed,
-      "refund.created": this.handleRefundCreated,
-      "dispute.created": this.handleDisputeCreated,
-      "dispute.closed": this.handleDisputeClosed,
-    };
-
-    const handler = handlerMap[event.eventType];
+    const handler = this.handlerMap[event.eventType];
     if (!handler) {
-      return { handled: true, action: "ignored" };
+      if (this.IGNORED_EVENT_TYPES.has(event.eventType)) {
+        return { handled: true, action: "ignored" };
+      }
+      return { handled: false, error: "unhandled_event_type" };
     }
-    return handler.call(this, event);
+    return handler(event);
   }
 
   private async resolveUserId(event: BillingEvent): Promise<string | null> {
@@ -109,6 +140,21 @@ export class BillingManager {
       );
     }
     return null;
+  }
+
+  private async resolveBillingOfferCached(
+    provider: string,
+    productId: string | null,
+    priceId: string | null,
+  ): Promise<Record<string, unknown> | null> {
+    const cacheKey = `${provider}:${productId ?? ""}:${priceId ?? ""}`;
+    const cached = this.offerCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) {
+      return cached.offer;
+    }
+    const offer = await this.store.resolveBillingOffer(provider, productId, priceId);
+    this.offerCache.set(cacheKey, { offer, expires: Date.now() + this.OFFER_CACHE_TTL_MS });
+    return offer;
   }
 
   private async handleCustomerCreated(event: BillingEvent): Promise<BillingEventResult> {
@@ -145,6 +191,9 @@ export class BillingManager {
           event.customer.email ?? null,
         );
       }
+    }
+    if (event.subscription?.providerSubscriptionId) {
+      return this.handleSubscriptionCreated(event);
     }
     return { handled: true, action: "checkout_completed" };
   }
@@ -203,16 +252,27 @@ export class BillingManager {
   }> {
     const refs = event.subscription?.refs;
     if (!refs) return { offer: null, offerKey: null, planKey: null };
-    const offer = await this.store.resolveBillingOffer(
+    const offer = await this.resolveBillingOfferCached(
       event.provider,
       refs.productId ?? null,
       refs.priceId ?? null,
     );
-    return {
-      offer,
-      offerKey: (offer?.offerKey as string | null) ?? null,
-      planKey: (offer?.planKey as string | null) ?? null,
-    };
+    if (offer) {
+      return {
+        offer,
+        offerKey: (offer?.offerKey as string | null) ?? null,
+        planKey: (offer?.planKey as string | null) ?? null,
+      };
+    }
+    // Fallback to lookupKey when no provider refs match (mock/Dodo webhooks)
+    if (refs.lookupKey) {
+      return {
+        offer: { planKey: refs.lookupKey, entitlementMode: "allowance" },
+        offerKey: null,
+        planKey: refs.lookupKey,
+      };
+    }
+    return { offer: null, offerKey: null, planKey: null };
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
@@ -449,8 +509,18 @@ export class BillingManager {
     return { handled: true, action: "subscription_resumed" };
   }
 
-  private async handleTrialWillEnd(_event: BillingEvent): Promise<BillingEventResult> {
-    return { handled: true, action: "trial_will_end" };
+  private async handleTrialWillEnd(event: BillingEvent): Promise<BillingEventResult> {
+    if (this.onTrialWillEnd) {
+      try {
+        await this.onTrialWillEnd(event);
+      } catch (err) {
+        console.error(
+          `[BillingManager] onTrialWillEnd callback failed for ${event.provider}/${event.eventId}`,
+          err,
+        );
+      }
+    }
+    return { handled: true, action: "trial_will_end_notified" };
   }
 
   private async handleInvoicePaid(event: BillingEvent): Promise<BillingEventResult> {
@@ -573,7 +643,13 @@ export class BillingManager {
         );
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const creditsPerMajor = Number(payMeta.creditsPerMajorUnit ?? 1000);
+          const creditsPerMajor = Number(payMeta.creditsPerMajorUnit ?? 0);
+          if (!creditsPerMajor) {
+            console.warn(
+              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerMajorUnit in payment metadata`,
+            );
+            return { handled: true, action: "refund_recorded_no_clawback" };
+          }
           const credits = Math.trunc((event.refund.amountMinor * creditsPerMajor) / 100);
           if (credits > 0) {
             await this.cm.deductCredits(uid, credits, {
@@ -622,11 +698,25 @@ export class BillingManager {
     offer: Record<string, unknown> | null,
     event: BillingEvent,
   ): Promise<void> {
-    if (!offer || !this.cm) return;
+    if (!offer) {
+      console.log(`[BillingManager] provisionSubscription: no offer for user ${uid}`);
+      return;
+    }
+    if (!this.cm) {
+      console.log(`[BillingManager] provisionSubscription: no creditManager for user ${uid}`);
+      return;
+    }
     const planKey = offer.planKey as string | undefined;
-    if (!planKey) return;
-    const planAssignedAt = event.subscription?.periodStart
-      ? new Date(event.subscription.periodStart)
+    if (!planKey) {
+      console.log(`[BillingManager] provisionSubscription: no planKey in offer for user ${uid}`);
+      return;
+    }
+    const periodStart = event.subscription?.periodStart;
+    const planAssignedAt = periodStart
+      ? (() => {
+          const d = new Date(periodStart);
+          return isNaN(d.getTime()) ? undefined : d;
+        })()
       : undefined;
     await this.cm.setUserPlan(uid, planKey, planAssignedAt);
 
@@ -679,7 +769,7 @@ export class BillingManager {
   private async resolveOffer(event: BillingEvent): Promise<Record<string, unknown> | null> {
     const refs = event.subscription?.refs;
     if (!refs) return null;
-    return this.store.resolveBillingOffer(
+    return this.resolveBillingOfferCached(
       event.provider,
       refs.productId ?? null,
       refs.priceId ?? null,

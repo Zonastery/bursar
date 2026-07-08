@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 
 class ProviderLogger(Protocol):
     def debug(self, msg: str, ctx: dict | None = None) -> None: ...
     def warn(self, msg: str, ctx: dict | None = None) -> None: ...
     def error(self, msg: str, ctx: dict | None = None) -> None: ...
+
+
+ProviderResolveUserFn = Callable[[dict[str, Any], dict[str, str]], Awaitable[str | None]]
 
 
 @dataclass
@@ -41,6 +45,7 @@ class UpdatePaymentMethodParams:
     customer_id: str = ""
     subscription_id: str = ""
     return_url: str = ""
+    product_id: str | None = None
 
 
 @dataclass

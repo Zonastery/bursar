@@ -60,7 +60,7 @@ export interface ProviderLogger {
 }
 
 export interface PaymentProvider {
-  readonly provider: "stripe" | "dodo";
+  readonly provider: "stripe" | "dodo" | "mock";
 
   createCheckoutSession(params: CheckoutParams): Promise<{ url: string; customerId?: string }>;
 

@@ -247,13 +247,13 @@ class TestMemoryBillingStoreIntegration:
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
         assert claim2.status == "duplicate"
 
-    def test_event_fail_then_retry(self, components):
+    def test_event_fail_then_reclaim(self, components):
         _, _, bs, _ = components
         claim1 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
         assert claim1.status == "claimed"
         bs.fail_billing_event(_PROVIDER, _EVENT_ID)
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
-        assert claim2.status == "retry"
+        assert claim2.status == "claimed"
 
     def test_multiple_providers_same_customer_id(self, components):
         _, _, bs, _ = components
@@ -303,15 +303,13 @@ class TestMemoryBillingStoreIntegration:
         assert result.status == "canceled"
 
     def test_compute_topup_credits(self, components):
-        _, _, bs, _ = components
         config = {"credits_per_major_unit": 1000}
-        credits = bs.compute_topup_credits(2000, config)
+        credits = BillingManager._compute_topup_credits(2000, config)
         assert credits == 20000  # (2000 / 100) * 1000 = 20000
 
     def test_compute_topup_credits_odd_amount(self, components):
-        _, _, bs, _ = components
         config = {"credits_per_major_unit": 1000}
-        credits = bs.compute_topup_credits(1999, config)
+        credits = BillingManager._compute_topup_credits(1999, config)
         assert credits == 19990  # int(19.99 * 1000) = 19990
 
     def test_resolve_billing_offer_no_match(self, components):
@@ -496,26 +494,24 @@ class TestPostgresBillingStoreIntegration:
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
         assert claim2.status == "duplicate"
 
-    def test_event_fail_then_retry(self, components):
+    def test_event_fail_then_reclaim(self, components):
         _, _, bs, _ = components
         claim1 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
         assert claim1.status == "claimed"
         bs.fail_billing_event(_PROVIDER, _EVENT_ID)
         claim2 = bs.claim_billing_event(_PROVIDER, _EVENT_ID, "test.event")
-        assert claim2.status == "retry"
+        assert claim2.status == "claimed"
 
     # ── Topup credits ────────────────────────────────────────────────────
 
     def test_compute_topup_credits(self, components):
-        _, _, bs, _ = components
         config = {"credits_per_major_unit": 1000}
-        credits = bs.compute_topup_credits(2000, config)
+        credits = BillingManager._compute_topup_credits(2000, config)
         assert credits == 20000  # (2000 / 100) * 1000 = 20000
 
     def test_compute_topup_credits_odd_amount(self, components):
-        _, _, bs, _ = components
         config = {"credits_per_major_unit": 1000}
-        credits = bs.compute_topup_credits(1999, config)
+        credits = BillingManager._compute_topup_credits(1999, config)
         assert credits == 19990  # int(19.99 * 1000) = 19990
 
     # ── BillingManager lifecycle ─────────────────────────────────────────
@@ -662,7 +658,7 @@ class TestPostgresBillingStoreIntegration:
         )
         assert cm.get_user_plan(_USER_ID2).plan_id is not None
 
-    def test_unknown_event_type_is_ignored(self, components):
+    def test_unknown_event_type_is_failed(self, components):
         _, _, bs, bm = components
         event = BillingEvent(
             provider=_PROVIDER,
@@ -672,8 +668,8 @@ class TestPostgresBillingStoreIntegration:
             user_id=_USER_ID,
         )
         result = bm.handle_event(event)
-        assert result.handled
-        assert result.action == "ignored"
+        assert not result.handled
+        assert result.error == "unhandled_event_type"
 
     def test_duplicate_event_skips_side_effects(self, components):
         _, cm, bs, bm = components

@@ -7,7 +7,6 @@
 
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import pg from "pg";
-import Decimal from "decimal.js";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditManager } from "../src/manager.js";
@@ -16,12 +15,9 @@ import type { BillingConfig, BillingSubscriptionState } from "../src/billing/ind
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
-const D = (n: number | string) => new Decimal(n);
-
 const USER_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID2 = "00000000-0000-0000-0000-000000000002";
 const PROVIDER = "stripe";
-const PROVIDER2 = "dodo";
 const CUSTOMER_ID = "cus_test123";
 const CUSTOMER_ID2 = "cus_test456";
 const SUB_ID = "sub_test789";
@@ -323,8 +319,8 @@ describe("MemoryBillingStore integration", () => {
       occurredAt: new Date().toISOString(),
       userId: USER_ID,
     });
-    expect(result.handled).toBe(true);
-    expect(result.action).toBe("ignored");
+    expect(result.handled).toBe(false);
+    expect(result.error).toBe("unhandled_event_type");
   });
 
   it("sync_offers_replaces_all", async () => {
@@ -792,14 +788,14 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(c2.status).toBe("duplicate");
   });
 
-  it("event_fail_then_retry", async () => {
+  it("event_fail_then_reclaim", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
     expect(c1.status).toBe("claimed");
     await bs.failBillingEvent(PROVIDER, "evt_fail_retry");
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
-    expect(c2.status).toBe("retry");
+    expect(c2.status).toBe("claimed");
   });
 
   // ── Topup credits ────────────────────────────────────────────────────
@@ -965,8 +961,8 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
       occurredAt: new Date().toISOString(),
       userId: USER_ID,
     });
-    expect(result.handled).toBe(true);
-    expect(result.action).toBe("ignored");
+    expect(result.handled).toBe(false);
+    expect(result.error).toBe("unhandled_event_type");
   });
 
   it("duplicate_event_skips_side_effects", async () => {

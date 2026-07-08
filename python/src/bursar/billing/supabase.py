@@ -209,14 +209,6 @@ class SupabaseBillingStore(BillingStore):
         data = result.get("data")
         return data if data else None
 
-    def compute_topup_credits(
-        self,
-        amount_minor: int,
-        topup_config: dict,
-    ) -> int:
-        credits_per = int(topup_config.get("creditsPerMajorUnit", 1000))
-        return (amount_minor * credits_per) // 100
-
     def upsert_billing_payment(
         self,
         provider: str,

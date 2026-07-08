@@ -81,12 +81,14 @@ export class StripeProvider implements PaymentProvider {
     params: PaymentMethodSetupParams,
   ): Promise<{ url: string }> {
     const stripe = this.getStripe();
-    const session = await stripe.billingPortal.sessions.create({
+    const session = await stripe.checkout.sessions.create({
       customer: params.customerId,
-      return_url: params.returnUrl,
-      flow_data: { type: "payment_method_update" },
+      mode: "setup",
+      success_url: params.returnUrl,
+      cancel_url: params.cancelUrl ?? params.returnUrl,
+      payment_method_types: ["card"],
     });
-    if (!session.url) throw new Error("Stripe portal session returned no URL");
+    if (!session.url) throw new Error("Stripe setup session returned no URL");
     return { url: session.url };
   }
 

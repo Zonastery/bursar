@@ -7,10 +7,12 @@ readme = "README.md"
 # stdlib, so no new runtime dependency is needed.
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "dodopayments>=1.0.0",
     "pydantic>=2.0.0",
     "pytest-timeout>=2.4.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.3",
+    "stripe>=10.0.0",
 ]
 keywords = ["credits", "billing", "llm", "usage-metering", "pricing"]
 classifiers = [

@@ -5,43 +5,77 @@
 
 // ── Enums ───────────────────────────────────────────────────────────────
 
-export type BillingProvider = "stripe" | "dodo";
+export type BillingProvider = "stripe" | "dodo" | "mock";
 
 export type BillingEventType =
-  | "customer.created"
+  | /** @emitted by stripe, dodo */ "customer.created"
+    /** @emitted by stripe, dodo */
   | "customer.updated"
+  /** @emitted by stripe, dodo */
   | "customer.deleted"
+  /** @emitted by stripe, dodo */
   | "checkout.completed"
+  /** @aspirational */
   | "checkout.expired"
+  /** @emitted by stripe, dodo */
   | "subscription.created"
+  /** @emitted by stripe, dodo */
   | "subscription.updated"
+  /** @emitted by stripe, dodo */
   | "subscription.activated"
+  /** @emitted (mapped from invoice.paid by stripe) */
   | "subscription.renewed"
+  /** @emitted by dodo */
   | "subscription.plan_changed"
+  /** @emitted by stripe, dodo */
   | "subscription.cancellation_scheduled"
+  /** @aspirational */
   | "subscription.cancellation_unscheduled"
+  /** @emitted by stripe, dodo */
   | "subscription.canceled"
+  /** @emitted by dodo */
   | "subscription.expired"
+  /** @emitted by dodo */
   | "subscription.paused"
+  /** @aspirational */
   | "subscription.resumed"
+  /** @aspirational */
   | "subscription.trial_will_end"
+  /** @aspirational */
   | "invoice.created"
+  /** @aspirational */
   | "invoice.finalized"
+  /** @aspirational */
   | "invoice.finalization_failed"
+  /** @aspirational */
   | "invoice.upcoming"
+  /** @emitted by stripe */
   | "invoice.paid"
+  /** @aspirational */
   | "invoice.payment_failed"
+  /** @aspirational */
   | "invoice.payment_action_required"
+  /** @aspirational */
   | "invoice.voided"
+  /** @emitted by stripe, dodo */
   | "payment.succeeded"
+  /** @emitted by stripe */
   | "payment.failed"
+  /** @emitted by stripe */
   | "refund.created"
+  /** @aspirational */
   | "refund.updated"
+  /** @aspirational */
   | "refund.failed"
+  /** @emitted by stripe */
   | "dispute.created"
+  /** @emitted by stripe */
   | "dispute.closed"
+  /** @aspirational */
   | "payment_method.attached"
+  /** @aspirational */
   | "payment_method.updated"
+  /** @aspirational */
   | "payment_method.detached";
 
 export type BillingSubscriptionStatus =

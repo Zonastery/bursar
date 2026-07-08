@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -10,6 +11,7 @@ from bursar.billing.models import (
     BillingConfig,
     BillingEvent,
     BillingEventResult,
+    BillingSubscriptionInfo,
     BillingSubscriptionState,
 )
 from bursar.billing.store import BillingStore
@@ -20,10 +22,30 @@ logger = logging.getLogger(__name__)
 
 ResolveUserFn = Callable[[str, str | None, str | None], str | None]
 
+IGNORED_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "checkout.expired",
+        "invoice.upcoming",
+    }
+)
 
-def _coalesce(*values: Any, default: Any = None) -> Any:
-    """Return the first non-None value, or `default`."""
-    return next((v for v in values if v is not None), default)
+
+@dataclass
+class SubscriptionStateMerge:
+    event_data: BillingSubscriptionInfo | None
+    existing: BillingSubscriptionState | None
+
+    def resolve(self, handler_override: Any, event_field: str, default: Any = None) -> Any:
+        """Precedence: handler_override → event_data → existing → default."""
+        if handler_override is not None:
+            return handler_override
+        if self.event_data is not None:
+            event_val = getattr(self.event_data, event_field, None)
+            if event_val is not None:
+                return event_val
+        if self.existing is not None:
+            return getattr(self.existing, event_field, default)
+        return default
 
 
 class BillingManager:
@@ -34,11 +56,37 @@ class BillingManager:
         emitter: CreditEventEmitter | None = None,
         resolve_user: ResolveUserFn | None = None,
         config: BillingConfig | None = None,
+        on_trial_will_end: Callable[[BillingEvent], None] | None = None,
     ) -> None:
         self._store = billing_store
         self._cm = credit_manager
         self._emitter = emitter
         self._resolve_user = resolve_user
+        self._on_trial_will_end = on_trial_will_end
+        self._handlers = {
+            "customer.created": self._handle_customer_created,
+            "customer.updated": self._handle_customer_updated,
+            "customer.deleted": self._handle_customer_deleted,
+            "checkout.completed": self._handle_checkout_completed,
+            "subscription.created": self._handle_subscription_created,
+            "subscription.updated": self._handle_subscription_updated,
+            "subscription.activated": self._handle_subscription_activated,
+            "subscription.renewed": self._handle_subscription_renewed,
+            "subscription.plan_changed": self._handle_subscription_plan_changed,
+            "subscription.cancellation_scheduled": self._handle_cancellation_scheduled,
+            "subscription.cancellation_unscheduled": self._handle_cancellation_unscheduled,
+            "subscription.canceled": self._handle_subscription_canceled,
+            "subscription.expired": self._handle_subscription_expired,
+            "subscription.paused": self._handle_subscription_paused,
+            "subscription.resumed": self._handle_subscription_resumed,
+            "subscription.trial_will_end": self._handle_trial_will_end,
+            "invoice.paid": self._handle_invoice_paid,
+            "payment.succeeded": self._handle_payment_succeeded,
+            "payment.failed": self._handle_payment_failed,
+            "refund.created": self._handle_refund_created,
+            "dispute.created": self._handle_dispute_created,
+            "dispute.closed": self._handle_dispute_closed,
+        }
         if config is not None:
             self._store.sync_billing_from_config(config)
 
@@ -68,35 +116,18 @@ class BillingManager:
             return BillingEventResult(handled=False, error=str(exc))
 
     def _route_event(self, event: BillingEvent) -> BillingEventResult:
-        handlers = {
-            "customer.created": self._handle_customer_created,
-            "customer.updated": self._handle_customer_updated,
-            "customer.deleted": self._handle_customer_deleted,
-            "checkout.completed": self._handle_checkout_completed,
-            "subscription.created": self._handle_subscription_created,
-            "subscription.updated": self._handle_subscription_updated,
-            "subscription.activated": self._handle_subscription_activated,
-            "subscription.renewed": self._handle_subscription_renewed,
-            "subscription.plan_changed": self._handle_subscription_plan_changed,
-            "subscription.cancellation_scheduled": self._handle_cancellation_scheduled,
-            "subscription.cancellation_unscheduled": self._handle_cancellation_unscheduled,
-            "subscription.canceled": self._handle_subscription_canceled,
-            "subscription.expired": self._handle_subscription_expired,
-            "subscription.paused": self._handle_subscription_paused,
-            "subscription.resumed": self._handle_subscription_resumed,
-            "subscription.trial_will_end": self._handle_trial_will_end,
-            "invoice.paid": self._handle_invoice_paid,
-            "payment.succeeded": self._handle_payment_succeeded,
-            "payment.failed": self._handle_payment_failed,
-            "refund.created": self._handle_refund_created,
-            "dispute.created": self._handle_dispute_created,
-            "dispute.closed": self._handle_dispute_closed,
-        }
-        handler = handlers.get(event.event_type)
+        handler = self._handlers.get(event.event_type)
         if handler is None:
-            logger.debug("unhandled billing event type %s", event.event_type)
-            return BillingEventResult(handled=True, action="ignored")
+            if event.event_type in IGNORED_EVENT_TYPES:
+                return BillingEventResult(handled=True, action="ignored")
+            logger.warning("unhandled billing event type %s (marking as failed)", event.event_type)
+            return BillingEventResult(handled=False, error="unhandled_event_type")
         return handler(event)
+
+    @staticmethod
+    def _compute_topup_credits(amount_minor: int, topup_config: dict) -> int:
+        credits_per = topup_config.get("credits_per_major_unit", 1000)
+        return (amount_minor * credits_per) // 100
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
         if event.user_id:
@@ -128,6 +159,13 @@ class BillingManager:
             price_id=refs.price_id,
         )
         if not offer:
+            refs = event.subscription.refs
+            if refs and refs.lookup_key:
+                return (
+                    {"plan_key": refs.lookup_key, "entitlement_mode": "allowance"},
+                    refs.lookup_key,
+                    refs.lookup_key,
+                )
             return None, None, None
         return offer, offer.get("offer_key"), offer.get("plan_key")
 
@@ -145,33 +183,31 @@ class BillingManager:
         if not event.subscription:
             raise ValueError("no_subscription_data")
         sub = event.subscription
+        merger = SubscriptionStateMerge(sub, existing)
+
+        _status = status
+        if _status is None and sub.status is not None:
+            _status = sub.status.value
+        if _status is None and existing is not None:
+            _status = existing.status
+        if _status is None:
+            _status = "incomplete"
+
         return BillingSubscriptionState(
             user_id=uid,
             provider=event.provider,
             provider_subscription_id=sub.provider_subscription_id,
-            provider_customer_id=_coalesce(
-                event.customer.provider_customer_id if event.customer else None,
-                existing.provider_customer_id if existing else None,
-            ),
-            offer_key=_coalesce(offer_key, existing.offer_key if existing else None),
-            plan_key=_coalesce(plan_key, existing.plan_key if existing else None),
-            status=_coalesce(
-                status,
-                sub.status.value if sub.status else None,
-                existing.status if existing else None,
-                "incomplete",
-            ),
-            current_period_start=_coalesce(sub.period_start, existing.current_period_start if existing else None),
-            current_period_end=_coalesce(sub.period_end, existing.current_period_end if existing else None),
-            cancel_at_period_end=_coalesce(
-                cancel_at_period_end,
-                sub.cancel_at_period_end,
-                existing.cancel_at_period_end if existing else None,
-                False,
-            ),
-            interval=_coalesce(sub.interval, existing.interval if existing else None),
-            interval_count=_coalesce(sub.interval_count, existing.interval_count if existing else None),
-            metadata=_coalesce(event.metadata, existing.metadata if existing else None),
+            provider_customer_id=(event.customer.provider_customer_id if event.customer else None)
+            or (existing.provider_customer_id if existing else None),
+            offer_key=merger.resolve(offer_key, "offer_key"),
+            plan_key=merger.resolve(plan_key, "plan_key"),
+            status=_status,
+            current_period_start=sub.period_start or (existing.current_period_start if existing else None),
+            current_period_end=sub.period_end or (existing.current_period_end if existing else None),
+            cancel_at_period_end=merger.resolve(cancel_at_period_end, "cancel_at_period_end", False),
+            interval=merger.resolve(None, "interval"),
+            interval_count=merger.resolve(None, "interval_count"),
+            metadata=event.metadata or (existing.metadata if existing else None),
         )
 
     def _apply_subscription_event(
@@ -236,9 +272,22 @@ class BillingManager:
         return BillingEventResult(handled=True, action="customer_created")
 
     def _handle_customer_updated(self, event: BillingEvent) -> BillingEventResult:
+        if event.customer and event.customer.provider_customer_id:
+            uid = self._resolve_user_id(event)
+            if uid:
+                self._store.upsert_billing_customer(
+                    event.provider,
+                    event.customer.provider_customer_id,
+                    uid,
+                    event.customer.email,
+                )
         return BillingEventResult(handled=True, action="customer_updated")
 
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
+        if event.customer and event.customer.provider_customer_id:
+            uid = self._resolve_user_id(event)
+            if uid and self._cm:
+                self._revoke_subscription(uid)
         return BillingEventResult(handled=True, action="customer_deleted")
 
     def _handle_checkout_completed(self, event: BillingEvent) -> BillingEventResult:
@@ -324,14 +373,12 @@ class BillingManager:
         )
 
     def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
-        cot = (
-            _coalesce(
-                event.subscription.cancel_at_period_end if event.subscription else None,
-                True,
+        if event.subscription:
+            cot = (
+                event.subscription.cancel_at_period_end if event.subscription.cancel_at_period_end is not None else True
             )
-            if event.subscription
-            else None
-        )
+        else:
+            cot = None
         result = self._apply_subscription_event(
             event,
             status="canceled",
@@ -347,14 +394,12 @@ class BillingManager:
         return result
 
     def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
-        cot = (
-            _coalesce(
-                event.subscription.cancel_at_period_end if event.subscription else None,
-                True,
+        if event.subscription:
+            cot = (
+                event.subscription.cancel_at_period_end if event.subscription.cancel_at_period_end is not None else True
             )
-            if event.subscription
-            else None
-        )
+        else:
+            cot = None
         result = self._apply_subscription_event(
             event,
             status="expired",
@@ -393,6 +438,15 @@ class BillingManager:
         )
 
     def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
+        if self._on_trial_will_end:
+            try:
+                self._on_trial_will_end(event)
+            except Exception:
+                logger.exception(
+                    "on_trial_will_end callback failed for event %s/%s",
+                    event.provider,
+                    event.event_id,
+                )
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
     def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
@@ -459,7 +513,7 @@ class BillingManager:
             max_amount = int(topup_config.get("max_amount_minor", 10**18))
             if event.payment.amount_minor < min_amount or event.payment.amount_minor > max_amount:
                 return BillingEventResult(handled=True, action="payment_succeeded")
-            credits = self._store.compute_topup_credits(event.payment.amount_minor, topup_config)
+            credits = self._compute_topup_credits(event.payment.amount_minor, topup_config)
             if credits > 0:
                 self._cm.add_credits(
                     uid,
@@ -510,8 +564,17 @@ class BillingManager:
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
                 if payment and payment.get("purpose") == "credit_topup":
                     pay_meta = payment.get("metadata") or {}
-                    credits_per_major = int(pay_meta.get("credits_per_major_unit", 1000))
-                    credits = (refund.amount_minor * credits_per_major) // 100
+                    credits_per_major = pay_meta.get("credits_per_major_unit")
+                    if credits_per_major is None:
+                        logger.warning(
+                            "cannot claw back credits for refund %s: no credits_per_major_unit in payment metadata",
+                            refund.provider_refund_id,
+                        )
+                        return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
+                    credits_per_major = int(credits_per_major)
+                    credits = self._compute_topup_credits(
+                        refund.amount_minor, {"credits_per_major_unit": credits_per_major}
+                    )
                     if credits > 0:
                         self._cm.deduct_credits(
                             uid,
@@ -566,7 +629,12 @@ class BillingManager:
         period_start = None
         if event.subscription:
             ps = event.subscription.period_start
-            period_start = datetime.fromisoformat(ps) if ps else None
+            if ps:
+                try:
+                    period_start = datetime.fromisoformat(ps)
+                except (ValueError, TypeError):
+                    logger.warning("invalid period_start timestamp %r for user %s, using now()", ps, uid)
+                    period_start = None
 
         self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
 

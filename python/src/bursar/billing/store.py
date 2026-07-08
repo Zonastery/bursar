@@ -78,14 +78,7 @@ class BillingStore(ABC):
         price_id: str | None = None,
     ) -> dict | None: ...
 
-    @abstractmethod
-    def compute_topup_credits(
-        self,
-        amount_minor: int,
-        topup_config: dict,
-    ) -> int:
-        """Convert paid amount to credits based on topup config."""
-        ...
+    # compute_topup_credits moved to BillingManager._compute_topup_credits
 
     @abstractmethod
     def upsert_billing_payment(

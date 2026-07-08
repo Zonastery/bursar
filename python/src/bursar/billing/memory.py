@@ -85,9 +85,11 @@ class MemoryBillingStore(BillingStore):
         if existing is None:
             self._events[key] = "processing"
             return BillingEventClaim(status="claimed")
+        if existing == "processing":
+            return BillingEventClaim(status="retry")
         if existing == "failed":
             self._events[key] = "processing"
-            return BillingEventClaim(status="retry")
+            return BillingEventClaim(status="claimed")
         return BillingEventClaim(status="duplicate")
 
     def complete_billing_event(self, provider: str, event_id: str) -> None:
@@ -167,10 +169,6 @@ class MemoryBillingStore(BillingStore):
                 if raw:
                     return {**raw, "topup_key": topup_key}
         return None
-
-    def compute_topup_credits(self, amount_minor: int, topup_config: dict) -> int:
-        credits_per = topup_config.get("credits_per_major_unit", 1000)
-        return (amount_minor * credits_per) // 100
 
     def upsert_billing_payment(
         self,

@@ -12,7 +12,7 @@ import type { BillingManager } from "../../billing/billing-manager.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
 
 export class MockPaymentProvider implements PaymentProvider {
-  readonly provider = "dodo" as const;
+  readonly provider = "mock" as const;
 
   constructor(
     private bm: BillingManager,

@@ -653,11 +653,22 @@ class TestPaymentTopup:
 
 
 class TestUnhandledEvents:
-    def test_unknown_event_type_is_ignored(self, manager: BillingManager) -> None:
+    def test_unknown_event_type_is_failed(self, manager: BillingManager) -> None:
         event = BillingEvent(
             provider="stripe",
             event_id="evt_unknown",
             event_type="unknown.type",
+            occurred_at="2026-01-01T00:00:00Z",
+        )
+        result = manager.handle_event(event)
+        assert result.handled is False
+        assert result.error == "unhandled_event_type"
+
+    def test_ignored_event_type(self, manager: BillingManager) -> None:
+        event = BillingEvent(
+            provider="stripe",
+            event_id="evt_checkout_expired",
+            event_type="checkout.expired",
             occurred_at="2026-01-01T00:00:00Z",
         )
         result = manager.handle_event(event)
@@ -729,11 +740,11 @@ class TestConfigSync:
         assert topup["topup_key"] == "bonus_topup"
         assert topup["credits_per_major_unit"] == 2000
 
-    def test_compute_topup_credits(self, billing_store: MemoryBillingStore) -> None:
+    def test_compute_topup_credits(self, manager: BillingManager) -> None:
         config = {
             "credits_per_major_unit": 1000,
         }
-        result = billing_store.compute_topup_credits(2000, config)
+        result = manager._compute_topup_credits(2000, config)
         # 2000 minor = $20.00, 20 * 1000 = 20000
         assert result == 20000
 

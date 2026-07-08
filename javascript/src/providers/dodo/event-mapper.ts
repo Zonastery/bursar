@@ -28,7 +28,27 @@ export async function handleDodoBillingEvent(
   }
 
   switch (type) {
-    case "subscription.active":
+    case "subscription.active": {
+      if (!userId) {
+        logger?.error?.("Dodo subscription event: no userId", { event: type });
+        return;
+      }
+      const subId = String(data.subscription_id ?? "");
+      const periodEnd = data.next_billing_date as string | null;
+
+      await bm.handleEvent({
+        ...baseEvent(rawId),
+        eventType: "subscription.created",
+        subscription: {
+          providerSubscriptionId: subId,
+          status: "active",
+          periodEnd,
+          refs: metadata.plan_slug ? { lookupKey: metadata.plan_slug } : undefined,
+        },
+      });
+      return;
+    }
+
     case "subscription.renewed": {
       if (!userId) {
         logger?.error?.("Dodo subscription event: no userId", { event: type });
@@ -37,21 +57,8 @@ export async function handleDodoBillingEvent(
       const subId = String(data.subscription_id ?? "");
       const periodEnd = data.next_billing_date as string | null;
 
-      if (type === "subscription.active") {
-        await bm.handleEvent({
-          ...baseEvent(`${rawId}_created`),
-          eventType: "subscription.created",
-          subscription: {
-            providerSubscriptionId: subId,
-            status: "active",
-            periodEnd,
-            refs: metadata.plan_slug ? { lookupKey: metadata.plan_slug } : undefined,
-          },
-        });
-      }
-
       await bm.handleEvent({
-        ...baseEvent(`${rawId}_activated`),
+        ...baseEvent(rawId),
         eventType: "subscription.activated",
         subscription: {
           providerSubscriptionId: subId,

@@ -10,6 +10,23 @@ function buildEnd(subscription: Stripe.Subscription): string | null {
   return raw ? new Date(raw * 1000).toISOString() : null;
 }
 
+function buildStart(subscription: Stripe.Subscription): string | null {
+  const raw = (subscription as { current_period_start?: number }).current_period_start;
+  return raw ? new Date(raw * 1000).toISOString() : null;
+}
+
+function buildEndFromInvoice(invoice: Stripe.Invoice): string | null {
+  return invoice.period_end
+    ? new Date(invoice.period_end * 1000).toISOString()
+    : new Date().toISOString();
+}
+
+function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
+  return invoice.period_start
+    ? new Date(invoice.period_start * 1000).toISOString()
+    : new Date().toISOString();
+}
+
 export async function handleStripeWebhook(
   event: Stripe.Event,
   bm: BillingManager,
@@ -46,15 +63,6 @@ export async function handleStripeWebhook(
           email: customer?.email ?? null,
         };
 
-        await bm.handleEvent({
-          provider: "stripe",
-          eventId: `${event.id}_checkout`,
-          eventType: "checkout.completed",
-          occurredAt: new Date().toISOString(),
-          userId,
-          customer: customerInfo,
-        });
-
         if (session.mode === "subscription" && session.subscription) {
           const subId =
             typeof session.subscription === "string"
@@ -63,12 +71,13 @@ export async function handleStripeWebhook(
           try {
             const sub = await stripe.subscriptions.retrieve(subId);
             const end = buildEnd(sub);
+            const currentPeriodStart = buildStart(sub);
             const planSlug = session.metadata?.plan_slug as string | undefined;
 
             await bm.handleEvent({
               provider: "stripe",
-              eventId: `${event.id}_sub`,
-              eventType: "subscription.created",
+              eventId: event.id,
+              eventType: "checkout.completed",
               occurredAt: new Date().toISOString(),
               userId,
               customer: customerInfo,
@@ -86,25 +95,10 @@ export async function handleStripeWebhook(
                   | "incomplete_expired",
                 cancelAtPeriodEnd: sub.cancel_at_period_end,
                 periodEnd: end,
+                periodStart: currentPeriodStart,
                 refs: planSlug ? { lookupKey: planSlug } : undefined,
               },
             });
-
-            if (sub.status === "active" || sub.status === "trialing") {
-              await bm.handleEvent({
-                provider: "stripe",
-                eventId: `${event.id}_sub_activated`,
-                eventType: "subscription.activated",
-                occurredAt: new Date().toISOString(),
-                userId,
-                customer: customerInfo,
-                subscription: {
-                  providerSubscriptionId: subId,
-                  status: sub.status as "active" | "trialing",
-                  periodEnd: end,
-                },
-              });
-            }
           } catch (err) {
             logger?.error?.("Failed to process subscription", {
               userId,
@@ -129,7 +123,7 @@ export async function handleStripeWebhook(
 
           await bm.handleEvent({
             provider: "stripe",
-            eventId: `${event.id}_payment`,
+            eventId: event.id,
             eventType: "payment.succeeded",
             occurredAt: new Date().toISOString(),
             userId,
@@ -209,19 +203,39 @@ export async function handleStripeWebhook(
           break;
         }
 
-        let stripeSub: Stripe.Subscription;
-        try {
-          stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
-        } catch (err) {
-          logger?.error?.("invoice.paid: failed to retrieve subscription", { subscriptionId, err });
+        let userId: string | undefined;
+
+        if (invoice.metadata?.userId) {
+          userId = invoice.metadata.userId;
+        }
+
+        if (!userId && invoice.parent?.subscription_details?.metadata) {
+          userId = invoice.parent.subscription_details.metadata.userId;
+        }
+
+        let stripeSub: Stripe.Subscription | undefined;
+        if (!userId) {
+          try {
+            stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
+            userId = stripeSub.metadata?.userId;
+          } catch (err) {
+            logger?.error?.("invoice.paid: failed to retrieve subscription", {
+              subscriptionId,
+              err,
+            });
+            break;
+          }
+        }
+        if (!userId) {
+          logger?.warn?.("invoice.paid: no userId", { subscriptionId });
           break;
         }
 
-        const userId = stripeSub.metadata?.userId;
-        if (!userId) {
-          logger?.warn?.("invoice.paid: no userId in metadata", { subscriptionId });
-          break;
-        }
+        const subStatus =
+          stripeSub?.status ??
+          (invoice.collection_method === "send_invoice" ? "active" : "incomplete");
+        const periodEnd = stripeSub ? buildEnd(stripeSub) : buildEndFromInvoice(invoice);
+        const periodStart = stripeSub ? buildStart(stripeSub) : buildStartFromInvoice(invoice);
 
         await bm.handleEvent({
           provider: "stripe",
@@ -231,11 +245,11 @@ export async function handleStripeWebhook(
           userId,
           customer: {
             providerCustomerId:
-              typeof stripeSub.customer === "string" ? stripeSub.customer : stripeSub.customer.id,
+              typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id,
           },
           subscription: {
             providerSubscriptionId: subscriptionId,
-            status: stripeSub.status as
+            status: subStatus as
               | "active"
               | "trialing"
               | "incomplete"
@@ -245,7 +259,8 @@ export async function handleStripeWebhook(
               | "paused"
               | "expired"
               | "incomplete_expired",
-            periodEnd: buildEnd(stripeSub),
+            periodEnd,
+            periodStart,
           },
           invoice: {
             providerInvoiceId: invoice.id,
