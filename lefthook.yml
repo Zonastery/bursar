@@ -34,7 +34,7 @@ pre-commit:
         npx eslint {staged_files} \
           || { echo "↳ run: npx eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
     trailing-whitespace:
-      run: git diff --cached --name-only --diff-filter=ACM | xargs -r git diff --check --cached --
+      run: git diff --cached --name-only --diff-filter=ACM | xargs -r git --no-pager diff --check --cached --
     merge-conflicts:
       run: |
         files=$(git diff --cached --name-only --diff-filter=ACM | grep -v '^lefthook\.yml$')
