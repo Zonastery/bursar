@@ -1,6 +1,6 @@
 [project]
 name = "bursar"
-version = "0.0.1"
+version = "0.0.2"
 description = "Declarative credit calculation engine for AI SaaS platforms"
 readme = "README.md"
 # Bounded to the advertised 3.11–3.13 range (M13). decimal-based money math is
