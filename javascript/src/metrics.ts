@@ -15,5 +15,5 @@ export interface UsageMetrics {
   searchResults?: number;
   webSearchCalls?: number;
   codeExecCalls?: number;
-  fixedJob?: string | null;
+  flatJob?: string | null;
 }

@@ -4,7 +4,7 @@ export { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
-export type { PricingConfig } from "./config.js";
+export type { PricingConfig, MeteringConfig, LedgerConfig, BillingSection } from "./config.js";
 export { loadConfigFromDict } from "./config.js";
 export {
   CapabilityNotSupportedError,
@@ -45,6 +45,9 @@ export type {
   AvailableResult,
   BalanceResult,
   BillingMode,
+  BucketBalance,
+  BucketBalancesResult,
+  BucketDefinition,
   CanAffordResult,
   CapCheckResult,
   CheckFeatureResult,
@@ -59,7 +62,6 @@ export type {
   LeaseResult,
   OperationPolicy,
   PlanDefinition,
-  PricingConfigData,
   PricingConfigResult,
   RefundResult,
   ReleaseResult,
@@ -77,9 +79,6 @@ export type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
-  TierBalance,
-  TierBalancesResult,
-  TierDefinition,
   TopUserRow,
 } from "./types.js";
 
@@ -117,10 +116,8 @@ export type {
   BillingOfferInterval,
   BillingPaymentInfo,
   BillingProvider,
-  BillingProviderRefs,
   BillingRefundInfo,
   BillingSubscriptionInfo,
-  BillingSubscriptionOfferRef,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   EntitlementMode,

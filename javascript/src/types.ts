@@ -17,60 +17,46 @@ export interface CreditMetadata {
   referenceType?: string | null;
   referenceId?: string | null;
   idempotencyKey?: string | null;
-  fixedJob?: string | null;
+  flatJob?: string | null;
   [key: string]: unknown;
 }
 
-/** Schema for a pricing configuration. */
-export interface PricingConfigData {
-  models: Record<string, string>;
-  tools?: Record<string, string> | null;
-  search?: string | null;
-  cache?: string | null;
-  // Money fields: Decimal, never a binary `number` (contract §1).
-  fixed?: Record<string, Decimal> | null;
-  minBalance?: Decimal | null;
-  signupBonus?: number | null;
-  plans?: Record<string, PlanDefinition> | null;
-  tiers?: Record<string, TierDefinition> | null;
-}
-
 /**
- * Definition of a credit tier (credit tiers feature).
+ * Definition of a credit bucket (credit buckets feature).
  *
  * ``priority`` controls deduction order (ascending = drained first, ties
  * broken by config key ascending — not an error). ``expires`` gates whether
- * ``addCredits`` into this tier requires/accepts an ``expiresAt``.
- * ``defaultTtlDays`` is used to compute an expiry when ``addCredits`` omits
- * ``expiresAt`` for an expiring tier. At most one tier may set
- * ``allowOverdraft: true`` (the tier that absorbs overdraft debt) and at most
- * one may set ``isDefault: true`` (the tier untagged ``addCredits`` calls
+ * ``addCredits`` into this bucket requires/accepts an ``expiresAt``.
+ * ``ttlDays`` is used to compute an expiry when ``addCredits`` omits
+ * ``expiresAt`` for an expiring bucket. At most one bucket may set
+ * ``allowOverdraft: true`` (the bucket that absorbs overdraft debt) and at most
+ * one may set ``isDefaultBucket: true`` (the bucket untagged ``addCredits`` calls
  * land in) — both enforced at config-validation time.
  */
-export interface TierDefinition {
-  name: string;
+export interface BucketDefinition {
+  label: string;
   priority: number;
   expires: boolean;
-  defaultTtlDays?: number | null;
+  ttlDays?: number | null;
   allowOverdraft?: boolean;
-  isDefault?: boolean;
+  isDefaultBucket?: boolean;
 }
 
-/** A single tier's current balance, as returned by `getCreditTiers`. */
-export interface TierBalance {
-  tierKey: string;
-  name: string;
+/** A single bucket's current balance, as returned by `getBucketBalances`. */
+export interface BucketBalance {
+  bucketKey: string;
+  label: string;
   priority: number;
   expires: boolean;
   balance: Decimal;
 }
 
-/** Result of querying a user's per-tier credit balances. */
-export interface TierBalancesResult {
+/** Result of querying a user's per-bucket credit balances. */
+export interface BucketBalancesResult {
   userId: string;
   /** Sorted by `priority` ascending. */
-  tiers: TierBalance[];
-  /** Equal to `BalanceResult.balance` — the aggregate across all tiers. */
+  buckets: BucketBalance[];
+  /** Equal to `BalanceResult.balance` — the aggregate across all buckets. */
   totalBalance: Decimal;
 }
 
@@ -88,8 +74,8 @@ export interface AddCreditsResult {
   amount: Decimal;
   newBalance: Decimal;
   lifetimePurchased: Decimal;
-  /** The tier this grant landed in (`"default"` when no tiers are configured). */
-  tier: string;
+  /** The bucket this grant landed in (`"default"` when no buckets are configured). */
+  bucket: string;
   /** `true` when this result is a replay of a prior grant with the same `idempotencyKey`. */
   idempotent?: boolean;
 }
@@ -104,8 +90,8 @@ export interface DeductionResult {
   idempotent: boolean;
   capWarning: string | null;
   error?: string | null;
-  /** Exact per-tier split of `amount` (credit tiers); `null` when not computed. */
-  tierBreakdown?: Record<string, Decimal> | null;
+  /** Exact per-bucket split of `amount` (credit buckets); `null` when not computed. */
+  bucketBreakdown?: Record<string, Decimal> | null;
   /**
    * Non-blocking `warn`/`notify` signal from a breached `FeatureLimit` (per-feature
    * invocation-count limits). `null` when no limit was breached (or none configured).
@@ -138,7 +124,7 @@ export interface DeductWithAllowanceOptions {
 /** Pricing config fetched from store. */
 export interface PricingConfigResult {
   id: string;
-  config: PricingConfigData;
+  config: Record<string, unknown>;
   version: number;
 }
 
@@ -192,35 +178,23 @@ export interface OperationPolicy {
 export interface FeatureLimit {
   maxCalls: number;
   period: FeatureLimitPeriod;
-  action: "deny" | "warn" | "notify";
+  onExceed: "deny" | "warn" | "notify";
 }
 
 /**
  * Definition of a subscription plan with free allowance and rate overrides.
  *
- * Beyond allowance/rates/features, a plan carries the financial-safety policy
- * (interface plan §1): a ``defaultBillingMode`` for the whole plan, optional
+ * Beyond allowance/rates/entitlements, a plan carries the financial-safety policy
+ * (interface plan §1): a ``billingMode`` for the whole plan, optional
  * ``perOperation`` overrides keyed by operation type, and plan-wide
  * ``maxConcurrent`` / ``overdraftFloor`` defaults.
  */
 export interface PlanDefinition {
-  id: string;
-  name: string;
-  freeAllowance: Decimal;
+  label: string;
+  allowance: { amount: Decimal; period: AllowancePeriod };
+  safety: { billingMode: BillingMode; perOperation?: Record<string, OperationPolicy>; maxConcurrent?: number | null; overdraftFloor?: Decimal | null };
   rateOverrides?: Record<string, string> | null;
-  features?: Record<string, unknown> | null;
-  /**
-   * Per-feature invocation-count limits, keyed by feature name. Independent of
-   * `features` (boolean/value entitlement) — a feature can be entitled and
-   * rate-limited at the same time.
-   */
-  featureLimits?: Record<string, FeatureLimit> | null;
-  defaultBillingMode?: BillingMode;
-  perOperation?: Record<string, OperationPolicy>;
-  maxConcurrent?: number | null;
-  overdraftFloor?: Decimal | null;
-  /** Free-allowance reset window mode (WS9). Defaults to `"calendar_month"` when absent. */
-  allowancePeriod?: AllowancePeriod;
+  entitlements?: Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }> | null;
 }
 
 /** Result of checking plan allowance. */
@@ -241,17 +215,14 @@ export interface AllowanceResult {
 export interface GetUserPlanResult {
   userId: string;
   planId: string | null;
-  planName: string | null;
-  freeAllowance: Decimal;
-  features: Record<string, unknown>;
-  /** Per-feature invocation-count limits, keyed by feature name. Empty when none configured. */
-  featureLimits?: Record<string, FeatureLimit>;
-  defaultBillingMode?: BillingMode;
+  planLabel: string | null;
+  allowanceAmount: Decimal;
+  allowancePeriod: AllowancePeriod | null;
+  entitlements: Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>;
+  billingMode: BillingMode;
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
   overdraftFloor?: Decimal | null;
-  /** Free-allowance reset window mode (WS9). Absent/omitted means `"calendar_month"`. */
-  allowancePeriod?: AllowancePeriod;
   /** Timestamp the current plan was assigned — the anchor for non-calendar periods. */
   planAssignedAt?: Date | null;
 }
@@ -356,8 +327,8 @@ export interface RefundResult {
   amount: Decimal;
   newBalance: Decimal;
   error?: string | null;
-  /** Per-tier LIFO restoration split of `amount` (credit tiers); `null` when not computed. */
-  tierBreakdown?: Record<string, Decimal> | null;
+  /** Per-bucket LIFO restoration split of `amount` (credit buckets); `null` when not computed. */
+  bucketBreakdown?: Record<string, Decimal> | null;
 }
 
 /** Result of sweeping expired credits. */
@@ -365,8 +336,8 @@ export interface SweepResult {
   expiredCount: number;
   expiredAmount: Decimal;
   dryRun: boolean;
-  /** Per-tier split of `expiredAmount` (credit tiers); `null` when not computed. */
-  expiredByTier?: Record<string, Decimal> | null;
+  /** Per-bucket split of `expiredAmount` (credit buckets); `null` when not computed. */
+  expiredByBucket?: Record<string, Decimal> | null;
 }
 
 // ── Transaction listing ──────────────────────────────────────────────

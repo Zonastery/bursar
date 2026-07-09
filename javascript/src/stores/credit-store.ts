@@ -9,6 +9,7 @@ import type {
   AvailableResult,
   BalanceResult,
   BillingMode,
+  BucketBalancesResult,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -23,7 +24,6 @@ import type {
   ListTransactionsOptions,
   ListUsageEventsOptions,
   PaginatedTransactions,
-  PricingConfigData,
   PricingConfigHistoryItem,
   PricingConfigResult,
   RefundResult,
@@ -36,7 +36,6 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
-  TierBalancesResult,
   TopUserRow,
   UserTransactionRow,
 } from "../types.js";
@@ -237,7 +236,7 @@ export abstract class CreditStore {
   abstract getAvailable(userId: string): Promise<AvailableResult>;
 
   abstract getActivePricing(): Promise<PricingConfigResult | null>;
-  abstract setActivePricing(config: PricingConfigData, label?: string | null): Promise<string>;
+  abstract setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string>;
 
   // H8: pricing history / activation — parity with Python base.py:293-312.
   abstract getPricingHistory(): Promise<PricingConfigHistoryItem[]>;
@@ -306,15 +305,15 @@ export abstract class CreditStore {
    */
   abstract sweepExpiredCredits(dryRun?: boolean, userId?: string): Promise<SweepResult>;
 
-  // ── Credit tiers ─────────────────────────────────────────────────────
+  // ── Credit buckets ─────────────────────────────────────────────────────
   /**
-   * Per-tier credit balances for a user (credit tiers).
+   * Per-bucket credit balances for a user (credit buckets).
    *
-   * Sorted by `priority` ascending. When no tiers are configured, synthesizes
+   * Sorted by `priority` ascending. When no buckets are configured, synthesizes
    * a single `"default"` entry from the aggregate balance so the shape is
    * uniform either way.
    */
-  abstract getCreditTiers(userId: string): Promise<TierBalancesResult>;
+  abstract getBucketBalances(userId: string): Promise<BucketBalancesResult>;
 
   // ── Usage analytics (optional capability — WS8) ──────────────────────
   async spendByUser(_start: Date, _end: Date): Promise<SpendByUserRow[]> {

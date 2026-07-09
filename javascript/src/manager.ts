@@ -20,6 +20,7 @@ import type {
   AvailableResult,
   BalanceResult,
   BillingMode,
+  BucketBalancesResult,
   CanAffordResult,
   CheckFeatureResult,
   CreditMetadata,
@@ -31,7 +32,6 @@ import type {
   GetUserPlanResult,
   LeaseResult,
   OperationPolicy,
-  PricingConfigData,
   RefundResult,
   ReleaseResult,
   SetupResult,
@@ -39,7 +39,6 @@ import type {
   SpendByUserRow,
   SweepResult,
   TeamDeductionResult,
-  TierBalancesResult,
   TopUserRow,
   UserTransactionRow,
 } from "./types.js";
@@ -52,6 +51,7 @@ import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
 import { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
+import type { FeatureLimitPeriod } from "./allowance.js";
 
 /**
  * Default `low_balance` threshold multiplier (contract §6 / M18). The event
@@ -299,11 +299,10 @@ export class CreditManager {
     return await this.store.setup();
   }
 
-  /** Load pricing from a PricingConfigData or raw dict and sync it. */
-  async publishPricingFromDict(data: PricingConfigData | Record<string, unknown>): Promise<void> {
-    const raw = data as Record<string, unknown>;
-    this.engine = PricingEngineClass.fromDict(raw);
-    await this.store.setActivePricing(data as PricingConfigData);
+  /** Load pricing from a raw dict and sync it. */
+  async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
+    this.engine = PricingEngineClass.fromDict(data);
+    await this.store.setActivePricing(data as Record<string, unknown>);
   }
 
   /** Load the active pricing config from the store. */
@@ -311,15 +310,25 @@ export class CreditManager {
     const active = await this.store.getActivePricing();
     if (!active) throw new PricingNotLoadedError("no active pricing config in store");
 
-    const { models, tools, search, cache, fixed, minBalance, plans } = active.config;
+    const config = active.config as Record<string, unknown>;
+    const metering = (config.metering ?? {}) as Record<string, unknown>;
+    const ledger = (config.ledger ?? {}) as Record<string, unknown>;
     const engineDict: Record<string, unknown> = {
-      models,
-      tools: tools ?? { _default: "tool_calls * 0" },
-      search: search ?? null,
-      cache: cache ?? null,
-      fixed: fixed ?? {},
-      minBalance: minBalance ?? 0,
-      ...(plans ? { plans } : {}),
+      version: config.version ?? 1,
+      metering: {
+        models: metering.models ?? {},
+        tools: metering.tools ?? { "*": "calls * 0" },
+        search: metering.search ?? null,
+        cacheDiscount: metering.cacheDiscount ?? null,
+        flatJobs: metering.flatJobs ?? {},
+      },
+      ledger: {
+        minBalance: ledger.minBalance ?? 0,
+        signupGrant: ledger.signupGrant ?? 50,
+        buckets: ledger.buckets ?? null,
+      },
+      ...(config.plans ? { plans: config.plans } : {}),
+      ...(config.billing ? { billing: config.billing } : {}),
     };
 
     this.engine = PricingEngineClass.fromDict(engineDict);
@@ -332,18 +341,8 @@ export class CreditManager {
    * a persistence failure surfaces to the caller instead of becoming an
    * unhandled promise rejection.
    */
-  async publishPricing(config: PricingConfigData, label?: string | null): Promise<void> {
-    const { models, tools, search, cache, fixed, minBalance, plans } = config;
-    const raw: Record<string, unknown> = {
-      models,
-      tools: tools ?? { _default: "tool_calls * 0" },
-      search: search ?? null,
-      cache: cache ?? null,
-      fixed: fixed ?? {},
-      minBalance: minBalance ?? 0,
-      ...(plans ? { plans } : {}),
-    };
-    this.engine = PricingEngineClass.fromDict(raw);
+  async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
+    this.engine = PricingEngineClass.fromDict(config);
     await this.store.setActivePricing(config, label);
   }
 
@@ -433,7 +432,7 @@ export class CreditManager {
     // The store only counts; the manager (which owns plan lookup) overrides
     // `limited`/`action` from the resolved FeatureLimit (mirrors how
     // checkAllowance overrides periodEnd after the store call).
-    return { ...result, limited: true, action: limit.action };
+    return { ...result, limited: true, action: limit.onExceed };
   }
 
   /**
@@ -589,8 +588,8 @@ export class CreditManager {
     let priorLeftover = new Decimal(0);
     let preLifetimePurchased = new Decimal(0);
     if (replacePrior) {
-      const tiersBefore = await this.getCreditTiers(userId);
-      const current = tiersBefore.tiers.find((t) => t.tierKey === tier);
+      const bucketsBefore = await this.getBucketBalances(userId);
+      const current = bucketsBefore.buckets.find((t) => t.bucketKey === tier);
       if (current) priorLeftover = current.balance;
       preLifetimePurchased = (await this.getBalance(userId)).lifetimePurchased;
     }
@@ -678,7 +677,7 @@ export class CreditManager {
 
     if (plan && plan.planId) {
       policy = {
-        billingMode: plan.defaultBillingMode ?? "strict",
+        billingMode: plan.billingMode ?? "strict",
         maxConcurrent: plan.maxConcurrent != null ? plan.maxConcurrent : policy.maxConcurrent,
         overdraftFloor: plan.overdraftFloor != null ? plan.overdraftFloor : policy.overdraftFloor,
       };
@@ -753,9 +752,14 @@ export class CreditManager {
     } catch {
       return { limit: null, periodStart: null, periodEnd: null };
     }
-    const limit = plan?.featureLimits?.[feature] ?? null;
-    if (limit == null) return { limit: null, periodStart: null, periodEnd: null };
-    const { start, end } = resolveCalendarWindow(new Date(), limit.period);
+    const rawLimit = plan?.entitlements?.[feature] ?? null;
+    if (rawLimit == null) return { limit: null, periodStart: null, periodEnd: null };
+    const limit: FeatureLimit = {
+      maxCalls: (rawLimit as any).maxCalls ?? 0,
+      period: ((rawLimit as any).period ?? "monthly") as FeatureLimitPeriod,
+      onExceed: ((rawLimit as any).onExceed ?? "deny") as "deny" | "warn" | "notify",
+    };
+    const { start, end } = resolveCalendarWindow(new Date(), limit.period ?? "monthly");
     return { limit, periodStart: start, periodEnd: end };
   }
 
@@ -916,7 +920,7 @@ export class CreditManager {
       txMeta["outputTokens"] = metricsOrAmount.outputTokens ?? 0;
       txMeta["model"] = metricsOrAmount.model ?? "unknown";
       txMeta["breakdownTotal"] = amount.toString();
-      if (metricsOrAmount.fixedJob) txMeta["fixedJob"] = metricsOrAmount.fixedJob;
+      if (metricsOrAmount.flatJob) txMeta["flatJob"] = metricsOrAmount.flatJob;
       if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
     }
 
@@ -1066,10 +1070,10 @@ export class CreditManager {
     return await this.store.getAvailable(userId);
   }
 
-  /** Get a user's per-tier credit balances (credit tiers). Thin pass-through, no event emission. */
-  async getCreditTiers(userId: string): Promise<TierBalancesResult> {
+  /** Get a user's per-bucket credit balances (credit buckets). Thin pass-through, no event emission. */
+  async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
     await this.maybeLazyExpire(userId);
-    return await this.store.getCreditTiers(userId);
+    return await this.store.getBucketBalances(userId);
   }
 
   /**
@@ -1282,7 +1286,7 @@ export class CreditManager {
     meta["outputTokens"] = metrics.outputTokens ?? 0;
     meta["model"] = metrics.model ?? "unknown";
     meta["breakdownTotal"] = breakdown.total.toString();
-    if (metrics.fixedJob) meta["fixedJob"] = metrics.fixedJob;
+    if (metrics.flatJob) meta["flatJob"] = metrics.flatJob;
     if (idempotencyKey) meta["idempotencyKey"] = idempotencyKey;
 
     const periodStart = await this.resolveAllowancePeriodStart(userId);
@@ -1477,13 +1481,13 @@ export class CreditManager {
   }
 
   /**
-   * Shortcut for fixed-cost batch jobs.
+   * Shortcut for flat-cost batch jobs.
    *
    * L1: an unknown/typo'd ``jobName`` is rejected (throws) instead of silently
-   * charging 0 credits — ``engine.getFixedCost(jobName) === null`` means the job
+   * charging 0 credits — ``engine.getFlatJobCost(jobName) === null`` means the job
    * is not configured.
    */
-  async deductFixed(
+  async deductFlatJob(
     userId: string,
     jobName: string,
     idempotencyKey?: string | null,
@@ -1495,12 +1499,12 @@ export class CreditManager {
       throw new PricingNotLoadedError(
         "pricing not loaded: call loadPricingFromStore or publishPricing first",
       );
-    if (this.engine.getFixedCost(jobName) === null) {
+    if (this.engine.getFlatJobCost(jobName) === null) {
       throw new ConfigError(
-        `unknown fixed job '${jobName}': not configured in pricing 'fixed' section`,
+        `unknown flat job '${jobName}': not configured in pricing metering.flatJobs section`,
       );
     }
-    return await this.deduct(userId, { fixedJob: jobName }, idempotencyKey, metadata, feature);
+    return await this.deduct(userId, { flatJob: jobName }, idempotencyKey, metadata, feature);
   }
 
   /**

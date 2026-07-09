@@ -3,7 +3,7 @@ import Decimal from "decimal.js";
 import { quantizeMoney } from "../expr.js";
 import { StoreError } from "../errors.js";
 import { resolveAllowanceWindow, resolveCalendarWindow } from "../allowance.js";
-import type { AllowancePeriod } from "../allowance.js";
+import type { AllowancePeriod, FeatureLimitPeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -12,6 +12,9 @@ import type {
   AvailableResult,
   BalanceResult,
   BillingMode,
+  BucketBalance,
+  BucketBalancesResult,
+  BucketDefinition,
   CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
@@ -25,9 +28,9 @@ import type {
   LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  OperationPolicy,
   PaginatedTransactions,
   PlanDefinition,
-  PricingConfigData,
   PricingConfigHistoryItem,
   PricingConfigResult,
   RefundResult,
@@ -41,9 +44,6 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
-  TierBalance,
-  TierBalancesResult,
-  TierDefinition,
   TopUserRow,
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
@@ -65,38 +65,39 @@ function featurePresent(value: unknown): boolean {
  */
 function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition {
   const p = raw as Record<string, unknown>;
-  const freeAllowanceRaw = (p["freeAllowance"] ?? p["free_allowance"]) as
+  const allowanceRaw = (p["allowance"] ?? {}) as Record<string, unknown>;
+  const safetyRaw = (p["safety"] ?? {}) as Record<string, unknown>;
+  const perOperationRaw = safetyRaw["perOperation"] as
+    Record<string, unknown> | null | undefined;
+  const allowanceAmountRaw = (allowanceRaw["amount"] ?? p["freeAllowance"] ?? p["free_allowance"]) as
     number | string | undefined;
-  const defaultBillingModeRaw = (p["defaultBillingMode"] ??
-    p["billingMode"] ??
-    p["default_billing_mode"] ??
-    p["billing_mode"]) as string | undefined;
-  const overdraftFloorRaw = (p["overdraftFloor"] ?? p["overdraft_floor"]) as
+  const allowancePeriodRaw = (allowanceRaw["period"] ?? p["allowancePeriod"] ?? p["allowance_period"]) as
+    AllowancePeriod | undefined;
+  const billingModeRaw = (safetyRaw["billingMode"] ?? p["defaultBillingMode"] ?? p["billingMode"] ?? p["default_billing_mode"]) as string | undefined;
+  const overdraftFloorRaw = (safetyRaw["overdraftFloor"] ?? p["overdraftFloor"] ?? p["overdraft_floor"]) as
     number | string | null | undefined;
+  const maxConcurrentRaw = (safetyRaw["maxConcurrent"] ?? p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
   const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as
     Record<string, string> | null | undefined;
-  const perOperationRaw = (p["perOperation"] ?? p["per_operation"]) as
-    Record<string, unknown> | null | undefined;
-  const maxConcurrentRaw = (p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
-  const allowancePeriodRaw = (p["allowancePeriod"] ?? p["allowance_period"]) as
-    AllowancePeriod | undefined;
-  const featureLimitsRaw = (p["featureLimits"] ?? p["feature_limits"]) as
+  const entitlementsRaw = (p["entitlements"] ?? p["featureLimits"] ?? p["feature_limits"]) as
     Record<string, unknown> | null | undefined;
 
-  const billingMode = (defaultBillingModeRaw === "overdraft" ? "overdraft" : "strict") as
+  const billingMode = (billingModeRaw === "overdraft" ? "overdraft" : "strict") as
     "strict" | "overdraft";
   return {
-    id: (p["id"] as string | undefined) ?? planKey,
-    name: (p["name"] as string | undefined) ?? planKey,
-    freeAllowance: freeAllowanceRaw != null ? new Decimal(freeAllowanceRaw) : ZERO,
+    label: (p["label"] as string | undefined) ?? (p["name"] as string | undefined) ?? planKey,
+    allowance: {
+      amount: allowanceAmountRaw != null ? new Decimal(allowanceAmountRaw) : ZERO,
+      period: allowancePeriodRaw ?? "calendar_month",
+    },
+    safety: {
+      billingMode,
+      perOperation: (perOperationRaw ?? undefined) as Record<string, OperationPolicy> | undefined,
+      maxConcurrent: maxConcurrentRaw ?? null,
+      overdraftFloor: overdraftFloorRaw != null ? new Decimal(overdraftFloorRaw) : null,
+    },
     rateOverrides: rateOverridesRaw ?? null,
-    features: (p["features"] as Record<string, unknown> | null | undefined) ?? null,
-    featureLimits: normaliseFeatureLimitsMap(featureLimitsRaw),
-    defaultBillingMode: billingMode,
-    overdraftFloor: overdraftFloorRaw != null ? new Decimal(overdraftFloorRaw) : null,
-    maxConcurrent: maxConcurrentRaw ?? null,
-    perOperation: (perOperationRaw as PlanDefinition["perOperation"]) ?? undefined,
-    allowancePeriod: allowancePeriodRaw ?? "calendar_month",
+    entitlements: (normaliseFeatureLimitsMap(entitlementsRaw) as unknown as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>) ?? null,
   };
 }
 
@@ -116,7 +117,7 @@ function normaliseFeatureLimitsMap(
     out[featureKey] = {
       maxCalls: maxCallsRaw != null ? Number(maxCallsRaw) : 0,
       period: (l["period"] as FeatureLimit["period"] | undefined) ?? "monthly",
-      action: (l["action"] as FeatureLimit["action"] | undefined) ?? "deny",
+      onExceed: ((l["onExceed"] ?? l["action"] ?? "deny") as FeatureLimit["onExceed"]),
     };
   }
   return out;
@@ -124,28 +125,28 @@ function normaliseFeatureLimitsMap(
 
 /**
  * Normalise a raw tier definition object (possibly snake_case from a JSON
- * fixture or raw dict) into a proper `TierDefinition`. Accepts both camelCase
+ * fixture or raw dict) into a proper `BucketDefinition`. Accepts both camelCase
  * and snake_case keys, mirroring `normalisePlanDefinition` (credit tiers).
  */
-function normaliseTierDefinition(tierKey: string, raw: unknown): TierDefinition {
+function normaliseBucketDefinition(bucketKey: string, raw: unknown): BucketDefinition {
   const t = raw as Record<string, unknown>;
   const defaultTtlDaysRaw = (t["defaultTtlDays"] ?? t["default_ttl_days"]) as
     number | string | null | undefined;
   const allowOverdraftRaw = (t["allowOverdraft"] ?? t["allow_overdraft"]) as boolean | undefined;
   const isDefaultRaw = (t["isDefault"] ?? t["is_default"]) as boolean | undefined;
   return {
-    name: (t["name"] as string | undefined) ?? tierKey,
+    label: (t["name"] as string | undefined) ?? t["label"] as string | undefined ?? bucketKey,
     priority: Number(t["priority"] ?? 0),
     expires: Boolean(t["expires"] ?? false),
-    defaultTtlDays: defaultTtlDaysRaw != null ? Number(defaultTtlDaysRaw) : null,
+    ttlDays: defaultTtlDaysRaw != null ? Number(defaultTtlDaysRaw) : null,
     allowOverdraft: Boolean(allowOverdraftRaw ?? false),
-    isDefault: Boolean(isDefaultRaw ?? false),
+    isDefaultBucket: Boolean(isDefaultRaw ?? false),
   };
 }
 
 /** One entry in the tier-priority walk order (deduct/settle/refund — credit tiers). */
-interface TierOrderEntry {
-  tierKey: string;
+interface BucketOrderEntry {
+  bucketKey: string;
   priority: number;
   allowOverdraft: boolean;
 }
@@ -209,15 +210,15 @@ export class MemoryStore extends CreditStore {
     version: number;
     label: string | null;
     active: boolean;
-    config: PricingConfigData;
+    config: Record<string, unknown>;
     createdAt: string;
   }> = [];
   private planDefinitions = new Map<string, PlanDefinition>();
   // Credit tiers: definitions keyed by tier key (config key); balances keyed by
-  // a composite `${userId}:${tierKey}` string — JS Maps compare object/tuple
+  // a composite `${userId}:${bucketKey}` string — JS Maps compare object/tuple
   // keys by reference, so a plain string key is required (repo CLAUDE.md).
-  private tierDefinitions = new Map<string, TierDefinition>();
-  private tierBalances = new Map<string, Decimal>();
+  private bucketDefinitions = new Map<string, BucketDefinition>();
+  private bucketBalances = new Map<string, Decimal>();
   private userPlanMap = new Map<string, string>();
   /** Timestamp each user's CURRENT plan was assigned — anchor for WS9 non-calendar periods. */
   private userPlanAssignedAt = new Map<string, Date>();
@@ -259,17 +260,17 @@ export class MemoryStore extends CreditStore {
 
   // ── Credit tiers: per-(user, tier) balance map ──────────────────────
 
-  private tierBalanceKey(userId: string, tierKey: string): string {
-    return `${userId}:${tierKey}`;
+  private tierBalanceKey(userId: string, bucketKey: string): string {
+    return `${userId}:${bucketKey}`;
   }
 
-  private getTierBalance(userId: string, tierKey: string): Decimal {
-    return this.tierBalances.get(this.tierBalanceKey(userId, tierKey)) ?? ZERO;
+  private getTierBalance(userId: string, bucketKey: string): Decimal {
+    return this.bucketBalances.get(this.tierBalanceKey(userId, bucketKey)) ?? ZERO;
   }
 
-  private adjustTierBalance(userId: string, tierKey: string, delta: Decimal): void {
-    const key = this.tierBalanceKey(userId, tierKey);
-    this.tierBalances.set(key, (this.tierBalances.get(key) ?? ZERO).plus(delta));
+  private adjustTierBalance(userId: string, bucketKey: string, delta: Decimal): void {
+    const key = this.tierBalanceKey(userId, bucketKey);
+    this.bucketBalances.set(key, (this.bucketBalances.get(key) ?? ZERO).plus(delta));
   }
 
   /**
@@ -282,30 +283,30 @@ export class MemoryStore extends CreditStore {
    * refund restoration); when omitted, orphaned keys are discovered from any
    * nonzero balance the user currently holds under an unconfigured tier key.
    */
-  private tierWalkOrder(userId: string, extraKeys?: Iterable<string>): TierOrderEntry[] {
-    const configured: TierOrderEntry[] = [...this.tierDefinitions.entries()]
-      .map(([tierKey, def]) => ({
-        tierKey,
+  private tierWalkOrder(userId: string, extraKeys?: Iterable<string>): BucketOrderEntry[] {
+    const configured: BucketOrderEntry[] = [...this.bucketDefinitions.entries()]
+      .map(([bucketKey, def]) => ({
+        bucketKey,
         priority: def.priority,
         allowOverdraft: def.allowOverdraft ?? false,
       }))
-      .sort((a, b) => a.priority - b.priority || a.tierKey.localeCompare(b.tierKey));
+      .sort((a, b) => a.priority - b.priority || a.bucketKey.localeCompare(b.bucketKey));
 
-    const base: TierOrderEntry[] =
+    const base: BucketOrderEntry[] =
       configured.length > 0
         ? configured
-        : [{ tierKey: "default", priority: 0, allowOverdraft: true }];
+        : [{ bucketKey: "default", priority: 0, allowOverdraft: true }];
 
-    const known = new Set(base.map((t) => t.tierKey));
+    const known = new Set(base.map((t) => t.bucketKey));
     const orphaned = new Set<string>();
     if (extraKeys) {
       for (const k of extraKeys) if (!known.has(k)) orphaned.add(k);
     } else {
       const prefix = `${userId}:`;
-      for (const [key, bal] of this.tierBalances) {
+      for (const [key, bal] of this.bucketBalances) {
         if (!key.startsWith(prefix)) continue;
-        const tierKey = key.slice(prefix.length);
-        if (!known.has(tierKey) && !bal.isZero()) orphaned.add(tierKey);
+        const bucketKey = key.slice(prefix.length);
+        if (!known.has(bucketKey) && !bal.isZero()) orphaned.add(bucketKey);
       }
     }
 
@@ -313,7 +314,7 @@ export class MemoryStore extends CreditStore {
       ...base,
       ...[...orphaned]
         .sort()
-        .map((tierKey) => ({ tierKey, priority: Number.MAX_SAFE_INTEGER, allowOverdraft: false })),
+        .map((bucketKey) => ({ bucketKey, priority: Number.MAX_SAFE_INTEGER, allowOverdraft: false })),
     ];
   }
 
@@ -325,20 +326,20 @@ export class MemoryStore extends CreditStore {
    *    tier, else throw (deliberately strict — never silently misroute money).
    */
   private resolveAddCreditsTier(tier?: string | null): string {
-    if (this.tierDefinitions.size === 0) {
+    if (this.bucketDefinitions.size === 0) {
       if (tier != null && tier !== "default") {
         throw new StoreError(`tier_not_found: ${tier}`);
       }
       return "default";
     }
     if (tier != null) {
-      if (!this.tierDefinitions.has(tier)) {
+      if (!this.bucketDefinitions.has(tier)) {
         throw new StoreError(`tier_not_found: ${tier}`);
       }
       return tier;
     }
-    for (const [key, def] of this.tierDefinitions) {
-      if (def.isDefault) return key;
+    for (const [key, def] of this.bucketDefinitions) {
+      if (def.isDefaultBucket) return key;
     }
     throw new StoreError("tier_required");
   }
@@ -352,15 +353,15 @@ export class MemoryStore extends CreditStore {
    *  - expiring tier + omitted `expiresAt` ⇒ use `defaultTtlDays` if set,
    *    else throw.
    */
-  private resolveAddCreditsExpiry(tierKey: string, expiresAt?: Date | null): Date | null {
-    if (this.tierDefinitions.size === 0) {
+  private resolveAddCreditsExpiry(bucketKey: string, expiresAt?: Date | null): Date | null {
+    if (this.bucketDefinitions.size === 0) {
       return expiresAt ?? null;
     }
-    const def = this.tierDefinitions.get(tierKey);
+    const def = this.bucketDefinitions.get(bucketKey);
     if (!def) return expiresAt ?? null;
     if (!def.expires) {
       if (expiresAt != null) {
-        throw new StoreError(`tier_does_not_expire: ${tierKey}`);
+        throw new StoreError(`tier_does_not_expire: ${bucketKey}`);
       }
       return null;
     }
@@ -372,8 +373,8 @@ export class MemoryStore extends CreditStore {
       }
       return expiresAt;
     }
-    if (def.defaultTtlDays != null) {
-      return new Date(this.now().getTime() + def.defaultTtlDays * 86_400_000);
+    if (def.ttlDays != null) {
+      return new Date(this.now().getTime() + def.ttlDays * 86_400_000);
     }
     throw new StoreError("expires_at_required");
   }
@@ -450,7 +451,7 @@ export class MemoryStore extends CreditStore {
           amount: existing.amount,
           newBalance: this.balance(userId),
           lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
-          tier: (existing.metadata?.["tier"] as string | undefined) ?? "default",
+          bucket: (existing.metadata?.["bucket"] as string | undefined) ?? "default",
           idempotent: true,
         };
       }
@@ -501,7 +502,7 @@ export class MemoryStore extends CreditStore {
       amount: amt,
       newBalance: this.balance(userId),
       lifetimePurchased: this.lifetime.get(userId) ?? ZERO,
-      tier: resolvedTier,
+      bucket: resolvedTier,
       idempotent: false,
     };
   }
@@ -531,11 +532,11 @@ export class MemoryStore extends CreditStore {
 
     for (const t of order) {
       if (remaining.lte(0)) break;
-      const bal = this.getTierBalance(userId, t.tierKey);
+      const bal = this.getTierBalance(userId, t.bucketKey);
       const take = Decimal.min(bal, remaining);
       if (take.gt(0)) {
-        breakdown[t.tierKey] = (breakdown[t.tierKey] ?? ZERO).plus(take);
-        this.adjustTierBalance(userId, t.tierKey, take.negated());
+        breakdown[t.bucketKey] = (breakdown[t.bucketKey] ?? ZERO).plus(take);
+        this.adjustTierBalance(userId, t.bucketKey, take.negated());
         remaining = remaining.minus(take);
       }
     }
@@ -543,9 +544,9 @@ export class MemoryStore extends CreditStore {
     if (remaining.gt(0)) {
       const overdraftTier = order.find((t) => t.allowOverdraft);
       const sink = overdraftTier
-        ? overdraftTier.tierKey
+        ? overdraftTier.bucketKey
         : order.length > 0
-          ? order.reduce((best, t) => (t.priority > best.priority ? t : best)).tierKey
+          ? order.reduce((best, t) => (t.priority > best.priority ? t : best)).bucketKey
           : "default";
       breakdown[sink] = (breakdown[sink] ?? ZERO).plus(remaining);
       this.adjustTierBalance(userId, sink, remaining.negated());
@@ -609,8 +610,8 @@ export class MemoryStore extends CreditStore {
           capWarning: null,
           featureLimitWarning: null,
           // Idempotent replay echoes the ORIGINAL tier breakdown — never recomputed.
-          tierBreakdown:
-            (existing.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ?? null,
+          bucketBreakdown:
+            (existing.metadata?.["bucketBreakdown"] as Record<string, Decimal> | undefined) ?? null,
         };
       }
     }
@@ -629,7 +630,7 @@ export class MemoryStore extends CreditStore {
           used = used.plus(w.usage);
         }
       }
-      const remaining = Decimal.max(ZERO, planDef.freeAllowance.minus(used));
+      const remaining = Decimal.max(ZERO, planDef.allowance.amount.minus(used));
       consume = Decimal.min(remaining, gross);
     }
 
@@ -675,7 +676,7 @@ export class MemoryStore extends CreditStore {
       const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
       const count = this.featureUsageCount(userId, feature, featurePeriodStart, featurePeriodEnd);
       if (count >= featureLimit.maxCalls) {
-        if (featureLimit.action === "deny") {
+        if (featureLimit.onExceed === "deny") {
           return {
             transactionId: "",
             userId,
@@ -688,7 +689,7 @@ export class MemoryStore extends CreditStore {
             error: "feature_limit_reached",
           };
         }
-        featureLimitWarning = featureLimit.action;
+        featureLimitWarning = featureLimit.onExceed;
       }
     }
 
@@ -714,7 +715,7 @@ export class MemoryStore extends CreditStore {
     }
 
     this.balances.set(userId, current.minus(net));
-    const tierBreakdown = this.walkTiers(userId, net);
+    const bucketBreakdown = this.walkTiers(userId, net);
 
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
@@ -724,7 +725,7 @@ export class MemoryStore extends CreditStore {
     // count accurate once a limit is enabled later.
     if (feature != null) txMeta["feature"] = feature;
     txMeta["allowanceConsumed"] = consume;
-    txMeta["tierBreakdown"] = tierBreakdown;
+    txMeta["bucketBreakdown"] = bucketBreakdown;
 
     const txId = randomUUID();
     this.transactions.push({
@@ -745,7 +746,7 @@ export class MemoryStore extends CreditStore {
       idempotent: false,
       capWarning,
       featureLimitWarning,
-      tierBreakdown,
+      bucketBreakdown,
     };
   }
 
@@ -849,7 +850,7 @@ export class MemoryStore extends CreditStore {
     if (
       feature != null &&
       featureLimit != null &&
-      featureLimit.action === "deny" &&
+      featureLimit.onExceed === "deny" &&
       featurePeriodStart != null
     ) {
       const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
@@ -930,8 +931,8 @@ export class MemoryStore extends CreditStore {
       capWarning: null,
       featureLimitWarning: null,
       // Idempotent replay echoes the ORIGINAL tier breakdown — never recomputed.
-      tierBreakdown:
-        (tx.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined) ?? null,
+      bucketBreakdown:
+        (tx.metadata?.["bucketBreakdown"] as Record<string, Decimal> | undefined) ?? null,
     };
   }
 
@@ -1069,7 +1070,7 @@ export class MemoryStore extends CreditStore {
           used = used.plus(w.usage);
         }
       }
-      const remaining = Decimal.max(ZERO, planDef.freeAllowance.minus(used));
+      const remaining = Decimal.max(ZERO, planDef.allowance.amount.minus(used));
       consume = Decimal.min(remaining, amount);
     }
     // Floor enforcement (C1): clamp net so balance stays ≥ floor.
@@ -1115,7 +1116,7 @@ export class MemoryStore extends CreditStore {
       const featurePeriodEnd = resolveCalendarWindow(featurePeriodStart, featureLimit.period).end;
       const count = this.featureUsageCount(userId, feature, featurePeriodStart, featurePeriodEnd);
       if (count >= featureLimit.maxCalls) {
-        featureLimitWarning = featureLimit.action;
+        featureLimitWarning = featureLimit.onExceed;
       }
     }
 
@@ -1124,7 +1125,7 @@ export class MemoryStore extends CreditStore {
     }
 
     this.balances.set(userId, balance.minus(net));
-    const tierBreakdown = this.walkTiers(userId, net);
+    const bucketBreakdown = this.walkTiers(userId, net);
 
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (model != null) txMeta["model"] = model;
@@ -1134,7 +1135,7 @@ export class MemoryStore extends CreditStore {
     // leased operation's usage transaction is inserted).
     if (feature != null) txMeta["feature"] = feature;
     txMeta["allowanceConsumed"] = consume;
-    txMeta["tierBreakdown"] = tierBreakdown;
+    txMeta["bucketBreakdown"] = bucketBreakdown;
 
     const txId = randomUUID();
     this.transactions.push({
@@ -1158,7 +1159,7 @@ export class MemoryStore extends CreditStore {
       idempotent: false,
       capWarning,
       featureLimitWarning,
-      tierBreakdown,
+      bucketBreakdown,
     };
   }
 
@@ -1241,7 +1242,7 @@ export class MemoryStore extends CreditStore {
     return { id: active.id, config: active.config, version: active.version };
   }
 
-  async setActivePricing(config: PricingConfigData, label?: string | null): Promise<string> {
+  async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     // Deactivate all previous versions, then insert a new active entry.
     for (const h of this.pricingHistory) h.active = false;
     this.pricingVersion += 1;
@@ -1263,9 +1264,10 @@ export class MemoryStore extends CreditStore {
         this.planDefinitions.set(planKey, normalisePlanDefinition(planKey, planData));
       }
     }
-    if ("tiers" in config && config.tiers) {
-      for (const [tierKey, tierData] of Object.entries(config.tiers)) {
-        this.tierDefinitions.set(tierKey, normaliseTierDefinition(tierKey, tierData));
+    const ledgerConfig = config.ledger as Record<string, unknown> | undefined;
+    if (ledgerConfig && ledgerConfig.buckets) {
+      for (const [bucketKey, bucketData] of Object.entries(ledgerConfig.buckets as Record<string, unknown>)) {
+        this.bucketDefinitions.set(bucketKey, normaliseBucketDefinition(bucketKey, bucketData));
       }
     }
     return id;
@@ -1303,9 +1305,10 @@ export class MemoryStore extends CreditStore {
         this.planDefinitions.set(planKey, normalisePlanDefinition(planKey, planData));
       }
     }
-    if ("tiers" in entry.config && entry.config.tiers) {
-      for (const [tierKey, tierData] of Object.entries(entry.config.tiers)) {
-        this.tierDefinitions.set(tierKey, normaliseTierDefinition(tierKey, tierData));
+    const ledgerEntry = entry.config.ledger as Record<string, unknown> | undefined;
+    if (ledgerEntry && ledgerEntry.buckets) {
+      for (const [bucketKey, bucketData] of Object.entries(ledgerEntry.buckets as Record<string, unknown>)) {
+        this.bucketDefinitions.set(bucketKey, normaliseBucketDefinition(bucketKey, bucketData));
       }
     }
     return entry.id;
@@ -1319,23 +1322,23 @@ export class MemoryStore extends CreditStore {
     return {
       userId,
       planId,
-      planName: planDef?.name ?? null,
-      freeAllowance: planDef?.freeAllowance ?? ZERO,
-      features: (planDef?.features as Record<string, unknown>) ?? {},
-      featureLimits: planDef?.featureLimits ?? {},
-      defaultBillingMode: planDef?.defaultBillingMode ?? "strict",
-      perOperation: (planDef?.perOperation as GetUserPlanResult["perOperation"]) ?? {},
-      maxConcurrent: planDef?.maxConcurrent ?? null,
-      overdraftFloor: planDef?.overdraftFloor ?? null,
-      allowancePeriod: planDef?.allowancePeriod ?? "calendar_month",
+      planLabel: planDef?.label ?? null,
+      allowanceAmount: planDef?.allowance?.amount ?? ZERO,
+      entitlements: (planDef?.entitlements ?? {}) as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>,
+      allowancePeriod: planDef?.allowance?.period ?? "calendar_month",
+      billingMode: planDef?.safety?.billingMode ?? "strict",
+      perOperation: (planDef?.safety?.perOperation ?? {}) as Record<string, OperationPolicy>,
+      maxConcurrent: planDef?.safety?.maxConcurrent ?? null,
+      overdraftFloor: planDef?.safety?.overdraftFloor ?? null,
       planAssignedAt: planId ? (this.userPlanAssignedAt.get(userId) ?? null) : null,
     };
   }
 
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
-    const present = Object.prototype.hasOwnProperty.call(plan.features, feature);
-    const value = present ? plan.features[feature] : null;
+    const present = Object.prototype.hasOwnProperty.call(plan.entitlements, feature);
+    const entitlement = present ? plan.entitlements[feature] : null;
+    const value = entitlement ? (entitlement as Record<string, unknown>)['value'] ?? null : null;
     return {
       userId,
       feature,
@@ -1377,7 +1380,7 @@ export class MemoryStore extends CreditStore {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
     const now = this.now();
-    const allowancePeriod: AllowancePeriod = planDef.allowancePeriod ?? "calendar_month";
+    const allowancePeriod: AllowancePeriod = planDef.allowance.period ?? "calendar_month";
     const anchor = this.userPlanAssignedAt.get(userId) ?? null;
     const { start, end: exclusiveEnd } = resolveAllowanceWindow(now, allowancePeriod, anchor);
     // Preserve the pre-WS9 display convention: periodEnd is the LAST DAY of the
@@ -1392,7 +1395,7 @@ export class MemoryStore extends CreditStore {
     }
     return {
       planId,
-      allowanceRemaining: Decimal.max(planDef.freeAllowance.minus(usage), ZERO),
+      allowanceRemaining: Decimal.max(planDef.allowance.amount.minus(usage), ZERO),
       periodStart: start.toISOString(),
       periodEnd: periodEnd.toISOString(),
     };
@@ -1556,7 +1559,7 @@ export class MemoryStore extends CreditStore {
     // Credit tiers: LIFO restoration (plan §5). The original debit's per-tier
     // breakdown drives allocation; legacy debits without a stored breakdown
     // (pre-tiers) fall back to the whole amount landing in "default".
-    const originalBreakdown = (origTx.metadata?.["tierBreakdown"] as
+    const originalBreakdown = (origTx.metadata?.["bucketBreakdown"] as
       Record<string, Decimal> | undefined) ?? { default: originalDebit };
 
     // tierRemaining[t] = original[t] - Σ(all PRIOR refunds' own breakdown[t]) —
@@ -1565,7 +1568,7 @@ export class MemoryStore extends CreditStore {
     const priorBreakdowns: Record<string, Decimal>[] = [];
     for (const t of this.transactions) {
       if (t.type === "refund" && t.referenceId === transactionId) {
-        const b = t.metadata?.["tierBreakdown"] as Record<string, Decimal> | undefined;
+        const b = t.metadata?.["bucketBreakdown"] as Record<string, Decimal> | undefined;
         if (b) priorBreakdowns.push(b);
       }
     }
@@ -1586,17 +1589,17 @@ export class MemoryStore extends CreditStore {
     ].reverse();
     for (const t of reverseOrder) {
       if (toAllocate.lte(0)) break;
-      const give = Decimal.min(tierRemaining[t.tierKey] ?? ZERO, toAllocate);
+      const give = Decimal.min(tierRemaining[t.bucketKey] ?? ZERO, toAllocate);
       if (give.gt(0)) {
-        newBreakdown[t.tierKey] = give;
+        newBreakdown[t.bucketKey] = give;
         toAllocate = toAllocate.minus(give);
-        this.adjustTierBalance(origTx.userId, t.tierKey, give);
+        this.adjustTierBalance(origTx.userId, t.bucketKey, give);
       }
     }
 
     const txMeta = metadata ? this.cleanMetadata(metadata) : {};
     if (reason) txMeta["reason"] = reason;
-    txMeta["tierBreakdown"] = newBreakdown;
+    txMeta["bucketBreakdown"] = newBreakdown;
 
     const txId = randomUUID();
     this.transactions.push({
@@ -1616,7 +1619,7 @@ export class MemoryStore extends CreditStore {
       userId: origTx.userId,
       amount: refundAmount,
       newBalance: current.plus(refundAmount),
-      tierBreakdown: newBreakdown,
+      bucketBreakdown: newBreakdown,
     };
   }
 
@@ -1625,9 +1628,9 @@ export class MemoryStore extends CreditStore {
   async sweepExpiredCredits(dryRun = false, userId?: string): Promise<SweepResult> {
     // ── critical section (synchronous; no awaits) ──
     const now = this.now();
-    // Credit tiers: re-scoped from per-userId to per-(userId, tierKey), reading
+    // Credit tiers: re-scoped from per-userId to per-(userId, bucketKey), reading
     // `metadata.tier` off each grant (legacy records without it default to
-    // "default"). Grouping key: `${userId} ${tierKey}`.
+    // "default"). Grouping key: `${userId} ${bucketKey}`.
     const expiredByUserTier = new Map<string, Decimal>();
     const expiredTxsByUserTier = new Map<string, TransactionRecord[]>();
 
@@ -1645,8 +1648,8 @@ export class MemoryStore extends CreditStore {
           tx.type === "adjustment")
       ) {
         if (tx.expiresAt <= now) {
-          const tierKey = (tx.metadata?.["tier"] as string | undefined) ?? "default";
-          const key = `${tx.userId} ${tierKey}`;
+          const bucketKey = (tx.metadata?.["tier"] as string | undefined) ?? "default";
+          const key = `${tx.userId} ${bucketKey}`;
           expiredByUserTier.set(key, (expiredByUserTier.get(key) ?? ZERO).plus(tx.amount));
           const list = expiredTxsByUserTier.get(key) ?? [];
           list.push(tx);
@@ -1657,24 +1660,24 @@ export class MemoryStore extends CreditStore {
 
     let expiredCount = 0;
     let expiredAmount = ZERO;
-    const expiredByTier: Record<string, Decimal> = {};
+    const expiredByBucket: Record<string, Decimal> = {};
 
     for (const [key, totalExpired] of expiredByUserTier) {
       const sep = key.indexOf(" ");
       const userId = key.slice(0, sep);
-      const tierKey = key.slice(sep + 1);
+      const bucketKey = key.slice(sep + 1);
       // Clamp per-TIER balance (not aggregate) — the existing LEAST(...) clamp,
       // just re-scoped.
-      const currentTierBalance = this.getTierBalance(userId, tierKey);
+      const currentTierBalance = this.getTierBalance(userId, bucketKey);
       const toExpire = Decimal.min(totalExpired, currentTierBalance);
 
       if (toExpire.gt(0)) {
         expiredCount++;
         expiredAmount = expiredAmount.plus(toExpire);
-        expiredByTier[tierKey] = (expiredByTier[tierKey] ?? ZERO).plus(toExpire);
+        expiredByBucket[bucketKey] = (expiredByBucket[bucketKey] ?? ZERO).plus(toExpire);
 
         if (!dryRun) {
-          this.adjustTierBalance(userId, tierKey, toExpire.negated());
+          this.adjustTierBalance(userId, bucketKey, toExpire.negated());
           this.balances.set(userId, this.balance(userId).minus(toExpire));
 
           // H4: mark swept grants so a second sweep reports zero.
@@ -1690,7 +1693,7 @@ export class MemoryStore extends CreditStore {
             userId,
             amount: toExpire.negated(),
             type: "adjustment",
-            metadata: { reason: "credit_expired", expiredAmount: toExpire, tier: tierKey },
+            metadata: { reason: "credit_expired", expiredAmount: toExpire, tier: bucketKey },
             createdAt: now,
           });
         }
@@ -1701,22 +1704,22 @@ export class MemoryStore extends CreditStore {
       expiredCount,
       expiredAmount,
       dryRun,
-      expiredByTier: Object.keys(expiredByTier).length > 0 ? expiredByTier : null,
+      expiredByBucket: Object.keys(expiredByBucket).length > 0 ? expiredByBucket : null,
     };
   }
 
   // ── Credit tiers ─────────────────────────────────────────────────────
 
-  async getCreditTiers(userId: string): Promise<TierBalancesResult> {
-    if (this.tierDefinitions.size === 0) {
+  async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
+    if (this.bucketDefinitions.size === 0) {
       // No tiers configured: synthesize a single "default" entry from the
       // aggregate balance so the API shape is uniform either way.
       return {
         userId,
-        tiers: [
+        buckets: [
           {
-            tierKey: "default",
-            name: "default",
+            bucketKey: "default",
+            label: "default",
             priority: 0,
             expires: false,
             balance: this.balance(userId),
@@ -1726,17 +1729,17 @@ export class MemoryStore extends CreditStore {
       };
     }
 
-    const tiers: TierBalance[] = [...this.tierDefinitions.entries()]
-      .map(([tierKey, def]) => ({
-        tierKey,
-        name: def.name,
+    const buckets: BucketBalance[] = [...this.bucketDefinitions.entries()]
+      .map(([bucketKey, def]) => ({
+        bucketKey,
+        label: def.label,
         priority: def.priority,
         expires: def.expires,
-        balance: this.getTierBalance(userId, tierKey),
+        balance: this.getTierBalance(userId, bucketKey),
       }))
-      .sort((a, b) => a.priority - b.priority || a.tierKey.localeCompare(b.tierKey));
+      .sort((a, b) => a.priority - b.priority || a.bucketKey.localeCompare(b.bucketKey));
 
-    return { userId, tiers, totalBalance: this.balance(userId) };
+    return { userId, buckets, totalBalance: this.balance(userId) };
   }
 
   // ── Usage analytics ──────────────────────────────────────────────────
@@ -2002,7 +2005,7 @@ export class MemoryStore extends CreditStore {
       remaining: Math.max(maxCalls - used, 0),
       periodStart: periodStart.toISOString(),
       periodEnd: periodEnd.toISOString(),
-      // The manager overwrites `action` with the resolved FeatureLimit.action.
+      // The manager overwrites `action` with the resolved FeatureLimit.onExceed.
       action: null,
     };
   }

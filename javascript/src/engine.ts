@@ -5,7 +5,6 @@ import { loadConfigFromDict } from "./config.js";
 import type { CostBreakdown } from "./breakdown.js";
 import { makeCostBreakdown } from "./breakdown.js";
 import type { UsageMetrics } from "./metrics.js";
-import type { PricingConfigData } from "./types.js";
 import { ConfigError } from "./errors.js";
 
 /**
@@ -33,7 +32,7 @@ export class PricingEngine {
     const toolCredits = this.calcTools(metrics, variables);
     const searchCredits = this.calcSearch(variables);
     const cacheSavings = this.calcCache(variables);
-    const fixedCredits = this.calcFixed(metrics);
+    const fixedCredits = this.calcFlatJobs(metrics);
 
     // makeCostBreakdown quantizes every component to 4dp HALF_UP and computes
     // the single-source-of-truth total (clamped at 0). No truncation.
@@ -57,22 +56,30 @@ export class PricingEngine {
     return metricsList.map((m) => this.calculate(m));
   }
 
-  /** Return the pricing config as a typed model. */
-  pricingSchema(): PricingConfigData {
+  /** Return the pricing config as a dict. */
+  pricingSchema(): Record<string, unknown> {
     return {
-      models: { ...this.config.models },
-      tools: Object.keys(this.config.tools).length > 0 ? { ...this.config.tools } : null,
-      search: this.config.search ?? null,
-      cache: this.config.cache ?? null,
-      fixed: Object.keys(this.config.fixed).length > 0 ? { ...this.config.fixed } : null,
-      minBalance: this.config.minBalance,
+      version: this.config.version,
+      metering: {
+        models: { ...this.config.metering.models },
+        tools: Object.keys(this.config.metering.tools).length > 0 ? { ...this.config.metering.tools } : null,
+        search: this.config.metering.search ?? null,
+        cacheDiscount: this.config.metering.cacheDiscount ?? null,
+        flatJobs: Object.keys(this.config.metering.flatJobs).length > 0 ? { ...this.config.metering.flatJobs } : null,
+      },
+      ledger: {
+        minBalance: this.config.ledger.minBalance,
+        signupGrant: this.config.ledger.signupGrant ?? null,
+        buckets: this.config.ledger.buckets ? { ...this.config.ledger.buckets } : null,
+      },
       plans: this.config.plans ? { ...this.config.plans } : null,
+      billing: this.config.billing ? { ...this.config.billing } : null,
     };
   }
 
   /** Minimum balance users must keep. */
   get minBalance(): Decimal {
-    return this.config.minBalance;
+    return this.config.ledger.minBalance;
   }
 
   /** The canonical set of metric variable names usable in expressions. */
@@ -82,27 +89,28 @@ export class PricingEngine {
 
   /** Check if a model name exists in the pricing config. */
   hasModel(modelName: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.config.models, modelName);
+    return Object.prototype.hasOwnProperty.call(this.config.metering.models, modelName);
   }
 
   /** Resolve a model version string to a pricing config key. */
   resolveModel(modelVersion: string): string | null {
-    if (Object.prototype.hasOwnProperty.call(this.config.models, modelVersion)) return modelVersion;
-    for (const key of Object.keys(this.config.models)) {
-      if (key !== "_default" && modelVersion.startsWith(key)) return key;
+    const models = this.config.metering.models;
+    if (Object.prototype.hasOwnProperty.call(models, modelVersion)) return modelVersion;
+    for (const key of Object.keys(models)) {
+      if (key !== "*" && modelVersion.startsWith(key)) return key;
     }
-    if (Object.prototype.hasOwnProperty.call(this.config.models, "_default")) return "_default";
+    if (Object.prototype.hasOwnProperty.call(models, "*")) return "*";
     return null;
   }
 
   /**
-   * Get the fixed credit cost for a named batch job, as a `Decimal`.
+   * Get the flat job credit cost for a named batch job, as a `Decimal`.
    * Returns `null` for an unknown job (L3 parity with Python). The amount is
    * NOT truncated to an integer.
    */
-  getFixedCost(jobName: string): Decimal | null {
-    if (Object.prototype.hasOwnProperty.call(this.config.fixed, jobName)) {
-      return this.config.fixed[jobName];
+  getFlatJobCost(jobName: string): Decimal | null {
+    if (Object.prototype.hasOwnProperty.call(this.config.metering.flatJobs, jobName)) {
+      return this.config.metering.flatJobs[jobName];
     }
     return null;
   }
@@ -124,24 +132,26 @@ export class PricingEngine {
   }
 
   private calcModel(modelName: string | null, variables: Record<string, number>): Decimal {
-    const name = modelName === null || modelName === "none" ? "_default" : modelName;
+    const models = this.config.metering.models;
+    const name = modelName === null || modelName === "none" ? "*" : modelName;
     let expr: string | undefined;
 
-    if (Object.prototype.hasOwnProperty.call(this.config.models, name)) {
-      expr = this.config.models[name];
-    } else if (Object.prototype.hasOwnProperty.call(this.config.models, "_default")) {
-      expr = this.config.models["_default"];
+    if (Object.prototype.hasOwnProperty.call(models, name)) {
+      expr = models[name];
+    } else if (Object.prototype.hasOwnProperty.call(models, "*")) {
+      expr = models["*"];
     }
 
     if (!expr) {
-      throw new ConfigError(`model '${modelName}' not found and no _default configured`);
+      throw new ConfigError(`model '${modelName}' not found and no "*" configured`);
     }
 
     return evaluateExpression(expr, variables);
   }
 
   private calcTools(metrics: UsageMetrics, variables: Record<string, number>): Decimal {
-    const defaultExpr = this.config.tools["_default"] ?? "tool_calls * 0";
+    const tools = this.config.metering.tools;
+    const defaultExpr = tools["*"] ?? "tool_calls * 0";
     let total = new Decimal(0);
     const seenSpecific = new Set<string>();
 
@@ -149,13 +159,13 @@ export class PricingEngine {
     const uniqueNames = [...new Set(calls.map((t) => t.name))];
 
     // WS2: `tool_calls` always means the GLOBAL total across all tools — it is
-    // never overridden. Each branch instead gets its own `this_tool_calls`,
+    // never overridden. Each branch instead gets its own `calls`,
     // scoped to just that branch's call count, alongside the unchanged globals.
     for (const toolName of uniqueNames) {
-      if (Object.prototype.hasOwnProperty.call(this.config.tools, toolName)) {
+      if (Object.prototype.hasOwnProperty.call(tools, toolName)) {
         const thisToolCalls = calls.filter((t) => t.name === toolName).length;
-        const local = { ...variables, this_tool_calls: thisToolCalls };
-        total = total.plus(evaluateExpression(this.config.tools[toolName], local));
+        const local = { ...variables, calls: thisToolCalls };
+        total = total.plus(evaluateExpression(tools[toolName], local));
         seenSpecific.add(toolName);
       }
     }
@@ -166,7 +176,7 @@ export class PricingEngine {
     // Python and (masked by 2dp rounding) under-charging on repeated unknowns.
     const unknownCount = calls.filter((t) => !seenSpecific.has(t.name)).length;
     if (unknownCount > 0) {
-      const local = { ...variables, this_tool_calls: unknownCount };
+      const local = { ...variables, calls: unknownCount };
       total = total.plus(evaluateExpression(defaultExpr, local));
     }
 
@@ -174,25 +184,26 @@ export class PricingEngine {
   }
 
   private calcSearch(variables: Record<string, number>): Decimal {
-    if (this.config.search) {
-      return evaluateExpression(this.config.search, variables);
+    if (this.config.metering.search) {
+      return evaluateExpression(this.config.metering.search, variables);
     }
     return new Decimal(0);
   }
 
   private calcCache(variables: Record<string, number>): Decimal {
-    if (this.config.cache) {
-      return evaluateExpression(this.config.cache, variables);
+    if (this.config.metering.cacheDiscount) {
+      // cacheDiscount is the savings expression; negate so it reduces cost.
+      return evaluateExpression(this.config.metering.cacheDiscount, variables).negated();
     }
     return new Decimal(0);
   }
 
-  private calcFixed(metrics: UsageMetrics): Decimal {
+  private calcFlatJobs(metrics: UsageMetrics): Decimal {
     if (
-      metrics.fixedJob &&
-      Object.prototype.hasOwnProperty.call(this.config.fixed, metrics.fixedJob)
+      metrics.flatJob &&
+      Object.prototype.hasOwnProperty.call(this.config.metering.flatJobs, metrics.flatJob)
     ) {
-      return this.config.fixed[metrics.fixedJob];
+      return this.config.metering.flatJobs[metrics.flatJob];
     }
     return new Decimal(0);
   }

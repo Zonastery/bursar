@@ -1,7 +1,7 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
 import { resolveCalendarWindow } from "../allowance.js";
-import type { AllowancePeriod } from "../allowance.js";
+import type { AllowancePeriod, FeatureLimitPeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -25,7 +25,7 @@ import type {
   ListUsageEventsOptions,
   OperationPolicy,
   PaginatedTransactions,
-  PricingConfigData,
+
   PricingConfigHistoryItem,
   PricingConfigResult,
   RefundResult,
@@ -38,8 +38,8 @@ import type {
   TeamBalanceResult,
   TeamDeductionResult,
   TeamMember,
-  TierBalance,
-  TierBalancesResult,
+  BucketBalance,
+  BucketBalancesResult,
   TopUserRow,
   UserTransactionRow,
 } from "../types.js";
@@ -81,7 +81,7 @@ function featureWindowEnd(start: Date, period: FeatureLimit["period"]): Date {
 
 /**
  * Parse a JSON `{tier_key: "3.0000", ...}` object (e.g. `tier_breakdown`,
- * `expired_by_tier`) into `Record<string, Decimal>`, converting every value
+ * `expired_by_bucket`) into `Record<string, Decimal>`, converting every value
  * the same way scalar money fields are (never left as a raw string/number).
  * Returns `null` when `raw` is not an object (absent/error responses).
  */
@@ -103,7 +103,7 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
     out[k] = {
       maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
       period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-      action: (String(fl.action ?? "deny") as FeatureLimit["action"]) ?? "deny",
+      onExceed: (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
     };
   }
   return out;
@@ -331,7 +331,7 @@ export class HttpxSupabaseStore extends CreditStore {
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
-      tier: String(row.tier ?? tier ?? "default"),
+      bucket: String(row.tier ?? tier ?? "default"),
       idempotent: Boolean(row.idempotent),
     };
   }
@@ -364,7 +364,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       p_feature: feature,
       p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
-      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_action: featureLimit != null ? featureLimit.onExceed : null,
       p_feature_period_start:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
       p_feature_period_end:
@@ -396,7 +396,7 @@ export class HttpxSupabaseStore extends CreditStore {
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
       featureLimitWarning:
         row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
-      tierBreakdown: decRecord(row.tier_breakdown),
+      bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
 
@@ -433,7 +433,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       p_feature: feature,
       p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
-      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_action: featureLimit != null ? featureLimit.onExceed : null,
       p_feature_period_start:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
       p_feature_period_end:
@@ -490,7 +490,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_period_start: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       p_feature: feature,
       p_feature_max_calls: featureLimit != null ? featureLimit.maxCalls : null,
-      p_feature_action: featureLimit != null ? featureLimit.action : null,
+      p_feature_action: featureLimit != null ? featureLimit.onExceed : null,
       p_feature_period_start:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
       p_feature_period_end:
@@ -521,7 +521,7 @@ export class HttpxSupabaseStore extends CreditStore {
       capWarning: row.cap_warning != null ? String(row.cap_warning) : null,
       featureLimitWarning:
         row.feature_limit_warning != null ? String(row.feature_limit_warning) : null,
-      tierBreakdown: decRecord(row.tier_breakdown),
+      bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
 
@@ -587,7 +587,7 @@ export class HttpxSupabaseStore extends CreditStore {
     return row as unknown as PricingConfigResult;
   }
 
-  async setActivePricing(config: PricingConfigData, label?: string | null): Promise<string> {
+  async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     const row = await this.rpc("set_active_pricing_config", {
       p_config: config,
       p_label: label ?? null,
@@ -620,7 +620,7 @@ export class HttpxSupabaseStore extends CreditStore {
     if (code) throw new StoreError(`get_pricing_config: ${code}`);
     return {
       id: String(row.id ?? ""),
-      config: row.config as PricingConfigData,
+      config: row.config as Record<string, unknown>,
       version: Number(row.version ?? version),
     };
   }
@@ -638,18 +638,17 @@ export class HttpxSupabaseStore extends CreditStore {
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const row = await this.rpc("get_user_plan", { p_user_id: userId });
     if (!row || Object.keys(row).length === 0) {
-      return { userId, planId: null, planName: null, freeAllowance: ZERO, features: {} };
+      return { userId, planId: null, planLabel: null, allowanceAmount: ZERO, allowancePeriod: 'calendar_month' as AllowancePeriod, entitlements: {}, billingMode: 'strict' as BillingMode };
     }
     const code = this.errorCode(row);
     if (code) throw new StoreError(`get_user_plan: ${code}`);
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
-      planName: (row.plan_name as string) ?? null,
-      freeAllowance: dec(row.free_allowance),
-      features: (row.features as Record<string, unknown>) ?? {},
-      featureLimits: parseFeatureLimits(row.feature_limits),
-      defaultBillingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
+      planLabel: (row.plan_label as string) ?? (row.plan_name as string) ?? null,
+      allowanceAmount: dec(row.free_allowance),
+      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>,
+      billingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
@@ -660,8 +659,8 @@ export class HttpxSupabaseStore extends CreditStore {
 
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
-    const present = Object.prototype.hasOwnProperty.call(plan.features, feature);
-    const value = present ? plan.features[feature] : null;
+    const present = Object.prototype.hasOwnProperty.call(plan.entitlements, feature);
+    const value = present ? (plan.entitlements[feature] as Record<string, unknown>)?.['value'] ?? null : null;
     return {
       userId,
       feature,
@@ -836,7 +835,7 @@ export class HttpxSupabaseStore extends CreditStore {
       userId: String(row.user_id ?? ""),
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
-      tierBreakdown: decRecord(row.tier_breakdown),
+      bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
 
@@ -1072,7 +1071,7 @@ export class HttpxSupabaseStore extends CreditStore {
       expiredCount: Number(row.expired_count ?? 0),
       expiredAmount: dec(row.expired_amount),
       dryRun,
-      expiredByTier: decRecord(row.expired_by_tier),
+      expiredByBucket: decRecord(row.expired_by_bucket),
     };
   }
 
@@ -1101,19 +1100,19 @@ export class HttpxSupabaseStore extends CreditStore {
     };
   }
 
-  async getCreditTiers(userId: string): Promise<TierBalancesResult> {
-    // get_user_credit_tiers returns one JSONB envelope object (not a rowset):
+  async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
+    // get_user_credit_buckets returns one JSONB envelope object (not a rowset):
     // {user_id, tiers: [...], total_balance} — use rpc() (single-object), not
     // rpcAll() (which is for genuine SETOF/TABLE-returning functions).
-    const envelope = await this.rpc("get_user_credit_tiers", { p_user_id: userId });
+    const envelope = await this.rpc("get_user_credit_buckets", { p_user_id: userId });
     const tierRows = (envelope.tiers as Record<string, unknown>[] | undefined) ?? [];
-    const tiers: TierBalance[] = tierRows.map((row) => ({
-      tierKey: String(row.tier_key ?? ""),
-      name: String(row.name ?? ""),
+    const buckets: BucketBalance[] = tierRows.map((row) => ({
+      bucketKey: String(row.bucket_key ?? ""),
+      label: String(row.name ?? ""),
       priority: Number(row.priority ?? 0),
       expires: Boolean(row.expires ?? false),
       balance: dec(row.balance),
     }));
-    return { userId, tiers, totalBalance: dec(envelope.total_balance) };
+    return { userId, buckets, totalBalance: dec(envelope.total_balance) };
   }
 }
