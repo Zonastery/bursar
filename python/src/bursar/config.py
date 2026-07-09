@@ -3,12 +3,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from bursar.billing.models import BillingCreditTopup, BillingOffer
 from bursar.expr import ExpressionError, validate_expression
 from bursar.interface.models import BucketDefinition, PlanDefinition
 from bursar.metrics import METRIC_VARIABLES
 
 
-class ConfigError(Exception):
+class ConfigError(ValueError):
     """Raised on config parsing or validation failures."""
 
 
@@ -42,8 +43,8 @@ class BillingSection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     currency: str = "USD"
-    subscriptions: dict[str, Any] | None = None
-    topups: dict[str, Any] | None = None
+    subscriptions: dict[str, BillingOffer] = Field(default_factory=dict)
+    topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
 
 
 class PricingConfig(BaseModel):
@@ -54,39 +55,6 @@ class PricingConfig(BaseModel):
     ledger: LedgerConfig = Field(default_factory=lambda: LedgerConfig())
     plans: dict[str, PlanDefinition] | None = None
     billing: BillingSection | None = None
-
-    @field_validator("billing")
-    @classmethod
-    def _validate_billing(cls, v: BillingSection | None) -> BillingSection | None:
-        if v is not None:
-            if v.subscriptions is not None:
-                from bursar.billing.models import BillingOffer as _BillingOffer
-
-                for key, val in v.subscriptions.items():
-                    if not isinstance(val, dict):
-                        raise ValueError(f"billing.subscriptions '{key}' must be a dict")
-                    try:
-                        _BillingOffer.model_validate(val)
-                    except Exception as e:
-                        raise ValueError(f"invalid billing.subscriptions '{key}': {e}") from e
-            if v.topups is not None:
-                from bursar.billing.models import BillingCreditTopup as _BillingCreditTopup
-
-                for key, val in v.topups.items():
-                    if not isinstance(val, dict):
-                        raise ValueError(f"billing.topups '{key}' must be a dict")
-                    try:
-                        _BillingCreditTopup.model_validate(val)
-                    except Exception as e:
-                        raise ValueError(f"invalid billing.topups '{key}': {e}") from e
-        return v
-
-    @field_validator("metering")
-    @classmethod
-    def _validate_metering_models_non_empty(cls, v: MeteringConfig) -> MeteringConfig:
-        if not v.models:
-            raise ConfigError("metering.models must be present and non-empty")
-        return v
 
     @model_validator(mode="before")
     @classmethod
@@ -105,16 +73,10 @@ class PricingConfig(BaseModel):
         plans = data.get("plans")
         if plans is not None and isinstance(plans, dict):
             plan_labels: list[str] = []
-            for plan_key, p in plans.items():
-                if isinstance(p, dict):
-                    label = p.get("label")
-                    if label is None:
-                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
-                else:
-                    label = getattr(p, "label", None)
-                    if label is None:
-                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
-                plan_labels.append(label)
+            for _, p in plans.items():
+                label = p.get("label") if isinstance(p, dict) else getattr(p, "label", None)
+                if label is not None:
+                    plan_labels.append(label)
             if len(plan_labels) != len(set(plan_labels)):
                 raise ConfigError("duplicate plan labels in pricing config")
 
@@ -154,10 +116,10 @@ class PricingConfig(BaseModel):
     @model_validator(mode="after")
     def validate_plan_references(self) -> "PricingConfig":
         billing = self.billing
-        plans = self.plans
-        if billing is not None and billing.subscriptions is not None and plans is not None:
+        if billing is not None and billing.subscriptions:
+            plans = self.plans or {}
             for offer_key, offer in billing.subscriptions.items():
-                plan_ref = offer.get("plan") if isinstance(offer, dict) else getattr(offer, "plan", None)
+                plan_ref = offer.plan
                 if plan_ref is not None and plan_ref not in plans:
                     raise ConfigError(f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'")
         return self
@@ -194,10 +156,6 @@ class PricingConfig(BaseModel):
             if plan_def.rate_overrides:
                 for model_key, expr in plan_def.rate_overrides.items():
                     self._check_expr(expr, f"plans.{plan_key}.rate_overrides.{model_key}", known)
-            if plan_def.entitlements:
-                for feature_key, entitlement in plan_def.entitlements.items():
-                    if entitlement.max_calls is not None and entitlement.max_calls < 0:
-                        raise ConfigError(f"plans.{plan_key}.entitlements.{feature_key}.max_calls must be >= 0")
 
     @staticmethod
     def _check_expr(expr: str, path: str, known: set[str]) -> None:

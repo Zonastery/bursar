@@ -154,7 +154,7 @@ class PostgresBillingStore(BillingStore):
                     """
                     INSERT INTO public.billing_subscriptions (
                         user_id, provider, provider_subscription_id, provider_customer_id,
-                        offer_key, plan_key, status, current_period_start,
+                        offer_key, plan, status, current_period_start,
                         current_period_end, cancel_at_period_end, interval, interval_count, metadata
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -164,7 +164,7 @@ class PostgresBillingStore(BillingStore):
                             EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id
                         ),
                         offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
-                        plan_key = COALESCE(EXCLUDED.plan_key, billing_subscriptions.plan_key),
+                        plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
                         status = EXCLUDED.status,
                         current_period_start = COALESCE(
                             EXCLUDED.current_period_start, billing_subscriptions.current_period_start
@@ -185,7 +185,7 @@ class PostgresBillingStore(BillingStore):
                         state.provider_subscription_id,
                         state.provider_customer_id,
                         state.offer_key,
-                        state.plan_key,
+                        state.plan,
                         state.status,
                         _to_utc_iso(state.current_period_start),
                         _to_utc_iso(state.current_period_end),
@@ -230,7 +230,7 @@ class PostgresBillingStore(BillingStore):
                 cur.execute(
                     """
                     SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-                           offer_key, plan_key, status, current_period_start,
+                           offer_key, plan, status, current_period_start,
                            current_period_end, cancel_at_period_end, interval, interval_count, metadata
                     FROM public.billing_subscriptions
                     WHERE provider = %s AND provider_subscription_id = %s
@@ -248,7 +248,7 @@ class PostgresBillingStore(BillingStore):
                 provider_subscription_id=str(row["provider_subscription_id"]),
                 provider_customer_id=str(row["provider_customer_id"]) if row["provider_customer_id"] else None,
                 offer_key=str(row["offer_key"]) if row["offer_key"] else None,
-                plan_key=str(row["plan_key"]) if row["plan_key"] else None,
+                plan=str(row["plan"]) if row["plan"] else None,
                 status=str(row["status"]) if row["status"] else "incomplete",
                 current_period_start=str(row["current_period_start"]) if row["current_period_start"] else None,
                 current_period_end=str(row["current_period_end"]) if row["current_period_end"] else None,
@@ -270,7 +270,7 @@ class PostgresBillingStore(BillingStore):
                 cur.execute(
                     """
                     SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-                           offer_key, plan_key, status, current_period_start,
+                           offer_key, plan, status, current_period_start,
                            current_period_end, cancel_at_period_end, interval, interval_count, metadata
                     FROM public.billing_subscriptions
                     WHERE user_id = %s
@@ -290,7 +290,7 @@ class PostgresBillingStore(BillingStore):
                 provider_subscription_id=str(row["provider_subscription_id"]),
                 provider_customer_id=str(row["provider_customer_id"]) if row["provider_customer_id"] else None,
                 offer_key=str(row["offer_key"]) if row["offer_key"] else None,
-                plan_key=str(row["plan_key"]) if row["plan_key"] else None,
+                plan=str(row["plan"]) if row["plan"] else None,
                 status=str(row["status"]) if row["status"] else "incomplete",
                 current_period_start=str(row["current_period_start"]) if row["current_period_start"] else None,
                 current_period_end=str(row["current_period_end"]) if row["current_period_end"] else None,

@@ -209,7 +209,7 @@ class BillingManager:
             provider_customer_id=(event.customer.provider_customer_id if event.customer else None)
             or (existing.provider_customer_id if existing else None),
             offer_key=merger.resolve(offer_key, "offer_key"),
-            plan_key=merger.resolve(plan_key, "plan_key"),
+            plan=merger.resolve(plan_key, "plan"),
             status=_status,
             current_period_start=sub.period_start or (existing.current_period_start if existing else None),
             current_period_end=sub.period_end or (existing.current_period_end if existing else None),
@@ -255,14 +255,13 @@ class BillingManager:
                 status=status,
                 cancel_at_period_end=cancel_at_period_end,
                 offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
-                plan_key=plan_key if plan_key is not None else (existing.plan_key if existing else None),
             )
         )
 
         if self._cm and provision_on_positive:
             self._provision_subscription(
                 uid,
-                offer or ({"plan": existing.plan_key} if existing and existing.plan_key else None),
+                offer or ({"plan": existing.plan} if existing and existing.plan else None),
                 event,
             )
 
@@ -682,7 +681,7 @@ class BillingManager:
                     event.provider,
                     event.subscription.provider_subscription_id,
                 )
-                if existing and existing.plan_key:
-                    self._provision_subscription(uid, {"plan": existing.plan_key}, event)
+                if existing and existing.plan:
+                    self._provision_subscription(uid, {"plan": existing.plan}, event)
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
             self._revoke_subscription(uid)

@@ -6,14 +6,13 @@
 
 CREATE TABLE IF NOT EXISTS public.credit_plans (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    name TEXT NOT NULL,
+    label TEXT NOT NULL,
     description TEXT,
-    free_allowance NUMERIC(18,4) NOT NULL DEFAULT 0,
+    allowance_amount NUMERIC(18,4) NOT NULL DEFAULT 0,
     rate_overrides JSONB DEFAULT '{}'::jsonb,
-    features JSONB DEFAULT '{}'::jsonb,
-    feature_limits JSONB DEFAULT '{}'::jsonb,
+    entitlements JSONB DEFAULT '{}'::jsonb,
     plan_key TEXT,
-    default_billing_mode TEXT NOT NULL DEFAULT 'strict',
+    billing_mode TEXT NOT NULL DEFAULT 'strict',
     per_operation JSONB,
     max_concurrent INTEGER,
     overdraft_floor NUMERIC(18,4),
@@ -27,11 +26,6 @@ CREATE TABLE IF NOT EXISTS public.credit_plans (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_plans_plan_key
     ON public.credit_plans (plan_key)
     WHERE plan_key IS NOT NULL;
-
--- feature_limits (per-feature invocation-count limits, 012_feature_limits.sql)
--- added after credit_plans first shipped — backfill via ALTER for existing
--- installs, since CREATE TABLE IF NOT EXISTS is a no-op once the table exists.
-ALTER TABLE public.credit_plans ADD COLUMN IF NOT EXISTS feature_limits JSONB DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.credit_usage_window (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -92,8 +86,8 @@ BEGIN
         FOR v_plan_key, v_plan_def IN SELECT * FROM jsonb_each(p_config->'plans')
         LOOP
             INSERT INTO public.credit_plans (
-                plan_key, name, free_allowance, rate_overrides, features, feature_limits,
-                default_billing_mode, per_operation, max_concurrent, overdraft_floor,
+                plan_key, label, allowance_amount, rate_overrides, entitlements,
+                billing_mode, per_operation, max_concurrent, overdraft_floor,
                 allowance_period
             )
             VALUES (
@@ -102,7 +96,6 @@ BEGIN
                 COALESCE((v_plan_def #>> '{allowance,amount}')::NUMERIC, 0),
                 COALESCE(v_plan_def->'rate_overrides', v_plan_def->'rateOverrides', '{}'::jsonb),
                 COALESCE(v_plan_def->'entitlements', '{}'::jsonb),
-                '{}'::jsonb,
                 COALESCE(v_plan_def #>> '{safety,billing_mode}', 'strict'),
                 v_plan_def #> '{safety,per_operation}',
                 (v_plan_def #>> '{safety,max_concurrent}')::INTEGER,
@@ -111,12 +104,11 @@ BEGIN
             )
             ON CONFLICT (plan_key) WHERE plan_key IS NOT NULL
             DO UPDATE SET
-                name = EXCLUDED.name,
-                free_allowance = EXCLUDED.free_allowance,
+                label = EXCLUDED.label,
+                allowance_amount = EXCLUDED.allowance_amount,
                 rate_overrides = EXCLUDED.rate_overrides,
-                features = EXCLUDED.features,
-                feature_limits = EXCLUDED.feature_limits,
-                default_billing_mode = EXCLUDED.default_billing_mode,
+                entitlements = EXCLUDED.entitlements,
+                billing_mode = EXCLUDED.billing_mode,
                 per_operation = EXCLUDED.per_operation,
                 max_concurrent = EXCLUDED.max_concurrent,
                 overdraft_floor = EXCLUDED.overdraft_floor,
@@ -138,10 +130,9 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_plan_id UUID;
-    v_plan_name TEXT;
-    v_free_allowance NUMERIC;
-    v_features JSONB;
-    v_feature_limits JSONB;
+    v_plan_label TEXT;
+    v_allowance_amount NUMERIC;
+    v_entitlements JSONB;
     v_billing_mode TEXT;
     v_per_operation JSONB;
     v_max_concurrent INTEGER;
@@ -153,10 +144,10 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT uc.plan_id, cp.name, cp.free_allowance, cp.features, cp.feature_limits,
-           cp.default_billing_mode, cp.per_operation, cp.max_concurrent, cp.overdraft_floor,
+    SELECT uc.plan_id, cp.label, cp.allowance_amount, cp.entitlements,
+           cp.billing_mode, cp.per_operation, cp.max_concurrent, cp.overdraft_floor,
            cp.allowance_period, uc.plan_assigned_at
-    INTO v_plan_id, v_plan_name, v_free_allowance, v_features, v_feature_limits,
+    INTO v_plan_id, v_plan_label, v_allowance_amount, v_entitlements,
          v_billing_mode, v_per_operation, v_max_concurrent, v_overdraft_floor,
          v_allowance_period, v_plan_assigned_at
     FROM public.user_credits uc
@@ -166,9 +157,9 @@ BEGIN
     RETURN jsonb_build_object(
         'user_id', p_user_id,
         'plan_id', v_plan_id,
-        'plan_label', v_plan_name,
-        'allowance_amount', COALESCE(v_free_allowance, 0),
-        'entitlements', COALESCE(v_features, '{}'::jsonb),
+        'plan_label', v_plan_label,
+        'allowance_amount', COALESCE(v_allowance_amount, 0),
+        'entitlements', COALESCE(v_entitlements, '{}'::jsonb),
         'billing_mode', COALESCE(v_billing_mode, 'strict'),
         'per_operation', COALESCE(v_per_operation, '{}'::jsonb),
         'max_concurrent', v_max_concurrent,

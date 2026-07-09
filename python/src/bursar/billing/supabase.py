@@ -180,7 +180,7 @@ class SupabaseBillingStore(BillingStore):
             provider_subscription_id=str(r.get("provider_subscription_id", "")),
             provider_customer_id=str(r.get("provider_customer_id")) if r.get("provider_customer_id") else None,
             offer_key=str(r.get("offer_key")) if r.get("offer_key") else None,
-            plan_key=str(r.get("plan_key")) if r.get("plan_key") else None,
+            plan=str(r.get("plan")) if r.get("plan") else None,
             status=str(r.get("status", "incomplete")),
             current_period_start=str(r.get("current_period_start")) if r.get("current_period_start") else None,
             current_period_end=str(r.get("current_period_end")) if r.get("current_period_end") else None,

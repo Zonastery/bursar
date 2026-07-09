@@ -1,6 +1,7 @@
 from bursar.billing.manager import BillingManager
 from bursar.billing.memory import MemoryBillingStore
 from bursar.billing.models import (
+    AllowanceGrant,
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
@@ -18,14 +19,15 @@ from bursar.billing.models import (
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
+    CycleGrant,
     ProviderRef,
-    SubscriptionGrant,
 )
 from bursar.billing.postgres import PostgresBillingStore
 from bursar.billing.store import BillingStore
 from bursar.billing.supabase import SupabaseBillingStore
 
 __all__ = [
+    "AllowanceGrant",
     "BillingConfig",
     "BillingCreditTopup",
     "BillingCustomerInfo",
@@ -46,7 +48,7 @@ __all__ = [
     "BillingSubscriptionInfo",
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
-    "SubscriptionGrant",
+    "CycleGrant",
     "MemoryBillingStore",
     "PostgresBillingStore",
     "SupabaseBillingStore",

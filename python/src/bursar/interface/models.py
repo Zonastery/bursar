@@ -116,7 +116,7 @@ class Entitlement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     value: Any | None = None
-    max_calls: int | None = None
+    max_calls: int | None = Field(default=None, ge=0)
     period: Literal["daily", "weekly", "monthly", "yearly"] = "monthly"
     on_exceed: Literal["deny", "warn", "notify"] = "deny"
 

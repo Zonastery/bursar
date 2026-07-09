@@ -1,7 +1,5 @@
-from __future__ import annotations
-
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -152,13 +150,22 @@ class BillingOfferInterval(StrEnum):
     year = "year"
 
 
-class SubscriptionGrant(BaseModel):
+class AllowanceGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["allowance", "cycle_grant"] = "allowance"
-    credits: int | None = None
+    mode: Literal["allowance"] = "allowance"
+
+
+class CycleGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["cycle_grant"] = "cycle_grant"
+    credits: int = Field(ge=0)
     bucket: str = "purchased"
     replace_prior: bool = True
+
+
+Grant = Annotated[AllowanceGrant | CycleGrant, Field(discriminator="mode")]
 
 
 class BillingOffer(BaseModel):
@@ -167,7 +174,7 @@ class BillingOffer(BaseModel):
     plan: str
     interval: BillingOfferInterval = BillingOfferInterval.month
     interval_count: int = Field(default=1, ge=1)
-    grant: SubscriptionGrant = Field(default_factory=lambda: SubscriptionGrant(mode="allowance"))
+    grant: Grant = Field(default_factory=lambda: AllowanceGrant())
     providers: dict[str, ProviderRef] = Field(default_factory=dict)
 
 
@@ -190,7 +197,7 @@ class BillingConfig(BaseModel):
     topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
 
     @classmethod
-    def from_pricing_config(cls, cfg: Any) -> BillingConfig:
+    def from_pricing_config(cls, cfg: Any) -> "BillingConfig":
         billing_data = getattr(cfg, "billing", None)
         if billing_data is None:
             return cls()
@@ -225,7 +232,7 @@ class BillingSubscriptionState(BaseModel):
     provider_subscription_id: str
     provider_customer_id: str | None = None
     offer_key: str | None = None
-    plan_key: str | None = None
+    plan: str | None = None
     status: str = "incomplete"
     current_period_start: str | None = None
     current_period_end: str | None = None

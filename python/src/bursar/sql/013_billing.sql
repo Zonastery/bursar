@@ -8,18 +8,18 @@
 
 CREATE TABLE IF NOT EXISTS public.billing_offers (
     offer_key TEXT PRIMARY KEY,
-    plan_key TEXT NOT NULL,
+    plan TEXT NOT NULL,
     interval TEXT NOT NULL DEFAULT 'month',
     interval_count INTEGER NOT NULL DEFAULT 1,
-    entitlement_mode TEXT NOT NULL DEFAULT 'allowance',
-    cycle_grant_credits INTEGER,
-    cycle_grant_tier TEXT,
-    cycle_grant_replace_prior BOOLEAN NOT NULL DEFAULT true,
+    grant_mode TEXT NOT NULL DEFAULT 'allowance',
+    grant_credits INTEGER,
+    grant_bucket TEXT,
+    grant_replace_prior BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_billing_offers_plan_key ON public.billing_offers (plan_key);
+CREATE INDEX IF NOT EXISTS idx_billing_offers_plan ON public.billing_offers (plan);
 
 ALTER TABLE public.billing_offers ENABLE ROW LEVEL SECURITY;
 DO $$
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS public.billing_subscriptions (
     provider_subscription_id TEXT NOT NULL,
     provider_customer_id TEXT,
     offer_key TEXT REFERENCES public.billing_offers(offer_key),
-    plan_key TEXT,
+    plan TEXT,
     status TEXT NOT NULL DEFAULT 'incomplete',
     current_period_start TIMESTAMPTZ,
     current_period_end TIMESTAMPTZ,
@@ -430,9 +430,8 @@ $$;
 
 CREATE TABLE IF NOT EXISTS public.billing_credit_topups (
     topup_key TEXT PRIMARY KEY,
-    tier TEXT NOT NULL DEFAULT 'purchased',
-    currency TEXT NOT NULL DEFAULT 'USD',
-    credits_per_major_unit INTEGER NOT NULL DEFAULT 1000,
+    deposit_to TEXT NOT NULL DEFAULT 'purchased',
+    credits_per_unit INTEGER NOT NULL DEFAULT 1000,
     min_amount_minor INTEGER NOT NULL DEFAULT 500,
     max_amount_minor INTEGER NOT NULL DEFAULT 500000,
     tax_behavior TEXT NOT NULL DEFAULT 'exclude_tax'
@@ -559,33 +558,33 @@ BEGIN
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
             INSERT INTO public.billing_offers (
-                offer_key, plan_key, interval, interval_count,
-                entitlement_mode, cycle_grant_credits, cycle_grant_tier,
-                cycle_grant_replace_prior
+                offer_key, plan, interval, interval_count,
+                grant_mode, grant_credits, grant_bucket,
+                grant_replace_prior
             )
             VALUES (
                 v_key,
-                v_item->>'plan_key',
+                v_item->>'plan',
                 COALESCE(v_item->>'interval', 'month'),
                 COALESCE((v_item->>'interval_count')::INTEGER, 1),
-                COALESCE(v_item->>'entitlement_mode', 'allowance'),
-                (v_item->>'cycle_grant_credits')::INTEGER,
-                v_item->>'cycle_grant_tier',
-                COALESCE((v_item->>'cycle_grant_replace_prior')::BOOLEAN, true)
+                COALESCE(v_item#>>'{grant,mode}', 'allowance'),
+                (v_item#>>'{grant,credits}')::INTEGER,
+                v_item#>>'{grant,bucket}',
+                COALESCE((v_item#>>'{grant,replace_prior}')::BOOLEAN, true)
             )
             ON CONFLICT (offer_key) DO UPDATE SET
-                plan_key = EXCLUDED.plan_key,
+                plan = EXCLUDED.plan,
                 interval = EXCLUDED.interval,
                 interval_count = EXCLUDED.interval_count,
-                entitlement_mode = EXCLUDED.entitlement_mode,
-                cycle_grant_credits = EXCLUDED.cycle_grant_credits,
-                cycle_grant_tier = EXCLUDED.cycle_grant_tier,
-                cycle_grant_replace_prior = EXCLUDED.cycle_grant_replace_prior,
+                grant_mode = EXCLUDED.grant_mode,
+                grant_credits = EXCLUDED.grant_credits,
+                grant_bucket = EXCLUDED.grant_bucket,
+                grant_replace_prior = EXCLUDED.grant_replace_prior,
                 updated_at = now();
 
             -- Sync provider refs for this offer
-            IF v_item ? 'provider_refs' AND jsonb_typeof(v_item->'provider_refs') = 'object' THEN
-                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'provider_refs')
+            IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
+                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
                 LOOP
                     INSERT INTO public.billing_provider_refs (
                         provider, price_id, product_id, variant_id,
@@ -613,38 +612,36 @@ BEGIN
     END IF;
 
     -- Sync credit topups
-    IF p_config ? 'credit_topups' AND jsonb_typeof(p_config->'credit_topups') = 'object' THEN
-        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'credit_topups')) > 0 THEN
+    IF p_config ? 'topups' AND jsonb_typeof(p_config->'topups') = 'object' THEN
+        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'topups')) > 0 THEN
             DELETE FROM public.billing_provider_refs
             WHERE resource_type = 'topup';
         END IF;
-        FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'credit_topups')
+        FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'topups')
         LOOP
             INSERT INTO public.billing_credit_topups (
-                topup_key, tier, currency, credits_per_major_unit,
+                topup_key, deposit_to, credits_per_unit,
                 min_amount_minor, max_amount_minor, tax_behavior
             )
             VALUES (
                 v_key,
-                COALESCE(v_item->>'tier', 'purchased'),
-                COALESCE(v_item->>'currency', 'USD'),
-                COALESCE((v_item->>'credits_per_major_unit')::INTEGER, 1000),
+                COALESCE(v_item->>'deposit_to', 'purchased'),
+                COALESCE((v_item->>'credits_per_unit')::INTEGER, 1000),
                 COALESCE((v_item->>'min_amount_minor')::INTEGER, 500),
                 COALESCE((v_item->>'max_amount_minor')::INTEGER, 500000),
                 COALESCE(v_item->>'tax_behavior', 'exclude_tax')
             )
             ON CONFLICT (topup_key) DO UPDATE SET
-                tier = EXCLUDED.tier,
-                currency = EXCLUDED.currency,
-                credits_per_major_unit = EXCLUDED.credits_per_major_unit,
+                deposit_to = EXCLUDED.deposit_to,
+                credits_per_unit = EXCLUDED.credits_per_unit,
                 min_amount_minor = EXCLUDED.min_amount_minor,
                 max_amount_minor = EXCLUDED.max_amount_minor,
                 tax_behavior = EXCLUDED.tax_behavior,
                 updated_at = now();
 
             -- Sync provider refs for this topup
-            IF v_item ? 'provider_refs' AND jsonb_typeof(v_item->'provider_refs') = 'object' THEN
-                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'provider_refs')
+            IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
+                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
                 LOOP
                     INSERT INTO public.billing_provider_refs (
                         provider, price_id, product_id, variant_id,
@@ -725,13 +722,13 @@ BEGIN
 
     RETURN jsonb_build_object(
         'offer_key', v_offer.offer_key,
-        'plan_key', v_offer.plan_key,
+        'plan', v_offer.plan,
         'interval', v_offer.interval,
         'interval_count', v_offer.interval_count,
-        'entitlement_mode', v_offer.entitlement_mode,
-        'cycle_grant_credits', v_offer.cycle_grant_credits,
-        'cycle_grant_tier', v_offer.cycle_grant_tier,
-        'cycle_grant_replace_prior', v_offer.cycle_grant_replace_prior
+        'grant_mode', v_offer.grant_mode,
+        'grant_credits', v_offer.grant_credits,
+        'grant_bucket', v_offer.grant_bucket,
+        'grant_replace_prior', v_offer.grant_replace_prior
     );
 END;
 $$;
@@ -788,9 +785,8 @@ BEGIN
 
     RETURN jsonb_build_object(
         'topup_key', v_topup.topup_key,
-        'tier', v_topup.tier,
-        'currency', v_topup.currency,
-        'credits_per_major_unit', v_topup.credits_per_major_unit,
+        'deposit_to', v_topup.deposit_to,
+        'credits_per_unit', v_topup.credits_per_unit,
         'min_amount_minor', v_topup.min_amount_minor,
         'max_amount_minor', v_topup.max_amount_minor,
         'tax_behavior', v_topup.tax_behavior
@@ -1215,11 +1211,7 @@ BEGIN
 
     PERFORM public.sync_plans_from_config(p_config);
     PERFORM public.sync_buckets_from_config(p_config);
-    BEGIN
-        PERFORM public.sync_billing_from_config(p_config);
-    EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'billing config sync failed (pricing update still applied): %', SQLERRM;
-    END;
+    PERFORM public.sync_billing_from_config(p_config->'billing');
 
     RETURN jsonb_build_object(
         'id', v_new_id,
