@@ -77,72 +77,8 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    // Map new schema fields to old SQL field names.  The SQL table + sync
-    // function still use the original naming (plan_key, entitlement_mode,
-    // cycle_grant_credits, credits_per_major_unit, tier, etc.) and expect
-    // the top-level key `credit_topups` rather than `topups`.
-    const adapted: Record<string, unknown> = {
-      ...config,
-      credit_topups: config.topups
-        ? Object.fromEntries(
-            Object.entries(config.topups).map(([key, topup]) => [
-              key,
-              {
-                tier: topup.depositTo ?? "purchased",
-                credits_per_major_unit: topup.creditsPerUnit ?? 1000,
-                min_amount_minor: topup.minAmountMinor ?? 500,
-                max_amount_minor: topup.maxAmountMinor ?? 500000,
-                tax_behavior: topup.taxBehavior ?? "exclude_tax",
-                provider_refs: topup.providers
-                  ? Object.fromEntries(
-                      Object.entries(topup.providers).map(([p, ref]) => [
-                        p,
-                        {
-                          price_id: ref.priceId ?? null,
-                          product_id: ref.productId ?? null,
-                          variant_id: ref.variantId ?? null,
-                          lookup_key: ref.lookupKey ?? null,
-                        },
-                      ]),
-                    )
-                  : {},
-              },
-            ]),
-          )
-        : undefined,
-      subscriptions: config.subscriptions
-        ? Object.fromEntries(
-            Object.entries(config.subscriptions).map(([key, offer]) => [
-              key,
-              {
-                plan_key: offer.plan,
-                interval: offer.interval ?? "month",
-                interval_count: offer.intervalCount ?? 1,
-                entitlement_mode: offer.grant?.mode ?? "allowance",
-                cycle_grant_credits: offer.grant?.credits ?? null,
-                cycle_grant_tier: offer.grant?.bucket ?? null,
-                cycle_grant_replace_prior: offer.grant?.replacePrior ?? true,
-                provider_refs: offer.providers
-                  ? Object.fromEntries(
-                      Object.entries(offer.providers).map(([p, ref]) => [
-                        p,
-                        {
-                          price_id: ref.priceId ?? null,
-                          product_id: ref.productId ?? null,
-                          variant_id: ref.variantId ?? null,
-                          lookup_key: ref.lookupKey ?? null,
-                        },
-                      ]),
-                    )
-                  : {},
-              },
-            ]),
-          )
-        : undefined,
-    };
-    delete (adapted as Record<string, unknown>).topups;
     await this.pool.query("SELECT public.sync_billing_from_config($1::jsonb)", [
-      JSON.stringify(adapted),
+      JSON.stringify(config),
     ]);
   }
 

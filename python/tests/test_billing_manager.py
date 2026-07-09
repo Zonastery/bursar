@@ -8,6 +8,7 @@ import pytest
 
 from bursar import CreditManager, MemoryStore
 from bursar.billing import (
+    AllowanceGrant,
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
@@ -21,9 +22,9 @@ from bursar.billing import (
     BillingRefundInfo,
     BillingSubscriptionInfo,
     BillingSubscriptionStatus,
+    CycleGrant,
     MemoryBillingStore,
     ProviderRef,
-    SubscriptionGrant,
 )
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ def billing_config() -> BillingConfig:
                 plan="pro",
                 interval=BillingOfferInterval.month,
                 interval_count=1,
-                grant=SubscriptionGrant(mode="allowance"),
+                grant=AllowanceGrant(),
                 providers={
                     "stripe": ProviderRef(
                         price_id="price_pro_monthly",
@@ -81,13 +82,13 @@ def billing_config() -> BillingConfig:
                 plan="pro",
                 interval=BillingOfferInterval.year,
                 interval_count=1,
-                grant=SubscriptionGrant(mode="allowance"),
+                grant=AllowanceGrant(),
             ),
             "pro_monthly_cycle_grant": BillingOffer(
                 plan="pro",
                 interval=BillingOfferInterval.month,
                 interval_count=1,
-                grant=SubscriptionGrant(
+                grant=CycleGrant(
                     mode="cycle_grant",
                     credits=5000,
                     bucket="subscription",
@@ -358,7 +359,7 @@ class TestSubscriptionLifecycle:
         assert sub.user_id == "user_123"
         assert sub.status == "active"
         assert sub.offer_key == "pro_monthly"
-        assert sub.plan_key == "pro"
+        assert sub.plan == "pro"
         assert sub.interval == "month"
 
     def test_subscription_created_provisions_plan(
@@ -678,7 +679,7 @@ class TestConfigSync:
                     plan="pro",
                     interval=BillingOfferInterval.month,
                     interval_count=1,
-                    grant=SubscriptionGrant(mode="allowance"),
+                    grant=AllowanceGrant(),
                 ),
             },
         )

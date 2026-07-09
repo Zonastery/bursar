@@ -267,7 +267,7 @@ class TestMemoryBillingStoreIntegration:
             provider_subscription_id=_SUB_ID,
             provider_customer_id=_CUSTOMER_ID,
             offer_key="pro_monthly",
-            plan_key="pro",
+            plan="pro",
             status="active",
             current_period_start="2025-01-01T00:00:00Z",
             current_period_end="2025-02-01T00:00:00Z",
@@ -277,7 +277,7 @@ class TestMemoryBillingStoreIntegration:
         assert result is not None
         assert result.user_id == _USER_ID
         assert result.status == "active"
-        assert result.plan_key == "pro"
+        assert result.plan == "pro"
 
     def test_subscription_update(self, components):
         _, _, bs, _ = components
@@ -435,7 +435,7 @@ class TestPostgresBillingStoreIntegration:
             provider_subscription_id=_SUB_ID,
             provider_customer_id=_CUSTOMER_ID,
             offer_key="pro_monthly",
-            plan_key="pro",
+            plan="pro",
             status="active",
             current_period_start="2025-01-01T00:00:00Z",
             current_period_end="2025-02-01T00:00:00Z",
@@ -445,7 +445,7 @@ class TestPostgresBillingStoreIntegration:
         assert result is not None
         assert result.user_id == _USER_ID
         assert result.status == "active"
-        assert result.plan_key == "pro"
+        assert result.plan == "pro"
 
     def test_subscription_not_found(self, components):
         _, _, bs, _ = components

@@ -140,14 +140,14 @@ describe("MemoryStore", () => {
   });
 
   describe("deductWithAllowance (atomic charge)", () => {
-    async function seedPlan(freeAllowance: number, userId = "user-1") {
+    async function seedPlan(allowanceAmount: number, userId = "user-1") {
       const config = {
         version: 1,
         metering: { models: { "*": "1" } },
         plans: {
           "plan-1": {
             label: "Plan",
-            allowance: { amount: D(freeAllowance), period: "calendar_month" },
+            allowance: { amount: D(allowanceAmount), period: "calendar_month" },
           },
         },
       };
@@ -756,8 +756,8 @@ describe("MemoryStore", () => {
       expect(r.bucketBreakdown?.z?.toString()).toBe("5");
     });
 
-    it("refund of a legacy debit lacking a stored tierBreakdown falls back to the 'default' bucket", async () => {
-      // deductWithAllowance/settleLease always stamp `metadata.tierBreakdown`
+    it("refund of a legacy debit lacking a stored bucketBreakdown falls back to the 'default' bucket", async () => {
+      // deductWithAllowance/settleLease always stamp `metadata.bucketBreakdown`
       // today, so this state (a ledger row with none) can only arise from
       // data that predates the credit-tiers migration. Simulate it via
       // direct (white-box) ledger injection, mirroring the fallback documented
@@ -1689,7 +1689,7 @@ describe("WS9 — configurable allowance reset window", () => {
 
   async function setupPlan(
     allowancePeriod: "calendar_month" | "rolling_30d" | "anniversary",
-    freeAllowance = 5,
+    allowanceAmount = 5,
   ): Promise<void> {
     const config = {
       version: 1,
@@ -1697,7 +1697,7 @@ describe("WS9 — configurable allowance reset window", () => {
       plans: {
         "plan-ws9": {
           label: "Plan WS9",
-          allowance: { amount: D(freeAllowance), period: allowancePeriod },
+          allowance: { amount: D(allowanceAmount), period: allowancePeriod },
         },
       },
     };

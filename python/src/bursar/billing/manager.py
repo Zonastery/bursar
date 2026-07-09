@@ -255,6 +255,7 @@ class BillingManager:
                 status=status,
                 cancel_at_period_end=cancel_at_period_end,
                 offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+                plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
             )
         )
 

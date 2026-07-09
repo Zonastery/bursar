@@ -9,7 +9,7 @@ from bursar.interface.models import BucketDefinition, PlanDefinition
 from bursar.metrics import METRIC_VARIABLES
 
 
-class ConfigError(ValueError):
+class ConfigError(Exception):
     """Raised on config parsing or validation failures."""
 
 
@@ -73,10 +73,16 @@ class PricingConfig(BaseModel):
         plans = data.get("plans")
         if plans is not None and isinstance(plans, dict):
             plan_labels: list[str] = []
-            for _, p in plans.items():
-                label = p.get("label") if isinstance(p, dict) else getattr(p, "label", None)
-                if label is not None:
-                    plan_labels.append(label)
+            for plan_key, p in plans.items():
+                if isinstance(p, dict):
+                    label = p.get("label")
+                    if label is None:
+                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
+                else:
+                    label = getattr(p, "label", None)
+                    if label is None:
+                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
+                plan_labels.append(label)
             if len(plan_labels) != len(set(plan_labels)):
                 raise ConfigError("duplicate plan labels in pricing config")
 

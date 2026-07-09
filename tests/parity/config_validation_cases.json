@@ -122,7 +122,7 @@
         "ledger": {
           "buckets": {
             "gifted": { "label": "Gifted", "priority": 10, "expires": true, "ttl_days": 30 },
-            "purchased": { "label": "Purchased", "priority": 30, "is_default_bucket": true, "allow_overdraft": true }
+            "purchased": { "label": "Purchased", "priority": 30, "default": true, "allow_overdraft": true }
           }
         }
       }
