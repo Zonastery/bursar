@@ -4,7 +4,7 @@
 --   deduct_with_allowance — atomic "calculate-then-charge": lock balance ->
 --                   user-scoped idempotency -> consume free allowance ->
 --                   enforce spend cap on the NET amount -> balance-floor
---                   check -> tier-aware debit -> insert ledger row.
+--                   check -> bucket-aware debit -> insert ledger row.
 --   create_lease  — the ONLY admission control: one lock, allowance headroom,
 --                   counts active leases for max_concurrent, deny-cap gate,
 --                   floor check.
@@ -21,10 +21,10 @@
 -- settling transaction id. Money is NUMERIC(18,4); windows pinned to UTC.
 --
 -- Both deduct_with_allowance and settle_lease additionally walk configured
--- credit tiers (see 010_credit_tiers.sql) priority-ascending after the
--- (unchanged) floor/clamp logic, to decide which per-tier balance(s) actually
+-- credit buckets (see 010_credit_buckets.sql) priority-ascending after the
+-- (unchanged) floor/clamp logic, to decide which per-bucket balance(s) actually
 -- fund a given debit. Idempotent replay always echoes the ORIGINAL row's
--- stored tier_breakdown — never recomputes.
+-- stored bucket_breakdown — never recomputes.
 
 -- ── Schema: lease columns on credit_reservations ───────────────────────────
 ALTER TABLE public.credit_reservations
@@ -115,14 +115,14 @@ DECLARE
     v_existing_amt         NUMERIC;
     v_existing_cons        NUMERIC;
     v_existing_bal_after   NUMERIC;
-    v_existing_tier_bd     JSONB;
-    -- Tier walk
-    v_tier_breakdown       JSONB := '{}'::jsonb;
-    v_tier_remaining       NUMERIC;
+    v_existing_bucket_bd     JSONB;
+    -- Bucket walk
+    v_bucket_breakdown       JSONB := '{}'::jsonb;
+    v_bucket_remaining       NUMERIC;
     v_walk                 RECORD;
-    v_tier_balance         NUMERIC;
+    v_bucket_balance         NUMERIC;
     v_take                 NUMERIC;
-    v_sink_tier            TEXT;
+    v_sink_bucket            TEXT;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
@@ -145,15 +145,15 @@ BEGIN
         FROM public.user_credits WHERE user_id = p_user_id FOR UPDATE;
     END IF;
 
-    -- (2) Idempotency replay: return the original balance_after/tier_breakdown
+    -- (2) Idempotency replay: return the original balance_after/bucket_breakdown
     --     from tx metadata rather than the (wrong) current balance.
     IF p_idempotency_key IS NOT NULL THEN
         SELECT id,
                ABS(amount),
                COALESCE((metadata->>'allowance_consumed')::numeric, 0),
                COALESCE((metadata->>'balance_after')::numeric, v_balance),
-               COALESCE(metadata->'tier_breakdown', '{}'::jsonb)
-        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_tier_bd
+               COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
+        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
         FROM public.credit_transactions
         WHERE user_id = p_user_id
           AND metadata->>'idempotency_key' = p_idempotency_key
@@ -167,7 +167,7 @@ BEGIN
                 'idempotent', true,
                 'cap_warning', NULL,
                 'feature_limit_warning', NULL,
-                'tier_breakdown', v_existing_tier_bd
+                'bucket_breakdown', v_existing_bucket_bd
             );
         END IF;
     END IF;
@@ -251,65 +251,65 @@ BEGIN
             RAISE EXCEPTION 'bursa_insufficient_credits' USING ERRCODE = 'DU002';
         END IF;
 
-        -- ── Tier walk: decide WHICH tier balance(s) fund this debit. The
+        -- ── Bucket walk: decide WHICH bucket balance(s) fund this debit. The
         -- aggregate UPDATE below is unchanged and remains authoritative; this
-        -- only decides how user_credit_tiers is split. Walk order: configured
-        -- tiers by priority ASC, then any tier_keys this user holds balance
-        -- under that are no longer in credit_tiers (config drift safety net),
+        -- only decides how user_credit_buckets is split. Walk order: configured
+        -- buckets by priority ASC, then any bucket_keys this user holds balance
+        -- under that are no longer in credit_buckets (config drift safety net),
         -- appended last.
-        v_tier_remaining := v_net;
+        v_bucket_remaining := v_net;
 
         FOR v_walk IN
-            SELECT tier_key, priority, 0 AS grp FROM public.credit_tiers
+            SELECT bucket_key, priority, 0 AS grp FROM public.credit_buckets
             UNION ALL
-            SELECT uct.tier_key, 0, 1 AS grp
-            FROM public.user_credit_tiers uct
+            SELECT uct.bucket_key, 0, 1 AS grp
+            FROM public.user_credit_buckets uct
             WHERE uct.user_id = p_user_id
-              AND NOT EXISTS (SELECT 1 FROM public.credit_tiers ct WHERE ct.tier_key = uct.tier_key)
-            ORDER BY grp ASC, priority ASC, tier_key ASC
+              AND NOT EXISTS (SELECT 1 FROM public.credit_buckets ct WHERE ct.bucket_key = uct.bucket_key)
+            ORDER BY grp ASC, priority ASC, bucket_key ASC
         LOOP
-            EXIT WHEN v_tier_remaining <= 0;
+            EXIT WHEN v_bucket_remaining <= 0;
 
-            SELECT balance INTO v_tier_balance
-            FROM public.user_credit_tiers
-            WHERE user_id = p_user_id AND tier_key = v_walk.tier_key
+            SELECT balance INTO v_bucket_balance
+            FROM public.user_credit_buckets
+            WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key
             FOR UPDATE;
-            v_tier_balance := COALESCE(v_tier_balance, 0);
+            v_bucket_balance := COALESCE(v_bucket_balance, 0);
 
-            v_take := LEAST(v_tier_balance, v_tier_remaining);
+            v_take := LEAST(v_bucket_balance, v_bucket_remaining);
             IF v_take > 0 THEN
-                UPDATE public.user_credit_tiers
+                UPDATE public.user_credit_buckets
                 SET balance = balance - v_take, updated_at = now()
-                WHERE user_id = p_user_id AND tier_key = v_walk.tier_key;
+                WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key;
 
-                v_tier_breakdown := v_tier_breakdown || jsonb_build_object(v_walk.tier_key, v_take);
-                v_tier_remaining := v_tier_remaining - v_take;
+                v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(v_walk.bucket_key, v_take);
+                v_bucket_remaining := v_bucket_remaining - v_take;
             END IF;
         END LOOP;
 
         -- Overdraft sink: only reachable when a negative floor sanctioned
         -- going negative (the floor check above already guarantees
-        -- v_balance - v_net >= p_min_balance, so configured-tier balances,
+        -- v_balance - v_net >= p_min_balance, so configured-bucket balances,
         -- which sum to v_balance, always fully cover v_net in strict mode).
-        IF v_tier_remaining > 0 THEN
-            SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true ORDER BY priority DESC, tier_key DESC LIMIT 1;
-            IF v_sink_tier IS NULL THEN
-                SELECT tier_key INTO v_sink_tier FROM public.credit_tiers ORDER BY priority DESC, tier_key DESC LIMIT 1;
+        IF v_bucket_remaining > 0 THEN
+            SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets WHERE allow_overdraft = true ORDER BY priority DESC, bucket_key DESC LIMIT 1;
+            IF v_sink_bucket IS NULL THEN
+                SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets ORDER BY priority DESC, bucket_key DESC LIMIT 1;
             END IF;
-            IF v_sink_tier IS NULL THEN
-                v_sink_tier := 'default';
+            IF v_sink_bucket IS NULL THEN
+                v_sink_bucket := 'default';
             END IF;
 
-            INSERT INTO public.user_credit_tiers (user_id, tier_key, balance)
-            VALUES (p_user_id, v_sink_tier, -v_tier_remaining)
-            ON CONFLICT (user_id, tier_key) DO UPDATE SET
-                balance = public.user_credit_tiers.balance - v_tier_remaining,
+            INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
+            VALUES (p_user_id, v_sink_bucket, -v_bucket_remaining)
+            ON CONFLICT (user_id, bucket_key) DO UPDATE SET
+                balance = public.user_credit_buckets.balance - v_bucket_remaining,
                 updated_at = now();
 
-            v_tier_breakdown := v_tier_breakdown || jsonb_build_object(
-                v_sink_tier, COALESCE((v_tier_breakdown->>v_sink_tier)::numeric, 0) + v_tier_remaining
+            v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
+                v_sink_bucket, COALESCE((v_bucket_breakdown->>v_sink_bucket)::numeric, 0) + v_bucket_remaining
             );
-            v_tier_remaining := 0;
+            v_bucket_remaining := 0;
         END IF;
 
         UPDATE public.user_credits
@@ -317,7 +317,7 @@ BEGIN
         WHERE user_id = p_user_id
         RETURNING balance INTO v_new_balance;
 
-        -- Store balance_after/tier_breakdown in metadata for correct
+        -- Store balance_after/bucket_breakdown in metadata for correct
         -- idempotent replay.
         -- Tag metadata.feature whenever p_feature is given, regardless of
         -- whether a limit is currently configured (p_feature_max_calls may be
@@ -326,7 +326,7 @@ BEGIN
         -- enforcement queries count against.
         v_metadata := COALESCE(p_metadata, '{}'::jsonb)
             || jsonb_strip_nulls(jsonb_build_object('idempotency_key', p_idempotency_key, 'model', p_model, 'feature', p_feature))
-            || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_new_balance, 'tier_breakdown', v_tier_breakdown);
+            || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_new_balance, 'bucket_breakdown', v_bucket_breakdown);
 
         INSERT INTO public.credit_transactions (user_id, amount, type, reference_type, metadata)
         VALUES (p_user_id, -v_net, 'usage', p_metadata->>'reference_type', v_metadata)
@@ -344,15 +344,15 @@ BEGIN
                    ABS(amount),
                    COALESCE((metadata->>'allowance_consumed')::numeric, 0),
                    COALESCE((metadata->>'balance_after')::numeric, v_balance),
-                   COALESCE(metadata->'tier_breakdown', '{}'::jsonb)
-            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_tier_bd
+                   COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
+            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
             FROM public.credit_transactions
             WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
             LIMIT 1;
             RETURN jsonb_build_object(
                 'transaction_id', v_existing_id, 'amount', v_existing_amt,
                 'allowance_consumed', v_existing_cons, 'balance_after', v_existing_bal_after,
-                'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'tier_breakdown', v_existing_tier_bd
+                'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'bucket_breakdown', v_existing_bucket_bd
             );
     END;
 
@@ -364,7 +364,7 @@ BEGIN
         'idempotent', false,
         'cap_warning', v_cap_warning,
         'feature_limit_warning', v_feature_limit_warning,
-        'tier_breakdown', v_tier_breakdown
+        'bucket_breakdown', v_bucket_breakdown
     );
 END;
 $$;
@@ -578,7 +578,7 @@ END $$;
 -- settle_lease: de-clamped charge of the ACTUAL cost, floor-clamped per
 -- billing mode (strict/strict_prepaid -> p_min_balance; overdraft -> the
 -- lease's own overdraft_floor, which can be negative). Applies the identical
--- tier walk to the already-floor-clamped v_net; no special-casing.
+-- bucket walk to the already-floor-clamped v_net; no special-casing.
 CREATE OR REPLACE FUNCTION public.settle_lease(
     p_user_id         UUID,
     p_lease_id        UUID,
@@ -627,14 +627,14 @@ DECLARE
     v_existing_id    UUID;
     v_existing_amt   NUMERIC;
     v_existing_cons  NUMERIC;
-    v_existing_tier_bd JSONB;
-    -- Tier walk
-    v_tier_breakdown JSONB := '{}'::jsonb;
-    v_tier_remaining NUMERIC;
+    v_existing_bucket_bd JSONB;
+    -- Bucket walk
+    v_bucket_breakdown JSONB := '{}'::jsonb;
+    v_bucket_remaining NUMERIC;
     v_walk           RECORD;
-    v_tier_balance   NUMERIC;
+    v_bucket_balance   NUMERIC;
     v_take           NUMERIC;
-    v_sink_tier      TEXT;
+    v_sink_bucket      TEXT;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
         RETURN jsonb_build_object('error', 'unauthorized');
@@ -657,8 +657,8 @@ BEGIN
     -- Idempotency replay (user-scoped).
     IF p_idempotency_key IS NOT NULL THEN
         SELECT id, ABS(amount), COALESCE((metadata->>'allowance_consumed')::numeric, 0),
-               COALESCE(metadata->'tier_breakdown', '{}'::jsonb)
-        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_tier_bd
+               COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
+        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bucket_bd
         FROM public.credit_transactions
         WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
         LIMIT 1;
@@ -666,7 +666,7 @@ BEGIN
             RETURN jsonb_build_object(
                 'transaction_id', v_existing_id, 'amount', v_existing_amt,
                 'allowance_consumed', v_existing_cons, 'balance_after', v_balance,
-                'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'tier_breakdown', v_existing_tier_bd
+                'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'bucket_breakdown', v_existing_bucket_bd
             );
         END IF;
     END IF;
@@ -683,18 +683,18 @@ BEGIN
     IF v_status = 'settled' THEN
         IF v_settle_tx IS NOT NULL THEN
             SELECT id, ABS(amount), COALESCE((metadata->>'allowance_consumed')::numeric, 0),
-                   COALESCE(metadata->'tier_breakdown', '{}'::jsonb)
-            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_tier_bd
+                   COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
+            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bucket_bd
             FROM public.credit_transactions WHERE id = v_settle_tx;
             IF FOUND THEN
                 RETURN jsonb_build_object(
                     'transaction_id', v_existing_id, 'amount', v_existing_amt,
                     'allowance_consumed', v_existing_cons, 'balance_after', v_balance,
-                    'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'tier_breakdown', v_existing_tier_bd
+                    'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'bucket_breakdown', v_existing_bucket_bd
                 );
             END IF;
         END IF;
-        RETURN jsonb_build_object('amount', 0, 'balance_after', v_balance, 'idempotent', true, 'tier_breakdown', '{}'::jsonb);
+        RETURN jsonb_build_object('amount', 0, 'balance_after', v_balance, 'idempotent', true, 'bucket_breakdown', '{}'::jsonb);
     END IF;
     IF v_status = 'expired' OR v_lease_expires <= now() THEN
         UPDATE public.credit_reservations SET status = 'expired' WHERE id = p_lease_id;
@@ -705,7 +705,7 @@ BEGIN
     -- tag/count anything toward a feature limit — no work happened).
     IF p_amount = 0 THEN
         UPDATE public.credit_reservations SET status = 'settled' WHERE id = p_lease_id;
-        RETURN jsonb_build_object('transaction_id', NULL, 'amount', 0, 'balance_after', v_balance, 'idempotent', false, 'tier_breakdown', '{}'::jsonb);
+        RETURN jsonb_build_object('transaction_id', NULL, 'amount', 0, 'balance_after', v_balance, 'idempotent', false, 'bucket_breakdown', '{}'::jsonb);
     END IF;
 
     -- Allowance consume on the actual cost (mirrors deduct_with_allowance).
@@ -787,57 +787,57 @@ BEGIN
         DO UPDATE SET usage = public.credit_usage_window.usage + v_consume, updated_at = now();
     END IF;
 
-    -- ── Tier walk: identical algorithm to deduct_with_allowance, applied to
+    -- ── Bucket walk: identical algorithm to deduct_with_allowance, applied to
     -- this already-floor-clamped v_net. No special-casing.
-    v_tier_remaining := v_net;
+    v_bucket_remaining := v_net;
 
     FOR v_walk IN
-        SELECT tier_key, priority, 0 AS grp FROM public.credit_tiers
+        SELECT bucket_key, priority, 0 AS grp FROM public.credit_buckets
         UNION ALL
-        SELECT uct.tier_key, 0, 1 AS grp
-        FROM public.user_credit_tiers uct
+        SELECT uct.bucket_key, 0, 1 AS grp
+        FROM public.user_credit_buckets uct
         WHERE uct.user_id = p_user_id
-          AND NOT EXISTS (SELECT 1 FROM public.credit_tiers ct WHERE ct.tier_key = uct.tier_key)
-        ORDER BY grp ASC, priority ASC, tier_key ASC
+          AND NOT EXISTS (SELECT 1 FROM public.credit_buckets ct WHERE ct.bucket_key = uct.bucket_key)
+        ORDER BY grp ASC, priority ASC, bucket_key ASC
     LOOP
-        EXIT WHEN v_tier_remaining <= 0;
+        EXIT WHEN v_bucket_remaining <= 0;
 
-        SELECT balance INTO v_tier_balance
-        FROM public.user_credit_tiers
-        WHERE user_id = p_user_id AND tier_key = v_walk.tier_key
+        SELECT balance INTO v_bucket_balance
+        FROM public.user_credit_buckets
+        WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key
         FOR UPDATE;
-        v_tier_balance := COALESCE(v_tier_balance, 0);
+        v_bucket_balance := COALESCE(v_bucket_balance, 0);
 
-        v_take := LEAST(v_tier_balance, v_tier_remaining);
+        v_take := LEAST(v_bucket_balance, v_bucket_remaining);
         IF v_take > 0 THEN
-            UPDATE public.user_credit_tiers
+            UPDATE public.user_credit_buckets
             SET balance = balance - v_take, updated_at = now()
-            WHERE user_id = p_user_id AND tier_key = v_walk.tier_key;
+            WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key;
 
-            v_tier_breakdown := v_tier_breakdown || jsonb_build_object(v_walk.tier_key, v_take);
-            v_tier_remaining := v_tier_remaining - v_take;
+            v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(v_walk.bucket_key, v_take);
+            v_bucket_remaining := v_bucket_remaining - v_take;
         END IF;
     END LOOP;
 
-    IF v_tier_remaining > 0 THEN
-        SELECT tier_key INTO v_sink_tier FROM public.credit_tiers WHERE allow_overdraft = true ORDER BY priority DESC, tier_key DESC LIMIT 1;
-        IF v_sink_tier IS NULL THEN
-            SELECT tier_key INTO v_sink_tier FROM public.credit_tiers ORDER BY priority DESC, tier_key DESC LIMIT 1;
+    IF v_bucket_remaining > 0 THEN
+        SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets WHERE allow_overdraft = true ORDER BY priority DESC, bucket_key DESC LIMIT 1;
+        IF v_sink_bucket IS NULL THEN
+            SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets ORDER BY priority DESC, bucket_key DESC LIMIT 1;
         END IF;
-        IF v_sink_tier IS NULL THEN
-            v_sink_tier := 'default';
+        IF v_sink_bucket IS NULL THEN
+            v_sink_bucket := 'default';
         END IF;
 
-        INSERT INTO public.user_credit_tiers (user_id, tier_key, balance)
-        VALUES (p_user_id, v_sink_tier, -v_tier_remaining)
-        ON CONFLICT (user_id, tier_key) DO UPDATE SET
-            balance = public.user_credit_tiers.balance - v_tier_remaining,
+        INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
+        VALUES (p_user_id, v_sink_bucket, -v_bucket_remaining)
+        ON CONFLICT (user_id, bucket_key) DO UPDATE SET
+            balance = public.user_credit_buckets.balance - v_bucket_remaining,
             updated_at = now();
 
-        v_tier_breakdown := v_tier_breakdown || jsonb_build_object(
-            v_sink_tier, COALESCE((v_tier_breakdown->>v_sink_tier)::numeric, 0) + v_tier_remaining
+        v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
+            v_sink_bucket, COALESCE((v_bucket_breakdown->>v_sink_bucket)::numeric, 0) + v_bucket_remaining
         );
-        v_tier_remaining := 0;
+        v_bucket_remaining := 0;
     END IF;
 
     -- Tag metadata.feature whenever p_feature is given (mirrors
@@ -846,7 +846,7 @@ BEGIN
     -- currently configured.
     v_metadata := COALESCE(p_metadata, '{}'::jsonb)
         || jsonb_strip_nulls(jsonb_build_object('idempotency_key', p_idempotency_key, 'model', p_model, 'feature', p_feature))
-        || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_balance - v_net, 'tier_breakdown', v_tier_breakdown);
+        || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_balance - v_net, 'bucket_breakdown', v_bucket_breakdown);
 
     UPDATE public.user_credits SET balance = balance - v_net, updated_at = now()
     WHERE user_id = p_user_id RETURNING balance INTO v_new_balance;
@@ -860,7 +860,7 @@ BEGIN
         'transaction_id', v_tx_id, 'amount', v_net, 'allowance_consumed', v_consume,
         'balance_after', v_new_balance, 'idempotent', false, 'cap_warning', v_cap_warning,
         'feature_limit_warning', v_feature_limit_warning,
-        'tier_breakdown', v_tier_breakdown
+        'bucket_breakdown', v_bucket_breakdown
     );
 END;
 $$;

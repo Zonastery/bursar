@@ -1214,7 +1214,7 @@ BEGIN
     RETURNING id INTO v_new_id;
 
     PERFORM public.sync_plans_from_config(p_config);
-    PERFORM public.sync_tiers_from_config(p_config);
+    PERFORM public.sync_buckets_from_config(p_config);
     BEGIN
         PERFORM public.sync_billing_from_config(p_config);
     EXCEPTION WHEN OTHERS THEN

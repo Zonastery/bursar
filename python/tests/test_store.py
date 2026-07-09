@@ -15,21 +15,19 @@ from bursar.interface.models import (
     AllowanceResult,
     AvailableResult,
     BalanceResult,
+    BucketBalancesResult,
     CapCheckResult,
     DeductionResult,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
-    PlanDefinition,
-    PricingConfigData,
     RefundResult,
     ReleaseResult,
     SetupResult,
     SetUserPlanResult,
     SpendCap,
     SweepResult,
-    TierBalancesResult,
 )
 
 
@@ -41,35 +39,36 @@ def test_get_pricing_when_none() -> None:
 
 def test_set_and_get_pricing() -> None:
     store = MemoryStore()
-    config = PricingConfigData(
-        models={"gpt-4": "input_tokens * 0.01"},
-    )
+    config = {
+        "version": 1,
+        "metering": {"models": {"gpt-4": "input_tokens * 0.01"}},
+    }
     returned_id = store.set_active_pricing(config, label="v1")
     assert returned_id != ""
 
     result = store.get_active_pricing()
     assert result is not None
-    assert result.config.models == {"gpt-4": "input_tokens * 0.01"}
+    assert result.config["metering"]["models"] == {"gpt-4": "input_tokens * 0.01"}
 
 
 def test_set_pricing_replaces_active() -> None:
     store = MemoryStore()
-    c1 = PricingConfigData(models={"_default": "input_tokens * 1"})
+    c1 = {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}
     store.set_active_pricing(c1, label="first")
 
-    c2 = PricingConfigData(models={"_default": "input_tokens * 2"})
+    c2 = {"version": 1, "metering": {"models": {"*": "input_tokens * 2"}}}
     store.set_active_pricing(c2, label="second")
 
     result = store.get_active_pricing()
     assert result is not None
-    assert result.config.models["_default"] == "input_tokens * 2"
+    assert result.config["metering"]["models"]["*"] == "input_tokens * 2"
 
 
 def test_pricing_history_returns_all_versions() -> None:
     store = MemoryStore()
-    c1 = PricingConfigData(models={"_default": "input_tokens * 1"})
-    c2 = PricingConfigData(models={"_default": "input_tokens * 2"})
-    c3 = PricingConfigData(models={"_default": "input_tokens * 3"})
+    c1 = {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}
+    c2 = {"version": 2, "metering": {"models": {"*": "input_tokens * 2"}}}
+    c3 = {"version": 3, "metering": {"models": {"*": "input_tokens * 3"}}}
 
     store.set_active_pricing(c1, label="first")
     store.set_active_pricing(c2, label="second")
@@ -85,20 +84,20 @@ def test_pricing_history_returns_all_versions() -> None:
 
 def test_get_pricing_config_by_version() -> None:
     store = MemoryStore()
-    c1 = PricingConfigData(models={"_default": "input_tokens * 1"})
-    c2 = PricingConfigData(models={"_default": "input_tokens * 2"})
+    c1 = {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}
+    c2 = {"version": 2, "metering": {"models": {"*": "input_tokens * 2"}}}
     store.set_active_pricing(c1, label="v1")
     store.set_active_pricing(c2, label="v2")
 
     v1 = store.get_pricing_config(1)
     assert v1 is not None
-    assert v1.config.models["_default"] == "input_tokens * 1"
+    assert v1.config["metering"]["models"]["*"] == "input_tokens * 1"
     assert v1.version == 1
     assert v1.label == "v1"
 
     v2 = store.get_pricing_config(2)
     assert v2 is not None
-    assert v2.config.models["_default"] == "input_tokens * 2"
+    assert v2.config["metering"]["models"]["*"] == "input_tokens * 2"
     assert v2.version == 2
 
     # Missing version
@@ -108,9 +107,9 @@ def test_get_pricing_config_by_version() -> None:
 
 def test_activate_pricing_rollback() -> None:
     store = MemoryStore()
-    c1 = PricingConfigData(models={"_default": "input_tokens * 1"})
-    c2 = PricingConfigData(models={"_default": "input_tokens * 2"})
-    c3 = PricingConfigData(models={"_default": "input_tokens * 3"})
+    c1 = {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}
+    c2 = {"version": 2, "metering": {"models": {"*": "input_tokens * 2"}}}
+    c3 = {"version": 3, "metering": {"models": {"*": "input_tokens * 3"}}}
 
     store.set_active_pricing(c1, label="v1")
     store.set_active_pricing(c2, label="v2")
@@ -120,7 +119,7 @@ def test_activate_pricing_rollback() -> None:
     store.activate_pricing(1)
     active = store.get_active_pricing()
     assert active is not None
-    assert active.config.models["_default"] == "input_tokens * 1"
+    assert active.config["metering"]["models"]["*"] == "input_tokens * 1"
     assert active.version == 1
 
     # History should reflect only v1 is active
@@ -139,8 +138,8 @@ def test_pricing_history_empty_when_no_config() -> None:
 def test_activate_pricing_does_not_create_new_version() -> None:
     """Activate switches active version without inserting a new config."""
     store = MemoryStore()
-    store.set_active_pricing(PricingConfigData(models={"_default": "input_tokens * 1"}), label="v1")
-    store.set_active_pricing(PricingConfigData(models={"_default": "input_tokens * 2"}), label="v2")
+    store.set_active_pricing({"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}, label="v1")
+    store.set_active_pricing({"version": 2, "metering": {"models": {"*": "input_tokens * 2"}}}, label="v2")
 
     store.activate_pricing(1)
     # Still only 2 versions
@@ -159,9 +158,9 @@ def test_load_pricing_file_yaml(tmp_path) -> None:
     from bursar.__main__ import _load_pricing_file
 
     f = tmp_path / "pricing.yaml"
-    f.write_text("models:\n  _default: input_tokens * 1\n")
+    f.write_text("version: 1\nmetering:\n  models:\n    '*': input_tokens * 1\n")
     data = _load_pricing_file(str(f))
-    assert data["models"]["_default"] == "input_tokens * 1"
+    assert data["metering"]["models"]["*"] == "input_tokens * 1"
 
 
 # ── Plan management ─────────────────────────────────────────────────────
@@ -172,67 +171,74 @@ class TestPlanManagement:
         store = MemoryStore()
         result = store.get_user_plan("user-1")
         assert result.plan_id is None
-        assert result.plan_name is None
-        assert result.free_allowance == 0
-        assert result.features == {}
+        assert result.plan_label is None
+        assert result.allowance_amount == 0
+        assert result.entitlements == {}
 
     def test_set_and_get_user_plan(self) -> None:
         store = MemoryStore()
         # Seed plan via v2 config
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={
-                "pro": PlanDefinition(id="pro", name="Pro Plan", free_allowance=Decimal("500")),
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {
+                "pro": {"label": "Pro Plan", "allowance": {"amount": 500}},
             },
-        )
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "pro")
 
         result = store.get_user_plan("user-1")
         assert result.plan_id == "pro"
-        assert result.plan_name == "Pro Plan"
-        assert result.free_allowance == 500
-        assert result.features == {}
+        assert result.plan_label == "Pro Plan"
+        assert result.allowance_amount == 500
+        assert result.entitlements == {}
 
     def test_get_user_plan_features(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={
-                "premium": PlanDefinition(
-                    id="premium",
-                    name="Premium Plan",
-                    free_allowance=Decimal("2000"),
-                    features={"ai_chat": True, "max_roadmaps": 20, "export_pdf": True},
-                ),
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {
+                "premium": {
+                    "label": "Premium Plan",
+                    "allowance": {"amount": 2000},
+                    "entitlements": {
+                        "ai_chat": {"value": True},
+                        "max_roadmaps": {"value": 20},
+                        "export_pdf": {"value": True},
+                    },
+                },
             },
-        )
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "premium")
 
         result = store.get_user_plan("user-1")
         assert result.plan_id == "premium"
-        assert result.features["ai_chat"] is True
-        assert result.features["max_roadmaps"] == 20
-        assert result.features["export_pdf"] is True
+        assert result.entitlements["ai_chat"].value is True
+        assert result.entitlements["max_roadmaps"].value == 20
+        assert result.entitlements["export_pdf"].value is True
 
     def test_check_feature(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={
-                "premium": PlanDefinition(
-                    id="premium",
-                    name="Premium Plan",
-                    features={"ai_chat": True, "max_roadmaps": 20},
-                ),
-                "free": PlanDefinition(
-                    id="free",
-                    name="Free Plan",
-                    features={},
-                ),
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {
+                "premium": {
+                    "label": "Premium Plan",
+                    "entitlements": {
+                        "ai_chat": {"value": True},
+                        "max_roadmaps": {"value": 20},
+                    },
+                },
+                "free": {
+                    "label": "Free Plan",
+                    "entitlements": {},
+                },
             },
-        )
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "premium")
         store.set_user_plan("user-2", "free")
@@ -255,10 +261,11 @@ class TestPlanManagement:
 
     def test_check_allowance_with_allowance(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("200"))},
-        )
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": 200}}},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "basic")
 
@@ -269,16 +276,13 @@ class TestPlanManagement:
     def test_unset_user_plan_clears_plan_and_assigned_at(self) -> None:
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(
-                        id="basic",
-                        name="Basic",
-                        free_allowance=Decimal(100),
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {"label": "Basic", "allowance": {"amount": 100}},
                 },
-            )
+            }
         )
         store.set_user_plan("u", "basic")
         plan = store.get_user_plan("u")
@@ -299,10 +303,11 @@ class TestPlanManagement:
 
     def test_increment_usage_window_reduces_allowance(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("200"))},
-        )
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": 200}}},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "basic")
 
@@ -315,11 +320,12 @@ class TestPlanManagement:
     def test_deduct_with_allowance_skip_allowance_bypasses_free_credits(self) -> None:
         """skip_allowance=True must charge the full amount from balance, not the allowance pool (Fix 7)."""
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal("100"))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "free")
         store.add_credits("user-1", Decimal("50"))
@@ -339,11 +345,12 @@ class TestPlanManagement:
     def test_deduct_with_allowance_default_consumes_allowance(self) -> None:
         """skip_allowance defaults to False — free allowance is consumed first."""
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal("100"))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "free")
         store.add_credits("user-1", Decimal("50"))
@@ -703,9 +710,9 @@ def test_load_pricing_file_json(tmp_path) -> None:
     from bursar.__main__ import _load_pricing_file
 
     f = tmp_path / "pricing.json"
-    f.write_text('{"models": {"_default": "input_tokens * 1"}}')
+    f.write_text('{"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}}')
     data = _load_pricing_file(str(f))
-    assert data["models"]["_default"] == "input_tokens * 1"
+    assert data["metering"]["models"]["*"] == "input_tokens * 1"
 
 
 # ── M1 — Allowance monthly window reset ──────────────────────────────────────
@@ -720,10 +727,11 @@ def test_allowance_resets_across_billing_periods() -> None:
     clock_box = {"now": datetime(2024, 1, 15, tzinfo=UTC)}
     store = MemoryStore(clock=lambda: clock_box["now"])
     store.set_active_pricing(
-        PricingConfigData(
-            models={"_default": "1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("5"))},
-        )
+        {
+            "version": 1,
+            "metering": {"models": {"*": "1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": 5}}},
+        }
     )
     store.set_user_plan("u", "basic")
     store.add_credits("u", Decimal("100"))
@@ -1481,14 +1489,18 @@ class TestListUserTransactionsPagination:
 
 class TestCheckFeatureZeroValues:
     def _make_store_with_features(self, features: dict) -> MemoryStore:
-        from bursar.interface.models import PlanDefinition, PricingConfigData
-
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"p": PlanDefinition(id="p", name="P", features=features)},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "p": {
+                        "label": "P",
+                        "entitlements": {k: {"value": v} for k, v in features.items()},
+                    }
+                },
+            }
         )
         store.set_user_plan("user-1", "p")
         return store
@@ -1535,8 +1547,8 @@ class _MinimalCoreStore(CreditStore):
     def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None, tier=None):
         return AddCreditsResult(transaction_id="tx", user_id=user_id, amount=amount, new_balance=amount)
 
-    def get_credit_tiers(self, user_id: str):
-        return TierBalancesResult(user_id=user_id, tiers=[], total_balance=Decimal(0))
+    def get_bucket_balances(self, user_id: str):
+        return BucketBalancesResult(user_id=user_id, buckets=[], total_balance=Decimal(0))
 
     def deduct_with_allowance(
         self,
@@ -1646,32 +1658,32 @@ class TestOptionalCapabilities:
         store = _MinimalCoreStore()
         assert store.get_balance("u1").user_id == "u1"
 
-    def test_minimal_store_implements_get_credit_tiers(self) -> None:
-        """get_credit_tiers is a CORE abstract method (credit tiers), not an
+    def test_minimal_store_implements_get_bucket_balances(self) -> None:
+        """get_bucket_balances is a CORE abstract method (credit buckets), not an
         optional capability — _MinimalCoreStore already implements it (see its
         class body above), so this must succeed with no
         CapabilityNotSupportedError."""
         store = _MinimalCoreStore()
-        result = store.get_credit_tiers("u1")
+        result = store.get_bucket_balances("u1")
         assert result.user_id == "u1"
 
-    def test_get_credit_tiers_is_a_required_core_abstract_method(self) -> None:
-        """get_credit_tiers is required (unlike the optional-capability group
+    def test_get_bucket_balances_is_a_required_core_abstract_method(self) -> None:
+        """get_bucket_balances is required (unlike the optional-capability group
         below, which has a default raise): it's part of
         CreditStore.__abstractmethods__, so a store subclass implementing
         every OTHER core method but omitting it cannot be instantiated at all
         (TypeError) — confirming it's core to the ABC contract added for
-        tiers, not an optional capability with a default implementation."""
-        assert "get_credit_tiers" in CreditStore.__abstractmethods__
+        buckets, not an optional capability with a default implementation."""
+        assert "get_bucket_balances" in CreditStore.__abstractmethods__
 
         # Build a store with every _MinimalCoreStore method EXCEPT
-        # get_credit_tiers, based directly on CreditStore (not
+        # get_bucket_balances, based directly on CreditStore (not
         # _MinimalCoreStore, whose inherited implementation would otherwise
         # satisfy the ABC).
-        namespace = {k: v for k, v in _MinimalCoreStore.__dict__.items() if k != "get_credit_tiers"}
-        missing_tiers_store_cls = type("_MissingTiersStore", (CreditStore,), namespace)
-        with pytest.raises(TypeError, match="get_credit_tiers"):
-            missing_tiers_store_cls()
+        namespace = {k: v for k, v in _MinimalCoreStore.__dict__.items() if k != "get_bucket_balances"}
+        missing_buckets_store_cls = type("_MissingBucketsStore", (CreditStore,), namespace)
+        with pytest.raises(TypeError, match="get_bucket_balances"):
+            missing_buckets_store_cls()
 
     def test_create_team_raises_capability_not_supported(self) -> None:
         store = _MinimalCoreStore()
@@ -1709,13 +1721,14 @@ class TestAllowancePeriodRollover:
         clock_box = {"now": now}
         store = MemoryStore(clock=lambda: clock_box["now"])
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(id="basic", name="Basic", free_allowance=allowance, allowance_period=period)
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {"label": "Basic", "allowance": {"amount": allowance, "period": period}},
                 },
-                min_balance=Decimal(0),
-            )
+                "ledger": {"min_balance": 0},
+            }
         )
         store.set_user_plan("u", "basic")
         store.add_credits("u", Decimal("1000"))
@@ -1786,18 +1799,21 @@ class TestAllowancePeriodRollover:
         clock_box = {"now": datetime(2024, 1, 15, tzinfo=UTC)}
         store = MemoryStore(clock=lambda: clock_box["now"])
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(
-                        id="basic", name="Basic", free_allowance=Decimal("5"), allowance_period="anniversary"
-                    ),
-                    "pro": PlanDefinition(
-                        id="pro", name="Pro", free_allowance=Decimal("50"), allowance_period="anniversary"
-                    ),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {
+                        "label": "Basic",
+                        "allowance": {"amount": 5, "period": "anniversary"},
+                    },
+                    "pro": {
+                        "label": "Pro",
+                        "allowance": {"amount": 50, "period": "anniversary"},
+                    },
                 },
-                min_balance=Decimal(0),
-            )
+                "ledger": {"min_balance": 0},
+            }
         )
         store.set_user_plan("u", "basic")
         first_assigned_at = store.get_user_plan("u").plan_assigned_at
@@ -1818,10 +1834,11 @@ class TestAllowancePeriodRollover:
     def test_get_user_plan_reports_allowance_period(self) -> None:
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"period": "rolling_30d"}}},
+            }
         )
         store.set_user_plan("u", "pro")
         result = store.get_user_plan("u")
@@ -1831,10 +1848,11 @@ class TestAllowancePeriodRollover:
     def test_get_user_plan_defaults_to_calendar_month(self) -> None:
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro"}},
+            }
         )
         store.set_user_plan("u", "pro")
         result = store.get_user_plan("u")

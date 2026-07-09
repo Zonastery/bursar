@@ -8,8 +8,9 @@
 export type BillingProvider = "stripe" | "dodo" | "mock";
 
 export type BillingEventType =
-  | /** @emitted by stripe, dodo */ "customer.created"
-    /** @emitted by stripe, dodo */
+  /** @emitted by stripe, dodo */
+  | "customer.created"
+  /** @emitted by stripe, dodo */
   | "customer.updated"
   /** @emitted by stripe, dodo */
   | "customer.deleted"
@@ -93,21 +94,22 @@ export type BillingOfferInterval = "day" | "week" | "month" | "year";
 
 export type EntitlementMode = "allowance" | "cycle_grant";
 
-// ── Provider refs ───────────────────────────────────────────────────────
+// ── Provider ref ────────────────────────────────────────────────────────
 
-export interface BillingProviderRefs {
+export interface ProviderRef {
   productId?: string | null;
   priceId?: string | null;
   variantId?: string | null;
   lookupKey?: string | null;
 }
 
-export interface BillingSubscriptionOfferRef {
-  provider: string;
-  productId?: string | null;
-  priceId?: string | null;
-  variantId?: string | null;
-  lookupKey?: string | null;
+// ── Subscription grant ──────────────────────────────────────────────────
+
+export interface SubscriptionGrant {
+  mode?: EntitlementMode;
+  credits?: number | null;
+  bucket?: string | null;
+  replacePrior?: boolean;
 }
 
 // ── Customer info ───────────────────────────────────────────────────────
@@ -125,8 +127,7 @@ export interface BillingSubscriptionInfo {
   cancelAtPeriodEnd?: boolean | null;
   periodStart?: string | null;
   periodEnd?: string | null;
-  trialEnd?: string | null;
-  refs?: BillingProviderRefs | null;
+  refs?: ProviderRef | null;
   interval?: string | null;
   intervalCount?: number | null;
 }
@@ -150,7 +151,7 @@ export interface BillingPaymentInfo {
   amountMinor: number;
   taxMinor?: number | null;
   currency: string;
-  refs?: BillingProviderRefs | null;
+  refs?: ProviderRef | null;
   purpose: "subscription" | "credit_topup" | "unknown";
 }
 
@@ -227,28 +228,24 @@ export interface BillingSubscriptionState {
 // ── Config models ───────────────────────────────────────────────────────
 
 export interface BillingOffer {
-  offerKey: string;
-  planKey: string;
+  plan: string;
   interval?: BillingOfferInterval;
   intervalCount?: number;
-  entitlementMode?: EntitlementMode;
-  cycleGrantCredits?: number | null;
-  cycleGrantTier?: string | null;
-  cycleGrantReplacePrior?: boolean;
-  providerRefs?: Record<string, BillingSubscriptionOfferRef>;
+  grant?: SubscriptionGrant;
+  providers?: Record<string, ProviderRef>;
 }
 
 export interface BillingCreditTopup {
-  tier?: string;
-  currency?: string;
-  creditsPerMajorUnit?: number;
+  creditsPerUnit?: number;
+  depositTo?: string;
   minAmountMinor?: number;
   maxAmountMinor?: number;
   taxBehavior?: "exclude_tax" | "include_tax";
-  providerRefs?: Record<string, BillingSubscriptionOfferRef>;
+  providers?: Record<string, ProviderRef>;
 }
 
 export interface BillingConfig {
+  currency?: string;
   subscriptions?: Record<string, BillingOffer>;
-  creditTopups?: Record<string, BillingCreditTopup>;
+  topups?: Record<string, BillingCreditTopup>;
 }

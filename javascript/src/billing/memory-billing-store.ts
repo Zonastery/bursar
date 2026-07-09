@@ -33,7 +33,7 @@ export class MemoryBillingStore extends BillingStore {
     const subs = config.subscriptions ?? {};
     for (const [offerKey, offer] of Object.entries(subs)) {
       this.offers.set(offerKey, { ...offer, offerKey });
-      const refs = offer.providerRefs ?? {};
+      const refs = offer.providers ?? {};
       for (const [provider, ref] of Object.entries(refs)) {
         if (ref.priceId) {
           this.providerRefsBy.set(this.refKey(provider, "price_id", ref.priceId), offerKey);
@@ -44,10 +44,10 @@ export class MemoryBillingStore extends BillingStore {
       }
     }
 
-    const topupConfigs = config.creditTopups ?? {};
+    const topupConfigs = config.topups ?? {};
     for (const [topupKey, topup] of Object.entries(topupConfigs)) {
       this.topups.set(topupKey, { ...topup, topupKey });
-      const refs = topup.providerRefs ?? {};
+      const refs = topup.providers ?? {};
       for (const [provider, ref] of Object.entries(refs)) {
         if (ref.priceId) {
           this.providerRefsBy.set(this.refKey(provider, "price_id", ref.priceId), topupKey);
@@ -175,7 +175,7 @@ export class MemoryBillingStore extends BillingStore {
     amountMinor: number,
     topupConfig: Record<string, unknown>,
   ): Promise<number> {
-    const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
+    const creditsPer = (topupConfig.creditsPerUnit as number) ?? 1000;
     return Math.trunc((amountMinor * creditsPer) / 100);
   }
 

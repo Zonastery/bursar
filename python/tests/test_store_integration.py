@@ -38,10 +38,7 @@ from bursar.interface.memory import MemoryStore
 from bursar.interface.models import (
     CreditMetadata,
     FeatureLimit,
-    PlanDefinition,
-    PricingConfigData,
     SpendCap,
-    TierDefinition,
 )
 from bursar.interface.postgres import PostgresStore
 from bursar.interface.supabase import HttpxSupabaseStore
@@ -52,12 +49,15 @@ from bursar.manager import InsufficientCreditsError
 # ---------------------------------------------------------------------------
 
 _PRICING = {
-    "models": {
-        "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
-        "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+    "version": 1,
+    "metering": {
+        "models": {
+            "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+            "*": "input_tokens * 0.001 + output_tokens * 0.003",
+        },
+        "tools": {"*": "tool_calls * 0"},
     },
-    "tools": {"_default": "tool_calls * 0"},
-    "min_balance": 5,
+    "ledger": {"min_balance": 5},
 }
 
 _PG_USER = "00000000-0000-0000-0000-000000000001"
@@ -147,17 +147,17 @@ class TestMemoryStoreIntegration:
         store = MemoryStore()
         store.setup()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "pro": PlanDefinition(
-                        id="pro",
-                        name="Pro",
-                        free_allowance=Decimal("500"),
-                        features={"ai_chat": True, "max_roadmaps": 20},
-                    ),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "pro": {
+                        "label": "Pro",
+                        "allowance": {"amount": Decimal("500")},
+                        "entitlements": {"ai_chat": {"value": True}, "max_roadmaps": {"value": 20}},
+                    },
                 },
-            )
+            }
         )
         store.set_user_plan("user_1", "pro")
 
@@ -186,10 +186,11 @@ class TestMemoryStoreIntegration:
     def test_deduct_with_allowance_consumes_plan_allowance_first(self) -> None:
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         store.set_user_plan("u", "pro")
         store.add_credits("u", Decimal("100"))
@@ -204,10 +205,11 @@ class TestMemoryStoreIntegration:
     def test_deduct_with_allowance_insufficient_no_allowance_consumed(self) -> None:
         store = MemoryStore()
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         store.set_user_plan("u", "pro")
         store.add_credits("u", Decimal("5"))
@@ -439,8 +441,8 @@ class TestPostgresStoreIntegration:
         balance = store.get_balance(str(new_user_id))
         assert balance.balance > Decimal("0")
 
-        tiers = store.get_credit_tiers(str(new_user_id))
-        assert sum((t.balance for t in tiers.tiers), Decimal(0)) == balance.balance
+        tiers = store.get_bucket_balances(str(new_user_id))
+        assert sum((t.balance for t in tiers.buckets), Decimal(0)) == balance.balance
 
     def test_deduct_with_allowance_fractional_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
@@ -544,25 +546,25 @@ class TestPostgresStoreIntegration:
     def test_check_feature_pg(self, store: PostgresStore) -> None:
         # Publish pricing with plan features → plans get synced to credit_plans
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "pro": PlanDefinition(
-                        id="pro",
-                        name="Pro Plan",
-                        free_allowance=Decimal("500"),
-                        features={"ai_chat": True, "max_roadmaps": 20},
-                    ),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "pro": {
+                        "label": "Pro Plan",
+                        "allowance": {"amount": Decimal("500")},
+                        "entitlements": {"ai_chat": {"value": True}, "max_roadmaps": {"value": 20}},
+                    },
                 },
-            )
+            }
         )
         # set_user_plan resolves "pro" plan_key to credit_plans UUID internally
         store.set_user_plan(_PG_USER, "pro")
 
         result = store.get_user_plan(_PG_USER)
-        assert result.plan_name == "Pro Plan"
-        assert result.features["ai_chat"] is True
-        assert result.features["max_roadmaps"] == 20
+        assert result.plan_label == "Pro Plan"
+        assert result.entitlements["ai_chat"].value is True
+        assert result.entitlements["max_roadmaps"].value == 20
 
         result = store.check_feature(_PG_USER, "ai_chat")
         assert result.has_feature is True
@@ -742,16 +744,16 @@ class TestPostgresStoreIntegration:
         allowance) → cap check: 0 + 15 > 10 → denied → allowance rolled back.
         """
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(
-                        id="basic",
-                        name="Basic",
-                        free_allowance=Decimal("5"),
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {
+                        "label": "Basic",
+                        "allowance": {"amount": Decimal("5")},
+                    }
                 },
-            )
+            }
         )
         store.set_user_plan(_PG_USER, "basic")
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
@@ -790,16 +792,16 @@ class TestPostgresStoreIntegration:
         credits but the allowance window (5 consumed) must stay unchanged.
         """
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(
-                        id="basic",
-                        name="Basic",
-                        free_allowance=Decimal("5"),
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {
+                        "label": "Basic",
+                        "allowance": {"amount": Decimal("5")},
+                    }
                 },
-            )
+            }
         )
         store.set_user_plan(_PG_USER, "basic")
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
@@ -907,16 +909,16 @@ class TestPostgresStoreIntegration:
         Then deduct(5): allowance covers 5, net=0 → balance unchanged, allowance=5.
         """
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "basic": PlanDefinition(
-                        id="basic",
-                        name="Basic",
-                        free_allowance=Decimal("10"),
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "basic": {
+                        "label": "Basic",
+                        "allowance": {"amount": Decimal("10")},
+                    }
                 },
-            )
+            }
         )
         store.set_user_plan(_PG_USER, "basic")
         store.add_credits(_PG_USER, Decimal("20"), "purchase")
@@ -1228,14 +1230,14 @@ class TestHttpxSupabaseStoreContract:
             headers=self._EXPECTED_HEADERS,
         )
         assert result.transaction_id == "tx_2"
-        assert result.tier == "gifted"
+        assert result.bucket == "gifted"
 
     def test_sweep_expired_credits_request_body_scoped_to_user(self, store: HttpxSupabaseStore) -> None:
         """``sweep_expired_credits(user_id=...)`` must thread ``p_user_id`` into
         the ``expire_credits`` RPC body -- the per-user lazy-sweep param added
         alongside ``p_idempotency_key`` in 011_lazy_expiry.sql. No existing test
         covered the ``expire_credits`` RPC contract at all before this."""
-        mock = self._mock_post(store, {"expired_count": 1, "expired_amount": 10, "expired_by_tier": {}})
+        mock = self._mock_post(store, {"expired_count": 1, "expired_amount": 10, "expired_by_bucket": {}})
         store.sweep_expired_credits(dry_run=False, user_id="u1")
         mock.assert_called_once_with(
             "https://test.supabase.co/rest/v1/rpc/expire_credits",
@@ -1246,7 +1248,7 @@ class TestHttpxSupabaseStoreContract:
     def test_sweep_expired_credits_request_body_global_when_user_id_omitted(self, store: HttpxSupabaseStore) -> None:
         """Omitting ``user_id`` must send ``p_user_id: null`` -- preserving the
         original global-sweep behavior (the periodic cron path) unchanged."""
-        mock = self._mock_post(store, {"expired_count": 0, "expired_amount": 0, "expired_by_tier": {}})
+        mock = self._mock_post(store, {"expired_count": 0, "expired_amount": 0, "expired_by_bucket": {}})
         store.sweep_expired_credits(dry_run=True)
         mock.assert_called_once_with(
             "https://test.supabase.co/rest/v1/rpc/expire_credits",
@@ -1325,11 +1327,11 @@ class TestHttpxSupabaseStoreContract:
     def test_get_active_pricing(self, store: HttpxSupabaseStore) -> None:
         self._mock_post(
             store,
-            {"id": "1", "config": {"models": {"a": "b"}}, "is_active": True},
+            {"id": "1", "config": {"version": 1, "metering": {"models": {"a": "b"}}}, "is_active": True},
         )
         result = store.get_active_pricing()
         assert result is not None
-        assert result.config.models == {"a": "b"}
+        assert result.config["metering"]["models"] == {"a": "b"}
         assert result.id == "1"
 
     def test_get_active_pricing_none(self, store: HttpxSupabaseStore) -> None:
@@ -1343,13 +1345,13 @@ class TestHttpxSupabaseStoreContract:
 
     def test_set_active_pricing(self, store: HttpxSupabaseStore) -> None:
         mock = self._mock_post(store, {"id": "cfg_1"})
-        config = PricingConfigData(models={"_default": "1"})
+        config = {"version": 1, "metering": {"models": {"*": "1"}}}
         result = store.set_active_pricing(config, label="v1")
         assert result == "cfg_1"
         call = mock.call_args
         assert call.args[0] == "https://test.supabase.co/rest/v1/rpc/set_active_pricing_config"
         assert call.kwargs["json"]["p_label"] == "v1"
-        assert "models" in call.kwargs["json"]["p_config"]
+        assert "metering" in call.kwargs["json"]["p_config"]
         assert call.kwargs["headers"] == self._EXPECTED_HEADERS
 
     def test_list_user_transactions_supabase(self, store: HttpxSupabaseStore) -> None:
@@ -1393,16 +1395,16 @@ class TestHttpxSupabaseStoreContract:
             {
                 "user_id": "u1",
                 "plan_id": "pro",
-                "plan_name": "Pro Plan",
-                "free_allowance": 500,
-                "features": {"ai_chat": True, "max_roadmaps": 20},
+                "plan_label": "Pro Plan",
+                "allowance_amount": 500,
+                "entitlements": {"ai_chat": {"value": True}, "max_roadmaps": {"value": 20}},
             },
         )
         result = store.get_user_plan("u1")
         assert result.plan_id == "pro"
-        assert result.free_allowance == Decimal("500")
-        assert result.features["ai_chat"] is True
-        assert result.features["max_roadmaps"] == 20
+        assert result.allowance_amount == Decimal("500")
+        assert result.entitlements["ai_chat"].value is True
+        assert result.entitlements["max_roadmaps"].value == 20
 
         result2 = store.check_feature("u1", "ai_chat")
         assert result2.has_feature is True
@@ -1547,30 +1549,38 @@ class TestLeaseLifecyclePg:
 
     def test_get_user_plan_returns_policy_fields(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={
-                    "pro": PlanDefinition(
-                        id="pro",
-                        name="Pro",
-                        default_billing_mode="overdraft",
-                        max_concurrent=3,
-                        overdraft_floor=Decimal("-25"),
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {
+                    "pro": {
+                        "label": "Pro",
+                        "safety": {
+                            "billing_mode": "overdraft",
+                            "max_concurrent": 3,
+                            "overdraft_floor": Decimal("-25"),
+                        },
+                    }
                 },
-            )
+            }
         )
         store.add_credits(_PG_USER, Decimal("0"), "adjustment")
         store.set_user_plan(_PG_USER, "pro")
         plan = store.get_user_plan(_PG_USER)
-        assert plan.default_billing_mode == "overdraft"
+        assert plan.billing_mode == "overdraft"
         assert plan.max_concurrent == 3
         assert plan.overdraft_floor == Decimal("-25")
 
     def test_manager_reserve_settle_flow_pg(self, store: PostgresStore) -> None:
         m = CreditManager(store=store, policy="strict_prepaid")
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = m.reserve(_PG_USER, Decimal("40"))
         ded = m.settle(_PG_USER, lease.lease_id, Decimal("25"))
@@ -1660,11 +1670,12 @@ class TestLeaseAdversarialPg:
 
     def test_allowance_consumed_at_settle_pg(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {"free": {"label": "Free", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         store.set_user_plan(_PG_USER, "free")
@@ -1741,10 +1752,11 @@ class TestAllowanceWindowPg:
     def test_get_user_plan_round_trips_rolling_30d(self, store: PostgresStore) -> None:
         user = _new_uuid(9001)
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"period": "rolling_30d"}}},
+            }
         )
         store.set_user_plan(user, "pro")
 
@@ -1754,10 +1766,11 @@ class TestAllowanceWindowPg:
 
     def test_sync_plans_persists_allowance_period_calendar_month_default(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"basic": PlanDefinition(id="basic", name="Basic")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"basic": {"label": "Basic"}},
+            }
         )
         user = _new_uuid(9002)
         store.set_user_plan(user, "basic")
@@ -1766,10 +1779,11 @@ class TestAllowanceWindowPg:
 
     def test_sync_plans_persists_allowance_period_rolling_30d(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", allowance_period="rolling_30d")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"period": "rolling_30d"}}},
+            }
         )
         user = _new_uuid(9003)
         store.set_user_plan(user, "pro")
@@ -1778,10 +1792,11 @@ class TestAllowanceWindowPg:
 
     def test_sync_plans_persists_allowance_period_anniversary(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"elite": PlanDefinition(id="elite", name="Elite", allowance_period="anniversary")},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"elite": {"label": "Elite", "allowance": {"period": "anniversary"}}},
+            }
         )
         user = _new_uuid(9004)
         store.set_user_plan(user, "elite")
@@ -1793,10 +1808,11 @@ class TestAllowanceWindowPg:
     def test_deduct_with_allowance_period_start_isolates_windows(self, store: PostgresStore) -> None:
         user = _new_uuid(9005)
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         store.set_user_plan(user, "basic")
         store.add_credits(user, Decimal("1000"), "purchase")
@@ -1820,10 +1836,11 @@ class TestAllowanceWindowPg:
     def test_lease_period_start_isolates_windows(self, store: PostgresStore) -> None:
         user = _new_uuid(9006)
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         store.set_user_plan(user, "basic")
         store.add_credits(user, Decimal("1000"), "purchase")
@@ -1847,16 +1864,18 @@ class TestAllowanceWindowPg:
 
     def test_manager_deduct_rolling_30d_rolls_over_vs_calendar_month_control(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={
-                    "roll": PlanDefinition(
-                        id="roll", name="Roll", free_allowance=Decimal("10"), allowance_period="rolling_30d"
-                    ),
-                    "cal": PlanDefinition(id="cal", name="Cal", free_allowance=Decimal("10")),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {
+                    "roll": {
+                        "label": "Roll",
+                        "allowance": {"amount": Decimal("10"), "period": "rolling_30d"},
+                    },
+                    "cal": {"label": "Cal", "allowance": {"amount": Decimal("10")}},
                 },
-            )
+            }
         )
         roll_user = _new_uuid(9007)
         cal_user = _new_uuid(9008)
@@ -1882,7 +1901,11 @@ class TestAllowanceWindowPg:
 
         m_roll = CreditManager(store=store)
         m_roll.publish_pricing_from_dict(
-            {"models": {"_default": "input_tokens * 1"}, "min_balance": 0, "signup_bonus": 0}
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0, "signup_grant": 0},
+            }
         )
         m_roll.deduct(roll_user, UsageMetrics(input_tokens=10))
         # Full allowance available again: the rolling window rolled over based on
@@ -1899,15 +1922,17 @@ class TestAllowanceWindowPg:
 
     def test_manager_reserve_settle_anniversary_plan(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={
-                    "anniv": PlanDefinition(
-                        id="anniv", name="Anniv", free_allowance=Decimal("10"), allowance_period="anniversary"
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {
+                    "anniv": {
+                        "label": "Anniv",
+                        "allowance": {"amount": Decimal("10"), "period": "anniversary"},
+                    }
                 },
-            )
+            }
         )
         user = _new_uuid(9009)
         store.set_user_plan(user, "anniv")
@@ -1927,7 +1952,13 @@ class TestAllowanceWindowPg:
             conn.close()
 
         m = CreditManager(store=store, policy="strict_prepaid")
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
 
         lease = m.reserve(user, Decimal("6"))
         ded = m.settle(user, lease.lease_id, Decimal("6"))
@@ -1939,15 +1970,17 @@ class TestAllowanceWindowPg:
 
     def test_manager_check_allowance_rolling_30d_matches_resolver(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={
-                    "roll": PlanDefinition(
-                        id="roll", name="Roll", free_allowance=Decimal("20"), allowance_period="rolling_30d"
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {
+                    "roll": {
+                        "label": "Roll",
+                        "allowance": {"amount": Decimal("20"), "period": "rolling_30d"},
+                    }
                 },
-            )
+            }
         )
         user = _new_uuid(9010)
         store.set_user_plan(user, "roll")
@@ -1957,7 +1990,13 @@ class TestAllowanceWindowPg:
         assert plan.plan_assigned_at is not None
 
         m = CreditManager(store=store)
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
 
         # Partial deduction, then cross-check the manager's reported window
         # against calling the pure resolver directly with the same anchor.
@@ -1982,15 +2021,17 @@ class TestAllowanceWindowPg:
 
     def test_manager_check_allowance_anniversary_matches_resolver(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={
-                    "anniv": PlanDefinition(
-                        id="anniv", name="Anniv", free_allowance=Decimal("15"), allowance_period="anniversary"
-                    )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {
+                    "anniv": {
+                        "label": "Anniv",
+                        "allowance": {"amount": Decimal("15"), "period": "anniversary"},
+                    }
                 },
-            )
+            }
         )
         user = _new_uuid(9011)
         store.set_user_plan(user, "anniv")
@@ -2000,7 +2041,13 @@ class TestAllowanceWindowPg:
         assert plan.plan_assigned_at is not None
 
         m = CreditManager(store=store)
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         m.deduct(user, UsageMetrics(input_tokens=5))
         result = m.check_allowance(user)
 
@@ -2024,18 +2071,25 @@ class TestAllowanceWindowPg:
 
     def test_manager_check_allowance_calendar_month_unchanged(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal("0"),
-                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         user = _new_uuid(9012)
         store.set_user_plan(user, "basic")
         store.add_credits(user, Decimal("1000"), "purchase")
 
         m = CreditManager(store=store)
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         m.deduct(user, UsageMetrics(input_tokens=3))
 
         # calendar_month is the fast path: manager.check_allowance() delegates
@@ -2048,7 +2102,13 @@ class TestAllowanceWindowPg:
 
     def test_manager_check_allowance_planless_user_zero_shape_pg(self, store: PostgresStore) -> None:
         m = CreditManager(store=store)
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         user = _new_uuid(9013)
         result = m.check_allowance(user)
         assert result.allowance_remaining == Decimal(0)
@@ -2058,13 +2118,14 @@ class TestAllowanceWindowPg:
 
     def test_set_user_plan_reanchors_plan_assigned_at_pg(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={
-                    "planA": PlanDefinition(id="planA", name="Plan A", allowance_period="anniversary"),
-                    "planB": PlanDefinition(id="planB", name="Plan B", allowance_period="anniversary"),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {
+                    "planA": {"label": "Plan A", "allowance": {"period": "anniversary"}},
+                    "planB": {"label": "Plan B", "allowance": {"period": "anniversary"}},
                 },
-            )
+            }
         )
         user = _new_uuid(9014)
         store.set_user_plan(user, "planA")
@@ -2095,10 +2156,11 @@ class TestAllowanceWindowPg:
 
     def test_unset_user_plan_clears_plan_and_assigned_at_pg(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"pro": {"label": "Pro", "allowance": {"amount": Decimal(100)}}},
+            }
         )
         user = _new_uuid(9015)
         store.set_user_plan(user, "pro")
@@ -2121,13 +2183,16 @@ class TestAllowanceWindowPg:
     # ── 10. WS3: fractional fixed job cost round-trips through Postgres ────
 
     def test_fractional_fixed_cost_round_trips_pg(self, store: PostgresStore) -> None:
-        config = PricingConfigData(models={"_default": "input_tokens * 1"}, fixed={"job": Decimal("2.5")})
+        config = {
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}, "flat_jobs": {"job": Decimal("2.5")}},
+        }
         store.set_active_pricing(config)
 
         fetched = store.get_active_pricing()
         assert fetched is not None
-        assert fetched.config.fixed["job"] == Decimal("2.5")
-        assert isinstance(fetched.config.fixed["job"], Decimal)
+        assert fetched.config["metering"]["flat_jobs"]["job"] == Decimal("2.5")
+        assert isinstance(fetched.config["metering"]["flat_jobs"]["job"], Decimal)
 
         user = _new_uuid(9015)
         store.add_credits(user, Decimal("100"), "purchase")
@@ -2150,11 +2215,12 @@ class TestAllowanceWindowPg:
         skip_allowance) always resolved to the un-floor-clamped overload.
         """
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                min_balance=Decimal("0"),
-                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("5"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "ledger": {"min_balance": Decimal("0")},
+                "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("5")}}},
+            }
         )
         user = _new_uuid(9016)
         store.set_user_plan(user, "basic")
@@ -2196,10 +2262,11 @@ class TestAllowanceWindowPg:
         anything (see the gap notes in the final summary).
         """
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "1"},
-                plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal("10"))},
-            )
+            {
+                "version": 1,
+                "metering": {"models": {"*": "1"}},
+                "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
+            }
         )
         user = _new_uuid(9017)
         store.set_user_plan(user, "basic")
@@ -2231,24 +2298,25 @@ class TestCreditTiersPg:
         assert s.setup().success
         return s
 
-    def _two_tier_config(self) -> PricingConfigData:
-        return PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            min_balance=Decimal("0"),
-            tiers={
-                "gifted": TierDefinition(name="Gifted", priority=10, expires=True, default_ttl_days=30),
-                "purchased": TierDefinition(name="Purchased", priority=30, is_default=True),
+    def _two_tier_config(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {"min_balance": Decimal("0")},
+            "buckets": {
+                "gifted": {"label": "Gifted", "priority": 10, "expires": True, "ttl_days": 30},
+                "purchased": {"label": "Purchased", "priority": 30, "default": True},
             },
-        )
+        }
 
     def test_no_tiers_configured_uses_synthetic_default(self, store: PostgresStore) -> None:
         user = _new_uuid(9101)
         store.add_credits(user, Decimal("50"), "purchase")
 
-        tiers = store.get_credit_tiers(user)
-        assert len(tiers.tiers) == 1
-        assert tiers.tiers[0].tier_key == "default"
-        assert tiers.tiers[0].balance == Decimal("50")
+        tiers = store.get_bucket_balances(user)
+        assert len(tiers.buckets) == 1
+        assert tiers.buckets[0].bucket_key == "default"
+        assert tiers.buckets[0].balance == Decimal("50")
         assert tiers.total_balance == Decimal("50")
 
     def test_add_credits_resolves_explicit_and_default_tier(self, store: PostgresStore) -> None:
@@ -2256,12 +2324,12 @@ class TestCreditTiersPg:
         user = _new_uuid(9102)
 
         gifted = store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
-        assert gifted.tier == "gifted"
+        assert gifted.bucket == "gifted"
 
         omitted = store.add_credits(user, Decimal("20"), "purchase")
-        assert omitted.tier == "purchased"
+        assert omitted.bucket == "purchased"
 
-        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        by_key = {t.bucket_key: t.balance for t in store.get_bucket_balances(user).buckets}
         assert by_key == {"gifted": Decimal("10"), "purchased": Decimal("20")}
 
     def test_add_credits_unknown_tier_raises(self, store: PostgresStore) -> None:
@@ -2270,7 +2338,7 @@ class TestCreditTiersPg:
         with pytest.raises(StoreError, match="tier_not_found"):
             store.add_credits(user, Decimal("10"), "purchase", tier="nonexistent")
 
-    def test_priority_ordered_deduct_and_tier_breakdown(self, store: PostgresStore) -> None:
+    def test_priority_ordered_deduct_and_bucket_breakdown(self, store: PostgresStore) -> None:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9104)
         future = datetime.now(UTC) + timedelta(days=1)
@@ -2279,9 +2347,9 @@ class TestCreditTiersPg:
 
         result = store.deduct_with_allowance(user, Decimal("15"))
         assert result.error is None
-        assert result.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+        assert result.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
-        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        by_key = {t.bucket_key: t.balance for t in store.get_bucket_balances(user).buckets}
         assert by_key == {"gifted": Decimal("0"), "purchased": Decimal("95")}
 
     def test_settle_lease_applies_same_tier_walk(self, store: PostgresStore) -> None:
@@ -2295,9 +2363,9 @@ class TestCreditTiersPg:
         assert lease.error is None
         settled = store.settle_lease(user, lease.lease_id, Decimal("15"))
         assert settled.error is None
-        assert settled.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+        assert settled.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
-    def test_idempotent_replay_echoes_original_tier_breakdown(self, store: PostgresStore) -> None:
+    def test_idempotent_replay_echoes_original_bucket_breakdown(self, store: PostgresStore) -> None:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9106)
         future = datetime.now(UTC) + timedelta(days=1)
@@ -2305,14 +2373,14 @@ class TestCreditTiersPg:
         store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
 
         first = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
-        assert first.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+        assert first.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
         # Mutate state after the fact — the replay must not recompute.
         store.add_credits(user, Decimal("1000"), "purchase", tier="gifted")
 
         second = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
         assert second.idempotent is True
-        assert second.tier_breakdown == first.tier_breakdown
+        assert second.bucket_breakdown == first.bucket_breakdown
 
     def test_lifo_refund_restores_reverse_priority_order(self, store: PostgresStore) -> None:
         store.set_active_pricing(self._two_tier_config())
@@ -2322,25 +2390,26 @@ class TestCreditTiersPg:
         store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
 
         ded = store.deduct_with_allowance(user, Decimal("15"))
-        assert ded.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+        assert ded.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
         refund = store.refund_credits(ded.transaction_id)
         assert refund.error is None
         # LIFO: last-drained (purchased) restored first.
-        assert refund.tier_breakdown == {"purchased": Decimal("5"), "gifted": Decimal("10")}
+        assert refund.bucket_breakdown == {"purchased": Decimal("5"), "gifted": Decimal("10")}
 
-        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        by_key = {t.bucket_key: t.balance for t in store.get_bucket_balances(user).buckets}
         assert by_key == {"gifted": Decimal("10"), "purchased": Decimal("100")}
 
     def test_overdraft_routes_excess_to_allow_overdraft_tier(self, store: PostgresStore) -> None:
         store.set_active_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                tiers={
-                    "gifted": TierDefinition(name="Gifted", priority=10),
-                    "purchased": TierDefinition(name="Purchased", priority=30, is_default=True, allow_overdraft=True),
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "buckets": {
+                    "gifted": {"label": "Gifted", "priority": 10},
+                    "purchased": {"label": "Purchased", "priority": 30, "default": True, "allow_overdraft": True},
                 },
-            )
+            }
         )
         user = _new_uuid(9108)
         store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
@@ -2348,9 +2417,9 @@ class TestCreditTiersPg:
 
         result = store.deduct_with_allowance(user, Decimal("40"), min_balance=Decimal("-50"))
         assert result.error is None
-        assert result.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
+        assert result.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
 
-        by_key = {t.tier_key: t.balance for t in store.get_credit_tiers(user).tiers}
+        by_key = {t.bucket_key: t.balance for t in store.get_bucket_balances(user).buckets}
         assert by_key["purchased"] == Decimal("-25")
 
     def test_get_credit_tiers_sorted_by_priority_ascending(self, store: PostgresStore) -> None:
@@ -2360,8 +2429,8 @@ class TestCreditTiersPg:
         store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
         store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
 
-        result = store.get_credit_tiers(user)
-        assert [t.tier_key for t in result.tiers] == ["gifted", "purchased"]
+        result = store.get_bucket_balances(user)
+        assert [t.bucket_key for t in result.buckets] == ["gifted", "purchased"]
         assert result.total_balance == Decimal("110")
         assert result.total_balance == store.get_balance(user).balance
 
@@ -2373,10 +2442,13 @@ class TestCreditTiersPg:
         with pytest.raises(ConfigError):
             manager.publish_pricing_from_dict(
                 {
-                    "models": {"_default": "input_tokens * 1"},
-                    "tiers": {
-                        "a": {"name": "A", "priority": 1, "is_default": True},
-                        "b": {"name": "B", "priority": 2, "is_default": True},
+                    "version": 1,
+                    "metering": {"models": {"*": "input_tokens * 1"}},
+                    "ledger": {
+                        "buckets": {
+                            "a": {"label": "A", "priority": 1, "default": True},
+                            "b": {"label": "B", "priority": 2, "default": True},
+                        },
                     },
                 }
             )
@@ -2413,11 +2485,14 @@ class TestCreditManagerTiersPg:
 
     def _tiered_config(self) -> dict[str, Any]:
         return {
-            "models": {"_default": "input_tokens * 1"},
-            "min_balance": 0,
-            "tiers": {
-                "gifted": {"name": "Gifted", "priority": 10, "expires": True, "default_ttl_days": 30},
-                "purchased": {"name": "Purchased", "priority": 30, "is_default": True},
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {
+                "min_balance": 0,
+                "buckets": {
+                    "gifted": {"label": "Gifted", "priority": 10, "expires": True, "ttl_days": 30},
+                    "purchased": {"label": "Purchased", "priority": 30, "default": True},
+                },
             },
         }
 
@@ -2438,13 +2513,13 @@ class TestCreditManagerTiersPg:
         user = _new_uuid(9301)
 
         gifted = mgr.add_credits(user, Decimal("20"), tx_type="purchase", tier="gifted")
-        assert gifted.tier == "gifted"
+        assert gifted.bucket == "gifted"
         purchased = mgr.add_credits(user, Decimal("50"), tx_type="purchase")  # omitted -> is_default
-        assert purchased.tier == "purchased"
+        assert purchased.bucket == "purchased"
         assert [e.type for e in events] == ["credits.added", "credits.added"]
 
-        tiers = mgr.get_credit_tiers(user)
-        assert {t.tier_key: t.balance for t in tiers.tiers} == {
+        tiers = mgr.get_bucket_balances(user)
+        assert {t.bucket_key: t.balance for t in tiers.buckets} == {
             "gifted": Decimal("20"),
             "purchased": Decimal("50"),
         }
@@ -2455,12 +2530,12 @@ class TestCreditManagerTiersPg:
         # from purchased.
         events.clear()
         result = mgr.deduct(user, UsageMetrics(input_tokens=25), idempotency_key="mgr-e2e-1")
-        assert result.tier_breakdown == {"gifted": Decimal("20"), "purchased": Decimal("5")}
+        assert result.bucket_breakdown == {"gifted": Decimal("20"), "purchased": Decimal("5")}
         assert result.balance_after == Decimal("45")
         assert "credits.deducted" in [e.type for e in events]
 
-        tiers_after_deduct = mgr.get_credit_tiers(user)
-        assert {t.tier_key: t.balance for t in tiers_after_deduct.tiers} == {
+        tiers_after_deduct = mgr.get_bucket_balances(user)
+        assert {t.bucket_key: t.balance for t in tiers_after_deduct.buckets} == {
             "gifted": Decimal("0"),
             "purchased": Decimal("45"),
         }
@@ -2469,11 +2544,11 @@ class TestCreditManagerTiersPg:
         refund = mgr.refund_credits(result.transaction_id)
         assert refund.error is None
         # LIFO: purchased (last drained) is restored first, then gifted.
-        assert refund.tier_breakdown == {"purchased": Decimal("5"), "gifted": Decimal("20")}
+        assert refund.bucket_breakdown == {"purchased": Decimal("5"), "gifted": Decimal("20")}
         assert "credits.refunded" in [e.type for e in events]
 
-        tiers_after_refund = mgr.get_credit_tiers(user)
-        assert {t.tier_key: t.balance for t in tiers_after_refund.tiers} == {
+        tiers_after_refund = mgr.get_bucket_balances(user)
+        assert {t.bucket_key: t.balance for t in tiers_after_refund.buckets} == {
             "gifted": Decimal("20"),
             "purchased": Decimal("50"),
         }
@@ -2498,10 +2573,10 @@ class TestCreditManagerTiersPg:
         assert "credits.reserved" in [e.type for e in events]
 
         settled = mgr.settle(user, lease.lease_id, UsageMetrics(input_tokens=15))
-        assert settled.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
+        assert settled.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
-        tiers = mgr.get_credit_tiers(user)
-        assert {t.tier_key: t.balance for t in tiers.tiers} == {
+        tiers = mgr.get_bucket_balances(user)
+        assert {t.bucket_key: t.balance for t in tiers.buckets} == {
             "gifted": Decimal("0"),
             "purchased": Decimal("95"),
         }
@@ -2509,7 +2584,7 @@ class TestCreditManagerTiersPg:
     def test_sweep_expired_credits_through_manager_scopes_per_tier(self, store: PostgresStore) -> None:
         """sweep_expired_credits() through the manager only drains the
         expiring tier's own balance, leaves the non-expiring tier untouched,
-        and emits credits.expired — SweepResult.expired_by_tier carries the
+        and emits credits.expired — SweepResult.expired_by_bucket carries the
         per-tier split."""
         emitter = CreditEventEmitter()
         events = self._subscribe_all(emitter)
@@ -2527,11 +2602,11 @@ class TestCreditManagerTiersPg:
 
         events.clear()
         swept = mgr.sweep_expired_credits(dry_run=False)
-        assert swept.expired_by_tier == {"gifted": Decimal("15")}
+        assert swept.expired_by_bucket == {"gifted": Decimal("15")}
         assert "credits.expired" in [e.type for e in events]
 
-        tiers = mgr.get_credit_tiers(user)
-        assert {t.tier_key: t.balance for t in tiers.tiers} == {
+        tiers = mgr.get_bucket_balances(user)
+        assert {t.bucket_key: t.balance for t in tiers.buckets} == {
             "gifted": Decimal("0"),
             "purchased": Decimal("10"),
         }
@@ -2549,10 +2624,13 @@ class TestCreditManagerTiersPg:
         mgr = CreditManager(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal("-50"))
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "tiers": {
-                    "gifted": {"name": "Gifted", "priority": 10, "is_default": True},
-                    "purchased": {"name": "Purchased", "priority": 20, "allow_overdraft": True},
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {
+                    "buckets": {
+                        "gifted": {"label": "Gifted", "priority": 10, "default": True},
+                        "purchased": {"label": "Purchased", "priority": 20, "allow_overdraft": True},
+                    },
                 },
             }
         )
@@ -2563,11 +2641,11 @@ class TestCreditManagerTiersPg:
         lease = mgr.reserve(user, UsageMetrics(input_tokens=40))
         events.clear()
         settled = mgr.settle(user, lease.lease_id, UsageMetrics(input_tokens=40))
-        assert settled.tier_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
+        assert settled.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("30")}
         assert settled.balance_after == Decimal("-25")
         assert "credits.overdraft" in [e.type for e in events]
 
-        by_key = {t.tier_key: t.balance for t in mgr.get_credit_tiers(user).tiers}
+        by_key = {t.bucket_key: t.balance for t in mgr.get_bucket_balances(user).buckets}
         assert by_key["purchased"] == Decimal("-25")
 
 
@@ -2661,7 +2739,13 @@ class TestLazyExpiryPg:
         must show the true non-expired balance" requirement against the real
         RPCs, not just MemoryStore."""
         mgr = CreditManager(store=store, lazy_expiry=True)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         user = _new_uuid(9404)
 
         soon = datetime.now(UTC) + timedelta(milliseconds=500)
@@ -2712,15 +2796,18 @@ class TestSubscriptionCyclePg:
 
     def _subscription_config(self) -> dict[str, Any]:
         return {
-            "models": {"_default": "input_tokens * 1"},
-            "min_balance": 0,
-            "tiers": {
-                "subscription": {
-                    "name": "Subscription",
-                    "priority": 1,
-                    "expires": True,
-                    "is_default": True,
-                    "default_ttl_days": 30,
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {
+                "min_balance": 0,
+                "buckets": {
+                    "subscription": {
+                        "label": "Subscription",
+                        "priority": 1,
+                        "expires": True,
+                        "default": True,
+                        "ttl_days": 30,
+                    },
                 },
             },
         }

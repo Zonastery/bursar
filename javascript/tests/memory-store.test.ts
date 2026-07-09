@@ -3,7 +3,7 @@ import Decimal from "decimal.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditStore } from "../src/stores/credit-store.js";
 import { CapabilityNotSupportedError, StoreError } from "../src/errors.js";
-import type { FeatureLimitResult, SetUserPlanResult, CheckFeatureResult } from "../src/types.js";
+import type { FeatureLimitResult } from "../src/types.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
 import type {
   AddCreditsResult,
@@ -16,13 +16,12 @@ import type {
   GetUserPlanResult,
   LeaseResult,
   PaginatedTransactions,
-  PricingConfigData,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
   SetupResult,
   SweepResult,
-  TierBalancesResult,
+  BucketBalancesResult,
 } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
@@ -142,9 +141,15 @@ describe("MemoryStore", () => {
 
   describe("deductWithAllowance (atomic charge)", () => {
     async function seedPlan(freeAllowance: number, userId = "user-1") {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-1": { id: "plan-1", name: "Plan", freeAllowance: D(freeAllowance) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-1": {
+            label: "Plan",
+            allowance: { amount: D(freeAllowance), period: "calendar_month" },
+          },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan(userId, "plan-1");
@@ -306,17 +311,19 @@ describe("MemoryStore", () => {
     });
 
     it("stores and retrieves pricing config", async () => {
-      const config: PricingConfigData = {
-        models: { "gpt-4": "input_tokens * 0.01" },
+      const config = {
+        version: 1,
+        metering: { models: { "gpt-4": "input_tokens * 0.01" } },
+        ledger: { minBalance: 0 },
       };
       await store.setActivePricing(config);
       const result = await store.getActivePricing();
       expect(result).not.toBeNull();
-      expect(result!.config.models["gpt-4"]).toBe("input_tokens * 0.01");
+      expect(result!.config.metering.models["gpt-4"]).toBe("input_tokens * 0.01");
     });
 
     it("increments version on each set", async () => {
-      const config: PricingConfigData = { models: { a: "1" } };
+      const config = { version: 1, metering: { models: { a: "1" } }, ledger: { minBalance: 0 } };
       const id1 = await store.setActivePricing(config);
       const id2 = await store.setActivePricing(config);
       expect(id1).not.toBe(id2);
@@ -327,15 +334,19 @@ describe("MemoryStore", () => {
     it("getUserPlan returns null plan for user with no plan", async () => {
       const result = await store.getUserPlan("user-1");
       expect(result.planId).toBeNull();
-      expect(result.planName).toBeNull();
-      expect(result.freeAllowance.toString()).toBe("0");
+      expect(result.planLabel).toBeNull();
+      expect(result.allowanceAmount.toString()).toBe("0");
     });
 
     it("setUserPlan and getUserPlan round-trips", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          "plan-free": { id: "plan-free", name: "Free Plan", freeAllowance: D(100) },
+          "plan-free": {
+            label: "Free Plan",
+            allowance: { amount: D(100), period: "calendar_month" },
+          },
         },
       };
       await store.setActivePricing(config);
@@ -343,20 +354,20 @@ describe("MemoryStore", () => {
       await store.setUserPlan("user-1", "plan-free");
       const result = await store.getUserPlan("user-1");
       expect(result.planId).toBe("plan-free");
-      expect(result.planName).toBe("Free Plan");
-      expect(result.freeAllowance.toString()).toBe("100");
-      expect(result.features).toEqual({});
+      expect(result.planLabel).toBe("Free Plan");
+      expect(result.allowanceAmount.toString()).toBe("100");
+      expect(result.entitlements).toEqual({});
     });
 
     it("getUserPlan returns features from plan definition", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           premium: {
-            id: "premium",
-            name: "Premium",
-            freeAllowance: D(2000),
-            features: { aiChat: true, maxRoadmaps: 20 },
+            label: "Premium",
+            allowance: { amount: D(2000), period: "calendar_month" },
+            entitlements: { aiChat: true, maxRoadmaps: 20 },
           },
         },
       };
@@ -365,20 +376,24 @@ describe("MemoryStore", () => {
 
       const result = await store.getUserPlan("user-1");
       expect(result.planId).toBe("premium");
-      expect(result.features["aiChat"]).toBe(true);
-      expect(result.features["maxRoadmaps"]).toBe(20);
+      expect(result.entitlements["aiChat"].value).toBe(true);
+      expect(result.entitlements["maxRoadmaps"].value).toBe(20);
     });
 
     it("checkFeature distinguishes presence from truthiness (M6)", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          free: { id: "free", name: "Free", freeAllowance: D(0), features: {} },
+          free: {
+            label: "Free",
+            allowance: { amount: D(0), period: "calendar_month" },
+            entitlements: {},
+          },
           premium: {
-            id: "premium",
-            name: "Premium",
-            freeAllowance: D(2000),
-            features: { aiChat: true, maxRoadmaps: 20, quota: 0, label: "", disabled: false },
+            label: "Premium",
+            allowance: { amount: D(2000), period: "calendar_month" },
+            entitlements: { aiChat: true, maxRoadmaps: 20, quota: 0, label: "", disabled: false },
           },
         },
       };
@@ -420,10 +435,14 @@ describe("MemoryStore", () => {
     });
 
     it("checkAllowance returns remaining allowance", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          "plan-pro": { id: "plan-pro", name: "Pro Plan", freeAllowance: D(500) },
+          "plan-pro": {
+            label: "Pro Plan",
+            allowance: { amount: D(500), period: "calendar_month" },
+          },
         },
       };
       await store.setActivePricing(config);
@@ -442,10 +461,11 @@ describe("MemoryStore", () => {
     });
 
     it("incrementUsageWindow reduces remaining allowance", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          "plan-basic": { id: "plan-basic", name: "Basic", freeAllowance: D(200) },
+          "plan-basic": { label: "Basic", allowance: { amount: D(200), period: "calendar_month" } },
         },
       };
       await store.setActivePricing(config);
@@ -716,10 +736,13 @@ describe("MemoryStore", () => {
   describe("credit tiers — MemoryStore edge cases", () => {
     it("tier walk breaks a priority tie by tier key ascending", async () => {
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          z: { name: "Z", priority: 10, expires: false },
-          a: { name: "A", priority: 10, expires: false },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          buckets: {
+            z: { label: "Z", priority: 10, expires: false },
+            a: { label: "A", priority: 10, expires: false },
+          },
         },
       });
       await store.addCredits("user-1", D(10), "adjustment", null, null, "z");
@@ -729,8 +752,8 @@ describe("MemoryStore", () => {
       expect(r.error).toBeUndefined();
       // Same priority (10) → tie-break by tier key ascending: "a" drains
       // fully before "z" is touched.
-      expect(r.tierBreakdown?.a?.toString()).toBe("10");
-      expect(r.tierBreakdown?.z?.toString()).toBe("5");
+      expect(r.bucketBreakdown?.a?.toString()).toBe("10");
+      expect(r.bucketBreakdown?.z?.toString()).toBe("5");
     });
 
     it("refund of a legacy debit lacking a stored tierBreakdown falls back to the 'default' bucket", async () => {
@@ -766,8 +789,8 @@ describe("MemoryStore", () => {
 
       const refund = await store.refundCredits(legacyTxId);
       expect(refund.error).toBeUndefined();
-      expect(refund.tierBreakdown?.default?.toString()).toBe("30");
-      expect(Object.keys(refund.tierBreakdown ?? {})).toEqual(["default"]);
+      expect(refund.bucketBreakdown?.default?.toString()).toBe("30");
+      expect(Object.keys(refund.bucketBreakdown ?? {})).toEqual(["default"]);
     });
   });
 
@@ -1134,9 +1157,12 @@ describe("MemoryStore", () => {
   describe("MS2 — deny cap does not consume plan allowance", () => {
     it("cap_reached error leaves allowanceRemaining unchanged", async () => {
       // Plan covers first 5 credits free; charge 10 → net = 5 which is > cap limit 3
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-ms2": { id: "plan-ms2", name: "Plan MS2", freeAllowance: D(5) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-ms2": { label: "Plan MS2", allowance: { amount: D(5), period: "calendar_month" } },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-ms2");
@@ -1159,9 +1185,12 @@ describe("MemoryStore", () => {
     it("allowanceRemaining stays reduced after refund", async () => {
       // Plan has 30 free allowance. Charge 50 → allowance covers 30, net = 20 debited from balance.
       // The transaction has amount = -20 (the net debit), so it is refundable.
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-ms3": { id: "plan-ms3", name: "Plan MS3", freeAllowance: D(30) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-ms3": { label: "Plan MS3", allowance: { amount: D(30), period: "calendar_month" } },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-ms3");
@@ -1327,9 +1356,12 @@ describe("MemoryStore", () => {
   // ── H8: incrementUsageWindow reduces available allowance ─────────────
   describe("H8 — incrementUsageWindow reduces available allowance", () => {
     it("incrementUsageWindow reduces available allowance", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-h8": { id: "plan-h8", name: "Plan H8", freeAllowance: D(10) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-h8": { label: "Plan H8", allowance: { amount: D(10), period: "calendar_month" } },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-h8");
@@ -1416,9 +1448,12 @@ describe("MemoryStore", () => {
 
       store.setClock(() => PERIOD_1);
 
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-m1": { id: "plan-m1", name: "Plan M1", freeAllowance: D(5) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-m1": { label: "Plan M1", allowance: { amount: D(5), period: "calendar_month" } },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-m1");
@@ -1533,9 +1568,12 @@ describe("MemoryStore", () => {
   // ── M8: Refund of allowance-covered deduction ─────────────────────────
   describe("M8 — refund of allowance-covered deduction", () => {
     it("refund of a deduction fully covered by allowance returns over_refund (net charge was zero)", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { "plan-m8": { id: "plan-m8", name: "Plan M8", freeAllowance: D(100) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          "plan-m8": { label: "Plan M8", allowance: { amount: D(100), period: "calendar_month" } },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-m8");
@@ -1605,14 +1643,14 @@ describe("MemoryStore", () => {
   // ── MS9: checkFeature: float(0) and Decimal("0") are present ─────────
   describe("MS9 — checkFeature treats numeric 0 and Decimal(0) as present, false as absent", () => {
     it("numeric 0 is present, Decimal(0) is present, false is absent", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           "plan-ms9": {
-            id: "plan-ms9",
-            name: "Plan MS9",
-            freeAllowance: D(0),
-            features: {
+            label: "Plan MS9",
+            allowance: { amount: D(0), period: "calendar_month" },
+            entitlements: {
               quota: 0,
               rate: new Decimal("0"),
               active: false,
@@ -1653,14 +1691,13 @@ describe("WS9 — configurable allowance reset window", () => {
     allowancePeriod: "calendar_month" | "rolling_30d" | "anniversary",
     freeAllowance = 5,
   ): Promise<void> {
-    const config: PricingConfigData = {
-      models: { _default: "1" },
+    const config = {
+      version: 1,
+      metering: { models: { "*": "1" } },
       plans: {
         "plan-ws9": {
-          id: "plan-ws9",
-          name: "Plan WS9",
-          freeAllowance: D(freeAllowance),
-          allowancePeriod,
+          label: "Plan WS9",
+          allowance: { amount: D(freeAllowance), period: allowancePeriod },
         },
       },
     };
@@ -1794,20 +1831,17 @@ describe("WS9 — configurable allowance reset window", () => {
       const t0 = new Date("2026-01-10T00:00:00.000Z");
       store.setClock(() => t0);
 
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           "plan-a": {
-            id: "plan-a",
-            name: "Plan A",
-            freeAllowance: D(5),
-            allowancePeriod: "rolling_30d",
+            label: "Plan A",
+            allowance: { amount: D(5), period: "rolling_30d" },
           },
           "plan-b": {
-            id: "plan-b",
-            name: "Plan B",
-            freeAllowance: D(9),
-            allowancePeriod: "rolling_30d",
+            label: "Plan B",
+            allowance: { amount: D(9), period: "rolling_30d" },
           },
         },
       };
@@ -1822,7 +1856,7 @@ describe("WS9 — configurable allowance reset window", () => {
       await store.setUserPlan("user-1", "plan-b");
       const plan = await store.getUserPlan("user-1");
       expect(plan.planId).toBe("plan-b");
-      expect(plan.freeAllowance.toString()).toBe("9");
+      expect(plan.allowanceAmount.toString()).toBe("9");
       expect(plan.planAssignedAt?.toISOString()).toBe(t1.toISOString());
 
       // The window resolved for "now" must be anchored at t1, not t0.
@@ -1852,7 +1886,7 @@ describe("CreditStore optional capabilities (WS8)", () => {
           amount,
           newBalance: amount,
           lifetimePurchased: D(0),
-          tier: "default",
+          bucket: "default",
         };
       }
       async deductWithAllowance(userId: string, amount: Decimal): Promise<DeductionResult> {
@@ -1921,7 +1955,19 @@ describe("CreditStore optional capabilities (WS8)", () => {
         return "";
       }
       async getUserPlan(userId: string): Promise<GetUserPlanResult> {
-        return { userId, planId: null, planName: null, freeAllowance: D(0), features: {} };
+        return {
+          userId,
+          planId: null,
+          planLabel: null,
+          allowanceAmount: D(0),
+          allowancePeriod: null,
+          entitlements: {},
+          billingMode: "strict",
+          perOperation: {},
+          maxConcurrent: null,
+          overdraftFloor: null,
+          planAssignedAt: null,
+        };
       }
       async setUserPlan(userId: string, planId: string): Promise<SetUserPlanResult> {
         return { userId, planId };
@@ -1961,8 +2007,8 @@ describe("CreditStore optional capabilities (WS8)", () => {
       }
       // Credit tiers: getCreditTiers is a CORE (required) abstract method, not
       // an optional capability — a minimal store must implement it too.
-      async getCreditTiers(userId: string): Promise<TierBalancesResult> {
-        return { userId, tiers: [], totalBalance: D(0) };
+      async getCreditTiers(userId: string): Promise<BucketBalancesResult> {
+        return { userId, buckets: [], totalBalance: D(0) };
       }
     }
 
@@ -2034,7 +2080,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("under the limit: deduction succeeds, no warning", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 3, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 3, period: "monthly" as const, onExceed: "deny" as const };
       const r1 = await store.deductWithAllowance("user-1", D(1), {
         feature: "export",
         featureLimit,
@@ -2046,7 +2092,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("at the limit: deny blocks with feature_limit_reached, nothing consumed", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 2, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 2, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       await store.deductWithAllowance("user-1", D(1), opts);
       await store.deductWithAllowance("user-1", D(1), opts);
@@ -2060,7 +2106,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("over the limit (maxCalls: 0): every call is denied", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 0, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 0, period: "monthly" as const, onExceed: "deny" as const };
       const r = await store.deductWithAllowance("user-1", D(1), {
         feature: "export",
         featureLimit,
@@ -2071,7 +2117,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("warn action: breach surfaces featureLimitWarning but does NOT block", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "warn" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       const r1 = await store.deductWithAllowance("user-1", D(1), opts);
       expect(r1.error).toBeUndefined();
@@ -2086,7 +2132,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("notify action: breach surfaces featureLimitWarning='notify', does NOT block", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "notify" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "notify" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       await store.deductWithAllowance("user-1", D(1), opts);
       const r2 = await store.deductWithAllowance("user-1", D(1), opts);
@@ -2096,7 +2142,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("isolation: a different feature name has an independent count", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       await store.deductWithAllowance("user-1", D(1), {
         feature: "export",
         featureLimit,
@@ -2114,7 +2160,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
     it("isolation: a different user has an independent count", async () => {
       await store.addCredits("user-1", D(100), "purchase");
       await store.addCredits("user-2", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       await store.deductWithAllowance("user-1", D(1), opts);
       // user-1 is now at the limit; user-2 is unaffected.
@@ -2126,7 +2172,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("accumulation-then-block across N deducts", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 5, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       for (let i = 0; i < 5; i++) {
         const r = await store.deductWithAllowance("user-1", D(1), opts);
@@ -2139,15 +2185,16 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
     });
 
     it("a call fully covered by free allowance (net amount 0) still counts as one invocation", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          free: { id: "free", name: "Free", freeAllowance: D(100) },
+          free: { label: "Free", allowance: { amount: D(100), period: "calendar_month" } },
         },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "free");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
 
       // Fully covered by the free allowance — net charged amount is 0, but the
@@ -2167,7 +2214,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
       await store.deductWithAllowance("user-1", D(1), { feature: "export" });
       // Now enable a limit for the SAME window: the untagged-limit call above
       // must already count toward it (it was tagged at deduction time).
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const r = await store.deductWithAllowance("user-1", D(1), {
         feature: "export",
         featureLimit,
@@ -2181,7 +2228,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
         await store.addCredits("user-1", D(100), "purchase");
         const day1 = new Date("2026-03-15T00:00:00.000Z");
         const day2 = new Date("2026-03-16T00:00:00.000Z");
-        const featureLimit = { maxCalls: 1, period: "daily" as const, action: "deny" as const };
+        const featureLimit = { maxCalls: 1, period: "daily" as const, onExceed: "deny" as const };
 
         store.setClock(() => day1);
         const r1 = await store.deductWithAllowance("user-1", D(1), {
@@ -2210,7 +2257,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
         await store.addCredits("user-1", D(100), "purchase");
         const week1 = new Date("2026-03-16T00:00:00.000Z"); // Monday
         const week2 = new Date("2026-03-23T00:00:00.000Z"); // next Monday
-        const featureLimit = { maxCalls: 1, period: "weekly" as const, action: "deny" as const };
+        const featureLimit = { maxCalls: 1, period: "weekly" as const, onExceed: "deny" as const };
 
         store.setClock(() => week1);
         await store.deductWithAllowance("user-1", D(1), {
@@ -2238,7 +2285,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
         await store.addCredits("user-1", D(100), "purchase");
         const month1 = new Date("2026-03-01T00:00:00.000Z");
         const month2 = new Date("2026-04-01T00:00:00.000Z");
-        const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+        const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
 
         store.setClock(() => month1);
         await store.deductWithAllowance("user-1", D(1), {
@@ -2266,7 +2313,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
         await store.addCredits("user-1", D(100), "purchase");
         const year1 = new Date("2026-01-01T00:00:00.000Z");
         const year2 = new Date("2027-01-01T00:00:00.000Z");
-        const featureLimit = { maxCalls: 1, period: "yearly" as const, action: "deny" as const };
+        const featureLimit = { maxCalls: 1, period: "yearly" as const, onExceed: "deny" as const };
 
         store.setClock(() => year1);
         await store.deductWithAllowance("user-1", D(1), {
@@ -2295,7 +2342,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
   describe("createLease (deny-only admission)", () => {
     it("deny action: admission is blocked once the limit is reached", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       // Commit one usage transaction tagged `feature` via a direct deduct (the
       // ledger-derived count only sees committed `usage` rows).
@@ -2306,7 +2353,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("warn/notify are NOT checked at admission (nothing to warn about yet)", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "warn" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       await store.deductWithAllowance("user-1", D(1), opts);
       // Count is already at the limit, but action='warn' is never enforced at
@@ -2317,7 +2364,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("under the limit: admission succeeds", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 5, period: "monthly" as const, onExceed: "deny" as const };
       const lease = await store.createLease("user-1", D(1), "usage", {
         feature: "export",
         featureLimit,
@@ -2330,7 +2377,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
   describe("settleLease (advisory only, never blocks)", () => {
     it("deny action breach at settle: featureLimitWarning='deny', settle still succeeds", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       // Pre-fill the count to the limit via a committed deduction.
       await store.deductWithAllowance("user-1", D(1), opts);
@@ -2345,7 +2392,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("tags metadata.feature on the settled transaction (countable for future checks)", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 5, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
       const lease = await store.createLease("user-1", D(1), "usage", opts);
       await store.settleLease("user-1", lease.leaseId, D(1), opts);
@@ -2364,7 +2411,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
   describe("release/refund do NOT restore quota", () => {
     it("release_lease never counted in the first place (no usage row inserted)", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
 
       // Reserve then release near the limit — a lease never inserts a usage
@@ -2380,7 +2427,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
     it("refund_credits does not free up quota (the counted row is untouched)", async () => {
       await store.addCredits("user-1", D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
 
       const deduct = await store.deductWithAllowance("user-1", D(1), opts);
@@ -2449,16 +2496,16 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
 
   describe("PlanDefinition.featureLimits / GetUserPlanResult.featureLimits round-trip", () => {
     it("setActivePricing + getUserPlan surfaces configured feature limits", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           free: {
-            id: "free",
-            name: "Free",
-            freeAllowance: D(0),
-            featureLimits: {
-              export: { maxCalls: 5, period: "monthly", action: "deny" },
-              hdExport: { maxCalls: 2, period: "weekly", action: "warn" },
+            label: "Free",
+            allowance: { amount: D(0), period: "calendar_month" },
+            entitlements: {
+              export: { maxCalls: 5, period: "monthly", onExceed: "deny" },
+              hdExport: { maxCalls: 2, period: "weekly", onExceed: "warn" },
             },
           },
         },
@@ -2467,30 +2514,31 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
       await store.setUserPlan("user-1", "free");
 
       const plan = await store.getUserPlan("user-1");
-      expect(plan.featureLimits?.["export"]).toEqual({
+      expect(plan.entitlements?.["export"]).toEqual({
         maxCalls: 5,
         period: "monthly",
-        action: "deny",
+        onExceed: "deny",
       });
-      expect(plan.featureLimits?.["hdExport"]).toEqual({
+      expect(plan.entitlements?.["hdExport"]).toEqual({
         maxCalls: 2,
         period: "weekly",
-        action: "warn",
+        onExceed: "warn",
       });
     });
 
     it("plan with no featureLimits configured returns an empty object", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
-          free: { id: "free", name: "Free", freeAllowance: D(0) },
+          free: { label: "Free", allowance: { amount: D(0), period: "calendar_month" } },
         },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "free");
 
       const plan = await store.getUserPlan("user-1");
-      expect(plan.featureLimits).toEqual({});
+      expect(plan.entitlements).toEqual({});
     });
   });
 });

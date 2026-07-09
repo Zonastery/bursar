@@ -27,7 +27,6 @@ from bursar import (
 )
 from bursar.events import CreditEvent, CreditEventEmitter
 from bursar.interface.memory import MemoryStore
-from bursar.interface.models import OperationPolicy, PlanDefinition, PricingConfigData
 
 
 @pytest.fixture
@@ -49,7 +48,9 @@ class _FakeClock:
 
 def _strict_manager(store: MemoryStore, min_balance: Decimal = Decimal(5), **kwargs) -> CreditManager:
     m = CreditManager(store=store, policy="strict_prepaid", **kwargs)
-    m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
+    m.publish_pricing_from_dict(
+        {"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": min_balance}}
+    )
     return m
 
 
@@ -128,14 +129,14 @@ class TestFeatureGate:
     def _manager_with_plans(self, store: MemoryStore) -> CreditManager:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={
-                    "free": PlanDefinition(id="free", name="Free", features={"chat": True}),
-                    "pro": PlanDefinition(id="pro", name="Pro", features={"chat": True, "agentic": True}),
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {
+                    "free": {"label": "Free", "entitlements": {"chat": {"value": True}}},
+                    "pro": {"label": "Pro", "entitlements": {"chat": {"value": True}, "agentic": {"value": True}}},
                 },
-            )
+            }
         )
         return m
 
@@ -169,7 +170,7 @@ class TestOverdraft:
     def test_settle_clamps_to_overdraft_floor(self, store: MemoryStore) -> None:
         # planless user → constructor preset (overdraft, floor -50).
         m = CreditManager(store=store, policy="overdraft", overdraft_floor=Decimal(-50))
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(0))  # ensure a balance row at 0
 
         lease = m.reserve("u1", Decimal(10))  # small estimate
@@ -191,7 +192,7 @@ class TestOverdraft:
         events: list[CreditEvent] = []
         emitter.on("credits.overdraft", events.append)
         m = CreditManager(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal(-50))
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(0))
 
         lease = m.reserve("u1", Decimal(10))
@@ -202,7 +203,7 @@ class TestOverdraft:
     def test_settle_within_overdraft_floor_is_unclamped(self, store: MemoryStore) -> None:
         # Actual cost ≤ balance - floor: charge goes through unchanged.
         m = CreditManager(store=store, policy="overdraft", overdraft_floor=Decimal(-50))
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(0))
 
         lease = m.reserve("u1", Decimal(10))
@@ -215,7 +216,7 @@ class TestStrictPrepaidFloor:
         # C1: strict_prepaid zero-debt guarantee enforced at settle time.
         # balance=20, min_balance=5, actual=80 → max debit = 15, balance_after = 5.
         m = CreditManager(store=store, policy="strict_prepaid")
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 5})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 5}})
         store.add_credits("u1", Decimal(20))
 
         lease = m.reserve("u1", Decimal(10))
@@ -225,7 +226,7 @@ class TestStrictPrepaidFloor:
     def test_settle_exact_min_balance(self, store: MemoryStore) -> None:
         # Actual cost exactly depletes to the floor: no over-clamp.
         m = CreditManager(store=store, policy="strict_prepaid")
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 5})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 5}})
         store.add_credits("u1", Decimal(20))
 
         lease = m.reserve("u1", Decimal(10))
@@ -340,7 +341,7 @@ class TestMultiLevelLowBalance:
             overdraft_floor=Decimal(0),
             low_balance=LowBalanceConfig(thresholds=[Decimal(50), Decimal(20), Decimal(10)]),
         )
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         fired = self._events(m, emitter)
         store.add_credits("u1", Decimal(100))
 
@@ -369,7 +370,7 @@ class TestMultiLevelLowBalance:
             overdraft_floor=Decimal(0),
             low_balance=LowBalanceConfig(thresholds=[Decimal(20)], on_trigger=boom),
         )
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(100))
         lease = m.reserve("u1", Decimal(85))
         # The handler raises, but settle still completes normally.
@@ -392,7 +393,7 @@ class TestPresetsAndPlanless:
     def test_planless_user_gets_constructor_default_not_unlimited(self, store: MemoryStore) -> None:
         # Overdraft preset with a bounded floor applies to a user with no plan.
         m = CreditManager(store=store, policy="overdraft", overdraft_floor=Decimal(-20))
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(0))
         m.reserve("u1", Decimal(20))  # down to the floor, ok
         with pytest.raises(InsufficientCreditsError):
@@ -402,20 +403,19 @@ class TestPresetsAndPlanless:
         # strict_prepaid preset, but the plan opts one op type into overdraft.
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={
-                    "pro": PlanDefinition(
-                        id="pro",
-                        name="Pro",
-                        default_billing_mode="strict",
-                        per_operation={
-                            "agent": OperationPolicy(billing_mode="overdraft", overdraft_floor=Decimal(-30))
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {
+                    "pro": {
+                        "label": "Pro",
+                        "safety": {
+                            "billing_mode": "strict",
+                            "per_operation": {"agent": {"billing_mode": "overdraft", "overdraft_floor": -30}},
                         },
-                    )
+                    },
                 },
-            )
+            }
         )
         store.add_credits("u1", Decimal(0))
         store.set_user_plan("u1", "pro")
@@ -476,7 +476,11 @@ class TestMisc:
     def test_reserve_and_settle_with_metrics(self, store: MemoryStore) -> None:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing_from_dict(
-            {"models": {"gpt-4": "input_tokens * 0.01 + output_tokens * 0.03"}, "min_balance": 0}
+            {
+                "version": 1,
+                "metering": {"models": {"gpt-4": "input_tokens * 0.01 + output_tokens * 0.03"}},
+                "ledger": {"min_balance": 0},
+            }
         )
         store.add_credits("u1", Decimal(100))
         worst = UsageMetrics(model="gpt-4", input_tokens=1000, output_tokens=1000)  # cost 40
@@ -489,7 +493,7 @@ class TestMisc:
     def test_reserve_with_explicit_model_kwarg(self, store: MemoryStore) -> None:
         """reserve(user, Decimal, model='gpt-4') must capture model even without UsageMetrics (Fix 5)."""
         m = CreditManager(store=store, policy="strict_prepaid")
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(100))
 
         # Raw Decimal amount + explicit model= kwarg.
@@ -512,11 +516,11 @@ class TestAllowanceAwareAdmission:
     def _manager_with_allowance(self, store: MemoryStore, allowance: Decimal) -> CreditManager:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={"free": PlanDefinition(id="free", name="Free", free_allowance=allowance)},
-            )
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {"free": {"label": "Free", "allowance": {"amount": allowance}}},
+            }
         )
         return m
 
@@ -558,11 +562,11 @@ class TestCanAffordWithAllowance:
     def _manager_with_allowance(self, store: MemoryStore, allowance: Decimal) -> CreditManager:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={"free": PlanDefinition(id="free", name="Free", free_allowance=allowance)},
-            )
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {"free": {"label": "Free", "allowance": {"amount": allowance}}},
+            }
         )
         return m
 

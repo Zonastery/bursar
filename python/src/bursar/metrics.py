@@ -1,6 +1,9 @@
 """Pure data structures for agent usage telemetry.
 
 Consumed by ``PricingEngine.calculate()`` to produce a ``CostBreakdown``.
+
+The expression namespace includes per-step ``METRIC_VARIABLES`` and a per-tool
+``calls`` variable that counts invocations of the current tool.
 """
 
 from pydantic import BaseModel, Field
@@ -35,6 +38,9 @@ class UsageMetrics(BaseModel):
 
     All integer fields default to 0 so callers can partially populate
     the struct and rely on sensible zero-values.
+
+    The ``calls`` variable is available only in tool-scoped expressions
+    and reflects the number of times the current tool was invoked.
     """
 
     model: str | None = None
@@ -47,4 +53,4 @@ class UsageMetrics(BaseModel):
     search_results: int = 0
     web_search_calls: int = 0
     code_exec_calls: int = 0
-    fixed_job: str | None = None
+    flat_job: str | None = None

@@ -98,16 +98,16 @@ BEGIN
             )
             VALUES (
                 v_plan_key,
-                v_plan_def->>'name',
-                COALESCE((v_plan_def->>'free_allowance')::NUMERIC, (v_plan_def->>'freeAllowance')::NUMERIC, 0),
+                v_plan_def->>'label',
+                COALESCE((v_plan_def #>> '{allowance,amount}')::NUMERIC, 0),
                 COALESCE(v_plan_def->'rate_overrides', v_plan_def->'rateOverrides', '{}'::jsonb),
-                COALESCE(v_plan_def->'features', '{}'::jsonb),
-                COALESCE(v_plan_def->'feature_limits', v_plan_def->'featureLimits', '{}'::jsonb),
-                COALESCE(v_plan_def->>'default_billing_mode', v_plan_def->>'defaultBillingMode', 'strict'),
-                COALESCE(v_plan_def->'per_operation', v_plan_def->'perOperation'),
-                COALESCE((v_plan_def->>'max_concurrent')::INTEGER, (v_plan_def->>'maxConcurrent')::INTEGER),
-                COALESCE((v_plan_def->>'overdraft_floor')::NUMERIC, (v_plan_def->>'overdraftFloor')::NUMERIC),
-                COALESCE(v_plan_def->>'allowance_period', v_plan_def->>'allowancePeriod', 'calendar_month')
+                COALESCE(v_plan_def->'entitlements', '{}'::jsonb),
+                '{}'::jsonb,
+                COALESCE(v_plan_def #>> '{safety,billing_mode}', 'strict'),
+                v_plan_def #> '{safety,per_operation}',
+                (v_plan_def #>> '{safety,max_concurrent}')::INTEGER,
+                (v_plan_def #>> '{safety,overdraft_floor}')::NUMERIC,
+                COALESCE(v_plan_def #>> '{allowance,period}', 'calendar_month')
             )
             ON CONFLICT (plan_key) WHERE plan_key IS NOT NULL
             DO UPDATE SET
@@ -166,11 +166,10 @@ BEGIN
     RETURN jsonb_build_object(
         'user_id', p_user_id,
         'plan_id', v_plan_id,
-        'plan_name', v_plan_name,
-        'free_allowance', COALESCE(v_free_allowance, 0),
-        'features', COALESCE(v_features, '{}'::jsonb),
-        'feature_limits', COALESCE(v_feature_limits, '{}'::jsonb),
-        'default_billing_mode', COALESCE(v_billing_mode, 'strict'),
+        'plan_label', v_plan_name,
+        'allowance_amount', COALESCE(v_free_allowance, 0),
+        'entitlements', COALESCE(v_features, '{}'::jsonb),
+        'billing_mode', COALESCE(v_billing_mode, 'strict'),
         'per_operation', COALESCE(v_per_operation, '{}'::jsonb),
         'max_concurrent', v_max_concurrent,
         'overdraft_floor', v_overdraft_floor,

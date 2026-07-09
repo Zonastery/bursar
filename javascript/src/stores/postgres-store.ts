@@ -25,7 +25,6 @@ import type {
   ListUsageEventsOptions,
   OperationPolicy,
   PaginatedTransactions,
-
   PricingConfigHistoryItem,
   PricingConfigResult,
   RefundResult,
@@ -98,12 +97,25 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, FeatureLimit> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const fl = (v ?? {}) as Record<string, unknown>;
-    out[k] = {
-      maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
-      period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-      onExceed: (String(fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
-    };
+    if (v === null || typeof v !== "object" || Object.getPrototypeOf(v) !== Object.prototype) {
+      // Plain or non-plain-object value (e.g. true, 20, ""): wrap as value.
+      out[k] = {
+        value: v,
+        maxCalls: 0,
+        period: "monthly",
+        onExceed: "deny",
+      } as FeatureLimit;
+    } else {
+      const fl = v as Record<string, unknown>;
+      const valueRaw = fl["value"];
+      out[k] = {
+        ...(valueRaw !== undefined ? { value: valueRaw } : {}),
+        maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
+        period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
+        onExceed:
+          (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+      } as FeatureLimit;
+    }
   }
   return out;
 }
@@ -302,7 +314,7 @@ export class PostgresStore extends CreditStore {
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
-      bucket: String(row.tier ?? tier ?? "default"),
+      bucket: String(row.bucket ?? row.tier ?? tier ?? "default"),
       idempotent: Boolean(row.idempotent),
     };
   }
@@ -578,12 +590,57 @@ export class PostgresStore extends CreditStore {
     if (!rows || rows.length === 0) return null;
     const row = rows[0] as Record<string, unknown> | undefined;
     if (!row || !row.config) return null;
-    return row as unknown as PricingConfigResult;
+    const result = row as unknown as PricingConfigResult;
+    // Convert snake_case config back to camelCase for JS consumers.
+    result.config = this.snakeToCamelKeys(result.config as Record<string, unknown>);
+    return result;
+  }
+
+  private camelToSnakeKeys(obj: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      const snakeKey = key.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
+      if (value instanceof Decimal) {
+        result[snakeKey] = value;
+      } else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        result[snakeKey] = this.camelToSnakeKeys(value as Record<string, unknown>);
+      } else if (Array.isArray(value)) {
+        result[snakeKey] = value.map((v) =>
+          v instanceof Decimal
+            ? v
+            : v !== null && typeof v === "object"
+              ? this.camelToSnakeKeys(v as Record<string, unknown>)
+              : v,
+        );
+      } else {
+        result[snakeKey] = value;
+      }
+    }
+    return result;
+  }
+
+  private snakeToCamelKeys(obj: Record<string, unknown>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      const camelKey = key.replace(/_([a-z])/g, (_, m) => m.toUpperCase());
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        result[camelKey] = this.snakeToCamelKeys(value as Record<string, unknown>);
+      } else if (Array.isArray(value)) {
+        result[camelKey] = value.map((v) =>
+          v !== null && typeof v === "object"
+            ? this.snakeToCamelKeys(v as Record<string, unknown>)
+            : v,
+        );
+      } else {
+        result[camelKey] = value;
+      }
+    }
+    return result;
   }
 
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     const rows = await this.callproc("set_active_pricing_config", [
-      JSON.stringify(config),
+      JSON.stringify(this.camelToSnakeKeys(config)),
       label ?? null,
     ]);
     const row = (rows?.[0] ?? {}) as Record<string, unknown>;
@@ -610,9 +667,10 @@ export class PostgresStore extends CreditStore {
     if (!rows || rows.length === 0) return null;
     const row = rows[0] as Record<string, unknown>;
     if (!row.config) return null;
+    const config = row.config as Record<string, unknown>;
     return {
       id: String(row.id ?? ""),
-      config: row.config as Record<string, unknown>,
+      config: this.snakeToCamelKeys(config),
       version: Number(row.version ?? version),
     };
   }
@@ -629,7 +687,15 @@ export class PostgresStore extends CreditStore {
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const rows = await this.callproc("get_user_plan", [userId]);
     if (!rows || rows.length === 0) {
-      return { userId, planId: null, planLabel: null, allowanceAmount: ZERO, allowancePeriod: 'calendar_month' as AllowancePeriod, entitlements: {}, billingMode: 'strict' as BillingMode };
+      return {
+        userId,
+        planId: null,
+        planLabel: null,
+        allowanceAmount: ZERO,
+        allowancePeriod: "calendar_month" as AllowancePeriod,
+        entitlements: {},
+        billingMode: "strict" as BillingMode,
+      };
     }
     const row = rows[0] as Record<string, unknown>;
     return {
@@ -637,7 +703,15 @@ export class PostgresStore extends CreditStore {
       planId: (row.plan_id as string) ?? null,
       planLabel: (row.plan_label as string) ?? (row.plan_name as string) ?? null,
       allowanceAmount: dec(row.free_allowance),
-      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>,
+      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<
+        string,
+        {
+          value?: unknown;
+          maxCalls?: number;
+          period?: FeatureLimitPeriod;
+          onExceed?: "deny" | "warn" | "notify";
+        }
+      >,
       billingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
@@ -650,7 +724,9 @@ export class PostgresStore extends CreditStore {
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
     const present = Object.prototype.hasOwnProperty.call(plan.entitlements, feature);
-    const value = present ? (plan.entitlements[feature] as Record<string, unknown>)?.['value'] ?? null : null;
+    const value = present
+      ? ((plan.entitlements[feature] as Record<string, unknown>)?.["value"] ?? null)
+      : null;
     return {
       userId,
       feature,
@@ -1059,10 +1135,10 @@ export class PostgresStore extends CreditStore {
     // unwrapping surfaces it as a single-element array.
     const rows = await this.callproc("get_user_credit_buckets", [userId]);
     const envelope = (rows?.[0] ?? {}) as Record<string, unknown>;
-    const tierRows = (envelope.tiers as Record<string, unknown>[] | undefined) ?? [];
-    const buckets: BucketBalance[] = tierRows.map((row) => ({
-      bucketKey: String(row.tier_key ?? ""),
-      label: String(row.name ?? ""),
+    const bucketRows = (envelope.buckets as Record<string, unknown>[] | undefined) ?? [];
+    const buckets: BucketBalance[] = bucketRows.map((row) => ({
+      bucketKey: String(row.bucket_key ?? ""),
+      label: String(row.label ?? ""),
       priority: Number(row.priority ?? 0),
       expires: Boolean(row.expires ?? false),
       balance: dec(row.balance),

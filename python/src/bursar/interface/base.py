@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from bursar.interface.models import (
     AddCreditsResult,
@@ -21,6 +22,7 @@ from bursar.interface.models import (
     AllowanceResult,
     AvailableResult,
     BalanceResult,
+    BucketBalancesResult,
     CapCheckResult,
     CheckFeatureResult,
     CreateTeamResult,
@@ -31,7 +33,6 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
-    PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
@@ -44,7 +45,6 @@ from bursar.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
-    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -169,7 +169,7 @@ class CreditStore(ABC):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
-        tier: str | None = None,
+        bucket: str | None = None,
         idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Atomically add credits and log a transaction.
@@ -177,9 +177,9 @@ class CreditStore(ABC):
         Args:
             amount: Fractional credit amount (``Decimal``).
             expires_at: Optional datetime after which the credits expire.
-            tier: Optional tier key to grant into. When no tiers are
-                configured, must be ``None`` or ``"default"``. When tiers are
-                configured and omitted, resolves to the tier with
+            bucket: Optional bucket key to grant into. When no buckets are
+                configured, must be ``None`` or ``"default"``. When buckets are
+                configured and omitted, resolves to the bucket with
                 ``is_default=True`` (raises if none is marked default).
             idempotency_key: Optional user-scoped replay key. A retried grant
                 with the same key (e.g. a webhook redelivered by the sender)
@@ -423,11 +423,11 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
-        """Return per-tier balance breakdown for a user, ordered by priority ascending.
+    def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
+        """Return per-bucket balance breakdown for a user, ordered by priority ascending.
 
-        When no tiers are configured, returns a single synthetic ``"default"``
-        tier entry so the shape is uniform regardless of whether tiers are
+        When no buckets are configured, returns a single synthetic ``"default"``
+        bucket entry so the shape is uniform regardless of whether buckets are
         configured.
         """
         ...
@@ -442,7 +442,7 @@ class CreditStore(ABC):
     @abstractmethod
     def set_active_pricing(
         self,
-        config: PricingConfigData,
+        config: dict[str, Any],
         label: str | None = None,
     ) -> str:
         """Publish a new pricing configuration.
@@ -501,8 +501,9 @@ class CreditStore(ABC):
         absent — defeating the very M6 intent ("numeric ``0``/``""`` ⇒ present").
         """
         plan = self.get_user_plan(user_id)
-        value = plan.features.get(feature)
-        has_feature = feature in plan.features and value is not None and value is not False
+        entitlement = plan.entitlements.get(feature)
+        value = entitlement.value if entitlement else None
+        has_feature = feature in plan.entitlements and value is not None and value is not False
         return CheckFeatureResult(
             user_id=user_id,
             feature=feature,
@@ -660,7 +661,7 @@ class CreditStore(ABC):
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
-        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "tier": ...}``.
+        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "bucket": ...}``.
         """
         ...
 

@@ -43,7 +43,7 @@ def mem_store(monkeypatch: pytest.MonkeyPatch) -> MemoryStore:
 def sample_config(tmp_path: Path) -> str:
     """Write a minimal pricing config and return its path."""
     p = tmp_path / "pricing.json"
-    p.write_text(json.dumps({"models": {"_default": "input_tokens * 1"}}))
+    p.write_text(json.dumps({"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {}}))
     return str(p)
 
 
@@ -207,7 +207,7 @@ class TestConfigValidate:
 
     def test_invalid_schema_exits_1(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
         p = tmp_path / "bad.json"
-        p.write_text('{"models": []}')
+        p.write_text('{"version": 1, "metering": {"models": []}, "ledger": {}}')
         code = _exit_code("config", "validate", str(p))
         assert code == 1
         assert "Validation failed" in capsys.readouterr().err
@@ -215,16 +215,23 @@ class TestConfigValidate:
     @pytest.mark.parametrize(
         "bad_config",
         [
-            {"models": {"_default": "1"}},  # expression references no variables
-            {"models": {"_default": "input_tokens * 1"}, "signup_bonus": -1},
+            {"version": 1, "metering": {"models": {"*": "1"}}, "ledger": {}},  # expression references no variables
+            {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"signup_grant": -1}},
             {
-                "models": {"_default": "input_tokens * 1"},
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {},
                 "tiers": {
                     "a": {"name": "A", "priority": 1, "allow_overdraft": True},
                     "b": {"name": "B", "priority": 2, "allow_overdraft": True},
                 },
             },
-            {"models": {"_default": "input_tokens * 1"}, "min_balnce": 5},  # typo'd key
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {},
+                "min_balnce": 5,
+            },  # typo'd key
         ],
         ids=["no-variables", "negative-signup-bonus", "conflicting-tiers", "unknown-key"],
     )
@@ -270,7 +277,7 @@ class TestConfigStore:
         """Setting a different config should create a new version."""
         _run("config", "set", sample_config)
         p2 = tmp_path / "other.json"
-        p2.write_text('{"models": {"_default": "input_tokens * 2"}}')
+        p2.write_text(json.dumps({"version": 1, "metering": {"models": {"*": "input_tokens * 2"}}, "ledger": {}}))
         _run("config", "set", str(p2))
         assert len(mem_store.get_pricing_history()) == 2
 
@@ -301,7 +308,7 @@ class TestConfigStore:
         capsys.readouterr()  # drain the "set" output
         _run("config", "get")
         payload = json.loads(capsys.readouterr().out)
-        assert payload["config"]["models"]["_default"] == "input_tokens * 1"
+        assert payload["config"]["metering"]["models"]["*"] == "input_tokens * 1"
         assert payload["version"] == 1
 
     def test_get_no_active_exits_1(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture) -> None:
@@ -319,7 +326,9 @@ class TestConfigStore:
     def test_list_marks_active(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, tmp_path: Path) -> None:
         def _conf(val: str) -> str:
             p = tmp_path / f"p{val}.json"
-            p.write_text(json.dumps({"models": {"_default": f"input_tokens * {val}"}}))
+            p.write_text(
+                json.dumps({"version": 1, "metering": {"models": {"*": f"input_tokens * {val}"}}, "ledger": {}})
+            )
             return str(p)
 
         _run("config", "set", _conf("1"), "--label", "v1")
@@ -337,7 +346,9 @@ class TestConfigStore:
     def test_activate_switches_active(self, mem_store: MemoryStore, tmp_path: Path) -> None:
         def _conf(val: str) -> str:
             p = tmp_path / f"p{val}.json"
-            p.write_text(json.dumps({"models": {"_default": f"input_tokens * {val}"}}))
+            p.write_text(
+                json.dumps({"version": 1, "metering": {"models": {"*": f"input_tokens * {val}"}}, "ledger": {}})
+            )
             return str(p)
 
         _run("config", "set", _conf("1"), "--label", "v1")
@@ -365,7 +376,7 @@ class TestConfigStore:
         capsys.readouterr()  # drain the "set" output
         _run("config", "export", "1")
         payload = json.loads(capsys.readouterr().out)
-        assert payload["models"]["_default"] == "input_tokens * 1"
+        assert payload["metering"]["models"]["*"] == "input_tokens * 1"
 
     def test_export_missing_version_exits_1(self, mem_store: MemoryStore, sample_config: str) -> None:
         _run("config", "set", sample_config)
@@ -373,9 +384,9 @@ class TestConfigStore:
 
     def test_diff_shows_changes(self, mem_store: MemoryStore, capsys: pytest.CaptureFixture, tmp_path: Path) -> None:
         p1 = tmp_path / "a.json"
-        p1.write_text(json.dumps({"models": {"a": "input_tokens * 1"}}))
+        p1.write_text(json.dumps({"version": 1, "metering": {"models": {"a": "input_tokens * 1"}}, "ledger": {}}))
         p2 = tmp_path / "b.json"
-        p2.write_text(json.dumps({"models": {"b": "input_tokens * 1"}}))
+        p2.write_text(json.dumps({"version": 1, "metering": {"models": {"b": "input_tokens * 1"}}, "ledger": {}}))
         _run("config", "set", str(p1))
         _run("config", "set", str(p2))
         _run("config", "diff", "1", "2")
@@ -398,7 +409,7 @@ class TestConfigSchema:
         _run("config", "schema")
         schema = json.loads(capsys.readouterr().out)
         assert schema["additionalProperties"] is False
-        assert "models" in schema["properties"]
+        assert "metering" in schema["properties"]
 
 
 class TestRetryNarrowing:
@@ -454,24 +465,25 @@ class TestConfigValidationSchemas:
 
     def test_realistic_config_with_search_plans(self, tmp_path: Path) -> None:
         config = {
-            "models": {"_default": "input_tokens * 1", "gpt-4": "input_tokens * 2"},
-            "tools": {"_default": "tool_calls * 5", "code_exec": "tool_calls * 50"},
-            "search": "search_queries * 5",
-            "cache": "clamp(-cache_read_tokens * 0.002, -max(input_tokens), 0)",
-            "fixed": {"batch": 100, "roadmap_gen": 20000},
-            "min_balance": 5000,
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 1", "gpt-4": "input_tokens * 2"},
+                "tools": {"*": "tool_calls * 5", "code_exec": "tool_calls * 50"},
+                "search": "search_queries * 5",
+                "cache_discount": "clamp(-cache_read_tokens * 0.002, -max(input_tokens), 0)",
+                "flat_jobs": {"batch": 100, "roadmap_gen": 20000},
+            },
+            "ledger": {"min_balance": 5000},
             "plans": {
                 "free": {
-                    "id": "free",
-                    "name": "Free",
-                    "free_allowance": 5000,
-                    "features": {"max_daily_roadmaps": 1, "max_concurrency": 1},
+                    "label": "Free",
+                    "allowance": {"amount": 5000},
+                    "entitlements": {"max_daily_roadmaps": {"value": 1}, "max_concurrency": {"value": 1}},
                 },
                 "pro": {
-                    "id": "pro",
-                    "name": "Pro",
-                    "free_allowance": 50000,
-                    "features": {"max_daily_roadmaps": 10, "max_concurrency": 3},
+                    "label": "Pro",
+                    "allowance": {"amount": 50000},
+                    "entitlements": {"max_daily_roadmaps": {"value": 10}, "max_concurrency": {"value": 3}},
                 },
             },
         }
@@ -483,12 +495,13 @@ class TestConfigValidationSchemas:
 
     def test_features_bool_and_int(self, tmp_path: Path) -> None:
         config = {
-            "models": {"_default": "input_tokens * 1"},
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {},
             "plans": {
                 "tier1": {
-                    "id": "tier1",
-                    "name": "Tier 1",
-                    "features": {"premium": True, "max_items": 100},
+                    "label": "Tier 1",
+                    "entitlements": {"premium": {"value": True}, "max_items": {"value": 100}},
                 },
             },
         }
@@ -501,8 +514,12 @@ class TestConfigValidationSchemas:
     def test_search_as_dict_fails(self, tmp_path: Path) -> None:
         """search/cache are single expression strings (WS1), not dicts."""
         config = {
-            "models": {"_default": "input_tokens * 1"},
-            "search": {"costs": "search_queries * 1", "rag": {"costs": "search_queries * 2"}},
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 1"},
+                "search": {"costs": "search_queries * 1", "rag": {"costs": "search_queries * 2"}},
+            },
+            "ledger": {},
         }
         p = tmp_path / "bad_search.yaml"
         import yaml
@@ -572,10 +589,13 @@ class TestValidateThenUseEngine:
         from decimal import Decimal
 
         config_data = {
-            "models": {
-                "_default": "input_tokens * 2 + output_tokens * 4",
+            "version": 1,
+            "metering": {
+                "models": {
+                    "*": "input_tokens * 2 + output_tokens * 4",
+                },
             },
-            "min_balance": 0,
+            "ledger": {"min_balance": 0},
         }
         p = tmp_path / "pricing.json"
         p.write_text(json.dumps(config_data))

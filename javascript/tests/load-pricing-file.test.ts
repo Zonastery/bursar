@@ -9,12 +9,12 @@ const tmpDir = join(tmpdir(), "bursar-js-test-" + Date.now());
 
 beforeAll(() => {
   mkdirSync(tmpDir, { recursive: true });
-  writeFileSync(join(tmpDir, "test.json"), JSON.stringify({ models: { a: "1" } }));
-  writeFileSync(join(tmpDir, "test.yaml"), 'models:\n  a: "1"\n');
+  writeFileSync(join(tmpDir, "test.json"), JSON.stringify({ metering: { models: { a: "1" } } }));
+  writeFileSync(join(tmpDir, "test.yaml"), 'metering:\n  models:\n    a: "1"\n');
   // LPF1: YAML file with unicode content
   writeFileSync(
     join(tmpDir, "unicode.yaml"),
-    'models:\n  "gpt-4-türkçe": "input_tokens * 1"\n  "模型": "output_tokens * 2"\n',
+    'metering:\n  models:\n    "gpt-4-türkçe": "input_tokens * 1"\n    "模型": "output_tokens * 2"\n',
   );
   // LPF2: valid JSON but not a pricing config (missing version and models)
   writeFileSync(join(tmpDir, "notconfig.json"), JSON.stringify({ hello: "world" }));
@@ -51,13 +51,13 @@ describe("loadPricingFile", () => {
   it("loads JSON file", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
     const result = await loadPricingFile(join(tmpDir, "test.json"));
-    expect(result.models).toEqual({ a: "1" });
+    expect(result.metering.models).toEqual({ a: "1" });
   });
 
   it("loads YAML file", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
     const result = await loadPricingFile(join(tmpDir, "test.yaml"));
-    expect(result.models).toEqual({ a: "1" });
+    expect(result.metering.models).toEqual({ a: "1" });
   });
 
   it("throws a clean ConfigError on missing file", async () => {
@@ -93,10 +93,10 @@ describe("loadPricingFile", () => {
   it("LPF1: loads YAML file with unicode string values without error", async () => {
     const { loadPricingFile } = await import("../src/load-pricing-file.js");
     const result = await loadPricingFile(join(tmpDir, "unicode.yaml"));
-    expect(result.models).toBeDefined();
+    expect(result.metering.models).toBeDefined();
     // unicode keys are preserved
-    expect(Object.keys(result.models as object)).toContain("gpt-4-türkçe");
-    expect(Object.keys(result.models as object)).toContain("模型");
+    expect(Object.keys(result.metering.models as object)).toContain("gpt-4-türkçe");
+    expect(Object.keys(result.metering.models as object)).toContain("模型");
   });
 
   // LPF2 — Valid JSON but not a pricing config → ConfigError when passed to engine

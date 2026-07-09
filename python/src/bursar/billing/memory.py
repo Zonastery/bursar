@@ -30,7 +30,7 @@ class MemoryBillingStore(BillingStore):
 
         for offer_key, offer in (config.subscriptions or {}).items():
             self._offers[offer_key] = offer.model_dump()
-            for provider, ref in (offer.provider_refs or {}).items():
+            for provider, ref in (offer.providers or {}).items():
                 if ref.price_id:
                     key = (provider, "price_id", ref.price_id)
                     self._provider_refs_by[key] = offer_key
@@ -40,9 +40,9 @@ class MemoryBillingStore(BillingStore):
                     self._provider_refs_by.setdefault(key, offer_key)
                     self._provider_refs.setdefault(key, "offer")
 
-        for topup_key, topup in (config.credit_topups or {}).items():
+        for topup_key, topup in (config.topups or {}).items():
             self._topups[topup_key] = topup.model_dump()
-            for provider, ref in (topup.provider_refs or {}).items():
+            for provider, ref in (topup.providers or {}).items():
                 if ref.product_id:
                     key = (provider, "product_id", ref.product_id)
                     self._provider_refs_by[key] = topup_key

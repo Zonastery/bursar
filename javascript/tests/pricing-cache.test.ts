@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { CreditStore } from "../src/stores/credit-store.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
-import type { PricingConfigData, PricingConfigResult } from "../src/types.js";
+import type { PricingConfigResult } from "../src/types.js";
 
 // ── Minimal store that counts loads ────────────────────────────────────
 
@@ -26,6 +26,7 @@ class FakeStore extends CreditStore {
   }
 
   // Stubs
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async setup(): Promise<any> {
     return {};
   }
@@ -57,7 +58,10 @@ class FakeStore extends CreditStore {
   async getAvailable(): Promise<never> {
     throw new Error("stub");
   }
-  async getCreditTiers(): Promise<never> {
+  async getBucketBalances(): Promise<never> {
+    throw new Error("stub");
+  }
+  async revokeCreditsByTxType(): Promise<never> {
     throw new Error("stub");
   }
   async setUserPlan(): Promise<never> {
@@ -136,8 +140,9 @@ function makeResult(ver: number = 1): PricingConfigResult {
     id: ver === 1 ? "cfg-a" : "cfg-b",
     config: {
       version: 1,
-      models: { _default: "input_tokens * 1" },
-    } as unknown as PricingConfigData,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    },
     version: ver,
   };
 }

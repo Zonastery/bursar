@@ -9,9 +9,9 @@ from bursar.billing.models import (
     BillingEvent,
     BillingInvoiceInfo,
     BillingPaymentInfo,
-    BillingProviderRefs,
     BillingSubscriptionInfo,
     BillingSubscriptionStatus,
+    ProviderRef,
 )
 from bursar.providers.types import ProviderLogger
 
@@ -110,7 +110,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                                 status=_parse_status(sub.get("status")),
                                 cancel_at_period_end=sub.get("cancel_at_period_end"),
                                 period_end=period_end,
-                                refs=BillingProviderRefs(
+                                refs=ProviderRef(
                                     lookup_key=plan_slug,
                                 )
                                 if plan_slug
@@ -158,7 +158,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                     amount_minor=session.get("amount_total") or 0,
                     currency=(session.get("currency") or "usd").upper(),
                     purpose="credit_topup",
-                    refs=BillingProviderRefs(
+                    refs=ProviderRef(
                         product_id=str(product_id) if product_id else None,
                         price_id=price_id,
                     ),

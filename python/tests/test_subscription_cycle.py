@@ -2,7 +2,7 @@
 
 This is the single call a payment-provider webhook handler makes for a
 subscription renewal or signup grant. Requires a store with the target
-``tier`` configured (tiers are what let a subscription grant coexist with,
+``bucket`` configured (buckets are what let a subscription grant coexist with,
 and not clobber, credits from other sources).
 """
 
@@ -28,15 +28,17 @@ def manager(store: MemoryStore) -> CreditManager:
     mgr = CreditManager(store=store)
     mgr.publish_pricing_from_dict(
         {
-            "models": {"_default": "input_tokens * 1"},
-            "min_balance": 0,
-            "tiers": {
-                "subscription": {
-                    "name": "Subscription",
-                    "priority": 1,
-                    "expires": True,
-                    "is_default": True,
-                    "default_ttl_days": 30,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {
+                "min_balance": 0,
+                "buckets": {
+                    "subscription": {
+                        "label": "Subscription",
+                        "priority": 1,
+                        "expires": True,
+                        "default": True,
+                        "ttl_days": 30,
+                    },
                 },
             },
         }
@@ -44,11 +46,11 @@ def manager(store: MemoryStore) -> CreditManager:
     return mgr
 
 
-def _tier_balance(manager: CreditManager, user_id: str, tier: str) -> Decimal:
-    tiers = manager.get_credit_tiers(user_id)
-    for t in tiers.tiers:
-        if t.tier_key == tier:
-            return t.balance
+def _bucket_balance(manager: CreditManager, user_id: str, bucket: str) -> Decimal:
+    result = manager.get_bucket_balances(user_id)
+    for b in result.buckets:
+        if b.bucket_key == bucket:
+            return b.balance
     return Decimal(0)
 
 
@@ -59,7 +61,7 @@ class TestIdempotency:
 
         assert r1.transaction_id == r2.transaction_id
         assert manager.get_balance("user_1").balance == Decimal(100)
-        assert _tier_balance(manager, "user_1", "subscription") == Decimal(100)
+        assert _bucket_balance(manager, "user_1", "subscription") == Decimal(100)
 
     def test_redelivery_does_not_double_grant_or_wipe_balance(self, manager: CreditManager) -> None:
         """Redelivery safety end-to-end: replace_prior defaults to True, so a
@@ -78,13 +80,13 @@ class TestReplacePrior:
         manager.grant_subscription_cycle("user_1", 100, ttl_days=30, idempotency_key="evt_1")
         manager.grant_subscription_cycle("user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=True)
 
-        assert _tier_balance(manager, "user_1", "subscription") == Decimal(40)
+        assert _bucket_balance(manager, "user_1", "subscription") == Decimal(40)
 
     def test_replace_prior_false_adds_on_top_of_leftover(self, manager: CreditManager) -> None:
         manager.grant_subscription_cycle("user_1", 100, ttl_days=30, idempotency_key="evt_1")
         manager.grant_subscription_cycle("user_1", 40, ttl_days=30, idempotency_key="evt_2", replace_prior=False)
 
-        assert _tier_balance(manager, "user_1", "subscription") == Decimal(140)
+        assert _bucket_balance(manager, "user_1", "subscription") == Decimal(140)
 
     def test_replace_prior_true_is_a_noop_when_leftover_already_zero(self, manager: CreditManager) -> None:
         """First-ever cycle: nothing to replace, so replace_prior=True must not
@@ -93,7 +95,7 @@ class TestReplacePrior:
             "user_1", 75, ttl_days=30, idempotency_key="evt_1", replace_prior=True
         )
         assert result.amount == Decimal(75)
-        assert _tier_balance(manager, "user_1", "subscription") == Decimal(75)
+        assert _bucket_balance(manager, "user_1", "subscription") == Decimal(75)
 
 
 class TestExpiry:
@@ -133,19 +135,21 @@ class TestSideEffects:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "min_balance": 0,
-                "tiers": {
-                    "subscription": {
-                        "name": "Subscription",
-                        "priority": 1,
-                        "expires": True,
-                        "is_default": True,
-                        "default_ttl_days": 30,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {
+                    "min_balance": 0,
+                    "buckets": {
+                        "subscription": {
+                            "label": "Subscription",
+                            "priority": 1,
+                            "expires": True,
+                            "default": True,
+                            "ttl_days": 30,
+                        },
                     },
                 },
                 "plans": {
-                    "pro": {"id": "pro", "name": "Pro"},
+                    "pro": {"label": "Pro"},
                 },
             }
         )
@@ -157,15 +161,17 @@ class TestSideEffects:
         mgr = CreditManager(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "min_balance": 0,
-                "tiers": {
-                    "subscription": {
-                        "name": "Subscription",
-                        "priority": 1,
-                        "expires": True,
-                        "is_default": True,
-                        "default_ttl_days": 30,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {
+                    "min_balance": 0,
+                    "buckets": {
+                        "subscription": {
+                            "label": "Subscription",
+                            "priority": 1,
+                            "expires": True,
+                            "default": True,
+                            "ttl_days": 30,
+                        },
                     },
                 },
             }

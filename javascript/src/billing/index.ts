@@ -18,11 +18,11 @@ export type {
   BillingOfferInterval,
   BillingPaymentInfo,
   BillingProvider,
-  BillingProviderRefs,
   BillingRefundInfo,
   BillingSubscriptionInfo,
-  BillingSubscriptionOfferRef,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   EntitlementMode,
+  ProviderRef,
+  SubscriptionGrant,
 } from "./billing-types.js";

@@ -22,17 +22,19 @@ from bursar.interface.models import (
     AllowanceResult,
     AvailableResult,
     BalanceResult,
+    BucketBalance,
+    BucketBalancesResult,
     CapCheckResult,
     CreateTeamResult,
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    Entitlement,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
-    PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
@@ -45,8 +47,6 @@ from bursar.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
-    TierBalance,
-    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -88,9 +88,9 @@ def _feature_period_end(feature_limit: FeatureLimit | None, feature_period_start
 
 
 def _dec_map(value: Any) -> dict[str, Decimal] | None:
-    """Coerce a ``{tier_key: amount}`` JSONB object into ``dict[str, Decimal]`` (023).
+    """Coerce a ``{bucket_key: amount}`` JSONB object into ``dict[str, Decimal]`` (023).
 
-    Used for ``tier_breakdown``/``expired_by_tier`` fields, which come back from
+    Used for ``bucket_breakdown``/``expired_by_bucket`` fields, which come back from
     RPCs as a JSON object of tier key -> NUMERIC amount. Returns ``None`` for a
     missing/empty/non-dict value so callers can distinguish "no tier data" from
     "empty breakdown" the same way the rest of this module treats optional fields.
@@ -190,7 +190,7 @@ class PostgresStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
-        tier: str | None = None,
+        bucket: str | None = None,
         idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
@@ -202,7 +202,7 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "credits_add",
-                    [user_id, amount, type, json.dumps(meta), tier, idempotency_key],
+                    [user_id, amount, type, json.dumps(meta), bucket, idempotency_key],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -218,7 +218,7 @@ class PostgresStore(CreditStore):
             amount=_dec(result_dict.get("amount"), amount),
             new_balance=_dec(result_dict.get("new_balance")),
             lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
-            tier=str(result_dict.get("tier", "default")),
+            bucket=str(result_dict.get("bucket", "default")),
         )
 
     def deduct_with_allowance(
@@ -313,7 +313,7 @@ class PostgresStore(CreditStore):
             idempotent=bool(result_dict.get("idempotent", False)),
             cap_warning=result_dict.get("cap_warning") or None,
             feature_limit_warning=result_dict.get("feature_limit_warning") or None,
-            tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(result_dict.get("bucket_breakdown")),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -459,7 +459,7 @@ class PostgresStore(CreditStore):
             idempotent=bool(result.get("idempotent", False)),
             cap_warning=result.get("cap_warning") or None,
             feature_limit_warning=result.get("feature_limit_warning") or None,
-            tier_breakdown=_dec_map(result.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(result.get("bucket_breakdown")),
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -545,7 +545,7 @@ class PostgresStore(CreditStore):
 
     def set_active_pricing(
         self,
-        config: PricingConfigData,
+        config: dict[str, Any],
         label: str | None = None,
     ) -> str:
         conn = self._conn()
@@ -553,7 +553,7 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "set_active_pricing_config",
-                    [json.dumps(config.model_dump(mode="json", exclude_none=True)), label],
+                    [json.dumps(config), label],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -618,19 +618,22 @@ class PostgresStore(CreditStore):
             conn.close()
 
         if not row:
-            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=Decimal(0))
+            return GetUserPlanResult(user_id=user_id)
 
         result_dict = row[0] if isinstance(row[0], dict) else {}
         return GetUserPlanResult(
             user_id=str(result_dict.get("user_id", user_id)),
             plan_id=result_dict.get("plan_id") or None,
-            plan_name=result_dict.get("plan_name") or None,
-            free_allowance=_dec(result_dict.get("free_allowance")),
-            features=result_dict.get("features") or {},
-            feature_limits={
-                k: FeatureLimit.model_validate(v) for k, v in (result_dict.get("feature_limits") or {}).items()
+            plan_label=result_dict.get("plan_label") or result_dict.get("plan_name") or None,
+            allowance_amount=_dec(result_dict["allowance_amount"])
+            if result_dict.get("allowance_amount") is not None
+            else _dec(result_dict.get("free_allowance", 0)),
+            allowance_period=str(result_dict.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
+            entitlements={
+                k: Entitlement.model_validate(v)
+                for k, v in (result_dict.get("entitlements") or result_dict.get("feature_limits") or {}).items()
             },
-            default_billing_mode=str(result_dict.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            billing_mode=str(result_dict.get("billing_mode") or result_dict.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={
                 k: OperationPolicy.model_validate(v) for k, v in (result_dict.get("per_operation") or {}).items()
             },
@@ -638,7 +641,6 @@ class PostgresStore(CreditStore):
             overdraft_floor=_dec(result_dict["overdraft_floor"])
             if result_dict.get("overdraft_floor") is not None
             else None,
-            allowance_period=str(result_dict.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
             plan_assigned_at=(
                 datetime.fromisoformat(str(result_dict["plan_assigned_at"]))
                 if result_dict.get("plan_assigned_at")
@@ -826,7 +828,7 @@ class PostgresStore(CreditStore):
             user_id=str(result_dict.get("user_id", "")),
             amount=_dec(result_dict.get("amount")),
             new_balance=_dec(result_dict.get("new_balance")),
-            tier_breakdown=_dec_map(result_dict.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(result_dict.get("bucket_breakdown")),
         )
 
     def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
@@ -843,7 +845,7 @@ class PostgresStore(CreditStore):
             "user_id": str(result_dict.get("user_id", user_id)),
             "amount": result_dict.get("amount", 0),
             "new_balance": result_dict.get("new_balance", ""),
-            "tier": result_dict.get("tier"),
+            "bucket": result_dict.get("bucket"),
         }
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -1137,33 +1139,33 @@ class PostgresStore(CreditStore):
             expired_count=int(result_dict.get("expired_count", 0)),
             expired_amount=_dec(result_dict.get("expired_amount")),
             dry_run=dry_run,
-            expired_by_tier=_dec_map(result_dict.get("expired_by_tier")),
+            expired_by_bucket=_dec_map(result_dict.get("expired_by_bucket")),
         )
 
-    # ── Credit tiers (023) ────────────────────────────────────────────────
+    # ── Credit buckets ────────────────────────────────────────────────
 
-    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
+    def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
-                cur.callproc("get_user_credit_tiers", [user_id])
+                cur.callproc("get_user_credit_buckets", [user_id])
                 row = cur.fetchone()
         finally:
             conn.close()
 
         result_dict = row[0] if row and isinstance(row[0], dict) else {}
-        tiers = [
-            TierBalance(
-                tier_key=str(t.get("tier_key", "")),
-                name=str(t.get("name", "")),
+        buckets = [
+            BucketBalance(
+                bucket_key=str(t.get("bucket_key", "")),
+                label=str(t.get("name", "")),
                 priority=int(t.get("priority", 0)),
                 expires=bool(t.get("expires", False)),
                 balance=_dec(t.get("balance")),
             )
-            for t in (result_dict.get("tiers") or [])
+            for t in (result_dict.get("buckets") or [])
         ]
-        return TierBalancesResult(
+        return BucketBalancesResult(
             user_id=str(result_dict.get("user_id", user_id)),
-            tiers=tiers,
+            buckets=buckets,
             total_balance=_dec(result_dict.get("total_balance")),
         )

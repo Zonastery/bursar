@@ -135,7 +135,7 @@ class BillingManager:
 
     @staticmethod
     def _compute_topup_credits(amount_minor: int, topup_config: dict) -> int:
-        credits_per = topup_config.get("credits_per_major_unit", 1000)
+        credits_per = topup_config.get("credits_per_unit", 1000)
         return (amount_minor * credits_per) // 100
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
@@ -171,12 +171,12 @@ class BillingManager:
             refs = event.subscription.refs
             if refs and refs.lookup_key:
                 return (
-                    {"plan_key": refs.lookup_key, "entitlement_mode": "allowance"},
+                    {"plan": refs.lookup_key, "grant": {"mode": "allowance"}},
                     refs.lookup_key,
                     refs.lookup_key,
                 )
             return None, None, None
-        return offer, offer.get("offer_key"), offer.get("plan_key")
+        return offer, offer.get("offer_key"), offer.get("plan")
 
     def _subscription_state(
         self,
@@ -262,7 +262,7 @@ class BillingManager:
         if self._cm and provision_on_positive:
             self._provision_subscription(
                 uid,
-                offer or ({"plan_key": existing.plan_key} if existing and existing.plan_key else None),
+                offer or ({"plan": existing.plan_key} if existing and existing.plan_key else None),
                 event,
             )
 
@@ -492,7 +492,7 @@ class BillingManager:
                 )
                 if topup_config:
                     payment_metadata = {
-                        "credits_per_major_unit": int(topup_config.get("credits_per_major_unit", 1000)),
+                        "credits_per_unit": int(topup_config.get("credits_per_unit", 1000)),
                     }
             self._store.upsert_billing_payment(
                 event.provider,
@@ -516,8 +516,6 @@ class BillingManager:
             )
 
         if topup_config and self._cm and event.payment.purpose == "credit_topup" and uid:
-            if event.payment.currency.upper() != str(topup_config.get("currency", "USD")).upper():
-                return BillingEventResult(handled=True, action="payment_succeeded")
             min_amount = int(topup_config.get("min_amount_minor", 0))
             max_amount = int(topup_config.get("max_amount_minor", 10**18))
             if event.payment.amount_minor < min_amount or event.payment.amount_minor > max_amount:
@@ -528,7 +526,7 @@ class BillingManager:
                     uid,
                     Decimal(credits),
                     tx_type="purchase",
-                    tier=topup_config.get("tier", "purchased"),
+                    bucket=topup_config.get("deposit_to", "purchased"),
                 )
                 logger.info(
                     "granted %d topup credits to user %s (payment %s)",
@@ -573,23 +571,21 @@ class BillingManager:
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
                 if payment and payment.get("purpose") == "credit_topup":
                     pay_meta = payment.get("metadata") or {}
-                    credits_per_major = pay_meta.get("credits_per_major_unit")
-                    if credits_per_major is None:
+                    credits_per_unit = pay_meta.get("credits_per_unit")
+                    if credits_per_unit is None:
                         logger.warning(
-                            "cannot claw back credits for refund %s: no credits_per_major_unit in payment metadata",
+                            "cannot claw back credits for refund %s: no credits_per_unit in payment metadata",
                             refund.provider_refund_id,
                         )
                         return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
-                    credits_per_major = int(credits_per_major)
-                    credits = self._compute_topup_credits(
-                        refund.amount_minor, {"credits_per_major_unit": credits_per_major}
-                    )
+                    credits_per_unit = int(credits_per_unit)
+                    credits = self._compute_topup_credits(refund.amount_minor, {"credits_per_unit": credits_per_unit})
                     if credits > 0:
                         self._cm.deduct_credits(
                             uid,
                             Decimal(str(credits)),
                             tx_type="refund_clawback",
-                            tier="purchased",
+                            bucket="purchased",
                         )
                         logger.info(
                             "clawed back %d credits from user %s for refund %s",
@@ -631,7 +627,7 @@ class BillingManager:
         if not offer or not self._cm:
             return
 
-        plan_key = offer.get("plan_key")
+        plan_key = offer.get("plan")
         if not plan_key:
             return
 
@@ -647,19 +643,19 @@ class BillingManager:
 
         self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
 
-        entitlement_mode = offer.get("entitlement_mode") if offer else None
-        if entitlement_mode == "cycle_grant" and self._cm:
-            cycle_credits = offer.get("cycle_grant_credits")
+        grant = offer.get("grant") or {}
+        if grant.get("mode") == "cycle_grant" and self._cm:
+            cycle_credits = grant.get("credits")
             if cycle_credits:
-                cycle_tier = offer.get("cycle_grant_tier", "purchased")
-                replace_prior = offer.get("cycle_grant_replace_prior", True)
+                cycle_tier = grant.get("bucket", "purchased")
+                replace_prior = grant.get("replace_prior", True)
                 if replace_prior:
                     self._cm.revoke_credits_by_tx_type(uid, "cycle_grant")
                 self._cm.add_credits(
                     uid,
                     Decimal(str(cycle_credits)),
                     tx_type="cycle_grant",
-                    tier=cycle_tier,
+                    bucket=cycle_tier,
                 )
                 logger.info("granted %d cycle credits to user %s (tier=%s)", cycle_credits, uid, cycle_tier)
 
@@ -687,6 +683,6 @@ class BillingManager:
                     event.subscription.provider_subscription_id,
                 )
                 if existing and existing.plan_key:
-                    self._provision_subscription(uid, {"plan_key": existing.plan_key}, event)
+                    self._provision_subscription(uid, {"plan": existing.plan_key}, event)
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
             self._revoke_subscription(uid)

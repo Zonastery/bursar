@@ -8,9 +8,9 @@ from bursar.billing.models import (
     BillingCustomerInfo,
     BillingEvent,
     BillingPaymentInfo,
-    BillingProviderRefs,
     BillingSubscriptionInfo,
     BillingSubscriptionStatus,
+    ProviderRef,
 )
 from bursar.providers.types import ProviderLogger
 
@@ -75,7 +75,7 @@ async def handle_dodo_billing_event(  # noqa: C901
                                 provider_subscription_id=sub_id,
                                 status=_parse_status("active"),
                                 period_end=period_end,
-                                refs=BillingProviderRefs(
+                                refs=ProviderRef(
                                     lookup_key=metadata.get("plan_slug"),
                                 )
                                 if metadata.get("plan_slug")
@@ -218,9 +218,9 @@ async def handle_dodo_billing_event(  # noqa: C901
         product_id = str(data.get("product_id", ""))
         refs = None
         if product_id:
-            refs = BillingProviderRefs(product_id=product_id)
+            refs = ProviderRef(product_id=product_id)
         elif metadata.get("plan_slug"):
-            refs = BillingProviderRefs(lookup_key=metadata["plan_slug"])
+            refs = ProviderRef(lookup_key=metadata["plan_slug"])
         bm.handle_event(
             BillingEvent(
                 **_with_user(
@@ -243,7 +243,7 @@ async def handle_dodo_billing_event(  # noqa: C901
         refs = None
         product_id = data.get("product_id")
         if product_id:
-            refs = BillingProviderRefs(product_id=str(product_id))
+            refs = ProviderRef(product_id=str(product_id))
 
         payment_info = BillingPaymentInfo(
             provider_payment_id=payment_id or raw_id,

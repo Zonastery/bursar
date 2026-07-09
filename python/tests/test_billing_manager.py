@@ -18,12 +18,12 @@ from bursar.billing import (
     BillingOffer,
     BillingOfferInterval,
     BillingPaymentInfo,
-    BillingProviderRefs,
     BillingRefundInfo,
     BillingSubscriptionInfo,
-    BillingSubscriptionOfferRef,
     BillingSubscriptionStatus,
     MemoryBillingStore,
+    ProviderRef,
+    SubscriptionGrant,
 )
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -44,31 +44,18 @@ def credit_manager(credit_store: MemoryStore) -> CreditManager:
     mgr = CreditManager(store=credit_store)
     mgr.publish_pricing_from_dict(
         {
-            "models": {"_default": "input_tokens * 1"},
-            "min_balance": 0,
-            "plans": {
-                "free": {
-                    "id": "free",
-                    "name": "Free",
-                    "free_allowance": 1000,
-                },
-                "pro": {
-                    "id": "pro",
-                    "name": "Pro",
-                    "free_allowance": 100000,
+            "version": 1,
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {
+                "min_balance": 0,
+                "buckets": {
+                    "purchased": {"label": "Purchased", "priority": 1, "default": True},
+                    "subscription": {"label": "Subscription", "priority": 2},
                 },
             },
-            "tiers": {
-                "purchased": {
-                    "name": "Purchased",
-                    "priority": 1,
-                    "is_default": True,
-                },
-                "subscription": {
-                    "name": "Subscription",
-                    "priority": 2,
-                    "is_default": False,
-                },
+            "plans": {
+                "free": {"label": "Free", "allowance": {"amount": 1000}},
+                "pro": {"label": "Pro", "allowance": {"amount": 100000}},
             },
         }
     )
@@ -80,52 +67,47 @@ def billing_config() -> BillingConfig:
     return BillingConfig(
         subscriptions={
             "pro_monthly": BillingOffer(
-                offer_key="pro_monthly",
-                plan_key="pro",
+                plan="pro",
                 interval=BillingOfferInterval.month,
                 interval_count=1,
-                entitlement_mode="allowance",
-                provider_refs={
-                    "stripe": BillingSubscriptionOfferRef(
-                        provider="stripe",
+                grant=SubscriptionGrant(mode="allowance"),
+                providers={
+                    "stripe": ProviderRef(
                         price_id="price_pro_monthly",
                     ),
                 },
             ),
             "pro_yearly": BillingOffer(
-                offer_key="pro_yearly",
-                plan_key="pro",
+                plan="pro",
                 interval=BillingOfferInterval.year,
                 interval_count=1,
-                entitlement_mode="allowance",
+                grant=SubscriptionGrant(mode="allowance"),
             ),
             "pro_monthly_cycle_grant": BillingOffer(
-                offer_key="pro_monthly_cycle_grant",
-                plan_key="pro",
+                plan="pro",
                 interval=BillingOfferInterval.month,
                 interval_count=1,
-                entitlement_mode="cycle_grant",
-                cycle_grant_credits=5000,
-                cycle_grant_tier="subscription",
-                provider_refs={
-                    "stripe": BillingSubscriptionOfferRef(
-                        provider="stripe",
+                grant=SubscriptionGrant(
+                    mode="cycle_grant",
+                    credits=5000,
+                    bucket="subscription",
+                ),
+                providers={
+                    "stripe": ProviderRef(
                         price_id="price_pro_monthly_cycle_grant",
                     ),
                 },
             ),
         },
-        credit_topups={
+        topups={
             "standard_topup": BillingCreditTopup(
-                tier="purchased",
-                currency="USD",
-                credits_per_major_unit=1000,
+                deposit_to="purchased",
+                credits_per_unit=1000,
                 min_amount_minor=500,
                 max_amount_minor=500000,
                 tax_behavior="exclude_tax",
-                provider_refs={
-                    "stripe": BillingSubscriptionOfferRef(
-                        provider="stripe",
+                providers={
+                    "stripe": ProviderRef(
                         price_id="price_topup_usd",
                     ),
                 },
@@ -184,7 +166,7 @@ def _sub_event(
             period_end=period_end,
             interval=interval,
             interval_count=interval_count,
-            refs=BillingProviderRefs(
+            refs=ProviderRef(
                 price_id=price_id,
                 product_id=product_id,
             ),
@@ -216,7 +198,7 @@ def _payment_event(
             provider_payment_id=provider_payment_id,
             amount_minor=amount_minor,
             currency=currency,
-            refs=BillingProviderRefs(
+            refs=ProviderRef(
                 price_id=price_id,
                 product_id=product_id,
             ),
@@ -390,7 +372,7 @@ class TestSubscriptionLifecycle:
 
         plan = credit_store.get_user_plan("user_123")
         assert plan.plan_id is not None
-        assert plan.plan_name == "Pro"
+        assert plan.plan_label == "Pro"
 
     def test_subscription_updated_changes_status(
         self,
@@ -693,11 +675,10 @@ class TestConfigSync:
         config = BillingConfig(
             subscriptions={
                 "enterprise_monthly": BillingOffer(
-                    offer_key="enterprise_monthly",
-                    plan_key="pro",
+                    plan="pro",
                     interval=BillingOfferInterval.month,
                     interval_count=1,
-                    entitlement_mode="allowance",
+                    grant=SubscriptionGrant(mode="allowance"),
                 ),
             },
         )
@@ -716,14 +697,12 @@ class TestConfigSync:
         billing_store: MemoryBillingStore,
     ) -> None:
         config = BillingConfig(
-            credit_topups={
+            topups={
                 "bonus_topup": BillingCreditTopup(
-                    tier="purchased",
-                    currency="USD",
-                    credits_per_major_unit=2000,
-                    provider_refs={
-                        "stripe": BillingSubscriptionOfferRef(
-                            provider="stripe",
+                    deposit_to="purchased",
+                    credits_per_unit=2000,
+                    providers={
+                        "stripe": ProviderRef(
                             price_id="price_bonus",
                         ),
                     },
@@ -738,7 +717,7 @@ class TestConfigSync:
         )
         assert topup is not None
         assert topup["topup_key"] == "bonus_topup"
-        assert topup["credits_per_major_unit"] == 2000
+        assert topup["credits_per_unit"] == 2000
 
     def test_compute_topup_credits(self, manager: BillingManager) -> None:
         config = {

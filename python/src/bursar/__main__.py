@@ -257,11 +257,9 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
 
 def _cmd_config_validate(args: argparse.Namespace) -> None:
     from bursar.config import PricingConfig
-    from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
     try:
-        PricingConfigData.model_validate(data)
         PricingConfig.model_validate(data)
     except Exception as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
@@ -271,15 +269,10 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
     from bursar.config import PricingConfig
-    from bursar.interface.models import PricingConfigData
 
     data = _load_pricing_file(args.file)
     try:
-        # Run the same two validators as `config validate` (PricingConfig is the
-        # strict gate: expressions, tier rules, signup_bonus sign, etc.) — `set`
-        # must never persist a config that `validate` would reject.
         PricingConfig.model_validate(data)
-        config = PricingConfigData.model_validate(data)
     except Exception as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -290,11 +283,11 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
     # version churn and noisy diffs.  Only applies when an active version exists;
     # first-time setup always proceeds.
     active = store.get_active_pricing()
-    if active is not None and config == active.config:
+    if active is not None and data == active.config:
         print("No changes — config is identical to the active version.")
         return
 
-    _retry_transient(lambda: store.set_active_pricing(config, label=args.label), what="set pricing")
+    _retry_transient(lambda: store.set_active_pricing(data, label=args.label), what="set pricing")
     print("Pricing config set successfully.")
 
 
@@ -331,7 +324,7 @@ def _cmd_config_export(args: argparse.Namespace) -> None:
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
         raise SystemExit(1)
-    print(json.dumps(result.config.model_dump(mode="json", exclude_none=True), indent=2))
+    print(json.dumps(result.config, indent=2, default=str))
 
 
 def _cmd_config_diff(args: argparse.Namespace) -> None:
@@ -348,8 +341,8 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
         print(f"Version {args.version_b} not found.", file=sys.stderr)
         raise SystemExit(1)
 
-    a_json = json.dumps(a.config.model_dump(mode="json"), indent=2)
-    b_json = json.dumps(b.config.model_dump(mode="json"), indent=2)
+    a_json = json.dumps(a.config, indent=2, default=str)
+    b_json = json.dumps(b.config, indent=2, default=str)
     diff = difflib.unified_diff(
         a_json.splitlines(keepends=True),
         b_json.splitlines(keepends=True),

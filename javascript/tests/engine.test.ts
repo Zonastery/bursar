@@ -8,19 +8,24 @@ import { ConfigError } from "../src/errors.js";
 import type { UsageMetrics } from "../src/metrics.js";
 
 const TEST_CONFIG = {
-  models: {
-    "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
-    "gpt-3.5-turbo": "input_tokens * (0.001 / 1000) + output_tokens * (0.002 / 1000)",
-    _default: "input_tokens * (0.05 / 1000)",
+  version: 1,
+  metering: {
+    models: {
+      "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
+      "gpt-3.5-turbo": "input_tokens * (0.001 / 1000) + output_tokens * (0.002 / 1000)",
+      "*": "input_tokens * (0.05 / 1000)",
+    },
+    tools: {
+      "*": "calls * 5 / 1000",
+      code_exec: "calls * 10 / 1000",
+    },
+    search: "search_queries * 0.5 + search_results * 0.05",
+    cacheDiscount: "cache_read_tokens * (0.001 / 1000)",
+    flatJobs: { batch_train: 100 },
   },
-  tools: {
-    _default: "tool_calls * 5 / 1000",
-    code_exec: "tool_calls * 10 / 1000",
+  ledger: {
+    minBalance: 5,
   },
-  search: "search_queries * 0.5 + search_results * 0.05",
-  cache: "-cache_read_tokens * (0.001 / 1000)",
-  fixed: { batch_train: 100 },
-  minBalance: 5,
 };
 
 describe("PricingEngine", () => {
@@ -30,7 +35,7 @@ describe("PricingEngine", () => {
   });
 
   it("rejects invalid config", () => {
-    expect(() => PricingEngine.fromDict({ models: {} })).toThrow(ConfigError);
+    expect(() => PricingEngine.fromDict({ metering: { models: {} } })).toThrow(ConfigError);
   });
 
   describe("calculate (Decimal money)", () => {
@@ -108,7 +113,7 @@ describe("PricingEngine", () => {
     it("includes fixed job cost (not truncated)", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
       const metrics: UsageMetrics = {
-        fixedJob: "batch_train",
+        flatJob: "batch_train",
       };
       const result = engine.calculate(metrics);
       expect(result.fixedCredits.toFixed(4)).toBe("100.0000");
@@ -119,7 +124,7 @@ describe("PricingEngine", () => {
       // CHANGED: a 0.4-credit op now yields total 0.4000 (was truncated to 0
       // downstream by Math.trunc in the manager).
       const engine = PricingEngine.fromDict({
-        models: { _default: "input_tokens * 0.0004" },
+        metering: { models: { "*": "input_tokens * 0.0004" } },
       });
       const result = engine.calculate({ model: "x", inputTokens: 1000 });
       expect(result.total.toFixed(4)).toBe("0.4000");
@@ -138,7 +143,7 @@ describe("PricingEngine", () => {
       expect(result.total.isNegative()).toBe(false);
     });
 
-    it("uses _default model when model not found", () => {
+    it("uses * model when model not found", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
       const metrics: UsageMetrics = {
         model: "unknown-model",
@@ -150,9 +155,9 @@ describe("PricingEngine", () => {
       expect(result.modelCredits.toFixed(4)).toBe("0.0500");
     });
 
-    it("throws for missing model with no _default", () => {
+    it("throws for missing model with no *", () => {
       const cfg = {
-        models: { "gpt-4": "input_tokens * 1" },
+        metering: { models: { "gpt-4": "input_tokens * 1" } },
       };
       const engine = PricingEngine.fromDict(cfg);
       expect(() => engine.calculate({ model: "unknown", inputTokens: 100 })).toThrow(ConfigError);
@@ -183,14 +188,14 @@ describe("PricingEngine", () => {
       expect(engine.resolveModel("gpt-4-turbo")).toBe("gpt-4");
     });
 
-    it("falls back to _default", () => {
+    it("falls back to *", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
-      expect(engine.resolveModel("claude-3")).toBe("_default");
+      expect(engine.resolveModel("claude-3")).toBe("*");
     });
 
-    it("returns null if no match and no _default", () => {
+    it("returns null if no match and no *", () => {
       const engine = PricingEngine.fromDict({
-        models: { "gpt-4": "input_tokens * 1" },
+        metering: { models: { "gpt-4": "input_tokens * 1" } },
       });
       expect(engine.resolveModel("claude-3")).toBeNull();
     });
@@ -214,35 +219,33 @@ describe("PricingEngine", () => {
     });
   });
 
-  describe("getFixedCost (Decimal | null)", () => {
-    it("returns fixed cost for known job as Decimal", () => {
+  describe("getFlatJobCost (Decimal | null)", () => {
+    it("returns flat job cost for known job as Decimal", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
-      const cost = engine.getFixedCost("batch_train");
+      const cost = engine.getFlatJobCost("batch_train");
       expect(cost).toBeInstanceOf(Decimal);
       expect(cost!.toFixed(4)).toBe("100.0000");
     });
 
-    it("accepts fractional (Decimal-compatible) fixed cost (WS3)", () => {
-      // WS3: fixed costs are Decimal-compatible, not integer-only. Only
+    it("accepts fractional (Decimal-compatible) flat job cost (WS3)", () => {
+      // WS3: flat job costs are Decimal-compatible, not integer-only. Only
       // negative values are rejected (see config.test.ts for that case).
       const engine = PricingEngine.fromDict({
-        models: { _default: "input_tokens * 1" },
-        fixed: { tiny: 0.5 },
+        metering: { models: { "*": "input_tokens * 1" }, flatJobs: { tiny: 0.5 } },
       });
-      expect(engine.getFixedCost("tiny")!.toFixed(4)).toBe("0.5000");
+      expect(engine.getFlatJobCost("tiny")!.toFixed(4)).toBe("0.5000");
     });
 
-    it("returns an integer fixed cost as exact Decimal", () => {
+    it("returns an integer flat job cost as exact Decimal", () => {
       const engine = PricingEngine.fromDict({
-        models: { _default: "input_tokens * 1" },
-        fixed: { embed: 2 },
+        metering: { models: { "*": "input_tokens * 1" }, flatJobs: { embed: 2 } },
       });
-      expect(engine.getFixedCost("embed")!.toFixed(4)).toBe("2.0000");
+      expect(engine.getFlatJobCost("embed")!.toFixed(4)).toBe("2.0000");
     });
 
     it("returns null for unknown job", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
-      expect(engine.getFixedCost("unknown")).toBeNull();
+      expect(engine.getFlatJobCost("unknown")).toBeNull();
     });
   });
 
@@ -250,11 +253,11 @@ describe("PricingEngine", () => {
     it("returns config as PricingConfigData", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
       const schema = engine.pricingSchema();
-      expect(schema.models["gpt-4"]).toBeTruthy();
-      expect(schema.tools).toBeTruthy();
-      expect(schema.search).toBeTruthy();
-      expect(schema.cache).toBeTruthy();
-      expect(schema.fixed).toBeTruthy();
+      expect(schema.metering.models["gpt-4"]).toBeTruthy();
+      expect(schema.metering.tools).toBeTruthy();
+      expect(schema.metering.search).toBeTruthy();
+      expect(schema.metering.cacheDiscount).toBeTruthy();
+      expect(schema.metering.flatJobs).toBeTruthy();
     });
   });
 });
@@ -292,14 +295,16 @@ describe("tool calls with duplicate names", () => {
   });
 });
 
-// ── WS2: per-tool pricing gets its own `this_tool_calls` variable ──
-describe("WS2: this_tool_calls is scoped per tool, tool_calls stays global", () => {
+// ── WS2: per-tool pricing gets its own `calls` variable ──
+describe("WS2: calls is scoped per tool, tool_calls stays global", () => {
   it("code_exec is priced on its OWN call count, not the total across all tools", () => {
     const engine = PricingEngine.fromDict({
-      models: { _default: "input_tokens * 0" },
-      tools: {
-        code_exec: "this_tool_calls * 10 / 1000",
-        _default: "this_tool_calls * 5 / 1000",
+      metering: {
+        models: { "*": "input_tokens * 0" },
+        tools: {
+          code_exec: "calls * 10 / 1000",
+          "*": "calls * 5 / 1000",
+        },
       },
     });
     const metrics: UsageMetrics = {
@@ -314,20 +319,22 @@ describe("WS2: this_tool_calls is scoped per tool, tool_calls stays global", () 
       ],
     };
     const result = engine.calculate(metrics);
-    // code_exec: this_tool_calls = 2 (its own count, NOT 5 total) → 2*10/1000 = 0.02
-    // default (3 unconfigured calls): this_tool_calls = 3 → 3*5/1000 = 0.015
+    // code_exec: calls = 2 (its own count, NOT 5 total) → 2*10/1000 = 0.02
+    // default (3 unconfigured calls): calls = 3 → 3*5/1000 = 0.015
     // total tool credits = 0.02 + 0.015 = 0.035
     expect(result.toolCredits.toFixed(4)).toBe("0.0350");
   });
 
   it("tool_calls (global) is still usable and reflects the TOTAL across all tools", () => {
-    // A tool expression referencing the global `tool_calls` (not `this_tool_calls`)
+    // A tool expression referencing the global `tool_calls` (not `calls`)
     // must see the total call count across every tool, unaffected by WS2.
     const engine = PricingEngine.fromDict({
-      models: { _default: "input_tokens * 0" },
-      tools: {
-        code_exec: "tool_calls * 1 / 1000",
-        _default: "tool_calls * 0",
+      metering: {
+        models: { "*": "input_tokens * 0" },
+        tools: {
+          code_exec: "tool_calls * 1 / 1000",
+          "*": "tool_calls * 0",
+        },
       },
     });
     const metrics: UsageMetrics = {
@@ -345,14 +352,14 @@ describe("WS2: this_tool_calls is scoped per tool, tool_calls stays global", () 
 describe("config with no tools section", () => {
   it("tool calls default to zero cost when no tools section provided", () => {
     const engine = PricingEngine.fromDict({
-      models: { _default: "input_tokens * 0.001" },
+      metering: { models: { "*": "input_tokens * 0.001" } },
     });
     const result = engine.calculate({
       model: "x",
       inputTokens: 0,
       toolCalls: [{ name: "web_search" }],
     });
-    // _default tools is "tool_calls * 0", so tool cost = 0
+    // default tool expression is "calls * 0", so tool cost = 0
     expect(result.toolCredits.toFixed(4)).toBe("0.0000");
   });
 });
@@ -361,7 +368,7 @@ describe("config with no tools section", () => {
 describe("config with no cache section", () => {
   it("cache cost is zero when cache section is missing", () => {
     const engine = PricingEngine.fromDict({
-      models: { _default: "input_tokens * 0.001" },
+      metering: { models: { "*": "input_tokens * 0.001" } },
     });
     const result = engine.calculate({
       model: "x",
@@ -372,11 +379,11 @@ describe("config with no cache section", () => {
   });
 });
 
-// ── EN4: Fixed cost for unknown job ──
-describe("getFixedCost for nonexistent job", () => {
+// ── EN4: Flat job cost for unknown job ──
+describe("getFlatJobCost for nonexistent job", () => {
   it("returns null for unknown job name", () => {
     const engine = PricingEngine.fromDict(TEST_CONFIG);
-    expect(engine.getFixedCost("nonexistent_job")).toBeNull();
+    expect(engine.getFlatJobCost("nonexistent_job")).toBeNull();
   });
 });
 
@@ -392,13 +399,15 @@ describe("calculateBatch with empty array", () => {
 describe("total clamped at zero when discount exceeds cost", () => {
   it("large cache discount produces total = 0.0000 (not negative)", () => {
     const engine = PricingEngine.fromDict({
-      models: { _default: "input_tokens * 0.000001" },
-      cache: "-cache_read_tokens * 1",
+      metering: {
+        models: { "*": "input_tokens * 0.000001" },
+        cacheDiscount: "cache_read_tokens * 1",
+      },
     });
     const result = engine.calculate({
       model: "x",
-      inputTokens: 1,       // model cost = 0.000001
-      cacheReadTokens: 100, // cache savings = -100 → cacheSavings = -100
+      inputTokens: 1, // model cost = 0.000001
+      cacheReadTokens: 100, // cacheDiscount = 100 → negated → cacheSavings = -100
     });
     // rawTotal = 0.000001 + (-100) < 0 → clamped to 0
     expect(result.total.toFixed(4)).toBe("0.0000");
@@ -410,9 +419,11 @@ describe("total clamped at zero when discount exceeds cost", () => {
 describe("model resolution: exact match over prefix", () => {
   it("gpt-4-turbo resolves to exact key, not gpt-4 prefix", () => {
     const engine = PricingEngine.fromDict({
-      models: {
-        "gpt-4": "input_tokens * 1",
-        "gpt-4-turbo": "input_tokens * 2",
+      metering: {
+        models: {
+          "gpt-4": "input_tokens * 1",
+          "gpt-4-turbo": "input_tokens * 2",
+        },
       },
     });
     const result = engine.calculate({ model: "gpt-4-turbo", inputTokens: 1000 });
@@ -429,14 +440,15 @@ describe("plan rate overrides (C4)", () => {
     // config-load time but the engine has no concept of per-user plan context.
     // TODO: plan rate overrides are stored but not yet applied by the engine.
     const engine = PricingEngine.fromDict({
-      models: {
-        "gpt-4": "input_tokens * 0.002",
-        _default: "input_tokens * 0.001",
+      metering: {
+        models: {
+          "gpt-4": "input_tokens * 0.002",
+          "*": "input_tokens * 0.001",
+        },
       },
       plans: {
         pro: {
-          id: "p1",
-          name: "Pro",
+          label: "Pro",
           rateOverrides: { "gpt-4": "input_tokens * 0.005" },
         },
       },
@@ -451,9 +463,9 @@ describe("plan rate overrides (C4)", () => {
 
 // ── M5: calculateBatch error propagation for unknown model with no _default ──
 describe("calculateBatch error propagation (M5)", () => {
-  it("throws with a descriptive error when model is unknown and no _default exists", () => {
+  it("throws with a descriptive error when model is unknown and no * exists", () => {
     const engine = PricingEngine.fromDict({
-      models: { "gpt-4": "input_tokens * 0.001" },
+      metering: { models: { "gpt-4": "input_tokens * 0.001" } },
     });
     // calculateBatch maps over calculate(); the first unknown model should throw,
     // not silently produce undefined or zero.
@@ -469,10 +481,12 @@ describe("calculateBatch error propagation (M5)", () => {
 // ── M6: Model prefix ambiguity — exact match beats prefix; prefix beats _default ──
 describe("model prefix ambiguity (M6)", () => {
   const m6Engine = PricingEngine.fromDict({
-    models: {
-      "gpt-4": "input_tokens * 0.002",
-      "gpt-4-turbo": "input_tokens * 0.003",
-      _default: "input_tokens * 0.001",
+    metering: {
+      models: {
+        "gpt-4": "input_tokens * 0.002",
+        "gpt-4-turbo": "input_tokens * 0.003",
+        "*": "input_tokens * 0.001",
+      },
     },
   });
 
@@ -533,10 +547,8 @@ describe("parity fixture — pricing_cases (totals)", () => {
         searchResults: (c.metrics.search_results as number) ?? 0,
         webSearchCalls: (c.metrics.web_search_calls as number) ?? 0,
         codeExecCalls: (c.metrics.code_exec_calls as number) ?? 0,
-        fixedJob: (c.metrics.fixed_job as string) ?? undefined,
-        toolCalls: Array.isArray(rawToolCalls)
-          ? rawToolCalls.map((t) => ({ name: t.name }))
-          : [],
+        flatJob: (c.metrics.flat_job as string) ?? undefined,
+        toolCalls: Array.isArray(rawToolCalls) ? rawToolCalls.map((t) => ({ name: t.name })) : [],
       };
       const result = engine.calculate(metrics);
       expect(result.total.toFixed(4)).toBe(c.expected_total);

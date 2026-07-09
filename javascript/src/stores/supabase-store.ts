@@ -25,7 +25,6 @@ import type {
   ListUsageEventsOptions,
   OperationPolicy,
   PaginatedTransactions,
-
   PricingConfigHistoryItem,
   PricingConfigResult,
   RefundResult,
@@ -99,12 +98,25 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, FeatureLimit> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const fl = (v ?? {}) as Record<string, unknown>;
-    out[k] = {
-      maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
-      period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-      onExceed: (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
-    };
+    if (v === null || typeof v !== "object" || Object.getPrototypeOf(v) !== Object.prototype) {
+      // Plain or non-plain-object value (e.g. true, 20, ""): wrap as value.
+      out[k] = {
+        value: v,
+        maxCalls: 0,
+        period: "monthly",
+        onExceed: "deny",
+      } as FeatureLimit;
+    } else {
+      const fl = v as Record<string, unknown>;
+      const valueRaw = fl["value"];
+      out[k] = {
+        ...(valueRaw !== undefined ? { value: valueRaw } : {}),
+        maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
+        period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
+        onExceed:
+          (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+      } as FeatureLimit;
+    }
   }
   return out;
 }
@@ -331,7 +343,7 @@ export class HttpxSupabaseStore extends CreditStore {
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
-      bucket: String(row.tier ?? tier ?? "default"),
+      bucket: String(row.bucket ?? row.tier ?? tier ?? "default"),
       idempotent: Boolean(row.idempotent),
     };
   }
@@ -638,7 +650,15 @@ export class HttpxSupabaseStore extends CreditStore {
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const row = await this.rpc("get_user_plan", { p_user_id: userId });
     if (!row || Object.keys(row).length === 0) {
-      return { userId, planId: null, planLabel: null, allowanceAmount: ZERO, allowancePeriod: 'calendar_month' as AllowancePeriod, entitlements: {}, billingMode: 'strict' as BillingMode };
+      return {
+        userId,
+        planId: null,
+        planLabel: null,
+        allowanceAmount: ZERO,
+        allowancePeriod: "calendar_month" as AllowancePeriod,
+        entitlements: {},
+        billingMode: "strict" as BillingMode,
+      };
     }
     const code = this.errorCode(row);
     if (code) throw new StoreError(`get_user_plan: ${code}`);
@@ -647,7 +667,15 @@ export class HttpxSupabaseStore extends CreditStore {
       planId: (row.plan_id as string) ?? null,
       planLabel: (row.plan_label as string) ?? (row.plan_name as string) ?? null,
       allowanceAmount: dec(row.free_allowance),
-      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>,
+      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<
+        string,
+        {
+          value?: unknown;
+          maxCalls?: number;
+          period?: FeatureLimitPeriod;
+          onExceed?: "deny" | "warn" | "notify";
+        }
+      >,
       billingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
@@ -660,7 +688,9 @@ export class HttpxSupabaseStore extends CreditStore {
   async checkFeature(userId: string, feature: string): Promise<CheckFeatureResult> {
     const plan = await this.getUserPlan(userId);
     const present = Object.prototype.hasOwnProperty.call(plan.entitlements, feature);
-    const value = present ? (plan.entitlements[feature] as Record<string, unknown>)?.['value'] ?? null : null;
+    const value = present
+      ? ((plan.entitlements[feature] as Record<string, unknown>)?.["value"] ?? null)
+      : null;
     return {
       userId,
       feature,
@@ -1102,13 +1132,13 @@ export class HttpxSupabaseStore extends CreditStore {
 
   async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
     // get_user_credit_buckets returns one JSONB envelope object (not a rowset):
-    // {user_id, tiers: [...], total_balance} — use rpc() (single-object), not
+    // {user_id, buckets: [...]} — use rpc() (single-object), not
     // rpcAll() (which is for genuine SETOF/TABLE-returning functions).
     const envelope = await this.rpc("get_user_credit_buckets", { p_user_id: userId });
-    const tierRows = (envelope.tiers as Record<string, unknown>[] | undefined) ?? [];
-    const buckets: BucketBalance[] = tierRows.map((row) => ({
+    const bucketRows = (envelope.buckets as Record<string, unknown>[] | undefined) ?? [];
+    const buckets: BucketBalance[] = bucketRows.map((row) => ({
       bucketKey: String(row.bucket_key ?? ""),
-      label: String(row.name ?? ""),
+      label: String(row.label ?? ""),
       priority: Number(row.priority ?? 0),
       expires: Boolean(row.expires ?? false),
       balance: dec(row.balance),

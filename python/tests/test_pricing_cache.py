@@ -6,7 +6,7 @@ import threading
 import time
 
 from bursar.interface.base import CreditStore
-from bursar.interface.models import PricingConfigData, PricingConfigResult
+from bursar.interface.models import PricingConfigResult
 
 
 class _CountingStore(CreditStore):
@@ -52,7 +52,7 @@ class _CountingStore(CreditStore):
     def release_lease(self, *args: object, **kwargs: object) -> None: ...
     def renew_lease(self, *args: object, **kwargs: object) -> None: ...
     def get_available(self, *args: object, **kwargs: object) -> None: ...
-    def get_credit_tiers(self, *args: object, **kwargs: object) -> None: ...
+    def get_bucket_balances(self, *args: object, **kwargs: object) -> None: ...
     def set_user_plan(self, *args: object, **kwargs: object) -> None: ...
     def get_user_plan(self, *args: object, **kwargs: object) -> None: ...
     def check_feature(self, *args: object, **kwargs: object) -> None: ...
@@ -76,7 +76,7 @@ class _CountingStore(CreditStore):
 def _make_result(value: str = "default") -> PricingConfigResult:
     return PricingConfigResult(
         id="test",
-        config=PricingConfigData(models={"_default": "input_tokens * 1"}),
+        config={"models": {"*": "input_tokens * 1"}},
         version=1,
         label=value,
     )

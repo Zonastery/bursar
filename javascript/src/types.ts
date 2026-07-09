@@ -1,6 +1,9 @@
 import type { Decimal } from "decimal.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 
+/** @deprecated Use raw `Record<string, unknown>` or `PricingConfig` instead. */
+export type PricingConfigData = Record<string, unknown>;
+
 /**
  * Billing mode for an operation. ``strict`` never lets the balance fall below
  * the floor at admission (lease worst-case ⇒ zero debt); ``overdraft`` permits
@@ -176,6 +179,8 @@ export interface OperationPolicy {
  * caps.
  */
 export interface FeatureLimit {
+  /** For value-based entitlements (e.g. `{ value: true }`, `{ value: 20 }`). */
+  value?: unknown;
   maxCalls: number;
   period: FeatureLimitPeriod;
   onExceed: "deny" | "warn" | "notify";
@@ -192,9 +197,22 @@ export interface FeatureLimit {
 export interface PlanDefinition {
   label: string;
   allowance: { amount: Decimal; period: AllowancePeriod };
-  safety: { billingMode: BillingMode; perOperation?: Record<string, OperationPolicy>; maxConcurrent?: number | null; overdraftFloor?: Decimal | null };
+  safety: {
+    billingMode: BillingMode;
+    perOperation?: Record<string, OperationPolicy>;
+    maxConcurrent?: number | null;
+    overdraftFloor?: Decimal | null;
+  };
   rateOverrides?: Record<string, string> | null;
-  entitlements?: Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }> | null;
+  entitlements?: Record<
+    string,
+    {
+      value?: unknown;
+      maxCalls?: number;
+      period?: FeatureLimitPeriod;
+      onExceed?: "deny" | "warn" | "notify";
+    }
+  > | null;
 }
 
 /** Result of checking plan allowance. */
@@ -218,7 +236,15 @@ export interface GetUserPlanResult {
   planLabel: string | null;
   allowanceAmount: Decimal;
   allowancePeriod: AllowancePeriod | null;
-  entitlements: Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>;
+  entitlements: Record<
+    string,
+    {
+      value?: unknown;
+      maxCalls?: number;
+      period?: FeatureLimitPeriod;
+      onExceed?: "deny" | "warn" | "notify";
+    }
+  >;
   billingMode: BillingMode;
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;

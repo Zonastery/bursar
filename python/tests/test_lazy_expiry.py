@@ -5,7 +5,7 @@ identical to before this feature existed — an expired grant stays in the
 balance until an explicit ``sweep_expired_credits()`` call (the periodic cron
 sweep). With ``lazy_expiry=True``, a per-user sweep runs inline as the first
 line of every balance-authoritative read/write (``get_balance``,
-``get_credit_tiers``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
+``get_bucket_balances``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
 ``reserve``, ``settle``), so an expired grant is invisible without any
 explicit sweep call.
 
@@ -42,7 +42,7 @@ def store() -> MemoryStore:
 
 def _manager(store: MemoryStore, *, lazy_expiry: bool, **pricing_extra: object) -> CreditManager:
     mgr = CreditManager(store=store, lazy_expiry=lazy_expiry)
-    pricing: dict[str, object] = {"models": {"_default": "input_tokens * 1"}, "min_balance": 0}
+    pricing: dict[str, object] = {"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}}
     pricing.update(pricing_extra)
     mgr.publish_pricing_from_dict(pricing)
     return mgr
@@ -96,12 +96,12 @@ class TestLazyExpiryEnabled:
         # No call to sweep_expired_credits() anywhere in this test.
         assert mgr.get_balance("user_1").balance == Decimal(0)
 
-    def test_get_credit_tiers_hides_expired_credits(self, store: MemoryStore) -> None:
+    def test_get_bucket_balances_hides_expired_credits(self, store: MemoryStore) -> None:
         mgr = _manager(store, lazy_expiry=True)
         mgr.add_credits("user_1", 100, expires_at=PAST_EXPIRY)
 
-        tiers = mgr.get_credit_tiers("user_1")
-        assert tiers.total_balance == Decimal(0)
+        result = mgr.get_bucket_balances("user_1")
+        assert result.total_balance == Decimal(0)
 
     def test_get_available_hides_expired_credits(self, store: MemoryStore) -> None:
         """`get_available` is the documented "UI only" read a credits page would
@@ -128,7 +128,14 @@ class TestLazyExpiryEnabled:
             mgr.deduct("user_1", UsageMetrics(input_tokens=50))
 
     def test_deduct_fixed_does_not_see_expired_credits(self, store: MemoryStore) -> None:
-        mgr = _manager(store, lazy_expiry=True, fixed={"batch_job": 20})
+        mgr = CreditManager(store=store, lazy_expiry=True)
+        mgr.publish_pricing_from_dict(
+            {
+                "version": 1,
+                "metering": {"models": {"*": "input_tokens * 1"}, "flat_jobs": {"batch_job": 20}},
+                "ledger": {"min_balance": 0},
+            }
+        )
         mgr.add_credits("user_1", 100, expires_at=PAST_EXPIRY)
 
         with pytest.raises(InsufficientCreditsError):
@@ -171,7 +178,7 @@ class TestLazyExpiryEnabled:
     def test_lazy_sweep_emits_scoped_credits_expired_event(self, store: MemoryStore) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter, lazy_expiry=True)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user_1", 100, expires_at=PAST_EXPIRY)
 
         events = []

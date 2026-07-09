@@ -49,6 +49,7 @@ from bursar.interface.models import (
     AvailableResult,
     BalanceResult,
     BillingMode,
+    BucketBalancesResult,
     CanAffordResult,
     CheckFeatureResult,
     CreditMetadata,
@@ -59,7 +60,6 @@ from bursar.interface.models import (
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
-    PricingConfigData,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -68,7 +68,6 @@ from bursar.interface.models import (
     SpendByUserRow,
     SweepResult,
     TeamDeductionResult,
-    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -167,7 +166,7 @@ class CreditManager:
             time (see :class:`LowBalanceConfig`).
         lazy_expiry: When ``True``, a per-user expiry sweep runs inline before
             every balance-authoritative read/write (``get_balance``,
-            ``get_credit_tiers``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
+            ``get_bucket_balances``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
             ``reserve``, ``settle``) so expired grants are invisible without
             waiting for the periodic cron ``sweep_expired_credits()``. Defaults
             to ``False`` (unchanged behavior — a background/cron sweep is the
@@ -243,13 +242,11 @@ class CreditManager:
 
     # -- Pricing configuration -------------------------------------------
 
-    def publish_pricing_from_dict(self, data: PricingConfigData | dict[str, Any]) -> None:
-        """Load pricing from a ``PricingConfigData`` or raw dict and sync it."""
-        raw = data if isinstance(data, dict) else data.model_dump(exclude_none=True)
-        engine = PricingEngine.from_dict(raw)
+    def publish_pricing_from_dict(self, data: dict[str, Any]) -> None:
+        """Load pricing from a raw dict and sync it."""
+        engine = PricingEngine.from_dict(data)
         self._engine = engine
-        config = data if isinstance(data, PricingConfigData) else PricingConfigData.model_validate(data)
-        self._store.set_active_pricing(config)
+        self._store.set_active_pricing(data)
 
     def load_pricing_from_store(self) -> None:
         """Load the active pricing config from the store."""
@@ -259,17 +256,16 @@ class CreditManager:
                 "No active pricing config found in the store. "
                 "Call publish_pricing_from_dict() or set_active_pricing() first."
             )
-        engine_dict = active.config.model_dump(exclude_none=True)
+        engine_dict = active.config if isinstance(active.config, dict) else {}
         self._engine = PricingEngine.from_dict(engine_dict)
 
     def publish_pricing(
         self,
-        config: PricingConfigData,
+        config: dict[str, Any],
         label: str | None = None,
     ) -> None:
         """Publish new pricing and update the engine in one call."""
-        raw = config.model_dump(exclude_none=True)
-        self._engine = PricingEngine.from_dict(raw)
+        self._engine = PricingEngine.from_dict(config)
         self._store.set_active_pricing(config, label=label)
 
     @property
@@ -291,15 +287,15 @@ class CreditManager:
         tx_type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
-        tier: str | None = None,
+        bucket: str | None = None,
     ) -> AddCreditsResult:
         """Add credits to a user's account (``amount`` is a ``Decimal``).
 
-        ``tier`` is an optional tier key to grant into (see
-        :meth:`get_credit_tiers`); omitted resolves to the configured
-        ``is_default`` tier, or ``"default"`` when no tiers are configured.
+        ``bucket`` is an optional bucket key to grant into (see
+        :meth:`get_bucket_balances`); omitted resolves to the configured
+        ``is_default`` bucket, or ``"default"`` when no buckets are configured.
         """
-        result = self._store.add_credits(user_id, Decimal(amount), tx_type, metadata, expires_at, tier)
+        result = self._store.add_credits(user_id, Decimal(amount), tx_type, metadata, expires_at, bucket)
         self._emit(
             "credits.added",
             user_id,
@@ -326,7 +322,7 @@ class CreditManager:
         amount: Decimal | int,
         *,
         tx_type: str = "adjustment",
-        tier: str | None = None,
+        bucket: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> AddCreditsResult:
         """Deduct a raw credit amount from a user's account.
@@ -340,7 +336,7 @@ class CreditManager:
             user_id: The user to deduct from.
             amount: The positive amount to deduct (internally negated).
             tx_type: Semantic label for the emitted event (e.g. ``"refund_clawback"``).
-            tier: The tier to deduct from.
+            bucket: The bucket to deduct from.
             metadata: Extra metadata (Pydantic model, passed through to the store).
         """
         result = self._store.add_credits(
@@ -349,7 +345,7 @@ class CreditManager:
             "adjustment",
             metadata,
             None,
-            tier,
+            bucket,
         )
         self._emit(
             "credits.deducted",
@@ -368,7 +364,7 @@ class CreditManager:
         user_id: str,
         amount: Decimal | int,
         *,
-        tier: str = "subscription",
+        bucket: str = "subscription",
         expires_at: datetime | None = None,
         ttl_days: int | None = None,
         replace_prior: bool = True,
@@ -385,9 +381,9 @@ class CreditManager:
         Args:
             user_id: The user whose subscription cycle is renewing.
             amount: The cycle's credit grant (coerced to ``Decimal``).
-            tier: The credit tier to grant into (and, when ``replace_prior``,
-                to zero out first). Requires a store with that tier configured
-                (see :meth:`get_credit_tiers`) — this is deliberate: tiers are
+            bucket: The credit bucket to grant into (and, when ``replace_prior``,
+                to zero out first). Requires a store with that bucket configured
+                (see :meth:`get_bucket_balances`) — this is deliberate: buckets are
                 what let a subscription grant coexist with, and not clobber,
                 credits from other sources (purchases, gifts, ...).
             expires_at: Explicit expiry for the new grant. Mutually exclusive
@@ -395,7 +391,7 @@ class CreditManager:
             ttl_days: Expire the new grant this many days from now. Mutually
                 exclusive with ``expires_at``.
             replace_prior: When ``True`` (the default), any leftover balance in
-                ``tier`` from a prior cycle is expired immediately before the
+                ``bucket`` from a prior cycle is expired immediately before the
                 new grant lands — a renewal replaces the unused balance rather
                 than stacking on top of it.
             plan_key: When given, also calls :meth:`set_user_plan` — this
@@ -419,21 +415,12 @@ class CreditManager:
 
         amount_dec = Decimal(amount)
 
-        # Snapshot the tier's leftover balance (and the account's lifetime_purchased,
-        # which only moves on `type="purchase"` grants) BEFORE granting. A redelivered
-        # webhook must be a full no-op — including skipping the replace-prior wipe
-        # below — not just avoid a double-grant. AddCreditsResult carries no separate
-        # "was this a replay" flag (contract-only fields), so we detect a genuine new
-        # grant after the fact by checking whether lifetime_purchased actually moved
-        # by `amount_dec`; an idempotent replay leaves it unchanged. This has a small
-        # inherent race window (two non-atomic store reads/writes, no cross-tier RPC),
-        # acceptable for a periodic/webhook-driven cycle grant.
         prior_leftover = Decimal(0)
         pre_lifetime_purchased = Decimal(0)
         if replace_prior:
-            tiers_before = self.get_credit_tiers(user_id)
-            for tb in tiers_before.tiers:
-                if tb.tier_key == tier:
+            buckets_before = self.get_bucket_balances(user_id)
+            for tb in buckets_before.buckets:
+                if tb.bucket_key == bucket:
                     prior_leftover = tb.balance
                     break
             pre_lifetime_purchased = self.get_balance(user_id).lifetime_purchased
@@ -443,7 +430,7 @@ class CreditManager:
             user_id,
             amount_dec,
             type="purchase",
-            tier=tier,
+            bucket=bucket,
             expires_at=expires_at,
             metadata=tx_metadata,
             idempotency_key=idempotency_key,
@@ -456,7 +443,7 @@ class CreditManager:
                 user_id,
                 -prior_leftover,
                 type="adjustment",
-                tier=tier,
+                bucket=bucket,
                 metadata=CreditMetadata(**replace_meta),
             )
             # Reflect the post-replace balance so the returned result is accurate
@@ -471,7 +458,7 @@ class CreditManager:
             user_id,
             {
                 "amount": amount_dec,
-                "tier": tier,
+                "bucket": bucket,
                 "plan_key": plan_key,
                 "idempotency_key": idempotency_key,
             },
@@ -573,7 +560,7 @@ class CreditManager:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
-        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "tier": ...}``.
+        Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "bucket": ...}``.
         """
         result = self._store.revoke_credits_by_tx_type(user_id, tx_type)
         amount = abs(Decimal(str(result.get("amount", 0))))
@@ -628,7 +615,7 @@ class CreditManager:
 
         if plan is not None and plan.plan_id:
             policy = OperationPolicy(
-                billing_mode=plan.default_billing_mode,
+                billing_mode=plan.billing_mode,
                 max_concurrent=plan.max_concurrent if plan.max_concurrent is not None else policy.max_concurrent,
                 overdraft_floor=plan.overdraft_floor if plan.overdraft_floor is not None else policy.overdraft_floor,
             )
@@ -673,23 +660,16 @@ class CreditManager:
     def _resolve_feature_limit(
         self, user_id: str, feature: str | None
     ) -> tuple[FeatureLimit | None, date | None, date | None]:
-        """Resolve the configured ``FeatureLimit`` (if any) and its calendar window.
-
-        Mirrors ``_resolve_allowance_period_start``: the manager owns plan lookup
-        and window resolution so the store's atomic ops receive plain scalars.
-        Returns ``(None, None, None)`` when ``feature`` is ``None`` (no feature
-        named on this call) or when the user's plan has no ``FeatureLimit``
-        configured for it — both cases mean enforcement/tagging is skipped by
-        the store, except the store still tags ``metadata.feature`` whenever
-        ``feature`` itself is non-``None`` (independent of whether a limit is
-        configured).
-        """
+        """Resolve the configured ``FeatureLimit`` (if any) and its calendar window."""
         if feature is None:
             return None, None, None
         plan = self._store.get_user_plan(user_id)
-        limit = plan.feature_limits.get(feature)
-        if limit is None:
+        entitlement = plan.entitlements.get(feature)
+        if entitlement is None or entitlement.max_calls is None:
             return None, None, None
+        from bursar.interface.models import FeatureLimit as _FeatureLimit
+
+        limit = _FeatureLimit(max_calls=entitlement.max_calls, period=entitlement.period, action=entitlement.on_exceed)
         period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
         return limit, period_start, period_end
 
@@ -1036,11 +1016,11 @@ class CreditManager:
         self._maybe_lazy_expire(user_id)
         return self._store.get_available(user_id)
 
-    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
-        """Per-tier balance breakdown for a user (pure read, no event — matches
+    def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
+        """Per-bucket balance breakdown for a user (pure read, no event — matches
         :meth:`get_balance`/:meth:`get_available`)."""
         self._maybe_lazy_expire(user_id)
-        return self._store.get_credit_tiers(user_id)
+        return self._store.get_bucket_balances(user_id)
 
     def check_allowance(self, user_id: str) -> AllowanceResult:
         """Get remaining free allowance for the current billing period (Fix 6).
@@ -1216,8 +1196,8 @@ class CreditManager:
         base["output_tokens"] = metrics.output_tokens
         base["model"] = metrics.model
         base["breakdown_total"] = breakdown_total
-        if metrics.fixed_job:
-            base["fixed_job"] = metrics.fixed_job
+        if metrics.flat_job:
+            base["flat_job"] = metrics.flat_job
         if idempotency_key:
             base["idempotency_key"] = idempotency_key
         return CreditMetadata(**base)
@@ -1571,7 +1551,7 @@ class CreditManager:
         ``lazy_expiry`` flag (default ``False`` -> single boolean check, no-op).
 
         Called as the first line of methods that gate real money movement or
-        an authoritative balance read (``get_balance``, ``get_credit_tiers``,
+        an authoritative balance read (``get_balance``, ``get_bucket_balances``,
         ``deduct``, ``deduct_fixed``, ``deduct_team``, ``reserve``, ``settle``)
         so expired grants are invisible without waiting for the periodic cron
         ``sweep_expired_credits()``. Deliberately NOT wired into advisory/
@@ -1656,7 +1636,7 @@ class CreditManager:
             raise PricingNotLoadedError(
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
             )
-        if self._engine.get_fixed_cost(job_name) is None:
+        if self._engine.get_flat_job_cost(job_name) is None:
             raise ValueError(f"Unknown fixed-cost job: {job_name!r}")
 
         if required_feature is not None:
@@ -1666,7 +1646,7 @@ class CreditManager:
 
         return self.deduct(
             user_id=user_id,
-            metrics=UsageMetrics(fixed_job=job_name),
+            metrics=UsageMetrics(flat_job=job_name),
             idempotency_key=idempotency_key,
             metadata=metadata,
             skip_allowance=not use_allowance,

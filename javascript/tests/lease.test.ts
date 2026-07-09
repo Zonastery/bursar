@@ -25,7 +25,6 @@ import {
   LeaseExpiredError,
   LeaseNotFoundError,
 } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
 
@@ -40,8 +39,9 @@ async function strictManager(
     ...options,
   });
   await m.publishPricingFromDict({
-    models: { _default: "input_tokens * 1" },
-    minBalance: minBalance.toNumber(),
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
+    ledger: { minBalance: minBalance.toNumber() },
   });
   return m;
 }
@@ -152,16 +152,20 @@ describe("feature gate", () => {
 
   async function managerWithPlans(s: MemoryStore): Promise<CreditManager> {
     const m = new CreditManager(s, undefined, undefined, { policy: "strict_prepaid" });
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      minBalance: 0,
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
       plans: {
-        free: { id: "free", name: "Free", freeAllowance: D(0), features: { chat: true } },
+        free: {
+          label: "Free",
+          allowance: { amount: D(0), period: "calendar_month" },
+          entitlements: { chat: { value: true } },
+        },
         pro: {
-          id: "pro",
-          name: "Pro",
-          freeAllowance: D(0),
-          features: { chat: true, agentic: true },
+          label: "Pro",
+          allowance: { amount: D(0), period: "calendar_month" },
+          entitlements: { chat: { value: true }, agentic: { value: true } },
         },
       },
     };
@@ -211,7 +215,11 @@ describe("overdraft", () => {
       policy: "overdraft",
       overdraftFloor: D(-50),
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(0)); // ensure a balance row at 0
 
     const lease = await m.reserve("u1", D(10)); // small estimate
@@ -234,7 +242,11 @@ describe("overdraft", () => {
       policy: "overdraft",
       overdraftFloor: D(-50),
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(0));
 
     const lease = await m.reserve("u1", D(10));
@@ -365,7 +377,11 @@ describe("multi-level low_balance", () => {
       overdraftFloor: D(0),
       lowBalance: { thresholds: [D(50), D(20), D(10)] },
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     const fired: Decimal[] = [];
     emitter.on("credits.low_balance", (e) => fired.push(e.data?.threshold as Decimal));
     await store.addCredits("u1", D(100));
@@ -398,7 +414,11 @@ describe("multi-level low_balance", () => {
         },
       },
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(100));
     const lease = await m.reserve("u1", D(85));
     // The handler throws, but settle still completes normally.
@@ -429,7 +449,11 @@ describe("presets / planless", () => {
       policy: "overdraft",
       overdraftFloor: D(-20),
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(0));
     await m.reserve("u1", D(20)); // down to the floor, ok
     await expect(m.reserve("u1", D(1))).rejects.toThrow(InsufficientCreditsError);
@@ -438,17 +462,19 @@ describe("presets / planless", () => {
   it("plan per-operation overrides the preset", async () => {
     // strict_prepaid preset, but the plan opts one op type into overdraft.
     const m = new CreditManager(store, undefined, undefined, { policy: "strict_prepaid" });
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      minBalance: 0,
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
       plans: {
         pro: {
-          id: "pro",
-          name: "Pro",
-          freeAllowance: D(0),
-          defaultBillingMode: "strict",
-          perOperation: {
-            agent: { billingMode: "overdraft", overdraftFloor: D(-30) },
+          label: "Pro",
+          allowance: { amount: D(0), period: "calendar_month" },
+          safety: {
+            billingMode: "strict",
+            perOperation: {
+              agent: { billingMode: "overdraft", overdraftFloor: D(-30) },
+            },
           },
         },
       },
@@ -529,8 +555,9 @@ describe("misc", () => {
   it("reserve and settle with metrics", async () => {
     const m = new CreditManager(store, undefined, undefined, { policy: "strict_prepaid" });
     await m.publishPricingFromDict({
-      models: { "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03" },
-      minBalance: 0,
+      version: 1,
+      metering: { models: { "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03" } },
+      ledger: { minBalance: 0 },
     });
     await store.addCredits("u1", D(100));
     const worst = { model: "gpt-4", inputTokens: 1000, outputTokens: 1000 }; // cost 40

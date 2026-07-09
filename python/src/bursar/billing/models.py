@@ -61,7 +61,9 @@ class BillingSubscriptionStatus(StrEnum):
     expired = "expired"
 
 
-class BillingProviderRefs(BaseModel):
+class ProviderRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     product_id: str | None = None
     price_id: str | None = None
     variant_id: str | None = None
@@ -80,7 +82,7 @@ class BillingSubscriptionInfo(BaseModel):
     period_start: str | None = None
     period_end: str | None = None
     trial_end: str | None = None
-    refs: BillingProviderRefs | None = None
+    refs: ProviderRef | None = None
     interval: str | None = None
     interval_count: int | None = None
 
@@ -100,7 +102,7 @@ class BillingPaymentInfo(BaseModel):
     amount_minor: int
     tax_minor: int | None = None
     currency: str
-    refs: BillingProviderRefs | None = None
+    refs: ProviderRef | None = None
     purpose: Literal["subscription", "credit_topup", "unknown"] = "unknown"
 
 
@@ -150,47 +152,67 @@ class BillingOfferInterval(StrEnum):
     year = "year"
 
 
-class BillingSubscriptionOfferRef(BaseModel):
+class SubscriptionGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: str
-    product_id: str | None = None
-    price_id: str | None = None
-    variant_id: str | None = None
-    lookup_key: str | None = None
+    mode: Literal["allowance", "cycle_grant"] = "allowance"
+    credits: int | None = None
+    bucket: str = "purchased"
+    replace_prior: bool = True
 
 
 class BillingOffer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    offer_key: str
-    plan_key: str
+    plan: str
     interval: BillingOfferInterval = BillingOfferInterval.month
     interval_count: int = Field(default=1, ge=1)
-    entitlement_mode: Literal["allowance", "cycle_grant"] = "allowance"
-    cycle_grant_credits: int | None = None
-    cycle_grant_tier: str | None = None
-    cycle_grant_replace_prior: bool = True
-    provider_refs: dict[str, BillingSubscriptionOfferRef] = Field(default_factory=dict)
+    grant: SubscriptionGrant = Field(default_factory=lambda: SubscriptionGrant(mode="allowance"))
+    providers: dict[str, ProviderRef] = Field(default_factory=dict)
 
 
 class BillingCreditTopup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tier: str = "purchased"
-    currency: str = "USD"
-    credits_per_major_unit: int = 1000
+    deposit_to: str = "purchased"
+    credits_per_unit: int = 1000
     min_amount_minor: int = 500
     max_amount_minor: int = 500000
     tax_behavior: Literal["exclude_tax", "include_tax"] = "exclude_tax"
-    provider_refs: dict[str, BillingSubscriptionOfferRef] = Field(default_factory=dict)
+    providers: dict[str, ProviderRef] = Field(default_factory=dict)
 
 
 class BillingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    currency: str = "USD"
     subscriptions: dict[str, BillingOffer] = Field(default_factory=dict)
-    credit_topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
+    topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
+
+    @classmethod
+    def from_pricing_config(cls, cfg: Any) -> BillingConfig:
+        billing_data = getattr(cfg, "billing", None)
+        if billing_data is None:
+            return cls()
+        subscriptions = {}
+        if billing_data.subscriptions:
+            for key, val in billing_data.subscriptions.items():
+                if isinstance(val, dict):
+                    subscriptions[key] = BillingOffer(**val)
+                else:
+                    subscriptions[key] = val
+        topups = {}
+        if billing_data.topups:
+            for key, val in billing_data.topups.items():
+                if isinstance(val, dict):
+                    topups[key] = BillingCreditTopup(**val)
+                else:
+                    topups[key] = val
+        return cls(
+            currency=billing_data.currency or "USD",
+            subscriptions=subscriptions,
+            topups=topups,
+        )
 
 
 class BillingEventClaim(BaseModel):

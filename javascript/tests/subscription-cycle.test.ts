@@ -5,22 +5,24 @@ import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { ConfigError } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
 
 /**
- * A "subscription" tier that expires, with a `defaultTtlDays` fallback so the
+ * A "subscription" bucket that expires, with a `ttlDays` fallback so the
  * `replacePrior` expire-adjustment (which never passes an explicit
- * `expiresAt`) can always resolve one, exactly like any other expiring tier.
+ * `expiresAt`) can always resolve one, exactly like any other expiring bucket.
  */
-const SUBSCRIPTION_CONFIG: PricingConfigData = {
-  models: { _default: "input_tokens * 1" },
-  tiers: {
-    subscription: {
-      name: "Subscription",
-      priority: 10,
-      expires: true,
-      defaultTtlDays: 30,
-      isDefault: true,
+const SUBSCRIPTION_CONFIG = {
+  version: 1,
+  metering: { models: { "*": "input_tokens * 1" } },
+  ledger: {
+    buckets: {
+      subscription: {
+        label: "Subscription",
+        priority: 10,
+        expires: true,
+        ttlDays: 30,
+        isDefaultBucket: true,
+      },
     },
   },
 };
@@ -43,7 +45,7 @@ describe("CreditManager.grantSubscriptionCycle", () => {
 
     const result = await mgr.grantSubscriptionCycle("user-1", 100, { ttlDays: 30 });
 
-    expect(result.tier).toBe("subscription");
+    expect(result.bucket).toBe("subscription");
     expect(result.amount.toString()).toBe("100");
     expect((await mgr.getBalance("user-1")).balance.toString()).toBe("100");
 

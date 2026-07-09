@@ -17,7 +17,6 @@ from typing import Any
 from bursar.breakdown import CostBreakdown
 from bursar.config import PricingConfig, load_config_from_dict
 from bursar.expr import evaluate_expression
-from bursar.interface.models import PricingConfigData
 from bursar.metrics import METRIC_VARIABLES, UsageMetrics
 
 __all__ = ["METRIC_VARIABLES", "PricingEngine"]
@@ -36,7 +35,9 @@ class PricingEngine:
     Usage::
 
         engine = PricingEngine.from_dict({
-            "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
+            "metering": {
+                "models": {"*": "input_tokens * 0.001 + output_tokens * 0.003"},
+            },
         })
         result = engine.calculate(UsageMetrics(
             model="claude-opus-4",
@@ -76,7 +77,7 @@ class PricingEngine:
             quantized to 4 dp. ``total`` is clamped to ``>= 0``.
 
         Raises:
-            ValueError: If the model is not found and no ``_default``
+            ValueError: If the model is not found and no ``*``
                 exists in the config.
             ExpressionError: If an expression evaluates unsafely (div/mod by
                 zero, non-finite, overflow).
@@ -87,10 +88,10 @@ class PricingEngine:
         tool_credits = self._calc_tools(metrics, variables)
         search_credits = self._calc_search(variables)
         cache_savings = self._calc_cache(variables)
-        fixed_credits = self._calc_fixed(metrics)
+        flat_job_credits = self._calc_flat_jobs(metrics)
 
         # Single source of truth: sum in exact Decimal, clamp to >= 0, quantize once.
-        raw_total = model_credits + tool_credits + search_credits + cache_savings + fixed_credits
+        raw_total = model_credits + tool_credits + search_credits + cache_savings + flat_job_credits
         total = _q(max(Decimal(0), raw_total))
 
         return CostBreakdown(
@@ -98,7 +99,7 @@ class PricingEngine:
             tool_credits=_q(tool_credits),
             search_credits=_q(search_credits),
             cache_savings=_q(cache_savings),
-            fixed_credits=_q(fixed_credits),
+            flat_job_credits=_q(flat_job_credits),
             total=total,
             breakdown={
                 "model": metrics.model,
@@ -119,30 +120,22 @@ class PricingEngine:
         """
         return [self.calculate(m) for m in metrics_list]
 
-    def pricing_schema(self) -> PricingConfigData:
-        """Return the pricing config as a typed model.
+    def pricing_schema(self) -> dict[str, Any]:
+        """Return the pricing config as a dictionary.
 
         Returns:
-            ``PricingConfigData`` with all pricing sections and expressions.
+            Full pricing config as a dict (the same shape as the input).
         """
-        return PricingConfigData(
-            models=dict(self._config.models),
-            tools=dict(self._config.tools),
-            search=self._config.search,
-            cache=self._config.cache,
-            min_balance=self._config.min_balance,
-            fixed=dict(self._config.fixed),
-            plans=self._config.plans,
-        )
+        return self._config.model_dump()
 
     @property
     def min_balance(self) -> Decimal:
         """Minimum balance users must keep (prevents spending last N credits)."""
-        return self._config.min_balance
+        return self._config.ledger.min_balance
 
     def has_model(self, model_name: str) -> bool:
         """Check if a model name exists in the pricing config (exact match)."""
-        return model_name in self._config.models
+        return model_name in self._config.metering.models
 
     def resolve_model(self, model_version: str) -> str | None:
         """Resolve a model version string to a pricing config key.
@@ -151,24 +144,26 @@ class PricingEngine:
         (e.g. ``\"claude-sonnet-4-20250514\"`` -> ``\"claude-sonnet-4\"``).
         Returns ``None`` when no match exists.
         """
-        if model_version in self._config.models:
+        models = self._config.metering.models
+        if model_version in models:
             return model_version
-        for key in self._config.models:
-            if key != "_default" and model_version.startswith(key):
+        for key in models:
+            if key != "*" and model_version.startswith(key):
                 return key
-        if "_default" in self._config.models:
-            return "_default"
+        if "*" in models:
+            return "*"
         return None
 
-    def get_fixed_cost(self, job_name: str) -> Decimal | None:
-        """Get the fixed credit cost for a named batch job.
+    def get_flat_job_cost(self, job_name: str) -> Decimal | None:
+        """Get the flat credit cost for a named batch job.
 
         Returns ``None`` for an unknown / unconfigured job so callers (the
         manager) can reject it rather than silently charging 0 (L1). Values
         are already ``Decimal`` (fractional fixed costs are charged exactly).
         """
-        if self._config.fixed and job_name in self._config.fixed:
-            return _q(self._config.fixed[job_name])
+        flat_jobs = self._config.metering.flat_jobs
+        if flat_jobs and job_name in flat_jobs:
+            return _q(flat_jobs[job_name])
         return None
 
     def _build_variables(self, metrics: UsageMetrics) -> dict[str, int]:
@@ -188,32 +183,32 @@ class PricingEngine:
     def _calc_model(self, model_name: str | None, variables: dict[str, int]) -> Decimal:
         """Evaluate model expression for the given model name."""
         if model_name is None or model_name == "none":
-            model_name = "_default"
+            model_name = "*"
 
-        models = self._config.models
+        models = self._config.metering.models
         if model_name in models:
             expr = models[model_name]
-        elif "_default" in models:
-            expr = models["_default"]
+        elif "*" in models:
+            expr = models["*"]
         else:
-            raise ValueError(f"no model match for '{model_name}' and no _default in config")
+            raise ValueError(f"no model match for '{model_name}' and no '*' in config")
 
         return evaluate_expression(expr, variables)
 
     def _calc_tools(self, metrics: UsageMetrics, variables: dict[str, int]) -> Decimal:
         """Evaluate tool costs.
 
-        Uses specific tool formula if available, falls back to _default.
+        Uses specific tool formula if available, falls back to ``*``.
         No double-counting when a specific override exists.
 
-        Each branch gets its own ``this_tool_calls`` count — the specific
+        Each branch gets its own ``calls`` count — the specific
         tool's own call count for a known-tool formula, or the unknown-call
-        count for the ``_default`` formula — while ``tool_calls`` in the base
+        count for the ``*`` formula — while ``tool_calls`` in the base
         ``variables`` dict always stays the GLOBAL total across all tools and
         is never overridden here (WS2).
         """
-        tools_config = self._config.tools
-        default_expr = tools_config.get("_default", "tool_calls * 0")
+        tools_config = self._config.metering.tools
+        default_expr = tools_config.get("*", "calls * 0")
         total = Decimal(0)
 
         tool_names = {t.name for t in metrics.tool_calls}
@@ -223,35 +218,40 @@ class PricingEngine:
             if tool_name in tools_config:
                 this_tool_count = sum(1 for t in metrics.tool_calls if t.name == tool_name)
                 local_vars = dict(variables)
-                local_vars["this_tool_calls"] = this_tool_count
+                local_vars["calls"] = this_tool_count
                 total += evaluate_expression(tools_config[tool_name], local_vars)
                 seen_specific.add(tool_name)
 
         unknown_tool_count = sum(1 for t in metrics.tool_calls if t.name not in seen_specific)
         if unknown_tool_count > 0:
             local_vars = dict(variables)
-            local_vars["this_tool_calls"] = unknown_tool_count
+            local_vars["calls"] = unknown_tool_count
             total += evaluate_expression(default_expr, local_vars)
 
         return total
 
     def _calc_search(self, variables: dict[str, int]) -> Decimal:
         """Evaluate the search cost expression if configured."""
-        if not self._config.search:
+        if not self._config.metering.search:
             return Decimal(0)
-        return evaluate_expression(self._config.search, variables)
+        return evaluate_expression(self._config.metering.search, variables)
 
     def _calc_cache(self, variables: dict[str, int]) -> Decimal:
-        """Evaluate the cache discount expression if configured."""
-        if not self._config.cache:
-            return Decimal(0)
-        return evaluate_expression(self._config.cache, variables)
+        """Evaluate the cache discount expression if configured.
 
-    def _calc_fixed(self, metrics: UsageMetrics) -> Decimal:
-        """Lookup fixed cost for a batch job, if applicable."""
-        if not self._config.fixed or not metrics.fixed_job:
+        ``cache_discount`` is a positive number in config; the result is
+        negated here so it acts as a saving (subtracted from the total).
+        """
+        if not self._config.metering.cache_discount:
             return Decimal(0)
-        job = metrics.fixed_job
-        if job in self._config.fixed:
-            return self._config.fixed[job]
+        return -evaluate_expression(self._config.metering.cache_discount, variables)
+
+    def _calc_flat_jobs(self, metrics: UsageMetrics) -> Decimal:
+        """Lookup flat cost for a batch job, if applicable."""
+        flat_jobs = self._config.metering.flat_jobs
+        if not flat_jobs or not metrics.flat_job:
+            return Decimal(0)
+        job = metrics.flat_job
+        if job in flat_jobs:
+            return flat_jobs[job]
         return Decimal(0)

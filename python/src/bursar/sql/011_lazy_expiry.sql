@@ -49,7 +49,7 @@
 
 -- ── 1. credits_add: add p_idempotency_key ────────────────────────────────
 -- Evolves the credits_add() RPC (currently a 5-arg function after
--- 010_credit_tiers.sql's p_tier addition — see 002_credit_rpcs.sql) with a
+-- 010_credit_buckets.sql's p_bucket addition — see 002_credit_rpcs.sql) with a
 -- trailing p_idempotency_key TEXT DEFAULT NULL, implementing the same
 -- "check existing row WHERE metadata->>'idempotency_key' = p_idempotency_key,
 -- return early if found" guard already used by deduct_with_allowance and
@@ -92,7 +92,7 @@ CREATE OR REPLACE FUNCTION public.credits_add_internal(
     p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
     p_metadata JSONB DEFAULT NULL,
-    p_tier TEXT DEFAULT NULL,
+    p_bucket TEXT DEFAULT NULL,
     p_idempotency_key TEXT DEFAULT NULL
 )
 RETURNS JSONB
@@ -104,15 +104,15 @@ DECLARE
     v_new_balance NUMERIC;
     v_lifetime NUMERIC;
     v_transaction_id UUID;
-    v_tiers_configured BOOLEAN;
-    v_resolved_tier TEXT;
-    v_tier_expires BOOLEAN;
-    v_tier_ttl_days INTEGER;
+    v_buckets_configured BOOLEAN;
+    v_resolved_bucket TEXT;
+    v_bucket_expires BOOLEAN;
+    v_bucket_ttl_days INTEGER;
     v_has_expires_at BOOLEAN;
     v_computed_expires_at TIMESTAMPTZ;
     v_metadata JSONB;
     v_existing_amount NUMERIC;
-    v_existing_tier TEXT;
+    v_existing_bucket TEXT;
 BEGIN
     -- No auth.role() guard here by design — see the header comment above.
     -- Callable only from within the database (this function, credits_add
@@ -135,8 +135,8 @@ BEGIN
     -- tier_required/expires_at validation on a redelivered call — the
     -- original grant already happened; nothing further is validated.
     IF p_idempotency_key IS NOT NULL THEN
-        SELECT id, amount, COALESCE(metadata->>'tier', 'default')
-        INTO v_transaction_id, v_existing_amount, v_existing_tier
+        SELECT id, amount, COALESCE(metadata->>'bucket', 'default')
+        INTO v_transaction_id, v_existing_amount, v_existing_bucket
         FROM public.credit_transactions
         WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
         LIMIT 1;
@@ -152,34 +152,34 @@ BEGIN
                 'amount', v_existing_amount,
                 'new_balance', COALESCE(v_new_balance, 0),
                 'lifetime_purchased', COALESCE(v_lifetime, 0),
-                'tier', v_existing_tier
+                'bucket', v_existing_bucket
             );
         END IF;
     END IF;
 
-    -- ── Tier resolution ──────────────────────────────────────────────────
-    v_tiers_configured := EXISTS (SELECT 1 FROM public.credit_tiers);
+    -- ── Bucket resolution ────────────────────────────────────────────────
+    v_buckets_configured := EXISTS (SELECT 1 FROM public.credit_buckets);
 
-    IF NOT v_tiers_configured THEN
-        IF p_tier IS NOT NULL AND p_tier <> 'default' THEN
-            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+    IF NOT v_buckets_configured THEN
+        IF p_bucket IS NOT NULL AND p_bucket <> 'default' THEN
+            RETURN jsonb_build_object('error', 'tier_not_found', 'bucket',p_bucket);
         END IF;
-        v_resolved_tier := 'default';
-    ELSIF p_tier IS NOT NULL THEN
-        SELECT tier_key, expires, default_ttl_days
-        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
-        FROM public.credit_tiers
-        WHERE tier_key = p_tier;
+        v_resolved_bucket := 'default';
+    ELSIF p_bucket IS NOT NULL THEN
+        SELECT bucket_key, expires, ttl_days
+        INTO v_resolved_bucket, v_bucket_expires, v_bucket_ttl_days
+        FROM public.credit_buckets
+        WHERE bucket_key = p_bucket;
 
         IF NOT FOUND THEN
-            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+            RETURN jsonb_build_object('error', 'tier_not_found', 'bucket',p_bucket);
         END IF;
     ELSE
-        SELECT tier_key, expires, default_ttl_days
-        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
-        FROM public.credit_tiers
+        SELECT bucket_key, expires, ttl_days
+        INTO v_resolved_bucket, v_bucket_expires, v_bucket_ttl_days
+        FROM public.credit_buckets
         WHERE is_default = true
-        ORDER BY priority ASC, tier_key ASC
+        ORDER BY priority ASC, bucket_key ASC
         LIMIT 1;
 
         IF NOT FOUND THEN
@@ -189,23 +189,23 @@ BEGIN
 
     v_metadata := COALESCE(p_metadata, '{}'::jsonb);
 
-    -- ── expires_at reconciliation against the resolved tier ─────────────
-    -- Only applies when tiers are configured (v_tier_expires is NULL, i.e.
-    -- falsy, in the no-tiers-configured branch above, so this whole block
+    -- ── expires_at reconciliation against the resolved bucket ───────────
+    -- Only applies when buckets are configured (v_bucket_expires is NULL, i.e.
+    -- falsy, in the no-buckets-configured branch above, so this whole block
     -- is skipped there).
-    IF v_tiers_configured THEN
+    IF v_buckets_configured THEN
         v_has_expires_at := v_metadata ? 'expires_at';
 
-        IF NOT COALESCE(v_tier_expires, false) THEN
+        IF NOT COALESCE(v_bucket_expires, false) THEN
             IF v_has_expires_at THEN
-                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'tier', v_resolved_tier);
+                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'bucket', v_resolved_bucket);
             END IF;
         ELSE
             IF NOT v_has_expires_at THEN
-                IF v_tier_ttl_days IS NULL THEN
-                    RETURN jsonb_build_object('error', 'expires_at_required', 'tier', v_resolved_tier);
+                IF v_bucket_ttl_days IS NULL THEN
+                    RETURN jsonb_build_object('error', 'expires_at_required', 'bucket', v_resolved_bucket);
                 END IF;
-                v_computed_expires_at := now() + (v_tier_ttl_days || ' days')::interval;
+                v_computed_expires_at := now() + (v_bucket_ttl_days || ' days')::interval;
                 v_metadata := v_metadata || jsonb_build_object('expires_at', to_jsonb(v_computed_expires_at));
             ELSE
                 -- Parity with MemoryStore (Python/JS): an explicit expires_at
@@ -213,7 +213,7 @@ BEGIN
                 IF (v_metadata->>'expires_at')::timestamptz <= now() THEN
                     RETURN jsonb_build_object(
                         'error', 'invalid_expires_at',
-                        'tier', v_resolved_tier,
+                        'bucket', v_resolved_bucket,
                         'expires_at', v_metadata->>'expires_at'
                     );
                 END IF;
@@ -221,7 +221,7 @@ BEGIN
         END IF;
     END IF;
 
-    v_metadata := v_metadata || jsonb_build_object('tier', v_resolved_tier);
+    v_metadata := v_metadata || jsonb_build_object('bucket', v_resolved_bucket);
     IF p_idempotency_key IS NOT NULL THEN
         v_metadata := v_metadata || jsonb_build_object('idempotency_key', p_idempotency_key);
     END IF;
@@ -237,11 +237,11 @@ BEGIN
         updated_at = now()
     RETURNING balance, lifetime_purchased INTO v_new_balance, v_lifetime;
 
-    -- Per-tier balance: lazily created on first touch.
-    INSERT INTO public.user_credit_tiers (user_id, tier_key, balance)
-    VALUES (p_user_id, v_resolved_tier, p_amount)
-    ON CONFLICT (user_id, tier_key) DO UPDATE SET
-        balance = public.user_credit_tiers.balance + p_amount,
+    -- Per-bucket balance: lazily created on first touch.
+    INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
+    VALUES (p_user_id, v_resolved_bucket, p_amount)
+    ON CONFLICT (user_id, bucket_key) DO UPDATE SET
+        balance = public.user_credit_buckets.balance + p_amount,
         updated_at = now();
 
     INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
@@ -254,7 +254,7 @@ BEGIN
         'amount', p_amount,
         'new_balance', v_new_balance,
         'lifetime_purchased', v_lifetime,
-        'tier', v_resolved_tier
+        'bucket', v_resolved_bucket
     );
 END;
 $$;
@@ -268,7 +268,7 @@ CREATE OR REPLACE FUNCTION public.credits_add(
     p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
     p_metadata JSONB DEFAULT NULL,
-    p_tier TEXT DEFAULT NULL,
+    p_bucket TEXT DEFAULT NULL,
     p_idempotency_key TEXT DEFAULT NULL
 )
 RETURNS JSONB
@@ -281,7 +281,7 @@ BEGIN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    RETURN public.credits_add_internal(p_user_id, p_amount, p_type, p_metadata, p_tier, p_idempotency_key);
+    RETURN public.credits_add_internal(p_user_id, p_amount, p_type, p_metadata, p_bucket, p_idempotency_key);
 END;
 $$;
 
@@ -290,7 +290,7 @@ REVOKE EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_ty
 -- ── 2. expire_credits: add p_user_id (lazy per-user sweep) ──────────────
 -- Evolves expire_credits() (defined in 006_refunds_and_expiry.sql) with a
 -- trailing p_user_id UUID DEFAULT NULL. When given, only that user's expired
--- grants are considered — everything else (grouping, the tier/aggregate
+-- grants are considered — everything else (grouping, the bucket/aggregate
 -- balance clamp, the swept_at idempotency marker) is byte-for-byte identical
 -- to the existing global sweep, just filtered to one user's rows. NULL (the
 -- default) preserves the exact original global-sweep behavior/output shape.
@@ -314,10 +314,10 @@ AS $$
 DECLARE
     v_expired_count INTEGER := 0;
     v_expired_amount NUMERIC := 0;
-    v_expired_by_tier JSONB := '{}'::jsonb;
+    v_expired_by_bucket JSONB := '{}'::jsonb;
     v_group RECORD;
     v_group_expired NUMERIC;
-    v_current_tier_balance NUMERIC;
+    v_current_bucket_balance NUMERIC;
     v_current_balance NUMERIC;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
@@ -328,20 +328,20 @@ BEGIN
     -- already been swept (no 'swept_at' marker). Marking swept grants is what
     -- makes the sweep idempotent: a second run finds nothing and never
     -- double-debits. Mirrors MemoryStore, which nulls expires_at on sweep.
-    -- Grouping is per-(user_id, tier) instead of per-user_id, reading tier
-    -- straight off each grant's own metadata->>'tier' (a tier's `expires` flag
+    -- Grouping is per-(user_id, bucket) instead of per-user_id, reading bucket
+    -- straight off each grant's own metadata->>'bucket' (a bucket's `expires` flag
     -- is only consulted at add_credits time; once stamped, a transaction's
     -- fate is fixed regardless of later config changes).
     -- p_user_id (lazy per-user sweep): when given, only that user's rows are
     -- ever considered; every other user's expired grants are left untouched.
     --
     -- Type filter covers every grant type credits_add can stamp expires_at
-    -- onto (matches the tier backfill's type set in 010_credit_tiers.sql
+    -- onto (matches the bucket backfill's type set in 010_credit_buckets.sql
     -- L151) — not just purchase/adjustment. A signup_bonus or subscription
-    -- grant into an expiring tier gets an expires_at too, and must be
+    -- grant into an expiring bucket gets an expires_at too, and must be
     -- sweepable like any other grant, or it never expires.
     FOR v_group IN
-        SELECT DISTINCT user_id, COALESCE(metadata->>'tier', 'default') AS tier_key
+        SELECT DISTINCT user_id, COALESCE(metadata->>'bucket', 'default') AS bucket_key
         FROM public.credit_transactions
         WHERE type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
@@ -349,11 +349,11 @@ BEGIN
           AND (metadata->>'expires_at')::timestamptz <= now()
           AND (p_user_id IS NULL OR user_id = p_user_id)
     LOOP
-        -- Total un-swept expired grants for this (user, tier).
+        -- Total un-swept expired grants for this (user, bucket).
         SELECT COALESCE(SUM(amount), 0) INTO v_group_expired
         FROM public.credit_transactions
         WHERE user_id = v_group.user_id
-          AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
+          AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
           AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
           AND metadata ? 'expires_at'
           AND NOT (metadata ? 'swept_at')
@@ -365,40 +365,40 @@ BEGIN
         WHERE user_id = v_group.user_id
         FOR UPDATE;
 
-        -- Lock (if present) this tier's own balance row for this user.
-        SELECT balance INTO v_current_tier_balance
-        FROM public.user_credit_tiers
-        WHERE user_id = v_group.user_id AND tier_key = v_group.tier_key
+        -- Lock (if present) this bucket's own balance row for this user.
+        SELECT balance INTO v_current_bucket_balance
+        FROM public.user_credit_buckets
+        WHERE user_id = v_group.user_id AND bucket_key = v_group.bucket_key
         FOR UPDATE;
-        v_current_tier_balance := COALESCE(v_current_tier_balance, 0);
+        v_current_bucket_balance := COALESCE(v_current_bucket_balance, 0);
 
-        -- Cap at both the tier's own balance and the aggregate (never expire
+        -- Cap at both the bucket's own balance and the aggregate (never expire
         -- money that isn't actually there under either ceiling).
-        v_group_expired := LEAST(v_group_expired, v_current_tier_balance, v_current_balance);
+        v_group_expired := LEAST(v_group_expired, v_current_bucket_balance, v_current_balance);
 
         IF v_group_expired > 0 THEN
             v_expired_count := v_expired_count + 1;
             v_expired_amount := v_expired_amount + v_group_expired;
-            v_expired_by_tier := v_expired_by_tier || jsonb_build_object(
-                v_group.tier_key,
-                COALESCE((v_expired_by_tier->>v_group.tier_key)::numeric, 0) + v_group_expired
+            v_expired_by_bucket := v_expired_by_bucket || jsonb_build_object(
+                v_group.bucket_key,
+                COALESCE((v_expired_by_bucket->>v_group.bucket_key)::numeric, 0) + v_group_expired
             );
 
             IF NOT p_dry_run THEN
-                -- Deduct expired amount from both the tier and aggregate balances.
-                UPDATE public.user_credit_tiers
+                -- Deduct expired amount from both the bucket and aggregate balances.
+                UPDATE public.user_credit_buckets
                 SET balance = balance - v_group_expired, updated_at = now()
-                WHERE user_id = v_group.user_id AND tier_key = v_group.tier_key;
+                WHERE user_id = v_group.user_id AND bucket_key = v_group.bucket_key;
 
                 UPDATE public.user_credits
                 SET balance = balance - v_group_expired,
                     updated_at = now()
                 WHERE user_id = v_group.user_id;
 
-                -- Log one adjustment transaction per (user, tier).
+                -- Log one adjustment transaction per (user, bucket).
                 INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
                 VALUES (v_group.user_id, -v_group_expired, 'adjustment',
-                        jsonb_build_object('reason', 'credit_expired', 'expired_amount', v_group_expired, 'tier', v_group.tier_key));
+                        jsonb_build_object('reason', 'credit_expired', 'expired_amount', v_group_expired, 'bucket', v_group.bucket_key));
             END IF;
         END IF;
 
@@ -408,7 +408,7 @@ BEGIN
             UPDATE public.credit_transactions
             SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
             WHERE user_id = v_group.user_id
-              AND COALESCE(metadata->>'tier', 'default') = v_group.tier_key
+              AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
               AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
               AND metadata ? 'expires_at'
               AND NOT (metadata ? 'swept_at')
@@ -419,7 +419,7 @@ BEGIN
     RETURN jsonb_build_object(
         'expired_count', v_expired_count,
         'expired_amount', v_expired_amount,
-        'expired_by_tier', v_expired_by_tier,
+        'expired_by_bucket', v_expired_by_bucket,
         'dry_run', p_dry_run
     );
 END;

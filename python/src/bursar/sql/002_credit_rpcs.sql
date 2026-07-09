@@ -19,8 +19,8 @@ BEGIN
     END LOOP;
 END $$;
 
--- credits_add gained a trailing p_tier param (see 010_credit_tiers.sql for the
--- tier-resolution logic). Drop any pre-existing overload by name first so
+-- credits_add gained a trailing p_bucket param (see 010_credit_tiers.sql for the
+-- bucket-resolution logic). Drop any pre-existing overload by name first so
 -- CREATE OR REPLACE below fully replaces it (no-op on fresh installs).
 DO $$
 DECLARE r RECORD;
@@ -37,17 +37,17 @@ END $$;
 -- Money is NUMERIC(18,4). Purchases must be a positive, finite amount;
 -- only the explicit 'adjustment' type may carry a negative/zero amount.
 --
--- p_tier (see 010_credit_tiers.sql): resolves against configured credit tiers
--- and reconciles p_metadata's `expires_at` against the resolved tier's
--- `expires`/`default_ttl_days`. When no tiers are configured, p_tier must be
+-- p_bucket (see 010_credit_tiers.sql): resolves against configured credit buckets
+-- and reconciles p_metadata's `expires_at` against the resolved bucket's
+-- `expires`/`ttl_days`. When no buckets are configured, p_bucket must be
 -- NULL/'default' and expires_at passes through unchanged (zero behavioral
--- change for pre-existing, tier-less configs).
+-- change for pre-existing, bucket-less configs).
 CREATE OR REPLACE FUNCTION public.credits_add(
     p_user_id UUID,
     p_amount NUMERIC,
     p_type public.credit_tx_type DEFAULT 'adjustment',
     p_metadata JSONB DEFAULT NULL,
-    p_tier TEXT DEFAULT NULL
+    p_bucket TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -58,10 +58,10 @@ DECLARE
     v_new_balance NUMERIC;
     v_lifetime NUMERIC;
     v_transaction_id UUID;
-    v_tiers_configured BOOLEAN;
-    v_resolved_tier TEXT;
-    v_tier_expires BOOLEAN;
-    v_tier_ttl_days INTEGER;
+    v_buckets_configured BOOLEAN;
+    v_resolved_bucket TEXT;
+    v_bucket_expires BOOLEAN;
+    v_bucket_ttl_days INTEGER;
     v_has_expires_at BOOLEAN;
     v_computed_expires_at TIMESTAMPTZ;
     v_metadata JSONB;
@@ -81,29 +81,29 @@ BEGIN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
-    -- ── Tier resolution ──────────────────────────────────────────────────
-    v_tiers_configured := EXISTS (SELECT 1 FROM public.credit_tiers);
+    -- ── Bucket resolution ──────────────────────────────────────────────────
+    v_buckets_configured := EXISTS (SELECT 1 FROM public.credit_buckets);
 
-    IF NOT v_tiers_configured THEN
-        IF p_tier IS NOT NULL AND p_tier <> 'default' THEN
-            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+    IF NOT v_buckets_configured THEN
+        IF p_bucket IS NOT NULL AND p_bucket <> 'default' THEN
+            RETURN jsonb_build_object('error', 'tier_not_found', 'bucket', p_bucket);
         END IF;
-        v_resolved_tier := 'default';
-    ELSIF p_tier IS NOT NULL THEN
-        SELECT tier_key, expires, default_ttl_days
-        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
-        FROM public.credit_tiers
-        WHERE tier_key = p_tier;
+        v_resolved_bucket := 'default';
+    ELSIF p_bucket IS NOT NULL THEN
+        SELECT bucket_key, expires, ttl_days
+        INTO v_resolved_bucket, v_bucket_expires, v_bucket_ttl_days
+        FROM public.credit_buckets
+        WHERE bucket_key = p_bucket;
 
         IF NOT FOUND THEN
-            RETURN jsonb_build_object('error', 'tier_not_found', 'tier', p_tier);
+            RETURN jsonb_build_object('error', 'tier_not_found', 'bucket', p_bucket);
         END IF;
     ELSE
-        SELECT tier_key, expires, default_ttl_days
-        INTO v_resolved_tier, v_tier_expires, v_tier_ttl_days
-        FROM public.credit_tiers
+        SELECT bucket_key, expires, ttl_days
+        INTO v_resolved_bucket, v_bucket_expires, v_bucket_ttl_days
+        FROM public.credit_buckets
         WHERE is_default = true
-        ORDER BY priority ASC, tier_key ASC
+        ORDER BY priority ASC, bucket_key ASC
         LIMIT 1;
 
         IF NOT FOUND THEN
@@ -113,23 +113,23 @@ BEGIN
 
     v_metadata := COALESCE(p_metadata, '{}'::jsonb);
 
-    -- ── expires_at reconciliation against the resolved tier ─────────────
-    -- Only applies when tiers are configured (v_tier_expires is NULL, i.e.
-    -- falsy, in the no-tiers-configured branch above, so this whole block
+    -- ── expires_at reconciliation against the resolved bucket ─────────────
+    -- Only applies when buckets are configured (v_bucket_expires is NULL, i.e.
+    -- falsy, in the no-buckets-configured branch above, so this whole block
     -- is skipped there).
-    IF v_tiers_configured THEN
+    IF v_buckets_configured THEN
         v_has_expires_at := v_metadata ? 'expires_at';
 
-        IF NOT COALESCE(v_tier_expires, false) THEN
+        IF NOT COALESCE(v_bucket_expires, false) THEN
             IF v_has_expires_at THEN
-                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'tier', v_resolved_tier);
+                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'bucket', v_resolved_bucket);
             END IF;
         ELSE
             IF NOT v_has_expires_at THEN
-                IF v_tier_ttl_days IS NULL THEN
-                    RETURN jsonb_build_object('error', 'expires_at_required', 'tier', v_resolved_tier);
+                IF v_bucket_ttl_days IS NULL THEN
+                    RETURN jsonb_build_object('error', 'expires_at_required', 'bucket', v_resolved_bucket);
                 END IF;
-                v_computed_expires_at := now() + (v_tier_ttl_days || ' days')::interval;
+                v_computed_expires_at := now() + (v_bucket_ttl_days || ' days')::interval;
                 v_metadata := v_metadata || jsonb_build_object('expires_at', to_jsonb(v_computed_expires_at));
             ELSE
                 -- Parity with MemoryStore (Python/JS): an explicit expires_at
@@ -137,7 +137,7 @@ BEGIN
                 IF (v_metadata->>'expires_at')::timestamptz <= now() THEN
                     RETURN jsonb_build_object(
                         'error', 'invalid_expires_at',
-                        'tier', v_resolved_tier,
+                        'bucket', v_resolved_bucket,
                         'expires_at', v_metadata->>'expires_at'
                     );
                 END IF;
@@ -145,7 +145,7 @@ BEGIN
         END IF;
     END IF;
 
-    v_metadata := v_metadata || jsonb_build_object('tier', v_resolved_tier);
+    v_metadata := v_metadata || jsonb_build_object('bucket', v_resolved_bucket);
 
     INSERT INTO public.user_credits (user_id, balance, lifetime_purchased)
     VALUES (p_user_id, p_amount, CASE WHEN p_type = 'purchase' THEN p_amount ELSE 0 END)
@@ -158,11 +158,11 @@ BEGIN
         updated_at = now()
     RETURNING balance, lifetime_purchased INTO v_new_balance, v_lifetime;
 
-    -- Per-tier balance: lazily created on first touch.
-    INSERT INTO public.user_credit_tiers (user_id, tier_key, balance)
-    VALUES (p_user_id, v_resolved_tier, p_amount)
-    ON CONFLICT (user_id, tier_key) DO UPDATE SET
-        balance = public.user_credit_tiers.balance + p_amount,
+    -- Per-bucket balance: lazily created on first touch.
+    INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
+    VALUES (p_user_id, v_resolved_bucket, p_amount)
+    ON CONFLICT (user_id, bucket_key) DO UPDATE SET
+        balance = public.user_credit_buckets.balance + p_amount,
         updated_at = now();
 
     INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
@@ -175,7 +175,7 @@ BEGIN
         'amount', p_amount,
         'new_balance', v_new_balance,
         'lifetime_purchased', v_lifetime,
-        'tier', v_resolved_tier
+        'bucket', v_resolved_bucket
     );
 END;
 $$;

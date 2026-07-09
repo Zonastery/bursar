@@ -29,7 +29,7 @@ from bursar import (
 )
 from bursar.events import CreditEvent, CreditEventEmitter
 from bursar.interface.memory import MemoryStore
-from bursar.interface.models import OperationPolicy, PlanDefinition, PricingConfigData, SpendCap
+from bursar.interface.models import SpendCap
 
 
 @pytest.fixture
@@ -51,7 +51,9 @@ class _FakeClock:
 
 def _manager(store: MemoryStore, min_balance: Decimal = Decimal(0), **kwargs) -> CreditManager:
     m = CreditManager(store=store, **kwargs)
-    m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
+    m.publish_pricing_from_dict(
+        {"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": min_balance}}
+    )
     return m
 
 
@@ -264,11 +266,11 @@ class TestAllowanceAtSettle:
     def _manager_with_allowance(self, store: MemoryStore, allowance: Decimal) -> CreditManager:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={"free": PlanDefinition(id="free", name="Free", free_allowance=allowance)},
-            )
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {"free": {"label": "Free", "allowance": {"amount": allowance}}},
+            }
         )
         return m
 
@@ -320,7 +322,7 @@ class TestSpendCaps:
         cap_reached: list[CreditEvent] = []
         emitter.on("credits.cap_reached", cap_reached.append)
         m = CreditManager(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal(-500))
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(200))
         # Deny cap 100; admit a small hold (under cap), then settle past the cap.
         store.set_spend_cap(SpendCap(user_id="u1", cap_type="monthly", limit=Decimal(100), action="deny"))
@@ -348,7 +350,7 @@ class TestOverdraftReconcile:
             overdraft_floor=Decimal(-100),
             low_balance=LowBalanceConfig(thresholds=[Decimal(20)]),
         )
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(50))
 
         l1 = m.reserve("u1", Decimal(40))
@@ -374,20 +376,21 @@ class TestMixedOperations:
     def test_chat_and_batch_share_one_available(self, store: MemoryStore) -> None:
         m = CreditManager(store=store, policy="strict_prepaid")
         m.publish_pricing(
-            PricingConfigData(
-                models={"_default": "input_tokens * 1"},
-                min_balance=Decimal(0),
-                plans={
-                    "pro": PlanDefinition(
-                        id="pro",
-                        name="Pro",
-                        per_operation={
-                            "chat": OperationPolicy(billing_mode="strict", max_concurrent=1),
-                            "batch": OperationPolicy(billing_mode="strict", max_concurrent=5),
+            {
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
+                "plans": {
+                    "pro": {
+                        "label": "Pro",
+                        "safety": {
+                            "per_operation": {
+                                "chat": {"billing_mode": "strict", "max_concurrent": 1},
+                                "batch": {"billing_mode": "strict", "max_concurrent": 5},
+                            },
                         },
-                    )
+                    },
                 },
-            )
+            }
         )
         store.add_credits("u1", Decimal(100))
         store.set_user_plan("u1", "pro")
@@ -423,11 +426,11 @@ class TestAllowanceAwareAdmissionStore:
 
     def _store_with_plan(self, allowance: Decimal) -> MemoryStore:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            min_balance=Decimal(0),
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=allowance)},
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {"min_balance": 0},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": allowance}}},
+        }
         store.set_active_pricing(v2)
         return store
 

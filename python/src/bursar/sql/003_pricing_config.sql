@@ -110,8 +110,8 @@ BEGIN
     -- Sync plan definitions into credit_plans (see 004_plans.sql).
     PERFORM public.sync_plans_from_config(p_config);
 
-    -- Sync tier definitions into credit_tiers (see 010_credit_tiers.sql).
-    PERFORM public.sync_tiers_from_config(p_config);
+    -- Sync bucket definitions into credit_buckets (see 010_credit_tiers.sql).
+    PERFORM public.sync_buckets_from_config(p_config);
 
     RETURN jsonb_build_object(
         'id', v_new_id,

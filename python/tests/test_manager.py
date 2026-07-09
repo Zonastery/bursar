@@ -23,7 +23,7 @@ from bursar import CreditManager, UsageMetrics
 from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from bursar.interface.base import CapReachedError, FeatureLimitReachedError
 from bursar.interface.memory import MemoryStore
-from bursar.interface.models import AllowanceResult, FeatureLimit, PlanDefinition, PricingConfigData, SpendCap
+from bursar.interface.models import AllowanceResult, SpendCap
 from bursar.manager import InsufficientCreditsError, LowBalanceConfig, PricingNotLoadedError
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -51,13 +51,15 @@ def manager(store: MemoryStore) -> CreditManager:
     m = CreditManager(store=store)
     m.publish_pricing_from_dict(
         {
-            "models": {
-                "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
-                "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+            "metering": {
+                "models": {
+                    "gpt-4": "input_tokens * 0.01 + output_tokens * 0.03",
+                    "*": "input_tokens * 0.001 + output_tokens * 0.003",
+                },
+                "tools": {"*": "tool_calls * 0"},
+                "flat_jobs": {"batch_job": 20},
             },
-            "tools": {"_default": "tool_calls * 0"},
-            "fixed": {"batch_job": 20},
-            "min_balance": 5,
+            "ledger": {"min_balance": 5},
         }
     )
     return m
@@ -85,7 +87,7 @@ class TestPricingLoading:
         manager = CreditManager(store=store)
         manager.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
             }
         )
         assert manager.engine is not None
@@ -115,7 +117,9 @@ class TestDeduct:
     def test_deduct_fractional_cost_no_truncation(self, store: MemoryStore) -> None:
         """A sub-1-credit op (0.4) is charged 0.4, not 0 (H1 revenue leak)."""
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 0.4"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict(
+            {"metering": {"models": {"*": "input_tokens * 0.4"}}, "ledger": {"min_balance": 0}}
+        )
         mgr.add_credits("user_1", 100)
 
         result = mgr.deduct("user_1", UsageMetrics(input_tokens=1))
@@ -190,7 +194,9 @@ class TestDeduct:
     def test_deduct_insufficient_credits_raises_and_emits_failure(self, store: MemoryStore) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 0.01"}, "min_balance": 5})
+        mgr.publish_pricing_from_dict(
+            {"metering": {"models": {"*": "input_tokens * 0.01"}}, "ledger": {"min_balance": 5}}
+        )
         mgr.add_credits("user_1", 2)  # below min_balance floor
 
         failures: list[CreditEvent] = []
@@ -271,7 +277,7 @@ class TestAddCredits:
 
 
 class TestCreditTiersPassThrough:
-    """CreditManager.add_credits(tier=...) / get_credit_tiers() are thin
+    """CreditManager.add_credits(bucket=...) / get_bucket_balances() are thin
     pass-throughs to the store (mirroring get_balance/get_available): forward
     args/return correctly, no extra logic, no event on the pure-read side."""
 
@@ -279,11 +285,13 @@ class TestCreditTiersPassThrough:
         m = CreditManager(store=store)
         m.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "min_balance": 0,
-                "tiers": {
-                    "gifted": {"name": "Gifted", "priority": 10},
-                    "purchased": {"name": "Purchased", "priority": 30, "is_default": True},
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {
+                    "min_balance": 0,
+                    "buckets": {
+                        "gifted": {"label": "Gifted", "priority": 10},
+                        "purchased": {"label": "Purchased", "priority": 30, "default": True},
+                    },
                 },
             }
         )
@@ -291,26 +299,26 @@ class TestCreditTiersPassThrough:
 
     def test_add_credits_forwards_tier_kwarg(self, store: MemoryStore) -> None:
         m = self._manager_with_tiers(store)
-        result = m.add_credits("user_1", 25, tx_type="purchase", tier="gifted")
-        assert result.tier == "gifted"
+        result = m.add_credits("user_1", 25, tx_type="purchase", bucket="gifted")
+        assert result.bucket == "gifted"
 
     def test_add_credits_omitted_tier_resolves_to_configured_default(self, store: MemoryStore) -> None:
         m = self._manager_with_tiers(store)
         result = m.add_credits("user_1", 10, tx_type="purchase")
-        assert result.tier == "purchased"
+        assert result.bucket == "purchased"
 
-    def test_get_credit_tiers_matches_store_result(self, store: MemoryStore) -> None:
+    def test_get_bucket_balances_matches_store_result(self, store: MemoryStore) -> None:
         m = self._manager_with_tiers(store)
-        m.add_credits("user_1", 25, tx_type="purchase", tier="gifted")
-        m.add_credits("user_1", 100, tx_type="purchase", tier="purchased")
+        m.add_credits("user_1", 25, tx_type="purchase", bucket="gifted")
+        m.add_credits("user_1", 100, tx_type="purchase", bucket="purchased")
 
-        result = m.get_credit_tiers("user_1")
-        assert result == store.get_credit_tiers("user_1")
-        by_key = {t.tier_key: t.balance for t in result.tiers}
+        result = m.get_bucket_balances("user_1")
+        assert result == store.get_bucket_balances("user_1")
+        by_key = {b.bucket_key: b.balance for b in result.buckets}
         assert by_key == {"gifted": Decimal("25"), "purchased": Decimal("100")}
         assert result.total_balance == Decimal("125")
 
-    def test_get_credit_tiers_emits_no_event(self, store: MemoryStore) -> None:
+    def test_get_bucket_balances_emits_no_event(self, store: MemoryStore) -> None:
         """Pure read, like get_balance()/get_available() — no event fires."""
         emitter = CreditEventEmitter()
         events: list[CreditEvent] = []
@@ -320,35 +328,37 @@ class TestCreditTiersPassThrough:
         m = CreditManager(store=store, emitter=emitter)
         m.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "tiers": {"gifted": {"name": "Gifted", "priority": 10, "is_default": True}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {
+                    "buckets": {"gifted": {"label": "Gifted", "priority": 10, "default": True}},
+                },
             }
         )
         m.add_credits("user_1", 10, tx_type="purchase")
-        events.clear()  # only care about events from get_credit_tiers itself
+        events.clear()  # only care about events from get_bucket_balances itself
 
-        m.get_credit_tiers("user_1")
+        m.get_bucket_balances("user_1")
         assert events == []
 
-    def test_no_tiers_configured_manager_pass_through_unchanged(self, store: MemoryStore) -> None:
-        """Zero-tiers-configured regression check at the manager layer: tier
-        defaults to "default" and get_credit_tiers synthesizes one entry."""
+    def test_no_buckets_configured_manager_pass_through_unchanged(self, store: MemoryStore) -> None:
+        """Zero-buckets-configured regression check at the manager layer: bucket
+        defaults to "default" and get_bucket_balances synthesizes one entry."""
         m = CreditManager(store=store)
-        m.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        m.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         result = m.add_credits("user_1", 50, tx_type="purchase")
-        assert result.tier == "default"
+        assert result.bucket == "default"
 
-        tiers = m.get_credit_tiers("user_1")
-        assert len(tiers.tiers) == 1
-        assert tiers.tiers[0].tier_key == "default"
-        assert tiers.tiers[0].balance == Decimal("50")
+        result = m.get_bucket_balances("user_1")
+        assert len(result.buckets) == 1
+        assert result.buckets[0].bucket_key == "default"
+        assert result.buckets[0].balance == Decimal("50")
 
     def test_add_credits_unknown_tier_propagates_store_error(self, store: MemoryStore) -> None:
         from bursar.interface.base import StoreError
 
         m = self._manager_with_tiers(store)
         with pytest.raises(StoreError, match="tier_not_found"):
-            m.add_credits("user_1", 10, tx_type="purchase", tier="nonexistent")
+            m.add_credits("user_1", 10, tx_type="purchase", bucket="nonexistent")
 
 
 class TestGetBalance:
@@ -373,11 +383,11 @@ class TestPlanAllowance:
     def test_full_allowance_covers_cost(self) -> None:
         """Deduct with full plan allowance skips balance deduction."""
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal(100))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user_1", "free")
         store.add_credits("user_1", Decimal(10))
@@ -398,11 +408,11 @@ class TestPlanAllowance:
     def test_partial_allowance_with_balance_deduct(self) -> None:
         """Plan covers part, remaining deducted from balance."""
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"starter": PlanDefinition(id="starter", name="Starter", free_allowance=Decimal(10))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"starter": {"label": "Starter", "allowance": {"amount": 10}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user_1", "starter")
         store.add_credits("user_1", Decimal(100))
@@ -452,8 +462,8 @@ class TestPlanAllowance:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
-                "min_balance": 0,
+                "metering": {"models": {"*": "input_tokens * 1"}},
+                "ledger": {"min_balance": 0},
             }
         )
         mgr.add_credits("user_1", 50)
@@ -469,7 +479,7 @@ class TestRefundFailures:
     def test_over_refund_rejected_no_success_event(self, store: MemoryStore) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user_1", 100)
         deduct = mgr.deduct("user_1", UsageMetrics(input_tokens=10))  # charges 10
 
@@ -490,7 +500,7 @@ class TestRefundFailures:
     def test_duplicate_full_refund_rejected(self, store: MemoryStore) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user_1", 100)
         deduct = mgr.deduct("user_1", UsageMetrics(input_tokens=10))
 
@@ -512,7 +522,7 @@ class TestRefundFailures:
     def test_refund_of_purchase_rejected(self, store: MemoryStore) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         purchase = mgr.add_credits("user_1", 100, tx_type="purchase")
 
         successes: list[CreditEvent] = []
@@ -599,7 +609,7 @@ class TestCreditExpiry:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
             }
         )
         # TZ FIX: tz-aware UTC expiry in the past so the sweep (which compares
@@ -617,7 +627,7 @@ class TestCreditExpiry:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
             }
         )
         # TZ FIX: tz-aware UTC expiry in the past.
@@ -634,7 +644,7 @@ class TestTeamDeduct:
     def test_deduct_team_calculates_cost_and_debits_team(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Team", Decimal(500))
         store.add_team_member(team.team_id, "user-1")
 
@@ -647,7 +657,7 @@ class TestTeamDeduct:
     def test_deduct_team_zero_cost_noop(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Team", Decimal(500))
         store.add_team_member(team.team_id, "user-1")
 
@@ -659,7 +669,7 @@ class TestTeamDeduct:
         """Same key → original team tx, no second pool charge (H12)."""
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Team", Decimal(500))
         store.add_team_member(team.team_id, "user-1")
 
@@ -679,7 +689,7 @@ class TestTeamDeduct:
         """deduct_team now raises on error, consistent with deduct (H3)."""
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Poor Team", Decimal(10))
         store.add_team_member(team.team_id, "user-1")
 
@@ -689,7 +699,7 @@ class TestTeamDeduct:
     def test_deduct_team_user_not_in_team_raises(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Closed Team", Decimal(500))
         with pytest.raises(InsufficientCreditsError, match="user_not_in_team"):
             mgr.deduct_team(team.team_id, "user-1", UsageMetrics(input_tokens=10))
@@ -699,7 +709,7 @@ class TestSpendCapsManager:
     def test_daily_deny_cap_blocks_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("user-1", Decimal(1000))
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(10), action="deny"))
 
@@ -711,7 +721,7 @@ class TestSpendCapsManager:
     def test_warn_action_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("user-1", Decimal(1000))
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(10), action="warn"))
 
@@ -723,7 +733,7 @@ class TestSpendCapsManager:
     def test_notify_action_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("user-1", Decimal(1000))
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(10), action="notify"))
 
@@ -734,7 +744,7 @@ class TestSpendCapsManager:
     def test_cap_within_limit_allows_deduction(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("user-1", Decimal(1000))
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(100), action="deny"))
 
@@ -767,20 +777,23 @@ class TestFeatureLimitsManager:
     ) -> tuple[MemoryStore, CreditManager]:
         store = MemoryStore()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
-        config = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            min_balance=Decimal(0),
-            plans={
-                "free": PlanDefinition(
-                    id="free",
-                    name="Free",
-                    feature_limits={
-                        (feature or self.FEATURE): FeatureLimit(max_calls=max_calls, period=period, action=action)
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
+        config = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "ledger": {"min_balance": 0},
+            "plans": {
+                "free": {
+                    "label": "Free",
+                    "entitlements": {
+                        (feature or self.FEATURE): {
+                            "max_calls": max_calls,
+                            "period": period,
+                            "on_exceed": action,
+                        },
                     },
-                ),
+                },
             },
-        )
+        }
         store.set_active_pricing(config)
         store.set_user_plan(user_id, "free")
         store.add_credits(user_id, Decimal(1000))
@@ -940,7 +953,7 @@ class TestFeatureLimitsManager:
     def test_check_feature_limit_planless_user_is_unlimited(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         result = mgr.check_feature_limit("nobody", self.FEATURE)
         assert result.limited is False
 
@@ -970,7 +983,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -986,7 +999,7 @@ class TestEventSystem:
     def test_emits_added_event(self) -> None:
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=MemoryStore(), emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
 
         events: list[CreditEvent] = []
         emitter.on("credits.added", events.append)
@@ -1000,7 +1013,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -1014,7 +1027,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(5), action="deny"))
 
@@ -1035,7 +1048,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
 
         events: list[CreditEvent] = []
         emitter.on("credits.expired", events.append)
@@ -1051,7 +1064,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         called: list[int] = []
@@ -1066,7 +1079,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         survivor: list[int] = []
@@ -1091,7 +1104,7 @@ class TestEventSystem:
         emitter = CreditEventEmitter()
         store = MemoryStore()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         called: list[str] = []
@@ -1109,7 +1122,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(5), action="warn"))
 
@@ -1127,7 +1140,7 @@ class TestEventSystem:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
 
         events: list[CreditEvent] = []
         emitter.on("credits.added", events.append)
@@ -1147,7 +1160,7 @@ class TestLowBalanceEvent:
         # min_balance 5 → default threshold 10. min_balance 0 here so the floor
         # never blocks; set min_balance explicitly to control the threshold.
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 5})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 5}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -1173,7 +1186,7 @@ class TestLowBalanceEvent:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(50)]))
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         events: list[CreditEvent] = []
@@ -1201,16 +1214,18 @@ class TestPlanFeatures:
 
     def test_check_feature_through_manager(self, manager: CreditManager) -> None:
         store = manager._store
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={
-                "premium": PlanDefinition(
-                    id="premium",
-                    name="Premium",
-                    features={"ai_chat": True, "max_roadmaps": 20},
-                ),
+        v2 = {
+            "metering": {"models": {"*": "1"}},
+            "plans": {
+                "premium": {
+                    "label": "Premium",
+                    "entitlements": {
+                        "ai_chat": {"value": True},
+                        "max_roadmaps": {"value": 20},
+                    },
+                },
             },
-        )
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "premium")
         result = manager.check_feature("user-1", "ai_chat")
@@ -1225,16 +1240,19 @@ class TestPlanFeatures:
         """Numeric 0 / "" entitlements are PRESENT (M6 presence-vs-truthiness)."""
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        v2 = PricingConfigData(
-            models={"_default": "1"},
-            plans={
-                "tier": PlanDefinition(
-                    id="tier",
-                    name="Tier",
-                    features={"quota": 0, "label": "", "disabled": False, "missing": None},
-                ),
+        v2 = {
+            "metering": {"models": {"*": "1"}},
+            "plans": {
+                "tier": {
+                    "label": "Tier",
+                    "entitlements": {
+                        "quota": {"value": 0},
+                        "label": {"value": ""},
+                        "disabled": {"value": False},
+                    },
+                },
             },
-        )
+        }
         store.set_active_pricing(v2)
         store.set_user_plan("user-1", "tier")
 
@@ -1251,7 +1269,7 @@ class TestMetadataMerge:
         from bursar.interface.models import CreditMetadata
 
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 100)
 
         # Caller tries to overwrite reserved system keys.
@@ -1298,9 +1316,9 @@ class TestPlanChanged:
         mgr = CreditManager(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
-                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                    "pro": {"label": "Pro", "allowance": {"amount": Decimal(100)}},
                 },
             }
         )
@@ -1333,9 +1351,9 @@ class TestPlanUnset:
         mgr = CreditManager(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
-                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                    "pro": {"label": "Pro", "allowance": {"amount": Decimal(100)}},
                 },
             }
         )
@@ -1363,7 +1381,7 @@ class TestTeamIdempotencyUserScoped:
     def test_same_key_different_users_both_charged(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}})
         team = store.create_team("Team", Decimal(500))
         store.add_team_member(team.team_id, "user-1")
         store.add_team_member(team.team_id, "user-2")
@@ -1388,7 +1406,7 @@ class TestCapWarningWithDeducted:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("user-1", Decimal(1000))
         store.set_spend_cap(SpendCap(user_id="user-1", type="daily", limit=Decimal(5), action="warn"))
 
@@ -1409,7 +1427,9 @@ class TestLowBalanceEdgeTriggered:
         store = MemoryStore()
         emitter = CreditEventEmitter()
         mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(20)]))
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 10})
+        mgr.publish_pricing_from_dict(
+            {"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 10}}
+        )
         mgr.add_credits("user-1", Decimal(25))
 
         events: list[CreditEvent] = []
@@ -1435,11 +1455,11 @@ class TestAllowanceWindowOnReset:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
-                    "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100)),
+                    "pro": {"label": "Pro", "allowance": {"amount": Decimal(100)}},
                 },
-                "min_balance": 0,
+                "ledger": {"min_balance": 0},
             }
         )
         store.set_user_plan("user-1", "pro")
@@ -1481,11 +1501,11 @@ class TestFullUserLifecycle:
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(
             {
-                "models": {"_default": "input_tokens * 1"},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
-                    "basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(10)),
+                    "basic": {"label": "Basic", "allowance": {"amount": Decimal(10)}},
                 },
-                "min_balance": 0,
+                "ledger": {"min_balance": 0},
             }
         )
 
@@ -1593,7 +1613,7 @@ class TestDeductRefundThenDeductAgain:
     def test_deduct_refund_then_deduct_again(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 10)
 
         # Step 1: balance=10
@@ -1633,7 +1653,7 @@ class TestLowBalanceThresholdReResolution:
         emitter = CreditEventEmitter()
         # Explicit threshold=5; min_balance=0 so the floor never blocks.
         mgr = CreditManager(store=store, emitter=emitter, low_balance=LowBalanceConfig(thresholds=[Decimal(5)]))
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("user-1", 6)
 
         events: list[CreditEvent] = []
@@ -1659,11 +1679,11 @@ class TestManagerCheckAllowance:
 
     def _mgr_with_plan(self, allowance: Decimal) -> tuple[CreditManager, MemoryStore]:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=allowance)},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": allowance}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1717,13 +1737,13 @@ class TestManagerCheckAllowanceWindowOverride:
         self, period: str, allowance: Decimal, assigned_at: datetime
     ) -> tuple[CreditManager, MemoryStore]:
         store = MemoryStore(clock=lambda: assigned_at)
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={
-                "basic": PlanDefinition(id="basic", name="Basic", free_allowance=allowance, allowance_period=period)
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {
+                "basic": {"label": "Basic", "allowance": {"amount": allowance, "period": period}},
             },
-            min_balance=Decimal(0),
-        )
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1809,11 +1829,11 @@ class TestResolveAllowancePeriodStartFastPath:
 
     def test_calendar_month_plan_resolves_to_none(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(100))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1824,20 +1844,20 @@ class TestResolveAllowancePeriodStartFastPath:
     def test_planless_user_resolves_to_none(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         assert mgr._resolve_allowance_period_start("nobody") is None
 
     def test_non_calendar_month_plan_resolves_to_a_date(self) -> None:
         from datetime import date
 
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={
-                "pro": PlanDefinition(id="pro", name="Pro", free_allowance=Decimal(100), allowance_period="rolling_30d")
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {
+                "pro": {"label": "Pro", "allowance": {"amount": 100, "period": "rolling_30d"}},
             },
-            min_balance=Decimal(0),
-        )
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1850,11 +1870,11 @@ class TestResolveAllowancePeriodStartFastPath:
         """Regression safety net: deduct()/settle() behavior for a calendar_month
         plan is byte-for-byte identical to pre-WS9 behavior."""
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"basic": PlanDefinition(id="basic", name="Basic", free_allowance=Decimal(100))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"basic": {"label": "Basic", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1883,12 +1903,11 @@ class TestDeductFixedAllowance:
 
     def _setup(self) -> tuple[CreditManager, MemoryStore]:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            fixed={"report": Decimal(10)},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal(50))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}, "flat_jobs": {"report": 10}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 50}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1924,11 +1943,11 @@ class TestDeductSkipAllowance:
 
     def test_skip_allowance_charges_full_balance(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal(100))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1943,11 +1962,11 @@ class TestDeductSkipAllowance:
 
     def test_skip_allowance_false_consumes_allowance_normally(self) -> None:
         store = MemoryStore()
-        v2 = PricingConfigData(
-            models={"_default": "input_tokens * 1"},
-            plans={"free": PlanDefinition(id="free", name="Free", free_allowance=Decimal(100))},
-            min_balance=Decimal(0),
-        )
+        v2 = {
+            "metering": {"models": {"*": "input_tokens * 1"}},
+            "plans": {"free": {"label": "Free", "allowance": {"amount": 100}}},
+            "ledger": {"min_balance": 0},
+        }
         store.set_active_pricing(v2)
         mgr = CreditManager(store=store)
         mgr.publish_pricing_from_dict(v2)
@@ -1978,7 +1997,9 @@ class TestFloorBreachEvent:
     ) -> tuple[CreditManager, MemoryStore]:
         store = MemoryStore()
         mgr = CreditManager(store=store, emitter=emitter)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": min_balance})
+        mgr.publish_pricing_from_dict(
+            {"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": min_balance}}
+        )
         return mgr, store
 
     def test_settle_clamps_actual_to_floor_no_breach(self) -> None:
@@ -2019,7 +2040,7 @@ class TestFloorBreachEvent:
         events: list[CreditEvent] = []
         emitter.on("credits.floor_breach", events.append)
         mgr = CreditManager(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal(-100))
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 5})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 5}})
         store.add_credits("u1", Decimal(10))
 
         # Overdraft settle pushes balance to -40 — no floor_breach in overdraft mode.
@@ -2041,7 +2062,7 @@ class TestResolvePolicyFailClosed:
         """A store outage during get_user_plan must surface — not silently demote the plan."""
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(100))
 
         original_get_user_plan = store.get_user_plan
@@ -2061,7 +2082,7 @@ class TestResolvePolicyFailClosed:
         affordable=False with reason='policy_unavailable' (#7)."""
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         store.add_credits("u1", Decimal(100))
 
         original_get_user_plan = store.get_user_plan
@@ -2088,7 +2109,7 @@ class TestIdempotentReplayStable:
     def test_idempotent_replay_stable_after_credit_top_up(self) -> None:
         store = MemoryStore()
         mgr = CreditManager(store=store)
-        mgr.publish_pricing_from_dict({"models": {"_default": "input_tokens * 1"}, "min_balance": 0})
+        mgr.publish_pricing_from_dict({"metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {"min_balance": 0}})
         mgr.add_credits("u1", Decimal(100))
 
         # First call: deducts 10, balance_after = 90.

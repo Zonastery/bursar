@@ -23,17 +23,19 @@ from bursar.interface.models import (
     AllowanceResult,
     AvailableResult,
     BalanceResult,
+    BucketBalance,
+    BucketBalancesResult,
     CapCheckResult,
     CreateTeamResult,
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    Entitlement,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     OperationPolicy,
-    PricingConfigData,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
@@ -46,8 +48,6 @@ from bursar.interface.models import (
     TeamBalanceResult,
     TeamDeductionResult,
     TeamMember,
-    TierBalance,
-    TierBalancesResult,
     TopUserRow,
     TransactionRow,
 )
@@ -102,9 +102,9 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
 
 
 def _dec_map(value: Any) -> dict[str, Decimal] | None:
-    """Coerce a ``{tier_key: amount}`` JSON object into ``dict[str, Decimal]`` (023).
+    """Coerce a ``{bucket_key: amount}`` JSON object into ``dict[str, Decimal]`` (023).
 
-    Used for ``tier_breakdown``/``expired_by_tier`` fields. Returns ``None`` for a
+    Used for ``bucket_breakdown``/``expired_by_bucket`` fields. Returns ``None`` for a
     missing/empty/non-dict value so callers can distinguish "no tier data" from
     "empty breakdown" the same way the rest of this module treats optional fields.
     """
@@ -316,7 +316,7 @@ class HttpxSupabaseStore(CreditStore):
         type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
-        tier: str | None = None,
+        bucket: str | None = None,
         idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
@@ -332,7 +332,7 @@ class HttpxSupabaseStore(CreditStore):
                 "p_amount": str(amount),
                 "p_type": type,
                 "p_metadata": meta,
-                "p_tier": tier,
+                "p_bucket": bucket,
                 "p_idempotency_key": idempotency_key,
             },
         )
@@ -344,7 +344,7 @@ class HttpxSupabaseStore(CreditStore):
             amount=_dec(row.get("amount"), amount),
             new_balance=_dec(row.get("new_balance")),
             lifetime_purchased=_dec(row.get("lifetime_purchased")),
-            tier=str(row.get("tier", "default")),
+            bucket=str(row.get("bucket", "default")),
         )
 
     def deduct_with_allowance(
@@ -427,7 +427,7 @@ class HttpxSupabaseStore(CreditStore):
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
             feature_limit_warning=row.get("feature_limit_warning") or None,
-            tier_breakdown=_dec_map(row.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(row.get("bucket_breakdown")),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -553,7 +553,7 @@ class HttpxSupabaseStore(CreditStore):
             idempotent=bool(row.get("idempotent", False)),
             cap_warning=row.get("cap_warning") or None,
             feature_limit_warning=row.get("feature_limit_warning") or None,
-            tier_breakdown=_dec_map(row.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(row.get("bucket_breakdown")),
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -607,12 +607,12 @@ class HttpxSupabaseStore(CreditStore):
 
     def set_active_pricing(
         self,
-        config: PricingConfigData,
+        config: dict[str, Any],
         label: str | None = None,
     ) -> str:
         row = self._rpc(
             "set_active_pricing_config",
-            {"p_config": config.model_dump(mode="json"), "p_label": label},
+            {"p_config": config, "p_label": label},
         )
         self.invalidate_pricing_cache()
         return str(row.get("id", ""))
@@ -640,19 +640,23 @@ class HttpxSupabaseStore(CreditStore):
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         row = self._rpc("get_user_plan", {"p_user_id": user_id})
         if not row:
-            return GetUserPlanResult(user_id=user_id, plan_id=None, plan_name=None, free_allowance=Decimal(0))
+            return GetUserPlanResult(user_id=user_id)
         return GetUserPlanResult(
             user_id=str(row.get("user_id", user_id)),
             plan_id=row.get("plan_id") or None,
-            plan_name=row.get("plan_name") or None,
-            free_allowance=_dec(row.get("free_allowance")),
-            features=row.get("features") or {},
-            feature_limits={k: FeatureLimit.model_validate(v) for k, v in (row.get("feature_limits") or {}).items()},
-            default_billing_mode=str(row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            plan_label=row.get("plan_label") or row.get("plan_name") or None,
+            allowance_amount=_dec(row["allowance_amount"])
+            if row.get("allowance_amount") is not None
+            else _dec(row.get("free_allowance", 0)),
+            allowance_period=str(row.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
+            entitlements={
+                k: Entitlement.model_validate(v)
+                for k, v in (row.get("entitlements") or row.get("feature_limits") or {}).items()
+            },
+            billing_mode=str(row.get("billing_mode") or row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
             max_concurrent=row.get("max_concurrent"),
             overdraft_floor=_dec(row["overdraft_floor"]) if row.get("overdraft_floor") is not None else None,
-            allowance_period=str(row.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
             plan_assigned_at=(
                 datetime.fromisoformat(str(row["plan_assigned_at"])) if row.get("plan_assigned_at") else None
             ),
@@ -788,7 +792,7 @@ class HttpxSupabaseStore(CreditStore):
             user_id=str(row.get("user_id", "")),
             amount=_dec(row.get("amount")),
             new_balance=_dec(row.get("new_balance")),
-            tier_breakdown=_dec_map(row.get("tier_breakdown")),
+            bucket_breakdown=_dec_map(row.get("bucket_breakdown")),
         )
 
     def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
@@ -797,7 +801,7 @@ class HttpxSupabaseStore(CreditStore):
             "user_id": str(row.get("user_id", user_id)),
             "amount": row.get("amount", 0),
             "new_balance": row.get("new_balance", ""),
-            "tier": row.get("tier"),
+            "bucket": row.get("bucket"),
         }
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -1018,25 +1022,25 @@ class HttpxSupabaseStore(CreditStore):
             expired_count=int(row.get("expired_count", 0)),
             expired_amount=_dec(row.get("expired_amount")),
             dry_run=dry_run,
-            expired_by_tier=_dec_map(row.get("expired_by_tier")),
+            expired_by_bucket=_dec_map(row.get("expired_by_bucket")),
         )
 
-    # ── Credit tiers (023) ────────────────────────────────────────────────
+    # ── Credit buckets ────────────────────────────────────────────────
 
-    def get_credit_tiers(self, user_id: str) -> TierBalancesResult:
-        row = self._rpc("get_user_credit_tiers", {"p_user_id": user_id})
-        tiers = [
-            TierBalance(
-                tier_key=str(t.get("tier_key", "")),
-                name=str(t.get("name", "")),
+    def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
+        row = self._rpc("get_user_credit_buckets", {"p_user_id": user_id})
+        buckets = [
+            BucketBalance(
+                bucket_key=str(t.get("bucket_key", "")),
+                label=str(t.get("name", "")),
                 priority=int(t.get("priority", 0)),
                 expires=bool(t.get("expires", False)),
                 balance=_dec(t.get("balance")),
             )
             for t in (row.get("tiers") or [])
         ]
-        return TierBalancesResult(
+        return BucketBalancesResult(
             user_id=str(row.get("user_id", user_id)),
-            tiers=tiers,
+            buckets=buckets,
             total_balance=_dec(row.get("total_balance")),
         )

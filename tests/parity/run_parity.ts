@@ -223,7 +223,7 @@ async function runAction(
     const r = await store.getUserPlan(action["user_id"] as string);
     return {
       plan_id: r.planId,
-      billing_mode: r.defaultBillingMode ?? "strict",
+      billing_mode: r.billingMode ?? "strict",
     };
   }
 

@@ -5,12 +5,12 @@ import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { InsufficientCreditsError } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
 
-const TEST_CONFIG: PricingConfigData = {
-  models: { _default: "input_tokens * 1" },
+const TEST_CONFIG = {
+  version: 1,
+  metering: { models: { "*": "input_tokens * 1" } },
 };
 
 /**
@@ -42,7 +42,7 @@ describe("CreditManager lazyExpiry", () => {
 
       // No lazy sweep — the expired grant is still counted.
       expect((await manager.getBalance("user-1")).balance.toString()).toBe("100");
-      expect((await manager.getCreditTiers("user-1")).totalBalance.toString()).toBe("100");
+      expect((await manager.getBucketBalances("user-1")).totalBalance.toString()).toBe("100");
 
       // Only an explicit sweep removes it.
       const sweep = await manager.sweepExpiredCredits();
@@ -98,7 +98,7 @@ describe("CreditManager lazyExpiry", () => {
       expect(balance.balance.toString()).toBe("50");
     });
 
-    it("getCreditTiers transparently sweeps before reporting balances", async () => {
+    it("getBucketBalances transparently sweeps before reporting balances", async () => {
       const manager = makeManager();
       await manager.addCredits("user-1", 100, {
         type: "purchase",
@@ -107,8 +107,8 @@ describe("CreditManager lazyExpiry", () => {
 
       store.setClock(() => AFTER_EXPIRY);
 
-      const tiers = await manager.getCreditTiers("user-1");
-      expect(tiers.totalBalance.toString()).toBe("0");
+      const buckets = await manager.getBucketBalances("user-1");
+      expect(buckets.totalBalance.toString()).toBe("0");
     });
 
     it("getAvailable (the credits-page 'UI only' read) transparently sweeps before reporting", async () => {

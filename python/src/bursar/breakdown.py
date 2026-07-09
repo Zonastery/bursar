@@ -30,6 +30,6 @@ class CostBreakdown(BaseModel):
     tool_credits: Decimal = Decimal("0.0000")
     search_credits: Decimal = Decimal("0.0000")
     cache_savings: Decimal = Decimal("0.0000")
-    fixed_credits: Decimal = Decimal("0.0000")
+    flat_job_credits: Decimal = Decimal("0.0000")
     total: Decimal = Decimal("0.0000")
     breakdown: dict[str, Any] = Field(default_factory=dict)

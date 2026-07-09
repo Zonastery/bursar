@@ -67,16 +67,27 @@ function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition 
   const p = raw as Record<string, unknown>;
   const allowanceRaw = (p["allowance"] ?? {}) as Record<string, unknown>;
   const safetyRaw = (p["safety"] ?? {}) as Record<string, unknown>;
-  const perOperationRaw = safetyRaw["perOperation"] as
+  const perOperationRaw = (safetyRaw["perOperation"] ?? safetyRaw["per_operation"]) as
     Record<string, unknown> | null | undefined;
-  const allowanceAmountRaw = (allowanceRaw["amount"] ?? p["freeAllowance"] ?? p["free_allowance"]) as
-    number | string | undefined;
-  const allowancePeriodRaw = (allowanceRaw["period"] ?? p["allowancePeriod"] ?? p["allowance_period"]) as
-    AllowancePeriod | undefined;
-  const billingModeRaw = (safetyRaw["billingMode"] ?? p["defaultBillingMode"] ?? p["billingMode"] ?? p["default_billing_mode"]) as string | undefined;
-  const overdraftFloorRaw = (safetyRaw["overdraftFloor"] ?? p["overdraftFloor"] ?? p["overdraft_floor"]) as
-    number | string | null | undefined;
-  const maxConcurrentRaw = (safetyRaw["maxConcurrent"] ?? p["maxConcurrent"] ?? p["max_concurrent"]) as number | null | undefined;
+  const allowanceAmountRaw = (allowanceRaw["amount"] ??
+    p["freeAllowance"] ??
+    p["free_allowance"]) as number | string | undefined;
+  const allowancePeriodRaw = (allowanceRaw["period"] ??
+    p["allowancePeriod"] ??
+    p["allowance_period"]) as AllowancePeriod | undefined;
+  const billingModeRaw = (safetyRaw["billingMode"] ??
+    safetyRaw["billing_mode"] ??
+    p["defaultBillingMode"] ??
+    p["billingMode"] ??
+    p["default_billing_mode"]) as string | undefined;
+  const overdraftFloorRaw = (safetyRaw["overdraftFloor"] ??
+    safetyRaw["overdraft_floor"] ??
+    p["overdraftFloor"] ??
+    p["overdraft_floor"]) as number | string | null | undefined;
+  const maxConcurrentRaw = (safetyRaw["maxConcurrent"] ??
+    safetyRaw["max_concurrent"] ??
+    p["maxConcurrent"] ??
+    p["max_concurrent"]) as number | null | undefined;
   const rateOverridesRaw = (p["rateOverrides"] ?? p["rate_overrides"]) as
     Record<string, string> | null | undefined;
   const entitlementsRaw = (p["entitlements"] ?? p["featureLimits"] ?? p["feature_limits"]) as
@@ -97,7 +108,16 @@ function normalisePlanDefinition(planKey: string, raw: unknown): PlanDefinition 
       overdraftFloor: overdraftFloorRaw != null ? new Decimal(overdraftFloorRaw) : null,
     },
     rateOverrides: rateOverridesRaw ?? null,
-    entitlements: (normaliseFeatureLimitsMap(entitlementsRaw) as unknown as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>) ?? null,
+    entitlements:
+      (normaliseFeatureLimitsMap(entitlementsRaw) as unknown as Record<
+        string,
+        {
+          value?: unknown;
+          maxCalls?: number;
+          period?: FeatureLimitPeriod;
+          onExceed?: "deny" | "warn" | "notify";
+        }
+      >) ?? null,
   };
 }
 
@@ -112,13 +132,30 @@ function normaliseFeatureLimitsMap(
   if (!raw) return null;
   const out: Record<string, FeatureLimit> = {};
   for (const [featureKey, rawLimit] of Object.entries(raw)) {
-    const l = (rawLimit ?? {}) as Record<string, unknown>;
-    const maxCallsRaw = (l["maxCalls"] ?? l["max_calls"]) as number | string | undefined;
-    out[featureKey] = {
-      maxCalls: maxCallsRaw != null ? Number(maxCallsRaw) : 0,
-      period: (l["period"] as FeatureLimit["period"] | undefined) ?? "monthly",
-      onExceed: ((l["onExceed"] ?? l["action"] ?? "deny") as FeatureLimit["onExceed"]),
-    };
+    if (
+      rawLimit === null ||
+      typeof rawLimit !== "object" ||
+      Object.getPrototypeOf(rawLimit) !== Object.prototype
+    ) {
+      // Plain or non-plain-object value (e.g. true, 20, "", new Decimal("0")):
+      // wrap as value-based entitlement.
+      out[featureKey] = {
+        value: rawLimit,
+        maxCalls: 0,
+        period: "monthly",
+        onExceed: "deny",
+      } as FeatureLimit;
+    } else {
+      const l = rawLimit as Record<string, unknown>;
+      const maxCallsRaw = (l["maxCalls"] ?? l["max_calls"]) as number | string | undefined;
+      const valueRaw = l["value"];
+      out[featureKey] = {
+        ...(valueRaw !== undefined ? { value: valueRaw } : {}),
+        maxCalls: maxCallsRaw != null ? Number(maxCallsRaw) : 0,
+        period: (l["period"] as FeatureLimit["period"] | undefined) ?? "monthly",
+        onExceed: (l["onExceed"] ?? l["action"] ?? "deny") as FeatureLimit["onExceed"],
+      } as FeatureLimit;
+    }
   }
   return out;
 }
@@ -130,12 +167,13 @@ function normaliseFeatureLimitsMap(
  */
 function normaliseBucketDefinition(bucketKey: string, raw: unknown): BucketDefinition {
   const t = raw as Record<string, unknown>;
-  const defaultTtlDaysRaw = (t["defaultTtlDays"] ?? t["default_ttl_days"]) as
+  const defaultTtlDaysRaw = (t["ttlDays"] ?? t["defaultTtlDays"] ?? t["default_ttl_days"]) as
     number | string | null | undefined;
   const allowOverdraftRaw = (t["allowOverdraft"] ?? t["allow_overdraft"]) as boolean | undefined;
-  const isDefaultRaw = (t["isDefault"] ?? t["is_default"]) as boolean | undefined;
+  const isDefaultRaw = (t["isDefaultBucket"] ?? t["isDefault"] ?? t["is_default"]) as
+    boolean | undefined;
   return {
-    label: (t["name"] as string | undefined) ?? t["label"] as string | undefined ?? bucketKey,
+    label: (t["name"] as string | undefined) ?? (t["label"] as string | undefined) ?? bucketKey,
     priority: Number(t["priority"] ?? 0),
     expires: Boolean(t["expires"] ?? false),
     ttlDays: defaultTtlDaysRaw != null ? Number(defaultTtlDaysRaw) : null,
@@ -312,9 +350,11 @@ export class MemoryStore extends CreditStore {
 
     return [
       ...base,
-      ...[...orphaned]
-        .sort()
-        .map((bucketKey) => ({ bucketKey, priority: Number.MAX_SAFE_INTEGER, allowOverdraft: false })),
+      ...[...orphaned].sort().map((bucketKey) => ({
+        bucketKey,
+        priority: Number.MAX_SAFE_INTEGER,
+        allowOverdraft: false,
+      })),
     ];
   }
 
@@ -1266,7 +1306,9 @@ export class MemoryStore extends CreditStore {
     }
     const ledgerConfig = config.ledger as Record<string, unknown> | undefined;
     if (ledgerConfig && ledgerConfig.buckets) {
-      for (const [bucketKey, bucketData] of Object.entries(ledgerConfig.buckets as Record<string, unknown>)) {
+      for (const [bucketKey, bucketData] of Object.entries(
+        ledgerConfig.buckets as Record<string, unknown>,
+      )) {
         this.bucketDefinitions.set(bucketKey, normaliseBucketDefinition(bucketKey, bucketData));
       }
     }
@@ -1307,7 +1349,9 @@ export class MemoryStore extends CreditStore {
     }
     const ledgerEntry = entry.config.ledger as Record<string, unknown> | undefined;
     if (ledgerEntry && ledgerEntry.buckets) {
-      for (const [bucketKey, bucketData] of Object.entries(ledgerEntry.buckets as Record<string, unknown>)) {
+      for (const [bucketKey, bucketData] of Object.entries(
+        ledgerEntry.buckets as Record<string, unknown>,
+      )) {
         this.bucketDefinitions.set(bucketKey, normaliseBucketDefinition(bucketKey, bucketData));
       }
     }
@@ -1324,7 +1368,15 @@ export class MemoryStore extends CreditStore {
       planId,
       planLabel: planDef?.label ?? null,
       allowanceAmount: planDef?.allowance?.amount ?? ZERO,
-      entitlements: (planDef?.entitlements ?? {}) as Record<string, { value?: unknown; maxCalls?: number; period?: FeatureLimitPeriod; onExceed?: "deny" | "warn" | "notify" }>,
+      entitlements: (planDef?.entitlements ?? {}) as Record<
+        string,
+        {
+          value?: unknown;
+          maxCalls?: number;
+          period?: FeatureLimitPeriod;
+          onExceed?: "deny" | "warn" | "notify";
+        }
+      >,
       allowancePeriod: planDef?.allowance?.period ?? "calendar_month",
       billingMode: planDef?.safety?.billingMode ?? "strict",
       perOperation: (planDef?.safety?.perOperation ?? {}) as Record<string, OperationPolicy>,
@@ -1338,7 +1390,7 @@ export class MemoryStore extends CreditStore {
     const plan = await this.getUserPlan(userId);
     const present = Object.prototype.hasOwnProperty.call(plan.entitlements, feature);
     const entitlement = present ? plan.entitlements[feature] : null;
-    const value = entitlement ? (entitlement as Record<string, unknown>)['value'] ?? null : null;
+    const value = entitlement ? ((entitlement as Record<string, unknown>)["value"] ?? null) : null;
     return {
       userId,
       feature,

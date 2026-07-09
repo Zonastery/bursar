@@ -121,4 +121,6 @@ export type {
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   EntitlementMode,
+  ProviderRef,
+  SubscriptionGrant,
 } from "./billing/index.js";

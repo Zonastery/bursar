@@ -23,13 +23,12 @@ from bursar.billing import (
     BillingOffer,
     BillingOfferInterval,
     BillingPaymentInfo,
-    BillingProviderRefs,
     BillingSubscriptionInfo,
-    BillingSubscriptionOfferRef,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     MemoryBillingStore,
     PostgresBillingStore,
+    ProviderRef,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────
@@ -49,59 +48,57 @@ _PRICE_ID_TOPUP = "price_topup_credits"
 _EVENT_ID = "evt_test_001"
 
 _PRICING_DICT = {
-    "models": {"_default": "input_tokens * 1"},
-    "min_balance": 0,
-    "plans": {
-        "free": {"id": "free", "name": "Free", "free_allowance": 1000},
-        "pro": {"id": "pro", "name": "Pro", "free_allowance": 100000},
-        "enterprise": {"id": "enterprise", "name": "Enterprise", "free_allowance": 1000000},
+    "version": 1,
+    "metering": {
+        "models": {"*": "input_tokens * 1"},
     },
-    "tiers": {
-        "purchased": {"name": "Purchased", "priority": 1, "is_default": True, "allow_overdraft": False},
+    "ledger": {
+        "min_balance": 0,
+        "buckets": {
+            "purchased": {"label": "Purchased", "priority": 1, "default": True, "allow_overdraft": False},
+        },
+    },
+    "plans": {
+        "free": {"label": "Free", "allowance": {"amount": 1000}},
+        "pro": {"label": "Pro", "allowance": {"amount": 100000}},
+        "enterprise": {"label": "Enterprise", "allowance": {"amount": 1000000}},
     },
 }
 
 _BILLING_CONFIG = BillingConfig(
+    currency="USD",
     subscriptions={
         "pro_monthly": BillingOffer(
-            offer_key="pro_monthly",
-            plan_key="pro",
+            plan="pro",
             interval=BillingOfferInterval.month,
             interval_count=1,
-            entitlement_mode="allowance",
-            provider_refs={
-                "stripe": BillingSubscriptionOfferRef(
-                    provider="stripe",
+            providers={
+                "stripe": ProviderRef(
                     product_id="prod_monthly",
                     price_id="price_monthly_1000",
                 ),
             },
         ),
         "enterprise_yearly": BillingOffer(
-            offer_key="enterprise_yearly",
-            plan_key="enterprise",
+            plan="enterprise",
             interval=BillingOfferInterval.year,
             interval_count=1,
-            entitlement_mode="allowance",
-            provider_refs={
-                "stripe": BillingSubscriptionOfferRef(
-                    provider="stripe",
+            providers={
+                "stripe": ProviderRef(
                     product_id="prod_yearly",
                     price_id="price_yearly_10000",
                 ),
             },
         ),
     },
-    credit_topups={
+    topups={
         "standard_topup": BillingCreditTopup(
-            tier="purchased",
-            currency="USD",
-            credits_per_major_unit=1000,
+            deposit_to="purchased",
+            credits_per_unit=1000,
             min_amount_minor=500,
             max_amount_minor=50000,
-            provider_refs={
-                "stripe": BillingSubscriptionOfferRef(
-                    provider="stripe",
+            providers={
+                "stripe": ProviderRef(
                     product_id="prod_topup",
                     price_id="price_topup_credits",
                 ),
@@ -199,7 +196,7 @@ class TestMemoryBillingStoreIntegration:
         offer = bs.resolve_billing_offer(_PROVIDER, price_id=_PRICE_ID)
         assert offer is not None
         assert offer["offer_key"] == "pro_monthly"
-        assert offer["plan_key"] == "pro"
+        assert offer["plan"] == "pro"
 
     def test_sync_billing_config_resolve_by_product_id(self, components):
         _, _, bs, _ = components
@@ -212,7 +209,7 @@ class TestMemoryBillingStoreIntegration:
         topup = bs.resolve_credit_topup(_PROVIDER, price_id=_PRICE_ID_TOPUP)
         assert topup is not None
         assert topup["topup_key"] == "standard_topup"
-        assert topup["credits_per_major_unit"] == 1000
+        assert topup["credits_per_unit"] == 1000
 
     def test_unresolved_offer_returns_none(self, components):
         _, _, bs, _ = components
@@ -329,12 +326,10 @@ class TestMemoryBillingStoreIntegration:
         config = BillingConfig(
             subscriptions={
                 "new_offer": BillingOffer(
-                    offer_key="new_offer",
-                    plan_key="free",
+                    plan="free",
                     interval=BillingOfferInterval.month,
-                    provider_refs={
-                        "stripe": BillingSubscriptionOfferRef(
-                            provider="stripe",
+                    providers={
+                        "stripe": ProviderRef(
                             price_id="price_new_offer",
                         ),
                     },
@@ -381,7 +376,7 @@ class TestPostgresBillingStoreIntegration:
         offer = bs.resolve_billing_offer(_PROVIDER, price_id=_PRICE_ID)
         assert offer is not None
         assert offer["offer_key"] == "pro_monthly"
-        assert offer["plan_key"] == "pro"
+        assert offer["plan"] == "pro"
 
     def test_sync_billing_config_resolve_by_product_id(self, components):
         _, _, bs, _ = components
@@ -394,7 +389,7 @@ class TestPostgresBillingStoreIntegration:
         topup = bs.resolve_credit_topup(_PROVIDER, price_id=_PRICE_ID_TOPUP)
         assert topup is not None
         assert topup["topup_key"] == "standard_topup"
-        assert topup["credits_per_major_unit"] == 1000
+        assert topup["credits_per_unit"] == 1000
 
     def test_unresolved_offer_returns_none(self, components):
         _, _, bs, _ = components
@@ -542,7 +537,7 @@ class TestPostgresBillingStoreIntegration:
                     status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
-                    refs=BillingProviderRefs(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
+                    refs=ProviderRef(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
                     interval="month",
                     interval_count=1,
                 ),
@@ -593,7 +588,7 @@ class TestPostgresBillingStoreIntegration:
                     provider_payment_id="py_test456",
                     amount_minor=2000,
                     currency="USD",
-                    refs=BillingProviderRefs(product_id="prod_topup", price_id=_PRICE_ID_TOPUP),
+                    refs=ProviderRef(product_id="prod_topup", price_id=_PRICE_ID_TOPUP),
                     purpose="credit_topup",
                 ),
             )
@@ -624,7 +619,7 @@ class TestPostgresBillingStoreIntegration:
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=_SUB_ID2,
                     status=BillingSubscriptionStatus.active,
-                    refs=BillingProviderRefs(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
+                    refs=ProviderRef(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
                 ),
             )
         )
@@ -652,7 +647,7 @@ class TestPostgresBillingStoreIntegration:
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=_SUB_ID2,
                     status=BillingSubscriptionStatus.active,
-                    refs=BillingProviderRefs(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
+                    refs=ProviderRef(product_id=_PRODUCT_ID, price_id=_PRICE_ID),
                 ),
             )
         )
@@ -709,12 +704,10 @@ class TestPostgresBillingStoreIntegration:
         config = BillingConfig(
             subscriptions={
                 "new_offer": BillingOffer(
-                    offer_key="new_offer",
-                    plan_key="free",
+                    plan="free",
                     interval=BillingOfferInterval.month,
-                    provider_refs={
-                        "stripe": BillingSubscriptionOfferRef(
-                            provider="stripe",
+                    providers={
+                        "stripe": ProviderRef(
                             price_id="price_new_offer",
                         ),
                     },

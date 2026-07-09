@@ -217,14 +217,14 @@ describe("HttpxSupabaseStore", () => {
         p_tier: "gifted",
         p_idempotency_key: "evt-1",
       });
-      expect(result.tier).toBe("gifted");
+      expect(result.bucket).toBe("gifted");
     });
 
     it("sweepExpiredCredits threads p_dry_run and a non-null p_user_id into the expire_credits RPC body (lazy per-user sweep)", async () => {
       const captured = mockFetch({
         expired_count: 1,
         expired_amount: "25",
-        expired_by_tier: { default: "25" },
+        expired_by_bucket: { default: "25" },
         dry_run: false,
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
@@ -242,7 +242,7 @@ describe("HttpxSupabaseStore", () => {
       const captured = mockFetch({
         expired_count: 0,
         expired_amount: "0",
-        expired_by_tier: {},
+        expired_by_bucket: {},
         dry_run: true,
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
@@ -337,7 +337,7 @@ describe("HttpxSupabaseStore", () => {
         plan_id: "p",
         plan_name: "P",
         free_allowance: "0",
-        features: { quota: 0 },
+        feature_limits: { quota: 0 },
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "quota");
@@ -351,7 +351,7 @@ describe("HttpxSupabaseStore", () => {
         plan_id: "p",
         plan_name: "P",
         free_allowance: "0",
-        features: { flag: false },
+        feature_limits: { flag: false },
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "flag");

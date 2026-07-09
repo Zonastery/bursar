@@ -12,7 +12,6 @@ import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
 import type { AllowancePeriod } from "../src/allowance.js";
-import type { PricingConfigData } from "../src/types.js";
 
 const ALLOWANCE_PERIODS: AllowancePeriod[] = ["calendar_month", "rolling_30d", "anniversary"];
 
@@ -370,7 +369,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     it("deny action: under limit succeeds, at limit blocks with feature_limit_reached", async () => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
-      const featureLimit = { maxCalls: 2, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 2, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
 
       const r1 = await store.deductWithAllowance(PG_USER, D(1), {
@@ -395,7 +394,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     it("warn action: breach surfaces featureLimitWarning, never blocks", async () => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "warn" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "warn" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
 
       await store.deductWithAllowance(PG_USER, D(1), { ...opts, idempotencyKey: "fl-warn-1" });
@@ -410,7 +409,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     it("createLease: deny-only admission blocks once the limit is reached", async () => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
       await store.deductWithAllowance(PG_USER, D(1), { ...opts, idempotencyKey: "fl-lease-1" });
       const lease = await store.createLease(PG_USER, D(1), "usage", opts);
@@ -420,7 +419,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     it("release_lease and refund_credits do NOT restore quota", async () => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(100), "purchase");
-      const featureLimit = { maxCalls: 1, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: monthStart };
 
       // Reserve then release near the limit — never counted, nothing to undo.
@@ -462,7 +461,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     it("concurrency: exactly N succeed under limit N", async () => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       await store.addCredits(PG_USER, D(1000), "purchase");
-      const featureLimit = { maxCalls: 5, period: "monthly" as const, action: "deny" as const };
+      const featureLimit = { maxCalls: 5, period: "monthly" as const, onExceed: "deny" as const };
 
       const results = await Promise.all(
         Array.from({ length: 10 }, (_, i) =>
@@ -1188,14 +1187,14 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     async (allowancePeriod) => {
       const store = new PostgresStore(DATABASE_URL!, pool);
       const planKey = `sync-${allowancePeriod}`;
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        ledger: { minBalance: 0 },
         plans: {
           [planKey]: {
-            id: planKey,
-            name: `Plan ${allowancePeriod}`,
-            freeAllowance: D(15),
-            allowancePeriod,
+            label: `Plan ${allowancePeriod}`,
+            allowance: { amount: D(15), period: allowancePeriod },
           },
         },
       };
@@ -1278,14 +1277,14 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("manager.deduct() on a rolling_30d plan resolves the window from a backdated plan_assigned_at", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
       plans: {
         rolling: {
-          id: "rolling",
-          name: "Rolling",
-          freeAllowance: D(10),
-          allowancePeriod: "rolling_30d",
+          label: "Rolling",
+          allowance: { amount: D(10), period: "rolling_30d" },
         },
       },
     };
@@ -1331,14 +1330,14 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("manager.reserve()/settle() on an anniversary plan resolves the window from a backdated plan_assigned_at", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
       plans: {
         anniv: {
-          id: "anniv",
-          name: "Anniversary",
-          freeAllowance: D(10),
-          allowancePeriod: "anniversary",
+          label: "Anniversary",
+          allowance: { amount: D(10), period: "anniversary" },
         },
       },
     };
@@ -1368,14 +1367,14 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       const store = new PostgresStore(DATABASE_URL!, pool);
       const manager = new CreditManager(store);
       const planKey = `ca-${allowancePeriod}`;
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: { minBalance: 0 },
         plans: {
           [planKey]: {
-            id: planKey,
-            name: planKey,
-            freeAllowance: D(20),
-            allowancePeriod,
+            label: planKey,
+            allowance: { amount: D(20), period: allowancePeriod },
           },
         },
       };
@@ -1520,18 +1519,19 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("WS3 — fractional fixed job cost round-trips through real Postgres JSONB and charges exactly", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      fixed: { job: 2.5 },
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" }, flatJobs: { job: 2.5 } },
+      ledger: { minBalance: 0 },
     };
     await store.setActivePricing(config);
     await manager.publishPricingFromDict(config);
 
     const stored = await store.getActivePricing();
-    expect(stored?.config.fixed?.job).toBe(2.5);
+    expect((stored?.config.metering as Record<string, unknown>)?.flatJobs?.job).toBe(2.5);
 
     await manager.addCredits(PG_USER11, 10);
-    const result = await manager.deductFixed(PG_USER11, "job");
+    const result = await manager.deductFlatJob(PG_USER11, "job");
     expect(result.amount.toString()).toBe("2.5");
     expect((await manager.getBalance(PG_USER11)).balance.toString()).toBe("7.5");
   });
@@ -1617,11 +1617,15 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   let pool: pg.Pool;
 
-  const TIER_CONFIG: PricingConfigData = {
-    models: { _default: "input_tokens * 1" },
-    tiers: {
-      gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
-      purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+  const TIER_CONFIG = {
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
+    ledger: {
+      minBalance: 0,
+      buckets: {
+        gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
+        purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+      },
     },
   };
 
@@ -1629,6 +1633,14 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
+    // Ensure clean slate for tier tests: remove FKs, user data, bucket config.
+    await pool.query("DELETE FROM public.credit_reservations");
+    await pool.query("DELETE FROM public.credit_transactions");
+    await pool.query("UPDATE public.user_credits SET plan_id = NULL");
+    await pool.query("DELETE FROM public.user_credits");
+    await pool.query("DELETE FROM public.credit_plans");
+    await pool.query("DELETE FROM public.user_credit_buckets");
+    await pool.query("DELETE FROM public.credit_buckets");
     await pool.query(
       `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
       [[PG_USER, PG_USER2, PG_USER3, PG_USER4, PG_USER5, PG_USER6]],
@@ -1647,8 +1659,8 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
       // stale row, matching MemoryStore's own accumulate-only semantics — see
       // tiers-adversarial.test.ts's config-drift test) — clear it explicitly
       // between tests so one test's tier config never leaks into the next.
-      await pool.query("DELETE FROM public.user_credit_tiers");
-      await pool.query("DELETE FROM public.credit_tiers");
+      await pool.query("DELETE FROM public.user_credit_buckets");
+      await pool.query("DELETE FROM public.credit_buckets");
     }
   });
 
@@ -1656,22 +1668,22 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     if (pool) await pool.end();
   });
 
-  it("addCredits into an explicit tier is reflected by getCreditTiers, sorted by priority", async () => {
+  it("addCredits into an explicit tier is reflected by getBucketBalances, sorted by priority", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
 
     const add = await store.addCredits(PG_USER, D(20), "adjustment", null, null, "gifted");
-    expect(add.tier).toBe("gifted");
+    expect(add.bucket).toBe("gifted");
     await store.addCredits(PG_USER, D(10)); // omitted → default "purchased"
 
-    const tiers = await store.getCreditTiers(PG_USER);
-    expect(tiers.tiers.map((t) => t.tierKey)).toEqual(["gifted", "purchased"]);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+    const tiers = await store.getBucketBalances(PG_USER);
+    expect(tiers.buckets.map((t) => t.bucketKey)).toEqual(["gifted", "purchased"]);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("10");
     expect(tiers.totalBalance.toString()).toBe("30");
   });
 
-  it("deductWithAllowance drains tiers in priority order and returns an exact tierBreakdown", async () => {
+  it("deductWithAllowance drains tiers in priority order and returns an exact bucketBreakdown", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await store.setActivePricing(TIER_CONFIG);
     await store.addCredits(PG_USER2, D(20), "adjustment", null, null, "gifted");
@@ -1679,12 +1691,12 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 
     const r = await store.deductWithAllowance(PG_USER2, D(25), { minBalance: D(0) });
     expect(r.error).toBeUndefined();
-    expect(r.tierBreakdown?.gifted?.toString()).toBe("20");
-    expect(r.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(r.bucketBreakdown?.gifted?.toString()).toBe("20");
+    expect(r.bucketBreakdown?.purchased?.toString()).toBe("5");
 
-    const tiers = await store.getCreditTiers(PG_USER2);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("5");
+    const tiers = await store.getBucketBalances(PG_USER2);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("5");
   });
 
   it("settleLease applies the same tier walk as deductWithAllowance", async () => {
@@ -1697,11 +1709,11 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     expect(lease.error).toBeUndefined();
     const settled = await store.settleLease(PG_USER3, lease.leaseId, D(18));
     expect(settled.error).toBeUndefined();
-    expect(settled.tierBreakdown?.gifted?.toString()).toBe("18");
+    expect(settled.bucketBreakdown?.gifted?.toString()).toBe("18");
 
-    const tiers = await store.getCreditTiers(PG_USER3);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("2");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+    const tiers = await store.getBucketBalances(PG_USER3);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("2");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("10");
   });
 
   it("refundCredits restores tiers LIFO (reverse priority order)", async () => {
@@ -1712,18 +1724,18 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 
     const deduct = await store.deductWithAllowance(PG_USER4, D(25), { minBalance: D(0) });
     expect(deduct.error).toBeUndefined();
-    expect(deduct.tierBreakdown?.gifted?.toString()).toBe("20");
-    expect(deduct.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(deduct.bucketBreakdown?.gifted?.toString()).toBe("20");
+    expect(deduct.bucketBreakdown?.purchased?.toString()).toBe("5");
 
     const refund = await store.refundCredits(deduct.transactionId);
     expect(refund.error).toBeUndefined();
     // LIFO: purchased (last drained) is restored first, then gifted.
-    expect(refund.tierBreakdown?.purchased?.toString()).toBe("5");
-    expect(refund.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(refund.bucketBreakdown?.purchased?.toString()).toBe("5");
+    expect(refund.bucketBreakdown?.gifted?.toString()).toBe("20");
 
-    const tiers = await store.getCreditTiers(PG_USER4);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("20");
+    const tiers = await store.getBucketBalances(PG_USER4);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("20");
   });
 
   it("sweepExpiredCredits expires only the expiring tier's grant, leaving the non-expiring tier untouched", async () => {
@@ -1745,23 +1757,23 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     await new Promise((resolve) => setTimeout(resolve, 800));
 
     const swept = await store.sweepExpiredCredits(false);
-    expect(swept.expiredByTier?.gifted?.toString()).toBe("15");
+    expect(swept.expiredByBucket?.gifted?.toString()).toBe("15");
 
-    const tiers = await store.getCreditTiers(PG_USER5);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+    const tiers = await store.getBucketBalances(PG_USER5);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("10");
   }, 10000);
 
-  it("addCredits / getCreditTiers synthesize the 'default' tier when no tiers are configured", async () => {
+  it("addCredits / getBucketBalances synthesize the 'default' tier when no tiers are configured", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     // No setActivePricing call in this test — no tiers configured at all.
     const add = await store.addCredits(PG_USER6, D(50), "purchase");
-    expect(add.tier).toBe("default");
+    expect(add.bucket).toBe("default");
 
-    const tiers = await store.getCreditTiers(PG_USER6);
-    expect(tiers.tiers).toHaveLength(1);
-    expect(tiers.tiers[0]).toMatchObject({ tierKey: "default", name: "default", priority: 0 });
-    expect(tiers.tiers[0].balance.toString()).toBe("50");
+    const tiers = await store.getBucketBalances(PG_USER6);
+    expect(tiers.buckets).toHaveLength(1);
+    expect(tiers.buckets[0]).toMatchObject({ bucketKey: "default", label: "default", priority: 0 });
+    expect(tiers.buckets[0].balance.toString()).toBe("50");
     expect(tiers.totalBalance.toString()).toBe("50");
   });
 });
@@ -1772,7 +1784,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 // PostgresStore directly to pin down SQL/RPC behavior; this block is the
 // manager-level counterpart: publishPricingFromDict, addCredits, the
 // pricing-engine-driven deduct, the reserve/settle lease lifecycle,
-// refundCredits, getCreditTiers, and sweepExpiredCredits exactly as an
+// refundCredits, getBucketBalances, and sweepExpiredCredits exactly as an
 // integrator would call them, asserting on both the returned results and the
 // CreditEventEmitter events they fire. Nothing else in this suite drives
 // CreditManager against a real store (every other manager test uses
@@ -1786,12 +1798,15 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
   const MGR_USER3 = "00000000-0000-0000-0000-000000000303";
   const MGR_USER4 = "00000000-0000-0000-0000-000000000304";
 
-  const TIER_CONFIG: PricingConfigData = {
-    models: { _default: "input_tokens * 1" },
-    minBalance: 0,
-    tiers: {
-      gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
-      purchased: { name: "Purchased", priority: 30, expires: false, isDefault: true },
+  const TIER_CONFIG = {
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
+    ledger: {
+      minBalance: 0,
+      buckets: {
+        gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
+        purchased: { label: "Purchased", priority: 30, expires: false, isDefaultBucket: true },
+      },
     },
   };
 
@@ -1829,8 +1844,8 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
       await pool.query("DELETE FROM public.user_credits");
       await pool.query("DELETE FROM public.credit_plans");
-      await pool.query("DELETE FROM public.user_credit_tiers");
-      await pool.query("DELETE FROM public.credit_tiers");
+      await pool.query("DELETE FROM public.user_credit_buckets");
+      await pool.query("DELETE FROM public.credit_buckets");
     }
   });
 
@@ -1838,7 +1853,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     if (pool) await pool.end();
   });
 
-  it("full lifecycle: publish tiers, addCredits, deduct, refund — results and events agree with getCreditTiers at each step", async () => {
+  it("full lifecycle: publish tiers, addCredits, deduct, refund — results and events agree with getBucketBalances at each step", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.added", "credits.deducted", "credits.refunded"]);
@@ -1846,14 +1861,14 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
     const gifted = await mgr.addCredits(MGR_USER1, D(20), { type: "purchase", tier: "gifted" });
-    expect(gifted.tier).toBe("gifted");
+    expect(gifted.bucket).toBe("gifted");
     const purchased = await mgr.addCredits(MGR_USER1, D(50), { type: "purchase" }); // omitted -> isDefault
-    expect(purchased.tier).toBe("purchased");
+    expect(purchased.bucket).toBe("purchased");
     expect(events.map((e) => e.type)).toEqual(["credits.added", "credits.added"]);
 
-    const tiers = await mgr.getCreditTiers(MGR_USER1);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("20");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("50");
+    const tiers = await mgr.getBucketBalances(MGR_USER1);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("20");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("50");
     expect(tiers.totalBalance.toString()).toBe("70");
 
     // Cost computed by the real pricing engine (not a raw amount) crosses the
@@ -1861,34 +1876,34 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     // purchased.
     events.length = 0;
     const result = await mgr.deduct(MGR_USER1, { inputTokens: 25 }, "mgr-e2e-1");
-    expect(result.tierBreakdown?.gifted?.toString()).toBe("20");
-    expect(result.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(result.bucketBreakdown?.gifted?.toString()).toBe("20");
+    expect(result.bucketBreakdown?.purchased?.toString()).toBe("5");
     expect(result.balanceAfter.toString()).toBe("45");
     expect(events.map((e) => e.type)).toContain("credits.deducted");
 
-    const tiersAfterDeduct = await mgr.getCreditTiers(MGR_USER1);
-    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe(
+    const tiersAfterDeduct = await mgr.getBucketBalances(MGR_USER1);
+    expect(tiersAfterDeduct.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe(
       "0",
     );
-    expect(tiersAfterDeduct.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe(
-      "45",
-    );
+    expect(
+      tiersAfterDeduct.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString(),
+    ).toBe("45");
 
     events.length = 0;
     const refund = await mgr.refundCredits(result.transactionId);
     expect(refund.error).toBeFalsy();
     // LIFO: purchased (last drained) is restored first, then gifted.
-    expect(refund.tierBreakdown?.purchased?.toString()).toBe("5");
-    expect(refund.tierBreakdown?.gifted?.toString()).toBe("20");
+    expect(refund.bucketBreakdown?.purchased?.toString()).toBe("5");
+    expect(refund.bucketBreakdown?.gifted?.toString()).toBe("20");
     expect(events.map((e) => e.type)).toContain("credits.refunded");
 
-    const tiersAfterRefund = await mgr.getCreditTiers(MGR_USER1);
-    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe(
+    const tiersAfterRefund = await mgr.getBucketBalances(MGR_USER1);
+    expect(tiersAfterRefund.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe(
       "20",
     );
-    expect(tiersAfterRefund.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe(
-      "50",
-    );
+    expect(
+      tiersAfterRefund.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString(),
+    ).toBe("50");
   });
 
   it("reserve/settle lease lifecycle applies the same tier walk as direct deduct", async () => {
@@ -1906,12 +1921,12 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     expect(events.map((e) => e.type)).toContain("credits.reserved");
 
     const settled = await mgr.settle(MGR_USER2, lease.leaseId, { inputTokens: 15 });
-    expect(settled.tierBreakdown?.gifted?.toString()).toBe("10");
-    expect(settled.tierBreakdown?.purchased?.toString()).toBe("5");
+    expect(settled.bucketBreakdown?.gifted?.toString()).toBe("10");
+    expect(settled.bucketBreakdown?.purchased?.toString()).toBe("5");
 
-    const tiers = await mgr.getCreditTiers(MGR_USER2);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("95");
+    const tiers = await mgr.getBucketBalances(MGR_USER2);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("95");
   });
 
   it("sweepExpiredCredits through the manager scopes per tier and emits credits.expired", async () => {
@@ -1934,12 +1949,12 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     await new Promise((resolve) => setTimeout(resolve, 800));
 
     const swept = await mgr.sweepExpiredCredits(false);
-    expect(swept.expiredByTier?.gifted?.toString()).toBe("15");
+    expect(swept.expiredByBucket?.gifted?.toString()).toBe("15");
     expect(events.map((e) => e.type)).toContain("credits.expired");
 
-    const tiers = await mgr.getCreditTiers(MGR_USER3);
-    expect(tiers.tiers.find((t) => t.tierKey === "gifted")?.balance.toString()).toBe("0");
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("10");
+    const tiers = await mgr.getBucketBalances(MGR_USER3);
+    expect(tiers.buckets.find((t) => t.bucketKey === "gifted")?.balance.toString()).toBe("0");
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("10");
   }, 10000);
 
   it("settle() past the balance floor routes overdraft excess into the allowOverdraft tier and emits credits.overdraft", async () => {
@@ -1954,10 +1969,14 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       overdraftFloor: -50,
     });
     await mgr.publishPricingFromDict({
-      models: { _default: "input_tokens * 1" },
-      tiers: {
-        gifted: { name: "Gifted", priority: 10, expires: false, isDefault: true },
-        purchased: { name: "Purchased", priority: 20, expires: false, allowOverdraft: true },
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: {
+        minBalance: 0,
+        buckets: {
+          gifted: { label: "Gifted", priority: 10, expires: false, isDefaultBucket: true },
+          purchased: { label: "Purchased", priority: 20, expires: false, allowOverdraft: true },
+        },
       },
     });
     await mgr.addCredits(MGR_USER4, D(10), { type: "purchase" }); // -> gifted (isDefault)
@@ -1965,13 +1984,13 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 
     const lease = await mgr.reserve(MGR_USER4, { inputTokens: 40 });
     const settled = await mgr.settle(MGR_USER4, lease.leaseId, { inputTokens: 40 });
-    expect(settled.tierBreakdown?.gifted?.toString()).toBe("10");
-    expect(settled.tierBreakdown?.purchased?.toString()).toBe("30");
+    expect(settled.bucketBreakdown?.gifted?.toString()).toBe("10");
+    expect(settled.bucketBreakdown?.purchased?.toString()).toBe("30");
     expect(settled.balanceAfter.toString()).toBe("-25");
     expect(events.map((e) => e.type)).toContain("credits.overdraft");
 
-    const tiers = await mgr.getCreditTiers(MGR_USER4);
-    expect(tiers.tiers.find((t) => t.tierKey === "purchased")?.balance.toString()).toBe("-25");
+    const tiers = await mgr.getBucketBalances(MGR_USER4);
+    expect(tiers.buckets.find((t) => t.bucketKey === "purchased")?.balance.toString()).toBe("-25");
   });
 });
 
@@ -2003,19 +2022,23 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   const SUB_USER3 = "00000000-0000-0000-0000-000000000403";
   const SUB_USER4 = "00000000-0000-0000-0000-000000000404";
 
-  // A "subscription" tier that expires, with a defaultTtlDays fallback so the
+  // A "subscription" tier that expires, with a ttlDays fallback so the
   // replacePrior expire-adjustment (which never passes an explicit
   // expiresAt) can always resolve one, exactly like any other expiring tier
   // — mirrors tests/subscription-cycle.test.ts's SUBSCRIPTION_CONFIG.
-  const SUBSCRIPTION_CONFIG: PricingConfigData = {
-    models: { _default: "input_tokens * 1" },
-    tiers: {
-      subscription: {
-        name: "Subscription",
-        priority: 10,
-        expires: true,
-        defaultTtlDays: 30,
-        isDefault: true,
+  const SUBSCRIPTION_CONFIG = {
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
+    ledger: {
+      minBalance: 0,
+      buckets: {
+        subscription: {
+          label: "Subscription",
+          priority: 10,
+          expires: true,
+          ttlDays: 30,
+          isDefaultBucket: true,
+        },
       },
     },
   };
@@ -2049,8 +2072,8 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
       // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
       await pool.query("DELETE FROM public.user_credits");
       await pool.query("DELETE FROM public.credit_plans");
-      await pool.query("DELETE FROM public.user_credit_tiers");
-      await pool.query("DELETE FROM public.credit_tiers");
+      await pool.query("DELETE FROM public.user_credit_buckets");
+      await pool.query("DELETE FROM public.credit_buckets");
     }
   });
 
@@ -2066,7 +2089,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
       ttlDays: 30,
       idempotencyKey: "invoice-123",
     });
-    expect(first.tier).toBe("subscription");
+    expect(first.bucket).toBe("subscription");
     expect(first.amount.toString()).toBe("100");
     expect((await manager.getBalance(SUB_USER1)).balance.toString()).toBe("100");
 

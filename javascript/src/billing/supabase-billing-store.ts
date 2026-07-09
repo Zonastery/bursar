@@ -41,21 +41,61 @@ export class SupabaseBillingStore extends BillingStore {
     return obj;
   }
 
-  private stripUndefined<T>(obj: T): T {
-    const result = { ...obj } as Record<string, unknown>;
-    for (const key of Object.keys(result)) {
-      if (result[key] === undefined) {
-        delete result[key];
-      } else if (typeof result[key] === "object" && result[key] !== null) {
-        result[key] = this.stripUndefined(result[key] as Record<string, unknown>);
-      }
-    }
-    return result as unknown as T;
-  }
-
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
+    // Map new schema fields to old SQL field names (same as PostgresBillingStore).
+    const adapted: Record<string, unknown> = {
+      ...config,
+      credit_topups: config.topups
+        ? Object.fromEntries(
+            Object.entries(config.topups).map(([key, topup]) => [
+              key,
+              {
+                tier: topup.depositTo ?? "purchased",
+                credits_per_major_unit: topup.creditsPerUnit ?? 1000,
+                min_amount_minor: topup.minAmountMinor ?? 500,
+                max_amount_minor: topup.maxAmountMinor ?? 500000,
+                tax_behavior: topup.taxBehavior ?? "exclude_tax",
+                provider_refs: topup.providers
+                  ? Object.fromEntries(
+                      Object.entries(topup.providers).map(([p, ref]) => [
+                        p,
+                        { price_id: ref.priceId, product_id: ref.productId },
+                      ]),
+                    )
+                  : {},
+              },
+            ]),
+          )
+        : undefined,
+      subscriptions: config.subscriptions
+        ? Object.fromEntries(
+            Object.entries(config.subscriptions).map(([key, offer]) => [
+              key,
+              {
+                plan_key: offer.plan,
+                interval: offer.interval ?? "month",
+                interval_count: offer.intervalCount ?? 1,
+                entitlement_mode: offer.grant?.mode ?? "allowance",
+                cycle_grant_credits: offer.grant?.credits ?? null,
+                cycle_grant_tier: offer.grant?.bucket ?? null,
+                cycle_grant_replace_prior: offer.grant?.replacePrior ?? true,
+                provider_refs: offer.providers
+                  ? Object.fromEntries(
+                      Object.entries(offer.providers).map(([p, ref]) => [
+                        p,
+                        { price_id: ref.priceId, product_id: ref.productId },
+                      ]),
+                    )
+                  : {},
+              },
+            ]),
+          )
+        : undefined,
+    };
+    delete (adapted as Record<string, unknown>).topups;
+    const payload = adapted as Record<string, unknown>;
     const { error } = await this.supabase.rpc("sync_billing_from_config", {
-      p_config: this.stripUndefined(config),
+      p_config: payload,
     });
     if (error) throw error;
   }
@@ -72,7 +112,11 @@ export class SupabaseBillingStore extends BillingStore {
     });
     if (error) throw error;
     if (!data) return null;
-    return this.snakeToCamelKeys(data) as Record<string, unknown> | null;
+    const result = this.snakeToCamelKeys(data) as Record<string, unknown> | null;
+    if (result && result.offerKey) {
+      return { ...result, plan: result.planKey ?? result.plan ?? null };
+    }
+    return null;
   }
 
   async claimBillingEvent(
@@ -197,14 +241,22 @@ export class SupabaseBillingStore extends BillingStore {
     });
     if (error) throw error;
     if (!data) return null;
-    return this.snakeToCamelKeys(data) as Record<string, unknown> | null;
+    const result = this.snakeToCamelKeys(data) as Record<string, unknown> | null;
+    if (result && result.topupKey) {
+      return {
+        ...result,
+        creditsPerUnit: result.creditsPerUnit ?? result.creditsPerMajorUnit ?? 1000,
+        depositTo: result.depositTo ?? result.tier ?? "purchased",
+      };
+    }
+    return null;
   }
 
   async computeTopupCredits(
     amountMinor: number,
     topupConfig: Record<string, unknown>,
   ): Promise<number> {
-    const creditsPer = (topupConfig.creditsPerMajorUnit as number) ?? 1000;
+    const creditsPer = (topupConfig.creditsPerUnit as number) ?? 1000;
     return Math.trunc((amountMinor * creditsPer) / 100);
   }
 

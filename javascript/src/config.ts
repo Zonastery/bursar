@@ -2,7 +2,13 @@ import Decimal from "decimal.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
-import type { BillingMode, FeatureLimit, OperationPolicy, PlanDefinition, BucketDefinition } from "./types.js";
+import type {
+  BillingMode,
+  FeatureLimit,
+  OperationPolicy,
+  PlanDefinition,
+  BucketDefinition,
+} from "./types.js";
 
 /** Valid `allowancePeriod` values (WS9b). */
 const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
@@ -91,11 +97,7 @@ const METERING_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Known ledger-section keys. */
-const LEDGER_KEYS: ReadonlySet<string> = new Set([
-  "minBalance",
-  "signupGrant",
-  "buckets",
-]);
+const LEDGER_KEYS: ReadonlySet<string> = new Set(["minBalance", "signupGrant", "buckets"]);
 
 /** Known plan-definition keys (new nested schema). */
 const PLAN_KEYS: ReadonlySet<string> = new Set([
@@ -107,7 +109,12 @@ const PLAN_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Known `FeatureLimit` keys. */
-const FEATURE_LIMIT_KEYS: ReadonlySet<string> = new Set(["maxCalls", "period", "onExceed"]);
+const FEATURE_LIMIT_KEYS: ReadonlySet<string> = new Set([
+  "maxCalls",
+  "period",
+  "onExceed",
+  "value",
+]);
 
 /** Known `OperationPolicy` keys (entries of a plan's `safety.perOperation` map). */
 const OPERATION_POLICY_KEYS: ReadonlySet<string> = new Set([
@@ -138,7 +145,11 @@ const SAFETY_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Reject any key not in `known` — catches typos that would otherwise silently fall back to a default. */
-function assertKnownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, context: string): void {
+function assertKnownKeys(
+  obj: Record<string, unknown>,
+  known: ReadonlySet<string>,
+  context: string,
+): void {
   for (const key of Object.keys(obj)) {
     if (!known.has(key)) {
       throw new ConfigError(`unknown config key in ${context}: ${key}`);
@@ -154,7 +165,9 @@ function validateExpressions(raw: PricingConfig): void {
     try {
       validateExpression(expr, KNOWN_VARIABLES);
     } catch (e) {
-      throw new ConfigError(`invalid expression in metering.models.${key}: ${(e as Error).message}`);
+      throw new ConfigError(
+        `invalid expression in metering.models.${key}: ${(e as Error).message}`,
+      );
     }
   }
   for (const [key, expr] of Object.entries(raw.metering.tools)) {
@@ -175,7 +188,9 @@ function validateExpressions(raw: PricingConfig): void {
     try {
       validateExpression(raw.metering.cacheDiscount, KNOWN_VARIABLES);
     } catch (e) {
-      throw new ConfigError(`invalid expression in metering.cacheDiscount: ${(e as Error).message}`);
+      throw new ConfigError(
+        `invalid expression in metering.cacheDiscount: ${(e as Error).message}`,
+      );
     }
   }
 }
@@ -262,7 +277,15 @@ function normaliseBucket(t: Record<string, unknown>): Record<string, unknown> {
 function normaliseEntitlements(
   planKey: string,
   raw: Record<string, unknown>,
-): Record<string, FeatureLimit> {
+): Record<
+  string,
+  {
+    value?: unknown;
+    maxCalls: number;
+    period: FeatureLimitPeriod;
+    onExceed: "deny" | "warn" | "notify";
+  }
+> {
   const out: Record<string, FeatureLimit> = {};
   for (const [featureKey, rawLimit] of Object.entries(raw)) {
     const limit = normaliseKeys((rawLimit ?? {}) as Record<string, unknown>);
@@ -291,6 +314,7 @@ function normaliseEntitlements(
       maxCalls,
       period: period as FeatureLimitPeriod,
       onExceed: onExceed as FeatureLimit["onExceed"],
+      value: limit.value,
     };
   }
   return out;
@@ -307,7 +331,11 @@ function normalisePerOperation(
   const out: Record<string, OperationPolicy> = {};
   for (const [opType, rawPolicy] of Object.entries(raw)) {
     const policy = normaliseKeys((rawPolicy ?? {}) as Record<string, unknown>);
-    assertKnownKeys(policy, OPERATION_POLICY_KEYS, `plans.${planKey}.safety.perOperation.${opType}`);
+    assertKnownKeys(
+      policy,
+      OPERATION_POLICY_KEYS,
+      `plans.${planKey}.safety.perOperation.${opType}`,
+    );
     const billingMode = (policy.billingMode as string | undefined) ?? "strict";
     if (billingMode !== "strict" && billingMode !== "overdraft") {
       throw new ConfigError(
@@ -319,7 +347,9 @@ function normalisePerOperation(
       billingMode: billingMode as BillingMode,
       maxConcurrent: (policy.maxConcurrent as number | null) ?? null,
       overdraftFloor:
-        policy.overdraftFloor != null ? new Decimal(policy.overdraftFloor as number | string) : null,
+        policy.overdraftFloor != null
+          ? new Decimal(policy.overdraftFloor as number | string)
+          : null,
     };
   }
   return out;
@@ -343,8 +373,12 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
   const meteringNormalised = normaliseKeys(rawMetering);
   assertKnownKeys(meteringNormalised, METERING_KEYS, "metering");
 
-  if (meteringNormalised.models == null) throw new ConfigError("missing required section: metering.models");
-  if (typeof meteringNormalised.models !== "object" || Object.keys(meteringNormalised.models as object).length === 0) {
+  if (meteringNormalised.models == null)
+    throw new ConfigError("missing required section: metering.models");
+  if (
+    typeof meteringNormalised.models !== "object" ||
+    Object.keys(meteringNormalised.models as object).length === 0
+  ) {
     throw new ConfigError("metering.models must be a non-empty dict");
   }
 
@@ -354,9 +388,9 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
     search: (meteringNormalised.search as string | null | undefined) ?? null,
     cacheDiscount: (meteringNormalised.cacheDiscount as string | null | undefined) ?? null,
     flatJobs: Object.fromEntries(
-      Object.entries((meteringNormalised.flatJobs as Record<string, number | string> | undefined) ?? {}).map(
-        ([job, cost]) => [job, new Decimal(cost)],
-      ),
+      Object.entries(
+        (meteringNormalised.flatJobs as Record<string, number | string> | undefined) ?? {},
+      ).map(([job, cost]) => [job, new Decimal(cost)]),
     ),
   };
 
@@ -389,9 +423,8 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
 
   // ── Parse `billing` section ──
 
-  const billing: BillingSection | undefined = d.billing != null
-    ? { currency: "USD", ...(d.billing as Record<string, unknown>) }
-    : undefined;
+  const billing: BillingSection | undefined =
+    d.billing != null ? { currency: "USD", ...(d.billing as Record<string, unknown>) } : undefined;
 
   // ── Parse `plans` section ──
 
@@ -405,14 +438,20 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
       // A plan definition must carry a `label` (mirrors Python's `config.py`).
       if (plan.label == null) {
-        throw new ConfigError(`plan definition is missing required 'label' field: plans.${planKey}`);
+        throw new ConfigError(
+          `plan definition is missing required 'label' field: plans.${planKey}`,
+        );
       }
       // Validate allowance section
       if (plan.allowance != null) {
         if (typeof plan.allowance !== "object" || Array.isArray(plan.allowance)) {
           throw new ConfigError(`plans.${planKey}.allowance must be a dict`);
         }
-        assertKnownKeys(plan.allowance as Record<string, unknown>, ALLOWANCE_KEYS, `plans.${planKey}.allowance`);
+        assertKnownKeys(
+          plan.allowance as Record<string, unknown>,
+          ALLOWANCE_KEYS,
+          `plans.${planKey}.allowance`,
+        );
         const allowance = plan.allowance as Record<string, unknown>;
         if (allowance.period != null && !ALLOWANCE_PERIODS.has(allowance.period as string)) {
           throw new ConfigError(
@@ -426,9 +465,17 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
         if (typeof plan.safety !== "object" || Array.isArray(plan.safety)) {
           throw new ConfigError(`plans.${planKey}.safety must be a dict`);
         }
-        assertKnownKeys(plan.safety as Record<string, unknown>, SAFETY_KEYS, `plans.${planKey}.safety`);
+        assertKnownKeys(
+          plan.safety as Record<string, unknown>,
+          SAFETY_KEYS,
+          `plans.${planKey}.safety`,
+        );
         const safety = plan.safety as Record<string, unknown>;
-        if (safety.billingMode != null && safety.billingMode !== "strict" && safety.billingMode !== "overdraft") {
+        if (
+          safety.billingMode != null &&
+          safety.billingMode !== "strict" &&
+          safety.billingMode !== "overdraft"
+        ) {
           throw new ConfigError(
             `invalid billingMode in plans.${planKey}.safety: '${String(safety.billingMode)}' ` +
               `(expected 'strict' or 'overdraft')`,
@@ -477,7 +524,8 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       );
     }
   }
-  const rawBuckets = ledgerNormalised.buckets as Record<string, Record<string, unknown>> | undefined;
+  const rawBuckets = ledgerNormalised.buckets as
+    Record<string, Record<string, unknown>> | undefined;
   const buckets = rawBuckets
     ? Object.fromEntries(Object.entries(rawBuckets).map(([k, v]) => [k, normaliseBucket(v)]))
     : undefined;
@@ -529,19 +577,24 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
     const planDefs: Record<string, PlanDefinition> = {};
     for (const [key, p] of Object.entries(plans)) {
       const allowanceRaw = (p.allowance as Record<string, unknown>) ?? {};
-      const allowanceAmount = new Decimal((allowanceRaw["amount"] as number | string | undefined) ?? 0);
+      const allowanceAmount = new Decimal(
+        (allowanceRaw["amount"] as number | string | undefined) ?? 0,
+      );
       if (allowanceAmount.isNegative()) {
-        throw new ConfigError(`plans.${key}.allowance.amount must be >= 0, got ${allowanceAmount.toString()}`);
+        throw new ConfigError(
+          `plans.${key}.allowance.amount must be >= 0, got ${allowanceAmount.toString()}`,
+        );
       }
       const safetyRaw = (p.safety as Record<string, unknown>) ?? {};
-      const billingMode = ((safetyRaw.billingMode ?? "strict") as "strict" | "overdraft");
+      const billingMode = (safetyRaw.billingMode ?? "strict") as "strict" | "overdraft";
       const perOperationRaw = safetyRaw.perOperation as Record<string, unknown> | undefined;
 
       planDefs[key] = {
         label: p.label as string,
         allowance: {
           amount: allowanceAmount,
-          period: ((allowanceRaw["period"] as AllowancePeriod) ?? "calendar_month") as AllowancePeriod,
+          period: ((allowanceRaw["period"] as AllowancePeriod) ??
+            "calendar_month") as AllowancePeriod,
         },
         safety: {
           billingMode,
@@ -551,7 +604,9 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
               : undefined,
           maxConcurrent: (safetyRaw.maxConcurrent as number | null) ?? null,
           overdraftFloor:
-            safetyRaw.overdraftFloor != null ? new Decimal(safetyRaw.overdraftFloor as number | string) : null,
+            safetyRaw.overdraftFloor != null
+              ? new Decimal(safetyRaw.overdraftFloor as number | string)
+              : null,
         },
         rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
         entitlements: (p.entitlements as Record<string, FeatureLimit>) ?? null,

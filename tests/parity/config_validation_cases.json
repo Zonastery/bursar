@@ -1,91 +1,93 @@
 {
-  "_comment": "Cross-SDK config-validation parity fixture. Python's load_config_from_dict and JS's loadConfigFromDict MUST agree on accept/reject for every case here — this is the guard against the Python<->JS validation drift found in the config schema review (missing version check, unvalidated signup_bonus/free_allowance sign, unknown-key typos, dropped per_operation, etc). Both runners load this file directly; do not hand-duplicate cases in engine-specific test files.",
+  "_comment": "Cross-SDK config-validation parity fixture. Python's load_config_from_dict and JS's loadConfigFromDict MUST agree on accept/reject for every case here — this is the guard against the Python<->JS validation drift found in the config schema review (missing version check, unvalidated signup_grant/allowance sign, unknown-key typos, dropped per_operation, etc). Both runners load this file directly; do not hand-duplicate cases in engine-specific test files.",
   "cases": [
     {
       "name": "minimal_valid_config",
       "expect": "accept",
-      "config": { "models": { "_default": "input_tokens * 1" } }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
       "name": "missing_models",
       "expect": "reject",
-      "reason": "models is required",
+      "reason": "metering is required",
       "config": {}
     },
     {
       "name": "empty_models",
       "expect": "reject",
-      "reason": "models must be a non-empty dict",
-      "config": { "models": {} }
+      "reason": "metering.models must be a non-empty dict",
+      "config": { "metering": { "models": {} } }
     },
     {
       "name": "version_1_accepted",
       "expect": "accept",
-      "config": { "version": 1, "models": { "_default": "input_tokens * 1" } }
+      "config": { "version": 1, "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
       "name": "version_2_rejected",
       "expect": "reject",
       "reason": "only version 1 is valid",
-      "config": { "version": 2, "models": { "_default": "input_tokens * 1" } }
+      "config": { "version": 2, "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
       "name": "version_string_rejected",
       "expect": "reject",
       "reason": "version must be an int, not a string",
-      "config": { "version": "1", "models": { "_default": "input_tokens * 1" } }
+      "config": { "version": "1", "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
       "name": "unknown_top_level_key_rejected",
       "expect": "reject",
       "reason": "typo'd key must not silently fall back to a default",
-      "config": { "models": { "_default": "input_tokens * 1" }, "min_balnce": 5 }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "min_balnce": 5 }
     },
     {
       "name": "negative_min_balance_rejected",
       "expect": "reject",
-      "config": { "models": { "_default": "input_tokens * 1" }, "min_balance": -1 }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "min_balance": -1 } }
     },
     {
       "name": "min_balance_string_coerced",
       "expect": "accept",
       "reason": "numeric strings coerce to the money type, not rejected",
-      "config": { "models": { "_default": "input_tokens * 1" }, "min_balance": "10" }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "min_balance": "10" } }
     },
     {
       "name": "negative_signup_bonus_rejected",
       "expect": "reject",
-      "config": { "models": { "_default": "input_tokens * 1" }, "signup_bonus": -1 }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "signup_grant": -1 } }
     },
     {
       "name": "zero_signup_bonus_accepted",
       "expect": "accept",
-      "config": { "models": { "_default": "input_tokens * 1" }, "signup_bonus": 0 }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "signup_grant": 0 } }
     },
     {
       "name": "negative_fixed_cost_rejected",
       "expect": "reject",
-      "config": { "models": { "_default": "input_tokens * 1" }, "fixed": { "batch_job": -1 } }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" }, "flat_jobs": { "batch_job": -1 } } }
     },
     {
       "name": "fractional_fixed_cost_accepted",
       "expect": "accept",
-      "config": { "models": { "_default": "input_tokens * 1" }, "fixed": { "batch_job": 2.5 } }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" }, "flat_jobs": { "batch_job": 2.5 } } }
     },
     {
       "name": "empty_tiers_dict_rejected",
       "expect": "reject",
-      "reason": "ambiguous — omit the tiers key entirely for no tiers",
-      "config": { "models": { "_default": "input_tokens * 1" }, "tiers": {} }
+      "reason": "ambiguous — omit the buckets key entirely for no buckets",
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "buckets": {} } }
     },
     {
       "name": "two_default_overdraft_tiers_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tiers": {
-          "a": { "name": "A", "priority": 1, "allow_overdraft": true },
-          "b": { "name": "B", "priority": 2, "allow_overdraft": true }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "buckets": {
+            "a": { "label": "A", "priority": 1, "allow_overdraft": true },
+            "b": { "label": "B", "priority": 2, "allow_overdraft": true }
+          }
         }
       }
     },
@@ -93,10 +95,12 @@
       "name": "two_is_default_tiers_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tiers": {
-          "a": { "name": "A", "priority": 1, "is_default": true },
-          "b": { "name": "B", "priority": 2, "is_default": true }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "buckets": {
+            "a": { "label": "A", "priority": 1, "is_default_bucket": true },
+            "b": { "label": "B", "priority": 2, "is_default_bucket": true }
+          }
         }
       }
     },
@@ -104,18 +108,22 @@
       "name": "non_positive_default_ttl_days_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tiers": { "a": { "name": "A", "priority": 1, "expires": true, "default_ttl_days": 0 } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "buckets": { "a": { "label": "A", "priority": 1, "expires": true, "ttl_days": 0 } }
+        }
       }
     },
     {
       "name": "valid_tiers_accepted",
       "expect": "accept",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tiers": {
-          "gifted": { "name": "Gifted", "priority": 10, "expires": true, "default_ttl_days": 30 },
-          "purchased": { "name": "Purchased", "priority": 30, "is_default": true, "allow_overdraft": true }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "buckets": {
+            "gifted": { "label": "Gifted", "priority": 10, "expires": true, "ttl_days": 30 },
+            "purchased": { "label": "Purchased", "priority": 30, "is_default_bucket": true, "allow_overdraft": true }
+          }
         }
       }
     },
@@ -123,26 +131,28 @@
       "name": "unknown_key_in_tier_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tiers": { "a": { "name": "A", "priority": 1, "expres": true } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "buckets": { "a": { "label": "A", "priority": 1, "expres": true } }
+        }
       }
     },
     {
       "name": "plan_missing_name_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "plans": { "pro": { "id": "p1" } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": {} }
       }
     },
     {
       "name": "duplicate_plan_names_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
+        "metering": { "models": { "*": "input_tokens * 1" } },
         "plans": {
-          "a": { "id": "a", "name": "Pro" },
-          "b": { "id": "b", "name": "Pro" }
+          "a": { "label": "Pro" },
+          "b": { "label": "Pro" }
         }
       }
     },
@@ -150,36 +160,35 @@
       "name": "plan_negative_free_allowance_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "plans": { "cheap": { "id": "cheap", "name": "Cheap", "free_allowance": -10 } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "cheap": { "label": "Cheap", "allowance": { "amount": -10, "period": "calendar_month" } } }
       }
     },
     {
       "name": "plan_rate_overrides_accepted",
       "expect": "accept",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "plans": { "pro": { "id": "pro", "name": "Pro", "rate_overrides": { "gpt-4": "input_tokens * 0.003" } } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro", "rate_overrides": { "gpt-4": "input_tokens * 0.003" } } }
       }
     },
     {
       "name": "unknown_key_in_plan_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "plans": { "pro": { "id": "pro", "name": "Pro", "free_allownce": 5 } }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro", "free_allownce": 5 } }
       }
     },
     {
       "name": "plan_per_operation_accepted",
       "expect": "accept",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
+        "metering": { "models": { "*": "input_tokens * 1" } },
         "plans": {
           "pro": {
-            "id": "pro",
-            "name": "Pro",
-            "per_operation": { "agent": { "billing_mode": "overdraft", "overdraft_floor": -30 } }
+            "label": "Pro",
+            "safety": { "per_operation": { "agent": { "billing_mode": "overdraft", "overdraft_floor": -30 } } }
           }
         }
       }
@@ -188,54 +197,58 @@
       "name": "plan_per_operation_invalid_billing_mode_rejected",
       "expect": "reject",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
+        "metering": { "models": { "*": "input_tokens * 1" } },
         "plans": {
-          "pro": { "id": "pro", "name": "Pro", "per_operation": { "agent": { "billing_mode": "bogus" } } }
+          "pro": { "label": "Pro", "safety": { "per_operation": { "agent": { "billing_mode": "bogus" } } } }
         }
       }
     },
     {
       "name": "unknown_variable_typo_rejected",
       "expect": "reject",
-      "config": { "models": { "_default": "inputtokens * 0.001" } }
+      "config": { "metering": { "models": { "*": "inputtokens * 0.001" } } }
     },
     {
       "name": "this_tool_calls_in_models_rejected",
       "expect": "reject",
-      "reason": "this_tool_calls is scoped to tools expressions only",
-      "config": { "models": { "_default": "this_tool_calls * 1" } }
+      "reason": "calls is scoped to tools expressions only",
+      "config": { "metering": { "models": { "*": "calls * 1" } } }
     },
     {
       "name": "this_tool_calls_in_tools_accepted",
       "expect": "accept",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tools": { "code_exec": "this_tool_calls * 10 / 1000" }
+        "metering": {
+          "models": { "*": "input_tokens * 1" },
+          "tools": { "code_exec": "calls * 10 / 1000" }
+        }
       }
     },
     {
       "name": "exponentiation_rejected",
       "expect": "reject",
-      "config": { "models": { "_default": "input_tokens ** 2" } }
+      "config": { "metering": { "models": { "*": "input_tokens ** 2" } } }
     },
     {
       "name": "no_variables_in_expression_rejected",
       "expect": "reject",
       "reason": "an expression with no metric-variable reference is rejected at config-load time",
-      "config": { "models": { "_default": "1" } }
+      "config": { "metering": { "models": { "*": "1" } } }
     },
     {
       "name": "tools_omitted_defaults",
       "expect": "accept",
-      "config": { "models": { "_default": "input_tokens * 1" } }
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
       "name": "tools_provided_without_default_accepted",
       "expect": "accept",
-      "reason": "a user-supplied tools map without _default is used as-is, not merged with the default",
+      "reason": "a user-supplied tools map without * is used as-is, not merged with the default",
       "config": {
-        "models": { "_default": "input_tokens * 1" },
-        "tools": { "code_exec": "this_tool_calls * 10 / 1000" }
+        "metering": {
+          "models": { "*": "input_tokens * 1" },
+          "tools": { "code_exec": "calls * 10 / 1000" }
+        }
       }
     }
   ]

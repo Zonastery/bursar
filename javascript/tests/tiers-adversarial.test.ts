@@ -21,14 +21,15 @@
 import { describe, it, expect } from "vitest";
 import Decimal from "decimal.js";
 import { MemoryStore } from "../src/stores/memory-store.js";
-import type { TierDefinition } from "../src/types.js";
+import type { BucketDefinition } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
 
-/** White-box: reach into MemoryStore's private tier-definition map (mirrors
+/** White-box: reach into MemoryStore's private bucket-definition map (mirrors
  * `lease-adversarial.test.ts`'s `expireLease` helper reaching into `reservations`). */
-function tierDefinitionsOf(store: MemoryStore): Map<string, TierDefinition> {
-  return (store as unknown as { tierDefinitions: Map<string, TierDefinition> }).tierDefinitions;
+function tierDefinitionsOf(store: MemoryStore): Map<string, BucketDefinition> {
+  return (store as unknown as { bucketDefinitions: Map<string, BucketDefinition> })
+    .bucketDefinitions;
 }
 
 describe("Credit tiers — adversarial", () => {
@@ -38,10 +39,14 @@ describe("Credit tiers — adversarial", () => {
     it("still fully drains an orphaned tier's balance, appended last, after its definition is removed", async () => {
       const store = new MemoryStore();
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          gifted: { name: "Gifted", priority: 10, expires: false },
-          purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          minBalance: 0,
+          buckets: {
+            gifted: { label: "Gifted", priority: 10, expires: false },
+            purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+          },
         },
       });
       await store.addCredits("u1", D(10), "adjustment", null, null, "gifted");
@@ -62,16 +67,16 @@ describe("Credit tiers — adversarial", () => {
       // "purchased" (still configured, priority 20) is walked FIRST; the
       // orphaned "gifted" balance is appended LAST regardless of its
       // original priority (10) and still fully absorbs the remainder.
-      expect(r.tierBreakdown?.purchased?.toString()).toBe("5");
-      expect(r.tierBreakdown?.gifted?.toString()).toBe("7");
+      expect(r.bucketBreakdown?.purchased?.toString()).toBe("5");
+      expect(r.bucketBreakdown?.gifted?.toString()).toBe("7");
 
-      // getCreditTiers only enumerates currently-CONFIGURED tiers, so the
+      // getBucketBalances only enumerates currently-CONFIGURED tiers, so the
       // orphaned "gifted" bucket no longer appears in the per-tier list —
       // but the aggregate total still correctly reflects the drain (no money
       // is lost or double-counted).
-      const tiers = await store.getCreditTiers("u1");
-      expect(tiers.tiers.map((t) => t.tierKey)).toEqual(["purchased"]);
-      expect(tiers.tiers[0].balance.toString()).toBe("0");
+      const tiers = await store.getBucketBalances("u1");
+      expect(tiers.buckets.map((t) => t.bucketKey)).toEqual(["purchased"]);
+      expect(tiers.buckets[0].balance.toString()).toBe("0");
       expect(tiers.totalBalance.toString()).toBe("3"); // 15 - 12
       expect((await store.getBalance("u1")).balance.toString()).toBe("3");
     });
@@ -80,14 +85,18 @@ describe("Credit tiers — adversarial", () => {
   // ── 2. No rounding drift across a multi-tier walk ──────────────────────
 
   describe("no rounding drift", () => {
-    it("tierBreakdown values sum EXACTLY to net via Decimal equality, never floating point", async () => {
+    it("bucketBreakdown values sum EXACTLY to net via Decimal equality, never floating point", async () => {
       const store = new MemoryStore();
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          a: { name: "A", priority: 10, expires: false },
-          b: { name: "B", priority: 20, expires: false },
-          c: { name: "C", priority: 30, expires: false },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          minBalance: 0,
+          buckets: {
+            a: { label: "A", priority: 10, expires: false },
+            b: { label: "B", priority: 20, expires: false },
+            c: { label: "C", priority: 30, expires: false },
+          },
         },
       });
       await store.addCredits("u1", D("10.3333"), "adjustment", null, null, "a");
@@ -98,7 +107,7 @@ describe("Credit tiers — adversarial", () => {
       const r = await store.deductWithAllowance("u1", net);
       expect(r.error).toBeUndefined();
 
-      const breakdown = r.tierBreakdown!;
+      const breakdown = r.bucketBreakdown!;
       const sum = Object.values(breakdown).reduce((acc, v) => acc.plus(v), D(0));
       expect(sum.equals(net)).toBe(true);
 
@@ -106,8 +115,8 @@ describe("Credit tiers — adversarial", () => {
       expect(breakdown.b.toString()).toBe("5.1111");
       expect(breakdown.c.toString()).toBe("0.0556");
 
-      const tiers = await store.getCreditTiers("u1");
-      const byKey = Object.fromEntries(tiers.tiers.map((t) => [t.tierKey, t.balance]));
+      const tiers = await store.getBucketBalances("u1");
+      const byKey = Object.fromEntries(tiers.buckets.map((t) => [t.bucketKey, t.balance]));
       expect(byKey.a.equals(D(0))).toBe(true);
       expect(byKey.b.equals(D(0))).toBe(true);
       expect(byKey.c.equals(D("0.7222"))).toBe(true);
@@ -121,11 +130,15 @@ describe("Credit tiers — adversarial", () => {
     it("sum of tier balances always equals the aggregate, which equals grants minus consumed", async () => {
       const store = new MemoryStore();
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          a: { name: "A", priority: 10, expires: false },
-          b: { name: "B", priority: 20, expires: false },
-          c: { name: "C", priority: 30, expires: false },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          minBalance: 0,
+          buckets: {
+            a: { label: "A", priority: 10, expires: false },
+            b: { label: "B", priority: 20, expires: false },
+            c: { label: "C", priority: 30, expires: false },
+          },
         },
       });
 
@@ -153,10 +166,10 @@ describe("Credit tiers — adversarial", () => {
         .filter((r) => !r.error)
         .reduce((acc, r) => acc.plus(r.amount), D(0));
 
-      const tiers = await store.getCreditTiers("u1");
-      const sumTierBalances = tiers.tiers.reduce((acc, t) => acc.plus(t.balance), D(0));
+      const tiers = await store.getBucketBalances("u1");
+      const sumBucketBalances = tiers.buckets.reduce((acc, t) => acc.plus(t.balance), D(0));
 
-      expect(sumTierBalances.equals(tiers.totalBalance)).toBe(true);
+      expect(sumBucketBalances.equals(tiers.totalBalance)).toBe(true);
       expect(tiers.totalBalance.equals(totalGranted.minus(totalConsumed))).toBe(true);
       expect(tiers.totalBalance.gte(0)).toBe(true);
     });
@@ -168,10 +181,14 @@ describe("Credit tiers — adversarial", () => {
     it("deductTeam behaves normally regardless of configured tiers", async () => {
       const store = new MemoryStore();
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          gifted: { name: "Gifted", priority: 10, expires: false },
-          purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          minBalance: 0,
+          buckets: {
+            gifted: { label: "Gifted", priority: 10, expires: false },
+            purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+          },
         },
       });
       const team = await store.createTeam("Pool", D(500));
@@ -182,7 +199,7 @@ describe("Credit tiers — adversarial", () => {
       expect(result.teamBalanceAfter.toString()).toBe("450");
 
       // deductTeam never touches the user's personal tier balances.
-      const tiers = await store.getCreditTiers("u1");
+      const tiers = await store.getBucketBalances("u1");
       expect(tiers.totalBalance.toString()).toBe("0");
     });
   });
@@ -193,11 +210,15 @@ describe("Credit tiers — adversarial", () => {
     it("composes correctly without ever over-restoring any single tier", async () => {
       const store = new MemoryStore();
       await store.setActivePricing({
-        models: { _default: "input_tokens * 1" },
-        tiers: {
-          a: { name: "A", priority: 10, expires: false },
-          b: { name: "B", priority: 20, expires: false },
-          c: { name: "C", priority: 30, expires: false },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: {
+          minBalance: 0,
+          buckets: {
+            a: { label: "A", priority: 10, expires: false },
+            b: { label: "B", priority: 20, expires: false },
+            c: { label: "C", priority: 30, expires: false },
+          },
         },
       });
       await store.addCredits("u1", D(30), "adjustment", null, null, "a");
@@ -206,39 +227,41 @@ describe("Credit tiers — adversarial", () => {
 
       const deduct = await store.deductWithAllowance("u1", D(45));
       expect(deduct.error).toBeUndefined();
-      expect(deduct.tierBreakdown?.a?.toString()).toBe("30");
-      expect(deduct.tierBreakdown?.b?.toString()).toBe("15");
-      expect(deduct.tierBreakdown?.c).toBeUndefined();
+      expect(deduct.bucketBreakdown?.a?.toString()).toBe("30");
+      expect(deduct.bucketBreakdown?.b?.toString()).toBe("15");
+      expect(deduct.bucketBreakdown?.c).toBeUndefined();
 
       const r1 = await store.refundCredits(deduct.transactionId, D(10));
       expect(r1.error).toBeUndefined();
-      expect(r1.tierBreakdown?.b?.toString()).toBe("10");
-      expect(r1.tierBreakdown?.a).toBeUndefined();
+      expect(r1.bucketBreakdown?.b?.toString()).toBe("10");
+      expect(r1.bucketBreakdown?.a).toBeUndefined();
 
       const r2 = await store.refundCredits(deduct.transactionId, D(10));
       expect(r2.error).toBeUndefined();
-      expect(r2.tierBreakdown?.b?.toString()).toBe("5");
-      expect(r2.tierBreakdown?.a?.toString()).toBe("5");
+      expect(r2.bucketBreakdown?.b?.toString()).toBe("5");
+      expect(r2.bucketBreakdown?.a?.toString()).toBe("5");
 
       const r3 = await store.refundCredits(deduct.transactionId, D(15));
       expect(r3.error).toBeUndefined();
-      expect(r3.tierBreakdown?.a?.toString()).toBe("15");
-      expect(r3.tierBreakdown?.b).toBeUndefined();
-      expect(r3.tierBreakdown?.c).toBeUndefined();
+      expect(r3.bucketBreakdown?.a?.toString()).toBe("15");
+      expect(r3.bucketBreakdown?.b).toBeUndefined();
+      expect(r3.bucketBreakdown?.c).toBeUndefined();
 
-      const tiers = await store.getCreditTiers("u1");
-      const byKey = Object.fromEntries(tiers.tiers.map((t) => [t.tierKey, t.balance.toString()]));
+      const tiers = await store.getBucketBalances("u1");
+      const byKey = Object.fromEntries(
+        tiers.buckets.map((t) => [t.bucketKey, t.balance.toString()]),
+      );
       expect(byKey).toEqual({ a: "20", b: "20", c: "10" });
       expect(tiers.totalBalance.toString()).toBe("50");
 
       // Never over-restored: cumulative per-tier refund never exceeds the
       // original per-tier debit breakdown ({a: 30, b: 15}).
-      const totalARefunded = D(0).plus(r2.tierBreakdown!.a!).plus(r3.tierBreakdown!.a!);
-      const totalBRefunded = D(0).plus(r1.tierBreakdown!.b!).plus(r2.tierBreakdown!.b!);
+      const totalARefunded = D(0).plus(r2.bucketBreakdown!.a!).plus(r3.bucketBreakdown!.a!);
+      const totalBRefunded = D(0).plus(r1.bucketBreakdown!.b!).plus(r2.bucketBreakdown!.b!);
       expect(totalARefunded.lte(D(30))).toBe(true);
       expect(totalBRefunded.equals(D(15))).toBe(true); // exactly the original b debit, never more
       // c was never part of the original debit breakdown — never touched by any refund.
-      expect(tiers.tiers.find((t) => t.tierKey === "c")?.balance.toString()).toBe("10");
+      expect(tiers.buckets.find((t) => t.bucketKey === "c")?.balance.toString()).toBe("10");
     });
   });
 });

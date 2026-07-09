@@ -28,23 +28,27 @@ const PRICE_ID_TOPUP = "price_topup_credits";
 const EVENT_ID = "evt_test_001";
 
 const PRICING_DICT = {
-  models: { _default: "input_tokens * 1" },
-  min_balance: 0,
-  plans: {
-    free: { id: "free", name: "Free", free_allowance: 1000 },
-    pro: { id: "pro", name: "Pro", free_allowance: 100000 },
-    enterprise: {
-      id: "enterprise",
-      name: "Enterprise",
-      free_allowance: 1000000,
+  version: 1,
+  metering: {
+    models: { "*": "input_tokens * 1" },
+  },
+  ledger: {
+    min_balance: 0,
+    buckets: {
+      purchased: {
+        label: "Purchased",
+        priority: 1,
+        is_default_bucket: true,
+        allow_overdraft: false,
+      },
     },
   },
-  tiers: {
-    purchased: {
-      name: "Purchased",
-      priority: 1,
-      is_default: true,
-      allow_overdraft: false,
+  plans: {
+    free: { label: "Free", allowance: { amount: 1000 } },
+    pro: { label: "Pro", allowance: { amount: 100000 } },
+    enterprise: {
+      label: "Enterprise",
+      allowance: { amount: 1000000 },
     },
   },
 };
@@ -52,61 +56,55 @@ const PRICING_DICT = {
 const BILLING_CONFIG: BillingConfig = {
   subscriptions: {
     pro_monthly: {
-      offerKey: "pro_monthly",
-      planKey: "pro",
+      plan: "pro",
       interval: "month",
       intervalCount: 1,
-      entitlementMode: "allowance",
-      providerRefs: {
+      grant: { mode: "allowance" },
+      providers: {
         stripe: {
-          provider: "stripe",
           productId: "prod_monthly",
           priceId: "price_monthly_1000",
         },
       },
     },
     enterprise_yearly: {
-      offerKey: "enterprise_yearly",
-      planKey: "enterprise",
+      plan: "enterprise",
       interval: "year",
       intervalCount: 1,
-      entitlementMode: "allowance",
-      providerRefs: {
+      grant: { mode: "allowance" },
+      providers: {
         stripe: {
-          provider: "stripe",
           productId: "prod_yearly",
           priceId: "price_yearly_10000",
         },
       },
     },
     cycle_grant_monthly: {
-      offerKey: "cycle_grant_monthly",
-      planKey: "pro",
+      plan: "pro",
       interval: "month",
       intervalCount: 1,
-      entitlementMode: "cycle_grant",
-      cycleGrantCredits: 5000,
-      cycleGrantTier: "purchased",
-      cycleGrantReplacePrior: true,
-      providerRefs: {
+      grant: {
+        mode: "cycle_grant",
+        credits: 5000,
+        bucket: "purchased",
+        replacePrior: true,
+      },
+      providers: {
         stripe: {
-          provider: "stripe",
           productId: "prod_cycle_grant",
           priceId: "price_cycle_grant_5000",
         },
       },
     },
   },
-  creditTopups: {
+  topups: {
     standard_topup: {
-      tier: "purchased",
-      currency: "USD",
-      creditsPerMajorUnit: 1000,
+      creditsPerUnit: 1000,
+      depositTo: "purchased",
       minAmountMinor: 500,
       maxAmountMinor: 50000,
-      providerRefs: {
+      providers: {
         stripe: {
-          provider: "stripe",
           productId: "prod_topup",
           priceId: "price_topup_credits",
         },
@@ -142,7 +140,7 @@ describe("MemoryBillingStore integration", () => {
     const offer = await bs.resolveBillingOffer(PROVIDER, null, PRICE_ID);
     expect(offer).not.toBeNull();
     expect(offer!.offerKey).toBe("pro_monthly");
-    expect(offer!.planKey).toBe("pro");
+    expect(offer!.plan).toBe("pro");
   });
 
   it("sync_billing_config_resolve_by_product_id", async () => {
@@ -157,7 +155,7 @@ describe("MemoryBillingStore integration", () => {
     const topup = await bs.resolveCreditTopup(PROVIDER, null, PRICE_ID_TOPUP);
     expect(topup).not.toBeNull();
     expect(topup!.topupKey).toBe("standard_topup");
-    expect(topup!.creditsPerMajorUnit).toBe(1000);
+    expect(topup!.creditsPerUnit).toBe(1000);
   });
 
   it("unresolved_offer_returns_null", async () => {
@@ -268,12 +266,12 @@ describe("MemoryBillingStore integration", () => {
 
   it("compute_topup_credits", async () => {
     const { bs } = await makeComponents();
-    expect(await bs.computeTopupCredits(2000, { creditsPerMajorUnit: 1000 })).toBe(20000);
+    expect(await bs.computeTopupCredits(2000, { creditsPerUnit: 1000 })).toBe(20000);
   });
 
   it("compute_topup_credits_odd_amount", async () => {
     const { bs } = await makeComponents();
-    expect(await bs.computeTopupCredits(1999, { creditsPerMajorUnit: 1000 })).toBe(19990);
+    expect(await bs.computeTopupCredits(1999, { creditsPerUnit: 1000 })).toBe(19990);
   });
 
   it("resolve_billing_offer_no_match", async () => {
@@ -328,11 +326,10 @@ describe("MemoryBillingStore integration", () => {
     await bs.syncBillingFromConfig({
       subscriptions: {
         new_offer: {
-          offerKey: "new_offer",
-          planKey: "free",
+          plan: "free",
           interval: "month",
-          providerRefs: {
-            stripe: { provider: "stripe", priceId: "price_new_offer" },
+          providers: {
+            stripe: { priceId: "price_new_offer" },
           },
         },
       },
@@ -653,7 +650,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     const offer = await bs.resolveBillingOffer(PROVIDER, null, PRICE_ID);
     expect(offer).not.toBeNull();
     expect(offer!.offerKey).toBe("pro_monthly");
-    expect(offer!.planKey).toBe("pro");
+    expect(offer!.plan).toBe("pro");
   });
 
   it("sync_billing_config_resolve_by_product_id", async () => {
@@ -670,7 +667,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     const topup = await bs.resolveCreditTopup(PROVIDER, null, PRICE_ID_TOPUP);
     expect(topup).not.toBeNull();
     expect(topup!.topupKey).toBe("standard_topup");
-    expect(topup!.creditsPerMajorUnit).toBe(1000);
+    expect(topup!.creditsPerUnit).toBe(1000);
   });
 
   it("unresolved_offer_returns_null", async () => {
@@ -802,12 +799,12 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   it("compute_topup_credits", async () => {
     const { bs } = await makePgComponents(pool);
-    expect(await bs.computeTopupCredits(2000, { creditsPerMajorUnit: 1000 })).toBe(20000);
+    expect(await bs.computeTopupCredits(2000, { creditsPerUnit: 1000 })).toBe(20000);
   });
 
   it("compute_topup_credits_odd_amount", async () => {
     const { bs } = await makePgComponents(pool);
-    expect(await bs.computeTopupCredits(1999, { creditsPerMajorUnit: 1000 })).toBe(19990);
+    expect(await bs.computeTopupCredits(1999, { creditsPerUnit: 1000 })).toBe(19990);
   });
 
   // ── BillingManager lifecycle ─────────────────────────────────────────
@@ -1005,11 +1002,10 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     await bs.syncBillingFromConfig({
       subscriptions: {
         new_offer: {
-          offerKey: "new_offer",
-          planKey: "free",
+          plan: "free",
           interval: "month",
-          providerRefs: {
-            stripe: { provider: "stripe", priceId: "price_new_offer" },
+          providers: {
+            stripe: { priceId: "price_new_offer" },
           },
         },
       },

@@ -15,31 +15,40 @@ from bursar.engine import PricingEngine
 from bursar.metrics import ToolCall, UsageMetrics
 
 FULL_PRICING = {
-    "models": {
-        "claude-opus-4": "input_tokens * 0.005 + output_tokens * 0.015",
-        "claude-sonnet-4": "input_tokens * 0.003 + output_tokens * 0.009",
-        "gemini-2.5-pro": "input_tokens * 0.0025 + output_tokens * 0.0075",
-        "gemini-2.5-flash": "input_tokens * 0.0005 + output_tokens * 0.0015",
-        "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+    "version": 1,
+    "metering": {
+        "models": {
+            "claude-opus-4": "input_tokens * 0.005 + output_tokens * 0.015",
+            "claude-sonnet-4": "input_tokens * 0.003 + output_tokens * 0.009",
+            "gemini-2.5-pro": "input_tokens * 0.0025 + output_tokens * 0.0075",
+            "gemini-2.5-flash": "input_tokens * 0.0005 + output_tokens * 0.0015",
+            "*": "input_tokens * 0.001 + output_tokens * 0.003",
+        },
+        "tools": {
+            "*": "calls * 0",
+            "web_search": "web_search_calls * 0.5",
+            "code_exec": "code_exec_calls * 0.3",
+        },
+        "search": "search_queries * 0.5 + search_results * 0.05",
+        "cache_discount": "cache_read_tokens * 0.0045",
+        "flat_jobs": {
+            "batch_job": 20,
+            "slow_job": 10,
+        },
     },
-    "tools": {
-        "_default": "tool_calls * 0",
-        "web_search": "web_search_calls * 0.5",
-        "code_exec": "code_exec_calls * 0.3",
-    },
-    "search": "search_queries * 0.5 + search_results * 0.05",
-    "cache": "-cache_read_tokens * 0.0045",
-    "min_balance": 5,
-    "fixed": {
-        "batch_job": 20,
-        "slow_job": 10,
+    "ledger": {
+        "min_balance": 5,
     },
 }
 
 MINIMAL_PRICING = {
-    "models": {
-        "_default": "input_tokens * 0.001 + output_tokens * 0.003",
+    "version": 1,
+    "metering": {
+        "models": {
+            "*": "input_tokens * 0.001 + output_tokens * 0.003",
+        },
     },
+    "ledger": {},
 }
 
 # ── Parity fixture (pricing_cases) ──────────────────────────────────────────
@@ -68,7 +77,9 @@ class TestPricingEngineLoading:
     """PricingEngine construction from dict sources."""
 
     def test_from_dict(self) -> None:
-        engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 1"}})
+        engine = PricingEngine.from_dict(
+            {"version": 1, "metering": {"models": {"*": "input_tokens * 1"}}, "ledger": {}}
+        )
         assert engine is not None
 
     def test_from_dict_with_full_config(self) -> None:
@@ -124,19 +135,23 @@ class TestPricingEngineCalculate:
 
     def test_sub_one_credit_not_truncated(self) -> None:
         # A 0.4-credit op must charge 0.4, not 0 (revenue-leak guard, H1).
-        engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 0.0004"}})
+        engine = PricingEngine.from_dict(
+            {"version": 1, "metering": {"models": {"*": "input_tokens * 0.0004"}}, "ledger": {}}
+        )
         result = engine.calculate(UsageMetrics(model="x", input_tokens=1000))
         assert result.total == Decimal("0.4000")
 
     def test_decimal_precision_no_float_artifacts(self) -> None:
-        engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 0.1 + output_tokens * 0.2"}})
+        engine = PricingEngine.from_dict(
+            {"version": 1, "metering": {"models": {"*": "input_tokens * 0.1 + output_tokens * 0.2"}}, "ledger": {}}
+        )
         result = engine.calculate(UsageMetrics(model="x", input_tokens=1, output_tokens=1))
         assert result.total == Decimal("0.3000")
 
     def test_fixed_cost_job(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
-        result = engine.calculate(UsageMetrics(model="none", fixed_job="batch_job"))
-        assert result.fixed_credits == Decimal("20.0000")
+        result = engine.calculate(UsageMetrics(model="none", flat_job="batch_job"))
+        assert result.flat_job_credits == Decimal("20.0000")
         assert result.total == Decimal("20.0000")
 
     def test_total_clamped_to_zero(self) -> None:
@@ -155,8 +170,10 @@ class TestPricingEngineCalculate:
         assert result.total == Decimal("0.0000")
 
     def test_model_not_found_and_no_default_raises_error(self) -> None:
-        engine = PricingEngine.from_dict({"models": {"gpt-4": "input_tokens * 1"}})
-        with pytest.raises(ValueError, match="no model match for 'unknown' and no _default in config"):
+        engine = PricingEngine.from_dict(
+            {"version": 1, "metering": {"models": {"gpt-4": "input_tokens * 1"}}, "ledger": {}}
+        )
+        with pytest.raises(ValueError, match="no model match for 'unknown' and no '\\*' in config"):
             engine.calculate(UsageMetrics(model="unknown"))
 
     def test_tool_specific_override_used(self) -> None:
@@ -188,10 +205,10 @@ class TestPricingEngineCalculate:
     def test_pricing_schema_returns_pydantic_model(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
         schema = engine.pricing_schema()
-        assert schema.models
-        assert "claude-opus-4" in schema.models
-        assert isinstance(schema.models["claude-opus-4"], str)
-        assert schema.models["claude-opus-4"] == "input_tokens * 0.005 + output_tokens * 0.015"
+        assert schema["metering"]["models"]
+        assert "claude-opus-4" in schema["metering"]["models"]
+        assert isinstance(schema["metering"]["models"]["claude-opus-4"], str)
+        assert schema["metering"]["models"]["claude-opus-4"] == "input_tokens * 0.005 + output_tokens * 0.015"
 
 
 class TestEngineMinBalance:
@@ -209,28 +226,28 @@ class TestEngineMinBalance:
 
 
 class TestEngineFixedJob:
-    """Fixed-cost job calculations and get_fixed_cost contract."""
+    """Fixed-cost job calculations and get_flat_job_cost contract."""
 
     def test_fixed_job_batch(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
-        result = engine.calculate(UsageMetrics(model=None, fixed_job="batch_job"))
-        assert result.fixed_credits == Decimal("20.0000")
+        result = engine.calculate(UsageMetrics(model=None, flat_job="batch_job"))
+        assert result.flat_job_credits == Decimal("20.0000")
         assert result.total == Decimal("20.0000")
 
-    def test_get_fixed_cost_known_returns_decimal(self) -> None:
+    def test_get_flat_job_cost_known_returns_decimal(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
-        cost = engine.get_fixed_cost("batch_job")
+        cost = engine.get_flat_job_cost("batch_job")
         assert cost == Decimal("20.0000")
         assert isinstance(cost, Decimal)
 
-    def test_get_fixed_cost_unknown_returns_none(self) -> None:
+    def test_get_flat_job_cost_unknown_returns_none(self) -> None:
         # Unknown / typo'd job -> None so the manager can reject it (L1).
         engine = PricingEngine.from_dict(FULL_PRICING)
-        assert engine.get_fixed_cost("does_not_exist") is None
+        assert engine.get_flat_job_cost("does_not_exist") is None
 
-    def test_get_fixed_cost_no_fixed_section(self) -> None:
+    def test_get_flat_job_cost_no_fixed_section(self) -> None:
         engine = PricingEngine.from_dict(MINIMAL_PRICING)
-        assert engine.get_fixed_cost("anything") is None
+        assert engine.get_flat_job_cost("anything") is None
 
 
 # ── EN1: Tool calls with duplicate names ─────────────────────────────────────
@@ -313,11 +330,11 @@ class TestCacheSectionAbsent:
 
 
 class TestFixedCostUnknownJob:
-    """EN5 — get_fixed_cost for a nonexistent job returns None."""
+    """EN5 — get_flat_job_cost for a nonexistent job returns None."""
 
     def test_nonexistent_job_returns_none(self) -> None:
         engine = PricingEngine.from_dict(FULL_PRICING)
-        assert engine.get_fixed_cost("nonexistent_job") is None
+        assert engine.get_flat_job_cost("nonexistent_job") is None
 
 
 # ── EN6: Model resolution — exact takes priority over prefix ─────────────────
@@ -328,10 +345,14 @@ class TestModelResolutionExactBeforePrefix:
 
     def test_exact_match_over_prefix(self) -> None:
         config = {
-            "models": {
-                "gpt-4": "input_tokens * 1",
-                "gpt-4-turbo": "input_tokens * 2",
-            }
+            "version": 1,
+            "metering": {
+                "models": {
+                    "gpt-4": "input_tokens * 1",
+                    "gpt-4-turbo": "input_tokens * 2",
+                }
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         resolved = engine.resolve_model("gpt-4-turbo")
@@ -339,9 +360,13 @@ class TestModelResolutionExactBeforePrefix:
 
     def test_prefix_match_used_when_no_exact(self) -> None:
         config = {
-            "models": {
-                "gpt-4": "input_tokens * 1",
-            }
+            "version": 1,
+            "metering": {
+                "models": {
+                    "gpt-4": "input_tokens * 1",
+                }
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         # "gpt-4-20240601" has no exact match; "gpt-4" is a prefix
@@ -351,10 +376,14 @@ class TestModelResolutionExactBeforePrefix:
     def test_calculate_uses_exact_model_formula(self) -> None:
         # Verify calculate() itself picks the right formula (exact match).
         config = {
-            "models": {
-                "gpt-4": "input_tokens * 1",
-                "gpt-4-turbo": "input_tokens * 2",
-            }
+            "version": 1,
+            "metering": {
+                "models": {
+                    "gpt-4": "input_tokens * 1",
+                    "gpt-4-turbo": "input_tokens * 2",
+                }
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(UsageMetrics(model="gpt-4-turbo", input_tokens=100))
@@ -372,7 +401,9 @@ class TestQuantizationSummedComponents:
         # input_tokens * (1/3) — but (1/3) is exact division in Decimal,
         # producing a long repeating decimal. Quantized to 4dp.
         # 1 * Decimal(1) / Decimal(3) = 0.3333... -> quantized = 0.3333
-        engine = PricingEngine.from_dict({"models": {"_default": "input_tokens * 1 / output_tokens"}})
+        engine = PricingEngine.from_dict(
+            {"version": 1, "metering": {"models": {"*": "input_tokens * 1 / output_tokens"}}, "ledger": {}}
+        )
         # input_tokens=1, output_tokens=3 -> 1/3 -> 0.3333...
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=1, output_tokens=3))
         assert result.total == Decimal("0.3333")
@@ -387,12 +418,16 @@ class TestTotalClampedAtZero:
 
     def test_cache_discount_exceeds_model_cost(self) -> None:
         config = {
-            "models": {"_default": "input_tokens * 0.001"},
-            "cache": "-cache_read_tokens * 0.01",
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 0.001"},
+                "cache_discount": "cache_read_tokens * 0.01",
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         # model cost: 10 * 0.001 = 0.01
-        # cache discount: -1000 * 0.01 = -10.0
+        # cache discount: -(1000 * 0.01) = -10.0
         # raw_total = 0.01 - 10.0 = -9.99 -> clamped to 0
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=10, cache_read_tokens=1000))
         assert result.total == Decimal("0.0000")
@@ -427,11 +462,14 @@ class TestModelPrefixAmbiguity:
 
     _CONFIG = {
         "version": 1,
-        "models": {
-            "gpt-4": "input_tokens * 0.002",
-            "gpt-4-turbo": "input_tokens * 0.003",
-            "_default": "input_tokens * 0.001",
+        "metering": {
+            "models": {
+                "gpt-4": "input_tokens * 0.002",
+                "gpt-4-turbo": "input_tokens * 0.003",
+                "*": "input_tokens * 0.001",
+            },
         },
+        "ledger": {},
     }
 
     def test_exact_match_gpt4_turbo(self) -> None:
@@ -485,11 +523,15 @@ class TestCalculateBatchOrdering:
     def test_batch_order_with_varied_models(self) -> None:
         # Use a config where each model produces a clearly distinct total.
         config = {
-            "models": {
-                "m1": "input_tokens * 1",
-                "m2": "input_tokens * 2",
-                "m3": "input_tokens * 3",
-            }
+            "version": 1,
+            "metering": {
+                "models": {
+                    "m1": "input_tokens * 1",
+                    "m2": "input_tokens * 2",
+                    "m3": "input_tokens * 3",
+                }
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         metrics = [
@@ -514,8 +556,12 @@ class TestCacheDiscountClampedAtZero:
         # Cache savings: -5000 * 0.01 = -50.0
         # raw total = 0.01 - 50.0 = -49.99 -> clamped to 0.0000
         config = {
-            "models": {"_default": "input_tokens * 0.001"},
-            "cache": "-cache_read_tokens * 0.01",
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 0.001"},
+                "cache_discount": "cache_read_tokens * 0.01",
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=10, cache_read_tokens=5000))
@@ -527,8 +573,12 @@ class TestCacheDiscountClampedAtZero:
     def test_total_never_negative_regardless_of_magnitude(self) -> None:
         # Extreme scenario: effectively unlimited cache discount.
         config = {
-            "models": {"_default": "input_tokens * 0.001"},
-            "cache": "-cache_read_tokens * 1000",
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 0.001"},
+                "cache_discount": "cache_read_tokens * 1000",
+            },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(UsageMetrics(model="_default", input_tokens=1, cache_read_tokens=999999))
@@ -550,11 +600,15 @@ class TestThisToolCallsPerTool:
     """
 
     _CONFIG = {
-        "models": {"_default": "input_tokens * 0"},
-        "tools": {
-            "code_exec": "this_tool_calls * 10 / 1000",
-            "_default": "this_tool_calls * 5 / 1000",
+        "version": 1,
+        "metering": {
+            "models": {"*": "input_tokens * 0"},
+            "tools": {
+                "code_exec": "calls * 10 / 1000",
+                "*": "calls * 5 / 1000",
+            },
         },
+        "ledger": {},
     }
 
     def test_known_tool_priced_on_its_own_count_not_total(self) -> None:
@@ -595,11 +649,15 @@ class TestThisToolCallsPerTool:
         # A tool formula that references the GLOBAL tool_calls (not this_tool_calls)
         # must see the total across ALL tools, not just its own count.
         config = {
-            "models": {"_default": "input_tokens * 0"},
-            "tools": {
-                "code_exec": "tool_calls * 1",
-                "_default": "tool_calls * 0",
+            "version": 1,
+            "metering": {
+                "models": {"*": "input_tokens * 0"},
+                "tools": {
+                    "code_exec": "tool_calls * 1",
+                    "*": "tool_calls * 0",
+                },
             },
+            "ledger": {},
         }
         engine = PricingEngine.from_dict(config)
         result = engine.calculate(

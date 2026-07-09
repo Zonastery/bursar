@@ -12,15 +12,17 @@ import {
   PricingNotLoadedError,
   RefundError,
 } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
 
-const TEST_CONFIG: PricingConfigData = {
-  models: {
-    "gpt-4": "input_tokens * (10 / 1000) + output_tokens * (30 / 1000)",
-  },
-  tools: {
-    _default: "tool_calls * 5 / 1000",
+const TEST_CONFIG = {
+  version: 1,
+  metering: {
+    models: {
+      "gpt-4": "input_tokens * (10 / 1000) + output_tokens * (30 / 1000)",
+    },
+    tools: {
+      "*": "tool_calls * 5 / 1000",
+    },
   },
 };
 
@@ -79,7 +81,10 @@ describe("CreditManager", () => {
   });
 
   it("charges a fractional sub-1 cost exactly (0.4, not truncated to 0) — H1", async () => {
-    await manager.publishPricingFromDict({ models: { _default: "input_tokens * 0.4" } });
+    await manager.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 0.4" } },
+    });
     await manager.addCredits("user-1", 100);
 
     const result = await manager.deduct("user-1", { inputTokens: 1 });
@@ -118,7 +123,10 @@ describe("CreditManager", () => {
     });
 
     it("same key + different amount still replays the ORIGINAL charge", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 500);
 
       const first = await manager.deduct("user-1", { inputTokens: 10 }, "idem-2");
@@ -134,7 +142,10 @@ describe("CreditManager", () => {
     });
 
     it("same key + different user does NOT collide (user-scoped)", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 100);
       await manager.addCredits("user-2", 100);
 
@@ -194,34 +205,34 @@ describe("CreditManager", () => {
       await manager.publishPricing(TEST_CONFIG, "v1");
       const active = await store.getActivePricing();
       expect(active).not.toBeNull();
-      expect(active?.config.models["gpt-4"]).toBe(TEST_CONFIG.models["gpt-4"]);
+      expect(active?.config.metering.models["gpt-4"]).toBe(TEST_CONFIG.metering.models["gpt-4"]);
     });
   });
 
   describe("deductFixed", () => {
     it("charges the configured fixed cost exactly", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
-        fixed: { batch_job: 50 },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" }, flatJobs: { batch_job: 50 } },
       };
       await manager.publishPricingFromDict(config);
       await manager.addCredits("user-1", 100);
 
-      const result = await manager.deductFixed("user-1", "batch_job");
+      const result = await manager.deductFlatJob("user-1", "batch_job");
       expect(result.transactionId).toBeTruthy();
       expectDecimal(result.amount, "50");
       expectDecimal(result.balanceAfter, "50");
     });
 
     it("rejects an unknown job instead of charging 0 (L1)", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
-        fixed: { batch_job: 50 },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" }, flatJobs: { batch_job: 50 } },
       };
       await manager.publishPricingFromDict(config);
       await manager.addCredits("user-1", 100);
 
-      await expect(() => manager.deductFixed("user-1", "does_not_exist")).rejects.toThrow(
+      await expect(() => manager.deductFlatJob("user-1", "does_not_exist")).rejects.toThrow(
         ConfigError,
       );
       // Nothing charged.
@@ -229,7 +240,7 @@ describe("CreditManager", () => {
     });
 
     it("rejects deductFixed before pricing is loaded", async () => {
-      await expect(() => manager.deductFixed("user-1", "batch_job")).rejects.toThrow(
+      await expect(() => manager.deductFlatJob("user-1", "batch_job")).rejects.toThrow(
         PricingNotLoadedError,
       );
     });
@@ -256,9 +267,15 @@ describe("CreditManager", () => {
 
   describe("plan allowance", () => {
     it("fully covers cost with plan allowance, skipping balance deduct", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
-        plans: { "plan-free": { id: "plan-free", name: "Free", freeAllowance: new Decimal(100) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        plans: {
+          "plan-free": {
+            label: "Free",
+            allowance: { amount: new Decimal(100), period: "calendar_month" },
+          },
+        },
       };
       await store.setActivePricing(config);
       await store.setUserPlan("user-1", "plan-free");
@@ -278,10 +295,14 @@ describe("CreditManager", () => {
     });
 
     it("partially covers cost with plan allowance, deducts remainder from balance", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
-          "plan-starter": { id: "plan-starter", name: "Starter", freeAllowance: new Decimal(10) },
+          "plan-starter": {
+            label: "Starter",
+            allowance: { amount: new Decimal(10), period: "calendar_month" },
+          },
         },
       };
       await store.setActivePricing(config);
@@ -314,14 +335,14 @@ describe("CreditManager", () => {
     });
 
     it("checkFeature through manager distinguishes presence from truthiness", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
           premium: {
-            id: "premium",
-            name: "Premium",
-            freeAllowance: new Decimal(2000),
-            features: { aiChat: true, maxRoadmaps: 20, freeSeats: 0, label: "" },
+            label: "Premium",
+            allowance: { amount: new Decimal(2000), period: "calendar_month" },
+            entitlements: { aiChat: true, maxRoadmaps: 20, freeSeats: 0, label: "" },
           },
         },
       };
@@ -371,7 +392,10 @@ describe("CreditManager", () => {
     });
 
     it("partial refund through manager", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 100);
 
       const deduct = await manager.deduct("user-1", { inputTokens: 50 });
@@ -384,7 +408,10 @@ describe("CreditManager", () => {
     it("duplicate (over-)refund throws RefundError and emits refund_failed (NO success event)", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 100);
 
       const deduct = await mgr.deduct("user-1", { inputTokens: 40 });
@@ -405,7 +432,10 @@ describe("CreditManager", () => {
     });
 
     it("over-refund (amount > remaining) throws RefundError", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 100);
 
       const deduct = await manager.deduct("user-1", { inputTokens: 30 });
@@ -416,13 +446,19 @@ describe("CreditManager", () => {
     });
 
     it("refund of a purchase (not a debit) is rejected", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       const add = await manager.addCredits("user-1", 100, { type: "purchase" });
       await expect(() => manager.refundCredits(add.transactionId)).rejects.toThrow(RefundError);
     });
 
     it("refund of unknown transaction throws RefundError", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await expect(() => manager.refundCredits("no-such-transaction")).rejects.toThrow(RefundError);
     });
   });
@@ -564,7 +600,10 @@ describe("CreditManager", () => {
   describe("team balance pools", () => {
     it("deductTeam calculates cost and debits team pool", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -577,7 +616,10 @@ describe("CreditManager", () => {
 
     it("deductTeam zero-cost returns without deducting", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -589,7 +631,10 @@ describe("CreditManager", () => {
 
     it("deductTeam threads idempotencyKey (H12) — retry does not double-charge", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -624,7 +669,10 @@ describe("CreditManager", () => {
       // H2 fix: manager now throws on store error rather than returning a
       // silent error object — mirrors Python manager.py:1069-1082.
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Poor Team", new Decimal(10));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -636,7 +684,10 @@ describe("CreditManager", () => {
 
     it("deductTeam user not in team throws InsufficientCreditsError", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Closed Team", new Decimal(500));
       await expect(mgr.deductTeam(team.teamId, "user-1", { inputTokens: 10 })).rejects.toThrow(
@@ -646,7 +697,10 @@ describe("CreditManager", () => {
 
     it("team balance reflects deductions through manager", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Pipeline Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -661,7 +715,10 @@ describe("CreditManager", () => {
     it("daily deny cap throws CapReachedError and emits deduct_failed", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -688,7 +745,10 @@ describe("CreditManager", () => {
     it("warn action allows deduction through and emits cap_warning", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -709,7 +769,10 @@ describe("CreditManager", () => {
 
     it("notify action allows deduction through", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -725,7 +788,10 @@ describe("CreditManager", () => {
 
     it("cap accumulates across prior window spend (no TOCTOU bypass, H2)", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -743,7 +809,10 @@ describe("CreditManager", () => {
 
     it("spend cap does not affect deductions within limit", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -763,7 +832,11 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       // Explicit minBalance: 5 → threshold = 10 (WS6: the implicit default is now 0).
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: { minBalance: 5 },
+      });
       await mgr.addCredits("user-1", 12);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -784,7 +857,10 @@ describe("CreditManager", () => {
     it("does not fire when the balance stays above the threshold", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 100);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -798,7 +874,10 @@ describe("CreditManager", () => {
       const mgr = new CreditManager(store, undefined, emitter, {
         lowBalance: { thresholds: [new Decimal(50)] },
       });
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 60);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -812,7 +891,11 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
       // Explicit minBalance: 5 → threshold = 10 (WS6: the implicit default is now 0).
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: { minBalance: 5 },
+      });
       await mgr.addCredits("user-1", 12);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -827,7 +910,10 @@ describe("CreditManager", () => {
     it("emits credits.deducted with Decimal money payload", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 100);
 
       const events = record(emitter, ["credits.deducted"]);
@@ -844,7 +930,10 @@ describe("CreditManager", () => {
       const mgr = new CreditManager(new MemoryStore(), undefined, emitter);
 
       const events = record(emitter, ["credits.added"]);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 50);
 
       expect(events).toHaveLength(1);
@@ -856,7 +945,10 @@ describe("CreditManager", () => {
       const s = new MemoryStore();
       s.setClock(() => FIXED_NOW);
       const mgr = new CreditManager(s, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const events = record(emitter, ["credits.expired"]);
       await mgr.addCredits("user-1", 100, {
@@ -877,7 +969,10 @@ describe("CreditManager", () => {
       emitter.on("credits.deducted", () => called.push(1));
       emitter.on("credits.deducted", () => called.push(2));
 
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 100);
       await mgr.deduct("user-1", { inputTokens: 10 });
 
@@ -894,7 +989,10 @@ describe("CreditManager", () => {
       const seen: string[] = [];
       emitter.on("credits.deducted", () => seen.push("ok"));
 
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 100);
 
       // The deduction still succeeds despite the throwing handler.
@@ -925,10 +1023,11 @@ describe("CreditManager", () => {
     // MG1 — credits.plan_changed fires on setUserPlan
     it("MG1: credits.plan_changed fires on setUserPlan and plan is updated", async () => {
       const emitter = new CreditEventEmitter();
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
-          pro: { id: "pro", name: "Pro", freeAllowance: new Decimal(100) },
+          pro: { label: "Pro", allowance: { amount: new Decimal(100), period: "calendar_month" } },
         },
       };
       await store.setActivePricing(config);
@@ -953,10 +1052,11 @@ describe("CreditManager", () => {
     });
 
     it("MG2: credits.plan_changed fires on unsetUserPlan with null planKey", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
-          pro: { id: "pro", name: "Pro", freeAllowance: new Decimal(100) },
+          pro: { label: "Pro", allowance: { amount: new Decimal(100), period: "calendar_month" } },
         },
       };
       await store.setActivePricing(config);
@@ -982,7 +1082,10 @@ describe("CreditManager", () => {
     it("MG3: cap_warning and credits.deducted both fire on a warn-capped deduction", async () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 1000);
       store.setSpendCap({
         userId: "user-1",
@@ -1006,7 +1109,10 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
       // Zero-rate model: cost is always 0
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 0" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 0" } },
+      });
 
       const team = await store.createTeam("ZeroTeam", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -1032,7 +1138,10 @@ describe("CreditManager", () => {
       const mgr = new CreditManager(store, undefined, emitter, {
         lowBalance: { thresholds: [new Decimal(20)] },
       });
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await mgr.addCredits("user-1", 25);
 
       const events = record(emitter, ["credits.low_balance"]);
@@ -1050,14 +1159,14 @@ describe("CreditManager", () => {
 
     // MG7 — deductFixed with unknown job → ConfigError
     it("MG7: deductFixed with unknown job throws ConfigError", async () => {
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
-        fixed: { known_job: 10 },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" }, flatJobs: { known_job: 10 } },
       };
       await manager.publishPricingFromDict(config);
       await manager.addCredits("user-1", 100);
 
-      await expect(() => manager.deductFixed("user-1", "nonexistent_job_xyz")).rejects.toThrow(
+      await expect(() => manager.deductFlatJob("user-1", "nonexistent_job_xyz")).rejects.toThrow(
         ConfigError,
       );
 
@@ -1070,7 +1179,10 @@ describe("CreditManager", () => {
   describe("MG2: deductTeam idempotency key scope", () => {
     it("same idempotency key for a different user on the same team is a replay (per-team scope)", async () => {
       const mgr = new CreditManager(store);
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
 
       const team = await store.createTeam("Team", new Decimal(500));
       await store.addTeamMember(team.teamId, "user-1", "member");
@@ -1094,7 +1206,10 @@ describe("CreditManager", () => {
   // H2 — Concurrent deduct + refund race
   describe("H2: concurrent deduct and refund do not corrupt balance", () => {
     it("10 concurrent deductions of 1 + 5 concurrent refunds — balance stays ≥ 0", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 20);
 
       // Run 10 deductions (each costs 1) and collect their transaction IDs.
@@ -1131,10 +1246,17 @@ describe("CreditManager", () => {
   describe("H3: plan change + deduction consistency", () => {
     it("concurrent plan change and deduction do not throw and leave a non-negative balance", async () => {
       const planConfig = {
-        models: { _default: "input_tokens * 1" },
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
-          "plan-a": { id: "plan-a", name: "Plan A", freeAllowance: new Decimal(50) },
-          "plan-b": { id: "plan-b", name: "Plan B", freeAllowance: new Decimal(20) },
+          "plan-a": {
+            label: "Plan A",
+            allowance: { amount: new Decimal(50), period: "calendar_month" },
+          },
+          "plan-b": {
+            label: "Plan B",
+            allowance: { amount: new Decimal(20), period: "calendar_month" },
+          },
         },
       };
       await manager.publishPricingFromDict(planConfig);
@@ -1159,7 +1281,10 @@ describe("CreditManager", () => {
   // H15 — listUserTransactions passthrough
   describe("H15: listUserTransactions passthrough", () => {
     it("returns paginated transactions with correct types and honours limit", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 500);
 
       // Create 5 usage transactions.
@@ -1183,7 +1308,10 @@ describe("CreditManager", () => {
     });
 
     it("returns all transaction types (usage + adjustment) when no type filter given", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 100); // type=adjustment
       await manager.deduct("user-1", { inputTokens: 5 }); // type=usage
 
@@ -1204,7 +1332,11 @@ describe("CreditManager", () => {
 
       // Explicit minBalance: 5 (WS6: the engine's implicit default is now 0, so
       // this must be set explicitly to exercise the minBalance*2 default).
-      await mgr.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 5 });
+      await mgr.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+        ledger: { minBalance: 5 },
+      });
       // Start at 12 so a single deduction of 3 crosses 10 from above.
       await mgr.addCredits("user-1", 12);
 
@@ -1225,7 +1357,10 @@ describe("CreditManager", () => {
   // M9 — Idempotency key isolation: personal vs team
   describe("M9: idempotency key scoped independently to personal vs team", () => {
     it("same key 'key-1' for personal deduct AND team deduct are both charged (no collision)", async () => {
-      await manager.publishPricingFromDict({ models: { _default: "input_tokens * 1" } });
+      await manager.publishPricingFromDict({
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
+      });
       await manager.addCredits("user-1", 200);
 
       const team = await store.createTeam("Team X", new Decimal(500));
@@ -1263,10 +1398,14 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(s, undefined, emitter);
 
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
-          starter: { id: "starter", name: "Starter", freeAllowance: new Decimal(10) },
+          starter: {
+            label: "Starter",
+            allowance: { amount: new Decimal(10), period: "calendar_month" },
+          },
         },
       };
       await s.setActivePricing(config);
@@ -1318,14 +1457,13 @@ describe("CreditManager", () => {
       s.setClock(() => FIXED_NOW);
       const mgr = new CreditManager(s);
 
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
           basic: {
-            id: "basic",
-            name: "Basic",
-            freeAllowance: new Decimal(10),
-            allowancePeriod: "calendar_month",
+            label: "Basic",
+            allowance: { amount: new Decimal(10), period: "calendar_month" },
           },
         },
       };
@@ -1352,9 +1490,15 @@ describe("CreditManager", () => {
     it("getUserPlan reports allowancePeriod calendar_month when omitted from the plan definition", async () => {
       const s = new MemoryStore();
       const mgr = new CreditManager(s);
-      const config: PricingConfigData = {
-        models: { _default: "1" },
-        plans: { basic: { id: "basic", name: "Basic", freeAllowance: new Decimal(0) } },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
+        plans: {
+          basic: {
+            label: "Basic",
+            allowance: { amount: new Decimal(0), period: "calendar_month" },
+          },
+        },
       };
       await s.setActivePricing(config);
       await s.setUserPlan("user-1", "basic");
@@ -1369,14 +1513,13 @@ describe("CreditManager", () => {
       const s = new MemoryStore();
       s.setClock(() => FIXED_NOW);
       const mgr = new CreditManager(s);
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           basic: {
-            id: "basic",
-            name: "Basic",
-            freeAllowance: new Decimal(20),
-            allowancePeriod: "calendar_month",
+            label: "Basic",
+            allowance: { amount: new Decimal(20), period: "calendar_month" },
           },
         },
       };
@@ -1408,14 +1551,13 @@ describe("CreditManager", () => {
     it("rolling_30d plan overrides periodStart/periodEnd with the resolved window", async () => {
       const s = new MemoryStore();
       const mgr = new CreditManager(s);
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           rolling: {
-            id: "rolling",
-            name: "Rolling",
-            freeAllowance: new Decimal(10),
-            allowancePeriod: "rolling_30d",
+            label: "Rolling",
+            allowance: { amount: new Decimal(10), period: "rolling_30d" },
           },
         },
       };
@@ -1439,14 +1581,13 @@ describe("CreditManager", () => {
     it("anniversary plan overrides periodStart/periodEnd with the resolved window", async () => {
       const s = new MemoryStore();
       const mgr = new CreditManager(s);
-      const config: PricingConfigData = {
-        models: { _default: "1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "1" } },
         plans: {
           anniv: {
-            id: "anniv",
-            name: "Anniversary",
-            freeAllowance: new Decimal(8),
-            allowancePeriod: "anniversary",
+            label: "Anniversary",
+            allowance: { amount: new Decimal(8), period: "anniversary" },
           },
         },
       };
@@ -1466,14 +1607,13 @@ describe("CreditManager", () => {
     it("rolling_30d plan reflects a partial deduction in allowanceRemaining", async () => {
       const s = new MemoryStore();
       const mgr = new CreditManager(s);
-      const config: PricingConfigData = {
-        models: { _default: "input_tokens * 1" },
+      const config = {
+        version: 1,
+        metering: { models: { "*": "input_tokens * 1" } },
         plans: {
           rolling: {
-            id: "rolling",
-            name: "Rolling",
-            freeAllowance: new Decimal(10),
-            allowancePeriod: "rolling_30d",
+            label: "Rolling",
+            allowance: { amount: new Decimal(10), period: "rolling_30d" },
           },
         },
       };
@@ -1491,21 +1631,24 @@ describe("CreditManager", () => {
   // ── Credit tiers pass-through (see tests/tiers.test.ts for the main
   // feature coverage on MemoryStore itself) ─────────────────────────────
   describe("credit tiers pass-through", () => {
-    const TIERED_CONFIG: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      tiers: {
-        gifted: { name: "Gifted", priority: 10, expires: true, defaultTtlDays: 30 },
-        purchased: { name: "Purchased", priority: 20, expires: false, isDefault: true },
+    const TIERED_CONFIG = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: {
+        buckets: {
+          gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
+          purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+        },
       },
     };
 
     it("addCredits(..., { tier }) routes the grant into the requested tier", async () => {
       await manager.publishPricingFromDict(TIERED_CONFIG);
       const result = await manager.addCredits("user-1", 25, { tier: "gifted" });
-      expect(result.tier).toBe("gifted");
+      expect(result.bucket).toBe("gifted");
 
-      const tiers = await manager.getCreditTiers("user-1");
-      const gifted = tiers.tiers.find((t) => t.tierKey === "gifted");
+      const tiers = await manager.getBucketBalances("user-1");
+      const gifted = tiers.buckets.find((t) => t.bucketKey === "gifted");
       expectDecimal(gifted!.balance, "25");
     });
 
@@ -1517,7 +1660,7 @@ describe("CreditManager", () => {
     it("addCredits omitting tier resolves to the configured default tier", async () => {
       await manager.publishPricingFromDict(TIERED_CONFIG);
       const result = await manager.addCredits("user-1", 10);
-      expect(result.tier).toBe("purchased");
+      expect(result.bucket).toBe("purchased");
     });
 
     it("getCreditTiers passes through to the store with no event emitted", async () => {
@@ -1536,11 +1679,11 @@ describe("CreditManager", () => {
         "credits.expired",
       ]);
 
-      const result = await mgr.getCreditTiers("user-1");
+      const result = await mgr.getBucketBalances("user-1");
       expect(result.userId).toBe("user-1");
-      expect(result.tiers.map((t) => t.tierKey).sort()).toEqual(["gifted", "purchased"]);
-      const gifted = result.tiers.find((t) => t.tierKey === "gifted");
-      const purchased = result.tiers.find((t) => t.tierKey === "purchased");
+      expect(result.buckets.map((t) => t.bucketKey).sort()).toEqual(["gifted", "purchased"]);
+      const gifted = result.buckets.find((t) => t.bucketKey === "gifted");
+      const purchased = result.buckets.find((t) => t.bucketKey === "purchased");
       expectDecimal(gifted!.balance, "20");
       expectDecimal(purchased!.balance, "10");
       expectDecimal(result.totalBalance, "30");
@@ -1557,8 +1700,8 @@ describe("CreditManager", () => {
       await mgr.addCredits("user-1", 10); // default → purchased
 
       const result = await mgr.deduct("user-1", { inputTokens: 25 });
-      expect(result.tierBreakdown?.gifted?.toString()).toBe("20");
-      expect(result.tierBreakdown?.purchased?.toString()).toBe("5");
+      expect(result.bucketBreakdown?.gifted?.toString()).toBe("20");
+      expect(result.bucketBreakdown?.purchased?.toString()).toBe("5");
     });
   });
 });
@@ -1588,16 +1731,16 @@ describe("CreditManager — feature limits", () => {
     manager = new CreditManager(store);
   });
 
-  const FEATURE_LIMIT_CONFIG: PricingConfigData = {
-    models: { _default: "input_tokens * 1" },
+  const FEATURE_LIMIT_CONFIG = {
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
     plans: {
       free: {
-        id: "free",
-        name: "Free",
-        freeAllowance: D(0),
-        featureLimits: {
-          export: { maxCalls: 2, period: "monthly", action: "deny" },
-          hdExport: { maxCalls: 1, period: "monthly", action: "warn" },
+        label: "Free",
+        allowance: { amount: D(0), period: "calendar_month" },
+        entitlements: {
+          export: { maxCalls: 2, period: "monthly", onExceed: "deny" },
+          hdExport: { maxCalls: 1, period: "monthly", onExceed: "warn" },
         },
       },
     },

@@ -1,31 +1,44 @@
 {
   "_comment": "Cross-SDK billing parity fixture. Python (MemoryStore) and JS (MemoryStore) MUST produce identical numeric results for every scenario. Both runners load this file; expected values are hand-verified. See plan Phase 2a.",
   "pricing_config": {
-    "models": {
-      "_default": "input_tokens * 0.01 + output_tokens * 0.03",
-      "gpt-4": "input_tokens * 0.03 + output_tokens * 0.06"
+    "version": 1,
+    "metering": {
+      "models": {
+        "*": "input_tokens * 0.01 + output_tokens * 0.03",
+        "gpt-4": "input_tokens * 0.03 + output_tokens * 0.06"
+      },
+      "tools": {
+        "*": "tool_calls * 1"
+      },
+      "flat_jobs": {
+        "summarize": 5,
+        "embed": 2
+      }
     },
-    "tools": {
-      "_default": "tool_calls * 1"
+    "ledger": {
+      "min_balance": 5
     },
-    "fixed": {
-      "summarize": 5,
-      "embed": 2
-    },
-    "min_balance": 5,
     "plans": {
       "free": {
-        "id": "free",
-        "name": "Free",
-        "free_allowance": 10,
-        "billing_mode": "strict"
+        "label": "Free",
+        "allowance": {
+          "amount": 10,
+          "period": "calendar_month"
+        },
+        "safety": {
+          "billing_mode": "strict"
+        }
       },
       "pro": {
-        "id": "pro",
-        "name": "Pro",
-        "free_allowance": 50,
-        "billing_mode": "overdraft",
-        "overdraft_floor": -20
+        "label": "Pro",
+        "allowance": {
+          "amount": 50,
+          "period": "calendar_month"
+        },
+        "safety": {
+          "billing_mode": "overdraft",
+          "overdraft_floor": -20
+        }
       }
     }
   },

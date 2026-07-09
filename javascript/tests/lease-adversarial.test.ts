@@ -29,7 +29,6 @@ import { MemoryStore } from "../src/stores/memory-store.js";
 import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { CapReachedError, ConcurrencyLimitError, InsufficientCreditsError } from "../src/errors.js";
-import type { PricingConfigData } from "../src/types.js";
 
 const D = (n: number | string) => new Decimal(n);
 
@@ -41,8 +40,9 @@ async function manager(
 ): Promise<CreditManager> {
   const m = new CreditManager(store, undefined, undefined, options);
   await m.publishPricingFromDict({
-    models: { _default: "input_tokens * 1" },
-    minBalance: minBalance.toNumber(),
+    version: 1,
+    metering: { models: { "*": "input_tokens * 1" } },
+    ledger: { minBalance: minBalance.toNumber() },
   });
   return m;
 }
@@ -335,10 +335,13 @@ describe("allowance at settle", () => {
 
   async function managerWithAllowance(s: MemoryStore, allowance: Decimal): Promise<CreditManager> {
     const m = new CreditManager(s, undefined, undefined, { policy: "strict_prepaid" });
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      minBalance: 0,
-      plans: { free: { id: "free", name: "Free", freeAllowance: allowance } },
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+      plans: {
+        free: { label: "Free", allowance: { amount: allowance, period: "calendar_month" } },
+      },
     };
     await m.publishPricing(config);
     return m;
@@ -383,7 +386,11 @@ describe("spend caps", () => {
     const warnings: CreditEvent[] = [];
     emitter.on("credits.cap_warning", (e) => warnings.push(e));
     const m = new CreditManager(store, undefined, emitter, { policy: "strict_prepaid" });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(1000));
     store.setSpendCap({ userId: "u1", type: "monthly", limit: D(10), action: "warn" });
 
@@ -402,7 +409,11 @@ describe("spend caps", () => {
       policy: "overdraft",
       overdraftFloor: D(-500),
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(200));
     // Deny cap 100; admit a small hold (under cap), then settle past the cap.
     store.setSpendCap({ userId: "u1", type: "monthly", limit: D(100), action: "deny" });
@@ -433,7 +444,11 @@ describe("overdraft reconcile", () => {
       overdraftFloor: D(-100),
       lowBalance: { thresholds: [D(20)] },
     });
-    await m.publishPricingFromDict({ models: { _default: "input_tokens * 1" }, minBalance: 0 });
+    await m.publishPricingFromDict({
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
+    });
     await store.addCredits("u1", D(50));
 
     const l1 = await m.reserve("u1", D(40));
@@ -463,17 +478,20 @@ describe("mixed operations", () => {
 
   it("chat and batch share one available pool", async () => {
     const m = new CreditManager(store, undefined, undefined, { policy: "strict_prepaid" });
-    const config: PricingConfigData = {
-      models: { _default: "input_tokens * 1" },
-      minBalance: 0,
+    const config = {
+      version: 1,
+      metering: { models: { "*": "input_tokens * 1" } },
+      ledger: { minBalance: 0 },
       plans: {
         pro: {
-          id: "pro",
-          name: "Pro",
-          freeAllowance: D(0),
-          perOperation: {
-            chat: { billingMode: "strict", maxConcurrent: 1 },
-            batch: { billingMode: "strict", maxConcurrent: 5 },
+          label: "Pro",
+          allowance: { amount: D(0), period: "calendar_month" },
+          safety: {
+            billingMode: "strict",
+            perOperation: {
+              chat: { billingMode: "strict", maxConcurrent: 1 },
+              batch: { billingMode: "strict", maxConcurrent: 5 },
+            },
           },
         },
       },

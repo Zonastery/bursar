@@ -268,13 +268,13 @@ export class BillingManager {
       return {
         offer,
         offerKey: (offer?.offerKey as string | null) ?? null,
-        planKey: (offer?.planKey as string | null) ?? null,
+        planKey: (offer?.plan as string | null) ?? null,
       };
     }
     // Fallback to lookupKey when no provider refs match (mock/Dodo webhooks)
     if (refs.lookupKey) {
       return {
-        offer: { planKey: refs.lookupKey, entitlementMode: "allowance" },
+        offer: { plan: refs.lookupKey, grant: { mode: "allowance" } },
         offerKey: null,
         planKey: refs.lookupKey,
       };
@@ -304,7 +304,7 @@ export class BillingManager {
     ) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
         event,
       );
     }
@@ -350,7 +350,7 @@ export class BillingManager {
     if (this.cm) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
         event,
       );
     }
@@ -400,7 +400,7 @@ export class BillingManager {
     if (this.cm && (planKey ?? existing?.planKey)) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
         event,
       );
     }
@@ -509,7 +509,7 @@ export class BillingManager {
     if (this.cm) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { planKey: existing.planKey } : null),
+        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
         event,
       );
     }
@@ -569,7 +569,7 @@ export class BillingManager {
     if (uid) {
       const paymentMetadata: Record<string, unknown> | null =
         topupConfig && event.payment.purpose === "credit_topup"
-          ? { creditsPerMajorUnit: Number(topupConfig.creditsPerMajorUnit ?? 1000) }
+          ? { creditsPerUnit: Number(topupConfig.creditsPerUnit ?? 1000) }
           : null;
       await this.store.upsertBillingPayment(
         event.provider,
@@ -585,21 +585,18 @@ export class BillingManager {
     }
 
     if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
-      const currency = String(topupConfig.currency ?? "USD");
-      if (event.payment.currency.toUpperCase() === currency.toUpperCase()) {
-        const minAmount = Number(topupConfig.minAmountMinor ?? 0);
-        const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
-        if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
-          const credits = await this.store.computeTopupCredits(
-            event.payment.amountMinor,
-            topupConfig,
-          );
-          if (credits > 0) {
-            await this.cm.addCredits(uid, new Decimal(credits), {
-              type: "purchase",
-              tier: (topupConfig.tier as string) ?? "purchased",
-            });
-          }
+      const minAmount = Number(topupConfig.minAmountMinor ?? 0);
+      const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
+      if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
+        const credits = await this.store.computeTopupCredits(
+          event.payment.amountMinor,
+          topupConfig,
+        );
+        if (credits > 0) {
+          await this.cm.addCredits(uid, new Decimal(credits), {
+            type: "purchase",
+            tier: (topupConfig.depositTo as string) ?? "purchased",
+          });
         }
       }
     }
@@ -650,14 +647,14 @@ export class BillingManager {
         );
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const creditsPerMajor = Number(payMeta.creditsPerMajorUnit ?? 0);
-          if (!creditsPerMajor) {
+          const creditsPerUnit = Number(payMeta.creditsPerUnit ?? 0);
+          if (!creditsPerUnit) {
             console.warn(
-              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerMajorUnit in payment metadata`,
+              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerUnit in payment metadata`,
             );
             return { handled: true, action: "refund_recorded_no_clawback" };
           }
-          const credits = Math.trunc((event.refund.amountMinor * creditsPerMajor) / 100);
+          const credits = Math.trunc((event.refund.amountMinor * creditsPerUnit) / 100);
           if (credits > 0) {
             await this.cm.deductCredits(uid, credits, {
               txType: "refund_clawback",
@@ -713,9 +710,9 @@ export class BillingManager {
       console.log(`[BillingManager] provisionSubscription: no creditManager for user ${uid}`);
       return;
     }
-    const planKey = offer.planKey as string | undefined;
+    const planKey = offer.plan as string | undefined;
     if (!planKey) {
-      console.log(`[BillingManager] provisionSubscription: no planKey in offer for user ${uid}`);
+      console.log(`[BillingManager] provisionSubscription: no plan in offer for user ${uid}`);
       return;
     }
     const periodStart = event.subscription?.periodStart;
@@ -727,18 +724,19 @@ export class BillingManager {
       : undefined;
     await this.cm.setUserPlan(uid, planKey, planAssignedAt);
 
-    const entitlementMode = offer?.entitlementMode as string | undefined;
-    if (entitlementMode === "cycle_grant" && this.cm) {
-      const cycleCredits = offer?.cycleGrantCredits as number | undefined;
+    const grant = (offer?.grant as Record<string, unknown> | undefined) ?? {};
+    const grantMode = grant.mode as string | undefined;
+    if (grantMode === "cycle_grant" && this.cm) {
+      const cycleCredits = grant.credits as number | undefined;
       if (cycleCredits && cycleCredits > 0) {
-        const cycleTier = (offer?.cycleGrantTier as string) ?? "purchased";
-        const replacePrior = (offer?.cycleGrantReplacePrior as boolean) ?? true;
+        const cycleBucket = (grant.bucket as string) ?? "purchased";
+        const replacePrior = (grant.replacePrior as boolean) ?? true;
         if (replacePrior) {
           await this.cm.revokeCreditsByTxType(uid, "cycle_grant");
         }
         await this.cm.addCredits(uid, new Decimal(cycleCredits), {
           type: "cycle_grant",
-          tier: cycleTier,
+          tier: cycleBucket,
         });
       }
     }
@@ -762,7 +760,7 @@ export class BillingManager {
           event.subscription.providerSubscriptionId,
         );
         if (existing?.planKey) {
-          await this.provisionSubscription(uid, { planKey: existing.planKey }, event);
+          await this.provisionSubscription(uid, { plan: existing.planKey }, event);
         }
       }
     } else if (
