@@ -217,7 +217,7 @@ describe("MemoryStore", () => {
     it("deny cap aborts without consuming allowance", async () => {
       await seedPlan(5);
       await store.addCredits("user-1", D(1000), "adjustment");
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), onExceed: "deny" });
       // net = 20 - 5 = 15 > cap 10 → deny
       const r = await store.deductWithAllowance("user-1", D(20));
       expect(r.error).toBe("cap_reached");
@@ -228,7 +228,7 @@ describe("MemoryStore", () => {
 
     it("warn cap sets capWarning but proceeds", async () => {
       await store.addCredits("user-1", D(1000));
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), action: "warn" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), onExceed: "warn" });
       const r = await store.deductWithAllowance("user-1", D(20));
       expect(r.error).toBeUndefined();
       expect(r.capWarning).toBe("warn");
@@ -237,7 +237,7 @@ describe("MemoryStore", () => {
 
     it("cap accumulates across prior window spend", async () => {
       await store.addCredits("user-1", D(1000));
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(30), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(30), onExceed: "deny" });
       const a = await store.deductWithAllowance("user-1", D(20));
       expect(a.error).toBeUndefined();
       // Prior 20 + this 20 = 40 > 30 → deny
@@ -247,7 +247,7 @@ describe("MemoryStore", () => {
 
     it("cap boundary: amount == limit is allowed", async () => {
       await store.addCredits("user-1", D(1000));
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), onExceed: "deny" });
       const r = await store.deductWithAllowance("user-1", D(10));
       expect(r.error).toBeUndefined();
     });
@@ -1010,40 +1010,40 @@ describe("MemoryStore", () => {
     });
 
     it("denies when spend exceeds daily cap", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-1", null, D(101));
       expect(result.capped).toBe(true);
       expect(result.action).toBe("deny");
     });
 
     it("allows when spend is within daily cap", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-1", null, D(50));
       expect(result.capped).toBe(false);
     });
 
     it("boundary: amount == limit is not capped", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-1", null, D(100));
       expect(result.capped).toBe(false);
     });
 
     it("warn action allows through", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "warn" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "warn" });
       const result = await store.checkSpendCap("user-1", null, D(101));
       expect(result.capped).toBe(false);
       expect(result.action).toBe("warn");
     });
 
     it("notify action allows through", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "notify" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "notify" });
       const result = await store.checkSpendCap("user-1", null, D(101));
       expect(result.capped).toBe(false);
       expect(result.action).toBe("notify");
     });
 
     it("monthly cap type accumulates over the month", async () => {
-      store.setSpendCap({ userId: "user-1", type: "monthly", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "monthly", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-1", null, D(150));
       expect(result.capped).toBe(true);
       expect(result.action).toBe("deny");
@@ -1054,10 +1054,10 @@ describe("MemoryStore", () => {
         userId: "user-1",
         type: "daily",
         limit: D(50),
-        action: "deny",
+        onExceed: "deny",
         model: "gpt-4",
       });
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(200), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(200), onExceed: "deny" });
 
       const r1 = await store.checkSpendCap("user-1", "gpt-4", D(30));
       expect(r1.capped).toBe(false);
@@ -1071,13 +1071,13 @@ describe("MemoryStore", () => {
     });
 
     it("caps only apply to matching user", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-2", null, D(200));
       expect(result.capped).toBe(false);
     });
 
     it("accounts for existing spend in current window", async () => {
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(100), onExceed: "deny" });
       const result = await store.checkSpendCap("user-1", null, D(110));
       expect(result.capped).toBe(true);
       expect(result.currentSpend.toString()).toBe("0");
@@ -1169,7 +1169,7 @@ describe("MemoryStore", () => {
       await store.addCredits("user-1", D(1000), "adjustment");
 
       // Deny cap: limit=3 on the net amount (10-5=5 > 3 → deny)
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(3), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(3), onExceed: "deny" });
 
       const r = await store.deductWithAllowance("user-1", D(10));
       expect(r.error).toBe("cap_reached");
@@ -1484,7 +1484,7 @@ describe("MemoryStore", () => {
   describe("M2 — spend cap accumulates and blocks correctly", () => {
     it("spend cap accumulates and blocks correctly", async () => {
       await store.addCredits("user-1", D(1000), "purchase");
-      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), action: "deny" });
+      store.setSpendCap({ userId: "user-1", type: "daily", limit: D(10), onExceed: "deny" });
 
       // First deduction of 4 → allowed
       const r1 = await store.deductWithAllowance("user-1", D(4));
@@ -1544,7 +1544,7 @@ describe("MemoryStore", () => {
       // Set up a deny cap at 10, with current spend of 8
       const denyUser = "user-deny-m7";
       await store.addCredits(denyUser, D(500), "purchase");
-      store.setSpendCap({ userId: denyUser, type: "daily", limit: D(10), action: "deny" });
+      store.setSpendCap({ userId: denyUser, type: "daily", limit: D(10), onExceed: "deny" });
       // Spend 8 first via deductWithAllowance
       await store.deductWithAllowance(denyUser, D(8));
       // Check if adding 3 more would exceed the cap (8 + 3 = 11 > 10)
@@ -1555,7 +1555,7 @@ describe("MemoryStore", () => {
       // Set up a warn cap at 10, with current spend of 8
       const warnUser = "user-warn-m7";
       await store.addCredits(warnUser, D(500), "purchase");
-      store.setSpendCap({ userId: warnUser, type: "daily", limit: D(10), action: "warn" });
+      store.setSpendCap({ userId: warnUser, type: "daily", limit: D(10), onExceed: "warn" });
       // Spend 8 first via deductWithAllowance
       await store.deductWithAllowance(warnUser, D(8));
       // Check if adding 3 more would exceed the cap (8 + 3 = 11 > 10)
@@ -1988,7 +1988,7 @@ describe("CreditStore optional capabilities (WS8)", () => {
         return;
       }
       async checkSpendCap(): Promise<CapCheckResult> {
-        return { capped: false, currentSpend: D(0), limit: D(0), action: null };
+        return { capped: false, currentSpend: D(0), limit: D(0), onExceed: null };
       }
       async refundCredits(transactionId: string): Promise<RefundResult> {
         return {
@@ -2115,7 +2115,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
       expect(r.error).toBe("feature_limit_reached");
     });
 
-    it("warn action: breach surfaces featureLimitWarning but does NOT block", async () => {
+    it("warn onExceed: breach surfaces featureLimitWarning but does NOT block", async () => {
       await store.addCredits("user-1", D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "warn" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
@@ -2130,7 +2130,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
       expect(bal.balance.toString()).toBe("98");
     });
 
-    it("notify action: breach surfaces featureLimitWarning='notify', does NOT block", async () => {
+    it("notify onExceed: breach surfaces featureLimitWarning='notify', does NOT block", async () => {
       await store.addCredits("user-1", D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "notify" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };
@@ -2340,7 +2340,7 @@ describe("Feature limits (per-feature invocation-count limits)", () => {
   });
 
   describe("createLease (deny-only admission)", () => {
-    it("deny action: admission is blocked once the limit is reached", async () => {
+    it("deny onExceed: admission is blocked once the limit is reached", async () => {
       await store.addCredits("user-1", D(100), "purchase");
       const featureLimit = { maxCalls: 1, period: "monthly" as const, onExceed: "deny" as const };
       const opts = { feature: "export", featureLimit, featurePeriodStart: WINDOW_START };

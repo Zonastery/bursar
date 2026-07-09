@@ -130,7 +130,7 @@ const BUCKET_KEYS: ReadonlySet<string> = new Set([
   "expires",
   "ttlDays",
   "allowOverdraft",
-  "isDefaultBucket",
+  "default",
 ]);
 
 /** Known allowance-section keys. */
