@@ -42,7 +42,7 @@ export interface BucketDefinition {
   expires: boolean;
   ttlDays?: number | null;
   allowOverdraft?: boolean;
-  isDefaultBucket?: boolean;
+  default?: boolean;
 }
 
 /** A single bucket's current balance, as returned by `getBucketBalances`. */

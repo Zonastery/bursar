@@ -472,7 +472,7 @@ describe("loadConfigFromDict", () => {
       });
     });
 
-    it("accepts snake_case bucket fields (ttl_days / allow_overdraft / is_default_bucket)", () => {
+    it("accepts snake_case bucket fields (ttl_days / allow_overdraft / default)", () => {
       const config = loadConfigFromDict({
         metering,
         ledger: {
@@ -487,14 +487,14 @@ describe("loadConfigFromDict", () => {
               label: "Purchased",
               priority: 20,
               expires: false,
-              is_default_bucket: true,
+              default: true,
               allow_overdraft: true,
             },
           },
         },
       });
       expect(config.ledger.buckets!.gifted.ttlDays).toBe(14);
-      expect(config.ledger.buckets!.purchased.isDefaultBucket).toBe(true);
+      expect(config.ledger.buckets!.purchased["default"]).toBe(true);
       expect(config.ledger.buckets!.purchased.allowOverdraft).toBe(true);
     });
 

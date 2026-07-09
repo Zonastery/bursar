@@ -539,7 +539,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
     for (const [bucketKey, t] of Object.entries(buckets)) {
       assertKnownKeys(t, BUCKET_KEYS, `ledger.buckets.${bucketKey}`);
       if (t.allowOverdraft === true) overdraftCount++;
-      if (t.isDefaultBucket === true) defaultCount++;
+      if (t["default"] === true) defaultCount++;
       if (t.ttlDays != null && (t.ttlDays as number) <= 0) {
         throw new ConfigError(
           `ledger.buckets.${bucketKey}.ttlDays must be > 0, got ${String(t.ttlDays)}`,
@@ -550,7 +550,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
       throw new ConfigError("at most one bucket may set allowOverdraft: true");
     }
     if (defaultCount > 1) {
-      throw new ConfigError("at most one bucket may set isDefaultBucket: true");
+      throw new ConfigError('at most one bucket may set "default": true');
     }
   }
 
@@ -570,7 +570,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
         expires: Boolean(t.expires ?? false),
         ttlDays: t.ttlDays != null ? Number(t.ttlDays) : null,
         allowOverdraft: Boolean(t.allowOverdraft ?? false),
-        isDefaultBucket: Boolean(t.isDefaultBucket ?? false),
+        default: Boolean(t["default"] ?? false),
       };
     }
     config.ledger.buckets = bucketDefs;
