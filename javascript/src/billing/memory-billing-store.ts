@@ -284,4 +284,11 @@ export class MemoryBillingStore extends BillingStore {
     const key = this.refKey(provider, "payment", providerPaymentId);
     return this.payments.get(key) ?? null;
   }
+
+  async getBillingPaymentDirect(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null> {
+    return this.getBillingPayment(provider, providerPaymentId);
+  }
 }

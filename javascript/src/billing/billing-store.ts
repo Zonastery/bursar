@@ -109,4 +109,15 @@ export abstract class BillingStore {
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null>;
+
+  /**
+   * Fallback: query billing_payments directly (including metadata).
+   * Some BillingStore implementations may reuse the same RPC as
+   * getBillingPayment; those that use a dedicated function that omits
+   * metadata should override this to include the metadata column.
+   */
+  abstract getBillingPaymentDirect(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null>;
 }

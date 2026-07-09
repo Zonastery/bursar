@@ -259,7 +259,7 @@ BEGIN
         RETURN jsonb_build_object('error', 'unauthorized');
     END IF;
 
-    SELECT purpose, amount_minor, currency, user_id
+    SELECT purpose, amount_minor, currency, user_id, metadata
     INTO v_payment
     FROM public.billing_payments
     WHERE provider = p_provider AND provider_payment_id = p_provider_payment_id
@@ -273,7 +273,8 @@ BEGIN
         'purpose', v_payment.purpose,
         'amount_minor', v_payment.amount_minor,
         'currency', v_payment.currency,
-        'user_id', v_payment.user_id
+        'user_id', v_payment.user_id,
+        'metadata', v_payment.metadata
     );
 END;
 $$;

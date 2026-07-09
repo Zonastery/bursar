@@ -1,6 +1,21 @@
 import type { BillingManager, BillingSubscriptionStatus } from "../../billing/index.js";
-import type { BillingPaymentInfo } from "../../billing/billing-types.js";
+import type {
+  BillingPaymentInfo,
+  BillingRefundInfo,
+  BillingDisputeInfo,
+} from "../../billing/billing-types.js";
 import type { ProviderLogger } from "../types.js";
+
+// Dodo dispute statuses that indicate the dispute is closed (resolved).
+// Maps to the internal "dispute.closed" event type.
+const DISPUTE_CLOSED_TYPES = new Set([
+  "dispute.won",
+  "dispute.lost",
+  "dispute.accepted",
+  "dispute.cancelled",
+  "dispute.challenged",
+  "dispute.expired",
+]);
 
 export async function handleDodoBillingEvent(
   type: string,
@@ -41,7 +56,7 @@ export async function handleDodoBillingEvent(
         eventType: "subscription.created",
         subscription: {
           providerSubscriptionId: subId,
-          status: "active",
+          status: (String(data.status ?? "active") || "active") as BillingSubscriptionStatus,
           periodEnd,
           refs: metadata.plan_slug ? { lookupKey: metadata.plan_slug } : undefined,
         },
@@ -182,7 +197,63 @@ export async function handleDodoBillingEvent(
       return;
     }
 
-    default:
+    case "payment.failed": {
+      const subId = String(data.subscription_id ?? "");
+      const paymentId = String(data.payment_id ?? "");
+      await bm.handleEvent({
+        ...baseEvent(rawId),
+        eventType: "payment.failed",
+        subscription: subId ? { providerSubscriptionId: subId } : undefined,
+        ...(paymentId || data.settlement_amount
+          ? {
+              payment: {
+                providerPaymentId: paymentId || rawId,
+                amountMinor: Number(data.settlement_amount ?? data.amount ?? 0),
+                taxMinor: data.settlement_tax ? Number(data.settlement_tax) : null,
+                currency: String(data.settlement_currency ?? data.currency ?? "USD").toUpperCase(),
+                purpose: "subscription" as const,
+                refs: data.product_id ? { productId: String(data.product_id) } : undefined,
+              },
+            }
+          : {}),
+      });
+      return;
+    }
+
+    case "refund.succeeded": {
+      const refundId = String(data.refund_id ?? data.id ?? "");
+      const refund: BillingRefundInfo = {
+        providerRefundId: refundId,
+        providerPaymentId: String(data.payment_id ?? "") || null,
+        amountMinor: Number(data.refund_amount ?? data.amount ?? 0),
+        currency: String(data.currency ?? "USD").toUpperCase(),
+        reason: (data.reason as string | undefined) ?? null,
+      };
+      await bm.handleEvent({
+        ...baseEvent(rawId),
+        eventType: "refund.created",
+        refund,
+      });
+      return;
+    }
+
+    default: {
+      if (type.startsWith("dispute.")) {
+        const disputeId = String(data.dispute_id ?? data.id ?? "");
+        const dispute: BillingDisputeInfo = {
+          providerDisputeId: disputeId,
+          providerPaymentId: String(data.payment_id ?? "") || null,
+          reason: (data.reason as string | undefined) ?? null,
+        };
+        const eventType = DISPUTE_CLOSED_TYPES.has(type) ? "dispute.closed" : "dispute.created";
+        await bm.handleEvent({
+          ...baseEvent(rawId),
+          eventType,
+          dispute,
+        });
+        return;
+      }
       logger?.debug?.("Unhandled Dodo webhook event type", { type });
+    }
   }
 }

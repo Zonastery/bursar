@@ -317,4 +317,18 @@ export class SupabaseBillingStore extends BillingStore {
     if (error) throw error;
     return data as Record<string, unknown> | null;
   }
+
+  async getBillingPaymentDirect(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase
+      .from("billing_payments")
+      .select("*")
+      .eq("provider", provider)
+      .eq("provider_payment_id", providerPaymentId)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? (this.snakeToCamelKeys(data) as Record<string, unknown>) : null;
+  }
 }

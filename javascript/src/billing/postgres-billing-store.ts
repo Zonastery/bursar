@@ -384,4 +384,22 @@ export class PostgresBillingStore extends BillingStore {
     }
     return null;
   }
+
+  /** Fallback: query billing_payments directly to include metadata (the
+   *  dedicated RPC get_billing_payment_for_refund omits the metadata column).
+   *  Used by refund clawback which needs creditsPerMajorUnit from metadata. */
+  async getBillingPaymentDirect(
+    provider: string,
+    providerPaymentId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const result = await this.pool.query(
+      `SELECT provider, provider_payment_id, user_id, amount_minor,
+              tax_minor, currency, purpose, metadata, created_at, updated_at
+       FROM public.billing_payments
+       WHERE provider = $1 AND provider_payment_id = $2`,
+      [provider, providerPaymentId],
+    );
+    if (result.rows.length === 0) return null;
+    return this.snakeToCamelKeys(result.rows[0]) as Record<string, unknown>;
+  }
 }
