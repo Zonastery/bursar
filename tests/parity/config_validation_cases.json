@@ -98,8 +98,8 @@
         "metering": { "models": { "*": "input_tokens * 1" } },
         "ledger": {
           "buckets": {
-            "a": { "label": "A", "priority": 1, "is_default_bucket": true },
-            "b": { "label": "B", "priority": 2, "is_default_bucket": true }
+            "a": { "label": "A", "priority": 1, "default": true },
+            "b": { "label": "B", "priority": 2, "default": true }
           }
         }
       }
