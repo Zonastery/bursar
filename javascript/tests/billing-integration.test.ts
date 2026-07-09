@@ -38,7 +38,7 @@ const PRICING_DICT = {
       purchased: {
         label: "Purchased",
         priority: 1,
-        is_default_bucket: true,
+        default: true,
         allow_overdraft: false,
       },
     },
@@ -223,7 +223,7 @@ describe("MemoryBillingStore integration", () => {
       providerSubscriptionId: SUB_ID,
       providerCustomerId: CUSTOMER_ID,
       offerKey: "pro_monthly",
-      planKey: "pro",
+      plan: "pro",
       status: "active",
       currentPeriodStart: "2025-01-01T00:00:00Z",
       currentPeriodEnd: "2025-02-01T00:00:00Z",
@@ -233,7 +233,7 @@ describe("MemoryBillingStore integration", () => {
     expect(result).not.toBeNull();
     expect(result!.userId).toBe(USER_ID);
     expect(result!.status).toBe("active");
-    expect(result!.planKey).toBe("pro");
+    expect(result!.plan).toBe("pro");
   });
 
   it("subscription_update", async () => {
@@ -721,7 +721,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
       providerSubscriptionId: SUB_ID,
       providerCustomerId: CUSTOMER_ID,
       offerKey: "pro_monthly",
-      planKey: "pro",
+      plan: "pro",
       status: "active",
       currentPeriodStart: "2025-01-01T00:00:00Z",
       currentPeriodEnd: "2025-02-01T00:00:00Z",
@@ -731,7 +731,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(result).not.toBeNull();
     expect(result!.userId).toBe(USER_ID);
     expect(result!.status).toBe("active");
-    expect(result!.planKey).toBe("pro");
+    expect(result!.plan).toBe("pro");
   });
 
   it("subscription_not_found", async () => {

@@ -141,17 +141,17 @@ await m.addCredits("user_abc", new Decimal(200));                   // -60 + 200
 
 ## Per-operation policy and `maxConcurrent`
 
-A plan carries a `default_billing_mode`, plan-wide `max_concurrent` / `overdraft_floor`, and `per_operation` overrides keyed by operation type. Policy resolves: explicit per-call `billingMode` → `per_operation[type]` → plan default → constructor preset.
+A plan carries a `safety.billing_mode`, plan-wide `safety.max_concurrent` / `safety.overdraft_floor`, and `per_operation` overrides keyed by operation type. Policy resolves: explicit per-call `billingMode` → `per_operation[type]` → plan `safety.billing_mode` → constructor preset.
 
 `maxConcurrent` bounds the number of **simultaneously-active leases per operation type** — the durable defense against a double-submit (impatient user, client retry). The second admission of the same type is rejected with `ConcurrencyLimitError`; releasing or settling the first frees the slot.
 
 ```python
-from bursar.interface.models import PlanDefinition, OperationPolicy
+from bursar.interface.models import PlanDefinition, OperationPolicy, PlanSafety
 
 PlanDefinition(
-    id="pro", name="Pro",
-    default_billing_mode="strict",
-    max_concurrent=4,
+    id="pro", label="Pro",
+    allowance={ amount=500000 },
+    safety=PlanSafety(billing_mode="strict", max_concurrent=4),
     per_operation={
         "agent": OperationPolicy(billing_mode="overdraft", overdraft_floor=Decimal("-30"), max_concurrent=1),
     },
@@ -165,9 +165,9 @@ m.reserve("user_abc", Decimal("10"), operation_type="chat")  # raises Concurrenc
 
 ```typescript
 const plan = {
-  id: "pro", name: "Pro",
-  defaultBillingMode: "strict",
-  maxConcurrent: 4,
+  id: "pro", label: "Pro",
+  allowance: { amount: 500000 },
+  safety: { billingMode: "strict", maxConcurrent: 4 },
   perOperation: {
     agent: { billingMode: "overdraft", overdraftFloor: new Decimal(-30), maxConcurrent: 1 },
   },
@@ -181,15 +181,15 @@ await m.reserve("user_abc", new Decimal(10), { operationType: "chat" }); // thro
 
 ## Feature gating
 
-Gate Pro-only operations (e.g. autonomous agentic runs) with `requiredFeature`. Define `features` on the plan; a user whose plan lacks the feature is rejected at admission with `FeatureNotEntitledError` — before any work or hold happens.
+Gate Pro-only operations (e.g. autonomous agentic runs) with `requiredFeature`. Define `entitlements` on the plan; a user whose plan lacks the feature is rejected at admission with `FeatureNotEntitledError` — before any work or hold happens.
 
 ```python
-PlanDefinition(id="pro", name="Pro", features={"chat": True, "agentic": True})
+PlanDefinition(id="pro", label="Pro", entitlements={"chat": True, "agentic": True})
 manager.reserve("user_abc", Decimal("10"), required_feature="agentic")  # FeatureNotEntitledError if not entitled
 ```
 
 ```typescript
-// plan: { id: "pro", name: "Pro", features: { chat: true, agentic: true } }
+// plan: { id: "pro", label: "Pro", entitlements: { chat: true, agentic: true } }
 await manager.reserve("user_abc", new Decimal(10), { requiredFeature: "agentic" }); // throws if not entitled
 ```
 
@@ -288,7 +288,7 @@ const manager = new CreditManager(store, undefined, undefined, {
 });
 ```
 
-Omitting `low_balance` / `lowBalance` entirely falls back to a single derived threshold of `min_balance * 2`. Because `min_balance` now defaults to `0` (see [Pricing Configuration](/docs/configuration#min_balance-optional)), that derived threshold is also `0` by default — **low-balance alerting is effectively opt-in**: set `min_balance` explicitly, or configure `low_balance`/`lowBalance` yourself, if you want `credits.low_balance` to fire.
+Omitting `low_balance` / `lowBalance` entirely falls back to a single derived threshold of `floor_abs * 2`. Because the default floor is now `0` (see [Pricing Configuration](/docs/configuration#safetyoverdraft_floor-optional)), that derived threshold is also `0` by default — **low-balance alerting is effectively opt-in**: set `safety.overdraft_floor` on the plan, or configure `low_balance`/`lowBalance` yourself, if you want `credits.low_balance` to fire.
 
 New lifecycle events join the existing ones: `credits.reserved`, `credits.reservation_released`, `credits.lease_expired`, `credits.overdraft`, plus `credits.low_balance`.
 

@@ -26,7 +26,7 @@ CreditManager(
 | `policy` | `str` | `"strict_prepaid"` | Financial-safety preset for planless users: `"strict_prepaid"` (floor ≥ 0, zero debt) or `"overdraft"` (admits to a negative floor). |
 | `overdraft_floor` | `Decimal \| None` | `None` | Negative admission floor when `policy="overdraft"`. |
 | `max_concurrent` | `int \| None` | `None` | Default maximum simultaneously-active leases per operation type. |
-| `low_balance` | `LowBalanceConfig \| None` | `None` | Low-balance alerting config: `thresholds` (a list, sorted internally high → low; supports single or multi-level) and `on_trigger` (a non-blocking callback invoked on each `credits.low_balance`). Each threshold is edge-triggered and re-arms only after the balance rises back above it. When `None`, falls back to a single threshold of `min_balance * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#min_balance-optional) — so alerting is effectively opt-in unless you set `min_balance` or `low_balance` explicitly). |
+| `low_balance` | `LowBalanceConfig \| None` | `None` | Low-balance alerting config: `thresholds` (a list, sorted internally high → low; supports single or multi-level) and `on_trigger` (a non-blocking callback invoked on each `credits.low_balance`). Each threshold is edge-triggered and re-arms only after the balance rises back above it. When `None`, falls back to a single threshold of `floor_abs * 2` (which is `0` by default — see [Pricing Configuration](/docs/configuration#safetyoverdraft_floor-optional) — so alerting is effectively opt-in unless you set the floor or `low_balance` explicitly). |
 | `default_ttl_seconds` | `int` | `600` | Default lease TTL for `reserve()` and `run_billed()`. |
 
 ```python

@@ -73,7 +73,7 @@ class TestConfigDriftSafetyNet:
         other way to construct that state).
         """
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
 
         # Republish a config that omits "gifted" entirely.
         store.set_active_pricing(
@@ -85,7 +85,7 @@ class TestConfigDriftSafetyNet:
 
         # "gifted" is STILL a fully configured bucket — a fresh grant into it
         # still succeeds, and get_bucket_balances still lists it.
-        result = store.add_credits("u1", Decimal("1"), "purchase", tier="gifted")
+        result = store.add_credits("u1", Decimal("1"), "purchase", bucket="gifted")
         assert result.bucket == "gifted"
         assert "gifted" in {b.bucket_key for b in store.get_bucket_balances("u1").buckets}
 
@@ -98,8 +98,8 @@ class TestConfigDriftSafetyNet:
         the discrepancy above: there is no public API path that produces this
         state today)."""
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("5"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("5"), "purchase", bucket="purchased")
 
         # Simulate the bucket being fully retired from config (white-box).
         del store._bucket_definitions["gifted"]
@@ -139,9 +139,9 @@ class TestNoRoundingDrift:
                 "c": {"label": "C", "priority": 3, "default": True},
             }
         )
-        store.add_credits("u1", Decimal("0.3333"), "purchase", tier="a")
-        store.add_credits("u1", Decimal("0.3333"), "purchase", tier="b")
-        store.add_credits("u1", Decimal("0.3334"), "purchase", tier="c")
+        store.add_credits("u1", Decimal("0.3333"), "purchase", bucket="a")
+        store.add_credits("u1", Decimal("0.3333"), "purchase", bucket="b")
+        store.add_credits("u1", Decimal("0.3334"), "purchase", bucket="c")
 
         net = Decimal("1.0000")
         result = store.deduct_with_allowance("u1", net)
@@ -167,7 +167,7 @@ class TestNoRoundingDrift:
         )
         amounts = [Decimal("0.0001"), Decimal("0.0002"), Decimal("0.0003"), Decimal("0.0004")]
         for bucket_key, amount in zip(("a", "b", "c", "d"), amounts, strict=True):
-            store.add_credits("u1", amount, "purchase", tier=bucket_key)
+            store.add_credits("u1", amount, "purchase", bucket=bucket_key)
 
         net = Decimal("0.0007")  # spans a, b, c fully and part of d
         result = store.deduct_with_allowance("u1", net)
@@ -199,8 +199,8 @@ class TestConcurrentDeductsAcrossBuckets:
                 "purchased": {"label": "Purchased", "priority": 30, "default": True},
             }
         )
-        store.add_credits("u1", Decimal("1000"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("1000"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("1000"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("1000"), "purchase", bucket="purchased")
         total_granted = Decimal("2000")
 
         attempts = 200
@@ -238,8 +238,8 @@ class TestConcurrentDeductsAcrossBuckets:
                 "purchased": {"label": "Purchased", "priority": 30, "default": True},
             }
         )
-        store.add_credits("u1", Decimal("500"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("500"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("500"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("500"), "purchase", bucket="purchased")
 
         def attempt(amount: Decimal) -> None:
             store.deduct_with_allowance("u1", amount, min_balance=Decimal(0))
@@ -268,7 +268,7 @@ class TestTeamPoolsUntouchedByBuckets:
             }
         )
         # The user's OWN bucket balance, separate from the team pool.
-        store.add_credits("u1", Decimal("100"), "purchase", tier="gifted")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="gifted")
         team = store.create_team("Pool", Decimal("500"))
         store.add_team_member(team.team_id, "u1")
 
@@ -305,10 +305,10 @@ class TestMultiBucketPartialRefunds:
                 "d": {"label": "D", "priority": 40, "default": True},
             }
         )
-        store.add_credits("u1", Decimal("10"), "purchase", tier="a")
-        store.add_credits("u1", Decimal("10"), "purchase", tier="b")
-        store.add_credits("u1", Decimal("10"), "purchase", tier="c")
-        store.add_credits("u1", Decimal("10"), "purchase", tier="d")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="a")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="b")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="c")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="d")
 
         ded = store.deduct_with_allowance("u1", Decimal("35"))
         assert ded.bucket_breakdown == {
@@ -356,8 +356,8 @@ class TestMultiBucketPartialRefunds:
                 "b": {"label": "B", "priority": 20, "default": True},
             }
         )
-        store.add_credits("u1", Decimal("10"), "purchase", tier="a")
-        store.add_credits("u1", Decimal("10"), "purchase", tier="b")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="a")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="b")
 
         ded = store.deduct_with_allowance("u1", Decimal("15"))
         r1 = store.refund_credits(ded.transaction_id, amount=Decimal("10"))

@@ -21,7 +21,7 @@ const SUBSCRIPTION_CONFIG = {
         priority: 10,
         expires: true,
         ttlDays: 30,
-        isDefaultBucket: true,
+        default: true,
       },
     },
   },
@@ -51,7 +51,7 @@ describe("CreditManager.grantSubscriptionCycle", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].userId).toBe("user-1");
-    expect(events[0].data?.tier).toBe("subscription");
+    expect(events[0].data?.bucket).toBe("subscription");
     expect((events[0].data?.amount as Decimal).toString()).toBe("100");
   });
 

@@ -29,7 +29,8 @@ fixed:
   batch_train: 100
   quick_summary: 0.5
 
-min_balance: 0
+safety:
+  overdraft_floor: 0
 ```
 
 The same config as JSON:
@@ -48,7 +49,7 @@ The same config as JSON:
   "search": "search_queries * 0.5 + search_results * 0.05",
   "cache": "-cache_read_tokens * 0.0045",
   "fixed": { "batch_train": 100, "quick_summary": 0.5 },
-  "min_balance": 0
+  "safety": { "overdraft_floor": 0 }
 }
 ```
 
@@ -67,41 +68,47 @@ models:
 plans:
   free:
     id: free
-    name: Free Tier
-    free_allowance: 50000
-    default_billing_mode: strict       # "strict" (default) or "overdraft"
-    max_concurrent: 1                  # max simultaneous leases per operation type
+    label: Free Tier
+    allowance:
+      amount: 50000
+    safety:
+      billing_mode: strict
+      max_concurrent: 1
     rate_overrides:
       _default: "input_tokens * (0.02 / 1000) + output_tokens * (0.06 / 1000)"
-    features:
+    entitlements:
       chat: true
       # agentic: absent → FeatureNotEntitledError when required_feature="agentic"
 
   pro:
     id: pro
-    name: Pro Plan
-    free_allowance: 500000
-    allowance_period: anniversary      # "calendar_month" (default), "rolling_30d", or "anniversary"
-    default_billing_mode: strict
-    max_concurrent: 4
-    per_operation:
-      agent:
-        billing_mode: overdraft
-        overdraft_floor: -30           # negative: how far into debt this operation may go
-        max_concurrent: 1
+    label: Pro Plan
+    allowance:
+      amount: 500000
+      period: anniversary
+    safety:
+      billing_mode: strict
+      max_concurrent: 4
+      per_operation:
+        agent:
+          billing_mode: overdraft
+          overdraft_floor: -30
+          max_concurrent: 1
     rate_overrides:
       gpt-4: "input_tokens * (0.005 / 1000) + output_tokens * (0.015 / 1000)"
-    features:
+    entitlements:
       chat: true
       agentic: true
 
   paid:
     id: paid
-    name: Paid (Auto-Reload)
-    free_allowance: 0
-    default_billing_mode: overdraft
-    overdraft_floor: -50               # plan-wide overdraft floor
-    max_concurrent: 8
+    label: Paid (Auto-Reload)
+    allowance:
+      amount: 0
+    safety:
+      billing_mode: overdraft
+      overdraft_floor: -50
+      max_concurrent: 8
 ```
 
 The same config as JSON:
@@ -115,29 +122,26 @@ The same config as JSON:
   "plans": {
     "free": {
       "id": "free",
-      "name": "Free Tier",
-      "free_allowance": 50000,
-      "default_billing_mode": "strict",
-      "max_concurrent": 1,
+      "label": "Free Tier",
+      "allowance": { "amount": 50000 },
+      "safety": { "billing_mode": "strict", "max_concurrent": 1 },
       "rate_overrides": {
         "_default": "input_tokens * (0.02 / 1000) + output_tokens * (0.06 / 1000)"
       },
-      "features": { "chat": true }
+      "entitlements": { "chat": true }
     },
     "pro": {
       "id": "pro",
-      "name": "Pro Plan",
-      "free_allowance": 500000,
-      "allowance_period": "anniversary",
-      "default_billing_mode": "strict",
-      "max_concurrent": 4,
+      "label": "Pro Plan",
+      "allowance": { "amount": 500000, "period": "anniversary" },
+      "safety": { "billing_mode": "strict", "max_concurrent": 4 },
       "per_operation": {
         "agent": { "billing_mode": "overdraft", "overdraft_floor": -30, "max_concurrent": 1 }
       },
       "rate_overrides": {
         "gpt-4": "input_tokens * (0.005 / 1000) + output_tokens * (0.015 / 1000)"
       },
-      "features": { "chat": true, "agentic": true }
+      "entitlements": { "chat": true, "agentic": true }
     }
   }
 }
@@ -148,16 +152,27 @@ The same config as JSON:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | yes | Unique plan identifier |
-| `name` | string | yes | Human-readable name |
-| `free_allowance` | number | yes | Free credits per allowance period, fractional (`NUMERIC(18,4)`; 0 = none) |
-| `allowance_period` | `"calendar_month"` \| `"rolling_30d"` \| `"anniversary"` | no | How the free-allowance window resets. Default: `"calendar_month"`. See [`allowance_period`](#allowance_period) below. |
+| `label` | string | yes | Human-readable name |
+| `allowance` | object | no | Free monthly allowance config — see `Allowance` fields below |
+| `safety` | object | no | Financial-safety policy — see `Safety` fields below |
 | `rate_overrides` | object | no | Per-model expression overrides for this plan |
-| `features` | object | no | Arbitrary feature entitlements. Presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
-| `feature_limits` | object | no | Per-feature invocation-count limits, keyed by feature name. Independent of `features` — a feature can be entitled *and* rate-limited at the same time. See [`feature_limits`](#feature_limits) below. |
-| `default_billing_mode` | `"strict"` \| `"overdraft"` | no | Default billing mode for this plan's users. Default: `"strict"`. |
+| `entitlements` | object | no | Feature entitlements map (presence over truthiness: `0` and `""` are present). |
+| `per_operation` | object | no | Per-operation-type policy overrides. Keys are operation type strings; values are [`OperationPolicy`](#operationpolicy-fields) objects. Overrides the plan's `safety` defaults for that operation type. |
+
+#### `Allowance` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `amount` | number | yes | Free credits per allowance period, fractional (`NUMERIC(18,4)`; 0 = none) |
+| `period` | `"calendar_month"` \| `"rolling_30d"` \| `"anniversary"` | no | How the free-allowance window resets. Default: `"calendar_month"`. See [`allowance_period`](#allowance_period) below. |
+
+#### `Safety` fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `billing_mode` | `"strict"` \| `"overdraft"` | no | Default billing mode for this plan's users. Default: `"strict"`. |
 | `max_concurrent` | integer | no | Plan-wide default maximum simultaneous active leases per operation type. `null` = unlimited. |
-| `overdraft_floor` | number | no | Plan-wide negative balance floor for overdraft mode (e.g. `-50`). Only applies when `default_billing_mode` is `"overdraft"`. |
-| `per_operation` | object | no | Per-operation-type policy overrides. Keys are operation type strings; values are [`OperationPolicy`](#operationpolicy-fields) objects. Overrides the plan defaults for that operation type. |
+| `overdraft_floor` | number | no | Plan-wide negative balance floor for overdraft mode (e.g. `-50`). Only applies when `billing_mode` is `"overdraft"`. |
 
 ### `allowance_period`
 
@@ -173,9 +188,10 @@ The anchor for `rolling_30d` and `anniversary` is the timestamp of `set_user_pla
 plans:
   pro:
     id: pro
-    name: Pro Plan
-    free_allowance: 500000
-    allowance_period: anniversary   # or rolling_30d, or calendar_month (default)
+    label: Pro Plan
+    allowance:
+      amount: 500000
+      period: anniversary   # or rolling_30d, or calendar_month (default)
 ```
 
 ### `OperationPolicy` fields
@@ -184,28 +200,28 @@ Used inside `per_operation` to set different billing rules for specific operatio
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `billing_mode` | `"strict"` \| `"overdraft"` | no | Billing mode for this operation type. Default: plan's `default_billing_mode`. |
+| `billing_mode` | `"strict"` \| `"overdraft"` | no | Billing mode for this operation type. Default: plan's `safety.billing_mode`. |
 | `max_concurrent` | integer | no | Maximum simultaneous active leases for this operation type specifically. |
-| `overdraft_floor` | number | no | Negative balance floor for this operation type (e.g. `-30`). Overrides the plan-level `overdraft_floor`. |
+| `overdraft_floor` | number | no | Negative balance floor for this operation type (e.g. `-30`). Overrides the plan's `safety.overdraft_floor`. |
 
-Policy resolution order (most specific wins): per-call `billing_mode` arg → `per_operation[type]` → plan `default_billing_mode` → manager constructor preset. See [Financial Safety](/docs/financial-safety) for how policies interact with `reserve`/`settle`.
+Policy resolution order (most specific wins): per-call `billing_mode` arg → `per_operation[type]` → plan `safety.billing_mode` → manager constructor preset. See [Financial Safety](/docs/financial-safety) for how policies interact with `reserve`/`settle`.
 
-### `feature_limits`
+### `entitlements`
 
-Per-feature **invocation-count** limits — e.g. "Free users get at most 5 background removals a month." This is a different axis than everything else on this page: `free_allowance`/spend caps bound *credits*, `feature_limits` bounds how many times a named feature is *called*, regardless of what any single call costs. Keyed by feature name inside a plan; each value is a `FeatureLimit`:
+Per-feature **invocation-count** limits — e.g. "Free users get at most 5 background removals a month." This is a different axis than everything else on this page: allowance/spend caps bound *credits*, `entitlements` bounds how many times a named feature is *called*, regardless of what any single call costs. Keyed by feature name inside a plan; each value is an `Entitlement` object (or a plain scalar):
 
 ```yaml
 plans:
   free:
     id: free
-    name: Free
-    features:
-      background_removal: true
-    feature_limits:
+    label: Free
+    entitlements:
       background_removal:
+        value: true
         max_calls: 5
         period: monthly
-        action: deny
+        on_exceed: deny
+      chat: true   # plain scalar = entitled with no rate limit
 ```
 
 The same config as JSON:
@@ -215,23 +231,26 @@ The same config as JSON:
   "plans": {
     "free": {
       "id": "free",
-      "name": "Free",
-      "features": { "background_removal": true },
-      "feature_limits": {
-        "background_removal": { "max_calls": 5, "period": "monthly", "action": "deny" }
+      "label": "Free",
+      "entitlements": {
+        "background_removal": { "value": true, "max_calls": 5, "period": "monthly", "on_exceed": "deny" },
+        "chat": true
       }
     }
   }
 }
 ```
 
-#### `FeatureLimit` fields
+#### `Entitlement` fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `max_calls` | integer (`>= 0`) | yes | Maximum number of invocations allowed within one `period` window. |
+| `value` | any | no | The entitlement value — presence is distinguished from truthiness: a key is "present" when it exists and is not `null`/`false`, so numeric `0` and `""` count as present (`check_feature` returns `has_feature=true`). |
+| `max_calls` | integer (`>= 0`) | no | Maximum number of invocations allowed within one `period` window. |
 | `period` | `"daily"` \| `"weekly"` \| `"monthly"` \| `"yearly"` | no | Cadence of the reset window. Default: `"monthly"`. See cadences below. |
-| `action` | `"deny"` \| `"warn"` \| `"notify"` | no | What happens once `max_calls` is reached within the window. Default: `"deny"`. Mirrors `SpendCap.action` both in name and in semantics — see [Architecture: Credit Lifecycle](/docs/architecture#credit-lifecycle) for how `deny`/`warn`/`notify` work for spend caps. |
+| `on_exceed` | `"deny"` \| `"warn"` \| `"notify"` | no | What happens once `max_calls` is reached within the window. Default: `"deny"`. Mirrors `SpendCap.action` both in name and in semantics — see [Architecture: Credit Lifecycle](/docs/architecture#credit-lifecycle) for how `deny`/`warn`/`notify` work for spend caps. |
+
+A plain scalar (e.g. `chat: true`) is shorthand for `{ "value": true }` — entitled with no rate limit.
 
 **Cadences** — all four are **calendar-aligned** and **unconditional**: every user on every plan resets at the same instant, with no per-user anchor (unlike `allowance_period`'s `rolling_30d`/`anniversary`, which anchor to plan-assignment time):
 
@@ -309,8 +328,8 @@ The same config as JSON:
 | `allow_overdraft` | boolean | no | Marks this tier as the sink for overdraft debt (only possible when a negative floor is configured). Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
 | `is_default` | boolean | no | Marks this tier as the destination for untagged `add_credits()`/`addCredits()` calls. Default: `false`. **At most one** tier may set this — a config validation error otherwise. |
 
-:::note Tier names are independent of `free_allowance`
-A tier named `"allowance"` is unrelated to `PlanDefinition.free_allowance` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; bursar doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
+:::note Tier names are independent of `allowance.amount`
+A tier named `"allowance"` is unrelated to a plan's `allowance.amount` (the per-plan monthly subscription quota consumed via `credit_usage_window`, before `net` is computed — see [Plan fields](#plan-fields)). They're independent systems; bursar doesn't reserve the name, but a tier called `"allowance"` is a documentation footgun, not a technical conflict.
 :::
 
 ### No-tiers fallback
@@ -361,9 +380,9 @@ cache: "-cache_read_tokens * 0.0045"
 
 Fixed-cost jobs. Keys match `UsageMetrics.fixed_job`. Values are non-negative numbers (fractional amounts are allowed — they are charged exactly, like any other cost). An unknown/unconfigured job name is rejected by `deduct_fixed()` rather than charged as a free 0-credit deduction.
 
-### `min_balance` (optional)
+### `safety.overdraft_floor` (optional)
 
-The **balance floor** — the minimum balance a user must keep. Default `0`, meaning users can spend down to exactly zero unless you configure a higher floor. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below `min_balance`; concretely, `deduct_with_allowance` aborts when `balance - net < min_balance` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`min_balance * 2`, configurable — see [Architecture](/docs/architecture)). Because the default is now `0`, that derived threshold is also `0` by default, which means **low-balance alerting is effectively opt-in** — set `min_balance` explicitly, or configure `low_balance` / `lowBalance` on the `CreditManager` constructor (see [Architecture](/docs/architecture) and the CreditManager API reference), if you want `credits.low_balance` to fire. Stored as a fractional decimal like all money.
+The **balance floor** — the minimum balance a user must keep. Set via `safety.overdraft_floor` on a plan, or the manager constructor's `overdraft_floor` for planless users. Default `0`, meaning users can spend down to exactly zero unless you configure a lower (negative) or higher (positive) floor. A deduction is rejected (`InsufficientCreditsError`) when it would bring the balance below the floor; concretely, `deduct_with_allowance` aborts when `balance - net < floor` (where `net` is the cost after free allowance is applied). It is the same value used by `reserve_credits` and, by default, the basis for the `low_balance` alert threshold (`floor_abs * 2`, configurable — see [Architecture](/docs/architecture)). Because the default floor is `0`, that derived threshold is also `0` by default, which means **low-balance alerting is effectively opt-in** — set `safety.overdraft_floor` on the plan or configure `low_balance` / `lowBalance` on the `CreditManager` constructor (see [Architecture](/docs/architecture) and the CreditManager API reference), if you want `credits.low_balance` to fire. Stored as a fractional decimal like all money.
 
 ## Loading
 
@@ -438,12 +457,12 @@ At load time the engine validates:
 1. `models` is non-empty
 2. All expression strings parse and are safe
 3. Only allowed functions used
-4. Plan names are unique (and every plan has a `name`)
-5. Plan `rate_overrides` expressions are valid
-6. No unknown keys, at any level (top-level, `plans.*`, `tiers.*`, `plans.*.feature_limits.*`, `plans.*.per_operation.*`) — a typo like `min_balnce` is rejected rather than silently falling back to a default
-7. `this_tool_calls` is used only inside `tools.*` expressions — referencing it in `models`, `search`, or `cache` raises a config-load-time error
-8. `version`, if present, must be `1`
-9. `min_balance`, `signup_bonus`, `fixed.*`, and `plans.*.free_allowance` must be `>= 0`
+ 4. Plan labels are unique (and every plan has a `label`)
+ 5. Plan `rate_overrides` expressions are valid
+ 6. No unknown keys, at any level (top-level, `safety`, `allowance`, `plans.*`, `tiers.*`, `plans.*.entitlements.*`, `plans.*.safety.*`, `plans.*.per_operation.*`) — a typo like `min_balnce` is rejected rather than silently falling back to a default
+ 7. `this_tool_calls` is used only inside `tools.*` expressions — referencing it in `models`, `search`, or `cache` raises a config-load-time error
+ 8. `version`, if present, must be `1`
+ 9. `fixed.*` must be `>= 0`
 
 Both the Python and JS SDKs enforce the same rules — see `tests/parity/config_validation_cases.json` for the shared fixture both test suites run against.
 

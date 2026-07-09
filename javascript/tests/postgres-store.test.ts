@@ -99,7 +99,7 @@ describe("PostgresStore", () => {
           amount: "20",
           new_balance: "20",
           lifetime_purchased: "0",
-          tier: "gifted",
+          bucket: "gifted",
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -457,9 +457,9 @@ describe("PostgresStore", () => {
         {
           user_id: "u1",
           plan_id: "p",
-          plan_name: "P",
-          free_allowance: "0",
-          feature_limits: { quota: 0 },
+          plan_label: "P",
+          allowance_amount: "0",
+          entitlements: { quota: 0 },
         },
       ]),
     );
@@ -475,9 +475,9 @@ describe("PostgresStore", () => {
         {
           user_id: "u1",
           plan_id: "p",
-          plan_name: "P",
-          free_allowance: "0",
-          feature_limits: { flag: false },
+          plan_label: "P",
+          allowance_amount: "0",
+          entitlements: { flag: false },
         },
       ]),
     );

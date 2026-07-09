@@ -32,8 +32,8 @@ manager.publishPricingFromDict({
   version: 1,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },
   plans: {
-    free: { id: "free", name: "Free Tier", freeAllowance: 50000 },
-    pro: { id: "pro", name: "Pro Plan", freeAllowance: 500000 },
+    free: { id: "free", name: "Free Tier", allowance: { amount: 50000 } },
+    pro: { id: "pro", name: "Pro Plan", allowance: { amount: 500000 } },
   },
 });
 

@@ -149,8 +149,8 @@ export abstract class CreditStore {
     type?: string,
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
-    /** Target credit tier (credit tiers); omitted/`null` resolves to the config's default tier. */
-    tier?: string | null,
+    /** Target credit bucket; omitted/`null` resolves to the config's default bucket. */
+    bucket?: string | null,
     /**
      * Replay-safe idempotency key (parity with the `deduct`/`settle`/`refund`
      * idempotency idiom). When a prior grant for this `userId` carries the same
@@ -236,7 +236,10 @@ export abstract class CreditStore {
   abstract getAvailable(userId: string): Promise<AvailableResult>;
 
   abstract getActivePricing(): Promise<PricingConfigResult | null>;
-  abstract setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string>;
+  abstract setActivePricing(
+    config: Record<string, unknown>,
+    label?: string | null,
+  ): Promise<string>;
 
   // H8: pricing history / activation — parity with Python base.py:293-312.
   abstract getPricingHistory(): Promise<PricingConfigHistoryItem[]>;

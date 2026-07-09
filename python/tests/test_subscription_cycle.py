@@ -185,7 +185,7 @@ class TestSideEffects:
         assert events[0].user_id == "user_1"
         assert events[0].data is not None
         assert events[0].data["amount"] == Decimal(100)
-        assert events[0].data["tier"] == "subscription"
+        assert events[0].data["bucket"] == "subscription"
         assert events[0].data["idempotency_key"] == "evt_1"
 
     def test_returned_result_reflects_post_replace_balance(self, manager: CreditManager) -> None:

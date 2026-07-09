@@ -295,7 +295,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance fully covers cost, no balance debit; window incremented", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Free', 100, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Free', 100, $2)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(10), "adjustment");
@@ -312,7 +312,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance partial, remainder charged to balance", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Starter', 10, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Starter', 10, $2)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(100), "adjustment");
@@ -704,7 +704,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // The SQL BEGIN block increments the usage window by 5, then the RAISE rolls
     // it back — so allowanceRemaining stays at 5 (unchanged from the initial 5).
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'PlanJI6', 5, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanJI6', 5, $2)`,
       [PLAN_JI6, PLAN_JI6],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
@@ -731,7 +731,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // take 15 from balance. This ensures the transaction has a real balance debit
     // (amount > 0) so the refund succeeds, while allowanceConsumed > 0.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'PlanJI7', 5, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanJI7', 5, $2)`,
       [PLAN_JI7, PLAN_JI7],
     );
     await store.addCredits(PG_USER, D(500), "purchase");
@@ -816,7 +816,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const PLAN_H4 = "00000000-0000-0000-0000-0000000000c1";
     // Plan with monthly allowance of 10.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'PlanH4', 10, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanH4', 10, $2)`,
       [PLAN_H4, PLAN_H4],
     );
     await store.addCredits(PG_USER, D(50), "purchase");
@@ -1167,7 +1167,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
        VALUES ($1, 'Rolling', 20, $2, 'rolling_30d')`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1216,7 +1216,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("deductWithAllowance with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
        VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d')`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1250,7 +1250,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("createLease/settleLease with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
        VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d')`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1404,7 +1404,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
        VALUES ($1, 'Cal', 15, $2, 'calendar_month')`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1469,7 +1469,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const PLAN_X = "00000000-0000-0000-0000-0000000000d1";
     const PLAN_Y = "00000000-0000-0000-0000-0000000000d2";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key)
        VALUES ($1, 'X', 5, $2), ($3, 'Y', 5, $4)`,
       [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
     );
@@ -1491,7 +1491,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const PURGE_PLAN = "00000000-0000-0000-0000-0000000000f1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key)
        VALUES ($1, 'purge-test', 100, $2)
        ON CONFLICT (id) DO NOTHING`,
       [PURGE_PLAN, "purge-plan"],
@@ -1560,7 +1560,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("settleLease jointly exercises floor-clamp (C1) and periodStart (WS9) against the canonical single signature", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key, allowance_period)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
        VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d')`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1624,7 +1624,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
       minBalance: 0,
       buckets: {
         gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
-        purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+        purchased: { label: "Purchased", priority: 20, expires: false, default: true },
       },
     },
   };
@@ -1805,7 +1805,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       minBalance: 0,
       buckets: {
         gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
-        purchased: { label: "Purchased", priority: 30, expires: false, isDefaultBucket: true },
+        purchased: { label: "Purchased", priority: 30, expires: false, default: true },
       },
     },
   };
@@ -1860,7 +1860,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     const mgr = new CreditManager(store, undefined, emitter);
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
-    const gifted = await mgr.addCredits(MGR_USER1, D(20), { type: "purchase", tier: "gifted" });
+    const gifted = await mgr.addCredits(MGR_USER1, D(20), { type: "purchase", bucket: "gifted" });
     expect(gifted.bucket).toBe("gifted");
     const purchased = await mgr.addCredits(MGR_USER1, D(50), { type: "purchase" }); // omitted -> isDefault
     expect(purchased.bucket).toBe("purchased");
@@ -1914,7 +1914,11 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
     const future = new Date(Date.now() + 86_400_000);
-    await mgr.addCredits(MGR_USER2, D(10), { type: "purchase", tier: "gifted", expiresAt: future });
+    await mgr.addCredits(MGR_USER2, D(10), {
+      type: "purchase",
+      bucket: "gifted",
+      expiresAt: future,
+    });
     await mgr.addCredits(MGR_USER2, D(100), { type: "purchase" });
 
     const lease = await mgr.reserve(MGR_USER2, { inputTokens: 15 });
@@ -1941,7 +1945,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     // live RPC.
     await mgr.addCredits(MGR_USER3, D(15), {
       type: "purchase",
-      tier: "gifted",
+      bucket: "gifted",
       expiresAt: new Date(Date.now() + 500),
     });
     await mgr.addCredits(MGR_USER3, D(10), { type: "purchase" }); // purchased — never expires
@@ -1974,13 +1978,13 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       ledger: {
         minBalance: 0,
         buckets: {
-          gifted: { label: "Gifted", priority: 10, expires: false, isDefaultBucket: true },
+          gifted: { label: "Gifted", priority: 10, expires: false, default: true },
           purchased: { label: "Purchased", priority: 20, expires: false, allowOverdraft: true },
         },
       },
     });
     await mgr.addCredits(MGR_USER4, D(10), { type: "purchase" }); // -> gifted (isDefault)
-    await mgr.addCredits(MGR_USER4, D(5), { type: "purchase", tier: "purchased" });
+    await mgr.addCredits(MGR_USER4, D(5), { type: "purchase", bucket: "purchased" });
 
     const lease = await mgr.reserve(MGR_USER4, { inputTokens: 40 });
     const settled = await mgr.settle(MGR_USER4, lease.leaseId, { inputTokens: 40 });
@@ -2037,7 +2041,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
           priority: 10,
           expires: true,
           ttlDays: 30,
-          isDefaultBucket: true,
+          default: true,
         },
       },
     },
@@ -2161,7 +2165,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     // plan_key string).
     const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, name, free_allowance, plan_key) VALUES ($1, 'Pro', 0, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Pro', 0, $2)`,
       [SUB_PLAN, "pro-monthly"],
     );
 
@@ -2173,6 +2177,6 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     expect((await manager.getUserPlan(SUB_USER4)).planId).toBe(SUB_PLAN);
     expect(events).toHaveLength(1);
     expect(events[0].userId).toBe(SUB_USER4);
-    expect(events[0].data?.tier).toBe("subscription");
+    expect(events[0].data?.bucket).toBe("subscription");
   });
 });

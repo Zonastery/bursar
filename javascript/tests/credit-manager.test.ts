@@ -724,7 +724,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(10),
-        action: "deny",
+        onExceed: "deny",
       });
 
       const events = record(emitter, ["credits.deducted", "credits.deduct_failed"]);
@@ -754,7 +754,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(10),
-        action: "warn",
+        onExceed: "warn",
       });
 
       const events = record(emitter, ["credits.deducted", "credits.cap_warning"]);
@@ -778,7 +778,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(10),
-        action: "notify",
+        onExceed: "notify",
       });
 
       const result = await mgr.deduct("user-1", { inputTokens: 11 });
@@ -797,7 +797,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(10),
-        action: "deny",
+        onExceed: "deny",
       });
 
       // First 6 within cap.
@@ -818,7 +818,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(100),
-        action: "deny",
+        onExceed: "deny",
       });
 
       const result = await mgr.deduct("user-1", { inputTokens: 5 });
@@ -1091,7 +1091,7 @@ describe("CreditManager", () => {
         userId: "user-1",
         type: "daily",
         limit: new Decimal(5),
-        action: "warn",
+        onExceed: "warn",
       });
 
       const events = record(emitter, ["credits.deducted", "credits.cap_warning"]);
@@ -1637,14 +1637,14 @@ describe("CreditManager", () => {
       ledger: {
         buckets: {
           gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
-          purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+          purchased: { label: "Purchased", priority: 20, expires: false, default: true },
         },
       },
     };
 
     it("addCredits(..., { tier }) routes the grant into the requested tier", async () => {
       await manager.publishPricingFromDict(TIERED_CONFIG);
-      const result = await manager.addCredits("user-1", 25, { tier: "gifted" });
+      const result = await manager.addCredits("user-1", 25, { bucket: "gifted" });
       expect(result.bucket).toBe("gifted");
 
       const tiers = await manager.getBucketBalances("user-1");
@@ -1654,7 +1654,7 @@ describe("CreditManager", () => {
 
     it("addCredits with an unknown tier rejects (store StoreError propagates)", async () => {
       await manager.publishPricingFromDict(TIERED_CONFIG);
-      await expect(manager.addCredits("user-1", 10, { tier: "bogus" })).rejects.toThrow();
+      await expect(manager.addCredits("user-1", 10, { bucket: "bogus" })).rejects.toThrow();
     });
 
     it("addCredits omitting tier resolves to the configured default tier", async () => {
@@ -1667,7 +1667,7 @@ describe("CreditManager", () => {
       const emitter = new CreditEventEmitter();
       const mgr = new CreditManager(store, undefined, emitter);
       await mgr.publishPricingFromDict(TIERED_CONFIG);
-      await mgr.addCredits("user-1", 20, { tier: "gifted" });
+      await mgr.addCredits("user-1", 20, { bucket: "gifted" });
       await mgr.addCredits("user-1", 10);
 
       // Registered AFTER the setup addCredits calls above, so only events
@@ -1696,7 +1696,7 @@ describe("CreditManager", () => {
     it("deduct() reports tierBreakdown drained in priority order through the manager", async () => {
       const mgr = new CreditManager(store);
       await mgr.publishPricingFromDict(TIERED_CONFIG);
-      await mgr.addCredits("user-1", 20, { tier: "gifted" });
+      await mgr.addCredits("user-1", 20, { bucket: "gifted" });
       await mgr.addCredits("user-1", 10); // default → purchased
 
       const result = await mgr.deduct("user-1", { inputTokens: 25 });

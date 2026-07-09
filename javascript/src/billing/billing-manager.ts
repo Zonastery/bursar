@@ -223,7 +223,7 @@ export class BillingManager {
       status?: string | null;
       cancelAtPeriodEnd?: boolean | null;
       offerKey?: string | null;
-      planKey?: string | null;
+      plan?: string | null;
     },
   ): BillingSubscriptionState {
     if (!event.subscription) {
@@ -237,7 +237,7 @@ export class BillingManager {
       providerCustomerId:
         event.customer?.providerCustomerId ?? existing?.providerCustomerId ?? null,
       offerKey: overrides?.offerKey ?? existing?.offerKey ?? null,
-      planKey: overrides?.planKey ?? existing?.planKey ?? null,
+      plan: overrides?.plan ?? existing?.plan ?? null,
       status: overrides?.status ?? sub.status ?? existing?.status ?? "incomplete",
       currentPeriodStart: sub.periodStart ?? existing?.currentPeriodStart ?? null,
       currentPeriodEnd: sub.periodEnd ?? existing?.currentPeriodEnd ?? null,
@@ -255,10 +255,10 @@ export class BillingManager {
   private async resolveOfferAndKeys(event: BillingEvent): Promise<{
     offer: Record<string, unknown> | null;
     offerKey: string | null;
-    planKey: string | null;
+    plan: string | null;
   }> {
     const refs = event.subscription?.refs;
-    if (!refs) return { offer: null, offerKey: null, planKey: null };
+    if (!refs) return { offer: null, offerKey: null, plan: null };
     const offer = await this.resolveBillingOfferCached(
       event.provider,
       refs.productId ?? null,
@@ -268,7 +268,7 @@ export class BillingManager {
       return {
         offer,
         offerKey: (offer?.offerKey as string | null) ?? null,
-        planKey: (offer?.plan as string | null) ?? null,
+        plan: (offer?.plan as string | null) ?? null,
       };
     }
     // Fallback to lookupKey when no provider refs match (mock/Dodo webhooks)
@@ -276,10 +276,10 @@ export class BillingManager {
       return {
         offer: { plan: refs.lookupKey, grant: { mode: "allowance" } },
         offerKey: null,
-        planKey: refs.lookupKey,
+        plan: refs.lookupKey,
       };
     }
-    return { offer: null, offerKey: null, planKey: null };
+    return { offer: null, offerKey: null, plan: null };
   }
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
@@ -288,13 +288,13 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: event.subscription.status ?? "incomplete",
         cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: planKey ?? existing?.planKey ?? null,
+        plan: plan ?? existing?.plan ?? null,
       }),
     );
     if (
@@ -304,7 +304,7 @@ export class BillingManager {
     ) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
+        offer ?? (existing?.plan ? { plan: existing.plan } : null),
         event,
       );
     }
@@ -317,14 +317,14 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const { offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: event.subscription.status ?? existing?.status ?? "incomplete",
         cancelAtPeriodEnd:
           event.subscription.cancelAtPeriodEnd ?? existing?.cancelAtPeriodEnd ?? false,
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: planKey ?? existing?.planKey ?? null,
+        plan: plan ?? existing?.plan ?? null,
       }),
     );
     if (this.cm) {
@@ -339,18 +339,18 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: planKey ?? existing?.planKey ?? null,
+        plan: plan ?? existing?.plan ?? null,
       }),
     );
     if (this.cm) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
+        offer ?? (existing?.plan ? { plan: existing.plan } : null),
         event,
       );
     }
@@ -363,13 +363,13 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offerKey, planKey } = await this.resolveOfferAndKeys(event);
-    const resolvedPlanKey = planKey ?? existing?.planKey ?? null;
+    const { offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const resolvedPlanKey = plan ?? existing?.plan ?? null;
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: resolvedPlanKey,
+        plan: resolvedPlanKey,
       }),
     );
     if (this.cm && resolvedPlanKey) {
@@ -389,18 +389,18 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: event.subscription.status ?? "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: planKey ?? existing?.planKey ?? null,
+        plan: plan ?? existing?.plan ?? null,
       }),
     );
-    if (this.cm && (planKey ?? existing?.planKey)) {
+    if (this.cm && (plan ?? existing?.plan)) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
+        offer ?? (existing?.plan ? { plan: existing.plan } : null),
         event,
       );
     }
@@ -497,19 +497,19 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, planKey } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: "active",
         cancelAtPeriodEnd: false,
         offerKey: offerKey ?? existing?.offerKey ?? null,
-        planKey: planKey ?? existing?.planKey ?? null,
+        plan: plan ?? existing?.plan ?? null,
       }),
     );
     if (this.cm) {
       await this.provisionSubscription(
         uid,
-        offer ?? (existing?.planKey ? { plan: existing.planKey } : null),
+        offer ?? (existing?.plan ? { plan: existing.plan } : null),
         event,
       );
     }
@@ -595,7 +595,7 @@ export class BillingManager {
         if (credits > 0) {
           await this.cm.addCredits(uid, new Decimal(credits), {
             type: "purchase",
-            tier: (topupConfig.depositTo as string) ?? "purchased",
+            bucket: (topupConfig.depositTo as string) ?? "purchased",
           });
         }
       }
@@ -658,7 +658,7 @@ export class BillingManager {
           if (credits > 0) {
             await this.cm.deductCredits(uid, credits, {
               txType: "refund_clawback",
-              tier: "purchased",
+              bucket: "purchased",
             });
           }
         }
@@ -710,8 +710,8 @@ export class BillingManager {
       console.log(`[BillingManager] provisionSubscription: no creditManager for user ${uid}`);
       return;
     }
-    const planKey = offer.plan as string | undefined;
-    if (!planKey) {
+    const plan = offer.plan as string | undefined;
+    if (!plan) {
       console.log(`[BillingManager] provisionSubscription: no plan in offer for user ${uid}`);
       return;
     }
@@ -722,7 +722,7 @@ export class BillingManager {
           return isNaN(d.getTime()) ? undefined : d;
         })()
       : undefined;
-    await this.cm.setUserPlan(uid, planKey, planAssignedAt);
+    await this.cm.setUserPlan(uid, plan, planAssignedAt);
 
     const grant = (offer?.grant as Record<string, unknown> | undefined) ?? {};
     const grantMode = grant.mode as string | undefined;
@@ -736,7 +736,7 @@ export class BillingManager {
         }
         await this.cm.addCredits(uid, new Decimal(cycleCredits), {
           type: "cycle_grant",
-          tier: cycleBucket,
+          bucket: cycleBucket,
         });
       }
     }
@@ -759,8 +759,8 @@ export class BillingManager {
           event.provider,
           event.subscription.providerSubscriptionId,
         );
-        if (existing?.planKey) {
-          await this.provisionSubscription(uid, { plan: existing.planKey }, event);
+        if (existing?.plan) {
+          await this.provisionSubscription(uid, { plan: existing.plan }, event);
         }
       }
     } else if (

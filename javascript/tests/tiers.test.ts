@@ -59,7 +59,7 @@ const TWO_TIER_CONFIG = {
     minBalance: 0,
     buckets: {
       gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
-      purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+      purchased: { label: "Purchased", priority: 20, expires: false, default: true },
     },
   },
 };
@@ -72,7 +72,7 @@ const THREE_TIER_CONFIG = {
     minBalance: 0,
     buckets: {
       gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
-      purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+      purchased: { label: "Purchased", priority: 20, expires: false, default: true },
       noTtl: { label: "NoTTL", priority: 15, expires: true },
     },
   },
@@ -147,7 +147,7 @@ describe("Credit tiers", () => {
                 priority: 20,
                 expires: false,
                 allowOverdraft: true,
-                isDefaultBucket: true,
+                default: true,
               },
             },
           },
@@ -155,7 +155,7 @@ describe("Credit tiers", () => {
       ).toThrow(ConfigError);
     });
 
-    it("rejects duplicate isDefaultBucket: true across tiers", () => {
+    it("rejects duplicate default: true across tiers", () => {
       expect(() =>
         loadConfigFromDict({
           version: 1,
@@ -163,8 +163,8 @@ describe("Credit tiers", () => {
           ledger: {
             minBalance: 0,
             buckets: {
-              a: { label: "A", priority: 10, expires: false, isDefaultBucket: true },
-              b: { label: "B", priority: 20, expires: false, isDefaultBucket: true },
+              a: { label: "A", priority: 10, expires: false, default: true },
+              b: { label: "B", priority: 20, expires: false, default: true },
             },
           },
         }),
@@ -217,7 +217,7 @@ describe("Credit tiers", () => {
                 label: "Purchased",
                 priority: 20,
                 expires: false,
-                isDefaultBucket: true,
+                default: true,
                 allowOverdraft: true,
               },
             },
@@ -333,7 +333,7 @@ describe("Credit tiers", () => {
           buckets: {
             gifted: { label: "Gifted", priority: 10, expires: false },
             allowance: { label: "Allowance", priority: 20, expires: false },
-            purchased: { label: "Purchased", priority: 30, expires: false, isDefaultBucket: true },
+            purchased: { label: "Purchased", priority: 30, expires: false, default: true },
           },
         },
       });
@@ -367,7 +367,7 @@ describe("Credit tiers", () => {
           minBalance: 0,
           buckets: {
             gifted: { label: "Gifted", priority: 10, expires: false },
-            purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+            purchased: { label: "Purchased", priority: 20, expires: false, default: true },
             bonus: { label: "Bonus", priority: 30, expires: false, allowOverdraft: true },
           },
         },
@@ -554,7 +554,7 @@ describe("Credit tiers", () => {
           buckets: {
             c: { label: "C", priority: 5, expires: false },
             a: { label: "A", priority: 1, expires: true, ttlDays: 10 },
-            b: { label: "B", priority: 3, expires: false, isDefaultBucket: true },
+            b: { label: "B", priority: 3, expires: false, default: true },
           },
         },
       });

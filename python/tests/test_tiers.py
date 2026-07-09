@@ -68,13 +68,13 @@ class TestNoTiersConfigured:
 
     def test_add_credits_explicit_default_tier_accepted(self) -> None:
         store = MemoryStore()
-        result = store.add_credits("u1", Decimal("50"), "purchase", tier="default")
+        result = store.add_credits("u1", Decimal("50"), "purchase", bucket="default")
         assert result.bucket == "default"
 
     def test_add_credits_unknown_tier_raises_tier_not_found(self) -> None:
         store = MemoryStore()
         with pytest.raises(StoreError, match="tier_not_found"):
-            store.add_credits("u1", Decimal("50"), "purchase", tier="gifted")
+            store.add_credits("u1", Decimal("50"), "purchase", bucket="gifted")
 
     def test_add_credits_expires_at_unrestricted_without_tiers(self) -> None:
         """No tiers configured -> expires_at behaves exactly as pre-tiers (no
@@ -266,7 +266,7 @@ class TestAddCreditsTierResolution:
 
     def test_explicit_valid_tier_lands_money_in_that_tier(self) -> None:
         store = self._store()
-        store.add_credits("u1", Decimal("50"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("50"), "purchase", bucket="purchased")
         tiers = {t.bucket_key: t.balance for t in store.get_bucket_balances("u1").buckets}
         assert tiers["purchased"] == Decimal("50")
         assert tiers["gifted"] == Decimal(0)
@@ -274,7 +274,7 @@ class TestAddCreditsTierResolution:
     def test_explicit_unknown_tier_raises_tier_not_found(self) -> None:
         store = self._store()
         with pytest.raises(StoreError, match="tier_not_found"):
-            store.add_credits("u1", Decimal("50"), "purchase", tier="nonexistent")
+            store.add_credits("u1", Decimal("50"), "purchase", bucket="nonexistent")
 
     def test_omitted_tier_resolves_to_is_default_tier(self) -> None:
         store = self._store()
@@ -306,18 +306,18 @@ class TestAddCreditsExpiryReconciliation:
         store = self._store()
         future = datetime.now(UTC) + timedelta(days=5)
         with pytest.raises(StoreError, match="tier_does_not_expire"):
-            store.add_credits("u1", Decimal("10"), "purchase", tier="purchased", expires_at=future)
+            store.add_credits("u1", Decimal("10"), "purchase", bucket="purchased", expires_at=future)
 
     def test_expiring_tier_with_past_expires_at_raises_invalid_expires_at(self) -> None:
         store = self._store()
         past = datetime.now(UTC) - timedelta(days=1)
         with pytest.raises(StoreError, match="invalid_expires_at"):
-            store.add_credits("u1", Decimal("10"), "purchase", tier="gifted", expires_at=past)
+            store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted", expires_at=past)
 
     def test_expiring_tier_with_future_expires_at_succeeds(self) -> None:
         store = self._store()
         future = datetime.now(UTC) + timedelta(days=5)
-        result = store.add_credits("u1", Decimal("10"), "purchase", tier="gifted", expires_at=future)
+        result = store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted", expires_at=future)
         assert result.bucket == "gifted"
 
     def test_expiring_tier_omitted_expires_at_uses_default_ttl_days(self) -> None:
@@ -339,7 +339,7 @@ class TestAddCreditsExpiryReconciliation:
             }
         )
         before = datetime.now(UTC)
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
         after = datetime.now(UTC)
 
         tx = store._transactions[-1]
@@ -358,7 +358,7 @@ class TestAddCreditsExpiryReconciliation:
     def test_expiring_tier_no_default_ttl_and_omitted_expires_at_raises_expires_at_required(self) -> None:
         store = self._store()
         with pytest.raises(StoreError, match="expires_at_required"):
-            store.add_credits("u1", Decimal("10"), "purchase", tier="bonus")
+            store.add_credits("u1", Decimal("10"), "purchase", bucket="bonus")
 
 
 # ── 5. Priority-ordered deduction ───────────────────────────────────────────
@@ -376,10 +376,10 @@ class TestPriorityOrderedDeduction:
 
     def _seed(self, store: MemoryStore) -> None:
         store.add_credits(
-            "u1", Decimal("10"), "purchase", tier="gifted", expires_at=datetime.now(UTC) + timedelta(days=1)
+            "u1", Decimal("10"), "purchase", bucket="gifted", expires_at=datetime.now(UTC) + timedelta(days=1)
         )
-        store.add_credits("u1", Decimal("15"), "purchase", tier="allowance")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("15"), "purchase", bucket="allowance")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
     def test_deduct_within_lowest_priority_tier_only(self) -> None:
         store = self._store()
@@ -427,8 +427,8 @@ class TestOverdraftRouting:
 
     def test_deduct_beyond_total_balance_routes_excess_to_overdraft_tier(self) -> None:
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("5"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("5"), "purchase", bucket="purchased")
 
         result = store.deduct_with_allowance("u1", Decimal("40"), min_balance=Decimal("-50"))
         assert result.error is None
@@ -445,8 +445,8 @@ class TestOverdraftRouting:
         """Sanity: when tiers fully cover net, the overdraft sink is never hit
         even though the allow_overdraft tier is configured."""
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("50"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("50"), "purchase", bucket="purchased")
 
         result = store.deduct_with_allowance("u1", Decimal("10"), min_balance=Decimal("-50"))
         assert result.bucket_breakdown == {"gifted": Decimal("10")}
@@ -463,8 +463,8 @@ class TestSettleLeaseTierWalk:
                 "purchased": BucketDefinition(label="Purchased", priority=30, default=True),
             }
         )
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
         lease = store.create_lease("u1", Decimal("20"), "usage", floor=Decimal(0))
         assert lease.error is None
@@ -488,15 +488,15 @@ class TestIdempotentReplayTierBreakdown:
                 "purchased": BucketDefinition(label="Purchased", priority=30, default=True),
             }
         )
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
         first = store.deduct_with_allowance("u1", Decimal("15"), idempotency_key="k1")
         assert first.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
         # Mutate tier balances after the fact via a manual grant into the
         # SAME tier the original deduction drained from.
-        store.add_credits("u1", Decimal("1000"), "purchase", tier="gifted")
+        store.add_credits("u1", Decimal("1000"), "purchase", bucket="gifted")
 
         second = store.deduct_with_allowance("u1", Decimal("15"), idempotency_key="k1")
         assert second.idempotent is True
@@ -512,14 +512,14 @@ class TestIdempotentReplayTierBreakdown:
                 "purchased": BucketDefinition(label="Purchased", priority=30, default=True),
             }
         )
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
         lease = store.create_lease("u1", Decimal("20"), "usage", floor=Decimal(0))
 
         first = store.settle_lease("u1", lease.lease_id, Decimal("15"), idempotency_key="settle-1")
         assert first.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
-        store.add_credits("u1", Decimal("500"), "purchase", tier="gifted")
+        store.add_credits("u1", Decimal("500"), "purchase", bucket="gifted")
 
         second = store.settle_lease("u1", lease.lease_id, Decimal("15"), idempotency_key="settle-1")
         assert second.idempotent is True
@@ -541,9 +541,9 @@ class TestLifoRefund:
 
     def test_full_refund_restores_in_reverse_priority_order(self) -> None:
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("15"), "purchase", tier="allowance")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("15"), "purchase", bucket="allowance")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
         ded = store.deduct_with_allowance("u1", Decimal("30"))
         assert ded.bucket_breakdown == {"gifted": Decimal("10"), "allowance": Decimal("15"), "purchased": Decimal("5")}
@@ -562,9 +562,9 @@ class TestLifoRefund:
 
     def test_two_partial_refunds_compose_without_double_restoring(self) -> None:
         store = self._store()
-        store.add_credits("u1", Decimal("10"), "purchase", tier="gifted")
-        store.add_credits("u1", Decimal("15"), "purchase", tier="allowance")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits("u1", Decimal("15"), "purchase", bucket="allowance")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
         ded = store.deduct_with_allowance("u1", Decimal("30"))
         # breakdown: gifted=10, allowance=15, purchased=5
@@ -620,8 +620,8 @@ class TestPerTierExpirySweep:
             }
         )
         near_future = start + timedelta(minutes=1)
-        store.add_credits("u1", Decimal("40"), "purchase", tier="gifted", expires_at=near_future)
-        store.add_credits("u1", Decimal("25"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("40"), "purchase", bucket="gifted", expires_at=near_future)
+        store.add_credits("u1", Decimal("25"), "purchase", bucket="purchased")
 
         # Not yet expired.
         dry_before = store.sweep_expired_credits(dry_run=True)
@@ -661,10 +661,10 @@ class TestGetCreditTiersShape:
             }
         )
         store.add_credits(
-            "u1", Decimal("10"), "purchase", tier="gifted", expires_at=datetime.now(UTC) + timedelta(days=5)
+            "u1", Decimal("10"), "purchase", bucket="gifted", expires_at=datetime.now(UTC) + timedelta(days=5)
         )
-        store.add_credits("u1", Decimal("15"), "purchase", tier="allowance")
-        store.add_credits("u1", Decimal("100"), "purchase", tier="purchased")
+        store.add_credits("u1", Decimal("15"), "purchase", bucket="allowance")
+        store.add_credits("u1", Decimal("100"), "purchase", bucket="purchased")
 
         result = store.get_bucket_balances("u1")
         assert [t.bucket_key for t in result.buckets] == ["gifted", "allowance", "purchased"]
@@ -730,7 +730,7 @@ class TestManagerPassThrough:
             }
         )
         manager = CreditManager(store=store)
-        result = manager.add_credits("u1", Decimal("25"), tx_type="purchase", tier="gifted")
+        result = manager.add_credits("u1", Decimal("25"), tx_type="purchase", bucket="gifted")
         assert result.bucket == "gifted"
 
         tiers = manager.get_bucket_balances("u1")

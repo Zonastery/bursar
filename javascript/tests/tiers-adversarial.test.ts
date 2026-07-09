@@ -45,7 +45,7 @@ describe("Credit tiers — adversarial", () => {
           minBalance: 0,
           buckets: {
             gifted: { label: "Gifted", priority: 10, expires: false },
-            purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+            purchased: { label: "Purchased", priority: 20, expires: false, default: true },
           },
         },
       });
@@ -187,7 +187,7 @@ describe("Credit tiers — adversarial", () => {
           minBalance: 0,
           buckets: {
             gifted: { label: "Gifted", priority: 10, expires: false },
-            purchased: { label: "Purchased", priority: 20, expires: false, isDefaultBucket: true },
+            purchased: { label: "Purchased", priority: 20, expires: false, default: true },
           },
         },
       });

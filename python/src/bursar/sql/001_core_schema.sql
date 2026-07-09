@@ -132,7 +132,7 @@ END;
 $$;
 
 -- Signup bonus trigger: give free credits (amount from active pricing config's
--- `signup_bonus` field, falling back to 50) on user signup.
+-- `signup_grant` field under `ledger` (new schema), falling back to 50) on user signup.
 -- SECURITY DEFINER so the trigger function runs with table-owner privileges.
 CREATE OR REPLACE FUNCTION public.grant_signup_bonus()
 RETURNS TRIGGER
@@ -143,16 +143,15 @@ DECLARE
   v_bonus NUMERIC;
 BEGIN
   SELECT COALESCE(
-    (SELECT (config->>'signup_bonus')::numeric FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1),
+    (SELECT (config->'ledger'->>'signup_grant')::numeric FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1),
     50
   ) INTO v_bonus;
 
-  -- p_tier = NULL (not a hardcoded 'gifted'): credits_add_internal then
-  -- resolves the configured default tier (is_default), or the synthetic
-  -- 'default' tier when no tiers are configured. A hardcoded 'gifted' would
-  -- make it return tier_not_found — silently swallowed by PERFORM — whenever
-  -- that tier isn't defined (e.g. every tier-less install), dropping the
-  -- bonus entirely.
+  -- p_bucket = NULL (not a hardcoded 'gifted'): credits_add_internal then
+  -- resolves the configured default bucket, or the synthetic 'default' bucket
+  -- when no buckets are configured. A hardcoded 'gifted' would make it return
+  -- bucket_not_found — silently swallowed by PERFORM — whenever that bucket
+  -- isn't defined (e.g. every bucket-less install), dropping the bonus entirely.
   --
   -- Calls credits_add_internal (defined in 011_lazy_expiry.sql), NOT the
   -- guarded credits_add: a real Supabase GoTrue signup INSERT runs with no

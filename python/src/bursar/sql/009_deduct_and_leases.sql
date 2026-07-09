@@ -96,7 +96,7 @@ AS $$
 DECLARE
     v_balance              NUMERIC;
     v_plan_id              UUID;
-    v_free_allowance       NUMERIC;
+    v_allowance_amount       NUMERIC;
     v_period_start         DATE;
     v_used                 NUMERIC;
     v_remaining            NUMERIC;
@@ -176,13 +176,13 @@ BEGIN
     -- v_period_start: explicit p_period_start (rolling_30d/anniversary,
     -- resolved by the manager) else the current UTC calendar month (unchanged).
     IF NOT p_skip_allowance AND v_plan_id IS NOT NULL THEN
-        SELECT free_allowance INTO v_free_allowance
+        SELECT allowance_amount INTO v_allowance_amount
         FROM public.credit_plans WHERE id = v_plan_id;
         v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
         SELECT COALESCE(SUM(usage), 0) INTO v_used
         FROM public.credit_usage_window
         WHERE user_id = p_user_id AND plan_id = v_plan_id AND billing_period = v_period_start;
-        v_remaining := GREATEST(COALESCE(v_free_allowance, 0) - COALESCE(v_used, 0), 0);
+        v_remaining := GREATEST(COALESCE(v_allowance_amount, 0) - COALESCE(v_used, 0), 0);
         v_consume   := LEAST(v_remaining, p_amount);
     END IF;
 
@@ -414,7 +414,7 @@ AS $$
 DECLARE
     v_balance         NUMERIC;
     v_plan_id         UUID;
-    v_free_allowance  NUMERIC;
+    v_allowance_amount  NUMERIC;
     v_period_start    DATE;
     v_used            NUMERIC;
     v_allowance_avail NUMERIC := 0;
@@ -451,13 +451,13 @@ BEGIN
     --      funds at admission. v_period_start: explicit p_period_start else
     --      the current UTC calendar month (unchanged).
     IF v_plan_id IS NOT NULL THEN
-        SELECT free_allowance INTO v_free_allowance
+        SELECT allowance_amount INTO v_allowance_amount
         FROM public.credit_plans WHERE id = v_plan_id;
         v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
         SELECT COALESCE(SUM(usage), 0) INTO v_used
         FROM public.credit_usage_window
         WHERE user_id = p_user_id AND plan_id = v_plan_id AND billing_period = v_period_start;
-        v_allowance_avail := GREATEST(COALESCE(v_free_allowance, 0) - COALESCE(v_used, 0), 0);
+        v_allowance_avail := GREATEST(COALESCE(v_allowance_amount, 0) - COALESCE(v_used, 0), 0);
     END IF;
 
     -- (2) Concurrency: count active, unexpired leases for this operation type.
@@ -610,7 +610,7 @@ DECLARE
     v_overdraft_floor NUMERIC;
     v_settle_floor   NUMERIC;
     v_max_debit      NUMERIC;
-    v_free_allowance NUMERIC;
+    v_allowance_amount NUMERIC;
     v_period_start   DATE;
     v_used           NUMERIC;
     v_consume        NUMERIC := 0;
@@ -714,12 +714,12 @@ BEGIN
     -- v_period_start: explicit p_period_start else the current UTC calendar
     -- month (unchanged).
     IF NOT p_skip_allowance AND v_plan_id IS NOT NULL THEN
-        SELECT free_allowance INTO v_free_allowance FROM public.credit_plans WHERE id = v_plan_id;
+        SELECT allowance_amount INTO v_allowance_amount FROM public.credit_plans WHERE id = v_plan_id;
         v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
         SELECT COALESCE(SUM(usage), 0) INTO v_used
         FROM public.credit_usage_window
         WHERE user_id = p_user_id AND plan_id = v_plan_id AND billing_period = v_period_start;
-        v_consume := LEAST(GREATEST(COALESCE(v_free_allowance, 0) - COALESCE(v_used, 0), 0), p_amount);
+        v_consume := LEAST(GREATEST(COALESCE(v_allowance_amount, 0) - COALESCE(v_used, 0), 0), p_amount);
     END IF;
     v_net := p_amount - v_consume;
 

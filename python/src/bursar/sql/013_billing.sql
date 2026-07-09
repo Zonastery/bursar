@@ -877,7 +877,7 @@ BEGIN
 
     INSERT INTO public.billing_subscriptions (
         user_id, provider, provider_subscription_id, provider_customer_id,
-        offer_key, plan_key, status, current_period_start,
+        offer_key, plan, status, current_period_start,
         current_period_end, cancel_at_period_end, interval, interval_count, metadata
     )
     VALUES (
@@ -886,7 +886,7 @@ BEGIN
         p_state->>'provider_subscription_id',
         p_state->>'provider_customer_id',
         p_state->>'offer_key',
-        p_state->>'plan_key',
+        p_state->>'plan',
         COALESCE(p_state->>'status', 'incomplete'),
         (p_state->>'current_period_start')::TIMESTAMPTZ,
         (p_state->>'current_period_end')::TIMESTAMPTZ,
@@ -899,7 +899,7 @@ BEGIN
         user_id = EXCLUDED.user_id,
         provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
         offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
-        plan_key = COALESCE(EXCLUDED.plan_key, billing_subscriptions.plan_key),
+        plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
         status = EXCLUDED.status,
         current_period_start = COALESCE(EXCLUDED.current_period_start, billing_subscriptions.current_period_start),
         current_period_end = COALESCE(EXCLUDED.current_period_end, billing_subscriptions.current_period_end),
@@ -935,7 +935,7 @@ BEGIN
 
     SELECT
         user_id, provider, provider_subscription_id, provider_customer_id,
-        offer_key, plan_key, status, current_period_start,
+        offer_key, plan, status, current_period_start,
         current_period_end, cancel_at_period_end, interval, interval_count, metadata
     INTO v_row
     FROM public.billing_subscriptions
@@ -952,7 +952,7 @@ BEGIN
         'provider_subscription_id', v_row.provider_subscription_id,
         'provider_customer_id', v_row.provider_customer_id,
         'offer_key', v_row.offer_key,
-        'plan_key', v_row.plan_key,
+        'plan', v_row.plan,
         'status', v_row.status,
         'current_period_start', v_row.current_period_start,
         'current_period_end', v_row.current_period_end,
@@ -1165,7 +1165,7 @@ BEGIN
         'provider_subscription_id', v_row.provider_subscription_id,
         'provider_customer_id', v_row.provider_customer_id,
         'offer_key', v_row.offer_key,
-        'plan_key', v_row.plan_key,
+        'plan', v_row.plan,
         'status', v_row.status,
         'current_period_start', v_row.current_period_start,
         'current_period_end', v_row.current_period_end,

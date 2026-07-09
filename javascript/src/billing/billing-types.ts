@@ -215,7 +215,7 @@ export interface BillingSubscriptionState {
   providerSubscriptionId: string;
   providerCustomerId?: string | null;
   offerKey?: string | null;
-  planKey?: string | null;
+  plan?: string | null;
   status?: string;
   currentPeriodStart?: string | null;
   currentPeriodEnd?: string | null;

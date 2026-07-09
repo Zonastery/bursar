@@ -289,7 +289,7 @@ SET search_path TO ''
 AS $$
 DECLARE
     v_plan_id UUID;
-    v_free_allowance NUMERIC;
+    v_allowance_amount NUMERIC;
     v_allowance_period TEXT;
     v_current_usage NUMERIC;
     v_period_start DATE;
@@ -299,8 +299,8 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    SELECT uc.plan_id, cp.free_allowance, cp.allowance_period
-    INTO v_plan_id, v_free_allowance, v_allowance_period
+    SELECT uc.plan_id, cp.allowance_amount, cp.allowance_period
+    INTO v_plan_id, v_allowance_amount, v_allowance_period
     FROM public.user_credits uc
     LEFT JOIN public.credit_plans cp ON cp.id = uc.plan_id
     WHERE uc.user_id = p_user_id;
@@ -338,7 +338,7 @@ BEGIN
 
     RETURN jsonb_build_object(
         'plan_id', v_plan_id,
-        'allowance_remaining', GREATEST(v_free_allowance - v_current_usage, 0),
+        'allowance_remaining', GREATEST(v_allowance_amount - v_current_usage, 0),
         'period_start', v_period_start::TEXT,
         'period_end', v_period_end::TEXT
     );

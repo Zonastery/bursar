@@ -110,8 +110,8 @@ bursar pricing set - <<'JSON'
   "version": 1,
   "models": { "_default": "input_tokens * 0.01 + output_tokens * 0.03" },
   "plans": {
-    "free": { "id": "free", "name": "Free Tier", "free_allowance": 50000 },
-    "pro": { "id": "pro", "name": "Pro", "free_allowance": 500000 }
+    "free": { "id": "free", "name": "Free Tier", "allowance": { "amount": 50000 } },
+    "pro": { "id": "pro", "name": "Pro", "allowance": { "amount": 500000 } }
   }
 }
 JSON
@@ -181,7 +181,7 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
   "search": { "costs": "search_queries * 0.5 + search_results * 0.05" },
   "cache": { "discount": "-cache_read_tokens * 0.0045" },
   "fixed": { "batch_job": 20 },
-  "min_balance": 5
+  "safety": { "overdraft_floor": 5 }
 }
 ```
 
@@ -195,17 +195,17 @@ print(f"Deducted {abs(result.amount)} credits. Balance: {result.balance_after}")
     "free": {
       "id": "free",
       "name": "Free Tier",
-      "free_allowance": 50000,
+      "allowance": { "amount": 50000, "period": "calendar_month" },
       "rate_overrides": { "_default": "input_tokens * 0.02 + output_tokens * 0.06" },
-      "features": { "max_concurrency": 1, "background_removal": true },
-      "feature_limits": {
-        "background_removal": { "max_calls": 5, "period": "monthly", "action": "deny" }
+      "entitlements": {
+        "max_concurrency": { "value": 1 },
+        "background_removal": { "value": true, "max_calls": 5, "period": "monthly", "on_exceed": "deny" }
       }
     },
     "pro": {
       "id": "pro",
       "name": "Pro Plan",
-      "free_allowance": 500000
+      "allowance": { "amount": 500000 }
     }
   }
 }

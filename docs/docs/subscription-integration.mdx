@@ -101,9 +101,8 @@ manager.publish_pricing_from_dict(PricingConfigData(
     models={"_default": "input_tokens * 1"},
     plans={
         "pro-annual": PlanDefinition(
-            id="pro-annual", name="Pro (Annual)",
-            free_allowance=50_000,
-            allowance_period="calendar_month",   # or "anniversary" — see below
+            id="pro-annual", label="Pro (Annual)",
+            allowance={ amount=50_000, period="calendar_month" },   # or "anniversary" — see below
         ),
     },
 ))
@@ -117,9 +116,8 @@ await manager.publishPricingFromDict({
   models: { _default: "input_tokens * 1" },
   plans: {
     "pro-annual": {
-      id: "pro-annual", name: "Pro (Annual)",
-      freeAllowance: 50000,
-      allowancePeriod: "calendar_month", // or "anniversary" — see below
+      id: "pro-annual", label: "Pro (Annual)",
+      allowance: { amount: 50000, period: "calendar_month" }, // or "anniversary"
     },
   },
 });

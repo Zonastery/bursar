@@ -41,61 +41,28 @@ export class SupabaseBillingStore extends BillingStore {
     return obj;
   }
 
+  private camelToSnake(str: string): string {
+    return str
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      .toLowerCase();
+  }
+
+  private camelToSnakeKeys(obj: unknown): unknown {
+    if (Array.isArray(obj)) return obj.map((item) => this.camelToSnakeKeys(item));
+    if (obj && typeof obj === "object" && obj !== null) {
+      const converted: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        converted[this.camelToSnake(key)] = this.camelToSnakeKeys(value);
+      }
+      return converted;
+    }
+    return obj;
+  }
+
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    // Map new schema fields to old SQL field names (same as PostgresBillingStore).
-    const adapted: Record<string, unknown> = {
-      ...config,
-      credit_topups: config.topups
-        ? Object.fromEntries(
-            Object.entries(config.topups).map(([key, topup]) => [
-              key,
-              {
-                tier: topup.depositTo ?? "purchased",
-                credits_per_major_unit: topup.creditsPerUnit ?? 1000,
-                min_amount_minor: topup.minAmountMinor ?? 500,
-                max_amount_minor: topup.maxAmountMinor ?? 500000,
-                tax_behavior: topup.taxBehavior ?? "exclude_tax",
-                provider_refs: topup.providers
-                  ? Object.fromEntries(
-                      Object.entries(topup.providers).map(([p, ref]) => [
-                        p,
-                        { price_id: ref.priceId, product_id: ref.productId },
-                      ]),
-                    )
-                  : {},
-              },
-            ]),
-          )
-        : undefined,
-      subscriptions: config.subscriptions
-        ? Object.fromEntries(
-            Object.entries(config.subscriptions).map(([key, offer]) => [
-              key,
-              {
-                plan_key: offer.plan,
-                interval: offer.interval ?? "month",
-                interval_count: offer.intervalCount ?? 1,
-                entitlement_mode: offer.grant?.mode ?? "allowance",
-                cycle_grant_credits: offer.grant?.credits ?? null,
-                cycle_grant_tier: offer.grant?.bucket ?? null,
-                cycle_grant_replace_prior: offer.grant?.replacePrior ?? true,
-                provider_refs: offer.providers
-                  ? Object.fromEntries(
-                      Object.entries(offer.providers).map(([p, ref]) => [
-                        p,
-                        { price_id: ref.priceId, product_id: ref.productId },
-                      ]),
-                    )
-                  : {},
-              },
-            ]),
-          )
-        : undefined,
-    };
-    delete (adapted as Record<string, unknown>).topups;
-    const payload = adapted as Record<string, unknown>;
     const { error } = await this.supabase.rpc("sync_billing_from_config", {
-      p_config: payload,
+      p_config: this.camelToSnakeKeys(config),
     });
     if (error) throw error;
   }
@@ -114,7 +81,7 @@ export class SupabaseBillingStore extends BillingStore {
     if (!data) return null;
     const result = this.snakeToCamelKeys(data) as Record<string, unknown> | null;
     if (result && result.offerKey) {
-      return { ...result, plan: result.planKey ?? result.plan ?? null };
+      return { ...result, plan: result.plan ?? null };
     }
     return null;
   }
@@ -215,7 +182,7 @@ export class SupabaseBillingStore extends BillingStore {
       providerSubscriptionId: String(r.provider_subscription_id),
       providerCustomerId: r.provider_customer_id ? String(r.provider_customer_id) : null,
       offerKey: r.offer_key ? String(r.offer_key) : null,
-      planKey: r.plan_key ? String(r.plan_key) : null,
+      plan: r.plan ? String(r.plan) : null,
       status: r.status ? String(r.status) : "incomplete",
       currentPeriodStart: r.current_period_start ? String(r.current_period_start) : null,
       currentPeriodEnd: r.current_period_end ? String(r.current_period_end) : null,

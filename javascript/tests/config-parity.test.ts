@@ -6,7 +6,7 @@
  * Python counterpart (`python/tests/test_config_parity.py`) runs the same
  * fixture through `load_config_from_dict` — this is the guard against the
  * Python<->JS validation drift found in the config schema review (missing
- * `version` check, unvalidated `signup_bonus`/`free_allowance` sign,
+ * `version` check, unvalidated `signup_bonus`/`allowance_amount` sign,
  * silently-ignored unknown keys, dropped `per_operation`, etc).
  */
 import { describe, it, expect } from "vitest";

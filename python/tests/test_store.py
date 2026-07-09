@@ -1544,7 +1544,7 @@ class _MinimalCoreStore(CreditStore):
     def get_balance(self, user_id: str):
         return BalanceResult(user_id=user_id)
 
-    def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None, tier=None):
+    def add_credits(self, user_id, amount, type="adjustment", metadata=None, expires_at=None, bucket=None):
         return AddCreditsResult(transaction_id="tx", user_id=user_id, amount=amount, new_balance=amount)
 
     def get_bucket_balances(self, user_id: str):

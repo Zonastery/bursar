@@ -198,8 +198,8 @@ function validateExpressions(raw: PricingConfig): void {
 /**
  * H6 fix: normalise snake_case keys to camelCase before consumption.
  *
- * The documented config format is snake_case (min_balance, free_allowance,
- * rate_overrides, billing_mode, overdraft_floor). JS previously only read
+ * The documented config format is snake_case (allowance_amount, billing_mode,
+ * rate_overrides, overdraft_floor). JS previously only read
  * camelCase, silently dropping these fields and falling back to defaults.
  */
 function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {

@@ -158,10 +158,10 @@ class PricingConfig(BaseModel):
                 self._check_expr(section_expr, section_name, known)
 
     def _validate_plan_exprs(self, known: set[str]) -> None:
-        for plan_key, plan_def in self.plans.items():
+        for plan_id, plan_def in (self.plans or {}).items():
             if plan_def.rate_overrides:
                 for model_key, expr in plan_def.rate_overrides.items():
-                    self._check_expr(expr, f"plans.{plan_key}.rate_overrides.{model_key}", known)
+                    self._check_expr(expr, f"plans.{plan_id}.rate_overrides.{model_key}", known)
 
     @staticmethod
     def _check_expr(expr: str, path: str, known: set[str]) -> None:

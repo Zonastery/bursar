@@ -114,7 +114,7 @@ The lower-level `reserve_credits` + `deduct_credits` pair (column-level reservat
 
 ### Low-balance alerts
 
-After a successful deduction the manager may emit `credits.low_balance`. The threshold(s) are **configurable** via the `CreditManager(low_balance=LowBalanceConfig(...))` constructor argument (`lowBalance: { thresholds, onTrigger }` in JS); when unset it defaults to a single threshold of `min_balance * 2` (which is `0` by default, since `min_balance` now defaults to `0` — see [Pricing Configuration](/docs/configuration#min_balance-optional)). Each threshold is **edge-triggered** — it fires only on the deduction that takes the balance from above the threshold to at-or-below it (`balance_before > threshold >= balance_after`), not on every call near the threshold, and re-arms after a top-up brings the balance back above that level.
+After a successful deduction the manager may emit `credits.low_balance`. The threshold(s) are **configurable** via the `CreditManager(low_balance=LowBalanceConfig(...))` constructor argument (`lowBalance: { thresholds, onTrigger }` in JS); when unset it defaults to a single threshold of `floor_abs * 2` (which is `0` by default, since the default floor is `0` — see [Pricing Configuration](/docs/configuration#safetyoverdraft_floor-optional)). Each threshold is **edge-triggered** — it fires only on the deduction that takes the balance from above the threshold to at-or-below it (`balance_before > threshold >= balance_after`), not on every call near the threshold, and re-arms after a top-up brings the balance back above that level.
 
 ## Additional Operations
 

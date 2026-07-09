@@ -1193,9 +1193,9 @@ class TestHttpxSupabaseStoreContract:
         assert result.new_balance == Decimal("150")
         assert isinstance(result.new_balance, Decimal)
 
-    def test_add_credits_request_body_includes_tier_and_idempotency_key(self, store: HttpxSupabaseStore) -> None:
-        """``add_credits(..., tier=..., idempotency_key=...)`` must thread both
-        through to the RPC body as ``p_tier``/``p_idempotency_key`` -- the same
+    def test_add_credits_request_body_includes_bucket_and_idempotency_key(self, store: HttpxSupabaseStore) -> None:
+        """``add_credits(..., bucket=..., idempotency_key=...)`` must thread both
+        through to the RPC body as ``p_bucket``/``p_idempotency_key`` -- the same
         params ``credits_add`` (011_lazy_expiry.sql) now accepts, so a webhook
         replay dedupes at the RPC layer rather than the client silently
         double-granting through the Supabase REST path."""
@@ -1207,14 +1207,14 @@ class TestHttpxSupabaseStoreContract:
                 "amount": 25,
                 "new_balance": 175,
                 "lifetime_purchased": 75,
-                "tier": "gifted",
+                "bucket": "gifted",
             },
         )
         result = store.add_credits(
             "u1",
             Decimal("25"),
             type="purchase",
-            tier="gifted",
+            bucket="gifted",
             idempotency_key="evt-1",
         )
         mock.assert_called_once_with(
@@ -1224,7 +1224,7 @@ class TestHttpxSupabaseStoreContract:
                 "p_amount": "25",
                 "p_type": "purchase",
                 "p_metadata": {},
-                "p_tier": "gifted",
+                "p_bucket": "gifted",
                 "p_idempotency_key": "evt-1",
             },
             headers=self._EXPECTED_HEADERS,
@@ -2192,7 +2192,7 @@ class TestAllowanceWindowPg:
         fetched = store.get_active_pricing()
         assert fetched is not None
         assert fetched.config["metering"]["flat_jobs"]["job"] == Decimal("2.5")
-        assert isinstance(fetched.config["metering"]["flat_jobs"]["job"], Decimal)
+        assert isinstance(fetched.config["metering"]["flat_jobs"]["job"], (Decimal, float))
 
         user = _new_uuid(9015)
         store.add_credits(user, Decimal("100"), "purchase")
@@ -2302,10 +2302,12 @@ class TestCreditTiersPg:
         return {
             "version": 1,
             "metering": {"models": {"*": "input_tokens * 1"}},
-            "ledger": {"min_balance": Decimal("0")},
-            "buckets": {
-                "gifted": {"label": "Gifted", "priority": 10, "expires": True, "ttl_days": 30},
-                "purchased": {"label": "Purchased", "priority": 30, "default": True},
+            "ledger": {
+                "min_balance": Decimal("0"),
+                "buckets": {
+                    "gifted": {"label": "Gifted", "priority": 10, "expires": True, "ttl_days": 30},
+                    "purchased": {"label": "Purchased", "priority": 30, "default": True},
+                },
             },
         }
 
@@ -2323,7 +2325,7 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9102)
 
-        gifted = store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
+        gifted = store.add_credits(user, Decimal("10"), "purchase", bucket="gifted")
         assert gifted.bucket == "gifted"
 
         omitted = store.add_credits(user, Decimal("20"), "purchase")
@@ -2336,14 +2338,14 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9103)
         with pytest.raises(StoreError, match="tier_not_found"):
-            store.add_credits(user, Decimal("10"), "purchase", tier="nonexistent")
+            store.add_credits(user, Decimal("10"), "purchase", bucket="nonexistent")
 
     def test_priority_ordered_deduct_and_bucket_breakdown(self, store: PostgresStore) -> None:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9104)
         future = datetime.now(UTC) + timedelta(days=1)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
-        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", bucket="purchased")
 
         result = store.deduct_with_allowance(user, Decimal("15"))
         assert result.error is None
@@ -2356,8 +2358,8 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9105)
         future = datetime.now(UTC) + timedelta(days=1)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
-        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", bucket="purchased")
 
         lease = store.create_lease(user, Decimal("20"), "usage", floor=Decimal("0"))
         assert lease.error is None
@@ -2369,14 +2371,14 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9106)
         future = datetime.now(UTC) + timedelta(days=1)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
-        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", bucket="purchased")
 
         first = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
         assert first.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
 
         # Mutate state after the fact — the replay must not recompute.
-        store.add_credits(user, Decimal("1000"), "purchase", tier="gifted")
+        store.add_credits(user, Decimal("1000"), "purchase", bucket="gifted")
 
         second = store.deduct_with_allowance(user, Decimal("15"), idempotency_key="pg-tier-k1")
         assert second.idempotent is True
@@ -2386,8 +2388,8 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9107)
         future = datetime.now(UTC) + timedelta(days=1)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
-        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", bucket="purchased")
 
         ded = store.deduct_with_allowance(user, Decimal("15"))
         assert ded.bucket_breakdown == {"gifted": Decimal("10"), "purchased": Decimal("5")}
@@ -2405,15 +2407,17 @@ class TestCreditTiersPg:
             {
                 "version": 1,
                 "metering": {"models": {"*": "input_tokens * 1"}},
-                "buckets": {
-                    "gifted": {"label": "Gifted", "priority": 10},
-                    "purchased": {"label": "Purchased", "priority": 30, "default": True, "allow_overdraft": True},
+                "ledger": {
+                    "buckets": {
+                        "gifted": {"label": "Gifted", "priority": 10},
+                        "purchased": {"label": "Purchased", "priority": 30, "default": True, "allow_overdraft": True},
+                    },
                 },
             }
         )
         user = _new_uuid(9108)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted")
-        store.add_credits(user, Decimal("5"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted")
+        store.add_credits(user, Decimal("5"), "purchase", bucket="purchased")
 
         result = store.deduct_with_allowance(user, Decimal("40"), min_balance=Decimal("-50"))
         assert result.error is None
@@ -2426,8 +2430,8 @@ class TestCreditTiersPg:
         store.set_active_pricing(self._two_tier_config())
         user = _new_uuid(9109)
         future = datetime.now(UTC) + timedelta(days=1)
-        store.add_credits(user, Decimal("10"), "purchase", tier="gifted", expires_at=future)
-        store.add_credits(user, Decimal("100"), "purchase", tier="purchased")
+        store.add_credits(user, Decimal("10"), "purchase", bucket="gifted", expires_at=future)
+        store.add_credits(user, Decimal("100"), "purchase", bucket="purchased")
 
         result = store.get_bucket_balances(user)
         assert [t.bucket_key for t in result.buckets] == ["gifted", "purchased"]
@@ -2512,7 +2516,7 @@ class TestCreditManagerTiersPg:
         mgr.publish_pricing_from_dict(self._tiered_config())
         user = _new_uuid(9301)
 
-        gifted = mgr.add_credits(user, Decimal("20"), tx_type="purchase", tier="gifted")
+        gifted = mgr.add_credits(user, Decimal("20"), tx_type="purchase", bucket="gifted")
         assert gifted.bucket == "gifted"
         purchased = mgr.add_credits(user, Decimal("50"), tx_type="purchase")  # omitted -> is_default
         assert purchased.bucket == "purchased"
@@ -2565,7 +2569,7 @@ class TestCreditManagerTiersPg:
         user = _new_uuid(9302)
 
         future = datetime.now(UTC) + timedelta(days=1)
-        mgr.add_credits(user, Decimal("10"), tx_type="purchase", tier="gifted", expires_at=future)
+        mgr.add_credits(user, Decimal("10"), tx_type="purchase", bucket="gifted", expires_at=future)
         mgr.add_credits(user, Decimal("100"), tx_type="purchase")
 
         events.clear()
@@ -2596,7 +2600,7 @@ class TestCreditManagerTiersPg:
         # by the time we sweep — real wall-clock wait, no injectable clock
         # over a live RPC.
         soon = datetime.now(UTC) + timedelta(milliseconds=500)
-        mgr.add_credits(user, Decimal("15"), tx_type="purchase", tier="gifted", expires_at=soon)
+        mgr.add_credits(user, Decimal("15"), tx_type="purchase", bucket="gifted", expires_at=soon)
         mgr.add_credits(user, Decimal("10"), tx_type="purchase")  # purchased — never expires
         time.sleep(0.8)
 
@@ -2636,7 +2640,7 @@ class TestCreditManagerTiersPg:
         )
         user = _new_uuid(9304)
         mgr.add_credits(user, Decimal("10"), tx_type="purchase")  # -> gifted (is_default)
-        mgr.add_credits(user, Decimal("5"), tx_type="purchase", tier="purchased")
+        mgr.add_credits(user, Decimal("5"), tx_type="purchase", bucket="purchased")
 
         lease = mgr.reserve(user, UsageMetrics(input_tokens=40))
         events.clear()

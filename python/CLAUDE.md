@@ -43,7 +43,7 @@ CreditManager
 - `strict_prepaid` (default) — floor ≥ 0, holds sized at worst case, structurally zero debt.
 - `overdraft` — negative `overdraft_floor`, bills full actual at settle, bounded admission.
 
-**Policy resolution** (most specific wins): per-call `billing_mode` → `plan.per_operation[type]` → `plan.default_billing_mode` → constructor preset. Planless users always get the constructor preset (never unlimited).
+**Policy resolution** (most specific wins): per-call `billing_mode` → `plan.per_operation[type]` → `plan.billing_mode` → constructor preset. Planless users always get the constructor preset (never unlimited).
 
 ## Money invariants
 - All amounts are `decimal.Decimal`; never `float`.

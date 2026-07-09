@@ -170,14 +170,14 @@ export interface CanAffordOptions {
 
 /** Options for {@link CreditManager.grantSubscriptionCycle}. */
 export interface GrantSubscriptionCycleOptions {
-  /** Target credit tier for the granted cycle. Defaults to ``"subscription"``. */
-  tier?: string;
+  /** Target credit bucket for the granted cycle. Defaults to ``"subscription"``. */
+  bucket?: string;
   /** Explicit expiry for the granted cycle. Mutually exclusive with ``ttlDays``. */
   expiresAt?: Date;
   /** TTL in days from now for the granted cycle. Mutually exclusive with ``expiresAt``. */
   ttlDays?: number;
   /**
-   * Expire any remaining balance in ``tier`` before granting the new cycle
+   * Expire any remaining balance in ``bucket`` before granting the new cycle
    * (default ``true``) — the usual "use it or lose it" subscription semantics.
    * When ``false``, the new cycle's credits are added on top of any leftover
    * balance.
@@ -470,8 +470,8 @@ export class CreditManager {
       type?: string;
       metadata?: CreditMetadata | null;
       expiresAt?: Date | null;
-      /** Target credit tier (credit tiers); omitted resolves to the config's default tier. */
-      tier?: string | null;
+      /** Target credit bucket; omitted resolves to the config's default bucket. */
+      bucket?: string | null;
       /** Replay-safe idempotency key (parity with `deduct`/`settle`/`refund`). */
       idempotencyKey?: string | null;
     },
@@ -483,7 +483,7 @@ export class CreditManager {
       type,
       options?.metadata,
       options?.expiresAt,
-      options?.tier,
+      options?.bucket,
       options?.idempotencyKey,
     );
     this.emit("credits.added", userId, {
@@ -518,7 +518,7 @@ export class CreditManager {
     amount: Decimal | number,
     options?: {
       txType?: string;
-      tier?: string | null;
+      bucket?: string | null;
       metadata?: CreditMetadata | null;
     },
   ): Promise<AddCreditsResult> {
@@ -529,7 +529,7 @@ export class CreditManager {
       "adjustment",
       options?.metadata ?? null,
       null,
-      options?.tier ?? undefined,
+      options?.bucket ?? undefined,
       undefined,
     );
     this.emit("credits.deducted", userId, {
@@ -550,8 +550,8 @@ export class CreditManager {
    *    ``ConfigError`` otherwise).
    * 2. When ``ttlDays`` is given, ``expiresAt = now + ttlDays`` days.
    * 3. When ``replacePrior`` (default ``true``), any remaining balance in
-   *    ``tier`` is expired immediately via a direct ``store.addCredits``
-   *    negative adjustment — naturally idempotent (a replay finds the tier
+   *    ``bucket`` is expired immediately via a direct ``store.addCredits``
+   *    negative adjustment — naturally idempotent (a replay finds the bucket
    *    already at zero and skips the call).
    * 4. The new cycle is granted via a direct ``store.addCredits`` call
    *    (bypassing {@link addCredits} so only ``credits.cycle_renewed`` fires,
@@ -570,7 +570,7 @@ export class CreditManager {
         "grantSubscriptionCycle: specify at most one of 'expiresAt' or 'ttlDays', not both",
       );
     }
-    const tier = options?.tier ?? "subscription";
+    const bucket = options?.bucket ?? "subscription";
     const replacePrior = options?.replacePrior ?? true;
     const expiresAt: Date | undefined =
       options?.ttlDays != null
@@ -578,7 +578,7 @@ export class CreditManager {
         : options?.expiresAt;
     const amountDec = toDecimal(amount);
 
-    // Snapshot the tier's leftover balance and lifetimePurchased BEFORE granting.
+    // Snapshot the bucket's leftover balance and lifetimePurchased BEFORE granting.
     // A redelivered webhook must be a full no-op -- including skipping the
     // replace-prior wipe below -- not just avoiding a double-grant. AddCreditsResult
     // carries no reliable cross-store "was this a replay" flag (Postgres/Supabase
@@ -589,7 +589,7 @@ export class CreditManager {
     let preLifetimePurchased = new Decimal(0);
     if (replacePrior) {
       const bucketsBefore = await this.getBucketBalances(userId);
-      const current = bucketsBefore.buckets.find((t) => t.bucketKey === tier);
+      const current = bucketsBefore.buckets.find((t) => t.bucketKey === bucket);
       if (current) priorLeftover = current.balance;
       preLifetimePurchased = (await this.getBalance(userId)).lifetimePurchased;
     }
@@ -600,7 +600,7 @@ export class CreditManager {
       "purchase",
       options?.metadata,
       expiresAt,
-      tier,
+      bucket,
       options?.idempotencyKey,
     );
 
@@ -612,7 +612,7 @@ export class CreditManager {
         "adjustment",
         { reason: "cycle_replaced" },
         undefined,
-        tier,
+        bucket,
       );
       // Reflect the post-replace balance so the returned result is accurate
       // (the grant call above only knows the pre-replace balance).
@@ -627,7 +627,7 @@ export class CreditManager {
       transactionId: result.transactionId,
       amount: amountDec,
       newBalance: result.newBalance,
-      tier,
+      bucket,
       planKey: options?.planKey ?? null,
       idempotencyKey: options?.idempotencyKey ?? null,
     });

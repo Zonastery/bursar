@@ -126,7 +126,7 @@ describe("HttpxSupabaseStore", () => {
         p_amount: "100.25",
         p_type: "purchase",
         p_metadata: {},
-        p_tier: null,
+        p_bucket: null,
         p_idempotency_key: null,
       });
       expect(result.newBalance.toString()).toBe("100.25");
@@ -195,7 +195,7 @@ describe("HttpxSupabaseStore", () => {
         amount: "50",
         new_balance: "150",
         lifetime_purchased: "150",
-        tier: "gifted",
+        bucket: "gifted",
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.addCredits(
@@ -214,7 +214,7 @@ describe("HttpxSupabaseStore", () => {
         p_amount: "50",
         p_type: "purchase",
         p_metadata: {},
-        p_tier: "gifted",
+        p_bucket: "gifted",
         p_idempotency_key: "evt-1",
       });
       expect(result.bucket).toBe("gifted");
@@ -335,9 +335,9 @@ describe("HttpxSupabaseStore", () => {
       mockFetch({
         user_id: "u1",
         plan_id: "p",
-        plan_name: "P",
-        free_allowance: "0",
-        feature_limits: { quota: 0 },
+        plan_label: "P",
+        allowance_amount: "0",
+        entitlements: { quota: 0 },
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "quota");
@@ -349,9 +349,9 @@ describe("HttpxSupabaseStore", () => {
       mockFetch({
         user_id: "u1",
         plan_id: "p",
-        plan_name: "P",
-        free_allowance: "0",
-        feature_limits: { flag: false },
+        plan_label: "P",
+        allowance_amount: "0",
+        entitlements: { flag: false },
       });
       const store = new HttpxSupabaseStore(URL_BASE, KEY);
       const result = await store.checkFeature("u1", "flag");

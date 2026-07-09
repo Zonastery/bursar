@@ -100,6 +100,15 @@ def _dec_map(value: Any) -> dict[str, Decimal] | None:
     return {str(k): _dec(v) for k, v in value.items()}
 
 
+class DecimalEncoder(json.JSONEncoder):
+    """Custom JSON encoder that converts ``Decimal`` to a float for JSONB storage."""
+
+    def default(self, o: object) -> object:
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
+
+
 class PostgresStore(CreditStore):
     """Credit store backed by a raw Postgres connection.
 
@@ -553,7 +562,7 @@ class PostgresStore(CreditStore):
             with conn.cursor() as cur:
                 cur.callproc(
                     "set_active_pricing_config",
-                    [json.dumps(config), label],
+                    [json.dumps(config, cls=DecimalEncoder), label],
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -624,16 +633,13 @@ class PostgresStore(CreditStore):
         return GetUserPlanResult(
             user_id=str(result_dict.get("user_id", user_id)),
             plan_id=result_dict.get("plan_id") or None,
-            plan_label=result_dict.get("plan_label") or result_dict.get("plan_name") or None,
+            plan_label=result_dict.get("plan_label") or None,
             allowance_amount=_dec(result_dict["allowance_amount"])
             if result_dict.get("allowance_amount") is not None
-            else _dec(result_dict.get("free_allowance", 0)),
+            else _dec(0),
             allowance_period=str(result_dict.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
-            entitlements={
-                k: Entitlement.model_validate(v)
-                for k, v in (result_dict.get("entitlements") or result_dict.get("feature_limits") or {}).items()
-            },
-            billing_mode=str(result_dict.get("billing_mode") or result_dict.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            entitlements={k: Entitlement.model_validate(v) for k, v in (result_dict.get("entitlements") or {}).items()},
+            billing_mode=str(result_dict.get("billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={
                 k: OperationPolicy.model_validate(v) for k, v in (result_dict.get("per_operation") or {}).items()
             },

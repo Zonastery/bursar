@@ -453,11 +453,11 @@ describe("loadConfigFromDict", () => {
         expires: true,
         ttlDays: 30,
         allowOverdraft: false,
-        isDefaultBucket: false,
+        default: false,
       });
     });
 
-    it("defaults label to the config key, priority to 0, expires/allowOverdraft/isDefaultBucket to false", () => {
+    it("defaults label to the config key, priority to 0, expires/allowOverdraft/default to false", () => {
       const config = loadConfigFromDict({
         metering,
         ledger: { buckets: { basic: {} } },
@@ -468,7 +468,7 @@ describe("loadConfigFromDict", () => {
         expires: false,
         ttlDays: null,
         allowOverdraft: false,
-        isDefaultBucket: false,
+        default: false,
       });
     });
 
@@ -523,28 +523,28 @@ describe("loadConfigFromDict", () => {
       ).toThrow(ConfigError);
     });
 
-    it("rejects more than one bucket with isDefaultBucket: true", () => {
+    it("rejects more than one bucket with default: true", () => {
       expect(() =>
         loadConfigFromDict({
           metering,
           ledger: {
             buckets: {
-              a: { label: "A", priority: 10, isDefaultBucket: true },
-              b: { label: "B", priority: 20, isDefaultBucket: true },
+              a: { label: "A", priority: 10, default: true },
+              b: { label: "B", priority: 20, default: true },
             },
           },
         }),
       ).toThrow(ConfigError);
     });
 
-    it("accepts exactly one allowOverdraft bucket and one isDefaultBucket (may be the same or different)", () => {
+    it("accepts exactly one allowOverdraft bucket and one default (may be the same or different)", () => {
       expect(() =>
         loadConfigFromDict({
           metering,
           ledger: {
             buckets: {
               a: { label: "A", priority: 10, allowOverdraft: true },
-              b: { label: "B", priority: 20, isDefaultBucket: true },
+              b: { label: "B", priority: 20, default: true },
             },
           },
         }),

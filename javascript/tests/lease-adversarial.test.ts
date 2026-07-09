@@ -377,7 +377,7 @@ describe("spend caps", () => {
   it("a deny cap blocks admission", async () => {
     const m = await manager(store);
     await store.addCredits("u1", D(1000));
-    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(10), action: "deny" });
+    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(10), onExceed: "deny" });
     await expect(m.reserve("u1", D(20))).rejects.toThrow(CapReachedError);
   });
 
@@ -392,7 +392,7 @@ describe("spend caps", () => {
       ledger: { minBalance: 0 },
     });
     await store.addCredits("u1", D(1000));
-    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(10), action: "warn" });
+    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(10), onExceed: "warn" });
 
     const lease = await m.reserve("u1", D(20));
     const ded = await m.settle("u1", lease.leaseId, D(15)); // 15 > 10 warn cap
@@ -416,7 +416,7 @@ describe("spend caps", () => {
     });
     await store.addCredits("u1", D(200));
     // Deny cap 100; admit a small hold (under cap), then settle past the cap.
-    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(100), action: "deny" });
+    store.setSpendCap({ userId: "u1", type: "monthly", limit: D(100), onExceed: "deny" });
 
     const lease = await m.reserve("u1", D(50)); // admission: 0 + 50 ≤ 100 ✓
     const ded = await m.settle("u1", lease.leaseId, D(120)); // de-clamped, breaches cap

@@ -93,7 +93,7 @@ function decRecord(raw: unknown): Record<string, Decimal> | null {
   return out;
 }
 
-/** Parse the ``feature_limits`` JSONB map into typed `FeatureLimit` records. */
+/** Parse the ``entitlements`` JSONB map into typed `FeatureLimit` records. */
 function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, FeatureLimit> = {};
@@ -316,7 +316,7 @@ export class HttpxSupabaseStore extends CreditStore {
     type = "adjustment",
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
-    tier?: string | null,
+    bucket?: string | null,
     // NOTE: threaded through defensively as a new named param to the
     // `credits_add` RPC. Confirm the SQL migration adds a `p_idempotency_key`
     // parameter (with a default) before relying on this against a real
@@ -332,7 +332,7 @@ export class HttpxSupabaseStore extends CreditStore {
       p_amount: decParam(amount),
       p_type: type,
       p_metadata: meta,
-      p_tier: tier ?? null,
+      p_bucket: bucket ?? null,
       p_idempotency_key: idempotencyKey ?? null,
     });
     const code = this.errorCode(row);
@@ -343,7 +343,7 @@ export class HttpxSupabaseStore extends CreditStore {
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
       lifetimePurchased: dec(row.lifetime_purchased),
-      bucket: String(row.bucket ?? row.tier ?? tier ?? "default"),
+      bucket: String(row.bucket ?? "default"),
       idempotent: Boolean(row.idempotent),
     };
   }
@@ -665,9 +665,9 @@ export class HttpxSupabaseStore extends CreditStore {
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
-      planLabel: (row.plan_label as string) ?? (row.plan_name as string) ?? null,
-      allowanceAmount: dec(row.free_allowance),
-      entitlements: parseFeatureLimits(row.feature_limits) as unknown as Record<
+      planLabel: (row.plan_label as string) ?? null,
+      allowanceAmount: dec(row.allowance_amount),
+      entitlements: parseFeatureLimits(row.entitlements) as unknown as Record<
         string,
         {
           value?: unknown;
@@ -676,7 +676,7 @@ export class HttpxSupabaseStore extends CreditStore {
           onExceed?: "deny" | "warn" | "notify";
         }
       >,
-      billingMode: (String(row.default_billing_mode ?? "strict") as BillingMode) ?? "strict",
+      billingMode: (String(row.billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,

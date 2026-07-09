@@ -446,7 +446,7 @@ export interface SpendCap {
   type: "daily" | "monthly";
   model?: string | null;
   limit: Decimal;
-  action: "deny" | "warn" | "notify";
+  onExceed: "deny" | "warn" | "notify";
 }
 
 /** Result of checking a spend cap. */

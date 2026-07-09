@@ -644,16 +644,11 @@ class HttpxSupabaseStore(CreditStore):
         return GetUserPlanResult(
             user_id=str(row.get("user_id", user_id)),
             plan_id=row.get("plan_id") or None,
-            plan_label=row.get("plan_label") or row.get("plan_name") or None,
-            allowance_amount=_dec(row["allowance_amount"])
-            if row.get("allowance_amount") is not None
-            else _dec(row.get("free_allowance", 0)),
+            plan_label=row.get("plan_label") or None,
+            allowance_amount=_dec(row["allowance_amount"]) if row.get("allowance_amount") is not None else _dec(0),
             allowance_period=str(row.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
-            entitlements={
-                k: Entitlement.model_validate(v)
-                for k, v in (row.get("entitlements") or row.get("feature_limits") or {}).items()
-            },
-            billing_mode=str(row.get("billing_mode") or row.get("default_billing_mode") or "strict"),  # type: ignore[arg-type]
+            entitlements={k: Entitlement.model_validate(v) for k, v in (row.get("entitlements") or {}).items()},
+            billing_mode=str(row.get("billing_mode") or "strict"),  # type: ignore[arg-type]
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (row.get("per_operation") or {}).items()},
             max_concurrent=row.get("max_concurrent"),
             overdraft_floor=_dec(row["overdraft_floor"]) if row.get("overdraft_floor") is not None else None,

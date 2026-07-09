@@ -78,7 +78,7 @@ export class PostgresBillingStore extends BillingStore {
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     await this.pool.query("SELECT public.sync_billing_from_config($1::jsonb)", [
-      JSON.stringify(config),
+      JSON.stringify(this.camelToSnakeKeys(config)),
     ]);
   }
 
@@ -93,8 +93,7 @@ export class PostgresBillingStore extends BillingStore {
       productId ?? null,
     ]);
     if (result && result.offerKey) {
-      // Map old SQL field planKey → new field plan (billing-manager reads offer.plan)
-      return { ...result, plan: result.planKey ?? result.plan ?? null };
+      return { ...result, plan: result.plan ?? null };
     }
     return null;
   }
@@ -146,7 +145,7 @@ export class PostgresBillingStore extends BillingStore {
     await this.pool.query(
       `INSERT INTO public.billing_subscriptions (
          user_id, provider, provider_subscription_id, provider_customer_id,
-         offer_key, plan_key, status, current_period_start,
+         offer_key, plan, status, current_period_start,
          current_period_end, cancel_at_period_end, interval, interval_count, metadata
        )
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -154,7 +153,7 @@ export class PostgresBillingStore extends BillingStore {
          user_id = EXCLUDED.user_id,
          provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
          offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
-         plan_key = COALESCE(EXCLUDED.plan_key, billing_subscriptions.plan_key),
+         plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
          status = EXCLUDED.status,
          current_period_start = COALESCE(EXCLUDED.current_period_start, billing_subscriptions.current_period_start),
          current_period_end = COALESCE(EXCLUDED.current_period_end, billing_subscriptions.current_period_end),
@@ -169,7 +168,7 @@ export class PostgresBillingStore extends BillingStore {
         state.providerSubscriptionId,
         state.providerCustomerId ?? null,
         state.offerKey ?? null,
-        state.planKey ?? null,
+        state.plan ?? null,
         state.status ?? "incomplete",
         state.currentPeriodStart ?? null,
         state.currentPeriodEnd ?? null,
@@ -196,7 +195,7 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<BillingSubscriptionState | null> {
     const result = await this.pool.query(
       `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-              offer_key, plan_key, status, current_period_start,
+              offer_key, plan, status, current_period_start,
               current_period_end, cancel_at_period_end, interval, interval_count, metadata
        FROM public.billing_subscriptions
        WHERE provider = $1 AND provider_subscription_id = $2`,
@@ -211,7 +210,7 @@ export class PostgresBillingStore extends BillingStore {
   async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
     const result = await this.pool.query(
       `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-              offer_key, plan_key, status, current_period_start,
+              offer_key, plan, status, current_period_start,
               current_period_end, cancel_at_period_end, interval, interval_count, metadata
        FROM public.billing_subscriptions
        WHERE user_id = $1
@@ -230,7 +229,7 @@ export class PostgresBillingStore extends BillingStore {
       providerSubscriptionId: String(r.provider_subscription_id),
       providerCustomerId: r.provider_customer_id ? String(r.provider_customer_id) : null,
       offerKey: r.offer_key ? String(r.offer_key) : null,
-      planKey: r.plan_key ? String(r.plan_key) : null,
+      plan: r.plan ? String(r.plan) : null,
       status: r.status ? String(r.status) : "incomplete",
       currentPeriodStart: r.current_period_start
         ? (r.current_period_start as Date).toISOString()
