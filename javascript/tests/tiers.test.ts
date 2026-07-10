@@ -278,11 +278,11 @@ describe("Credit tiers", () => {
       await store.setActivePricing(THREE_TIER_CONFIG);
     });
 
-    it("non-expiring tier + explicit expiresAt throws tier_does_not_expire", async () => {
+    it("non-expiring tier + explicit expiresAt throws bucket_does_not_expire", async () => {
       const future = new Date(T0.getTime() + 86_400_000);
       await expect(
         store.addCredits("u1", D(10), "adjustment", null, future, "purchased"),
-      ).rejects.toThrow(/tier_does_not_expire/);
+      ).rejects.toThrow(/bucket_does_not_expire/);
     });
 
     it("expiring tier + explicit past expiresAt throws invalid_expires_at", async () => {

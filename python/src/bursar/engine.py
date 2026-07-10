@@ -190,8 +190,10 @@ class PricingEngine:
             expr = models[model_name]
         elif "*" in models:
             expr = models["*"]
+        elif "_default" in models:
+            expr = models["_default"]
         else:
-            raise ValueError(f"no model match for '{model_name}' and no '*' in config")
+            raise ValueError(f"no model match for '{model_name}' and no '*' or '_default' in config")
 
         return evaluate_expression(expr, variables)
 

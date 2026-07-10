@@ -114,7 +114,9 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
         maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
         period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
         onExceed:
-          (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+          (String(
+            fl.onExceed ?? fl.on_exceed ?? fl.action ?? "deny",
+          ) as FeatureLimit["onExceed"]) ?? "deny",
       } as FeatureLimit;
     }
   }

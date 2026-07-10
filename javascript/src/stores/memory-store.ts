@@ -393,7 +393,7 @@ export class MemoryStore extends CreditStore {
     if (!def) return expiresAt ?? null;
     if (!def.expires) {
       if (expiresAt != null) {
-        throw new StoreError(`tier_does_not_expire: ${bucketKey}`);
+        throw new StoreError(`bucket_does_not_expire: ${bucketKey}`);
       }
       return null;
     }

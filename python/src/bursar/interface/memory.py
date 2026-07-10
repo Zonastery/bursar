@@ -325,7 +325,7 @@ class MemoryStore(CreditStore):
         - No tiers configured (implicit ``"default"`` tier): behaves exactly as
           ``add_credits`` always has — no restriction on ``expires_at``.
         - Non-expiring tier + explicit ``expires_at``: raises ``StoreError``
-          with error code ``tier_does_not_expire``.
+          with error code ``bucket_does_not_expire``.
         - Expiring tier + explicit ``expires_at``: validated to be in the
           future and used as-is.
         - Expiring tier + omitted ``expires_at``: uses ``default_ttl_days``
@@ -339,7 +339,7 @@ class MemoryStore(CreditStore):
             return self._ensure_aware(expires_at) if expires_at else None
         if not tier_def.expires:
             if expires_at is not None:
-                raise StoreError(f"tier_does_not_expire: {resolved_tier}")
+                raise StoreError(f"bucket_does_not_expire: {resolved_tier}")
             return None
         if expires_at is not None:
             aware = self._ensure_aware(expires_at)

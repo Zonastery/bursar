@@ -158,7 +158,7 @@ describe("PostgresStore", () => {
     // bogus "success"). The SQL `credits_add` (010_credit_tiers.sql) returns
     // error envelopes such as {error: "tier_not_found", tier: "<requested>"}
     // for every tier failure (tier_not_found/tier_required/
-    // tier_does_not_expire/invalid_expires_at/expires_at_required); these
+    // bucket_does_not_expire/invalid_expires_at/expires_at_required); these
     // must now surface as a thrown StoreError, matching SupabaseStore's
     // pre-existing errorCode()-checked behavior.
     it("addCredits surfaces the SQL error envelope for tier failures", async () => {

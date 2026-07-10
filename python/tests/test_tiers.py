@@ -305,7 +305,7 @@ class TestAddCreditsExpiryReconciliation:
     def test_non_expiring_tier_with_explicit_expires_at_raises(self) -> None:
         store = self._store()
         future = datetime.now(UTC) + timedelta(days=5)
-        with pytest.raises(StoreError, match="tier_does_not_expire"):
+        with pytest.raises(StoreError, match="bucket_does_not_expire"):
             store.add_credits("u1", Decimal("10"), "purchase", bucket="purchased", expires_at=future)
 
     def test_expiring_tier_with_past_expires_at_raises_invalid_expires_at(self) -> None:

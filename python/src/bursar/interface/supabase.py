@@ -78,7 +78,7 @@ _BUSINESS_ERROR_CODES = frozenset(
         # Credit tier business codes (023).
         "tier_not_found",
         "tier_required",
-        "tier_does_not_expire",
+        "bucket_does_not_expire",
         "expires_at_required",
         "invalid_expires_at",
     }

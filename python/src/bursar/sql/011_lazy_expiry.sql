@@ -198,7 +198,7 @@ BEGIN
 
         IF NOT COALESCE(v_bucket_expires, false) THEN
             IF v_has_expires_at THEN
-                RETURN jsonb_build_object('error', 'tier_does_not_expire', 'bucket', v_resolved_bucket);
+                RETURN jsonb_build_object('error', 'bucket_does_not_expire', 'bucket', v_resolved_bucket);
             END IF;
         ELSE
             IF NOT v_has_expires_at THEN

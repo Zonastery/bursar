@@ -319,12 +319,12 @@ export class CreditManager {
         models: metering.models ?? {},
         tools: metering.tools ?? { "*": "calls * 0" },
         search: metering.search ?? null,
-        cacheDiscount: metering.cacheDiscount ?? null,
-        flatJobs: metering.flatJobs ?? {},
+        cacheDiscount: (metering as any).cacheDiscount ?? (metering as any).cache_discount ?? null,
+        flatJobs: (metering as any).flatJobs ?? (metering as any).flat_jobs ?? {},
       },
       ledger: {
         minBalance: ledger.minBalance ?? 0,
-        signupGrant: ledger.signupGrant ?? 50,
+        signupGrant: (ledger as any).signupGrant ?? (ledger as any).signup_grant ?? 50,
         buckets: ledger.buckets ?? null,
       },
       ...(config.plans ? { plans: config.plans } : {}),
@@ -1286,7 +1286,10 @@ export class CreditManager {
     meta["outputTokens"] = metrics.outputTokens ?? 0;
     meta["model"] = metrics.model ?? "unknown";
     meta["breakdownTotal"] = breakdown.total.toString();
-    if (metrics.flatJob) meta["flatJob"] = metrics.flatJob;
+    if (metrics.flatJob) {
+      meta["flatJob"] = metrics.flatJob;
+      meta["reference_type"] = metrics.flatJob;
+    }
     if (idempotencyKey) meta["idempotencyKey"] = idempotencyKey;
 
     const periodStart = await this.resolveAllowancePeriodStart(userId);
