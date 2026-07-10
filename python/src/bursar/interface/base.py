@@ -109,6 +109,7 @@ class CreditStore(ABC):
         self._pricing_cache_result: PricingConfigResult | None = None
         self._pricing_cache_time: float = 0.0
         self._pricing_cache_lock = threading.Lock()
+        self._pricing_load_lock = threading.Lock()
 
     # ── Pricing cache ──────────────────────────────────────────────────
 
@@ -118,20 +119,32 @@ class CreditStore(ABC):
     ) -> PricingConfigResult | None:
         """Return cached pricing if within TTL, else call *loader* and cache.
 
-        Thread-safe. ``None`` results are **not** cached — a missing config
-        triggers a backend call on every invocation so that newly-published
-        pricing is picked up immediately.
+        Thread-safe with stampede protection (double-checked locking).
+        ``None`` results are **not** cached — a missing config triggers a
+        backend call on every invocation so that newly-published pricing is
+        picked up immediately.
         """
         now = time.monotonic()
         with self._pricing_cache_lock:
             if self._pricing_cache_result is not None and (now - self._pricing_cache_time) < self._pricing_cache_ttl:
                 return self._pricing_cache_result
-        result = loader()
-        now = time.monotonic()  # re-read after loader to avoid TTL erosion
-        with self._pricing_cache_lock:
-            self._pricing_cache_result = result
-            self._pricing_cache_time = now
-        return result
+
+        with self._pricing_load_lock:
+            # Double-check: another thread may have loaded while we waited
+            now = time.monotonic()
+            with self._pricing_cache_lock:
+                if (
+                    self._pricing_cache_result is not None
+                    and (now - self._pricing_cache_time) < self._pricing_cache_ttl
+                ):
+                    return self._pricing_cache_result
+
+            result = loader()
+            now = time.monotonic()  # re-read after loader to avoid TTL erosion
+            with self._pricing_cache_lock:
+                self._pricing_cache_result = result
+                self._pricing_cache_time = now
+            return result
 
     def invalidate_pricing_cache(self) -> None:
         """Force the next ``get_active_pricing()`` call to reload from the backend."""

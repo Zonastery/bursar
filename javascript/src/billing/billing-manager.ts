@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { LRUCache } from "lru-cache";
 import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
 import type {
@@ -7,6 +8,16 @@ import type {
   BillingEventResult,
   BillingSubscriptionState,
 } from "./billing-types.js";
+
+interface OfferCacheValue {
+  offer: Record<string, unknown> | null;
+}
+
+interface OfferContext {
+  provider: string;
+  productId: string | null;
+  priceId: string | null;
+}
 
 type ResolveUserFn = (
   provider: string,
@@ -30,11 +41,7 @@ export class BillingManager {
   private resolveUser: ResolveUserFn | null;
   private onTrialWillEnd: ((event: BillingEvent) => void | Promise<void>) | null;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
-  private offerCache = new Map<
-    string,
-    { offer: Record<string, unknown> | null; expires: number }
-  >();
-  private readonly OFFER_CACHE_TTL_MS = 60_000;
+  private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
 
   constructor(store: BillingStore, options?: BillingManagerOptions) {
@@ -42,6 +49,19 @@ export class BillingManager {
     this.cm = options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
     this.onTrialWillEnd = options?.onTrialWillEnd ?? null;
+    this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
+      max: 100,
+      ttl: 60_000,
+      allowStale: false,
+      fetchMethod: async (_, __, { context }) => {
+        const offer = await this.store.resolveBillingOffer(
+          context.provider,
+          context.productId,
+          context.priceId,
+        );
+        return { offer };
+      },
+    });
     this.handlerMap = {
       "customer.created": this.handleCustomerCreated.bind(this),
       "customer.updated": this.handleCustomerUpdated.bind(this),
@@ -79,6 +99,11 @@ export class BillingManager {
    */
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     await this.store.syncBillingFromConfig(config);
+  }
+
+  /** Invalidate the offer cache so the next resolution call re-fetches fresh data. */
+  invalidateOfferCache(): void {
+    this.offerCache.clear();
   }
 
   async handleEvent(event: BillingEvent): Promise<BillingEventResult> {
@@ -155,13 +180,10 @@ export class BillingManager {
     priceId: string | null,
   ): Promise<Record<string, unknown> | null> {
     const cacheKey = `${provider}:${productId ?? ""}:${priceId ?? ""}`;
-    const cached = this.offerCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) {
-      return cached.offer;
-    }
-    const offer = await this.store.resolveBillingOffer(provider, productId, priceId);
-    this.offerCache.set(cacheKey, { offer, expires: Date.now() + this.OFFER_CACHE_TTL_MS });
-    return offer;
+    const result = await this.offerCache.fetch(cacheKey, {
+      context: { provider, productId, priceId },
+    });
+    return result?.offer ?? null;
   }
 
   private async handleCustomerCreated(event: BillingEvent): Promise<BillingEventResult> {

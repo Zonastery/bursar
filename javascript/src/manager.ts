@@ -11,6 +11,7 @@ import {
   PricingNotLoadedError,
   RefundError,
 } from "./errors.js";
+import { LRUCache } from "lru-cache";
 import type { PricingEngine } from "./engine.js";
 import { PricingEngine as PricingEngineClass } from "./engine.js";
 import type {
@@ -136,6 +137,15 @@ export interface CreditManagerOptions {
    * ``reserve``, and ``settle`` so a caller never needs to run a cron job.
    */
   lazyExpiry?: boolean;
+  /**
+   * Milliseconds after which the cached PricingEngine is considered stale and
+   * the next call to {@link CreditManager.refreshIfStale} will reload it from
+   * the store. When `0`, the engine is never reloaded automatically (the
+   * consumer must call ``loadPricingFromStore`` manually). Default ``300_000``
+   * (5 minutes). Concurrent calls to ``refreshIfStale`` are deduplicated —
+   * only one ``loadPricingFromStore`` runs, the rest await the same result.
+   */
+  pricingTtl?: number;
 }
 
 /** Options for {@link CreditManager.reserve}. */
@@ -243,6 +253,11 @@ export class CreditManager {
   // keyed by `.toString()`. A level re-arms only after the balance climbs back
   // above it (a top-up).
   private lbBelow = new Map<string, Set<string>>();
+  // Pricing-engine TTL cache with async dedup (stampede protection).
+  // When expired, the next `refreshIfStale()` call blocks and reloads from
+  // the store; concurrent callers are deduplicated by lru-cache's `fetch()`.
+  private pricingTtl: number;
+  private pricingCache: LRUCache<string, PricingEngine>;
 
   constructor(
     store: CreditStore,
@@ -269,6 +284,20 @@ export class CreditManager {
       : null;
     this.onLowBalance = options?.lowBalance?.onTrigger ?? null;
     this.lazyExpiry = options?.lazyExpiry ?? false;
+    this.pricingTtl = options?.pricingTtl ?? 300_000;
+    this.pricingCache = new LRUCache<string, PricingEngine>({
+      max: 1,
+      ttl: this.pricingTtl,
+      allowStale: true,
+      fetchMethod: async () => {
+        // When loadPricingFromStore fails (e.g. transient DB error) and a stale
+        // engine exists, lru-cache returns the stale value without resetting the
+        // TTL — the next call retries immediately after the stale TTL elapses.
+        // A first-load failure propagates as there is no stale value to serve.
+        await this.loadPricingFromStore();
+        return this.engine!;
+      },
+    });
   }
 
   /** Emit a credit lifecycle event. No-op if no emitter is configured. */
@@ -302,6 +331,7 @@ export class CreditManager {
   /** Load pricing from a raw dict and sync it. */
   async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
     this.engine = PricingEngineClass.fromDict(data);
+    this.pricingCache.set("pricing", this.engine);
     await this.store.setActivePricing(data as Record<string, unknown>);
   }
 
@@ -332,6 +362,31 @@ export class CreditManager {
     };
 
     this.engine = PricingEngineClass.fromDict(engineDict);
+    this.pricingCache.set("pricing", this.engine);
+  }
+
+  /**
+   * If the cached PricingEngine is stale (TTL expired), reload it from the
+   * store. Concurrent callers are deduplicated via the underlying
+   * ``lru-cache.fetch()`` — only one ``loadPricingFromStore`` runs and all
+   * callers await the same result.
+   *
+   * When ``pricingTtl`` is ``0``, this is a no-op (the consumer must call
+   * ``loadPricingFromStore`` manually).
+   */
+  async refreshIfStale(): Promise<void> {
+    if (this.pricingTtl === 0) return;
+    await this.pricingCache.fetch("pricing");
+  }
+
+  /**
+   * Invalidate the pricing cache so the next ``refreshIfStale`` call
+   * reloads from the store. Useful after a manual ``loadPricingFromStore``
+   * that bypasses the cache, or when the consumer knows the remote config
+   * has changed.
+   */
+  invalidatePricing(): void {
+    this.pricingCache.delete("pricing");
   }
 
   /**
@@ -343,6 +398,7 @@ export class CreditManager {
    */
   async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
     this.engine = PricingEngineClass.fromDict(config);
+    this.pricingCache.set("pricing", this.engine);
     await this.store.setActivePricing(config, label);
   }
 

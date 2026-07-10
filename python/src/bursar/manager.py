@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -172,6 +173,13 @@ class CreditManager:
             to ``False`` (unchanged behavior — a background/cron sweep is the
             only way expired credits are removed); when ``False`` this is a
             single boolean check with no other overhead.
+        pricing_ttl: Seconds after which the cached ``PricingEngine`` is
+            considered stale and the next call to ``refresh_if_stale()`` will
+            reload it from the store. Set to ``0`` to disable auto-reload (the
+            consumer must call ``load_pricing_from_store()`` manually).
+            Default ``300`` (5 minutes). Concurrent calls to
+            ``refresh_if_stale()`` are safe (the underlying store cache has its
+            own stampede protection).
     """
 
     def __init__(
@@ -186,6 +194,7 @@ class CreditManager:
         low_balance: LowBalanceConfig | None = None,
         default_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
         lazy_expiry: bool = False,
+        pricing_ttl: int = 300,
     ) -> None:
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
@@ -212,6 +221,14 @@ class CreditManager:
         self._lb_below: dict[str, set[Decimal]] = {}
         self._lb_lock = threading.RLock()
         self._lazy_expiry = lazy_expiry
+        # Pricing-engine staleness tracking. ``load_pricing_from_store`` /
+        # ``publish_pricing`` / ``publish_pricing_from_dict`` bump the timestamp.
+        self._pricing_ttl = pricing_ttl
+        self._last_loaded: float = 0.0
+        # Guards refresh_if_stale() so only one thread calls load_pricing_from_store
+        # at a time. Double-checked locking (the time check runs before AND after
+        # acquiring the lock) prevents stampede when the TTL expires concurrently.
+        self._pricing_refresh_lock = threading.Lock()
 
     def _emit(self, type_: str, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
@@ -246,6 +263,7 @@ class CreditManager:
         """Load pricing from a raw dict and sync it."""
         engine = PricingEngine.from_dict(data)
         self._engine = engine
+        self._last_loaded = time.monotonic()
         self._store.set_active_pricing(data)
 
     def load_pricing_from_store(self) -> None:
@@ -258,6 +276,7 @@ class CreditManager:
             )
         engine_dict = active.config if isinstance(active.config, dict) else {}
         self._engine = PricingEngine.from_dict(engine_dict)
+        self._last_loaded = time.monotonic()
 
     def publish_pricing(
         self,
@@ -266,7 +285,32 @@ class CreditManager:
     ) -> None:
         """Publish new pricing and update the engine in one call."""
         self._engine = PricingEngine.from_dict(config)
+        self._last_loaded = time.monotonic()
         self._store.set_active_pricing(config, label=label)
+
+    def refresh_if_stale(self) -> None:
+        """If the cached ``PricingEngine`` is stale (TTL expired), reload it
+        from the store. When ``pricing_ttl`` is ``0`` this is a no-op.
+
+        Double-checked locking prevents stampede when multiple threads observe
+        the TTL expiring concurrently — only the first thread past the lock
+        calls ``load_pricing_from_store()``; the rest see the updated timestamp
+        on re-check and skip.
+        """
+        if self._pricing_ttl == 0:
+            return
+        now = time.monotonic()
+        if self._last_loaded > 0 and now - self._last_loaded < self._pricing_ttl:
+            return
+        with self._pricing_refresh_lock:
+            now = time.monotonic()
+            if self._last_loaded > 0 and now - self._last_loaded < self._pricing_ttl:
+                return
+            self.load_pricing_from_store()
+
+    def invalidate_pricing(self) -> None:
+        """Force the next ``refresh_if_stale()`` call to reload from the store."""
+        self._last_loaded = 0.0
 
     @property
     def engine(self) -> PricingEngine | None:

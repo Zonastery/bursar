@@ -1221,4 +1221,22 @@ BEGIN
 END;
 $$;
 
+-- Grant EXECUTE to service_role for each billing function individually rather
+-- than using "ALL FUNCTIONS IN SCHEMA public", which would accidentally expose
+-- non-billing functions through the Supabase REST API gateway.
+GRANT EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sync_billing_from_config(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.resolve_billing_offer_by_price(TEXT, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.resolve_credit_topup_by_price(TEXT, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_billing_customer(TEXT, TEXT, UUID, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_billing_customer(TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_billing_subscription(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_billing_subscription(TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.claim_billing_event(TEXT, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.reclaim_billing_event(TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.complete_billing_event(TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.fail_billing_event(TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_billing_subscription(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.set_active_pricing_config(JSONB, TEXT) TO service_role;
+
 NOTIFY pgrst, 'reload schema';

@@ -73,14 +73,15 @@
   "homepage": "https://zonastery.github.io/bursar/",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "decimal.js": "^10.6.0"
+    "decimal.js": "^10.6.0",
+    "lru-cache": "^10.4.3"
   },
   "peerDependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "dodopayments": "^2.40.1",
     "js-yaml": "^4.0.0",
     "pg": "^8.0.0",
-    "@supabase/supabase-js": "^2.0.0",
-    "stripe": "^22.2.0",
-    "dodopayments": "^2.40.1"
+    "stripe": "^22.2.0"
   },
   "peerDependenciesMeta": {
     "js-yaml": {
