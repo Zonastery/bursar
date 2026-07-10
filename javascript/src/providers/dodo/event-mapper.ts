@@ -31,7 +31,11 @@ async function callBillingManager(
   event: Parameters<BillingManager["handleEvent"]>[0],
 ): Promise<BillingEventResult> {
   const result = await bm.handleEvent(event);
-  if (!result.handled && result.error !== "unhandled_event_type") {
+  if (
+    !result.handled &&
+    result.error !== "unhandled_event_type" &&
+    result.error !== "user_not_found"
+  ) {
     throw new Error(`BillingManager failed to handle event: ${result.error}`);
   }
   return result;
