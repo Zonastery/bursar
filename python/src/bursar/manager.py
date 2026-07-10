@@ -60,6 +60,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     OperationPolicy,
     RefundResult,
     ReleaseResult,
@@ -561,6 +562,25 @@ class CreditManager:
                 "timestamp": datetime.now(UTC),
             },
         )
+
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        """Bulk-migrate users to a specific version of a plan.
+
+        Users on older versions of ``plan_key`` are moved to the target version.
+        ``plan_assigned_at`` is preserved so allowance windows keep their anchor.
+
+        Args:
+            plan_key: The plan key to migrate.
+            target_config_version: Target version (default: latest).
+
+        Returns:
+            ``MigratePlanUsersResult`` with migrated count.
+        """
+        return self._store.migrate_plan_users(plan_key, target_config_version)
 
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         """Fetch user's current plan (including feature entitlements)."""

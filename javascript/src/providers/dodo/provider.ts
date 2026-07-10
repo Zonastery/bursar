@@ -1,4 +1,5 @@
 import DodoPayments from "dodopayments";
+import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
 import type { PaymentProvider, ResolveUserCallback, ProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
@@ -27,12 +28,16 @@ export class DodoProvider implements PaymentProvider {
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string }> {
     const client = this.getClient();
-    const session = await client.checkoutSessions.create({
+    const body: CheckoutSessionCreateParams = {
       product_cart: [{ product_id: params.productId, quantity: params.quantity ?? 1 }],
-      ...(params.customerId ? { customer: { customer_id: params.customerId } } : {}),
+      customer: params.customerId ? { customer_id: params.customerId } : undefined,
       return_url: params.returnUrl,
       metadata: params.metadata,
-    });
+    };
+    const requestOptions = params.idempotencyKey
+      ? { idempotencyKey: params.idempotencyKey }
+      : undefined;
+    const session = await client.checkoutSessions.create(body, requestOptions);
     if (!session.checkout_url) throw new Error("Checkout session returned no URL");
     return { url: session.checkout_url };
   }

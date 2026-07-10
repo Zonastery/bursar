@@ -23,6 +23,7 @@ import type {
   LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  MigratePlanUsersResult,
   OperationPolicy,
   PaginatedTransactions,
   PricingConfigHistoryItem,
@@ -649,6 +650,24 @@ export class HttpxSupabaseStore extends CreditStore {
 
   // ── Plan management ────────────────────────────────────────────────
 
+  async migratePlanUsers(
+    planKey: string,
+    targetConfigVersion?: number | null,
+  ): Promise<MigratePlanUsersResult> {
+    const row = await this.rpc("migrate_plan_users", {
+      p_plan_key: planKey,
+      p_target_config_version: targetConfigVersion ?? null,
+    });
+    const code = this.errorCode(row);
+    if (code) throw new StoreError(`migrate_plan_users: ${code}`);
+    return {
+      planKey: String((row as Record<string, unknown>).plan_key ?? planKey),
+      targetPlanId: String((row as Record<string, unknown>).target_plan_id ?? ""),
+      targetConfigVersion: Number((row as Record<string, unknown>).target_config_version ?? 0),
+      migratedCount: Number((row as Record<string, unknown>).migrated_count ?? 0),
+    };
+  }
+
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const row = await this.rpc("get_user_plan", { p_user_id: userId });
     if (!row || Object.keys(row).length === 0) {
@@ -684,6 +703,7 @@ export class HttpxSupabaseStore extends CreditStore {
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
       allowancePeriod: (row.allowance_period as AllowancePeriod | undefined) ?? "calendar_month",
       planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
+      configVersion: row.config_version != null ? Number(row.config_version) : null,
     };
   }
 

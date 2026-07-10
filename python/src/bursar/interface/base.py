@@ -33,6 +33,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     PricingConfigHistoryItem,
     PricingConfigResult,
     RefundResult,
@@ -542,6 +543,26 @@ class CreditStore(ABC):
     @abstractmethod
     def unset_user_plan(self, user_id: str) -> dict:
         """Clear the user's plan (pauses allowance period)."""
+        ...
+
+    @abstractmethod
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        """Bulk-migrate all users on a plan_key to a specific config version.
+
+        Users on older versions of this plan_key are moved to the target version.
+        ``plan_assigned_at`` is preserved (allowance windows keep their anchor).
+
+        Args:
+            plan_key: The plan key to migrate users for.
+            target_config_version: Target config version (default: latest).
+
+        Returns:
+            ``MigratePlanUsersResult`` with migrated count.
+        """
         ...
 
     @abstractmethod

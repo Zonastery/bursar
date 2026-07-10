@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from bursar.billing.models import (
     BillingConfig,
     BillingEventClaim,
@@ -39,6 +41,10 @@ class MemoryBillingStore(BillingStore):
                     key = (provider, "product_id", ref.product_id)
                     self._provider_refs_by.setdefault(key, offer_key)
                     self._provider_refs.setdefault(key, "offer")
+                if ref.lookup_key:
+                    key = (provider, "lookup_key", ref.lookup_key)
+                    self._provider_refs_by.setdefault(key, offer_key)
+                    self._provider_refs.setdefault(key, "offer")
 
         for topup_key, topup in (config.topups or {}).items():
             self._topups[topup_key] = topup.model_dump()
@@ -49,6 +55,10 @@ class MemoryBillingStore(BillingStore):
                     self._provider_refs[key] = "topup"
                 if ref.price_id:
                     key = (provider, "price_id", ref.price_id)
+                    self._provider_refs_by[key] = topup_key
+                    self._provider_refs[key] = "topup"
+                if ref.lookup_key:
+                    key = (provider, "lookup_key", ref.lookup_key)
                     self._provider_refs_by[key] = topup_key
                     self._provider_refs[key] = "topup"
 
@@ -168,6 +178,32 @@ class MemoryBillingStore(BillingStore):
                 raw = self._topups.get(topup_key)
                 if raw:
                     return {**raw, "topup_key": topup_key}
+        return None
+
+    def resolve_billing_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        key = (provider, "lookup_key", lookup_key)
+        offer_key = self._provider_refs_by.get(key)
+        if offer_key:
+            raw = self._offers.get(offer_key)
+            if raw:
+                return {**raw, "offer_key": offer_key}
+        return None
+
+    def resolve_credit_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        key = (provider, "lookup_key", lookup_key)
+        topup_key = self._provider_refs_by.get(key)
+        if topup_key:
+            raw = self._topups.get(topup_key)
+            if raw:
+                return {**raw, "topup_key": topup_key}
         return None
 
     def upsert_billing_payment(
@@ -299,3 +335,18 @@ class MemoryBillingStore(BillingStore):
     ) -> dict | None:
         key = (provider, provider_dispute_id)
         return self._disputes.get(key)
+
+    def get_user_subscriptions(self, user_id: str) -> list[dict[str, Any]]:
+        return [sub.model_dump() for sub in self._subscriptions.values() if sub.user_id == user_id]
+
+    def deactivate_other_provider_subscriptions(
+        self,
+        user_id: str,
+        keep_provider: str,
+    ) -> dict[str, Any]:
+        canceled = 0
+        for key, sub in list(self._subscriptions.items()):
+            if sub.user_id == user_id and sub.provider != keep_provider:
+                self._subscriptions[key] = sub.model_copy(update={"status": "canceled"})
+                canceled += 1
+        return {"user_id": user_id, "keep_provider": keep_provider, "deactivated_count": canceled}

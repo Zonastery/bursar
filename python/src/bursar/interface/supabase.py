@@ -35,6 +35,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     OperationPolicy,
     PricingConfigHistoryItem,
     PricingConfigResult,
@@ -655,6 +656,7 @@ class HttpxSupabaseStore(CreditStore):
             plan_assigned_at=(
                 datetime.fromisoformat(str(row["plan_assigned_at"])) if row.get("plan_assigned_at") else None
             ),
+            config_version=row.get("config_version") or None,
         )
 
     def set_user_plan(
@@ -676,6 +678,26 @@ class HttpxSupabaseStore(CreditStore):
     def unset_user_plan(self, user_id: str) -> dict:
         row = self._rpc("unset_user_plan", {"p_user_id": user_id})
         return {"user_id": str(row.get("user_id", user_id))}
+
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        row = self._rpc(
+            "migrate_plan_users",
+            {"p_plan_key": plan_key, "p_target_config_version": target_config_version},
+        )
+        if not row or not isinstance(row, dict):
+            raise StoreError("migrate_plan_users returned no data")
+        if "error" in row and row["error"]:
+            raise StoreError(row["error"])
+        return MigratePlanUsersResult(
+            plan_key=str(row.get("plan_key", plan_key)),
+            target_plan_id=str(row.get("target_plan_id", "")),
+            target_config_version=int(row.get("target_config_version", 0)),
+            migrated_count=int(row.get("migrated_count", 0)),
+        )
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         row = self._rpc(

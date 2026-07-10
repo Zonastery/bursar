@@ -32,6 +32,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     PlanDefinition,
     PricingConfigHistoryItem,
     PricingConfigResult,
@@ -176,6 +177,9 @@ class MemoryStore(CreditStore):
         # Keyed on the *plan_key* (the dict key in config.plans), matching SQL
         # (L6) so set_user_plan(user, "pro") resolves identically across backends.
         self._plan_definitions: dict[str, PlanDefinition] = {}
+        # Tracks the config_version each plan_key was loaded at (set during
+        # sync_pricing_config / activate_pricing for parity with SQL).
+        self._plan_config_version: dict[str, int] = {}
         self._user_plan_map: dict[str, str] = {}
         # When each user was (most recently) assigned their current plan —
         # the anchor for rolling_30d/anniversary allowance windows (WS9).
@@ -1205,6 +1209,7 @@ class MemoryStore(CreditStore):
             if plans:
                 for plan_key, plan in plans.items():
                     self._plan_definitions[plan_key] = PlanDefinition.model_validate(plan)
+                    self._plan_config_version[plan_key] = self._pricing_version
             buckets = None
             if config:
                 ledger = config.get("ledger")
@@ -1272,6 +1277,7 @@ class MemoryStore(CreditStore):
                 max_concurrent=plan_def.safety.max_concurrent if plan_def and plan_def.safety else None,
                 overdraft_floor=plan_def.safety.overdraft_floor if plan_def and plan_def.safety else None,
                 plan_assigned_at=self._user_plan_assigned_at.get(user_id) if plan_key else None,
+                config_version=self._plan_config_version.get(plan_key) if plan_key else None,
             )
 
     def set_user_plan(
@@ -1301,6 +1307,23 @@ class MemoryStore(CreditStore):
             self._user_plan_map.pop(user_id, None)
             self._user_plan_assigned_at.pop(user_id, None)
             return {"user_id": user_id}
+
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        if plan_key not in self._plan_definitions:
+            raise StoreError(f"plan_key '{plan_key}' not found")
+
+        target_cv = target_config_version if target_config_version is not None else 0
+        migrated = sum(1 for pk in self._user_plan_map.values() if pk == plan_key)
+        return MigratePlanUsersResult(
+            plan_key=plan_key,
+            target_plan_id=plan_key,
+            target_config_version=target_cv,
+            migrated_count=migrated,
+        )
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         # period_start is unused here: MemoryStore already has direct access to

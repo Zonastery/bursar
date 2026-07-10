@@ -41,6 +41,9 @@ export class MemoryBillingStore extends BillingStore {
         if (ref.productId) {
           this.providerRefsBy.set(this.refKey(provider, "product_id", ref.productId), offerKey);
         }
+        if (ref.lookupKey) {
+          this.providerRefsBy.set(this.refKey(provider, "lookup_key", ref.lookupKey), offerKey);
+        }
       }
     }
 
@@ -54,6 +57,9 @@ export class MemoryBillingStore extends BillingStore {
         }
         if (ref.productId) {
           this.providerRefsBy.set(this.refKey(provider, "product_id", ref.productId), topupKey);
+        }
+        if (ref.lookupKey) {
+          this.providerRefsBy.set(this.refKey(provider, "lookup_key", ref.lookupKey), topupKey);
         }
       }
     }
@@ -150,6 +156,28 @@ export class MemoryBillingStore extends BillingStore {
       }
     }
     return latest;
+  }
+
+  async resolveBillingOfferByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null> {
+    const resourceKey = this.providerRefsBy.get(this.refKey(provider, "lookup_key", lookupKey));
+    if (!resourceKey) return null;
+    const raw = this.offers.get(resourceKey);
+    if (!raw) return null;
+    return { ...raw, offerKey: resourceKey };
+  }
+
+  async resolveCreditTopupByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null> {
+    const resourceKey = this.providerRefsBy.get(this.refKey(provider, "lookup_key", lookupKey));
+    if (!resourceKey) return null;
+    const raw = this.topups.get(resourceKey);
+    if (!raw) return null;
+    return { ...raw, topupKey: resourceKey };
   }
 
   async resolveCreditTopup(
@@ -290,5 +318,23 @@ export class MemoryBillingStore extends BillingStore {
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null> {
     return this.getBillingPayment(provider, providerPaymentId);
+  }
+
+  async getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
+    return Array.from(this.subscriptions.values()).filter((sub) => sub.userId === userId);
+  }
+
+  async deactivateOtherProviderSubscriptions(
+    userId: string,
+    keepProvider: string,
+  ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }> {
+    let count = 0;
+    for (const [key, sub] of this.subscriptions) {
+      if (sub.userId === userId && sub.provider !== keepProvider && sub.status !== "canceled") {
+        this.subscriptions.set(key, { ...sub, status: "canceled" });
+        count++;
+      }
+    }
+    return { userId, keepProvider, deactivatedCount: count };
   }
 }

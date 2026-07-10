@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from bursar.billing.models import (
     BillingConfig,
@@ -78,6 +79,20 @@ class BillingStore(ABC):
         price_id: str | None = None,
     ) -> dict | None: ...
 
+    @abstractmethod
+    def resolve_billing_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def resolve_credit_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None: ...
+
     # compute_topup_credits moved to BillingManager._compute_topup_credits
 
     @abstractmethod
@@ -141,3 +156,13 @@ class BillingStore(ABC):
         provider: str,
         provider_payment_id: str,
     ) -> dict | None: ...
+
+    @abstractmethod
+    def get_user_subscriptions(self, user_id: str) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def deactivate_other_provider_subscriptions(
+        self,
+        user_id: str,
+        keep_provider: str,
+    ) -> dict[str, Any]: ...

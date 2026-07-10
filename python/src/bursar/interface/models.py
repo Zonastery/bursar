@@ -183,6 +183,7 @@ class GetUserPlanResult(BaseModel):
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
     plan_assigned_at: datetime | None = None
+    config_version: int | None = None
 
 
 class FeatureLimit(BaseModel):
@@ -216,6 +217,13 @@ class SetUserPlanResult(BaseModel):
     user_id: str
     plan_id: str
     plan_assigned_at: str | None = None
+
+
+class MigratePlanUsersResult(BaseModel):
+    plan_key: str
+    target_plan_id: str
+    target_config_version: int
+    migrated_count: int
 
 
 class RefundResult(BaseModel):

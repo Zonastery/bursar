@@ -28,6 +28,7 @@ import type {
   LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  MigratePlanUsersResult,
   OperationPolicy,
   PaginatedTransactions,
   PlanDefinition,
@@ -244,6 +245,9 @@ export class MemoryStore extends CreditStore {
     createdAt: string;
   }> = [];
   private planDefinitions = new Map<string, PlanDefinition>();
+  /** Tracks the config_version each plan_key was loaded at (set during
+   *  setActivePricing / activatePricing for parity with SQL). */
+  private planConfigVersion = new Map<string, number>();
   // Credit tiers: definitions keyed by tier key (config key); balances keyed by
   // a composite `${userId}:${bucketKey}` string — JS Maps compare object/tuple
   // keys by reference, so a plain string key is required (repo CLAUDE.md).
@@ -1291,6 +1295,7 @@ export class MemoryStore extends CreditStore {
     if ("plans" in config && config.plans) {
       for (const [planKey, planData] of Object.entries(config.plans)) {
         this.planDefinitions.set(planKey, normalisePlanDefinition(planKey, planData));
+        this.planConfigVersion.set(planKey, this.pricingVersion);
       }
     }
     const ledgerConfig = config.ledger as Record<string, unknown> | undefined;
@@ -1334,6 +1339,7 @@ export class MemoryStore extends CreditStore {
     if ("plans" in entry.config && entry.config.plans) {
       for (const [planKey, planData] of Object.entries(entry.config.plans)) {
         this.planDefinitions.set(planKey, normalisePlanDefinition(planKey, planData));
+        this.planConfigVersion.set(planKey, this.pricingVersion);
       }
     }
     const ledgerEntry = entry.config.ledger as Record<string, unknown> | undefined;
@@ -1348,6 +1354,27 @@ export class MemoryStore extends CreditStore {
   }
 
   // ── Plan management ────────────────────────────────────────────────
+
+  async migratePlanUsers(
+    planKey: string,
+    targetConfigVersion?: number | null,
+  ): Promise<MigratePlanUsersResult> {
+    if (!this.planDefinitions.has(planKey)) {
+      throw new StoreError(`plan_key '${planKey}' not found`);
+    }
+
+    let count = 0;
+    for (const [, currentPlan] of this.userPlanMap) {
+      if (currentPlan === planKey) count++;
+    }
+
+    return {
+      planKey,
+      targetPlanId: planKey,
+      targetConfigVersion: targetConfigVersion ?? 0,
+      migratedCount: count,
+    };
+  }
 
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const planId = this.userPlanMap.get(userId) ?? null;
@@ -1372,6 +1399,7 @@ export class MemoryStore extends CreditStore {
       maxConcurrent: planDef?.safety?.maxConcurrent ?? null,
       overdraftFloor: planDef?.safety?.overdraftFloor ?? null,
       planAssignedAt: planId ? (this.userPlanAssignedAt.get(userId) ?? null) : null,
+      configVersion: planId ? (this.planConfigVersion.get(planId) ?? null) : null,
     };
   }
 

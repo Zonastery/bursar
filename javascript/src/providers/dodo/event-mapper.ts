@@ -1,4 +1,8 @@
-import type { BillingManager, BillingSubscriptionStatus } from "../../billing/index.js";
+import type {
+  BillingManager,
+  BillingEventResult,
+  BillingSubscriptionStatus,
+} from "../../billing/index.js";
 import type {
   BillingPaymentInfo,
   BillingRefundInfo,
@@ -16,6 +20,22 @@ const DISPUTE_CLOSED_TYPES = new Set([
   "dispute.challenged",
   "dispute.expired",
 ]);
+
+/**
+ * Wrapper around bm.handleEvent that throws on unhandled results (except
+ * "unhandled_event_type" which is a permanent no-op). Ensures the provider
+ * receives a retryable signal when the event could not be processed.
+ */
+async function callBillingManager(
+  bm: BillingManager,
+  event: Parameters<BillingManager["handleEvent"]>[0],
+): Promise<BillingEventResult> {
+  const result = await bm.handleEvent(event);
+  if (!result.handled && result.error !== "unhandled_event_type") {
+    throw new Error(`BillingManager failed to handle event: ${result.error}`);
+  }
+  return result;
+}
 
 export async function handleDodoBillingEvent(
   type: string,
@@ -51,7 +71,7 @@ export async function handleDodoBillingEvent(
       const subId = String(data.subscription_id ?? "");
       const periodEnd = data.next_billing_date as string | null;
 
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.created",
         subscription: {
@@ -72,7 +92,7 @@ export async function handleDodoBillingEvent(
       const subId = String(data.subscription_id ?? "");
       const periodEnd = data.next_billing_date as string | null;
 
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.activated",
         subscription: {
@@ -87,7 +107,7 @@ export async function handleDodoBillingEvent(
     case "subscription.cancelled": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.canceled",
         subscription: { providerSubscriptionId: subId },
@@ -98,7 +118,7 @@ export async function handleDodoBillingEvent(
     case "subscription.expired": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.expired",
         subscription: { providerSubscriptionId: subId },
@@ -109,7 +129,7 @@ export async function handleDodoBillingEvent(
     case "subscription.failed": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.updated",
         subscription: { providerSubscriptionId: subId, status: "past_due" },
@@ -120,7 +140,7 @@ export async function handleDodoBillingEvent(
     case "subscription.on_hold": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.updated",
         subscription: { providerSubscriptionId: subId, status: "past_due" },
@@ -132,7 +152,7 @@ export async function handleDodoBillingEvent(
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
       const periodEnd = data.next_billing_date as string | null;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.updated",
         subscription: {
@@ -147,7 +167,7 @@ export async function handleDodoBillingEvent(
     case "subscription.cancellation_scheduled": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.cancellation_scheduled",
         subscription: { providerSubscriptionId: subId, cancelAtPeriodEnd: true },
@@ -164,7 +184,7 @@ export async function handleDodoBillingEvent(
         : metadata.plan_slug
           ? { lookupKey: metadata.plan_slug }
           : undefined;
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "subscription.plan_changed",
         subscription: {
@@ -188,7 +208,7 @@ export async function handleDodoBillingEvent(
         refs: data.product_id ? { productId: String(data.product_id) } : undefined,
       };
 
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "payment.succeeded",
         ...(userId ? { userId } : {}),
@@ -200,7 +220,7 @@ export async function handleDodoBillingEvent(
     case "payment.failed": {
       const subId = String(data.subscription_id ?? "");
       const paymentId = String(data.payment_id ?? "");
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "payment.failed",
         subscription: subId ? { providerSubscriptionId: subId } : undefined,
@@ -229,7 +249,7 @@ export async function handleDodoBillingEvent(
         currency: String(data.currency ?? "USD").toUpperCase(),
         reason: (data.reason as string | undefined) ?? null,
       };
-      await bm.handleEvent({
+      await callBillingManager(bm, {
         ...baseEvent(rawId),
         eventType: "refund.created",
         refund,
@@ -246,7 +266,7 @@ export async function handleDodoBillingEvent(
           reason: (data.reason as string | undefined) ?? null,
         };
         const eventType = DISPUTE_CLOSED_TYPES.has(type) ? "dispute.closed" : "dispute.created";
-        await bm.handleEvent({
+        await callBillingManager(bm, {
           ...baseEvent(rawId),
           eventType,
           dispute,

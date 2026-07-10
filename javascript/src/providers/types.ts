@@ -13,6 +13,9 @@ export interface CheckoutParams {
   returnUrl: string;
   cancelUrl: string;
   metadata: Record<string, string>;
+  /** Provider-level idempotency key. Prevents duplicate checkout sessions on
+   *  network retries or double-clicks. Generated server-side per request. */
+  idempotencyKey?: string;
 }
 
 export interface PortalParams {

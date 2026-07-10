@@ -34,6 +34,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     OperationPolicy,
     PricingConfigHistoryItem,
     PricingConfigResult,
@@ -652,6 +653,7 @@ class PostgresStore(CreditStore):
                 if result_dict.get("plan_assigned_at")
                 else None
             ),
+            config_version=result_dict.get("config_version") or None,
         )
 
     def set_user_plan(
@@ -695,6 +697,33 @@ class PostgresStore(CreditStore):
 
         result_dict = row[0] if row and isinstance(row[0], dict) else {}
         return {"user_id": str(result_dict.get("user_id", user_id))}
+
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(
+                    "migrate_plan_users",
+                    [plan_key, target_config_version],
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except psycopg2.Error as e:
+            conn.rollback()
+            raise StoreError(f"migrate_plan_users failed: {e}") from e
+        finally:
+            conn.close()
+
+        if not row or not isinstance(row[0], dict):
+            raise StoreError("migrate_plan_users returned no data")
+        result_dict = row[0]
+        if "error" in result_dict and result_dict["error"]:
+            raise StoreError(result_dict["error"])
+        return MigratePlanUsersResult(**result_dict)
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         conn = self._conn()

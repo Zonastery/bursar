@@ -23,6 +23,7 @@ import type {
   LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  MigratePlanUsersResult,
   PaginatedTransactions,
   PricingConfigHistoryItem,
   PricingConfigResult,
@@ -264,6 +265,15 @@ export abstract class CreditStore {
   abstract getPricingHistory(): Promise<PricingConfigHistoryItem[]>;
   abstract getPricingConfig(version: number): Promise<PricingConfigResult | null>;
   abstract activatePricing(version: number): Promise<string>;
+
+  /**
+   * Bulk-migrate all users on a plan_key to a specific config version.
+   * plan_assigned_at is preserved (allowance windows keep their anchor).
+   */
+  abstract migratePlanUsers(
+    planKey: string,
+    targetConfigVersion?: number | null,
+  ): Promise<MigratePlanUsersResult>;
 
   // ── Plan management ────────────────────────────────────────────────
   abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;

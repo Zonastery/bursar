@@ -32,6 +32,7 @@ import type {
   FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
+  MigratePlanUsersResult,
   OperationPolicy,
   RefundResult,
   ReleaseResult,
@@ -440,6 +441,19 @@ export class CreditManager {
       planKey: null,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Bulk-migrate users to a specific version of a plan.
+   *
+   * Users on older versions of ``planKey`` are moved to the target version.
+   * ``planAssignedAt`` is preserved so allowance windows keep their anchor.
+   */
+  async migratePlanUsers(
+    planKey: string,
+    targetConfigVersion?: number | null,
+  ): Promise<MigratePlanUsersResult> {
+    return this.store.migratePlanUsers(planKey, targetConfigVersion);
   }
 
   /**

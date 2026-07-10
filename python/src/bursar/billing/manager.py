@@ -57,12 +57,14 @@ class BillingManager:
         resolve_user: ResolveUserFn | None = None,
         config: BillingConfig | None = None,
         on_trial_will_end: Callable[[BillingEvent], None] | None = None,
+        cancel_prior_providers: bool = True,
     ) -> None:
         self._store = billing_store
         self._cm = credit_manager
         self._emitter = emitter
         self._resolve_user = resolve_user
         self._on_trial_will_end = on_trial_will_end
+        self._cancel_prior_providers = cancel_prior_providers
         self._handlers = {
             "customer.created": self._handle_customer_created,
             "customer.updated": self._handle_customer_updated,
@@ -167,9 +169,10 @@ class BillingManager:
             product_id=refs.product_id,
             price_id=refs.price_id,
         )
+        if not offer and refs.lookup_key:
+            offer = self._resolve_offer_by_lookup(event.provider, refs.lookup_key)
         if not offer:
-            refs = event.subscription.refs
-            if refs and refs.lookup_key:
+            if refs.lookup_key:
                 return (
                     {"plan": refs.lookup_key, "grant": {"mode": "allowance"}},
                     refs.lookup_key,
@@ -177,6 +180,12 @@ class BillingManager:
                 )
             return None, None, None
         return offer, offer.get("offer_key"), offer.get("plan")
+
+    def _resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> dict | None:
+        result = self._store.resolve_billing_offer_by_lookup(provider, lookup_key)
+        if result and "offer_key" in result and "plan" in result:
+            return result
+        return None
 
     def _subscription_state(
         self,
@@ -642,6 +651,12 @@ class BillingManager:
                     period_start = None
 
         self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
+
+        if self._cancel_prior_providers and event.provider:
+            result = self._store.deactivate_other_provider_subscriptions(uid, event.provider)
+            count = result.get("deactivated_count", 0) or 0
+            if count:
+                logger.info("deactivated %d prior provider subscription(s) for user %s", count, uid)
 
         grant = offer.get("grant") or {}
         if grant.get("mode") == "cycle_grant" and self._cm:

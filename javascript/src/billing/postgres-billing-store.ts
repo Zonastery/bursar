@@ -245,6 +245,32 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
+  async resolveBillingOfferByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null> {
+    const result = await this.callRpcJson("resolve_billing_offer_by_lookup", [provider, lookupKey]);
+    if (result && result.offerKey) {
+      return { ...result, plan: result.plan ?? null };
+    }
+    return null;
+  }
+
+  async resolveCreditTopupByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null> {
+    const result = await this.callRpcJson("resolve_credit_topup_by_lookup", [provider, lookupKey]);
+    if (result && result.topupKey) {
+      return {
+        ...result,
+        creditsPerUnit: result.creditsPerUnit ?? result.creditsPerMajorUnit ?? 1000,
+        depositTo: result.depositTo ?? result.tier ?? "purchased",
+      };
+    }
+    return null;
+  }
+
   async resolveCreditTopup(
     provider: string,
     productId?: string | null,
@@ -392,6 +418,36 @@ export class PostgresBillingStore extends BillingStore {
       }
     }
     return null;
+  }
+
+  async getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
+    const result = await this.pool.query(
+      `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
+              offer_key, plan, status, current_period_start,
+              current_period_end, cancel_at_period_end, interval, interval_count, metadata
+       FROM public.billing_subscriptions
+       WHERE user_id = $1
+       ORDER BY current_period_start DESC NULLS LAST`,
+      [userId],
+    );
+    return result.rows.map((r) => this.rowToSubscriptionState(r));
+  }
+
+  async deactivateOtherProviderSubscriptions(
+    userId: string,
+    keepProvider: string,
+  ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }> {
+    const result = await this.pool.query(
+      `UPDATE public.billing_subscriptions
+               SET status = 'canceled', updated_at = now()
+       WHERE user_id = $1 AND provider != $2 AND status IN ('active', 'trialing')`,
+      [userId, keepProvider],
+    );
+    return {
+      userId,
+      keepProvider,
+      deactivatedCount: result.rowCount ?? 0,
+    };
   }
 
   /** Fallback: query billing_payments directly to include metadata (the

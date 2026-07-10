@@ -295,7 +295,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance fully covers cost, no balance debit; window incremented", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Free', 100, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Free', 100, $2, 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(10), "adjustment");
@@ -312,7 +312,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance partial, remainder charged to balance", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Starter', 10, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Starter', 10, $2, 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(100), "adjustment");
@@ -704,7 +704,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // The SQL BEGIN block increments the usage window by 5, then the RAISE rolls
     // it back — so allowanceRemaining stays at 5 (unchanged from the initial 5).
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanJI6', 5, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI6', 5, $2, 0)`,
       [PLAN_JI6, PLAN_JI6],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
@@ -731,7 +731,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // take 15 from balance. This ensures the transaction has a real balance debit
     // (amount > 0) so the refund succeeds, while allowanceConsumed > 0.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanJI7', 5, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI7', 5, $2, 0)`,
       [PLAN_JI7, PLAN_JI7],
     );
     await store.addCredits(PG_USER, D(500), "purchase");
@@ -816,7 +816,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const PLAN_H4 = "00000000-0000-0000-0000-0000000000c1";
     // Plan with monthly allowance of 10.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'PlanH4', 10, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanH4', 10, $2, 0)`,
       [PLAN_H4, PLAN_H4],
     );
     await store.addCredits(PG_USER, D(50), "purchase");
@@ -1167,8 +1167,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
-       VALUES ($1, 'Rolling', 20, $2, 'rolling_30d')`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+       VALUES ($1, 'Rolling', 20, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     const before = new Date();
@@ -1216,8 +1216,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("deductWithAllowance with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
-       VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d')`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+       VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
@@ -1250,8 +1250,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("createLease/settleLease with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
-       VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d')`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+       VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
@@ -1404,8 +1404,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditManager(store);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
-       VALUES ($1, 'Cal', 15, $2, 'calendar_month')`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+       VALUES ($1, 'Cal', 15, $2, 'calendar_month', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER6, D(100), "purchase");
@@ -1469,8 +1469,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const PLAN_X = "00000000-0000-0000-0000-0000000000d1";
     const PLAN_Y = "00000000-0000-0000-0000-0000000000d2";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key)
-       VALUES ($1, 'X', 5, $2), ($3, 'Y', 5, $4)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version)
+       VALUES ($1, 'X', 5, $2, 0), ($3, 'Y', 5, $4, 0)`,
       [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
     );
 
@@ -1491,8 +1491,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const PURGE_PLAN = "00000000-0000-0000-0000-0000000000f1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key)
-       VALUES ($1, 'purge-test', 100, $2)
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version)
+       VALUES ($1, 'purge-test', 100, $2, 0)
        ON CONFLICT (id) DO NOTHING`,
       [PURGE_PLAN, "purge-plan"],
     );
@@ -1560,8 +1560,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("settleLease jointly exercises floor-clamp (C1) and periodStart (WS9) against the canonical single signature", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period)
-       VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d')`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+       VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     // Balance of 8: floor 0 means settle can debit at most 8 net regardless of
@@ -2165,7 +2165,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     // plan_key string).
     const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key) VALUES ($1, 'Pro', 0, $2)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, 0)`,
       [SUB_PLAN, "pro-monthly"],
     );
 

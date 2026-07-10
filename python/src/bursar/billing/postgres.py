@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 
 import psycopg2
 import psycopg2.extras
@@ -320,6 +321,32 @@ class PostgresBillingStore(BillingStore):
             return result
         return None
 
+    def resolve_billing_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        result = self._call_rpc_json_sync(
+            "public.resolve_billing_offer_by_lookup",
+            [provider, lookup_key],
+        )
+        if result and "offer_key" in result:
+            return result
+        return None
+
+    def resolve_credit_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        result = self._call_rpc_json_sync(
+            "public.resolve_credit_topup_by_lookup",
+            [provider, lookup_key],
+        )
+        if result and "topup_key" in result:
+            return result
+        return None
+
     def upsert_billing_payment(
         self,
         provider: str,
@@ -435,3 +462,22 @@ class PostgresBillingStore(BillingStore):
             "public.get_billing_payment_for_refund",
             [provider, provider_payment_id],
         )
+
+    def get_user_subscriptions(self, user_id: str) -> list[dict[str, Any]]:
+        result = self._call_rpc_json_sync(
+            "public.get_user_subscriptions",
+            [user_id],
+        )
+        subscriptions = result.get("subscriptions") if result else None
+        return subscriptions if isinstance(subscriptions, list) else []
+
+    def deactivate_other_provider_subscriptions(
+        self,
+        user_id: str,
+        keep_provider: str,
+    ) -> dict[str, Any]:
+        result = self._call_rpc_json_sync(
+            "public.deactivate_other_provider_subscriptions",
+            [user_id, keep_provider],
+        )
+        return result or {}

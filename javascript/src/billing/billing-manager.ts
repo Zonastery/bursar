@@ -29,6 +29,7 @@ export interface BillingManagerOptions {
   creditManager?: CreditManager | null;
   resolveUser?: ResolveUserFn | null;
   onTrialWillEnd?: (event: BillingEvent) => void | Promise<void>;
+  cancelPriorProviders?: boolean;
 }
 
 /**
@@ -40,6 +41,7 @@ export class BillingManager {
   private cm: CreditManager | null;
   private resolveUser: ResolveUserFn | null;
   private onTrialWillEnd: ((event: BillingEvent) => void | Promise<void>) | null;
+  private cancelPriorProviders: boolean;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
@@ -49,9 +51,10 @@ export class BillingManager {
     this.cm = options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
     this.onTrialWillEnd = options?.onTrialWillEnd ?? null;
+    this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
-      ttl: 60_000,
+      ttl: 10_000,
       allowStale: false,
       fetchMethod: async (_, __, { context }) => {
         const offer = await this.store.resolveBillingOffer(
@@ -201,11 +204,28 @@ export class BillingManager {
     return { handled: true, action: "customer_created" };
   }
 
-  private async handleCustomerUpdated(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleCustomerUpdated(event: BillingEvent): Promise<BillingEventResult> {
+    if (event.customer?.providerCustomerId) {
+      const uid = await this.resolveUserId(event);
+      if (uid) {
+        await this.store.upsertBillingCustomer(
+          event.provider,
+          event.customer.providerCustomerId,
+          uid,
+          event.customer.email ?? null,
+        );
+      }
+    }
     return { handled: true, action: "customer_updated" };
   }
 
-  private async handleCustomerDeleted(_event: BillingEvent): Promise<BillingEventResult> {
+  private async handleCustomerDeleted(event: BillingEvent): Promise<BillingEventResult> {
+    if (event.customer?.providerCustomerId) {
+      const uid = await this.resolveUserId(event);
+      if (uid && this.cm) {
+        await this.revokeSubscription(uid);
+      }
+    }
     return { handled: true, action: "customer_deleted" };
   }
 
@@ -281,6 +301,8 @@ export class BillingManager {
   }> {
     const refs = event.subscription?.refs;
     if (!refs) return { offer: null, offerKey: null, plan: null };
+
+    // Tier 1: Resolve by price/product ID
     const offer = await this.resolveBillingOfferCached(
       event.provider,
       refs.productId ?? null,
@@ -293,14 +315,32 @@ export class BillingManager {
         plan: (offer?.plan as string | null) ?? null,
       };
     }
-    // Fallback to lookupKey when no provider refs match (mock/Dodo webhooks)
+
+    // Tier 2: Resolve by lookup_key
     if (refs.lookupKey) {
+      const lookupOffer = await this.store.resolveBillingOfferByLookup(
+        event.provider,
+        refs.lookupKey,
+      );
+      if (lookupOffer) {
+        return {
+          offer: lookupOffer,
+          offerKey: (lookupOffer?.offerKey as string | null) ?? null,
+          plan: (lookupOffer?.plan as string | null) ?? null,
+        };
+      }
+
+      // Tier 3: Synthetic fallback (last resort)
+      console.warn(
+        `[BillingManager] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}, using synthetic fallback`,
+      );
       return {
         offer: { plan: refs.lookupKey, grant: { mode: "allowance" } },
         offerKey: null,
         plan: refs.lookupKey,
       };
     }
+
     return { offer: null, offerKey: null, plan: null };
   }
 
@@ -745,6 +785,16 @@ export class BillingManager {
         })()
       : undefined;
     await this.cm.setUserPlan(uid, plan, planAssignedAt);
+
+    // Cancel subscriptions from other providers (migration support)
+    if (this.cancelPriorProviders && event.provider) {
+      const result = await this.store.deactivateOtherProviderSubscriptions(uid, event.provider);
+      if (result.deactivatedCount > 0) {
+        console.log(
+          `[BillingManager] deactivated ${result.deactivatedCount} prior provider subscription(s) for user ${uid}`,
+        );
+      }
+    }
 
     const grant = (offer?.grant as Record<string, unknown> | undefined) ?? {};
     const grantMode = grant.mode as string | undefined;

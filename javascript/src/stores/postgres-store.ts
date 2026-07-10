@@ -23,6 +23,7 @@ import type {
   LeaseResult,
   ListTransactionsOptions,
   ListUsageEventsOptions,
+  MigratePlanUsersResult,
   OperationPolicy,
   PaginatedTransactions,
   PricingConfigHistoryItem,
@@ -684,6 +685,20 @@ export class PostgresStore extends CreditStore {
 
   // ── Plan management ────────────────────────────────────────────────
 
+  async migratePlanUsers(
+    planKey: string,
+    targetConfigVersion?: number | null,
+  ): Promise<MigratePlanUsersResult> {
+    const rows = await this.callproc("migrate_plan_users", [planKey, targetConfigVersion ?? null]);
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      planKey: String(row.plan_key ?? planKey),
+      targetPlanId: String(row.target_plan_id ?? ""),
+      targetConfigVersion: Number(row.target_config_version ?? 0),
+      migratedCount: Number(row.migrated_count ?? 0),
+    };
+  }
+
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
     const rows = await this.callproc("get_user_plan", [userId]);
     if (!rows || rows.length === 0) {
@@ -718,6 +733,7 @@ export class PostgresStore extends CreditStore {
       overdraftFloor: row.overdraft_floor != null ? dec(row.overdraft_floor) : null,
       allowancePeriod: (row.allowance_period as AllowancePeriod | undefined) ?? "calendar_month",
       planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
+      configVersion: row.config_version != null ? Number(row.config_version) : null,
     };
   }
 

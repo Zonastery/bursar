@@ -209,6 +209,40 @@ class SupabaseBillingStore(BillingStore):
         data = result.get("data")
         return data if data else None
 
+    def resolve_billing_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        result = self._supabase.rpc(
+            "resolve_billing_offer_by_lookup",
+            {
+                "p_provider": provider,
+                "p_lookup_key": lookup_key,
+            },
+        )
+        if "error" in result and result["error"]:
+            raise RuntimeError(result["error"])
+        data = result.get("data")
+        return data if data else None
+
+    def resolve_credit_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> dict[str, Any] | None:
+        result = self._supabase.rpc(
+            "resolve_credit_topup_by_lookup",
+            {
+                "p_provider": provider,
+                "p_lookup_key": lookup_key,
+            },
+        )
+        if "error" in result and result["error"]:
+            raise RuntimeError(result["error"])
+        data = result.get("data")
+        return data if data else None
+
     def upsert_billing_payment(
         self,
         provider: str,
@@ -339,3 +373,30 @@ class SupabaseBillingStore(BillingStore):
             raise RuntimeError(result["error"])
         data = result.get("data")
         return data if data else None
+
+    def get_user_subscriptions(self, user_id: str) -> list[dict[str, Any]]:
+        result = self._supabase.rpc(
+            "get_user_subscriptions",
+            {"p_user_id": user_id},
+        )
+        if "error" in result and result["error"]:
+            raise RuntimeError(result["error"])
+        data = result.get("data")
+        return data if isinstance(data, list) else []
+
+    def deactivate_other_provider_subscriptions(
+        self,
+        user_id: str,
+        keep_provider: str,
+    ) -> dict[str, Any]:
+        result = self._supabase.rpc(
+            "deactivate_other_provider_subscriptions",
+            {
+                "p_user_id": user_id,
+                "p_keep_provider": keep_provider,
+            },
+        )
+        if "error" in result and result["error"]:
+            raise RuntimeError(result["error"])
+        data = result.get("data")
+        return data if isinstance(data, dict) else {}

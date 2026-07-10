@@ -53,6 +53,16 @@ export abstract class BillingStore {
     priceId?: string | null,
   ): Promise<Record<string, unknown> | null>;
 
+  abstract resolveBillingOfferByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  abstract resolveCreditTopupByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<Record<string, unknown> | null>;
+
   abstract computeTopupCredits(
     amountMinor: number,
     topupConfig: Record<string, unknown>,
@@ -120,4 +130,11 @@ export abstract class BillingStore {
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null>;
+
+  abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
+
+  abstract deactivateOtherProviderSubscriptions(
+    userId: string,
+    keepProvider: string,
+  ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }>;
 }

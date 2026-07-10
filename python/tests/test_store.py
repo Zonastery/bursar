@@ -22,6 +22,7 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    MigratePlanUsersResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -1646,6 +1647,9 @@ class _MinimalCoreStore(CreditStore):
 
     def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
         return {"user_id": user_id, "amount": 0, "new_balance": "0", "tier": None}
+
+    def migrate_plan_users(self, plan_key: str, target_config_version: int):
+        return MigratePlanUsersResult(plan_key=plan_key, target_config_version=target_config_version, users_migrated=0)
 
 
 class TestOptionalCapabilities:

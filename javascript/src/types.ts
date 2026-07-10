@@ -251,6 +251,7 @@ export interface GetUserPlanResult {
   overdraftFloor?: Decimal | null;
   /** Timestamp the current plan was assigned — the anchor for non-calendar periods. */
   planAssignedAt?: Date | null;
+  configVersion?: number | null;
 }
 
 /**
@@ -343,6 +344,13 @@ export interface SetUserPlanResult {
   userId: string;
   planId: string;
   planAssignedAt?: string | null;
+}
+
+export interface MigratePlanUsersResult {
+  planKey: string;
+  targetPlanId: string;
+  targetConfigVersion: number;
+  migratedCount: number;
 }
 
 /** Result of refunding a credit deduction. */
