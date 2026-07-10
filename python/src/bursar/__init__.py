@@ -1,6 +1,7 @@
 """bursar — declarative credit calculation engine for AI SaaS platforms."""
 
 from importlib.metadata import PackageNotFoundError, version
+from typing import TYPE_CHECKING
 
 try:
     __version__ = version("bursar")
@@ -27,11 +28,13 @@ from bursar.billing import (
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     MemoryBillingStore,
-    PostgresBillingStore,
     ProviderRef,
     SupabaseBillingStore,
 )
 from bursar.breakdown import CostBreakdown
+
+if TYPE_CHECKING:
+    from bursar.billing import PostgresBillingStore
 from bursar.config import ConfigError, PricingConfig
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter
@@ -106,6 +109,17 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
+
+
+def __getattr__(name: str):
+    """Lazy-import PostgresBillingStore — requires psycopg2."""
+    if name == "PostgresBillingStore":
+        from bursar.billing import PostgresBillingStore  # pyright: ignore[reportUnsupportedDunderAll]
+
+        return PostgresBillingStore
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
 
 __all__ = [
     "AddCreditsResult",

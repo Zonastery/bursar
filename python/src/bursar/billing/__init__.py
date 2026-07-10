@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from bursar.billing.manager import BillingManager
 from bursar.billing.memory import MemoryBillingStore
 from bursar.billing.models import (
@@ -22,9 +24,22 @@ from bursar.billing.models import (
     CycleGrant,
     ProviderRef,
 )
-from bursar.billing.postgres import PostgresBillingStore
 from bursar.billing.store import BillingStore
 from bursar.billing.supabase import SupabaseBillingStore
+
+if TYPE_CHECKING:
+    from bursar.billing.postgres import PostgresBillingStore
+
+
+def __getattr__(name: str):
+    """Lazy-import PostgresBillingStore — psycopg2 optional unless used."""
+    if name == "PostgresBillingStore":
+        from bursar.billing.postgres import PostgresBillingStore
+
+        return PostgresBillingStore
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
 
 __all__ = [
     "AllowanceGrant",
