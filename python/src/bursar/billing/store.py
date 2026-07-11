@@ -1,12 +1,12 @@
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from typing import Any
 
 from bursar.billing.models import (
     BillingConfig,
     BillingEventClaim,
+    BillingOfferResult,
     BillingSubscriptionState,
+    BillingTopupResult,
 )
 
 
@@ -20,7 +20,7 @@ class BillingStore(ABC):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-    ) -> dict | None: ...
+    ) -> BillingOfferResult | None: ...
 
     @abstractmethod
     def claim_billing_event(
@@ -77,21 +77,21 @@ class BillingStore(ABC):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-    ) -> dict | None: ...
+    ) -> BillingTopupResult | None: ...
 
     @abstractmethod
     def resolve_billing_offer_by_lookup(
         self,
         provider: str,
         lookup_key: str,
-    ) -> dict[str, Any] | None: ...
+    ) -> BillingOfferResult | None: ...
 
     @abstractmethod
     def resolve_credit_topup_by_lookup(
         self,
         provider: str,
         lookup_key: str,
-    ) -> dict[str, Any] | None: ...
+    ) -> BillingTopupResult | None: ...
 
     # compute_topup_credits moved to BillingManager._compute_topup_credits
 

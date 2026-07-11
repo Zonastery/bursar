@@ -1,7 +1,9 @@
 import type {
   BillingConfig,
   BillingEventClaim,
+  BillingOfferResult,
   BillingSubscriptionState,
+  BillingTopupResult,
 } from "./billing-types.js";
 
 /**
@@ -17,7 +19,7 @@ export abstract class BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<BillingOfferResult | null>;
 
   abstract claimBillingEvent(
     provider: string,
@@ -51,21 +53,21 @@ export abstract class BillingStore {
     provider: string,
     productId?: string | null,
     priceId?: string | null,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<BillingTopupResult | null>;
 
   abstract resolveBillingOfferByLookup(
     provider: string,
     lookupKey: string,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<BillingOfferResult | null>;
 
   abstract resolveCreditTopupByLookup(
     provider: string,
     lookupKey: string,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<BillingTopupResult | null>;
 
   abstract computeTopupCredits(
     amountMinor: number,
-    topupConfig: Record<string, unknown>,
+    topupConfig: BillingTopupResult,
   ): Promise<number>;
 
   abstract upsertBillingPayment(

@@ -6,11 +6,13 @@ import type {
   BillingConfig,
   BillingEvent,
   BillingEventResult,
+  BillingOfferResult,
   BillingSubscriptionState,
+  BillingTopupResult,
 } from "./billing-types.js";
 
 interface OfferCacheValue {
-  offer: Record<string, unknown> | null;
+  offer: BillingOfferResult | null;
 }
 
 interface OfferContext {
@@ -181,7 +183,7 @@ export class BillingManager {
     provider: string,
     productId: string | null,
     priceId: string | null,
-  ): Promise<Record<string, unknown> | null> {
+  ): Promise<BillingOfferResult | null> {
     const cacheKey = `${provider}:${productId ?? ""}:${priceId ?? ""}`;
     const result = await this.offerCache.fetch(cacheKey, {
       context: { provider, productId, priceId },
@@ -295,7 +297,7 @@ export class BillingManager {
   }
 
   private async resolveOfferAndKeys(event: BillingEvent): Promise<{
-    offer: Record<string, unknown> | null;
+    offer: BillingOfferResult | null;
     offerKey: string | null;
     plan: string | null;
   }> {
@@ -358,11 +360,7 @@ export class BillingManager {
       event.subscription.status &&
       ["active", "trialing"].includes(event.subscription.status)
     ) {
-      await this.provisionSubscription(
-        uid,
-        offer ?? (existing?.plan ? { plan: existing.plan } : null),
-        event,
-      );
+      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_created" };
   }
@@ -404,11 +402,7 @@ export class BillingManager {
       }),
     );
     if (this.cm) {
-      await this.provisionSubscription(
-        uid,
-        offer ?? (existing?.plan ? { plan: existing.plan } : null),
-        event,
-      );
+      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_activated" };
   }
@@ -429,11 +423,7 @@ export class BillingManager {
       }),
     );
     if (this.cm && resolvedPlanKey) {
-      await this.provisionSubscription(
-        uid,
-        offer ?? (existing?.plan ? { plan: existing.plan } : null),
-        event,
-      );
+      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_renewed" };
   }
@@ -453,11 +443,7 @@ export class BillingManager {
       }),
     );
     if (this.cm && (plan ?? existing?.plan)) {
-      await this.provisionSubscription(
-        uid,
-        offer ?? (existing?.plan ? { plan: existing.plan } : null),
-        event,
-      );
+      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
@@ -562,11 +548,7 @@ export class BillingManager {
       }),
     );
     if (this.cm) {
-      await this.provisionSubscription(
-        uid,
-        offer ?? (existing?.plan ? { plan: existing.plan } : null),
-        event,
-      );
+      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_resumed" };
   }
@@ -612,7 +594,7 @@ export class BillingManager {
 
     const uid = await this.resolveUserId(event);
     const refs = event.payment.refs;
-    let topupConfig: Record<string, unknown> | null = null;
+    let topupConfig: BillingTopupResult | null = null;
     if (refs) {
       topupConfig = await this.store.resolveCreditTopup(
         event.provider,
@@ -640,19 +622,12 @@ export class BillingManager {
     }
 
     if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
-      const minAmount = Number(topupConfig.minAmountMinor ?? 0);
-      const maxAmount = Number(topupConfig.maxAmountMinor ?? Number.MAX_SAFE_INTEGER);
-      if (event.payment.amountMinor >= minAmount && event.payment.amountMinor <= maxAmount) {
-        const credits = await this.store.computeTopupCredits(
-          event.payment.amountMinor,
-          topupConfig,
-        );
-        if (credits > 0) {
-          await this.cm.addCredits(uid, new Decimal(credits), {
-            type: "purchase",
-            bucket: (topupConfig.depositTo as string) ?? "purchased",
-          });
-        }
+      const credits = await this.store.computeTopupCredits(event.payment.amountMinor, topupConfig);
+      if (credits > 0) {
+        await this.cm.addCredits(uid, new Decimal(credits), {
+          type: "purchase",
+          bucket: topupConfig.depositTo ?? "purchased",
+        });
       }
     }
 
@@ -754,20 +729,17 @@ export class BillingManager {
 
   private async provisionSubscription(
     uid: string,
-    offer: Record<string, unknown> | null,
+    offer: BillingOfferResult | null,
     event: BillingEvent,
+    planKeyOverride?: string,
   ): Promise<void> {
-    if (!offer) {
-      console.log(`[BillingManager] provisionSubscription: no offer for user ${uid}`);
-      return;
-    }
     if (!this.cm) {
       console.log(`[BillingManager] provisionSubscription: no creditManager for user ${uid}`);
       return;
     }
-    const plan = offer.plan as string | undefined;
+    const plan = planKeyOverride ?? offer?.plan;
     if (!plan) {
-      console.log(`[BillingManager] provisionSubscription: no plan in offer for user ${uid}`);
+      console.log(`[BillingManager] provisionSubscription: no plan for user ${uid}`);
       return;
     }
     const periodStart = event.subscription?.periodStart;
@@ -789,14 +761,12 @@ export class BillingManager {
       }
     }
 
-    const grant = (offer?.grant as Record<string, unknown> | undefined) ?? {};
-    const grantMode = grant.mode as string | undefined;
-    if (grantMode === "cycle_grant" && this.cm) {
-      const cycleCredits = grant.credits as number | undefined;
+    const g = offer?.grant;
+    if (g?.mode === "cycle_grant" && this.cm) {
+      const cycleCredits = g.credits;
       if (cycleCredits && cycleCredits > 0) {
-        const cycleBucket = (grant.bucket as string) ?? "purchased";
-        const replacePrior = (grant.replacePrior as boolean) ?? true;
-        if (replacePrior) {
+        const cycleBucket = g.bucket ?? "purchased";
+        if (g.replacePrior) {
           await this.cm.revokeCreditsByTxType(uid, "cycle_grant");
         }
         await this.cm.addCredits(uid, new Decimal(cycleCredits), {
@@ -825,7 +795,7 @@ export class BillingManager {
           event.subscription.providerSubscriptionId,
         );
         if (existing?.plan) {
-          await this.provisionSubscription(uid, { plan: existing.plan }, event);
+          await this.provisionSubscription(uid, null, event, existing.plan);
         }
       }
     } else if (
@@ -836,7 +806,7 @@ export class BillingManager {
     }
   }
 
-  private async resolveOffer(event: BillingEvent): Promise<Record<string, unknown> | null> {
+  private async resolveOffer(event: BillingEvent): Promise<BillingOfferResult | null> {
     const refs = event.subscription?.refs;
     if (!refs) return null;
     return this.resolveBillingOfferCached(

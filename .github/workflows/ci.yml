@@ -37,7 +37,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
-      - run: pip install -e "python/[test,postgres,supabase]"
+      - run: pip install -e "python/[test,postgres]"
       - working-directory: python
         run: pyright src/
 
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e "python/[test,postgres,supabase]"
+      - run: pip install -e "python/[test,postgres]"
       # Loads tests/parity/expression_cases.json (parity gate, §7) AND runs the
       # real-Postgres concurrency/double-spend suite via the DATABASE_URL above.
       # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).

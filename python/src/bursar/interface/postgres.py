@@ -7,13 +7,13 @@ Postgres database that has the bursar schema installed.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Literal, cast
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 from bursar.allowance import resolve_calendar_window
 from bursar.interface.base import CreditStore, StoreError
@@ -53,6 +53,14 @@ from bursar.interface.models import (
     TopUserRow,
     TransactionRow,
 )
+from bursar.repositories.analytics import AnalyticsRepository
+from bursar.repositories.balance import BalanceRepository
+from bursar.repositories.bucket import BucketRepository
+from bursar.repositories.deduction import DeductionRepository
+from bursar.repositories.lease import LeaseRepository
+from bursar.repositories.plan import PlanRepository
+from bursar.repositories.pricing import PricingRepository
+from bursar.repositories.team import TeamRepository
 from bursar.sql import _get_sql_files
 
 
@@ -115,7 +123,7 @@ class DecimalEncoder(json.JSONEncoder):
 
 
 class PostgresStore(CreditStore):
-    """Credit store backed by a raw Postgres connection.
+    """Credit store backed by a raw Postgres connection with pooling.
 
     Args:
         database_url: Postgres connection string
@@ -125,25 +133,85 @@ class PostgresStore(CreditStore):
     def __init__(self, database_url: str, *, pricing_cache_ttl: int = 300) -> None:
         super().__init__(pricing_cache_ttl=pricing_cache_ttl)
         self._database_url = database_url
+        self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, database_url)
+
+    # ── Repository getters ─────────────────────────────────────────────
+
+    @property
+    def _balance_repo(self) -> BalanceRepository:
+        if not hasattr(self, "__balance_repo"):
+            self.__balance_repo = BalanceRepository(self._callproc)
+        return self.__balance_repo
+
+    @property
+    def _deduction_repo(self) -> DeductionRepository:
+        if not hasattr(self, "__deduction_repo"):
+            self.__deduction_repo = DeductionRepository(self._callproc)
+        return self.__deduction_repo
+
+    @property
+    def _lease_repo(self) -> LeaseRepository:
+        if not hasattr(self, "__lease_repo"):
+            self.__lease_repo = LeaseRepository(self._callproc)
+        return self.__lease_repo
+
+    @property
+    def _pricing_repo(self) -> PricingRepository:
+        if not hasattr(self, "__pricing_repo"):
+            self.__pricing_repo = PricingRepository(self._callproc)
+        return self.__pricing_repo
+
+    @property
+    def _plan_repo(self) -> PlanRepository:
+        if not hasattr(self, "__plan_repo"):
+            self.__plan_repo = PlanRepository(self._callproc)
+        return self.__plan_repo
+
+    @property
+    def _analytics_repo(self) -> AnalyticsRepository:
+        if not hasattr(self, "__analytics_repo"):
+            self.__analytics_repo = AnalyticsRepository(self._callproc)
+        return self.__analytics_repo
+
+    @property
+    def _team_repo(self) -> TeamRepository:
+        if not hasattr(self, "__team_repo"):
+            self.__team_repo = TeamRepository(self._callproc)
+        return self.__team_repo
+
+    @property
+    def _bucket_repo(self) -> BucketRepository:
+        if not hasattr(self, "__bucket_repo"):
+            self.__bucket_repo = BucketRepository(self._callproc)
+        return self.__bucket_repo
+
+    def close(self) -> None:
+        """Close all connections in the pool."""
+        self._pool.closeall()
+
+    # ── RPC dispatcher ─────────────────────────────────────────────────
+
+    def _callproc(self, name: str, params: list[Any]) -> list[Any]:
+        """Execute an RPC and return all result rows, using the connection pool."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.callproc(name, params)
+                rows = cur.fetchall()
+            conn.commit()
+            return [r[0] if isinstance(r, (list, tuple)) else r for r in (rows or [])]
+        except psycopg2.Error:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
 
     def _conn(self):
+        """Create a dedicated connection for one-time operations (e.g. setup)."""
         try:
             return psycopg2.connect(self._database_url)
         except psycopg2.Error as e:
             raise StoreError(f"database connection failed: {e}") from e
-
-    @contextmanager
-    def _conn_ctx(self):
-        conn = self._conn()
-        try:
-            yield conn
-        except BaseException:
-            conn.rollback()
-            raise
-        else:
-            conn.commit()
-        finally:
-            conn.close()
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -192,22 +260,14 @@ class PostgresStore(CreditStore):
     # ── Runtime operations ─────────────────────────────────────────────
 
     def get_balance(self, user_id: str) -> BalanceResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_credits_balance", [user_id])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._balance_repo.get_balance(user_id)
+        if result_dict is None:
             return BalanceResult(user_id=user_id, balance=Decimal(0))
 
-        result_dict = row[0] if isinstance(row[0], dict) else {}
         return BalanceResult(
-            user_id=str(result_dict.get("user_id", user_id)),
-            balance=_dec(result_dict.get("balance")),
-            lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            balance=_dec(result_dict.balance),
+            lifetime_purchased=_dec(result_dict.lifetime_purchased),
         )
 
     def add_credits(
@@ -221,31 +281,26 @@ class PostgresStore(CreditStore):
         idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         amount = _dec(amount)
-        conn = self._conn()
-        try:
-            meta = metadata.model_dump(mode="json") if metadata else {}
-            if expires_at:
-                meta["expires_at"] = expires_at.isoformat()
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "credits_add",
-                    [user_id, amount, type, json.dumps(meta), bucket, idempotency_key],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row else {}
-        if "error" in result_dict and result_dict["error"]:
+        meta = metadata.model_dump(mode="json") if metadata else {}
+        if expires_at:
+            meta["expires_at"] = expires_at.isoformat()
+        result_dict = self._balance_repo.add_credits(
+            user_id,
+            str(amount),
+            type,
+            json.dumps(meta),
+            bucket,
+            idempotency_key,
+        )
+        if result_dict.error is not None:
             raise StoreError(f"credits_add failed: {result_dict['error']}")
         return AddCreditsResult(
-            transaction_id=str(result_dict.get("id", "")),
-            user_id=str(result_dict.get("user_id", user_id)),
-            amount=_dec(result_dict.get("amount"), amount),
-            new_balance=_dec(result_dict.get("new_balance")),
-            lifetime_purchased=_dec(result_dict.get("lifetime_purchased")),
-            bucket=str(result_dict.get("bucket", "default")),
+            transaction_id=str(getattr(result_dict, "id", "")),
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            amount=_dec(result_dict.amount, amount),
+            new_balance=_dec(result_dict.new_balance),
+            lifetime_purchased=_dec(result_dict.lifetime_purchased),
+            bucket=str(getattr(result_dict, "bucket", "default")),
         )
 
     def deduct_with_allowance(
@@ -287,33 +342,22 @@ class PostgresStore(CreditStore):
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
 
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "deduct_with_allowance",
-                    [
-                        user_id,
-                        amount,
-                        idempotency_key,
-                        min_balance,
-                        model,
-                        json.dumps(meta),
-                        skip_allowance,
-                        period_start.isoformat() if period_start is not None else None,
-                        feature,
-                        feature_limit.max_calls if feature_limit is not None else None,
-                        feature_limit.action if feature_limit is not None else None,
-                        feature_period_start.isoformat() if feature_period_start is not None else None,
-                        feature_period_end.isoformat() if feature_period_end is not None else None,
-                    ],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
+        result_dict = self._deduction_repo.deduct_with_allowance(
+            user_id,
+            str(amount),
+            idempotency_key,
+            str(min_balance),
+            model,
+            json.dumps(meta),
+            skip_allowance,
+            period_start.isoformat() if period_start is not None else None,
+            feature,
+            feature_limit.max_calls if feature_limit is not None else None,
+            feature_limit.action if feature_limit is not None else None,
+            feature_period_start.isoformat() if feature_period_start is not None else None,
+            feature_period_end.isoformat() if feature_period_end is not None else None,
+        )
 
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
         if not result_dict:
             return DeductionResult(
                 transaction_id="",
@@ -322,25 +366,25 @@ class PostgresStore(CreditStore):
                 balance_after=Decimal(0),
                 error="no result",
             )
-        if "error" in result_dict:
+        if result_dict.error is not None:
             return DeductionResult(
                 transaction_id="",
                 user_id=user_id,
                 amount=Decimal(0),
-                balance_after=_dec(result_dict.get("balance_after")),
-                error=str(result_dict["error"]),
+                balance_after=_dec(result_dict.balance_after),
+                error=str(result_dict.error),
             )
 
         return DeductionResult(
-            transaction_id=str(result_dict.get("transaction_id", "")),
+            transaction_id=str(getattr(result_dict, "transaction_id", "")),
             user_id=user_id,
-            amount=_dec(result_dict.get("amount")),
-            allowance_consumed=_dec(result_dict.get("allowance_consumed")),
-            balance_after=_dec(result_dict.get("balance_after")),
-            idempotent=bool(result_dict.get("idempotent", False)),
-            cap_warning=result_dict.get("cap_warning") or None,
-            feature_limit_warning=result_dict.get("feature_limit_warning") or None,
-            bucket_breakdown=_dec_map(result_dict.get("bucket_breakdown")),
+            amount=_dec(result_dict.amount),
+            allowance_consumed=_dec(result_dict.allowance_consumed),
+            balance_after=_dec(result_dict.balance_after),
+            idempotent=bool(getattr(result_dict, "idempotent", False)),
+            cap_warning=result_dict.cap_warning or None,
+            feature_limit_warning=result_dict.feature_limit_warning or None,
+            bucket_breakdown=_dec_map(result_dict.bucket_breakdown),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -366,36 +410,27 @@ class PostgresStore(CreditStore):
         amount = _dec(amount)
         floor = _dec(floor)
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "create_lease",
-                    [
-                        user_id,
-                        amount,
-                        operation_type,
-                        billing_mode,
-                        floor,
-                        max_concurrent,
-                        ttl_seconds,
-                        model,
-                        str(overdraft_floor) if overdraft_floor is not None else None,
-                        json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
-                        period_start.isoformat() if period_start is not None else None,
-                        feature,
-                        feature_limit.max_calls if feature_limit is not None else None,
-                        feature_limit.action if feature_limit is not None else None,
-                        feature_period_start.isoformat() if feature_period_start is not None else None,
-                        feature_period_end.isoformat() if feature_period_end is not None else None,
-                    ],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
 
-        result = row[0] if row and isinstance(row[0], dict) else {}
+        params = {
+            "user_id": user_id,
+            "amount": str(amount),
+            "operation_type": operation_type,
+            "billing_mode": billing_mode,
+            "floor": str(floor),
+            "max_concurrent": max_concurrent,
+            "ttl_seconds": ttl_seconds,
+            "model": model,
+            "overdraft_floor": str(overdraft_floor) if overdraft_floor is not None else None,
+            "metadata": json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
+            "period_start": period_start.isoformat() if period_start is not None else None,
+            "feature": feature,
+            "feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
+            "feature_action": feature_limit.action if feature_limit is not None else None,
+            "feature_period_start": feature_period_start.isoformat() if feature_period_start is not None else None,
+            "feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
+        }
+        result = self._lease_repo.create_lease(params)
+
         if not result:
             return LeaseResult(lease_id="", user_id=user_id, error="no result")
         if "error" in result:
@@ -437,34 +472,25 @@ class PostgresStore(CreditStore):
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "settle_lease",
-                    [
-                        user_id,
-                        lease_id,
-                        amount,
-                        idempotency_key,
-                        min_balance,
-                        model,
-                        json.dumps(meta),
-                        skip_allowance,
-                        period_start.isoformat() if period_start is not None else None,
-                        feature,
-                        feature_limit.max_calls if feature_limit is not None else None,
-                        feature_limit.action if feature_limit is not None else None,
-                        feature_period_start.isoformat() if feature_period_start is not None else None,
-                        feature_period_end.isoformat() if feature_period_end is not None else None,
-                    ],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
 
-        result = row[0] if row and isinstance(row[0], dict) else {}
+        params = {
+            "user_id": user_id,
+            "lease_id": lease_id,
+            "amount": str(amount),
+            "idempotency_key": idempotency_key,
+            "min_balance": str(min_balance),
+            "model": model,
+            "metadata": json.dumps(meta),
+            "skip_allowance": skip_allowance,
+            "period_start": period_start.isoformat() if period_start is not None else None,
+            "feature": feature,
+            "feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
+            "feature_action": feature_limit.action if feature_limit is not None else None,
+            "feature_period_start": feature_period_start.isoformat() if feature_period_start is not None else None,
+            "feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
+        }
+        result = self._lease_repo.settle_lease(params)
+
         if not result:
             return DeductionResult(
                 transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
@@ -490,16 +516,7 @@ class PostgresStore(CreditStore):
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("release_lease", [user_id, lease_id])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result = row[0] if row and isinstance(row[0], dict) else {}
+        result = self._lease_repo.release_lease(user_id, lease_id)
         return ReleaseResult(
             lease_id=lease_id,
             user_id=user_id,
@@ -508,16 +525,7 @@ class PostgresStore(CreditStore):
         )
 
     def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("renew_lease", [user_id, lease_id, ttl_seconds])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result = row[0] if row and isinstance(row[0], dict) else {}
+        result = self._lease_repo.renew_lease(user_id, lease_id, ttl_seconds)
         if "error" in result:
             return LeaseResult(lease_id=lease_id, user_id=user_id, error=str(result["error"]))
         return LeaseResult(
@@ -531,15 +539,7 @@ class PostgresStore(CreditStore):
         )
 
     def get_available(self, user_id: str) -> AvailableResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_available_credits", [user_id])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        result = row[0] if row and isinstance(row[0], dict) else {}
+        result = self._balance_repo.get_available(user_id)
         return AvailableResult(
             user_id=user_id,
             balance=_dec(result.get("balance")),
@@ -553,124 +553,61 @@ class PostgresStore(CreditStore):
         return self._get_cached_pricing(self._load_active_pricing)
 
     def _load_active_pricing(self) -> PricingConfigResult | None:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_active_pricing_config", [])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
+        result = self._pricing_repo.get_active_pricing()
+        if result is None:
             return None
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
-        if not result_dict:
-            return None
-
-        return PricingConfigResult.model_validate(result_dict)
+        return PricingConfigResult.model_validate(result.model_dump())
 
     def set_active_pricing(
         self,
         config: dict[str, Any],
         label: str | None = None,
     ) -> str:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "set_active_pricing_config",
-                    [json.dumps(config, cls=DecimalEncoder), label],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._pricing_repo.set_active_pricing(json.dumps(config, cls=DecimalEncoder), label)
         self.invalidate_pricing_cache()
-        return str(result_dict.get("id", ""))
+        return str(getattr(result_dict, "id", ""))
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_pricing_configs")
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
-
-        return [PricingConfigHistoryItem.model_validate(r[0]) for r in rows]
+        rows = self._pricing_repo.get_pricing_history()
+        return [PricingConfigHistoryItem.model_validate(r) for r in rows]
 
     def get_pricing_config(self, version: int) -> PricingConfigResult | None:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_pricing_config", [version])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        if row is None:
+        result = self._pricing_repo.get_pricing_config(version)
+        if result is None:
             return None
-        return PricingConfigResult.model_validate(row[0])
+        return PricingConfigResult.model_validate(result.model_dump())
 
     def activate_pricing(self, version: int) -> str:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("activate_pricing_config", [version])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        if row is None:
+        result_dict = self._pricing_repo.activate_pricing(version)
+        if not result_dict:
             msg = f"Version {version} not found"
             raise StoreError(msg)
         self.invalidate_pricing_cache()
-        return str(row[0].get("id", "")) if isinstance(row[0], dict) else str(row[0])
+        return str(getattr(result_dict, "id", ""))
 
     # ── Plan management ────────────────────────────────────────────────
 
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_user_plan", [user_id])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._plan_repo.get_user_plan(user_id)
+        if result_dict is None:
             return GetUserPlanResult(user_id=user_id)
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
         return GetUserPlanResult(
-            user_id=str(result_dict.get("user_id", user_id)),
-            plan_id=result_dict.get("plan_id") or None,
-            plan_label=result_dict.get("plan_label") or None,
-            allowance_amount=_dec(result_dict["allowance_amount"])
-            if result_dict.get("allowance_amount") is not None
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            plan_id=result_dict.plan_id or None,
+            plan_label=result_dict.plan_label or None,
+            allowance_amount=_dec(result_dict.allowance_amount)
+            if result_dict.allowance_amount is not None
             else _dec(0),
-            allowance_period=str(result_dict.get("allowance_period") or "calendar_month"),  # type: ignore[arg-type]
-            entitlements={k: Entitlement.model_validate(v) for k, v in (result_dict.get("entitlements") or {}).items()},
-            billing_mode=str(result_dict.get("billing_mode") or "strict"),  # type: ignore[arg-type]
-            per_operation={
-                k: OperationPolicy.model_validate(v) for k, v in (result_dict.get("per_operation") or {}).items()
-            },
-            max_concurrent=result_dict.get("max_concurrent"),
-            overdraft_floor=_dec(result_dict["overdraft_floor"])
-            if result_dict.get("overdraft_floor") is not None
-            else None,
+            allowance_period=str(result_dict.allowance_period or "calendar_month"),  # type: ignore[arg-type]
+            entitlements={k: Entitlement.model_validate(v) for k, v in (result_dict.entitlements or {}).items()},
+            billing_mode=str(result_dict.billing_mode or "strict"),  # type: ignore[arg-type]
+            per_operation={k: OperationPolicy.model_validate(v) for k, v in (result_dict.per_operation or {}).items()},
+            max_concurrent=result_dict.max_concurrent,
+            overdraft_floor=_dec(result_dict.overdraft_floor) if result_dict.overdraft_floor is not None else None,
             plan_assigned_at=(
-                datetime.fromisoformat(str(result_dict["plan_assigned_at"]))
-                if result_dict.get("plan_assigned_at")
-                else None
+                datetime.fromisoformat(str(result_dict.plan_assigned_at)) if result_dict.plan_assigned_at else None
             ),
-            config_version=result_dict.get("config_version") or None,
+            config_version=result_dict.config_version or None,
         )
 
     def set_user_plan(
@@ -679,41 +616,20 @@ class PostgresStore(CreditStore):
         plan_id: str,
         plan_assigned_at: datetime | None = None,
     ) -> SetUserPlanResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "set_user_plan",
-                    [
-                        user_id,
-                        plan_id,
-                        plan_assigned_at.isoformat() if plan_assigned_at else None,
-                    ],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._plan_repo.set_user_plan(
+            user_id,
+            plan_id,
+            plan_assigned_at.isoformat() if plan_assigned_at else None,
+        )
         return SetUserPlanResult(
-            user_id=str(result_dict.get("user_id", user_id)),
-            plan_id=str(result_dict.get("plan_id", plan_id)),
-            plan_assigned_at=str(result_dict["plan_assigned_at"]) if result_dict.get("plan_assigned_at") else None,
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            plan_id=str(getattr(result_dict, "plan_id", plan_id)),
+            plan_assigned_at=str(result_dict.plan_assigned_at) if result_dict.plan_assigned_at else None,
         )
 
     def unset_user_plan(self, user_id: str) -> dict:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("unset_user_plan", [user_id])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
-        return {"user_id": str(result_dict.get("user_id", user_id))}
+        result_dict = self._plan_repo.unset_user_plan(user_id)
+        return {"user_id": str(getattr(result_dict, "user_id", user_id))}
 
     def migrate_plan_users(
         self,
@@ -721,55 +637,37 @@ class PostgresStore(CreditStore):
         target_config_version: int | None = None,
     ) -> MigratePlanUsersResult:
         try:
-            with self._conn_ctx() as conn, conn.cursor() as cur:
-                cur.callproc(
-                    "migrate_plan_users",
-                    [plan_key, target_config_version],
-                )
-                row = cur.fetchone()
+            result_dict = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
         except psycopg2.Error as e:
             raise StoreError(f"migrate_plan_users failed: {e}") from e
 
-        if not row or not isinstance(row[0], dict):
+        if not result_dict:
             raise StoreError("migrate_plan_users returned no data")
-        result_dict = row[0]
-        if "error" in result_dict and result_dict["error"]:
-            raise StoreError(result_dict["error"])
+        if result_dict.error is not None:
+            raise StoreError(result_dict.error)
         return MigratePlanUsersResult(
-            plan_key=str(result_dict.get("plan_key", plan_key)),
-            target_plan_id=str(result_dict.get("target_plan_id", "")),
-            target_config_version=int(result_dict.get("target_config_version", 0)),
-            migrated_count=int(result_dict.get("migrated_count", 0)),
+            plan_key=str(getattr(result_dict, "plan_key", plan_key)),
+            target_plan_id=str(getattr(result_dict, "target_plan_id", "")),
+            target_config_version=int(getattr(result_dict, "target_config_version", 0)),
+            migrated_count=int(getattr(result_dict, "migrated_count", 0)),
         )
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("check_plan_allowance", [user_id, period_start])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._plan_repo.check_allowance(
+            user_id,
+            period_start.isoformat() if period_start is not None else None,
+        )
+        if result_dict is None:
             return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
         return AllowanceResult(
-            plan_id=str(result_dict.get("plan_id", "")),
-            allowance_remaining=_dec(result_dict.get("allowance_remaining")),
-            period_start=str(result_dict.get("period_start", "")),
-            period_end=str(result_dict.get("period_end", "")),
+            plan_id=str(getattr(result_dict, "plan_id", "")),
+            allowance_remaining=_dec(result_dict.allowance_remaining),
+            period_start=str(getattr(result_dict, "period_start", "")),
+            period_end=str(getattr(result_dict, "period_end", "")),
         )
 
     def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("increment_usage_window", [user_id, plan_id, _dec(amount)])
-            conn.commit()
-        finally:
-            conn.close()
+        self._plan_repo.increment_usage_window(user_id, plan_id, str(_dec(amount)))
 
     def check_feature_limit(
         self,
@@ -780,34 +678,27 @@ class PostgresStore(CreditStore):
         period_end: date,
     ) -> FeatureLimitResult:
         """Call the advisory ``check_feature_limit`` RPC (mirrors ``check_spend_cap``)."""
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "check_feature_limit",
-                    [user_id, feature, max_calls, period_start.isoformat(), period_end.isoformat()],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._plan_repo.check_feature_limit(
+            user_id,
+            feature,
+            max_calls,
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+        if result_dict is None:
             return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
         return FeatureLimitResult(
             user_id=user_id,
             feature=feature,
-            limited=bool(result_dict.get("limited", False)),
-            limit=int(result_dict.get("limit") or 0),
-            used=int(result_dict.get("used") or 0),
-            remaining=int(result_dict.get("remaining") or 0),
-            period_start=str(result_dict.get("period_start", "")),
-            period_end=str(result_dict.get("period_end", "")),
+            limited=bool(getattr(result_dict, "limited", False)),
+            limit=int(result_dict.limit or 0),
+            used=int(result_dict.used or 0),
+            remaining=int(result_dict.remaining or 0),
+            period_start=str(getattr(result_dict, "period_start", "")),
+            period_end=str(getattr(result_dict, "period_end", "")),
             action=cast(
                 "Literal['deny', 'warn', 'notify'] | None",
-                str(result_dict["action"]) if "action" in result_dict else None,
+                str(result_dict.action) if "action" in result_dict else None,
             ),
         )
 
@@ -819,26 +710,16 @@ class PostgresStore(CreditStore):
         model: str | None = None,
         amount: Decimal | None = None,
     ) -> CapCheckResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("check_spend_cap", [user_id, model, _dec(amount)])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._plan_repo.check_spend_cap(user_id, model, str(_dec(amount)))
+        if result_dict is None:
             return CapCheckResult(capped=False, current_spend=Decimal(0), cap_limit=Decimal(0), action=None)
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
-        action = result_dict.get("action")
+        action = result_dict.action
         return CapCheckResult(
-            capped=bool(result_dict.get("capped", False)),
-            current_spend=_dec(result_dict.get("current_spend")),
-            cap_limit=_dec(result_dict.get("cap_limit")),
+            capped=bool(getattr(result_dict, "capped", False)),
+            current_spend=_dec(result_dict.current_spend),
+            cap_limit=_dec(result_dict.cap_limit),
             action=action if action in ("deny", "warn", "notify") else None,
-            model=str(result_dict.get("model")) if result_dict.get("model") else None,
+            model=str(result_dict.model) if result_dict.model else None,
         )
 
     # ── Refunds ─────────────────────────────────────────────────────────
@@ -850,155 +731,98 @@ class PostgresStore(CreditStore):
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "refund_credits",
-                    [
-                        transaction_id,
-                        _dec(amount) if amount is not None else None,
-                        reason,
-                        json.dumps(metadata.model_dump(mode="json") if metadata else {}),
-                    ],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
-        if "error" in result_dict and result_dict["error"]:
+        result_dict = self._deduction_repo.refund_credits(
+            transaction_id,
+            str(_dec(amount)) if amount is not None else None,
+            reason,
+            json.dumps(metadata.model_dump(mode="json") if metadata else {}),
+        )
+        if result_dict.error is not None:
             return RefundResult(
                 refund_transaction_id="",
                 original_transaction_id=transaction_id,
-                user_id=str(result_dict.get("user_id", "")),
+                user_id=str(getattr(result_dict, "user_id", "")),
                 amount=Decimal(0),
-                new_balance=_dec(result_dict.get("new_balance")),
-                error=str(result_dict["error"]),
+                new_balance=_dec(result_dict.new_balance),
+                error=str(result_dict.error),
             )
-
         return RefundResult(
-            refund_transaction_id=str(result_dict.get("refund_transaction_id", "")),
+            refund_transaction_id=str(getattr(result_dict, "refund_transaction_id", "")),
             original_transaction_id=transaction_id,
-            user_id=str(result_dict.get("user_id", "")),
-            amount=_dec(result_dict.get("amount")),
-            new_balance=_dec(result_dict.get("new_balance")),
-            bucket_breakdown=_dec_map(result_dict.get("bucket_breakdown")),
+            user_id=str(getattr(result_dict, "user_id", "")),
+            amount=_dec(result_dict.amount),
+            new_balance=_dec(result_dict.new_balance),
+            bucket_breakdown=_dec_map(result_dict.bucket_breakdown),
         )
 
     def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("revoke_credits_by_tx_type", [user_id, tx_type])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._deduction_repo.revoke_credits_by_tx_type(user_id, tx_type)
         return {
-            "user_id": str(result_dict.get("user_id", user_id)),
-            "amount": result_dict.get("amount", 0),
-            "new_balance": result_dict.get("new_balance", ""),
-            "bucket": result_dict.get("bucket"),
+            "user_id": str(getattr(result_dict, "user_id", user_id)),
+            "amount": getattr(result_dict, "amount", 0),
+            "new_balance": getattr(result_dict, "new_balance", ""),
+            "bucket": result_dict.bucket,
         }
 
     # ── Usage analytics ─────────────────────────────────────────────────
 
     def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("spend_by_user", [start.isoformat(), end.isoformat()])
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
+        rows = self._analytics_repo.spend_by_user(start.isoformat(), end.isoformat())
         return [
             SpendByUserRow(
-                user_id=str(r[0].get("user_id", "")),
-                total_spend=_dec(r[0].get("total_spend")),
-                transaction_count=int(r[0].get("transaction_count", 0)),
+                user_id=str(r.get("user_id", "")),
+                total_spend=_dec(r.get("total_spend")),
+                transaction_count=int(r.get("transaction_count", 0)),
             )
             for r in (rows or [])
-            if r and isinstance(r[0], dict)
+            if isinstance(r, dict)
         ]
 
     def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("spend_by_model", [start.isoformat(), end.isoformat()])
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
+        rows = self._analytics_repo.spend_by_model(start.isoformat(), end.isoformat())
         return [
             SpendByModelRow(
-                model=str(r[0].get("model", "")),
-                total_spend=_dec(r[0].get("total_spend")),
-                transaction_count=int(r[0].get("transaction_count", 0)),
+                model=str(r.get("model", "")),
+                total_spend=_dec(r.get("total_spend")),
+                transaction_count=int(r.get("transaction_count", 0)),
             )
             for r in (rows or [])
-            if r and isinstance(r[0], dict)
+            if isinstance(r, dict)
         ]
 
     def top_users(self, limit: int, start: datetime, end: datetime) -> list[TopUserRow]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("top_users", [limit, start.isoformat(), end.isoformat()])
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
+        rows = self._analytics_repo.top_users(limit, start.isoformat(), end.isoformat())
         return [
             TopUserRow(
-                user_id=str(r[0].get("user_id", "")),
-                total_spend=_dec(r[0].get("total_spend")),
+                user_id=str(r.get("user_id", "")),
+                total_spend=_dec(r.get("total_spend")),
             )
             for r in (rows or [])
-            if r and isinstance(r[0], dict)
+            if isinstance(r, dict)
         ]
 
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("daily_spend", [start.isoformat(), end.isoformat()])
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
+        rows = self._analytics_repo.daily_spend(start.isoformat(), end.isoformat())
         return [
             DailySpendRow(
-                date=str(r[0].get("date", "")),
-                total_spend=_dec(r[0].get("total_spend")),
-                transaction_count=int(r[0].get("transaction_count", 0)),
+                date=str(r.get("date", "")),
+                total_spend=_dec(r.get("total_spend")),
+                transaction_count=int(r.get("transaction_count", 0)),
             )
             for r in (rows or [])
-            if r and isinstance(r[0], dict)
+            if isinstance(r, dict)
         ]
 
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("aggregate_stats", [start.isoformat(), end.isoformat()])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-        if not row or not isinstance(row[0], dict):
+        result = self._analytics_repo.aggregate_stats(start.isoformat(), end.isoformat())
+        if not result:
             return AggregateStatsRow()
-        d = row[0]
         return AggregateStatsRow(
-            total_credits_consumed=_dec(d.get("total_credits_consumed")),
-            active_users=int(d.get("active_users", 0)),
-            avg_daily_spend=_dec(d.get("avg_daily_spend")),
-            top_model=str(d.get("top_model", "")),
-            top_user=str(d.get("top_user", "")),
+            total_credits_consumed=_dec(result.get("total_credits_consumed")),
+            active_users=int(result.get("active_users", 0)),
+            avg_daily_spend=_dec(result.get("avg_daily_spend")),
+            top_model=str(result.get("top_model", "")),
+            top_user=str(result.get("top_user", "")),
         )
 
     # ── Transaction listing ─────────────────────────────────────────────────
@@ -1012,11 +836,11 @@ class PostgresStore(CreditStore):
         limit: int = 50,
         offset: int = 0,
     ) -> list[TransactionRow]:
-        conn = self._conn()
+        conn = self._pool.getconn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT * FROM list_user_transactions(%s, %s, %s, %s, %s, %s)",
+                    "SELECT * FROM public.list_user_transactions(%s, %s, %s, %s, %s, %s)",
                     [
                         user_id,
                         types,
@@ -1029,7 +853,7 @@ class PostgresStore(CreditStore):
                 rows = cur.fetchall()
             conn.commit()
         finally:
-            conn.close()
+            self._pool.putconn(conn)
         return [
             TransactionRow(
                 id=str(r["id"]),
@@ -1048,42 +872,23 @@ class PostgresStore(CreditStore):
     # ── Team/shared balance pools ─────────────────────────────────────────
 
     def create_team(self, name: str, initial_balance: Decimal = Decimal(0)) -> CreateTeamResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("create_team", [name, _dec(initial_balance)])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._team_repo.create_team(name, str(_dec(initial_balance)))
         return CreateTeamResult(
-            team_id=str(result_dict.get("team_id", "")),
-            name=str(result_dict.get("name", name)),
+            team_id=str(getattr(result_dict, "team_id", "")),
+            name=str(getattr(result_dict, "name", name)),
         )
 
     def get_team_balance(self, team_id: str) -> TeamBalanceResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_team_balance", [team_id])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        if not row:
+        result_dict = self._team_repo.get_team_balance(team_id)
+        if result_dict is None:
             return TeamBalanceResult(team_id=team_id)
-
-        result_dict = row[0] if isinstance(row[0], dict) else {}
-        if "error" in result_dict and result_dict["error"]:
+        if result_dict.error is not None:
             return TeamBalanceResult(team_id=team_id)
-
         return TeamBalanceResult(
-            team_id=str(result_dict.get("team_id", team_id)),
-            name=str(result_dict.get("name", "")),
-            balance=_dec(result_dict.get("balance")),
-            member_count=int(result_dict.get("member_count", 0)),
+            team_id=str(getattr(result_dict, "team_id", team_id)),
+            name=str(getattr(result_dict, "name", "")),
+            balance=_dec(result_dict.balance),
+            member_count=int(getattr(result_dict, "member_count", 0)),
         )
 
     def add_team_member(
@@ -1093,44 +898,29 @@ class PostgresStore(CreditStore):
         role: str = "member",
         spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "add_team_member",
-                    [team_id, user_id, role, _dec(spend_cap) if spend_cap is not None else None],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._team_repo.add_team_member(
+            team_id,
+            user_id,
+            role,
+            str(_dec(spend_cap)) if spend_cap is not None else None,
+        )
         return AddTeamMemberResult(
-            team_id=str(result_dict.get("team_id", team_id)),
-            user_id=str(result_dict.get("user_id", user_id)),
-            role=str(result_dict.get("role", role)),
+            team_id=str(getattr(result_dict, "team_id", team_id)),
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            role=str(getattr(result_dict, "role", role)),
         )
 
     def get_team_members(self, team_id: str) -> list[TeamMember]:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_team_members", [team_id])
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            conn.close()
-
+        rows = self._team_repo.get_team_members(team_id)
         return [
             TeamMember(
-                user_id=str(r[0].get("user_id", "")),
-                role=str(r[0].get("role", "member")),
-                spend_cap=_dec(r[0]["spend_cap"]) if r[0].get("spend_cap") is not None else None,
-                total_spent=_dec(r[0].get("total_spent")),
+                user_id=str(r.get("user_id", "")),
+                role=str(r.get("role", "member")),
+                spend_cap=_dec(r["spend_cap"]) if r.get("spend_cap") is not None else None,
+                total_spent=_dec(r.get("total_spent")),
             )
             for r in (rows or [])
-            if r and isinstance(r[0], dict)
+            if isinstance(r, dict)
         ]
 
     def deduct_team(
@@ -1147,69 +937,39 @@ class PostgresStore(CreditStore):
         # metadata->>'idempotency_key') for idempotent replay (H12).
         if idempotency_key:
             meta["idempotency_key"] = idempotency_key
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(
-                    "deduct_team",
-                    [team_id, user_id, amount, json.dumps(meta)],
-                )
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
-        if "error" in result_dict and result_dict["error"]:
+        result_dict = self._team_repo.deduct_team(team_id, user_id, str(amount), json.dumps(meta))
+        if result_dict.error is not None:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=Decimal(0),
-                team_balance_after=_dec(result_dict.get("team_balance_after")),
-                error=str(result_dict["error"]),
+                team_balance_after=_dec(result_dict.team_balance_after),
+                error=str(result_dict.error),
             )
-
         return TeamDeductionResult(
-            transaction_id=str(result_dict.get("transaction_id", "")),
-            team_id=str(result_dict.get("team_id", team_id)),
-            user_id=str(result_dict.get("user_id", user_id)),
-            amount=_dec(result_dict.get("amount"), -amount),
-            team_balance_after=_dec(result_dict.get("team_balance_after")),
+            transaction_id=str(getattr(result_dict, "transaction_id", "")),
+            team_id=str(getattr(result_dict, "team_id", team_id)),
+            user_id=str(getattr(result_dict, "user_id", user_id)),
+            amount=_dec(result_dict.amount, -amount),
+            team_balance_after=_dec(result_dict.team_balance_after),
         )
 
     # ── Credit expiry ───────────────────────────────────────────────────
 
     def sweep_expired_credits(self, dry_run: bool = False, user_id: str | None = None) -> SweepResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("expire_credits", [dry_run, user_id])
-                row = cur.fetchone()
-            conn.commit()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._bucket_repo.sweep_expired_credits(dry_run, user_id)
         return SweepResult(
-            expired_count=int(result_dict.get("expired_count", 0)),
-            expired_amount=_dec(result_dict.get("expired_amount")),
+            expired_count=int(getattr(result_dict, "expired_count", 0)),
+            expired_amount=_dec(result_dict.expired_amount),
             dry_run=dry_run,
-            expired_by_bucket=_dec_map(result_dict.get("expired_by_bucket")),
+            expired_by_bucket=_dec_map(result_dict.expired_by_bucket),
         )
 
     # ── Credit buckets ────────────────────────────────────────────────
 
     def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
-        conn = self._conn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc("get_user_credit_buckets", [user_id])
-                row = cur.fetchone()
-        finally:
-            conn.close()
-
-        result_dict = row[0] if row and isinstance(row[0], dict) else {}
+        result_dict = self._bucket_repo.get_bucket_balances(user_id)
         buckets = [
             BucketBalance(
                 bucket_key=str(t.get("bucket_key", "")),
@@ -1218,10 +978,19 @@ class PostgresStore(CreditStore):
                 expires=bool(t.get("expires", False)),
                 balance=_dec(t.get("balance")),
             )
-            for t in (result_dict.get("buckets") or [])
+            for t in (result_dict.buckets or [])
         ]
         return BucketBalancesResult(
-            user_id=str(result_dict.get("user_id", user_id)),
+            user_id=str(getattr(result_dict, "user_id", user_id)),
             buckets=buckets,
-            total_balance=_dec(result_dict.get("total_balance")),
+            total_balance=_dec(result_dict.total_balance),
         )
+
+
+def run_migrations(database_url: str) -> SetupResult:
+    """Run bundled SQL migrations against *database_url*.
+
+    Standalone entry point for the CLI ``migrate`` command.
+    """
+    store = PostgresStore(database_url)
+    return store.setup(database_url)

@@ -225,6 +225,30 @@ export interface BillingSubscriptionState {
   metadata?: Record<string, unknown> | null;
 }
 
+// ── Typed store result types ─────────────────────────────────────────────
+
+export interface BillingGrantResult {
+  mode?: string;
+  credits?: number | null;
+  bucket?: string;
+  replacePrior?: boolean;
+}
+
+export interface BillingOfferResult {
+  offerKey: string;
+  plan?: string | null;
+  interval?: string;
+  intervalCount?: number;
+  grant?: BillingGrantResult;
+}
+
+export interface BillingTopupResult {
+  topupKey: string;
+  creditsPerUnit?: number;
+  creditsPerMajorUnit?: number;
+  depositTo?: string;
+}
+
 // ── Config models ───────────────────────────────────────────────────────
 
 export interface BillingOffer {

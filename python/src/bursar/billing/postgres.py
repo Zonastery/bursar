@@ -10,9 +10,22 @@ import psycopg2.pool
 from bursar.billing.models import (
     BillingConfig,
     BillingEventClaim,
+    BillingGrantResult,
+    BillingOfferResult,
     BillingSubscriptionState,
+    BillingTopupResult,
 )
 from bursar.billing.store import BillingStore
+from bursar.repositories.billing.config import BillingConfigRepository
+from bursar.repositories.billing.customer import BillingCustomerRepository
+from bursar.repositories.billing.dispute import BillingDisputeRepository
+from bursar.repositories.billing.event import BillingEventRepository
+from bursar.repositories.billing.invoice import BillingInvoiceRepository
+from bursar.repositories.billing.offer import BillingOfferRepository
+from bursar.repositories.billing.payment import BillingPaymentRepository
+from bursar.repositories.billing.refund import BillingRefundRepository
+from bursar.repositories.billing.subscription import BillingSubscriptionRepository
+from bursar.repositories.billing.topup import BillingTopupRepository
 
 
 def _to_utc_iso(dt_str: str | None) -> str | None:
@@ -29,35 +42,83 @@ class PostgresBillingStore(BillingStore):
     def close(self) -> None:
         self._pool.closeall()
 
-    # ── Synchronous helpers ────────────────────────────────────────────
-
-    def _call_rpc_json_sync(self, rpc_name: str, params: list) -> dict | None:
+    def _execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+        """Execute raw SQL and return all result rows as dicts via the connection pool."""
         conn = self._pool.getconn()
         try:
-            with conn.cursor() as cur:
-                cur.callproc(rpc_name, params)
-                row = cur.fetchone()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params or [])
+                try:
+                    rows = cur.fetchall()
+                except psycopg2.ProgrammingError:
+                    rows = []
             conn.commit()
+            return rows
         except psycopg2.Error:
             conn.rollback()
             raise
         finally:
             self._pool.putconn(conn)
-        if row and isinstance(row[0], dict):
-            return row[0]
-        return None
 
-    def _call_rpc_void_sync(self, rpc_name: str, params: list) -> None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.callproc(rpc_name, params)
-            conn.commit()
-        except psycopg2.Error:
-            conn.rollback()
-            raise
-        finally:
-            self._pool.putconn(conn)
+    @property
+    def _offer_repo(self) -> BillingOfferRepository:
+        if not hasattr(self, "__offer_repo"):
+            self.__offer_repo = BillingOfferRepository(self._execute)
+        return self.__offer_repo
+
+    @property
+    def _topup_repo(self) -> BillingTopupRepository:
+        if not hasattr(self, "__topup_repo"):
+            self.__topup_repo = BillingTopupRepository(self._execute)
+        return self.__topup_repo
+
+    @property
+    def _customer_repo(self) -> BillingCustomerRepository:
+        if not hasattr(self, "__customer_repo"):
+            self.__customer_repo = BillingCustomerRepository(self._execute)
+        return self.__customer_repo
+
+    @property
+    def _subscription_repo(self) -> BillingSubscriptionRepository:
+        if not hasattr(self, "__subscription_repo"):
+            self.__subscription_repo = BillingSubscriptionRepository(self._execute)
+        return self.__subscription_repo
+
+    @property
+    def _event_repo(self) -> BillingEventRepository:
+        if not hasattr(self, "__event_repo"):
+            self.__event_repo = BillingEventRepository(self._execute)
+        return self.__event_repo
+
+    @property
+    def _payment_repo(self) -> BillingPaymentRepository:
+        if not hasattr(self, "__payment_repo"):
+            self.__payment_repo = BillingPaymentRepository(self._execute)
+        return self.__payment_repo
+
+    @property
+    def _refund_repo(self) -> BillingRefundRepository:
+        if not hasattr(self, "__refund_repo"):
+            self.__refund_repo = BillingRefundRepository(self._execute)
+        return self.__refund_repo
+
+    @property
+    def _invoice_repo(self) -> BillingInvoiceRepository:
+        if not hasattr(self, "__invoice_repo"):
+            self.__invoice_repo = BillingInvoiceRepository(self._execute)
+        return self.__invoice_repo
+
+    @property
+    def _dispute_repo(self) -> BillingDisputeRepository:
+        if not hasattr(self, "__dispute_repo"):
+            self.__dispute_repo = BillingDisputeRepository(self._execute)
+        return self.__dispute_repo
+
+    @property
+    def _config_repo(self) -> BillingConfigRepository:
+        if not hasattr(self, "__config_repo"):
+            self.__config_repo = BillingConfigRepository(self._execute)
+        return self.__config_repo
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -84,44 +145,28 @@ class PostgresBillingStore(BillingStore):
     def sync_billing_from_config(self, config: BillingConfig) -> None:
         raw = config.model_dump()
         config_json = json.dumps(raw, default=str)
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT public.sync_billing_from_config(%s::jsonb)", [config_json])
-            conn.commit()
-        except psycopg2.Error:
-            conn.rollback()
-            raise
-        finally:
-            self._pool.putconn(conn)
+        self._config_repo.sync_from_config(config_json)
 
     def resolve_billing_offer(
         self,
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-    ) -> dict | None:
-        result = self._call_rpc_json_sync(
-            "public.resolve_billing_offer_by_price",
-            [
-                provider,
-                price_id,
-                product_id,
-            ],
-        )
-        if result and "offer_key" in result:
-            return {
-                "offer_key": result["offer_key"],
-                "plan": result.get("plan"),
-                "interval": result.get("interval"),
-                "interval_count": result.get("interval_count"),
-                "grant": {
-                    "mode": result.get("grant_mode"),
-                    "credits": result.get("grant_credits"),
-                    "bucket": result.get("grant_bucket"),
-                    "replace_prior": result.get("grant_replace_prior"),
-                },
-            }
+    ) -> BillingOfferResult | None:
+        result = self._offer_repo.resolve_by_price(provider, price_id, product_id)
+        if result and result.offer_key:
+            return BillingOfferResult(
+                offer_key=result.offer_key,
+                plan=result.plan,
+                interval=result.interval,
+                interval_count=result.interval_count,
+                grant=BillingGrantResult(
+                    mode=result.grant_mode,
+                    credits=result.grant_credits,
+                    bucket=result.grant_bucket,
+                    replace_prior=result.grant_replace_prior,
+                ),
+            )
         return None
 
     def claim_billing_event(
@@ -130,25 +175,22 @@ class PostgresBillingStore(BillingStore):
         event_id: str,
         event_type: str,
     ) -> BillingEventClaim:
-        result = self._call_rpc_json_sync(
-            "public.claim_billing_event",
-            [
-                provider,
-                event_id,
-                event_type,
-                json.dumps({"event_type": event_type}),
-            ],
+        result = self._event_repo.claim(
+            provider,
+            event_id,
+            event_type,
+            json.dumps({"event_type": event_type}),
         )
         if result is None:
             return BillingEventClaim(status="retry")
-        status = result.get("status", "retry")
+        status = result.status or "retry"
         return BillingEventClaim(status=status)
 
     def complete_billing_event(self, provider: str, event_id: str) -> None:
-        self._call_rpc_void_sync("public.complete_billing_event", [provider, event_id])
+        self._event_repo.complete(provider, event_id)
 
     def fail_billing_event(self, provider: str, event_id: str) -> None:
-        self._call_rpc_void_sync("public.fail_billing_event", [provider, event_id])
+        self._event_repo.fail(provider, event_id)
 
     def upsert_billing_customer(
         self,
@@ -157,133 +199,49 @@ class PostgresBillingStore(BillingStore):
         user_id: str,
         email: str | None = None,
     ) -> None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
-                        user_id = EXCLUDED.user_id,
-                        email = COALESCE(EXCLUDED.email, billing_customers.email),
-                        updated_at = now()
-                    """,
-                    [provider, provider_customer_id, user_id, email],
-                )
-            conn.commit()
-        except psycopg2.Error:
-            conn.rollback()
-            raise
-        finally:
-            self._pool.putconn(conn)
+        self._customer_repo.upsert(provider, provider_customer_id, user_id, email)
 
     def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO public.billing_subscriptions (
-                        user_id, provider, provider_subscription_id, provider_customer_id,
-                        offer_key, plan, status, current_period_start,
-                        current_period_end, cancel_at_period_end, interval, interval_count, metadata
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
-                        user_id = EXCLUDED.user_id,
-                        provider_customer_id = COALESCE(
-                            EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id
-                        ),
-                        offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
-                        plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
-                        status = EXCLUDED.status,
-                        current_period_start = COALESCE(
-                            EXCLUDED.current_period_start, billing_subscriptions.current_period_start
-                        ),
-                        current_period_end = COALESCE(
-                            EXCLUDED.current_period_end, billing_subscriptions.current_period_end
-                        ),
-                        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                        interval = COALESCE(EXCLUDED.interval, billing_subscriptions.interval),
-                        interval_count = COALESCE(EXCLUDED.interval_count, billing_subscriptions.interval_count),
-                        metadata = CASE WHEN EXCLUDED.metadata IS NOT NULL
-                            THEN EXCLUDED.metadata ELSE billing_subscriptions.metadata END,
-                        updated_at = now()
-                    """,
-                    [
-                        state.user_id,
-                        state.provider,
-                        state.provider_subscription_id,
-                        state.provider_customer_id,
-                        state.offer_key,
-                        state.plan,
-                        state.status,
-                        _to_utc_iso(state.current_period_start),
-                        _to_utc_iso(state.current_period_end),
-                        state.cancel_at_period_end,
-                        state.interval,
-                        state.interval_count,
-                        json.dumps(state.metadata) if state.metadata else None,
-                    ],
-                )
-            conn.commit()
-        except psycopg2.Error:
-            conn.rollback()
-            raise
-        finally:
-            self._pool.putconn(conn)
+        self._subscription_repo.upsert(
+            {
+                "user_id": state.user_id,
+                "provider": state.provider,
+                "provider_subscription_id": state.provider_subscription_id,
+                "provider_customer_id": state.provider_customer_id,
+                "offer_key": state.offer_key,
+                "plan": state.plan,
+                "status": state.status,
+                "current_period_start": _to_utc_iso(state.current_period_start),
+                "current_period_end": _to_utc_iso(state.current_period_end),
+                "cancel_at_period_end": state.cancel_at_period_end,
+                "interval": state.interval,
+                "interval_count": state.interval_count,
+                "metadata": state.metadata,
+            }
+        )
 
     def get_billing_customer(
         self,
         provider: str,
         provider_customer_id: str,
     ) -> str | None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT user_id FROM public.billing_customers WHERE provider = %s AND provider_customer_id = %s",
-                    [provider, provider_customer_id],
-                )
-                row = cur.fetchone()
-            return str(row[0]) if row else None
-        finally:
-            self._pool.putconn(conn)
+        return self._customer_repo.get(provider, provider_customer_id)
 
     def get_billing_subscription(
         self,
         provider: str,
         provider_subscription_id: str,
     ) -> BillingSubscriptionState | None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-                           offer_key, plan, status, current_period_start,
-                           current_period_end, cancel_at_period_end, interval, interval_count, metadata
-                    FROM public.billing_subscriptions
-                    WHERE provider = %s AND provider_subscription_id = %s
-                    """,
-                    [provider, provider_subscription_id],
-                )
-                row = cur.fetchone()
-            if not row:
-                return None
-            return self._row_to_subscription_state(dict(row))
-        finally:
-            self._pool.putconn(conn)
+        result = self._subscription_repo.get(provider, provider_subscription_id)
+        if not result:
+            return None
+        return self._row_to_subscription_state(result)
 
     def get_user_subscription(
         self,
         user_id: str,
     ) -> BillingSubscriptionState | None:
-        result = self._call_rpc_json_sync(
-            "public.get_user_billing_subscription",
-            [user_id, None],
-        )
+        result = self._subscription_repo.get_user_subscription(user_id)
         if not result:
             return None
         return self._row_to_subscription_state(result)
@@ -293,54 +251,51 @@ class PostgresBillingStore(BillingStore):
         provider: str,
         product_id: str | None = None,
         price_id: str | None = None,
-    ) -> dict | None:
-        result = self._call_rpc_json_sync(
-            "public.resolve_credit_topup_by_price",
-            [
-                provider,
-                price_id,
-                product_id,
-            ],
-        )
-        if result and "topup_key" in result:
-            return result
+    ) -> BillingTopupResult | None:
+        result = self._topup_repo.resolve_by_price(provider, price_id, product_id)
+        if result and result.topup_key:
+            return BillingTopupResult(
+                topup_key=result.topup_key,
+                credits_per_unit=result.credits_per_unit,
+                credits_per_major_unit=result.credits_per_major_unit,
+                deposit_to=result.deposit_to or "purchased",
+            )
         return None
 
     def resolve_billing_offer_by_lookup(
         self,
         provider: str,
         lookup_key: str,
-    ) -> dict[str, Any] | None:
-        result = self._call_rpc_json_sync(
-            "public.resolve_billing_offer_by_lookup",
-            [provider, lookup_key],
-        )
-        if result and "offer_key" in result:
-            return {
-                "offer_key": result["offer_key"],
-                "plan": result.get("plan"),
-                "interval": result.get("interval"),
-                "interval_count": result.get("interval_count"),
-                "grant": {
-                    "mode": result.get("grant_mode"),
-                    "credits": result.get("grant_credits"),
-                    "bucket": result.get("grant_bucket"),
-                    "replace_prior": result.get("grant_replace_prior"),
-                },
-            }
+    ) -> BillingOfferResult | None:
+        result = self._offer_repo.resolve_by_lookup(provider, lookup_key)
+        if result and result.offer_key:
+            return BillingOfferResult(
+                offer_key=result.offer_key,
+                plan=result.plan,
+                interval=result.interval,
+                interval_count=result.interval_count,
+                grant=BillingGrantResult(
+                    mode=result.grant_mode,
+                    credits=result.grant_credits,
+                    bucket=result.grant_bucket,
+                    replace_prior=result.grant_replace_prior,
+                ),
+            )
         return None
 
     def resolve_credit_topup_by_lookup(
         self,
         provider: str,
         lookup_key: str,
-    ) -> dict[str, Any] | None:
-        result = self._call_rpc_json_sync(
-            "public.resolve_credit_topup_by_lookup",
-            [provider, lookup_key],
-        )
-        if result and "topup_key" in result:
-            return result
+    ) -> BillingTopupResult | None:
+        result = self._topup_repo.resolve_by_lookup(provider, lookup_key)
+        if result and result.topup_key:
+            return BillingTopupResult(
+                topup_key=result.topup_key,
+                credits_per_unit=result.credits_per_unit,
+                credits_per_major_unit=result.credits_per_major_unit,
+                deposit_to=result.deposit_to or "purchased",
+            )
         return None
 
     def upsert_billing_payment(
@@ -355,19 +310,16 @@ class PostgresBillingStore(BillingStore):
         purpose: str = "unknown",
         metadata: dict | None = None,
     ) -> None:
-        self._call_rpc_void_sync(
-            "public.upsert_billing_payment",
-            [
-                provider,
-                provider_payment_id,
-                provider_invoice_id,
-                user_id,
-                amount_minor,
-                tax_minor,
-                currency,
-                purpose,
-                json.dumps(metadata) if metadata else None,
-            ],
+        self._payment_repo.upsert(
+            provider,
+            provider_payment_id,
+            provider_invoice_id,
+            user_id,
+            amount_minor,
+            tax_minor,
+            currency,
+            purpose,
+            json.dumps(metadata) if metadata else None,
         )
 
     def upsert_billing_refund(
@@ -381,18 +333,15 @@ class PostgresBillingStore(BillingStore):
         reason: str | None = None,
         metadata: dict | None = None,
     ) -> None:
-        self._call_rpc_void_sync(
-            "public.upsert_billing_refund",
-            [
-                provider,
-                provider_refund_id,
-                provider_payment_id,
-                user_id,
-                amount_minor,
-                currency,
-                reason,
-                json.dumps(metadata) if metadata else None,
-            ],
+        self._refund_repo.upsert(
+            provider,
+            provider_refund_id,
+            provider_payment_id,
+            user_id,
+            amount_minor,
+            currency,
+            reason,
+            json.dumps(metadata) if metadata else None,
         )
 
     def upsert_billing_invoice(
@@ -409,21 +358,18 @@ class PostgresBillingStore(BillingStore):
         period_end: str | None = None,
         metadata: dict | None = None,
     ) -> None:
-        self._call_rpc_void_sync(
-            "public.upsert_billing_invoice",
-            [
-                provider,
-                provider_invoice_id,
-                provider_subscription_id,
-                user_id,
-                status,
-                amount_paid_minor,
-                amount_due_minor,
-                currency,
-                period_start,
-                period_end,
-                json.dumps(metadata) if metadata else None,
-            ],
+        self._invoice_repo.upsert(
+            provider,
+            provider_invoice_id,
+            provider_subscription_id,
+            user_id,
+            status,
+            amount_paid_minor,
+            amount_due_minor,
+            currency,
+            period_start,
+            period_end,
+            json.dumps(metadata) if metadata else None,
         )
 
     def upsert_billing_dispute(
@@ -436,17 +382,14 @@ class PostgresBillingStore(BillingStore):
         reason: str | None = None,
         metadata: dict | None = None,
     ) -> None:
-        self._call_rpc_void_sync(
-            "public.upsert_billing_dispute",
-            [
-                provider,
-                provider_dispute_id,
-                provider_payment_id,
-                user_id,
-                status,
-                reason,
-                json.dumps(metadata) if metadata else None,
-            ],
+        self._dispute_repo.upsert(
+            provider,
+            provider_dispute_id,
+            provider_payment_id,
+            user_id,
+            status,
+            reason,
+            json.dumps(metadata) if metadata else None,
         )
 
     def get_billing_payment(
@@ -454,37 +397,16 @@ class PostgresBillingStore(BillingStore):
         provider: str,
         provider_payment_id: str,
     ) -> dict | None:
-        return self._call_rpc_json_sync(
-            "public.get_billing_payment_for_refund",
-            [provider, provider_payment_id],
-        )
+        return self._payment_repo.get_for_refund(provider, provider_payment_id)
 
     def get_user_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-                           offer_key, plan, status, current_period_start,
-                           current_period_end, cancel_at_period_end, interval, interval_count, metadata
-                    FROM public.billing_subscriptions
-                    WHERE user_id = %s
-                    ORDER BY current_period_start DESC NULLS LAST
-                    """,
-                    [user_id],
-                )
-                return [self._row_to_subscription_state(dict(row)) for row in cur.fetchall()]
-        finally:
-            self._pool.putconn(conn)
+        rows = self._subscription_repo.get_user_subscriptions(user_id)
+        return [self._row_to_subscription_state(r) for r in rows]
 
     def deactivate_other_provider_subscriptions(
         self,
         user_id: str,
         keep_provider: str,
     ) -> dict[str, Any]:
-        result = self._call_rpc_json_sync(
-            "public.deactivate_other_provider_subscriptions",
-            [user_id, keep_provider],
-        )
-        return result or {}
+        count = self._subscription_repo.deactivate_other_provider_subscriptions(user_id, keep_provider)
+        return {"deactivated_count": count}

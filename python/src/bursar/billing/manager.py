@@ -11,8 +11,10 @@ from bursar.billing.models import (
     BillingConfig,
     BillingEvent,
     BillingEventResult,
+    BillingOfferResult,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
+    BillingTopupResult,
 )
 from bursar.billing.store import BillingStore
 from bursar.events import CreditEventEmitter
@@ -136,8 +138,8 @@ class BillingManager:
         return handler(event)
 
     @staticmethod
-    def _compute_topup_credits(amount_minor: int, topup_config: dict) -> int:
-        credits_per = topup_config.get("credits_per_unit", 1000)
+    def _compute_topup_credits(amount_minor: int, topup_config: BillingTopupResult) -> int:
+        credits_per = int(topup_config.credits_per_unit or 1000)
         return (amount_minor * credits_per) // 100
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
@@ -158,7 +160,7 @@ class BillingManager:
             )
         return None
 
-    def _offer_for_event(self, event: BillingEvent) -> tuple[dict | None, str | None, str | None]:
+    def _offer_for_event(self, event: BillingEvent) -> tuple[BillingOfferResult | None, str | None, str | None]:
         if not event.subscription:
             return None, None, None
         refs = event.subscription.refs
@@ -173,11 +175,11 @@ class BillingManager:
             offer = self._resolve_offer_by_lookup(event.provider, refs.lookup_key)
         if not offer:
             return None, None, None
-        return offer, offer.get("offer_key"), offer.get("plan")
+        return offer, offer.offer_key, offer.plan
 
-    def _resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> dict | None:
+    def _resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> BillingOfferResult | None:
         result = self._store.resolve_billing_offer_by_lookup(provider, lookup_key)
-        if result and "offer_key" in result and "plan" in result:
+        if result and result.offer_key and result.plan:
             return result
         return None
 
@@ -265,8 +267,9 @@ class BillingManager:
         if self._cm and provision_on_positive:
             self._provision_subscription(
                 uid,
-                offer or ({"plan": existing.plan} if existing and existing.plan else None),
+                offer,
                 event,
+                _plan_key=existing.plan if existing and existing.plan else None,
             )
 
         return BillingEventResult(handled=True, action=action)
@@ -495,7 +498,7 @@ class BillingManager:
                 )
                 if topup_config:
                     payment_metadata = {
-                        "credits_per_unit": int(topup_config.get("credits_per_unit", 1000)),
+                        "credits_per_unit": int(topup_config.credits_per_unit or 1000),
                     }
             self._store.upsert_billing_payment(
                 event.provider,
@@ -519,8 +522,8 @@ class BillingManager:
             )
 
         if topup_config and self._cm and event.payment.purpose == "credit_topup" and uid:
-            min_amount = int(topup_config.get("min_amount_minor", 0))
-            max_amount = int(topup_config.get("max_amount_minor", 10**18))
+            min_amount = 0
+            max_amount = 10**18
             if event.payment.amount_minor < min_amount or event.payment.amount_minor > max_amount:
                 return BillingEventResult(handled=True, action="payment_succeeded")
             credits = self._compute_topup_credits(event.payment.amount_minor, topup_config)
@@ -529,7 +532,7 @@ class BillingManager:
                     uid,
                     Decimal(credits),
                     tx_type="purchase",
-                    bucket=topup_config.get("deposit_to", "purchased"),
+                    bucket=topup_config.deposit_to,
                 )
                 logger.info(
                     "granted %d topup credits to user %s (payment %s)",
@@ -582,7 +585,10 @@ class BillingManager:
                         )
                         return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
                     credits_per_unit = int(credits_per_unit)
-                    credits = self._compute_topup_credits(refund.amount_minor, {"credits_per_unit": credits_per_unit})
+                    credits = self._compute_topup_credits(
+                        refund.amount_minor,
+                        BillingTopupResult(topup_key="", credits_per_unit=Decimal(credits_per_unit)),
+                    )
                     if credits > 0:
                         self._cm.deduct_credits(
                             uid,
@@ -624,13 +630,15 @@ class BillingManager:
     def _provision_subscription(
         self,
         uid: str,
-        offer: dict | None,
+        offer: BillingOfferResult | None,
         event: BillingEvent,
+        *,
+        _plan_key: str | None = None,
     ) -> None:
-        if not offer or not self._cm:
+        if not self._cm:
             return
 
-        plan_key = offer.get("plan")
+        plan_key = _plan_key or (offer.plan if offer else None)
         if not plan_key:
             return
 
@@ -652,12 +660,12 @@ class BillingManager:
             if count:
                 logger.info("deactivated %d prior provider subscription(s) for user %s", count, uid)
 
-        grant = offer.get("grant") or {}
-        if grant.get("mode") == "cycle_grant" and self._cm:
-            cycle_credits = grant.get("credits")
+        g = offer.grant if offer else None
+        if g and g.mode == "cycle_grant" and self._cm:
+            cycle_credits = g.credits
             if cycle_credits:
-                cycle_tier = grant.get("bucket", "purchased")
-                replace_prior = grant.get("replace_prior", True)
+                cycle_tier = g.bucket or "purchased"
+                replace_prior = g.replace_prior
                 if replace_prior:
                     self._cm.revoke_credits_by_tx_type(uid, "cycle_grant")
                 self._cm.add_credits(
@@ -692,6 +700,6 @@ class BillingManager:
                     event.subscription.provider_subscription_id,
                 )
                 if existing and existing.plan:
-                    self._provision_subscription(uid, {"plan": existing.plan}, event)
+                    self._provision_subscription(uid, None, event, _plan_key=existing.plan)
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
             self._revoke_subscription(uid)

@@ -1,6 +1,7 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
 import { resolveCalendarWindow } from "../allowance.js";
+import { camelToSnakeKeys, snakeToCamelKeys } from "../case-utils.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
@@ -44,14 +45,17 @@ import type {
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
 import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
+import { BalanceRepository } from "../repositories/balance.js";
+import { DeductionRepository } from "../repositories/deduction.js";
+import { LeaseRepository } from "../repositories/lease.js";
+import { PricingRepository } from "../repositories/pricing.js";
+import { PlanRepository } from "../repositories/plan.js";
+import { AnalyticsRepository } from "../repositories/analytics.js";
+import { TeamRepository } from "../repositories/team.js";
+import { BucketRepository } from "../repositories/bucket.js";
 
 const ZERO = new Decimal(0);
 
-/**
- * Parse a Postgres NUMERIC column into an exact `Decimal`. Postgres returns
- * NUMERIC as a *string* via `pg`, so this preserves full precision (contract
- * §1). `null`/`undefined` become the supplied fallback.
- */
 function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
   if (value === null || value === undefined) return fallback;
   if (value instanceof Decimal) return value;
@@ -62,28 +66,14 @@ function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
   }
 }
 
-/** A money serialized for an SQL parameter: send as a decimal string. */
 function decParam(value: Decimal): string {
   return value.toString();
 }
 
-/**
- * Derive the feature-limit window END from its (already calendar-aligned)
- * START — the manager only resolves/threads the start (mirrors Python
- * `base.py`); the RPC needs an explicit end for its `WHERE` clause, so this
- * store computes it via `resolveCalendarWindow` (idempotent on an aligned
- * start — re-resolving it yields the identical window).
- */
 function featureWindowEnd(start: Date, period: FeatureLimit["period"]): Date {
   return resolveCalendarWindow(start, period).end;
 }
 
-/**
- * Parse a JSON `{tier_key: "3.0000", ...}` object (e.g. `tier_breakdown`,
- * `expired_by_bucket`) into `Record<string, Decimal>`, converting every value
- * the same way scalar money fields are (never left as a raw string/number).
- * Returns `null` when `raw` is not an object (absent/error responses).
- */
 function decRecord(raw: unknown): Record<string, Decimal> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const out: Record<string, Decimal> = {};
@@ -93,13 +83,11 @@ function decRecord(raw: unknown): Record<string, Decimal> | null {
   return out;
 }
 
-/** Parse the ``entitlements`` JSONB map into typed `FeatureLimit` records. */
 function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, FeatureLimit> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (v === null || typeof v !== "object" || Object.getPrototypeOf(v) !== Object.prototype) {
-      // Plain or non-plain-object value (e.g. true, 20, ""): wrap as value.
       out[k] = {
         value: v,
         maxCalls: 0,
@@ -120,35 +108,20 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
   return out;
 }
 
-/** Parse the ``per_operation`` JSONB map into typed `OperationPolicy` records. */
 function parsePerOperation(raw: unknown): Record<string, OperationPolicy> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, OperationPolicy> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const op = (v ?? {}) as Record<string, unknown>;
+    const op = snakeToCamelKeys((v ?? {}) as Record<string, unknown>);
     out[k] = {
-      billingMode:
-        (String(op.billing_mode ?? op.billingMode ?? "strict") as BillingMode) ?? "strict",
-      maxConcurrent:
-        op.max_concurrent != null
-          ? Number(op.max_concurrent)
-          : op.maxConcurrent != null
-            ? Number(op.maxConcurrent)
-            : null,
-      overdraftFloor:
-        op.overdraft_floor != null
-          ? dec(op.overdraft_floor)
-          : op.overdraftFloor != null
-            ? dec(op.overdraftFloor)
-            : null,
+      billingMode: (String(op.billingMode ?? "strict") as BillingMode) ?? "strict",
+      maxConcurrent: op.maxConcurrent != null ? Number(op.maxConcurrent) : null,
+      overdraftFloor: op.overdraftFloor != null ? dec(op.overdraftFloor) : null,
     };
   }
   return out;
 }
 
-/**
- * Minimal interface for a PG pool (real or mock).
- */
 export interface PgPool {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
   end(): Promise<void>;
@@ -158,23 +131,76 @@ export interface PgPoolConstructor {
   new (config: { connectionString: string }): PgPool;
 }
 
-/**
- * Credit store backed by a raw Postgres connection.
- *
- * Uses dependency injection for the PG pool — supply a real ``pg.Pool`` class
- * for production, a mock constructor for tests, or a pre-created pool instance
- * to share across stores (avoids exhausting Postgres connections).
- *
- * Args:
- *   databaseUrl: Postgres connection string.
- *   poolOrCtor: A pre-created PgPool instance, a PgPoolConstructor, or omitted
- *     (loads ``pg`` on first use).
- */
 export class PostgresStore extends CreditStore {
   private databaseUrl: string;
   private poolCtor: PgPoolConstructor | null = null;
   private pool: PgPool | null = null;
   private ownsPool: boolean;
+
+  private _balanceRepo: BalanceRepository | null = null;
+  private _deductionRepo: DeductionRepository | null = null;
+  private _leaseRepo: LeaseRepository | null = null;
+  private _pricingRepo: PricingRepository | null = null;
+  private _planRepo: PlanRepository | null = null;
+  private _analyticsRepo: AnalyticsRepository | null = null;
+  private _teamRepo: TeamRepository | null = null;
+  private _bucketRepo: BucketRepository | null = null;
+
+  private get balanceRepo(): BalanceRepository {
+    if (!this._balanceRepo) {
+      this._balanceRepo = new BalanceRepository(this.callproc.bind(this));
+    }
+    return this._balanceRepo;
+  }
+
+  private get deductionRepo(): DeductionRepository {
+    if (!this._deductionRepo) {
+      this._deductionRepo = new DeductionRepository(this.callproc.bind(this));
+    }
+    return this._deductionRepo;
+  }
+
+  private get leaseRepo(): LeaseRepository {
+    if (!this._leaseRepo) {
+      this._leaseRepo = new LeaseRepository(this.callproc.bind(this));
+    }
+    return this._leaseRepo;
+  }
+
+  private get pricingRepo(): PricingRepository {
+    if (!this._pricingRepo) {
+      this._pricingRepo = new PricingRepository(this.callproc.bind(this));
+    }
+    return this._pricingRepo;
+  }
+
+  private get planRepo(): PlanRepository {
+    if (!this._planRepo) {
+      this._planRepo = new PlanRepository(this.callproc.bind(this));
+    }
+    return this._planRepo;
+  }
+
+  private get analyticsRepo(): AnalyticsRepository {
+    if (!this._analyticsRepo) {
+      this._analyticsRepo = new AnalyticsRepository(this.callproc.bind(this));
+    }
+    return this._analyticsRepo;
+  }
+
+  private get teamRepo(): TeamRepository {
+    if (!this._teamRepo) {
+      this._teamRepo = new TeamRepository(this.callproc.bind(this));
+    }
+    return this._teamRepo;
+  }
+
+  private get bucketRepo(): BucketRepository {
+    if (!this._bucketRepo) {
+      this._bucketRepo = new BucketRepository(this.callproc.bind(this));
+    }
+    return this._bucketRepo;
+  }
 
   constructor(
     databaseUrl: string,
@@ -184,7 +210,6 @@ export class PostgresStore extends CreditStore {
     super(pricingCacheTtl);
     this.databaseUrl = databaseUrl;
     if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
-      // Pre-created pool instance — share, don't own.
       this.pool = poolOrCtor as PgPool;
       this.ownsPool = false;
     } else {
@@ -221,21 +246,6 @@ export class PostgresStore extends CreditStore {
     }
   }
 
-  /**
-   * Call a SQL function and return its result rows.
-   *
-   * bursar's RPCs come in two shapes:
-   *   1. **Scalar JSONB** (`RETURNS JSONB`) — `pg` returns one row whose single
-   *      column holds the parsed object. We unwrap that to `[object]`.
-   *   2. **Set-returning** (`RETURNS TABLE/SETOF`) — many rows of named columns.
-   *      We return them as-is.
-   *
-   * The previous `rows[0]` heuristic was fragile: a single-row set-returning
-   * function whose first column happened to be an object would be misread. We
-   * instead detect the JSONB-scalar case precisely: exactly one row with exactly
-   * one column whose value is a non-array object. Lists therefore always return
-   * all their rows.
-   */
   private async callproc(name: string, params: unknown[]): Promise<unknown[]> {
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
     const rows = await this.query(`SELECT * FROM ${name}(${placeholders})`, params);
@@ -245,7 +255,6 @@ export class PostgresStore extends CreditStore {
       if (keys.length === 1) {
         const v = row[keys[0]];
         if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-          // Scalar JSONB result: unwrap to the parsed object.
           return [v];
         }
       }
@@ -254,10 +263,6 @@ export class PostgresStore extends CreditStore {
   }
 
   async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    // H17: do NOT silently report success for a no-op. bursar's schema is managed
-    // as a set of ordered SQL migrations bundled with the Python package; this
-    // store does not embed them. Surface that clearly instead of green-lighting
-    // a missing schema (which would only fail later as missing-RPC errors).
     throw new StoreError(
       "PostgresStore.setup() does not run migrations. Apply the bundled SQL " +
         "migrations first — run `bursar migrate` via the Python CLI, or execute the " +
@@ -267,11 +272,10 @@ export class PostgresStore extends CreditStore {
   }
 
   async getBalance(userId: string): Promise<BalanceResult> {
-    const rows = await this.callproc("get_credits_balance", [userId]);
-    if (!rows || rows.length === 0) {
+    const row = await this.balanceRepo.getBalance(userId);
+    if (!row) {
       return { userId, balance: ZERO, lifetimePurchased: ZERO };
     }
-    const row = rows[0] as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
       balance: dec(row.balance),
@@ -286,25 +290,20 @@ export class PostgresStore extends CreditStore {
     metadata?: CreditMetadata | null,
     expiresAt?: Date | null,
     bucket?: string | null,
-    // NOTE: threaded through defensively as a trailing positional param to the
-    // `credits_add` RPC. Confirm the SQL migration adds a `p_idempotency_key`
-    // parameter (with a default, so existing 5-arg call sites keep working)
-    // before relying on this against a real database (see 011_lazy_expiry.sql).
     idempotencyKey?: string | null,
   ): Promise<AddCreditsResult> {
     const meta: Record<string, unknown> = { ...(metadata ?? {}) };
     if (expiresAt) {
       meta.expires_at = expiresAt instanceof Date ? expiresAt.toISOString() : String(expiresAt);
     }
-    const rows = await this.callproc("credits_add", [
+    const row = await this.balanceRepo.addCredits(
       userId,
       decParam(amount),
       type,
       JSON.stringify(meta),
       bucket ?? null,
       idempotencyKey ?? null,
-    ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    );
     if ("error" in row && row.error) {
       throw new StoreError(`credits_add: ${String(row.error)}`);
     }
@@ -337,28 +336,23 @@ export class PostgresStore extends CreditStore {
         ? featureWindowEnd(featurePeriodStart, featureLimit.period)
         : null;
 
-    const rows = await this.callproc("deduct_with_allowance", [
+    const row = await this.deductionRepo.deductWithAllowance(
       userId,
       decParam(amount),
       idempotencyKey,
       decParam(minBalance),
       model,
       JSON.stringify(metadata ?? {}),
-      false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
+      false,
       periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
       featureLimit != null ? featureLimit.maxCalls : null,
       featureLimit != null ? featureLimit.onExceed : null,
       featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
       featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
-    ]);
+    );
 
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if ("error" in row && row.error) {
-      // Map the SQL error envelope to DeductionResult.error (the manager maps
-      // codes to typed exceptions). cap_reached / insufficient_credits /
-      // invalid_amount / feature_limit_reached all flow through here without
-      // throwing.
       return {
         transactionId: "",
         userId,
@@ -386,8 +380,6 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Lease lifecycle (atomic admission) ─────────────────────────────
-
   async createLease(
     userId: string,
     amount: Decimal,
@@ -405,26 +397,27 @@ export class PostgresStore extends CreditStore {
       featureLimit != null && featurePeriodStart != null
         ? featureWindowEnd(featurePeriodStart, featureLimit.period)
         : null;
-    const rows = await this.callproc("create_lease", [
+    const row = await this.leaseRepo.createLease({
       userId,
-      decParam(amount),
+      amount: decParam(amount),
       operationType,
       billingMode,
-      decParam(floor),
-      options?.maxConcurrent ?? null,
-      options?.ttlSeconds ?? 600,
-      options?.model ?? null,
-      overdraftFloor != null ? decParam(overdraftFloor) : null,
-      JSON.stringify(options?.metadata ?? {}),
-      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      floor: decParam(floor),
+      maxConcurrent: options?.maxConcurrent ?? null,
+      ttlSeconds: options?.ttlSeconds ?? 600,
+      model: options?.model ?? null,
+      overdraftFloor: overdraftFloor != null ? decParam(overdraftFloor) : null,
+      metadata: JSON.stringify(options?.metadata ?? {}),
+      periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureLimit != null ? featureLimit.maxCalls : null,
-      featureLimit != null ? featureLimit.onExceed : null,
-      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
-      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
-    ]);
+      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
+      featurePeriodStart:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
+    });
 
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if (!row || Object.keys(row).length === 0) {
       return {
         leaseId: "",
@@ -475,24 +468,25 @@ export class PostgresStore extends CreditStore {
       featureLimit != null && featurePeriodStart != null
         ? featureWindowEnd(featurePeriodStart, featureLimit.period)
         : null;
-    const rows = await this.callproc("settle_lease", [
+    const row = await this.leaseRepo.settleLease({
       userId,
       leaseId,
-      decParam(amount),
-      options?.idempotencyKey ?? null,
-      decParam(minBalance),
-      options?.model ?? null,
-      JSON.stringify(options?.metadata ?? {}),
-      false, // p_skip_allowance: not yet exposed as a JS option; keep the SQL default
-      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      amount: decParam(amount),
+      idempotencyKey: options?.idempotencyKey ?? null,
+      minBalance: decParam(minBalance),
+      model: options?.model ?? null,
+      metadata: JSON.stringify(options?.metadata ?? {}),
+      skipAllowance: false,
+      periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureLimit != null ? featureLimit.maxCalls : null,
-      featureLimit != null ? featureLimit.onExceed : null,
-      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
-      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
-    ]);
+      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
+      featurePeriodStart:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
+    });
 
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
     if (!row || Object.keys(row).length === 0) {
       return {
         transactionId: "",
@@ -534,8 +528,7 @@ export class PostgresStore extends CreditStore {
   }
 
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
-    const rows = await this.callproc("release_lease", [userId, leaseId]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.leaseRepo.releaseLease(userId, leaseId);
     return {
       leaseId,
       userId,
@@ -545,8 +538,7 @@ export class PostgresStore extends CreditStore {
   }
 
   async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult> {
-    const rows = await this.callproc("renew_lease", [userId, leaseId, ttlSeconds]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.leaseRepo.renewLease(userId, leaseId, ttlSeconds);
     if ("error" in row && row.error) {
       return {
         leaseId,
@@ -571,8 +563,7 @@ export class PostgresStore extends CreditStore {
   }
 
   async getAvailable(userId: string): Promise<AvailableResult> {
-    const rows = await this.callproc("get_available_credits", [userId]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.balanceRepo.getAvailable(userId);
     return {
       userId,
       balance: dec(row.balance),
@@ -586,26 +577,18 @@ export class PostgresStore extends CreditStore {
   }
 
   private async _loadActivePricing(): Promise<PricingConfigResult | null> {
-    const rows = await this.callproc("get_active_pricing_config", []);
-    if (!rows || rows.length === 0) return null;
-    const row = rows[0] as Record<string, unknown> | undefined;
+    const row = await this.pricingRepo.getActivePricing();
     if (!row || !row.config) return null;
     const result = row as unknown as PricingConfigResult;
     const config = result.config as Record<string, unknown> | undefined;
 
-    // Preserve dynamic-identifier sub-sections before key conversion.
-    // snakeToCamelKeys deep-converts ALL keys at ALL depths, including
-    // user-defined identifiers like flat_job names (roadmap_gen → roadmapGen),
-    // which would break getFlatJobCost lookups.
     const rawFlatJobs: unknown =
       config && typeof config.metering === "object" && config.metering !== null
         ? (config.metering as Record<string, unknown>).flat_jobs
         : undefined;
 
-    // Convert snake_case keys to camelCase for JS consumers.
-    result.config = this.snakeToCamelKeys(result.config as Record<string, unknown>);
+    result.config = snakeToCamelKeys(result.config as Record<string, unknown>);
 
-    // Restore dynamic-identifier sub-sections with original key names.
     if (rawFlatJobs) {
       const metering = (result.config as Record<string, unknown>).metering as Record<
         string,
@@ -617,62 +600,17 @@ export class PostgresStore extends CreditStore {
     return result;
   }
 
-  private camelToSnakeKeys(obj: Record<string, unknown>): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      const snakeKey = key.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`);
-      if (value instanceof Decimal) {
-        result[snakeKey] = value;
-      } else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        result[snakeKey] = this.camelToSnakeKeys(value as Record<string, unknown>);
-      } else if (Array.isArray(value)) {
-        result[snakeKey] = value.map((v) =>
-          v instanceof Decimal
-            ? v
-            : v !== null && typeof v === "object"
-              ? this.camelToSnakeKeys(v as Record<string, unknown>)
-              : v,
-        );
-      } else {
-        result[snakeKey] = value;
-      }
-    }
-    return result;
-  }
-
-  private snakeToCamelKeys(obj: Record<string, unknown>): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj)) {
-      const camelKey = key.replace(/_([a-z])/g, (_, m) => m.toUpperCase());
-      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        result[camelKey] = this.snakeToCamelKeys(value as Record<string, unknown>);
-      } else if (Array.isArray(value)) {
-        result[camelKey] = value.map((v) =>
-          v !== null && typeof v === "object"
-            ? this.snakeToCamelKeys(v as Record<string, unknown>)
-            : v,
-        );
-      } else {
-        result[camelKey] = value;
-      }
-    }
-    return result;
-  }
-
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
-    const rows = await this.callproc("set_active_pricing_config", [
-      JSON.stringify(this.camelToSnakeKeys(config)),
+    const row = await this.pricingRepo.setActivePricing(
+      JSON.stringify(camelToSnakeKeys(config)),
       label ?? null,
-    ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    );
     this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 
-  // H8: pricing history / activation — mirrors Python base.py:293-312.
-
   async getPricingHistory(): Promise<PricingConfigHistoryItem[]> {
-    const rows = await this.callproc("get_pricing_history", []);
+    const rows = await this.pricingRepo.getPricingHistory();
     if (!rows) return [];
     return (rows as Record<string, unknown>[]).map((r) => ({
       id: String(r.id ?? ""),
@@ -684,13 +622,10 @@ export class PostgresStore extends CreditStore {
   }
 
   async getPricingConfig(version: number): Promise<PricingConfigResult | null> {
-    const rows = await this.callproc("get_pricing_config", [version]);
-    if (!rows || rows.length === 0) return null;
-    const row = rows[0] as Record<string, unknown>;
-    if (!row.config) return null;
+    const row = await this.pricingRepo.getPricingConfig(version);
+    if (!row || !row.config) return null;
     const config = row.config as Record<string, unknown>;
 
-    // Preserve dynamic-identifier sub-sections (same rationale as getActivePricing).
     const rawFlatJobs: unknown =
       config && typeof config.metering === "object" && config.metering !== null
         ? (config.metering as Record<string, unknown>).flat_jobs
@@ -698,7 +633,7 @@ export class PostgresStore extends CreditStore {
 
     const result: PricingConfigResult = {
       id: String(row.id ?? ""),
-      config: this.snakeToCamelKeys(config),
+      config: snakeToCamelKeys(config),
       version: Number(row.version ?? version),
     };
 
@@ -711,20 +646,16 @@ export class PostgresStore extends CreditStore {
   }
 
   async activatePricing(version: number): Promise<string> {
-    const rows = await this.callproc("activate_pricing", [version]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.pricingRepo.activatePricing(version);
     this.invalidatePricingCache();
     return String(row.id ?? "");
   }
-
-  // ── Plan management ────────────────────────────────────────────────
 
   async migratePlanUsers(
     planKey: string,
     targetConfigVersion?: number | null,
   ): Promise<MigratePlanUsersResult> {
-    const rows = await this.callproc("migrate_plan_users", [planKey, targetConfigVersion ?? null]);
-    const row = rows[0] as Record<string, unknown>;
+    const row = await this.planRepo.migratePlanUsers(planKey, targetConfigVersion ?? null);
     return {
       planKey: String(row.plan_key ?? planKey),
       targetPlanId: String(row.target_plan_id ?? ""),
@@ -734,8 +665,8 @@ export class PostgresStore extends CreditStore {
   }
 
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
-    const rows = await this.callproc("get_user_plan", [userId]);
-    if (!rows || rows.length === 0) {
+    const row = await this.planRepo.getUserPlan(userId);
+    if (!row) {
       return {
         userId,
         planId: null,
@@ -746,7 +677,6 @@ export class PostgresStore extends CreditStore {
         billingMode: "strict" as BillingMode,
       };
     }
-    const row = rows[0] as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
@@ -781,7 +711,6 @@ export class PostgresStore extends CreditStore {
       userId,
       feature,
       value,
-      // M6: presence-vs-truthiness — numeric 0 / "" count as present.
       hasFeature: present && value !== null && value !== undefined && value !== false,
     };
   }
@@ -791,11 +720,11 @@ export class PostgresStore extends CreditStore {
     planId: string,
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult> {
-    const params = planAssignedAt
-      ? [userId, planId, planAssignedAt.toISOString()]
-      : [userId, planId];
-    const rows = await this.callproc("set_user_plan", params);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.planRepo.setUserPlan(
+      userId,
+      planId,
+      planAssignedAt?.toISOString() ?? null,
+    );
     return {
       userId: String(row.user_id ?? userId),
       planId: String(row.plan_id ?? planId),
@@ -804,20 +733,18 @@ export class PostgresStore extends CreditStore {
   }
 
   async unsetUserPlan(userId: string): Promise<{ userId: string }> {
-    const rows = await this.callproc("unset_user_plan", [userId]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.planRepo.unsetUserPlan(userId);
     return { userId: String(row.user_id ?? userId) };
   }
 
   async checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult> {
-    const rows = await this.callproc("check_plan_allowance", [
+    const row = await this.planRepo.checkAllowance(
       userId,
       periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
-    ]);
-    if (!rows || rows.length === 0) {
+    );
+    if (!row) {
       return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
     }
-    const row = rows[0] as Record<string, unknown>;
     return {
       planId: String(row.plan_id ?? ""),
       allowanceRemaining: dec(row.allowance_remaining),
@@ -827,10 +754,9 @@ export class PostgresStore extends CreditStore {
   }
 
   async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
-    await this.callproc("increment_usage_window", [userId, planId, decParam(amount)]);
+    await this.planRepo.incrementUsageWindow(userId, planId, decParam(amount));
   }
 
-  /** Advisory, non-locking read of invocation-count usage (UI only). Mirrors `checkSpendCap`. */
   async checkFeatureLimit(
     userId: string,
     feature: string,
@@ -838,14 +764,14 @@ export class PostgresStore extends CreditStore {
     periodStart: Date,
     periodEnd: Date,
   ): Promise<FeatureLimitResult> {
-    const rows = await this.callproc("check_feature_limit", [
+    const row = await this.planRepo.checkFeatureLimit(
       userId,
       feature,
       maxCalls,
       periodStart.toISOString().slice(0, 10),
       periodEnd.toISOString().slice(0, 10),
-    ]);
-    if (!rows || rows.length === 0) {
+    );
+    if (!row) {
       return {
         userId,
         feature,
@@ -858,7 +784,6 @@ export class PostgresStore extends CreditStore {
         action: null,
       };
     }
-    const row = rows[0] as Record<string, unknown>;
     return {
       userId: String(row.user_id ?? userId),
       feature: String(row.feature ?? feature),
@@ -872,22 +797,15 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Spend caps and rate limiting ──────────────────────────────────────
-
   async checkSpendCap(
     userId: string,
     model?: string | null,
     amount?: Decimal,
   ): Promise<CapCheckResult> {
-    const rows = await this.callproc("check_spend_cap", [
-      userId,
-      model ?? null,
-      decParam(amount ?? ZERO),
-    ]);
-    if (!rows || rows.length === 0) {
+    const row = await this.planRepo.checkSpendCap(userId, model ?? null, decParam(amount ?? ZERO));
+    if (!row) {
       return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
     }
-    const row = rows[0] as Record<string, unknown>;
     return {
       capped: Boolean(row.capped),
       currentSpend: dec(row.current_spend),
@@ -897,14 +815,9 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Revoke credits by tx type ──────────────────────────────────────────
-
   async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
-    const rows = await this.callproc("revoke_credits_by_tx_type", [userId, txType]);
-    return (rows?.[0] ?? {}) as Record<string, unknown>;
+    return this.deductionRepo.revokeCreditsByTxType(userId, txType);
   }
-
-  // ── Refunds ──────────────────────────────────────────────────────────
 
   async refundCredits(
     transactionId: string,
@@ -912,13 +825,12 @@ export class PostgresStore extends CreditStore {
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
-    const rows = await this.callproc("refund_credits", [
+    const row = await this.deductionRepo.refundCredits(
       transactionId,
       amount != null ? decParam(amount) : null,
       reason ?? null,
       JSON.stringify(metadata ?? {}),
-    ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    );
     if ("error" in row && row.error) {
       return {
         refundTransactionId: "",
@@ -939,84 +851,64 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Usage analytics ──────────────────────────────────────────────────
-
   async spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]> {
-    const rows = await this.callproc("spend_by_user", [start.toISOString(), end.toISOString()]);
-    return (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        userId: String(row.user_id ?? ""),
-        totalSpend: dec(row.total_spend),
-        transactionCount: Number(row.transaction_count ?? 0),
-      };
-    });
+    const rows = await this.analyticsRepo.spendByUser(start.toISOString(), end.toISOString());
+    return (rows ?? []).map((r) => ({
+      userId: String(r.user_id ?? ""),
+      totalSpend: dec(r.total_spend),
+      transactionCount: Number(r.transaction_count ?? 0),
+    }));
   }
 
   async spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]> {
-    const rows = await this.callproc("spend_by_model", [start.toISOString(), end.toISOString()]);
-    return (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        model: String(row.model ?? ""),
-        totalSpend: dec(row.total_spend),
-        transactionCount: Number(row.transaction_count ?? 0),
-      };
-    });
+    const rows = await this.analyticsRepo.spendByModel(start.toISOString(), end.toISOString());
+    return (rows ?? []).map((r) => ({
+      model: String(r.model ?? ""),
+      totalSpend: dec(r.total_spend),
+      transactionCount: Number(r.transaction_count ?? 0),
+    }));
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {
-    const rows = await this.callproc("top_users", [limit, start.toISOString(), end.toISOString()]);
-    return (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        userId: String(row.user_id ?? ""),
-        totalSpend: dec(row.total_spend),
-      };
-    });
+    const rows = await this.analyticsRepo.topUsers(limit, start.toISOString(), end.toISOString());
+    return (rows ?? []).map((r) => ({
+      userId: String(r.user_id ?? ""),
+      totalSpend: dec(r.total_spend),
+    }));
   }
 
   async dailySpend(start: Date, end: Date): Promise<DailySpendRow[]> {
-    const rows = await this.callproc("daily_spend", [start.toISOString(), end.toISOString()]);
-    return (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        date: String(row.date ?? ""),
-        totalSpend: dec(row.total_spend),
-        transactionCount: Number(row.transaction_count ?? 0),
-      };
-    });
+    const rows = await this.analyticsRepo.dailySpend(start.toISOString(), end.toISOString());
+    return (rows ?? []).map((r) => ({
+      date: String(r.date ?? ""),
+      totalSpend: dec(r.total_spend),
+      transactionCount: Number(r.transaction_count ?? 0),
+    }));
   }
-
-  // ── Transaction listing ─────────────────────────────────────────────
 
   async listUserTransactions(
     userId: string,
     options?: ListTransactionsOptions,
   ): Promise<PaginatedTransactions> {
-    const rows = await this.callproc("list_user_transactions", [
+    const rows = await this.analyticsRepo.listUserTransactions(
       userId,
       options?.types ?? null,
       options?.fromDate?.toISOString() ?? null,
       options?.toDate?.toISOString() ?? null,
       options?.limit ?? 50,
       options?.offset ?? 0,
-    ]);
-    const items = (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        id: String(row.id ?? ""),
-        userId: String(row.user_id ?? ""),
-        amount: dec(row.amount),
-        type: String(row.type ?? ""),
-        referenceType: row.reference_type != null ? String(row.reference_type) : null,
-        referenceId: row.reference_id != null ? String(row.reference_id) : null,
-        metadata: (row.metadata as Record<string, unknown> | null) ?? null,
-        createdAt: String(row.created_at ?? ""),
-      };
-    });
-    const total =
-      rows.length > 0 ? Number((rows[0] as Record<string, unknown>).total_count ?? 0) : 0;
+    );
+    const items = (rows ?? []).map((r) => ({
+      id: String(r.id ?? ""),
+      userId: String(r.user_id ?? ""),
+      amount: dec(r.amount),
+      type: String(r.type ?? ""),
+      referenceType: r.reference_type != null ? String(r.reference_type) : null,
+      referenceId: r.reference_id != null ? String(r.reference_id) : null,
+      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
+      createdAt: String(r.created_at ?? ""),
+    }));
+    const total = rows.length > 0 ? Number(rows[0].total_count ?? 0) : 0;
     return { items, total };
   }
 
@@ -1024,36 +916,29 @@ export class PostgresStore extends CreditStore {
     userId: string,
     options?: ListUsageEventsOptions,
   ): Promise<PaginatedTransactions> {
-    const rows = await this.callproc("list_usage_events", [
+    const rows = await this.analyticsRepo.listUsageEvents(
       userId,
       options?.fromDate?.toISOString() ?? null,
       options?.toDate?.toISOString() ?? null,
       options?.limit ?? 50,
       options?.offset ?? 0,
-    ]);
-    const items = (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        id: String(row.id ?? ""),
-        userId: String(row.user_id ?? ""),
-        amount: dec(row.amount),
-        type: String(row.type ?? ""),
-        referenceType: row.reference_type != null ? String(row.reference_type) : null,
-        referenceId: row.reference_id != null ? String(row.reference_id) : null,
-        metadata: (row.metadata as Record<string, unknown> | null) ?? null,
-        createdAt: String(row.created_at ?? ""),
-      };
-    });
-    const total =
-      rows.length > 0 ? Number((rows[0] as Record<string, unknown>).total_count ?? 0) : 0;
+    );
+    const items = (rows ?? []).map((r) => ({
+      id: String(r.id ?? ""),
+      userId: String(r.user_id ?? ""),
+      amount: dec(r.amount),
+      type: String(r.type ?? ""),
+      referenceType: r.reference_type != null ? String(r.reference_type) : null,
+      referenceId: r.reference_id != null ? String(r.reference_id) : null,
+      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
+      createdAt: String(r.created_at ?? ""),
+    }));
+    const total = rows.length > 0 ? Number(rows[0].total_count ?? 0) : 0;
     return { items, total };
   }
 
-  // ── Aggregate stats ────────────────────────────────────────────────
-
   async aggregateStats(start: Date, end: Date): Promise<AggregateStats> {
-    const rows = await this.callproc("aggregate_stats", [start.toISOString(), end.toISOString()]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.analyticsRepo.aggregateStats(start.toISOString(), end.toISOString());
     return {
       totalCreditsConsumed: dec(row.total_credits_consumed),
       activeUsers: Number(row.active_users ?? 0),
@@ -1063,11 +948,8 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Team/shared balance pools ────────────────────────────────────────
-
   async createTeam(name: string, initialBalance: Decimal = ZERO): Promise<CreateTeamResult> {
-    const rows = await this.callproc("create_team", [name, decParam(initialBalance)]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.teamRepo.createTeam(name, decParam(initialBalance));
     return {
       teamId: String(row.team_id ?? ""),
       name: String(row.name ?? name),
@@ -1075,11 +957,10 @@ export class PostgresStore extends CreditStore {
   }
 
   async getTeamBalance(teamId: string): Promise<TeamBalanceResult> {
-    const rows = await this.callproc("get_team_balance", [teamId]);
-    if (!rows || rows.length === 0) {
+    const row = await this.teamRepo.getTeamBalance(teamId);
+    if (!row) {
       return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
-    const row = rows[0] as Record<string, unknown>;
     if ("error" in row && row.error) {
       return { teamId, name: "", balance: ZERO, memberCount: 0 };
     }
@@ -1097,13 +978,12 @@ export class PostgresStore extends CreditStore {
     role = "member",
     spendCap?: Decimal | null,
   ): Promise<AddTeamMemberResult> {
-    const rows = await this.callproc("add_team_member", [
+    const row = await this.teamRepo.addTeamMember(
       teamId,
       userId,
       role,
       spendCap != null ? decParam(spendCap) : null,
-    ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    );
     return {
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
@@ -1112,16 +992,13 @@ export class PostgresStore extends CreditStore {
   }
 
   async getTeamMembers(teamId: string): Promise<TeamMember[]> {
-    const rows = await this.callproc("get_team_members", [teamId]);
-    return (rows ?? []).map((r) => {
-      const row = r as Record<string, unknown>;
-      return {
-        userId: String(row.user_id ?? ""),
-        role: String(row.role ?? "member"),
-        spendCap: row.spend_cap != null ? dec(row.spend_cap) : null,
-        totalSpent: dec(row.total_spent),
-      };
-    });
+    const rows = await this.teamRepo.getTeamMembers(teamId);
+    return (rows ?? []).map((r) => ({
+      userId: String(r.user_id ?? ""),
+      role: String(r.role ?? "member"),
+      spendCap: r.spend_cap != null ? dec(r.spend_cap) : null,
+      totalSpent: dec(r.total_spent),
+    }));
   }
 
   async deductTeam(
@@ -1133,13 +1010,12 @@ export class PostgresStore extends CreditStore {
   ): Promise<TeamDeductionResult> {
     const meta: Record<string, unknown> = { ...(metadata ?? {}) };
     if (idempotencyKey) meta.idempotency_key = idempotencyKey;
-    const rows = await this.callproc("deduct_team", [
+    const row = await this.teamRepo.deductTeam(
       teamId,
       userId,
       decParam(amount),
       JSON.stringify(meta),
-    ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    );
     if ("error" in row && row.error) {
       return {
         transactionId: "",
@@ -1159,16 +1035,8 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Credit expiry ────────────────────────────────────────────────────
-
   async sweepExpiredCredits(dryRun = false, userId?: string): Promise<SweepResult> {
-    // NOTE: `userId` is threaded through defensively as a trailing positional
-    // param to `expire_credits`. Confirm the SQL migration adds a `p_user_id`
-    // parameter (with a `DEFAULT NULL`, so the existing 1-arg call sites keep
-    // meaning "global sweep") before relying on this against a real database
-    // (see 011_lazy_expiry.sql).
-    const rows = await this.callproc("expire_credits", [dryRun, userId ?? null]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = await this.bucketRepo.sweepExpiredCredits(dryRun, userId ?? null);
     return {
       expiredCount: Number(row.expired_count ?? 0),
       expiredAmount: dec(row.expired_amount),
@@ -1177,14 +1045,8 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  // ── Credit tiers ─────────────────────────────────────────────────────
-
   async getBucketBalances(userId: string): Promise<BucketBalancesResult> {
-    // get_user_credit_buckets returns one JSONB envelope object (not a rowset):
-    // {user_id, tiers: [...], total_balance}. callproc's scalar-JSONB
-    // unwrapping surfaces it as a single-element array.
-    const rows = await this.callproc("get_user_credit_buckets", [userId]);
-    const envelope = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const envelope = await this.bucketRepo.getBucketBalances(userId);
     const bucketRows = (envelope.buckets as Record<string, unknown>[] | undefined) ?? [];
     const buckets: BucketBalance[] = bucketRows.map((row) => ({
       bucketKey: String(row.bucket_key ?? ""),

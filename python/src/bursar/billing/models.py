@@ -1,3 +1,4 @@
+from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -240,3 +241,31 @@ class BillingSubscriptionState(BaseModel):
     interval: str | None = None
     interval_count: int | None = None
     metadata: dict[str, Any] | None = None
+
+
+class BillingGrantResult(BaseModel):
+    """Resolved grant info returned by resolve_billing_offer / resolve_billing_offer_by_lookup."""
+
+    mode: str | None = None
+    credits: str | Decimal | None = None
+    bucket: str | None = None
+    replace_prior: bool = False
+
+
+class BillingOfferResult(BaseModel):
+    """Typed return type for resolve_billing_offer / resolve_billing_offer_by_lookup."""
+
+    offer_key: str
+    plan: str | None = None
+    interval: str = "month"
+    interval_count: int = 1
+    grant: BillingGrantResult = Field(default_factory=BillingGrantResult)
+
+
+class BillingTopupResult(BaseModel):
+    """Typed return type for resolve_credit_topup / resolve_credit_topup_by_lookup."""
+
+    topup_key: str
+    credits_per_unit: Decimal | int | None = None
+    credits_per_major_unit: Decimal | int | None = None
+    deposit_to: str = "purchased"

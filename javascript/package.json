@@ -74,7 +74,8 @@
   "license": "AGPL-3.0-only",
   "dependencies": {
     "decimal.js": "^10.6.0",
-    "lru-cache": "^10.4.3"
+    "lru-cache": "^10.4.3",
+    "zod": "^4.4.3"
   },
   "peerDependencies": {
     "dodopayments": "^2.40.1",
