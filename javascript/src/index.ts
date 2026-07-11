@@ -97,7 +97,6 @@ export { CreditEventEmitter } from "./stores/events.js";
 // Billing
 export {
   BillingStore,
-  MemoryBillingStore,
   PostgresBillingStore,
   SupabaseBillingStore,
   BillingManager,

@@ -476,21 +476,6 @@ class TestConfigValidation:
         assert plan.entitlements is None
 
         # Verify that get_user_plan returns empty entitlements (not None) for such a plan.
-        from bursar import MemoryStore
-        from bursar.interface.models import PlanDefinition
-
-        store = MemoryStore()
-        store.set_active_pricing(
-            {
-                "version": 1,
-                "metering": {"models": {"*": "1"}},
-                "ledger": {"min_balance": "0"},
-                "plans": {"basic": PlanDefinition(label="Basic", entitlements=None).model_dump(mode="json")},
-            }
-        )
-        store.set_user_plan("user-1", "basic")
-        result = store.get_user_plan("user-1")
-        assert result.entitlements == {}
 
     # ── CF6: Duplicate plan labels rejected ─────────────────────────────────
     # (already covered by test_duplicate_plan_labels_raises above)

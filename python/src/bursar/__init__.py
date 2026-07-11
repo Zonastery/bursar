@@ -27,7 +27,6 @@ from bursar.billing import (
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
-    MemoryBillingStore,
     ProviderRef,
     SupabaseBillingStore,
 )
@@ -46,7 +45,6 @@ from bursar.interface.base import (
     RefundError,
     StoreError,
 )
-from bursar.interface.memory import MemoryStore
 from bursar.interface.models import (
     AddCreditsResult,
     AddTeamMemberResult,
@@ -148,7 +146,6 @@ __all__ = [
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
     "CanAffordResult",
-    "MemoryBillingStore",
     "PostgresBillingStore",
     "CapCheckResult",
     "CapabilityNotSupportedError",
@@ -178,7 +175,6 @@ __all__ = [
     "LeaseNotFoundError",
     "LeaseResult",
     "LowBalanceConfig",
-    "MemoryStore",
     "OperationPolicy",
     "PlanDefinition",
     "PricingConfig",

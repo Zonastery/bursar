@@ -1,7 +1,6 @@
 from typing import TYPE_CHECKING
 
 from bursar.billing.manager import BillingManager
-from bursar.billing.memory import MemoryBillingStore
 from bursar.billing.models import (
     AllowanceGrant,
     BillingConfig,
@@ -64,7 +63,6 @@ __all__ = [
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
     "CycleGrant",
-    "MemoryBillingStore",
     "PostgresBillingStore",
     "SupabaseBillingStore",
 ]
