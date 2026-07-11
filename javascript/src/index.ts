@@ -87,7 +87,6 @@ export type { CreateLeaseOptions, SettleLeaseOptions } from "./stores/credit-sto
 
 // Stores
 export { CreditStore } from "./stores/credit-store.js";
-export { HttpxSupabaseStore } from "./stores/supabase-store.js";
 export { PostgresStore } from "./stores/postgres-store.js";
 
 // Events
@@ -95,12 +94,7 @@ export type { CreditEvent, CreditEventType } from "./stores/events.js";
 export { CreditEventEmitter } from "./stores/events.js";
 
 // Billing
-export {
-  BillingStore,
-  PostgresBillingStore,
-  SupabaseBillingStore,
-  BillingManager,
-} from "./billing/index.js";
+export { BillingStore, PostgresBillingStore, BillingManager } from "./billing/index.js";
 export type {
   BillingConfig,
   BillingCreditTopup,

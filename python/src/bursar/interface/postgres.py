@@ -7,11 +7,13 @@ Postgres database that has the bursar schema installed.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, cast
 
 import psycopg2
+import psycopg2.extras
 
 from bursar.allowance import resolve_calendar_window
 from bursar.interface.base import CreditStore, StoreError
@@ -62,6 +64,8 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     to avoid binary-float error) so no money value is ever truncated via ``int``.
     """
     if value is None:
+        return default
+    if isinstance(value, bool):
         return default
     if isinstance(value, Decimal):
         return value
@@ -127,6 +131,19 @@ class PostgresStore(CreditStore):
             return psycopg2.connect(self._database_url)
         except psycopg2.Error as e:
             raise StoreError(f"database connection failed: {e}") from e
+
+    @contextmanager
+    def _conn_ctx(self):
+        conn = self._conn()
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            conn.close()
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -703,27 +720,27 @@ class PostgresStore(CreditStore):
         plan_key: str,
         target_config_version: int | None = None,
     ) -> MigratePlanUsersResult:
-        conn = self._conn()
         try:
-            with conn.cursor() as cur:
+            with self._conn_ctx() as conn, conn.cursor() as cur:
                 cur.callproc(
                     "migrate_plan_users",
                     [plan_key, target_config_version],
                 )
                 row = cur.fetchone()
-            conn.commit()
         except psycopg2.Error as e:
-            conn.rollback()
             raise StoreError(f"migrate_plan_users failed: {e}") from e
-        finally:
-            conn.close()
 
         if not row or not isinstance(row[0], dict):
             raise StoreError("migrate_plan_users returned no data")
         result_dict = row[0]
         if "error" in result_dict and result_dict["error"]:
             raise StoreError(result_dict["error"])
-        return MigratePlanUsersResult(**result_dict)
+        return MigratePlanUsersResult(
+            plan_key=str(result_dict.get("plan_key", plan_key)),
+            target_plan_id=str(result_dict.get("target_plan_id", "")),
+            target_config_version=int(result_dict.get("target_config_version", 0)),
+            migrated_count=int(result_dict.get("migrated_count", 0)),
+        )
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         conn = self._conn()
@@ -788,6 +805,10 @@ class PostgresStore(CreditStore):
             remaining=int(result_dict.get("remaining") or 0),
             period_start=str(result_dict.get("period_start", "")),
             period_end=str(result_dict.get("period_end", "")),
+            action=cast(
+                "Literal['deny', 'warn', 'notify'] | None",
+                str(result_dict["action"]) if "action" in result_dict else None,
+            ),
         )
 
     # ── Spend caps and rate limiting ────────────────────────────────────
@@ -993,7 +1014,7 @@ class PostgresStore(CreditStore):
     ) -> list[TransactionRow]:
         conn = self._conn()
         try:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT * FROM list_user_transactions(%s, %s, %s, %s, %s, %s)",
                     [
@@ -1011,15 +1032,15 @@ class PostgresStore(CreditStore):
             conn.close()
         return [
             TransactionRow(
-                id=str(r[0]),
-                user_id=str(r[1]),
-                amount=_dec(r[2]),
-                type=str(r[3]),
-                reference_type=str(r[4]) if r[4] else None,
-                reference_id=str(r[5]) if r[5] else None,
-                metadata=r[6] if isinstance(r[6], dict) else {},
-                created_at=str(r[7]),
-                total_count=int(r[8]),
+                id=str(r["id"]),
+                user_id=str(r["user_id"]),
+                amount=_dec(r["amount"]),
+                type=str(r["type"]),
+                reference_type=str(r["reference_type"]) if r.get("reference_type") else None,
+                reference_id=str(r["reference_id"]) if r.get("reference_id") else None,
+                metadata=r.get("metadata"),
+                created_at=str(r["created_at"]),
+                total_count=int(r["total_count"]),
             )
             for r in (rows or [])
         ]

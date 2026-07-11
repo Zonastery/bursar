@@ -77,7 +77,6 @@
     "lru-cache": "^10.4.3"
   },
   "peerDependencies": {
-    "@supabase/supabase-js": "^2.0.0",
     "dodopayments": "^2.40.1",
     "js-yaml": "^4.0.0",
     "pg": "^8.0.0",
@@ -90,9 +89,6 @@
     "pg": {
       "optional": true
     },
-    "@supabase/supabase-js": {
-      "optional": true
-    },
     "stripe": {
       "optional": true
     },
@@ -103,7 +99,6 @@
   "devDependencies": {
     "@dodopayments/core": "^0.3.0",
     "@eslint/js": "^10.0.1",
-    "@supabase/supabase-js": "^2.0.0",
     "@testcontainers/postgresql": "^12.0.4",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
