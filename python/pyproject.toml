@@ -43,11 +43,6 @@ bursar = "bursar.__main__:main"
 where = ["src"]
 
 [project.optional-dependencies]
-# Supabase store talks to the REST API over httpx only — it does NOT need a
-# direct Postgres driver (M13). psycopg2 belongs to the `postgres` extra.
-supabase = [
-    "httpx>=0.28.1",
-]
 providers = [
     "stripe>=7.0.0",
     "dodopayments>=1.0.0",
