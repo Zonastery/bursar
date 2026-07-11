@@ -24,7 +24,6 @@ from bursar.billing.models import (
     ProviderRef,
 )
 from bursar.billing.store import BillingStore
-from bursar.billing.supabase import SupabaseBillingStore
 
 if TYPE_CHECKING:
     from bursar.billing.postgres import PostgresBillingStore
@@ -64,5 +63,4 @@ __all__ = [
     "BillingSubscriptionStatus",
     "CycleGrant",
     "PostgresBillingStore",
-    "SupabaseBillingStore",
 ]

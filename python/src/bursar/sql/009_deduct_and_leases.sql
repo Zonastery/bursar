@@ -124,10 +124,6 @@ DECLARE
     v_take                 NUMERIC;
     v_sink_bucket            TEXT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     IF p_amount IS NULL
        OR NOT (p_amount = p_amount)
        OR p_amount = 'Infinity'::numeric
@@ -428,10 +424,6 @@ DECLARE
     v_lease_id        UUID;
     v_expires_at      TIMESTAMPTZ;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     IF p_amount IS NULL OR NOT (p_amount = p_amount)
        OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric OR p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
@@ -636,10 +628,6 @@ DECLARE
     v_take           NUMERIC;
     v_sink_bucket      TEXT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     IF p_amount IS NULL OR NOT (p_amount = p_amount)
        OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric OR p_amount < 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
@@ -877,10 +865,6 @@ AS $$
 DECLARE
     v_status TEXT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT status INTO v_status FROM public.credit_reservations
     WHERE id = p_lease_id AND user_id = p_user_id FOR UPDATE;
 
@@ -915,10 +899,6 @@ DECLARE
     v_balance     NUMERIC;
     v_reserved    NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT status, amount, billing_mode, expires_at
     INTO v_status, v_amount, v_billing, v_lease_exp
     FROM public.credit_reservations
@@ -959,10 +939,6 @@ DECLARE
     v_balance  NUMERIC;
     v_reserved NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT COALESCE(balance, 0) INTO v_balance FROM public.user_credits WHERE user_id = p_user_id;
     v_balance := COALESCE(v_balance, 0);
     SELECT COALESCE(SUM(amount), 0) INTO v_reserved
@@ -986,9 +962,6 @@ AS $$
 DECLARE
     v_count INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
     UPDATE public.credit_reservations SET status = 'expired'
     WHERE status = 'active' AND expires_at <= now();
     GET DIAGNOSTICS v_count = ROW_COUNT;

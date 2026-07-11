@@ -38,10 +38,6 @@ DECLARE
   v_used      INT;
   v_remaining INT;
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('limited', false, 'error', 'unauthorized');
-  END IF;
-
   -- Windows are pinned to UTC (dates are treated as UTC midnight) for
   -- deterministic bucketing, matching resolve_calendar_window's contract.
   -- Deliberately no `amount < 0` filter (unlike check_spend_cap, which only

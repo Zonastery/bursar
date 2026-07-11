@@ -57,10 +57,6 @@ DECLARE
     v_bucket_remaining NUMERIC;
     v_give NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Prevent concurrent refund on same transaction (advisory + row locks below).
     PERFORM pg_advisory_xact_lock(hashtext('refund_' || p_transaction_id));
 
@@ -249,10 +245,6 @@ DECLARE
     v_current_bucket_balance NUMERIC;
     v_current_balance NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- A grant is "sweepable" when it has an expires_at in the past AND has not
     -- already been swept (no 'swept_at' marker). Marking swept grants is what
     -- makes the sweep idempotent: a second run finds nothing and never

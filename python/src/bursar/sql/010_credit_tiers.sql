@@ -174,10 +174,6 @@ DECLARE
     v_buckets JSONB;
     v_bucket_count INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT COALESCE(balance, 0) INTO v_total_balance
     FROM public.user_credits
     WHERE user_id = p_user_id;

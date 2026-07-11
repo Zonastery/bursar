@@ -62,10 +62,6 @@ AS $$
 DECLARE
     v_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_payments (
         provider, provider_payment_id, provider_invoice_id, user_id,
         amount_minor, tax_minor, currency, purpose, metadata
@@ -111,10 +107,6 @@ AS $$
 DECLARE
     v_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_refunds (
         provider, provider_refund_id, provider_payment_id, user_id,
         amount_minor, currency, reason, metadata
@@ -162,10 +154,6 @@ AS $$
 DECLARE
     v_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_invoices (
         provider, provider_invoice_id, provider_subscription_id, user_id,
         status, amount_paid_minor, amount_due_minor, currency,
@@ -214,10 +202,6 @@ AS $$
 DECLARE
     v_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_disputes (
         provider, provider_dispute_id, provider_payment_id, user_id,
         status, reason, metadata
@@ -255,10 +239,6 @@ AS $$
 DECLARE
     v_payment RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT purpose, amount_minor, currency, user_id, metadata
     INTO v_payment
     FROM public.billing_payments

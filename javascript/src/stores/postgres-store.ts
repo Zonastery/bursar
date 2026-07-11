@@ -111,10 +111,9 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
       const valueRaw = fl["value"];
       out[k] = {
         ...(valueRaw !== undefined ? { value: valueRaw } : {}),
-        maxCalls: Number(fl.max_calls ?? fl.maxCalls ?? 0),
+        maxCalls: Number(fl.max_calls ?? 0),
         period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-        onExceed:
-          (String(fl.onExceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+        onExceed: (String(fl.on_exceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
       } as FeatureLimit;
     }
   }
@@ -592,8 +591,29 @@ export class PostgresStore extends CreditStore {
     const row = rows[0] as Record<string, unknown> | undefined;
     if (!row || !row.config) return null;
     const result = row as unknown as PricingConfigResult;
-    // Convert snake_case config back to camelCase for JS consumers.
+    const config = result.config as Record<string, unknown> | undefined;
+
+    // Preserve dynamic-identifier sub-sections before key conversion.
+    // snakeToCamelKeys deep-converts ALL keys at ALL depths, including
+    // user-defined identifiers like flat_job names (roadmap_gen → roadmapGen),
+    // which would break getFlatJobCost lookups.
+    const rawFlatJobs: unknown =
+      config && typeof config.metering === "object" && config.metering !== null
+        ? (config.metering as Record<string, unknown>).flat_jobs
+        : undefined;
+
+    // Convert snake_case keys to camelCase for JS consumers.
     result.config = this.snakeToCamelKeys(result.config as Record<string, unknown>);
+
+    // Restore dynamic-identifier sub-sections with original key names.
+    if (rawFlatJobs) {
+      const metering = (result.config as Record<string, unknown>).metering as Record<
+        string,
+        unknown
+      >;
+      metering.flatJobs = rawFlatJobs;
+    }
+
     return result;
   }
 
@@ -669,11 +689,25 @@ export class PostgresStore extends CreditStore {
     const row = rows[0] as Record<string, unknown>;
     if (!row.config) return null;
     const config = row.config as Record<string, unknown>;
-    return {
+
+    // Preserve dynamic-identifier sub-sections (same rationale as getActivePricing).
+    const rawFlatJobs: unknown =
+      config && typeof config.metering === "object" && config.metering !== null
+        ? (config.metering as Record<string, unknown>).flat_jobs
+        : undefined;
+
+    const result: PricingConfigResult = {
       id: String(row.id ?? ""),
       config: this.snakeToCamelKeys(config),
       version: Number(row.version ?? version),
     };
+
+    if (rawFlatJobs) {
+      const metering = result.config.metering as Record<string, unknown> | undefined;
+      if (metering) metering.flatJobs = rawFlatJobs;
+    }
+
+    return result;
   }
 
   async activatePricing(version: number): Promise<string> {

@@ -277,10 +277,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     RETURN public.credits_add_internal(p_user_id, p_amount, p_type, p_metadata, p_bucket, p_idempotency_key);
 END;
 $$;
@@ -320,10 +316,6 @@ DECLARE
     v_current_bucket_balance NUMERIC;
     v_current_balance NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- A grant is "sweepable" when it has an expires_at in the past AND has not
     -- already been swept (no 'swept_at' marker). Marking swept grants is what
     -- makes the sweep idempotent: a second run finds nothing and never

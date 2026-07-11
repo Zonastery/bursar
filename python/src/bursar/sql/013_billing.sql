@@ -495,10 +495,6 @@ DECLARE
     v_plan_id UUID;
     v_assigned_at TIMESTAMPTZ;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT id INTO v_plan_id
     FROM public.credit_plans
     WHERE plan_key = p_plan_key;
@@ -540,10 +536,6 @@ DECLARE
     v_ref JSONB;
     v_provider TEXT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     -- Sync billing offers (subscription plans)
     -- Note: offers are upserted, not deleted+rebuilt. Removing an offer from
     -- the config leaves a stale row, but this is intentional — active
@@ -688,10 +680,6 @@ DECLARE
     v_ref RECORD;
     v_offer RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     IF p_price_id IS NULL AND p_product_id IS NULL THEN
         RETURN NULL;
     END IF;
@@ -751,10 +739,6 @@ DECLARE
     v_ref RECORD;
     v_topup RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_price_id IS NULL AND p_product_id IS NULL THEN
         RETURN NULL;
     END IF;
@@ -810,10 +794,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
     VALUES (p_provider, p_provider_customer_id, p_user_id, p_email)
     ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
@@ -841,10 +821,6 @@ AS $$
 DECLARE
     v_user_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT user_id INTO v_user_id
     FROM public.billing_customers
     WHERE provider = p_provider AND provider_customer_id = p_provider_customer_id
@@ -871,10 +847,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     INSERT INTO public.billing_subscriptions (
         user_id, provider, provider_subscription_id, provider_customer_id,
         offer_key, plan, status, current_period_start,
@@ -929,10 +901,6 @@ AS $$
 DECLARE
     v_row RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT
         user_id, provider, provider_subscription_id, provider_customer_id,
         offer_key, plan, status, current_period_start,
@@ -983,10 +951,6 @@ DECLARE
     v_existing RECORD;
     v_new_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     BEGIN
         INSERT INTO public.billing_events (provider, provider_event_id, event_type, status, payload)
         VALUES (p_provider, p_event_id, p_event_type, 'processing', p_payload)
@@ -1054,10 +1018,6 @@ AS $$
 DECLARE
     v_existing RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT * INTO v_existing FROM public.billing_events
     WHERE provider = p_provider AND provider_event_id = p_event_id
     FOR UPDATE;
@@ -1096,10 +1056,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     UPDATE public.billing_events
     SET status = 'completed', updated_at = now()
     WHERE provider = p_provider AND provider_event_id = p_event_id;
@@ -1120,10 +1076,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     UPDATE public.billing_events
     SET status = 'failed', updated_at = now()
     WHERE provider = p_provider AND provider_event_id = p_event_id;
@@ -1145,10 +1097,6 @@ AS $$
 DECLARE
     v_row RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT * INTO v_row
     FROM public.billing_subscriptions
     WHERE user_id = p_user_id
@@ -1194,10 +1142,6 @@ DECLARE
     v_new_id UUID;
     v_next_version INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version

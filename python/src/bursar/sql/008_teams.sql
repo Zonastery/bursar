@@ -55,10 +55,6 @@ AS $$
 DECLARE
   v_team_id UUID;
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('error', 'unauthorized');
-  END IF;
-
   INSERT INTO public.credit_teams (name, balance)
   VALUES (p_name, p_initial_balance)
   RETURNING id INTO v_team_id;
@@ -80,10 +76,6 @@ AS $$
 DECLARE
   v_team RECORD;
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('error', 'unauthorized');
-  END IF;
-
   SELECT id, name, balance, member_count INTO v_team
   FROM public.credit_teams
   WHERE id = p_team_id;
@@ -114,10 +106,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('error', 'unauthorized');
-  END IF;
-
   -- Existence check up front: without it, a nonexistent p_team_id surfaces as
   -- a raw FK unique_violation/foreign_key_violation exception instead of the
   -- structured {"error": "team_not_found"} envelope deduct_team already
@@ -160,10 +148,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN;
-  END IF;
-
   RETURN QUERY
   SELECT jsonb_build_object(
     'user_id', tm.user_id,
@@ -213,10 +197,6 @@ DECLARE
   v_idempotency_key TEXT;
   v_window TIMESTAMPTZ;
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('error', 'unauthorized');
-  END IF;
-
   IF p_amount IS NULL OR p_amount <= 0 THEN
     RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
   END IF;

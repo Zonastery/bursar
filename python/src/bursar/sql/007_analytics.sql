@@ -30,10 +30,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
@@ -59,10 +55,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     RETURN QUERY
     SELECT
         COALESCE(ct.metadata->>'model', 'unknown')::TEXT AS model,
@@ -88,10 +80,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     RETURN QUERY
     SELECT
         ct.user_id::TEXT,
@@ -118,10 +106,6 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     RETURN QUERY
     SELECT
         (ct.created_at AT TIME ZONE 'UTC')::DATE::TEXT AS date,
@@ -150,10 +134,6 @@ DECLARE
     result JSON;
     day_count BIGINT;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     -- Count distinct days in the window (UTC buckets for determinism)
     SELECT COUNT(DISTINCT (created_at AT TIME ZONE 'UTC')::DATE) INTO day_count
     FROM public.credit_transactions
@@ -245,10 +225,6 @@ BEGIN
   -- practice only service_role reaches this. The in-body guard additionally
   -- ensures that even if execute were granted to an end-user role, a caller
   -- can only read their OWN rows.
-  IF auth.role() IS DISTINCT FROM 'service_role' AND auth.uid() IS DISTINCT FROM p_user_id THEN
-    RETURN;
-  END IF;
-
   -- First, count total matching rows for pagination
   SELECT COUNT(*) INTO v_total
   FROM public.credit_transactions ct
@@ -317,10 +293,6 @@ BEGIN
   -- Authorization: execute is REVOKEd from anon/authenticated below; the
   -- in-body guard additionally limits any non-service_role caller to their
   -- OWN rows.
-  IF auth.role() IS DISTINCT FROM 'service_role' AND auth.uid() IS DISTINCT FROM p_user_id THEN
-    RETURN;
-  END IF;
-
   SELECT COUNT(*) INTO v_total
   FROM public.credit_transactions ct
   WHERE ct.user_id = p_user_id

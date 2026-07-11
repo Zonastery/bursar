@@ -44,10 +44,6 @@ DECLARE
   v_spend NUMERIC;
   v_window TIMESTAMPTZ;
 BEGIN
-  IF auth.role() IS DISTINCT FROM 'service_role' THEN
-    RETURN jsonb_build_object('capped', false, 'error', 'unauthorized');
-  END IF;
-
   -- Check deny caps first (hard limit)
   FOR v_cap IN
     SELECT action, cap_type, model, cap_limit

@@ -94,10 +94,6 @@ DECLARE
     v_lookup_key TEXT;
     v_config_keys TEXT[];
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     -- ── Sync billing offers ─────────────────────────────────────────────
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
         -- Collect config offer keys for archiving absent offers
@@ -291,10 +287,6 @@ DECLARE
     v_ref RECORD;
     v_offer RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_price_id IS NULL AND p_product_id IS NULL THEN
         RETURN NULL;
     END IF;
@@ -361,10 +353,6 @@ DECLARE
     v_ref RECORD;
     v_topup RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_price_id IS NULL AND p_product_id IS NULL THEN
         RETURN NULL;
     END IF;
@@ -426,10 +414,6 @@ DECLARE
     v_ref RECORD;
     v_offer RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_lookup_key IS NULL THEN
         RETURN NULL;
     END IF;
@@ -487,10 +471,6 @@ DECLARE
     v_ref RECORD;
     v_topup RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_lookup_key IS NULL THEN
         RETURN NULL;
     END IF;

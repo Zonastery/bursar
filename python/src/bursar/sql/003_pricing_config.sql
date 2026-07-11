@@ -51,10 +51,6 @@ DECLARE
     v_version INTEGER;
     v_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT id, config, version INTO v_id, v_config, v_version
     FROM public.credit_pricing_config
     WHERE active = true
@@ -89,10 +85,6 @@ DECLARE
     v_new_id UUID;
     v_next_version INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Serialize concurrent publishers so version assignment can't race.
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
@@ -129,10 +121,6 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN '[]'::JSONB;
-    END IF;
-
     RETURN (
         SELECT jsonb_agg(
             jsonb_build_object(
@@ -161,10 +149,6 @@ DECLARE
     v_id UUID;
     v_version INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT id, config, version INTO v_id, v_config, v_version
     FROM public.credit_pricing_config
     WHERE version = p_version
@@ -193,10 +177,6 @@ DECLARE
     v_target_version INTEGER;
     v_target_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Serialize concurrent activations (same lock/key as set_active_pricing_config)
     -- so two racing activate_pricing_config calls can't both pass the
     -- version_not_found check and then both try to flip `active`, tripping the

@@ -37,10 +37,6 @@ AS $$
 DECLARE
     v_row RECORD;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     IF p_provider IS NOT NULL THEN
         SELECT * INTO v_row
         FROM public.billing_subscriptions
@@ -94,10 +90,6 @@ AS $$
 DECLARE
     v_result JSONB;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN '[]'::JSONB;
-    END IF;
-
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
             'user_id', bs.user_id,
@@ -141,10 +133,6 @@ AS $$
 DECLARE
     v_count INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     UPDATE public.billing_subscriptions
     SET status = 'canceled',
         cancel_at_period_end = true,

@@ -140,10 +140,6 @@ DECLARE
     v_allowance_period TEXT;
     v_plan_assigned_at TIMESTAMPTZ;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT uc.plan_id, cp.label, cp.allowance_amount, cp.entitlements,
            cp.billing_mode, cp.per_operation, cp.max_concurrent, cp.overdraft_floor,
            cp.allowance_period, uc.plan_assigned_at
@@ -201,10 +197,6 @@ AS $$
 DECLARE
     v_plan_id UUID;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Resolve plan_key to credit_plans UUID
     SELECT id INTO v_plan_id
     FROM public.credit_plans
@@ -239,10 +231,6 @@ SET search_path TO ''
 AS $$
 DECLARE
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     UPDATE public.user_credits
     SET plan_id = NULL,
         plan_assigned_at = NULL,
@@ -295,10 +283,6 @@ DECLARE
     v_period_start DATE;
     v_period_end DATE;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT uc.plan_id, cp.allowance_amount, cp.allowance_period
     INTO v_plan_id, v_allowance_amount, v_allowance_period
     FROM public.user_credits uc
@@ -381,10 +365,6 @@ DECLARE
     v_period_start DATE;
     v_new_usage NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     IF p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;

@@ -68,10 +68,6 @@ DECLARE
     v_plan_key TEXT;
     v_plan_def JSONB;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN;
-    END IF;
-
     IF p_config ? 'plans' AND jsonb_typeof(p_config->'plans') = 'object' THEN
         FOR v_plan_key, v_plan_def IN SELECT * FROM jsonb_each(p_config->'plans')
         LOOP
@@ -132,10 +128,6 @@ DECLARE
     v_new_id UUID;
     v_next_version INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
@@ -193,10 +185,6 @@ DECLARE
     v_plan_id UUID;
     v_assigned_at TIMESTAMPTZ;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Resolve to the active config's version of this plan_key
     SELECT cp.id INTO v_plan_id
     FROM public.credit_plans cp
@@ -258,10 +246,6 @@ DECLARE
     v_target_plan_id UUID;
     v_count INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Resolve target plan_id: specific version if given, otherwise latest
     IF p_target_config_version IS NOT NULL THEN
         SELECT id INTO v_target_plan_id
@@ -327,10 +311,6 @@ DECLARE
     v_target_id UUID;
     v_config JSONB;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     -- Verify the target version exists and fetch its config
@@ -385,10 +365,6 @@ DECLARE
     v_plan_assigned_at TIMESTAMPTZ;
     v_config_version INTEGER;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN NULL;
-    END IF;
-
     SELECT uc.plan_id, cp.label, cp.allowance_amount, cp.entitlements,
            cp.billing_mode, cp.per_operation, cp.max_concurrent, cp.overdraft_floor,
            cp.allowance_period, uc.plan_assigned_at, cp.config_version

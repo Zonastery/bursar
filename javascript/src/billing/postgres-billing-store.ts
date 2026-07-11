@@ -10,11 +10,31 @@ import { BillingStore } from "./billing-store.js";
  * Mirrors Python bursar/billing/postgres.py.
  */
 export class PostgresBillingStore extends BillingStore {
-  private pool: import("pg").Pool;
+  private pool: import("pg").Pool | null = null;
+  private databaseUrl: string | null = null;
 
-  constructor(pool: import("pg").Pool) {
+  constructor(poolOrUrl: import("pg").Pool | string) {
     super();
-    this.pool = pool;
+    if (typeof poolOrUrl === "string") {
+      this.databaseUrl = poolOrUrl;
+    } else {
+      this.pool = poolOrUrl;
+    }
+  }
+
+  private async getPool(): Promise<import("pg").Pool> {
+    if (!this.pool) {
+      if (!this.databaseUrl) {
+        throw new Error(
+          "PostgresBillingStore not initialized — no connection string or pool provided",
+        );
+      }
+      const pg = await import("pg");
+      this.pool = new pg.Pool({
+        connectionString: this.databaseUrl,
+      }) as unknown as import("pg").Pool;
+    }
+    return this.pool;
   }
 
   private snakeToCamel(str: string): string {
@@ -41,7 +61,9 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<Record<string, unknown> | null> {
     if (!this.VALID_RPC_RE.test(rpcName)) throw new Error(`Invalid RPC name: ${rpcName}`);
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
-    const rows = await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
+    const rows = await (
+      await this.getPool()
+    ).query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
     if (rows.rows.length === 1) {
       const row = rows.rows[0] as Record<string, unknown>;
       const keys = Object.keys(row);
@@ -58,7 +80,7 @@ export class PostgresBillingStore extends BillingStore {
   private async callRpcVoid(rpcName: string, params: unknown[]): Promise<void> {
     if (!this.VALID_RPC_RE.test(rpcName)) throw new Error(`Invalid RPC name: ${rpcName}`);
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
-    await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
+    await (await this.getPool()).query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
   }
 
   private camelToSnake(str: string): string {
@@ -81,7 +103,9 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    await this.pool.query("SELECT public.sync_billing_from_config($1::jsonb)", [
+    await (
+      await this.getPool()
+    ).query("SELECT public.sync_billing_from_config($1::jsonb)", [
       JSON.stringify(this.camelToSnakeKeys(config)),
     ]);
   }
@@ -145,7 +169,9 @@ export class PostgresBillingStore extends BillingStore {
     userId: string,
     email?: string | null,
   ): Promise<void> {
-    await this.pool.query(
+    await (
+      await this.getPool()
+    ).query(
       `INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
@@ -157,7 +183,9 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async upsertBillingSubscription(state: BillingSubscriptionState): Promise<void> {
-    await this.pool.query(
+    await (
+      await this.getPool()
+    ).query(
       `INSERT INTO public.billing_subscriptions (
          user_id, provider, provider_subscription_id, provider_customer_id,
          offer_key, plan, status, current_period_start,
@@ -196,7 +224,9 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async getBillingCustomer(provider: string, providerCustomerId: string): Promise<string | null> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       "SELECT user_id FROM public.billing_customers WHERE provider = $1 AND provider_customer_id = $2",
       [provider, providerCustomerId],
     );
@@ -208,7 +238,9 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     providerSubscriptionId: string,
   ): Promise<BillingSubscriptionState | null> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
               offer_key, plan, status, current_period_start,
               current_period_end, cancel_at_period_end, interval, interval_count, metadata
@@ -223,7 +255,9 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
               offer_key, plan, status, current_period_start,
               current_period_end, cancel_at_period_end, interval, interval_count, metadata
@@ -337,20 +371,19 @@ export class PostgresBillingStore extends BillingStore {
     purpose?: string,
     metadata?: Record<string, unknown> | null,
   ): Promise<void> {
-    await this.pool.query(
-      `SELECT public.upsert_billing_payment($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        provider,
-        providerPaymentId,
-        providerInvoiceId ?? null,
-        userId ?? null,
-        amountMinor ?? 0,
-        taxMinor ?? null,
-        currency ?? "USD",
-        purpose ?? null,
-        metadata ? JSON.stringify(metadata) : null,
-      ],
-    );
+    await (
+      await this.getPool()
+    ).query(`SELECT public.upsert_billing_payment($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+      provider,
+      providerPaymentId,
+      providerInvoiceId ?? null,
+      userId ?? null,
+      amountMinor ?? 0,
+      taxMinor ?? null,
+      currency ?? "USD",
+      purpose ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+    ]);
   }
 
   async upsertBillingRefund(
@@ -363,7 +396,9 @@ export class PostgresBillingStore extends BillingStore {
     reason?: string | null,
     metadata?: Record<string, unknown> | null,
   ): Promise<void> {
-    await this.pool.query(`SELECT public.upsert_billing_refund($1, $2, $3, $4, $5, $6, $7, $8)`, [
+    await (
+      await this.getPool()
+    ).query(`SELECT public.upsert_billing_refund($1, $2, $3, $4, $5, $6, $7, $8)`, [
       provider,
       providerRefundId,
       providerPaymentId ?? null,
@@ -388,22 +423,21 @@ export class PostgresBillingStore extends BillingStore {
     periodEnd?: string | null,
     metadata?: Record<string, unknown> | null,
   ): Promise<void> {
-    await this.pool.query(
-      `SELECT public.upsert_billing_invoice($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        provider,
-        providerInvoiceId,
-        providerSubscriptionId ?? null,
-        userId ?? null,
-        status ?? null,
-        amountPaidMinor ?? null,
-        amountDueMinor ?? null,
-        currency ?? "USD",
-        periodStart ?? null,
-        periodEnd ?? null,
-        metadata ? JSON.stringify(metadata) : null,
-      ],
-    );
+    await (
+      await this.getPool()
+    ).query(`SELECT public.upsert_billing_invoice($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`, [
+      provider,
+      providerInvoiceId,
+      providerSubscriptionId ?? null,
+      userId ?? null,
+      status ?? null,
+      amountPaidMinor ?? null,
+      amountDueMinor ?? null,
+      currency ?? "USD",
+      periodStart ?? null,
+      periodEnd ?? null,
+      metadata ? JSON.stringify(metadata) : null,
+    ]);
   }
 
   async upsertBillingDispute(
@@ -415,12 +449,14 @@ export class PostgresBillingStore extends BillingStore {
     reason?: string | null,
     metadata?: Record<string, unknown> | null,
   ): Promise<void> {
-    await this.pool.query(`SELECT public.upsert_billing_dispute($1, $2, $3, $4, $5, $6, $7)`, [
+    await (
+      await this.getPool()
+    ).query(`SELECT public.upsert_billing_dispute($1, $2, $3, $4, $5, $6, $7)`, [
       provider,
       providerDisputeId,
       providerPaymentId ?? null,
       userId ?? null,
-      status ?? "open",
+      status ?? "needs_response",
       reason ?? null,
       metadata ? JSON.stringify(metadata) : null,
     ]);
@@ -430,10 +466,12 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null> {
-    const result = await this.pool.query(
-      `SELECT * FROM public.get_billing_payment_for_refund($1, $2)`,
-      [provider, providerPaymentId],
-    );
+    const result = await (
+      await this.getPool()
+    ).query(`SELECT * FROM public.get_billing_payment_for_refund($1, $2)`, [
+      provider,
+      providerPaymentId,
+    ]);
     if (result.rows.length === 0) return null;
     const row = result.rows[0] as Record<string, unknown>;
     const keys = Object.keys(row);
@@ -447,7 +485,9 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
               offer_key, plan, status, current_period_start,
               current_period_end, cancel_at_period_end, interval, interval_count, metadata
@@ -463,7 +503,9 @@ export class PostgresBillingStore extends BillingStore {
     userId: string,
     keepProvider: string,
   ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       `UPDATE public.billing_subscriptions
                SET status = 'canceled', cancel_at_period_end = true, updated_at = now()
        WHERE user_id = $1 AND provider != $2 AND status IN ('active', 'trialing')`,
@@ -483,7 +525,9 @@ export class PostgresBillingStore extends BillingStore {
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null> {
-    const result = await this.pool.query(
+    const result = await (
+      await this.getPool()
+    ).query(
       `SELECT provider, provider_payment_id, user_id, amount_minor,
               tax_minor, currency, purpose, metadata, created_at, updated_at
        FROM public.billing_payments

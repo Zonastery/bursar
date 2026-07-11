@@ -35,10 +35,6 @@ DECLARE
     v_transaction_id UUID;
     v_new_balance NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Total credits granted of the given type
     SELECT COALESCE(SUM(amount), 0) INTO v_total_granted
     FROM public.credit_transactions

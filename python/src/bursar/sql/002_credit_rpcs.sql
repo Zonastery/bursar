@@ -66,10 +66,6 @@ DECLARE
     v_computed_expires_at TIMESTAMPTZ;
     v_metadata JSONB;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     -- Reject non-finite amounts (NaN / +-Infinity) outright.
     IF p_amount IS NULL OR NOT (p_amount = p_amount) OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
@@ -192,10 +188,6 @@ DECLARE
     v_balance NUMERIC;
     v_lifetime NUMERIC;
 BEGIN
-    IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
-    END IF;
-
     SELECT balance, lifetime_purchased INTO v_balance, v_lifetime
     FROM public.user_credits
     WHERE user_id = p_user_id;

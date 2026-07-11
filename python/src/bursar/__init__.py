@@ -28,7 +28,6 @@ from bursar.billing import (
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     ProviderRef,
-    SupabaseBillingStore,
 )
 from bursar.breakdown import CostBreakdown
 
@@ -212,5 +211,4 @@ __all__ = [
     "PortalParams",
     "PostgresBillingStore",
     "ProviderLogger",
-    "SupabaseBillingStore",
 ]

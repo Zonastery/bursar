@@ -120,40 +120,26 @@ def _retry_transient(op: Callable[[], _T], *, what: str) -> _T:
 
 
 def _store_from_env(store_type: str | None = None) -> CreditStore:
-    """Create a store from env vars (``SUPABASE_*`` or ``DATABASE_URL``).
+    """Create a store from env vars (``DATABASE_URL``).
 
     Args:
-        store_type: ``"supabase"`` or ``"postgres"``. Falls back to the
-            ``BURSAR_STORE`` env var, then ``"supabase"``.
+        store_type: ``"postgres"``. Falls back to the
+            ``BURSAR_STORE`` env var, then ``"postgres"``.
     """
-    kind = store_type or os.environ.get("BURSAR_STORE", "supabase")
+    kind = store_type or os.environ.get("BURSAR_STORE", "postgres")
 
-    if kind == "supabase":
-        _require_extra("supabase")
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_SECRET_KEY")
-        if not url:
-            print("SUPABASE_URL required", file=sys.stderr)
-            raise SystemExit(1)
-        if not key:
-            print("SUPABASE_SECRET_KEY required", file=sys.stderr)
-            raise SystemExit(1)
-        from bursar.interface.supabase import HttpxSupabaseStore
+    if kind != "postgres":
+        print(f"Unknown store: {kind}", file=sys.stderr)
+        raise SystemExit(1)
 
-        return HttpxSupabaseStore(url=url, key=key)
+    _require_extra("postgres")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        print("DATABASE_URL required", file=sys.stderr)
+        raise SystemExit(1)
+    from bursar.interface.postgres import PostgresStore
 
-    if kind == "postgres":
-        _require_extra("postgres")
-        database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
-            print("DATABASE_URL required for postgres store", file=sys.stderr)
-            raise SystemExit(1)
-        from bursar.interface.postgres import PostgresStore
-
-        return PostgresStore(database_url=database_url)
-
-    print(f"Unknown store: {kind}", file=sys.stderr)
-    raise SystemExit(1)
+    return PostgresStore(database_url=database_url)
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
@@ -240,9 +226,10 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
-    from bursar.interface.supabase import run_migrations
+    from bursar.interface.postgres import PostgresStore
 
-    result = run_migrations(database_url)
+    store = PostgresStore(database_url)
+    result = store.setup()
     for t in result.tables_created:
         print(f"  ✓ {t}")
     for e in result.errors:

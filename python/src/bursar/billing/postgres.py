@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
 import psycopg2
@@ -19,8 +18,6 @@ from bursar.billing.store import BillingStore
 def _to_utc_iso(dt_str: str | None) -> str | None:
     if dt_str is None:
         return None
-    if isinstance(dt_str, datetime):
-        return dt_str.isoformat()
     return dt_str
 
 
@@ -28,6 +25,9 @@ class PostgresBillingStore(BillingStore):
     def __init__(self, database_url: str, pool: psycopg2.pool.ThreadedConnectionPool | None = None) -> None:
         self._database_url = database_url
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
+
+    def close(self) -> None:
+        self._pool.closeall()
 
     # ── Synchronous helpers ────────────────────────────────────────────
 
@@ -58,6 +58,26 @@ class PostgresBillingStore(BillingStore):
             raise
         finally:
             self._pool.putconn(conn)
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_subscription_state(r: dict[str, Any]) -> BillingSubscriptionState:
+        return BillingSubscriptionState(
+            user_id=str(r.get("user_id", "")),
+            provider=str(r.get("provider", "")),
+            provider_subscription_id=str(r.get("provider_subscription_id", "")),
+            provider_customer_id=str(r.get("provider_customer_id")) if r.get("provider_customer_id") else None,
+            offer_key=str(r.get("offer_key")) if r.get("offer_key") else None,
+            plan=str(r.get("plan")) if r.get("plan") else None,
+            status=str(r.get("status", "incomplete")),
+            current_period_start=str(r.get("current_period_start")) if r.get("current_period_start") else None,
+            current_period_end=str(r.get("current_period_end")) if r.get("current_period_end") else None,
+            cancel_at_period_end=bool(r.get("cancel_at_period_end", False)),
+            interval=str(r.get("interval")) if r.get("interval") else None,
+            interval_count=int(r["interval_count"]) if r.get("interval_count") is not None else None,
+            metadata=r.get("metadata") if isinstance(r.get("metadata"), dict) else None,
+        )
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -252,23 +272,7 @@ class PostgresBillingStore(BillingStore):
                 row = cur.fetchone()
             if not row:
                 return None
-
-            meta = row["metadata"]
-            return BillingSubscriptionState(
-                user_id=str(row["user_id"]),
-                provider=str(row["provider"]),
-                provider_subscription_id=str(row["provider_subscription_id"]),
-                provider_customer_id=str(row["provider_customer_id"]) if row["provider_customer_id"] else None,
-                offer_key=str(row["offer_key"]) if row["offer_key"] else None,
-                plan=str(row["plan"]) if row["plan"] else None,
-                status=str(row["status"]) if row["status"] else "incomplete",
-                current_period_start=str(row["current_period_start"]) if row["current_period_start"] else None,
-                current_period_end=str(row["current_period_end"]) if row["current_period_end"] else None,
-                cancel_at_period_end=bool(row["cancel_at_period_end"]),
-                interval=str(row["interval"]) if row["interval"] else None,
-                interval_count=int(row["interval_count"]) if row["interval_count"] else None,
-                metadata=meta if isinstance(meta, dict) else None,
-            )
+            return self._row_to_subscription_state(dict(row))
         finally:
             self._pool.putconn(conn)
 
@@ -276,43 +280,13 @@ class PostgresBillingStore(BillingStore):
         self,
         user_id: str,
     ) -> BillingSubscriptionState | None:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-                           offer_key, plan, status, current_period_start,
-                           current_period_end, cancel_at_period_end, interval, interval_count, metadata
-                    FROM public.billing_subscriptions
-                    WHERE user_id = %s
-                    ORDER BY current_period_start DESC NULLS LAST, created_at DESC
-                    LIMIT 1
-                    """,
-                    [user_id],
-                )
-                row = cur.fetchone()
-            if not row:
-                return None
-
-            meta = row["metadata"]
-            return BillingSubscriptionState(
-                user_id=str(row["user_id"]),
-                provider=str(row["provider"]),
-                provider_subscription_id=str(row["provider_subscription_id"]),
-                provider_customer_id=str(row["provider_customer_id"]) if row["provider_customer_id"] else None,
-                offer_key=str(row["offer_key"]) if row["offer_key"] else None,
-                plan=str(row["plan"]) if row["plan"] else None,
-                status=str(row["status"]) if row["status"] else "incomplete",
-                current_period_start=str(row["current_period_start"]) if row["current_period_start"] else None,
-                current_period_end=str(row["current_period_end"]) if row["current_period_end"] else None,
-                cancel_at_period_end=bool(row["cancel_at_period_end"]),
-                interval=str(row["interval"]) if row["interval"] else None,
-                interval_count=int(row["interval_count"]) if row["interval_count"] else None,
-                metadata=meta if isinstance(meta, dict) else None,
-            )
-        finally:
-            self._pool.putconn(conn)
+        result = self._call_rpc_json_sync(
+            "public.get_user_billing_subscription",
+            [user_id, None],
+        )
+        if not result:
+            return None
+        return self._row_to_subscription_state(result)
 
     def resolve_credit_topup(
         self,
@@ -485,13 +459,24 @@ class PostgresBillingStore(BillingStore):
             [provider, provider_payment_id],
         )
 
-    def get_user_subscriptions(self, user_id: str) -> list[dict[str, Any]]:
-        result = self._call_rpc_json_sync(
-            "public.get_user_subscriptions",
-            [user_id],
-        )
-        subscriptions = result.get("subscriptions") if result else None
-        return subscriptions if isinstance(subscriptions, list) else []
+    def get_user_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, provider, provider_subscription_id, provider_customer_id,
+                           offer_key, plan, status, current_period_start,
+                           current_period_end, cancel_at_period_end, interval, interval_count, metadata
+                    FROM public.billing_subscriptions
+                    WHERE user_id = %s
+                    ORDER BY current_period_start DESC NULLS LAST
+                    """,
+                    [user_id],
+                )
+                return [self._row_to_subscription_state(dict(row)) for row in cur.fetchall()]
+        finally:
+            self._pool.putconn(conn)
 
     def deactivate_other_provider_subscriptions(
         self,
