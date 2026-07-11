@@ -17,6 +17,8 @@ const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
 const USER_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID2 = "00000000-0000-0000-0000-000000000002";
+const USER_ID3 = "00000000-0000-0000-0000-000000000003";
+const USER_ID4 = "00000000-0000-0000-0000-000000000004";
 const PROVIDER = "stripe";
 const CUSTOMER_ID = "cus_test123";
 const CUSTOMER_ID2 = "cus_test456";
@@ -604,10 +606,10 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     await pool.query(
       `CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE SQL IMMUTABLE AS $$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $$`,
     );
-    await pool.query("INSERT INTO auth.users (id) VALUES ($1), ($2) ON CONFLICT DO NOTHING", [
-      USER_ID,
-      USER_ID2,
-    ]);
+    await pool.query(
+      "INSERT INTO auth.users (id) VALUES ($1), ($2), ($3), ($4) ON CONFLICT DO NOTHING",
+      [USER_ID, USER_ID2, USER_ID3, USER_ID4],
+    );
     // Apply all bundled SQL migrations (assumes python/src/bursar/sql/ is
     // accessible via relative path — same as store-integration.test.ts).
     const { readdirSync, readFileSync } = await import("fs");
@@ -1013,5 +1015,90 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     const newOffer = await bs.resolveBillingOffer("stripe", null, "price_new_offer");
     expect(newOffer).not.toBeNull();
     expect(newOffer!.offerKey).toBe("new_offer");
+  });
+
+  it("cycle_grant_credits_granted", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_cg1",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      customer: { providerCustomerId: CUSTOMER_ID2 },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_cg1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      customer: { providerCustomerId: CUSTOMER_ID2 },
+      subscription: {
+        providerSubscriptionId: "sub_cg_test",
+        status: "active",
+        periodStart: "2025-06-01T00:00:00Z",
+        periodEnd: "2025-07-01T00:00:00Z",
+        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        interval: "month",
+        intervalCount: 1,
+      },
+    });
+    const balance = await cm.getBalance(USER_ID3);
+    expect(balance.balance.toString()).toBe("5000");
+  });
+
+  it("cycle_grant_replace_prior", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_cg2",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID4,
+      customer: { providerCustomerId: "cus_cg_replace" },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_cg2a",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID4,
+      customer: { providerCustomerId: "cus_cg_replace" },
+      subscription: {
+        providerSubscriptionId: "sub_cg_replace",
+        status: "active",
+        periodStart: "2025-06-01T00:00:00Z",
+        periodEnd: "2025-07-01T00:00:00Z",
+        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        interval: "month",
+        intervalCount: 1,
+      },
+    });
+    const balance1 = await cm.getBalance(USER_ID4);
+    expect(balance1.balance.toString()).toBe("5000");
+
+    // Renew — should revoke prior cycle_grant and grant new 5000
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_cg2b",
+      eventType: "subscription.renewed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID4,
+      customer: { providerCustomerId: "cus_cg_replace" },
+      subscription: {
+        providerSubscriptionId: "sub_cg_replace",
+        status: "active",
+        periodStart: "2025-07-01T00:00:00Z",
+        periodEnd: "2025-08-01T00:00:00Z",
+        refs: { productId: "prod_cycle_grant", priceId: "price_cycle_grant_5000" },
+        interval: "month",
+        intervalCount: 1,
+      },
+    });
+    const balance2 = await cm.getBalance(USER_ID4);
+    expect(balance2.balance.toString()).toBe("5000");
   });
 });

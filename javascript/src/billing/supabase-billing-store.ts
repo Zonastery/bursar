@@ -81,7 +81,18 @@ export class SupabaseBillingStore extends BillingStore {
     if (!data) return null;
     const result = this.snakeToCamelKeys(data) as Record<string, unknown> | null;
     if (result && result.offerKey) {
-      return { ...result, plan: result.plan ?? null };
+      return {
+        offerKey: result.offerKey,
+        plan: result.plan ?? null,
+        interval: result.interval,
+        intervalCount: result.intervalCount,
+        grant: {
+          mode: result.grantMode,
+          credits: result.grantCredits,
+          bucket: result.grantBucket,
+          replacePrior: result.grantReplacePrior,
+        },
+      };
     }
     return null;
   }
@@ -208,7 +219,18 @@ export class SupabaseBillingStore extends BillingStore {
     if (!data) return null;
     const result = this.snakeToCamelKeys(data) as Record<string, unknown> | null;
     if (result && result.offerKey) {
-      return { ...result, plan: result.plan ?? null };
+      return {
+        offerKey: result.offerKey,
+        plan: result.plan ?? null,
+        interval: result.interval,
+        intervalCount: result.intervalCount,
+        grant: {
+          mode: result.grantMode,
+          credits: result.grantCredits,
+          bucket: result.grantBucket,
+          replacePrior: result.grantReplacePrior,
+        },
+      };
     }
     return null;
   }
@@ -408,6 +430,11 @@ export class SupabaseBillingStore extends BillingStore {
       p_keep_provider: keepProvider,
     });
     if (error) throw error;
-    return data as unknown as { userId: string; keepProvider: string; deactivatedCount: number };
+    const result = this.snakeToCamelKeys(data) as Record<string, unknown>;
+    return {
+      userId: String(result.userId ?? ""),
+      keepProvider: String(result.keepProvider ?? ""),
+      deactivatedCount: Number(result.deactivatedCount ?? 0),
+    };
   }
 }

@@ -173,7 +173,7 @@ class TestPricingEngineCalculate:
         engine = PricingEngine.from_dict(
             {"version": 1, "metering": {"models": {"gpt-4": "input_tokens * 1"}}, "ledger": {}}
         )
-        with pytest.raises(ValueError, match="no model match for 'unknown' and no '\\*' in config"):
+        with pytest.raises(ValueError, match="no model match for 'unknown' and no '\\*' or '_default' in config"):
             engine.calculate(UsageMetrics(model="unknown"))
 
     def test_tool_specific_override_used(self) -> None:

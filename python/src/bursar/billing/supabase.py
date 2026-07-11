@@ -38,7 +38,20 @@ class SupabaseBillingStore(BillingStore):
         if "error" in result and result["error"]:
             raise RuntimeError(result["error"])
         data = result.get("data")
-        return data if data else None
+        if data and "offer_key" in data:
+            return {
+                "offer_key": data["offer_key"],
+                "plan": data.get("plan"),
+                "interval": data.get("interval"),
+                "interval_count": data.get("interval_count"),
+                "grant": {
+                    "mode": data.get("grant_mode"),
+                    "credits": data.get("grant_credits"),
+                    "bucket": data.get("grant_bucket"),
+                    "replace_prior": data.get("grant_replace_prior"),
+                },
+            }
+        return None
 
     def claim_billing_event(
         self,
@@ -224,7 +237,20 @@ class SupabaseBillingStore(BillingStore):
         if "error" in result and result["error"]:
             raise RuntimeError(result["error"])
         data = result.get("data")
-        return data if data else None
+        if data and "offer_key" in data:
+            return {
+                "offer_key": data["offer_key"],
+                "plan": data.get("plan"),
+                "interval": data.get("interval"),
+                "interval_count": data.get("interval_count"),
+                "grant": {
+                    "mode": data.get("grant_mode"),
+                    "credits": data.get("grant_credits"),
+                    "bucket": data.get("grant_bucket"),
+                    "replace_prior": data.get("grant_replace_prior"),
+                },
+            }
+        return None
 
     def resolve_credit_topup_by_lookup(
         self,

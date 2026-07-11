@@ -24,6 +24,12 @@ def _parse_status(raw: str | None) -> BillingSubscriptionStatus | None:
         return None
 
 
+def _call_billing_manager(bm: BillingManager, event: BillingEvent) -> None:
+    result = bm.handle_event(event)
+    if not result.handled and result.error not in ("unhandled_event_type", "user_not_found"):
+        raise RuntimeError(f"BillingManager failed to handle event: {result.error}")
+
+
 async def handle_dodo_billing_event(  # noqa: C901
     event_type: str,
     data: dict[str, Any],
@@ -65,7 +71,8 @@ async def handle_dodo_billing_event(  # noqa: C901
         period_end = data.get("next_billing_date")
 
         if event_type == "subscription.active":
-            bm.handle_event(
+            _call_billing_manager(
+                bm,
                 BillingEvent(
                     **_with_user(
                         {
@@ -83,10 +90,11 @@ async def handle_dodo_billing_event(  # noqa: C901
                             ),
                         }
                     )
-                )
+                ),
             )
 
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -99,14 +107,15 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.cancelled":
         sub_id = str(data.get("subscription_id", ""))
         if not sub_id:
             return
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -117,14 +126,15 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.expired":
         sub_id = str(data.get("subscription_id", ""))
         if not sub_id:
             return
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -135,14 +145,15 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.failed":
         sub_id = str(data.get("subscription_id", ""))
         if not sub_id:
             return
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -154,14 +165,15 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.on_hold":
         sub_id = str(data.get("subscription_id", ""))
         if not sub_id:
             return
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -172,7 +184,7 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.updated":
@@ -190,13 +202,14 @@ async def handle_dodo_billing_event(  # noqa: C901
                 period_end=period_end,
             ),
         }
-        bm.handle_event(BillingEvent(**_with_user(kw)))
+        _call_billing_manager(bm, BillingEvent(**_with_user(kw)))
 
     elif event_type == "subscription.cancellation_scheduled":
         sub_id = str(data.get("subscription_id", ""))
         if not sub_id:
             return
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -208,7 +221,7 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "subscription.plan_changed":
@@ -221,7 +234,8 @@ async def handle_dodo_billing_event(  # noqa: C901
             refs = ProviderRef(product_id=product_id)
         elif metadata.get("plan_slug"):
             refs = ProviderRef(lookup_key=metadata["plan_slug"])
-        bm.handle_event(
+        _call_billing_manager(
+            bm,
             BillingEvent(
                 **_with_user(
                     {
@@ -234,7 +248,7 @@ async def handle_dodo_billing_event(  # noqa: C901
                         ),
                     }
                 )
-            )
+            ),
         )
 
     elif event_type == "payment.succeeded":
@@ -261,7 +275,7 @@ async def handle_dodo_billing_event(  # noqa: C901
         }
         if user_id:
             kw["user_id"] = user_id
-        bm.handle_event(BillingEvent(**kw))
+        _call_billing_manager(bm, BillingEvent(**kw))
 
     else:
         if logger:

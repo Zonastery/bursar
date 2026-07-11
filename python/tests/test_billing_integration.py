@@ -26,6 +26,7 @@ from bursar.billing import (
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
+    CycleGrant,
     MemoryBillingStore,
     PostgresBillingStore,
     ProviderRef,
@@ -87,6 +88,23 @@ _BILLING_CONFIG = BillingConfig(
                 "stripe": ProviderRef(
                     product_id="prod_yearly",
                     price_id="price_yearly_10000",
+                ),
+            },
+        ),
+        "cycle_grant_monthly": BillingOffer(
+            plan="pro",
+            interval=BillingOfferInterval.month,
+            interval_count=1,
+            grant=CycleGrant(
+                mode="cycle_grant",
+                credits=5000,
+                bucket="purchased",
+                replace_prior=True,
+            ),
+            providers={
+                "stripe": ProviderRef(
+                    product_id="prod_cycle_grant",
+                    price_id="price_cycle_grant_5000",
                 ),
             },
         ),
@@ -718,6 +736,91 @@ class TestPostgresBillingStoreIntegration:
         new_offer = bs.resolve_billing_offer("stripe", price_id="price_new_offer")
         assert new_offer is not None
         assert new_offer["offer_key"] == "new_offer"
+
+    def test_cycle_grant_credits_granted(self, components):
+        cs, cm, bs, bm = components
+        bm.handle_event(
+            BillingEvent(
+                provider=_PROVIDER,
+                event_id="evt_cus_cg1",
+                event_type="customer.created",
+                occurred_at=datetime.now(UTC).isoformat(),
+                user_id=_USER_ID2,
+                customer=BillingCustomerInfo(provider_customer_id=_CUSTOMER_ID2),
+            )
+        )
+        bm.handle_event(
+            BillingEvent(
+                provider=_PROVIDER,
+                event_id="evt_sub_cg1",
+                event_type="subscription.created",
+                occurred_at=datetime.now(UTC).isoformat(),
+                user_id=_USER_ID2,
+                customer=BillingCustomerInfo(provider_customer_id=_CUSTOMER_ID2),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_cg_test",
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2025-06-01T00:00:00Z",
+                    period_end="2025-07-01T00:00:00Z",
+                    refs=ProviderRef(product_id="prod_cycle_grant", price_id="price_cycle_grant_5000"),
+                ),
+            )
+        )
+        balance = cm.get_balance(_USER_ID2)
+        assert balance.balance == Decimal("5000")
+
+    def test_cycle_grant_replace_prior(self, components):
+        cs, cm, bs, bm = components
+        bm.handle_event(
+            BillingEvent(
+                provider=_PROVIDER,
+                event_id="evt_cus_cg2",
+                event_type="customer.created",
+                occurred_at=datetime.now(UTC).isoformat(),
+                user_id=_USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
+            )
+        )
+        bm.handle_event(
+            BillingEvent(
+                provider=_PROVIDER,
+                event_id="evt_sub_cg2a",
+                event_type="subscription.created",
+                occurred_at=datetime.now(UTC).isoformat(),
+                user_id=_USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_cg_replace",
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2025-06-01T00:00:00Z",
+                    period_end="2025-07-01T00:00:00Z",
+                    refs=ProviderRef(product_id="prod_cycle_grant", price_id="price_cycle_grant_5000"),
+                ),
+            )
+        )
+        balance1 = cm.get_balance(_USER_ID)
+        assert balance1.balance == Decimal("5000")
+
+        # Renew — should revoke prior cycle_grant and grant new 5000
+        bm.handle_event(
+            BillingEvent(
+                provider=_PROVIDER,
+                event_id="evt_sub_cg2b",
+                event_type="subscription.renewed",
+                occurred_at=datetime.now(UTC).isoformat(),
+                user_id=_USER_ID,
+                customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_cg_replace",
+                    status=BillingSubscriptionStatus.active,
+                    period_start="2025-07-01T00:00:00Z",
+                    period_end="2025-08-01T00:00:00Z",
+                    refs=ProviderRef(product_id="prod_cycle_grant", price_id="price_cycle_grant_5000"),
+                ),
+            )
+        )
+        balance2 = cm.get_balance(_USER_ID)
+        assert balance2.balance == Decimal("5000")
 
 
 class TestPricingConfigPreservesBillingRefs:

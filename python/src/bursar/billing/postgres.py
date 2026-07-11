@@ -90,7 +90,18 @@ class PostgresBillingStore(BillingStore):
             ],
         )
         if result and "offer_key" in result:
-            return result
+            return {
+                "offer_key": result["offer_key"],
+                "plan": result.get("plan"),
+                "interval": result.get("interval"),
+                "interval_count": result.get("interval_count"),
+                "grant": {
+                    "mode": result.get("grant_mode"),
+                    "credits": result.get("grant_credits"),
+                    "bucket": result.get("grant_bucket"),
+                    "replace_prior": result.get("grant_replace_prior"),
+                },
+            }
         return None
 
     def claim_billing_event(
@@ -331,7 +342,18 @@ class PostgresBillingStore(BillingStore):
             [provider, lookup_key],
         )
         if result and "offer_key" in result:
-            return result
+            return {
+                "offer_key": result["offer_key"],
+                "plan": result.get("plan"),
+                "interval": result.get("interval"),
+                "interval_count": result.get("interval_count"),
+                "grant": {
+                    "mode": result.get("grant_mode"),
+                    "credits": result.get("grant_credits"),
+                    "bucket": result.get("grant_bucket"),
+                    "replace_prior": result.get("grant_replace_prior"),
+                },
+            }
         return None
 
     def resolve_credit_topup_by_lookup(

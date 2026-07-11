@@ -48,6 +48,12 @@ def _customer_email(raw: Any) -> str | None:
     return getattr(raw, "email", None)
 
 
+def _call_billing_manager(bm: BillingManager, event: BillingEvent) -> None:
+    result = bm.handle_event(event)
+    if not result.handled and result.error not in ("unhandled_event_type", "user_not_found"):
+        raise RuntimeError(f"BillingManager failed to handle event: {result.error}")
+
+
 async def handle_stripe_billing_event(  # noqa: C901
     event_type: str,
     event_id: str,
@@ -77,7 +83,8 @@ async def handle_stripe_billing_event(  # noqa: C901
 
             occurred_at = datetime.now(UTC).isoformat()
 
-            bm.handle_event(
+            _call_billing_manager(
+                bm,
                 BillingEvent(
                     provider="stripe",
                     event_id=f"{event_id}_checkout",
@@ -85,7 +92,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                     occurred_at=occurred_at,
                     user_id=uid,
                     customer=customer_info,
-                )
+                ),
             )
 
             if session.get("mode") == "subscription" and session.get("subscription"):
@@ -97,7 +104,8 @@ async def handle_stripe_billing_event(  # noqa: C901
                     period_end = _build_end(sub)
                     plan_slug = (session.get("metadata") or {}).get("plan_slug")
 
-                    bm.handle_event(
+                    _call_billing_manager(
+                        bm,
                         BillingEvent(
                             provider="stripe",
                             event_id=f"{event_id}_sub",
@@ -116,12 +124,13 @@ async def handle_stripe_billing_event(  # noqa: C901
                                 if plan_slug
                                 else None,
                             ),
-                        )
+                        ),
                     )
 
                     sub_status = sub.get("status")
                     if sub_status in ("active", "trialing"):
-                        bm.handle_event(
+                        _call_billing_manager(
+                            bm,
                             BillingEvent(
                                 provider="stripe",
                                 event_id=f"{event_id}_sub_activated",
@@ -134,7 +143,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                                     status=_parse_status(sub_status),
                                     period_end=period_end,
                                 ),
-                            )
+                            ),
                         )
                 except Exception as exc:
                     if logger:
@@ -164,7 +173,8 @@ async def handle_stripe_billing_event(  # noqa: C901
                     ),
                 )
 
-                bm.handle_event(
+                _call_billing_manager(
+                    bm,
                     BillingEvent(
                         provider="stripe",
                         event_id=f"{event_id}_payment",
@@ -173,7 +183,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                         user_id=uid,
                         customer=customer_info,
                         payment=payment_info,
-                    )
+                    ),
                 )
 
         elif event_type == "customer.subscription.updated":
@@ -198,7 +208,8 @@ async def handle_stripe_billing_event(  # noqa: C901
             else:
                 evt_type = "subscription.updated"
 
-            bm.handle_event(
+            _call_billing_manager(
+                bm,
                 BillingEvent(
                     provider="stripe",
                     event_id=event_id,
@@ -214,12 +225,13 @@ async def handle_stripe_billing_event(  # noqa: C901
                         cancel_at_period_end=cancel_at_end,
                         period_end=period_end,
                     ),
-                )
+                ),
             )
 
         elif event_type == "customer.subscription.deleted":
             sub = data
-            bm.handle_event(
+            _call_billing_manager(
+                bm,
                 BillingEvent(
                     provider="stripe",
                     event_id=event_id,
@@ -231,7 +243,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                     subscription=BillingSubscriptionInfo(
                         provider_subscription_id=sub.get("id"),
                     ),
-                )
+                ),
             )
 
         elif event_type == "invoice.paid":
@@ -260,7 +272,8 @@ async def handle_stripe_billing_event(  # noqa: C901
 
             period_end = _build_end(stripe_sub)
 
-            bm.handle_event(
+            _call_billing_manager(
+                bm,
                 BillingEvent(
                     provider="stripe",
                     event_id=event_id,
@@ -282,7 +295,7 @@ async def handle_stripe_billing_event(  # noqa: C901
                         amount_due_minor=invoice.get("amount_due"),
                         currency=(invoice.get("currency") or "usd").upper(),
                     ),
-                )
+                ),
             )
 
         else:

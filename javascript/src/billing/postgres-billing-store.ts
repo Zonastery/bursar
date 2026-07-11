@@ -33,10 +33,13 @@ export class PostgresBillingStore extends BillingStore {
     return obj;
   }
 
+  private VALID_RPC_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
   private async callRpcJson(
     rpcName: string,
     params: unknown[],
   ): Promise<Record<string, unknown> | null> {
+    if (!this.VALID_RPC_RE.test(rpcName)) throw new Error(`Invalid RPC name: ${rpcName}`);
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
     const rows = await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
     if (rows.rows.length === 1) {
@@ -53,6 +56,7 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   private async callRpcVoid(rpcName: string, params: unknown[]): Promise<void> {
+    if (!this.VALID_RPC_RE.test(rpcName)) throw new Error(`Invalid RPC name: ${rpcName}`);
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
     await this.pool.query(`SELECT * FROM public.${rpcName}(${placeholders})`, params);
   }
@@ -93,7 +97,18 @@ export class PostgresBillingStore extends BillingStore {
       productId ?? null,
     ]);
     if (result && result.offerKey) {
-      return { ...result, plan: result.plan ?? null };
+      return {
+        offerKey: result.offerKey,
+        plan: result.plan ?? null,
+        interval: result.interval,
+        intervalCount: result.intervalCount,
+        grant: {
+          mode: result.grantMode,
+          credits: result.grantCredits,
+          bucket: result.grantBucket,
+          replacePrior: result.grantReplacePrior,
+        },
+      };
     }
     return null;
   }
@@ -251,7 +266,18 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<Record<string, unknown> | null> {
     const result = await this.callRpcJson("resolve_billing_offer_by_lookup", [provider, lookupKey]);
     if (result && result.offerKey) {
-      return { ...result, plan: result.plan ?? null };
+      return {
+        offerKey: result.offerKey,
+        plan: result.plan ?? null,
+        interval: result.interval,
+        intervalCount: result.intervalCount,
+        grant: {
+          mode: result.grantMode,
+          credits: result.grantCredits,
+          bucket: result.grantBucket,
+          replacePrior: result.grantReplacePrior,
+        },
+      };
     }
     return null;
   }
@@ -439,7 +465,7 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }> {
     const result = await this.pool.query(
       `UPDATE public.billing_subscriptions
-               SET status = 'canceled', updated_at = now()
+               SET status = 'canceled', cancel_at_period_end = true, updated_at = now()
        WHERE user_id = $1 AND provider != $2 AND status IN ('active', 'trialing')`,
       [userId, keepProvider],
     );

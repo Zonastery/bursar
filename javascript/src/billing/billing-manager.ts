@@ -54,7 +54,7 @@ export class BillingManager {
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
-      ttl: 10_000,
+      ttl: 60_000,
       allowStale: false,
       fetchMethod: async (_, __, { context }) => {
         const offer = await this.store.resolveBillingOffer(
@@ -330,15 +330,9 @@ export class BillingManager {
         };
       }
 
-      // Tier 3: Synthetic fallback (last resort)
-      console.warn(
-        `[BillingManager] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}, using synthetic fallback`,
+      console.error(
+        `[BillingManager] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}`,
       );
-      return {
-        offer: { plan: refs.lookupKey, grant: { mode: "allowance" } },
-        offerKey: null,
-        plan: refs.lookupKey,
-      };
     }
 
     return { offer: null, offerKey: null, plan: null };
@@ -425,7 +419,7 @@ export class BillingManager {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     const resolvedPlanKey = plan ?? existing?.plan ?? null;
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
@@ -435,11 +429,10 @@ export class BillingManager {
       }),
     );
     if (this.cm && resolvedPlanKey) {
-      const periodStart = event.subscription.periodStart;
-      await this.cm.setUserPlan(
+      await this.provisionSubscription(
         uid,
-        resolvedPlanKey,
-        periodStart ? new Date(periodStart) : undefined,
+        offer ?? (existing?.plan ? { plan: existing.plan } : null),
+        event,
       );
     }
     return { handled: true, action: "subscription_renewed" };

@@ -172,12 +172,6 @@ class BillingManager:
         if not offer and refs.lookup_key:
             offer = self._resolve_offer_by_lookup(event.provider, refs.lookup_key)
         if not offer:
-            if refs.lookup_key:
-                return (
-                    {"plan": refs.lookup_key, "grant": {"mode": "allowance"}},
-                    refs.lookup_key,
-                    refs.lookup_key,
-                )
             return None, None, None
         return offer, offer.get("offer_key"), offer.get("plan")
 

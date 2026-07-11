@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import type { BillingManager } from "../../billing/index.js";
+import type { BillingManager, BillingEventResult } from "../../billing/index.js";
 import type { BillingPaymentInfo } from "../../billing/billing-types.js";
 import type { ProviderLogger } from "../types.js";
 
@@ -25,6 +25,21 @@ function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
   return invoice.period_start
     ? new Date(invoice.period_start * 1000).toISOString()
     : new Date().toISOString();
+}
+
+async function callBillingManager(
+  bm: BillingManager,
+  event: Parameters<BillingManager["handleEvent"]>[0],
+): Promise<BillingEventResult> {
+  const result = await bm.handleEvent(event);
+  if (
+    !result.handled &&
+    result.error !== "unhandled_event_type" &&
+    result.error !== "user_not_found"
+  ) {
+    throw new Error(`BillingManager failed to handle event: ${result.error}`);
+  }
+  return result;
 }
 
 export async function handleStripeWebhook(
@@ -74,7 +89,7 @@ export async function handleStripeWebhook(
             const currentPeriodStart = buildStart(sub);
             const planSlug = session.metadata?.plan_slug as string | undefined;
 
-            await bm.handleEvent({
+            await callBillingManager(bm, {
               provider: "stripe",
               eventId: event.id,
               eventType: "checkout.completed",
@@ -121,7 +136,7 @@ export async function handleStripeWebhook(
             },
           };
 
-          await bm.handleEvent({
+          await callBillingManager(bm, {
             provider: "stripe",
             eventId: event.id,
             eventType: "payment.succeeded",
@@ -152,7 +167,7 @@ export async function handleStripeWebhook(
               ? "subscription.cancellation_scheduled"
               : "subscription.updated";
 
-        await bm.handleEvent({
+        await callBillingManager(bm, {
           provider: "stripe",
           eventId: event.id,
           eventType,
@@ -182,7 +197,7 @@ export async function handleStripeWebhook(
 
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription;
-        await bm.handleEvent({
+        await callBillingManager(bm, {
           provider: "stripe",
           eventId: event.id,
           eventType: "subscription.canceled",
@@ -237,7 +252,7 @@ export async function handleStripeWebhook(
         const periodEnd = stripeSub ? buildEnd(stripeSub) : buildEndFromInvoice(invoice);
         const periodStart = stripeSub ? buildStart(stripeSub) : buildStartFromInvoice(invoice);
 
-        await bm.handleEvent({
+        await callBillingManager(bm, {
           provider: "stripe",
           eventId: event.id,
           eventType: "invoice.paid",

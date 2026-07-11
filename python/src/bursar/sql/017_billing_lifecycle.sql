@@ -427,7 +427,7 @@ DECLARE
     v_offer RECORD;
 BEGIN
     IF auth.role() IS DISTINCT FROM 'service_role' THEN
-        RETURN jsonb_build_object('error', 'unauthorized');
+        RETURN NULL;
     END IF;
 
     IF p_lookup_key IS NULL THEN
