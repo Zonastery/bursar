@@ -7,7 +7,7 @@ Connection secrets are taken from the environment, never the command line:
 
 * ``migrate`` reads ``DATABASE_URL`` (primary). A positional URL is accepted for
   convenience but is discouraged — it leaks via ``ps``/shell history/CI logs.
-* ``pricing`` reads ``SUPABASE_URL`` + ``SUPABASE_SECRET_KEY``.
+* ``pricing`` reads ``DATABASE_URL``.
 """
 
 from __future__ import annotations
@@ -66,7 +66,6 @@ def _load_env() -> None:
 # Extra name → top-level import names needed
 _EXTRAS: dict[str, list[str]] = {
     "postgres": ["psycopg2"],
-    "supabase": ["httpx"],
 }
 
 
@@ -190,7 +189,7 @@ def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
         try:
             import yaml
         except ImportError:
-            print("PyYAML required for .yaml files: pip install bursar[supabase]", file=sys.stderr)
+            print("PyYAML required for .yaml files: pip install bursar[postgres]", file=sys.stderr)
             raise SystemExit(1) from None
         try:
             return yaml.safe_load(raw)
@@ -226,10 +225,9 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
-    from bursar.interface.postgres import PostgresStore
+    from bursar.interface.postgres import run_migrations
 
-    store = PostgresStore(database_url)
-    result = store.setup()
+    result = run_migrations(database_url)
     for t in result.tables_created:
         print(f"  ✓ {t}")
     for e in result.errors:
@@ -357,9 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--store",
-        choices=["supabase", "postgres"],
-        default=os.environ.get("BURSAR_STORE", "supabase"),
-        help="Store backend (env: BURSAR_STORE, default: supabase)",
+        choices=["postgres"],
+        default=os.environ.get("BURSAR_STORE", "postgres"),
+        help="Store backend (env: BURSAR_STORE, default: postgres)",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
@@ -386,8 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
     # pricing
     p_config = sub.add_parser(
         "config",
-        help="Manage pricing config (bursar[supabase])",
-        description="Manage immutable pricing-config versions via the Supabase store.",
+        help="Manage pricing config",
+        description="Manage immutable pricing-config versions.",
     )
     psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
 
