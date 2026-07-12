@@ -3,6 +3,7 @@ import type {
   BillingEventClaim,
   BillingOfferResult,
   BillingSubscriptionState,
+  BillingSubscriptionStatus,
   BillingTopupResult,
 } from "./billing-types.js";
 import { BillingStore } from "./billing-store.js";
@@ -18,6 +19,16 @@ import { BillingRefundRepository } from "../repositories/billing/refund.js";
 import { BillingInvoiceRepository } from "../repositories/billing/invoice.js";
 import { BillingDisputeRepository } from "../repositories/billing/dispute.js";
 import { BillingConfigRepository } from "../repositories/billing/config.js";
+
+function toIso(value: unknown): string | null {
+  if (!value) return null;
+  if (typeof value === "string") return value;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof (value as Record<string, unknown>)["toISOString"] === "function") {
+    return (value as Date).toISOString();
+  }
+  return String(value);
+}
 
 export class PostgresBillingStore extends BillingStore {
   private pool: import("pg").Pool | null = null;
@@ -129,25 +140,29 @@ export class PostgresBillingStore extends BillingStore {
     await this.billingConfig.syncFromConfig(JSON.stringify(camelToSnakeKeys(config)));
   }
 
+  private rowToOffer(r: Record<string, unknown>): BillingOfferResult | null {
+    if (!r?.offer_key) return null;
+    return {
+      offerKey: r.offer_key as string,
+      plan: (r.plan as string | undefined) ?? null,
+      interval: (r.interval as string | undefined) ?? "month",
+      intervalCount: Number(r.interval_count ?? 1),
+      grant: {
+        mode: r.grant_mode as string | undefined,
+        credits: r.grant_credits != null ? Number(r.grant_credits) : null,
+        bucket: (r.grant_bucket as string | undefined) ?? undefined,
+        replacePrior: r.grant_replace_prior === true,
+      },
+    };
+  }
+
   async resolveBillingOffer(
     provider: string,
     productId?: string | null,
     priceId?: string | null,
   ): Promise<BillingOfferResult | null> {
     const r = await this.billingOffer.resolveByPrice(provider, priceId ?? null, productId ?? null);
-    if (!r?.offer_key) return null;
-    return {
-      offerKey: r.offer_key,
-      plan: r.plan ?? null,
-      interval: r.interval ?? "month",
-      intervalCount: Number(r.interval_count ?? 1),
-      grant: {
-        mode: r.grant_mode,
-        credits: r.grant_credits != null ? Number(r.grant_credits) : null,
-        bucket: r.grant_bucket ?? undefined,
-        replacePrior: r.grant_replace_prior === true,
-      },
-    };
+    return this.rowToOffer(r as Record<string, unknown>);
   }
 
   async resolveBillingOfferByLookup(
@@ -155,19 +170,7 @@ export class PostgresBillingStore extends BillingStore {
     lookupKey: string,
   ): Promise<BillingOfferResult | null> {
     const r = await this.billingOffer.resolveByLookup(provider, lookupKey);
-    if (!r?.offer_key) return null;
-    return {
-      offerKey: r.offer_key,
-      plan: r.plan ?? null,
-      interval: r.interval ?? "month",
-      intervalCount: Number(r.interval_count ?? 1),
-      grant: {
-        mode: r.grant_mode,
-        credits: r.grant_credits != null ? Number(r.grant_credits) : null,
-        bucket: r.grant_bucket ?? undefined,
-        replacePrior: r.grant_replace_prior === true,
-      },
-    };
+    return this.rowToOffer(r as Record<string, unknown>);
   }
 
   async claimBillingEvent(
@@ -245,18 +248,12 @@ export class PostgresBillingStore extends BillingStore {
     return { userId, keepProvider, deactivatedCount };
   }
 
-  async resolveCreditTopupByLookup(
-    provider: string,
-    lookupKey: string,
-  ): Promise<BillingTopupResult | null> {
-    const r = await this.billingTopup.resolveByLookup(provider, lookupKey);
+  private rowToTopup(r: Record<string, unknown>): BillingTopupResult | null {
     if (!r?.topup_key) return null;
     return {
-      topupKey: r.topup_key,
+      topupKey: r.topup_key as string,
       creditsPerUnit: Number(r.credits_per_unit ?? r.credits_per_major_unit ?? 1000),
-      creditsPerMajorUnit:
-        r.credits_per_major_unit != null ? Number(r.credits_per_major_unit) : undefined,
-      depositTo: r.deposit_to || "purchased",
+      depositTo: (r.deposit_to as string | undefined) || "purchased",
     };
   }
 
@@ -266,14 +263,7 @@ export class PostgresBillingStore extends BillingStore {
     priceId?: string | null,
   ): Promise<BillingTopupResult | null> {
     const r = await this.billingTopup.resolveByPrice(provider, priceId ?? null, productId ?? null);
-    if (!r?.topup_key) return null;
-    return {
-      topupKey: r.topup_key,
-      creditsPerUnit: Number(r.credits_per_unit ?? r.credits_per_major_unit ?? 1000),
-      creditsPerMajorUnit:
-        r.credits_per_major_unit != null ? Number(r.credits_per_major_unit) : undefined,
-      depositTo: r.deposit_to || "purchased",
-    };
+    return this.rowToTopup(r as Record<string, unknown>);
   }
 
   async computeTopupCredits(amountMinor: number, topupConfig: BillingTopupResult): Promise<number> {
@@ -281,97 +271,97 @@ export class PostgresBillingStore extends BillingStore {
     return Math.trunc((amountMinor * creditsPer) / 100);
   }
 
-  async upsertBillingPayment(
-    provider: string,
-    providerPaymentId: string,
-    providerInvoiceId?: string | null,
-    userId?: string | null,
-    amountMinor?: number,
-    taxMinor?: number | null,
-    currency?: string,
-    purpose?: string,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void> {
+  async upsertBillingPayment(options: {
+    provider: string;
+    providerPaymentId: string;
+    providerInvoiceId?: string | null;
+    userId?: string | null;
+    amountMinor?: number;
+    taxMinor?: number | null;
+    currency?: string | null;
+    purpose?: string;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void> {
     await this.billingPayment.upsert(
-      provider,
-      providerPaymentId,
-      providerInvoiceId ?? null,
-      userId ?? null,
-      amountMinor ?? 0,
-      taxMinor ?? null,
-      currency ?? "USD",
-      purpose ?? null,
-      metadata ? JSON.stringify(metadata) : null,
+      options.provider,
+      options.providerPaymentId,
+      options.providerInvoiceId ?? null,
+      options.userId ?? null,
+      options.amountMinor ?? 0,
+      options.taxMinor ?? null,
+      options.currency ?? "USD",
+      options.purpose ?? null,
+      options.metadata ? JSON.stringify(options.metadata) : null,
     );
   }
 
-  async upsertBillingRefund(
-    provider: string,
-    providerRefundId: string,
-    providerPaymentId?: string | null,
-    userId?: string | null,
-    amountMinor?: number,
-    currency?: string,
-    reason?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void> {
+  async upsertBillingRefund(options: {
+    provider: string;
+    providerRefundId: string;
+    providerPaymentId?: string | null;
+    userId?: string | null;
+    amountMinor?: number;
+    currency?: string | null;
+    reason?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void> {
     await this.billingRefund.upsert(
-      provider,
-      providerRefundId,
-      providerPaymentId ?? null,
-      userId ?? null,
-      amountMinor ?? 0,
-      currency ?? "USD",
-      reason ?? null,
-      metadata ? JSON.stringify(metadata) : null,
+      options.provider,
+      options.providerRefundId,
+      options.providerPaymentId ?? null,
+      options.userId ?? null,
+      options.amountMinor ?? 0,
+      options.currency ?? "USD",
+      options.reason ?? null,
+      options.metadata ? JSON.stringify(options.metadata) : null,
     );
   }
 
-  async upsertBillingInvoice(
-    provider: string,
-    providerInvoiceId: string,
-    providerSubscriptionId?: string | null,
-    userId?: string | null,
-    status?: string | null,
-    amountPaidMinor?: number | null,
-    amountDueMinor?: number | null,
-    currency?: string,
-    periodStart?: string | null,
-    periodEnd?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void> {
+  async upsertBillingInvoice(options: {
+    provider: string;
+    providerInvoiceId: string;
+    providerSubscriptionId?: string | null;
+    userId?: string | null;
+    status?: string | null;
+    amountPaidMinor?: number | null;
+    amountDueMinor?: number | null;
+    currency?: string | null;
+    periodStart?: string | null;
+    periodEnd?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void> {
     await this.billingInvoice.upsert(
-      provider,
-      providerInvoiceId,
-      providerSubscriptionId ?? null,
-      userId ?? null,
-      status ?? null,
-      amountPaidMinor ?? null,
-      amountDueMinor ?? null,
-      currency ?? "USD",
-      periodStart ?? null,
-      periodEnd ?? null,
-      metadata ? JSON.stringify(metadata) : null,
+      options.provider,
+      options.providerInvoiceId,
+      options.providerSubscriptionId ?? null,
+      options.userId ?? null,
+      options.status ?? null,
+      options.amountPaidMinor ?? null,
+      options.amountDueMinor ?? null,
+      options.currency ?? "USD",
+      options.periodStart ?? null,
+      options.periodEnd ?? null,
+      options.metadata ? JSON.stringify(options.metadata) : null,
     );
   }
 
-  async upsertBillingDispute(
-    provider: string,
-    providerDisputeId: string,
-    providerPaymentId?: string | null,
-    userId?: string | null,
-    status?: string,
-    reason?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void> {
+  async upsertBillingDispute(options: {
+    provider: string;
+    providerDisputeId: string;
+    providerPaymentId?: string | null;
+    userId?: string | null;
+    status?: string;
+    reason?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void> {
     await this.billingDispute.upsert(
-      provider,
-      providerDisputeId,
-      providerPaymentId ?? null,
-      userId ?? null,
-      status ?? "needs_response",
-      reason ?? null,
-      metadata ? JSON.stringify(metadata) : null,
+      options.provider,
+      options.providerDisputeId,
+      options.providerPaymentId ?? null,
+      options.userId ?? null,
+      options.status ?? "needs_response",
+      options.reason ?? null,
+      options.metadata ? JSON.stringify(options.metadata) : null,
     );
   }
 
@@ -384,15 +374,6 @@ export class PostgresBillingStore extends BillingStore {
     return snakeToCamelKeys(result) as Record<string, unknown>;
   }
 
-  async getBillingPaymentDirect(
-    provider: string,
-    providerPaymentId: string,
-  ): Promise<Record<string, unknown> | null> {
-    const result = await this.billingPayment.getDirect(provider, providerPaymentId);
-    if (!result) return null;
-    return snakeToCamelKeys(result) as Record<string, unknown>;
-  }
-
   private rowToSubscriptionState(r: Record<string, unknown>): BillingSubscriptionState {
     return {
       userId: String(r.user_id),
@@ -401,11 +382,9 @@ export class PostgresBillingStore extends BillingStore {
       providerCustomerId: r.provider_customer_id ? String(r.provider_customer_id) : null,
       offerKey: r.offer_key ? String(r.offer_key) : null,
       plan: r.plan ? String(r.plan) : null,
-      status: r.status ? String(r.status) : "incomplete",
-      currentPeriodStart: r.current_period_start
-        ? (r.current_period_start as Date).toISOString()
-        : null,
-      currentPeriodEnd: r.current_period_end ? (r.current_period_end as Date).toISOString() : null,
+      status: (r.status ? String(r.status) : "incomplete") as BillingSubscriptionStatus,
+      currentPeriodStart: toIso(r.current_period_start),
+      currentPeriodEnd: toIso(r.current_period_end),
       cancelAtPeriodEnd: Boolean(r.cancel_at_period_end),
       interval: r.interval ? String(r.interval) : null,
       intervalCount: r.interval_count ? Number(r.interval_count) : null,

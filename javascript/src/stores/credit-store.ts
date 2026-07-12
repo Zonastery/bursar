@@ -1,5 +1,4 @@
 import type { Decimal } from "decimal.js";
-import { LRUCache } from "lru-cache";
 import { CapabilityNotSupportedError } from "../errors.js";
 import type {
   AddCreditsResult,
@@ -10,7 +9,6 @@ import type {
   BalanceResult,
   BillingMode,
   BucketBalancesResult,
-  CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
   CreditMetadata,
@@ -99,67 +97,7 @@ export interface SettleLeaseOptions extends FeatureLimitOptions {
  *    throws {@link CapabilityNotSupportedError} instead of forcing a stub.
  */
 export abstract class CreditStore {
-  // ── Pricing config TTL cache (with async dedup) ──────────────────────
-  // Uses lru-cache for TTL management (evicts after pricingCacheTtl
-  // seconds) and a manual dedup promise to coalesce concurrent calls.
-  private _pricingCache: LRUCache<string, PricingConfigResult> | null;
-  private _pricingLoadPromise: Promise<PricingConfigResult | null> | null = null;
-
-  /**
-   * @param pricingCacheTtl Seconds to cache [[getActivePricing]] results.
-   *   Set to 0 to disable caching. Default 300.
-   */
-  constructor(pricingCacheTtl: number = 300) {
-    this._pricingCache =
-      pricingCacheTtl > 0
-        ? new LRUCache<string, PricingConfigResult>({
-            max: 1,
-            ttl: pricingCacheTtl * 1000,
-            allowStale: false,
-          })
-        : null;
-  }
-
-  /**
-   * Return cached pricing if within TTL, else call *loader* and cache.
-   * Concurrent calls for a cold/expired cache are deduplicated — one
-   * ``loader`` invocation runs and all callers await the same result.
-   * ``null`` results are **not** cached — missing config triggers a
-   * backend call on every invocation so newly-published pricing is
-   * picked up immediately.
-   */
-  protected async _getCachedPricing(
-    loader: () => Promise<PricingConfigResult | null>,
-  ): Promise<PricingConfigResult | null> {
-    if (!this._pricingCache) {
-      // Caching disabled (pricingCacheTtl === 0)
-      return loader();
-    }
-
-    // Fast path: cache hit
-    const cached = this._pricingCache.get("pricing");
-    if (cached !== undefined) return cached;
-
-    // Slow path: cache miss or expired — deduplicate concurrent calls
-    if (this._pricingLoadPromise) return this._pricingLoadPromise;
-
-    this._pricingLoadPromise = loader()
-      .then((result) => {
-        // Don't cache null — missing config should be re-checked on every call
-        if (result) this._pricingCache!.set("pricing", result);
-        return result;
-      })
-      .finally(() => {
-        this._pricingLoadPromise = null;
-      });
-
-    return this._pricingLoadPromise;
-  }
-
-  /** Force the next [[getActivePricing]] call to reload from the backend. */
-  invalidatePricingCache(): void {
-    this._pricingCache?.delete("pricing");
-  }
+  constructor() {}
 
   abstract setup(databaseUrl?: string | null): Promise<SetupResult>;
   abstract getBalance(userId: string): Promise<BalanceResult>;
@@ -288,7 +226,6 @@ export abstract class CreditStore {
   // (resolved by CreditManager via resolveAllowanceWindow); undefined keeps
   // the calendar-month default (WS9).
   abstract checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult>;
-  abstract incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void>;
 
   /**
    * Advisory, non-locking read of invocation-count usage (UI only).
@@ -307,13 +244,6 @@ export abstract class CreditStore {
     periodStart: Date,
     periodEnd: Date,
   ): Promise<FeatureLimitResult>;
-
-  // ── Spend caps and rate limiting ────────────────────────────────────
-  abstract checkSpendCap(
-    userId: string,
-    model?: string | null,
-    amount?: Decimal,
-  ): Promise<CapCheckResult>;
 
   // ── Revoke credits by tx type ──────────────────────────────────────
   abstract revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>>;
@@ -376,7 +306,7 @@ export abstract class CreditStore {
     options?: ListUsageEventsOptions,
   ): Promise<PaginatedTransactions>;
 
-  // ── Transaction listing (optional capability — WS8) ──────────────────
+  // ── Single transaction lookup (optional capability — WS8) ────────────
   /**
    * Fetch a single transaction by ID. Returns `null` when the transaction
    * does not exist or belongs to a different user.

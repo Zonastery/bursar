@@ -9,7 +9,6 @@ import {
   LeaseExpiredError,
   LeaseNotFoundError,
   PricingNotLoadedError,
-  RefundError,
 } from "./errors.js";
 import { LRUCache } from "lru-cache";
 import type { PricingEngine } from "./engine.js";
@@ -344,18 +343,21 @@ export class CreditManager {
     const config = active.config as Record<string, unknown>;
     const metering = (config.metering ?? {}) as Record<string, unknown>;
     const ledger = (config.ledger ?? {}) as Record<string, unknown>;
+    const cacheDiscount = metering["cacheDiscount"] ?? metering["cache_discount"] ?? null;
+    const flatJobs = metering["flatJobs"] ?? metering["flat_jobs"] ?? {};
+    const signupGrant = ledger["signupGrant"] ?? ledger["signup_grant"] ?? 50;
     const engineDict: Record<string, unknown> = {
       version: config.version ?? 1,
       metering: {
         models: metering.models ?? {},
         tools: metering.tools ?? { "*": "calls * 0" },
         search: metering.search ?? null,
-        cacheDiscount: (metering as any).cacheDiscount ?? (metering as any).cache_discount ?? null,
-        flatJobs: (metering as any).flatJobs ?? (metering as any).flat_jobs ?? {},
+        cacheDiscount,
+        flatJobs,
       },
       ledger: {
         minBalance: ledger.minBalance ?? 0,
-        signupGrant: (ledger as any).signupGrant ?? (ledger as any).signup_grant ?? 50,
+        signupGrant,
         buckets: ledger.buckets ?? null,
       },
       ...(config.plans ? { plans: config.plans } : {}),
@@ -596,7 +598,7 @@ export class CreditManager {
     const result = await this.store.addCredits(
       userId,
       toDecimal(amount).neg(),
-      "adjustment",
+      txType,
       options?.metadata ?? null,
       null,
       options?.bucket ?? undefined,
@@ -675,6 +677,7 @@ export class CreditManager {
     );
 
     const isFreshGrant = result.lifetimePurchased.minus(preLifetimePurchased).eq(amountDec);
+    // TODO: once PostgresAddCreditsResult reliably populates idempotent, use result.idempotent instead
     if (replacePrior && isFreshGrant && priorLeftover.gt(0)) {
       await this.store.addCredits(
         userId,
@@ -824,10 +827,11 @@ export class CreditManager {
     }
     const rawLimit = plan?.entitlements?.[feature] ?? null;
     if (rawLimit == null) return { limit: null, periodStart: null, periodEnd: null };
+    const raw = rawLimit as Record<string, unknown>;
     const limit: FeatureLimit = {
-      maxCalls: (rawLimit as any).maxCalls ?? 0,
-      period: ((rawLimit as any).period ?? "monthly") as FeatureLimitPeriod,
-      onExceed: ((rawLimit as any).onExceed ?? "deny") as "deny" | "warn" | "notify",
+      maxCalls: Number(raw["maxCalls"] ?? 0),
+      period: (raw["period"] ?? "monthly") as FeatureLimitPeriod,
+      onExceed: (raw["onExceed"] ?? "deny") as "deny" | "warn" | "notify",
     };
     const { start, end } = resolveCalendarWindow(new Date(), limit.period ?? "monthly");
     return { limit, periodStart: start, periodEnd: end };
@@ -876,6 +880,27 @@ export class CreditManager {
         throw new RangeError(`Invalid amount: ${amount}`);
       default:
         throw new InsufficientCreditsError(`Operation failed: ${error}. user=${userId}`);
+    }
+  }
+
+  /** Map a store business code to the coherent typed exception for deduct (M2). */
+  private raiseDeductError(
+    error: string,
+    userId: string,
+    cost: Decimal,
+    feature?: string | null,
+  ): never {
+    switch (error) {
+      case "cap_reached":
+        throw new CapReachedError(`Spend cap exceeded for user ${userId} (requested ${cost})`);
+      case "feature_limit_reached":
+        throw new FeatureLimitReachedError(
+          `Feature limit exceeded for '${feature}'. user=${userId}`,
+        );
+      default:
+        throw new InsufficientCreditsError(
+          `Credit deduction failed: ${error}. user=${userId}, requested=${cost}`,
+        );
     }
   }
 
@@ -1172,11 +1197,10 @@ export class CreditManager {
     // The store/SQL layer only knows a generic calendar-month periodEnd (see
     // 004_plans.sql / 009_deduct_and_leases.sql); override it here with the
     // authoritative window this manager resolved.
-    const periodEnd = new Date(end.getTime() - 86_400_000);
     return {
       ...result,
       periodStart: start.toISOString(),
-      periodEnd: periodEnd.toISOString(),
+      periodEnd: end.toISOString(),
     };
   }
 
@@ -1389,7 +1413,7 @@ export class CreditManager {
         model: metrics.model ?? null,
       });
       if (result.error === "cap_reached") {
-        throw new CapReachedError(`Spend cap exceeded for user ${userId} (requested ${cost})`);
+        this.raiseDeductError(result.error, userId, cost);
       }
       if (result.error === "feature_limit_reached") {
         this.emit("credits.feature_limit_reached", userId, {
@@ -1397,14 +1421,9 @@ export class CreditManager {
           amount: cost,
           model: metrics.model ?? null,
         });
-        throw new FeatureLimitReachedError(
-          `Feature limit exceeded for '${feature}'. user=${userId}`,
-        );
+        this.raiseDeductError(result.error, userId, cost, feature);
       }
-      // insufficient_credits, invalid_amount, and any other business error.
-      throw new InsufficientCreditsError(
-        `Credit deduction failed: ${result.error}. user=${userId}, requested=${cost}`,
-      );
+      this.raiseDeductError(result.error, userId, cost);
     }
 
     // Success — emit deducted, then any cap warning, then edge-triggered low-balance.
@@ -1442,15 +1461,8 @@ export class CreditManager {
     // the threshold. A replayed (idempotent) result did not move the balance, so
     // it never crosses. balanceBefore = balanceAfter + amount charged.
     if (!result.idempotent) {
-      const threshold = this.resolveLowBalanceThreshold();
       const balanceBefore = result.balanceAfter.plus(result.amount);
-      if (result.balanceAfter.lte(threshold) && balanceBefore.gt(threshold)) {
-        this.emit("credits.low_balance", userId, {
-          balance: result.balanceAfter,
-          threshold,
-          minBalance: this.minBalanceDecimal(),
-        });
-      }
+      await this.emitLowBalance(userId, balanceBefore, result.balanceAfter);
     }
 
     return result;
@@ -1459,10 +1471,10 @@ export class CreditManager {
   /**
    * Refund a previous credit deduction.
    *
-   * H3: the store's ``error`` is checked **before** emitting. A successful refund
+   * Returns the RefundResult (with .error set on failure). A successful refund
    * emits ``credits.refunded``; a failed/duplicate/over-refund emits
-   * ``credits.refund_failed`` and throws a typed ``RefundError`` (no success
-   * event is ever emitted for a failed refund).
+   * ``credits.refund_failed`` (no success event is ever emitted for a failed
+   * refund).
    */
   async refundCredits(
     transactionId: string,
@@ -1479,7 +1491,7 @@ export class CreditManager {
         error: result.error,
         reason: reason ?? null,
       });
-      throw new RefundError(`Refund failed: ${result.error}. transaction=${transactionId}`);
+      return result;
     }
 
     this.emit("credits.refunded", result.userId, {

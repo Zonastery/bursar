@@ -358,269 +358,250 @@ function normalisePerOperation(
   return out;
 }
 
-/** Load and validate a pricing config from a raw dictionary. */
-export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig {
-  // H6: normalise top-level keys from snake_case to camelCase first.
-  const d = normaliseKeys(data);
-  assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
+// ── Section parsers (extracted from loadConfigFromDict, M6) ─────────
 
-  // Only `1` is a valid version (mirrors Python's `Literal[1]`).
-  const version = (d.version as number | undefined) ?? 1;
-  if (version !== 1) {
-    throw new ConfigError(`version must be 1, got ${JSON.stringify(d.version)}`);
-  }
+function parseMetering(raw: Record<string, unknown>): MeteringConfig {
+  const normalised = normaliseKeys(raw);
+  assertKnownKeys(normalised, METERING_KEYS, "metering");
 
-  // ── Parse `metering` section ──
-
-  const rawMetering = (d.metering ?? {}) as Record<string, unknown>;
-  const meteringNormalised = normaliseKeys(rawMetering);
-  assertKnownKeys(meteringNormalised, METERING_KEYS, "metering");
-
-  if (meteringNormalised.models == null)
-    throw new ConfigError("missing required section: metering.models");
+  if (normalised.models == null) throw new ConfigError("missing required section: metering.models");
   if (
-    typeof meteringNormalised.models !== "object" ||
-    Object.keys(meteringNormalised.models as object).length === 0
+    typeof normalised.models !== "object" ||
+    Object.keys(normalised.models as object).length === 0
   ) {
     throw new ConfigError("metering.models must be a non-empty dict");
   }
 
   const metering: MeteringConfig = {
-    models: meteringNormalised.models as Record<string, string>,
-    tools: (meteringNormalised.tools as Record<string, string> | undefined) ?? { "*": "calls * 0" },
-    search: (meteringNormalised.search as string | null | undefined) ?? null,
-    cacheDiscount: (meteringNormalised.cacheDiscount as string | null | undefined) ?? null,
+    models: normalised.models as Record<string, string>,
+    tools: (normalised.tools as Record<string, string> | undefined) ?? { "*": "calls * 0" },
+    search: (normalised.search as string | null | undefined) ?? null,
+    cacheDiscount: (normalised.cacheDiscount as string | null | undefined) ?? null,
     flatJobs: Object.fromEntries(
       Object.entries(
-        (meteringNormalised.flatJobs as Record<string, number | string> | undefined) ?? {},
+        (normalised.flatJobs as Record<string, number | string> | undefined) ?? {},
       ).map(([job, cost]) => [job, new Decimal(cost)]),
     ),
   };
 
-  // Validate flatJobs >= 0
   for (const [job, cost] of Object.entries(metering.flatJobs)) {
     if (cost.isNegative()) {
       throw new ConfigError(`metering.flatJobs.${job} must be >= 0, got ${cost.toString()}`);
     }
   }
 
-  // ── Parse `ledger` section ──
+  return metering;
+}
 
-  const rawLedger = (d.ledger ?? {}) as Record<string, unknown>;
-  const ledgerNormalised = normaliseKeys(rawLedger);
-  assertKnownKeys(ledgerNormalised, LEDGER_KEYS, "ledger");
+function parseLedger(raw: Record<string, unknown>): LedgerConfig {
+  const normalised = normaliseKeys(raw);
+  assertKnownKeys(normalised, LEDGER_KEYS, "ledger");
 
-  const minBalance = new Decimal((ledgerNormalised.minBalance as number | string | undefined) ?? 0);
+  const minBalance = new Decimal((normalised.minBalance as number | string | undefined) ?? 0);
   if (minBalance.isNegative()) throw new ConfigError("ledger.minBalance must be >= 0");
 
-  const signupGrant = ledgerNormalised.signupGrant as number | undefined;
+  const signupGrant = normalised.signupGrant as number | undefined;
   if (signupGrant != null && signupGrant < 0) {
     throw new ConfigError(`ledger.signupGrant must be >= 0, got ${signupGrant}`);
   }
 
-  const ledger: LedgerConfig = {
+  return {
     minBalance,
     signupGrant: signupGrant ?? 50,
-    buckets: undefined, // populated below
+    buckets: undefined,
   };
+}
 
-  // ── Parse `billing` section ──
+function parseBuckets(raw: Record<string, unknown>): Record<string, BucketDefinition> | undefined {
+  if (raw.buckets === undefined || raw.buckets === null) return undefined;
+  if (typeof raw.buckets !== "object" || Array.isArray(raw.buckets)) {
+    throw new ConfigError("ledger.buckets must be a dict of bucket definitions");
+  }
+  if (Object.keys(raw.buckets as object).length === 0) {
+    throw new ConfigError(
+      "ledger.buckets must not be an empty object; omit the `buckets` key entirely for no buckets",
+    );
+  }
+
+  const rawBuckets = raw.buckets as Record<string, Record<string, unknown>>;
+  const buckets = Object.fromEntries(
+    Object.entries(rawBuckets).map(([k, v]) => [k, normaliseBucket(v)]),
+  );
+
+  let overdraftCount = 0;
+  let defaultCount = 0;
+  for (const [bucketKey, t] of Object.entries(buckets)) {
+    assertKnownKeys(t, BUCKET_KEYS, `ledger.buckets.${bucketKey}`);
+    if (t.allowOverdraft === true) overdraftCount++;
+    if (t["default"] === true) defaultCount++;
+    if (t.ttlDays != null && (t.ttlDays as number) <= 0) {
+      throw new ConfigError(
+        `ledger.buckets.${bucketKey}.ttlDays must be > 0, got ${String(t.ttlDays)}`,
+      );
+    }
+  }
+  if (overdraftCount > 1) {
+    throw new ConfigError("at most one bucket may set allowOverdraft: true");
+  }
+  if (defaultCount > 1) {
+    throw new ConfigError('at most one bucket may set "default": true');
+  }
+
+  const bucketDefs: Record<string, BucketDefinition> = {};
+  for (const [key, t] of Object.entries(buckets)) {
+    bucketDefs[key] = {
+      label: (t.label as string | undefined) ?? key,
+      priority: Number(t.priority ?? 0),
+      expires: Boolean(t.expires ?? false),
+      ttlDays: t.ttlDays != null ? Number(t.ttlDays) : null,
+      allowOverdraft: Boolean(t.allowOverdraft ?? false),
+      default: Boolean(t["default"] ?? false),
+    };
+  }
+  return bucketDefs;
+}
+
+function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition> | undefined {
+  const rawPlans = raw.plans as Record<string, Record<string, unknown>> | undefined;
+  if (!rawPlans) return undefined;
+
+  const plans = Object.fromEntries(Object.entries(rawPlans).map(([k, v]) => [k, normalisePlan(v)]));
+
+  for (const [planKey, plan] of Object.entries(plans)) {
+    assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
+    if (plan.label == null) {
+      throw new ConfigError(`plan definition is missing required 'label' field: plans.${planKey}`);
+    }
+    if (plan.allowance != null) {
+      if (typeof plan.allowance !== "object" || Array.isArray(plan.allowance)) {
+        throw new ConfigError(`plans.${planKey}.allowance must be a dict`);
+      }
+      assertKnownKeys(
+        plan.allowance as Record<string, unknown>,
+        ALLOWANCE_KEYS,
+        `plans.${planKey}.allowance`,
+      );
+      const allowance = plan.allowance as Record<string, unknown>;
+      if (allowance.period != null && !ALLOWANCE_PERIODS.has(allowance.period as string)) {
+        throw new ConfigError(
+          `invalid allowance period in plans.${planKey}: ${String(allowance.period)} ` +
+            `(expected one of ${[...ALLOWANCE_PERIODS].sort().join(", ")})`,
+        );
+      }
+    }
+    if (plan.safety != null) {
+      if (typeof plan.safety !== "object" || Array.isArray(plan.safety)) {
+        throw new ConfigError(`plans.${planKey}.safety must be a dict`);
+      }
+      assertKnownKeys(
+        plan.safety as Record<string, unknown>,
+        SAFETY_KEYS,
+        `plans.${planKey}.safety`,
+      );
+      const safety = plan.safety as Record<string, unknown>;
+      if (
+        safety.billingMode != null &&
+        safety.billingMode !== "strict" &&
+        safety.billingMode !== "overdraft"
+      ) {
+        throw new ConfigError(
+          `invalid billingMode in plans.${planKey}.safety: '${String(safety.billingMode)}' ` +
+            `(expected 'strict' or 'overdraft')`,
+        );
+      }
+    }
+    const overrides = plan.rateOverrides as Record<string, string> | undefined;
+    if (overrides) {
+      for (const [modelKey, expr] of Object.entries(overrides)) {
+        try {
+          validateExpression(expr, KNOWN_VARIABLES);
+        } catch (e) {
+          throw new ConfigError(
+            `invalid expression in plans.${planKey}.rateOverrides.${modelKey}: ${(e as Error).message}`,
+          );
+        }
+      }
+    }
+    if (plan.entitlements != null) {
+      if (typeof plan.entitlements !== "object" || Array.isArray(plan.entitlements)) {
+        throw new ConfigError(`plans.${planKey}.entitlements must be a dict`);
+      }
+      plan.entitlements = normaliseEntitlements(
+        planKey,
+        plan.entitlements as Record<string, unknown>,
+      );
+    }
+  }
+
+  const planLabels = Object.values(plans).map((p) => p.label as string);
+  if (new Set(planLabels).size !== planLabels.length) {
+    throw new ConfigError("duplicate plan labels in pricing config");
+  }
+
+  const planDefs: Record<string, PlanDefinition> = {};
+  for (const [key, p] of Object.entries(plans)) {
+    const allowanceRaw = (p.allowance as Record<string, unknown>) ?? {};
+    const allowanceAmount = new Decimal(
+      (allowanceRaw["amount"] as number | string | undefined) ?? 0,
+    );
+    if (allowanceAmount.isNegative()) {
+      throw new ConfigError(
+        `plans.${key}.allowance.amount must be >= 0, got ${allowanceAmount.toString()}`,
+      );
+    }
+    const safetyRaw = (p.safety as Record<string, unknown>) ?? {};
+    const billingMode = (safetyRaw.billingMode ?? "strict") as "strict" | "overdraft";
+    const perOperationRaw = safetyRaw.perOperation as Record<string, unknown> | undefined;
+
+    planDefs[key] = {
+      label: p.label as string,
+      allowance: {
+        amount: allowanceAmount,
+        period: ((allowanceRaw["period"] as AllowancePeriod) ??
+          "calendar_month") as AllowancePeriod,
+      },
+      safety: {
+        billingMode,
+        perOperation:
+          perOperationRaw != null
+            ? normalisePerOperation(key, perOperationRaw as Record<string, unknown>)
+            : undefined,
+        maxConcurrent: (safetyRaw.maxConcurrent as number | null) ?? null,
+        overdraftFloor:
+          safetyRaw.overdraftFloor != null
+            ? new Decimal(safetyRaw.overdraftFloor as number | string)
+            : null,
+      },
+      rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
+      entitlements: (p.entitlements as Record<string, FeatureLimit>) ?? null,
+    };
+  }
+  return planDefs;
+}
+
+/** Load and validate a pricing config from a raw dictionary. */
+export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig {
+  const d = normaliseKeys(data);
+  assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
+
+  const version = (d.version as number | undefined) ?? 1;
+  if (version !== 1) {
+    throw new ConfigError(`version must be 1, got ${JSON.stringify(d.version)}`);
+  }
+
+  const metering = parseMetering((d.metering ?? {}) as Record<string, unknown>);
+  const ledger = parseLedger((d.ledger ?? {}) as Record<string, unknown>);
+  const buckets = parseBuckets((d.ledger ?? {}) as Record<string, unknown>);
+  if (buckets) ledger.buckets = buckets;
+
+  const plans = parsePlans(d as Record<string, unknown>);
 
   const billing: BillingSection | undefined =
     d.billing != null ? { currency: "USD", ...(d.billing as Record<string, unknown>) } : undefined;
 
-  // ── Parse `plans` section ──
-
-  const rawPlans = d.plans as Record<string, Record<string, unknown>> | undefined;
-  const plans = rawPlans
-    ? Object.fromEntries(Object.entries(rawPlans).map(([k, v]) => [k, normalisePlan(v)]))
-    : undefined;
-
-  if (plans) {
-    for (const [planKey, plan] of Object.entries(plans)) {
-      assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
-      // A plan definition must carry a `label` (mirrors Python's `config.py`).
-      if (plan.label == null) {
-        throw new ConfigError(
-          `plan definition is missing required 'label' field: plans.${planKey}`,
-        );
-      }
-      // Validate allowance section
-      if (plan.allowance != null) {
-        if (typeof plan.allowance !== "object" || Array.isArray(plan.allowance)) {
-          throw new ConfigError(`plans.${planKey}.allowance must be a dict`);
-        }
-        assertKnownKeys(
-          plan.allowance as Record<string, unknown>,
-          ALLOWANCE_KEYS,
-          `plans.${planKey}.allowance`,
-        );
-        const allowance = plan.allowance as Record<string, unknown>;
-        if (allowance.period != null && !ALLOWANCE_PERIODS.has(allowance.period as string)) {
-          throw new ConfigError(
-            `invalid allowance period in plans.${planKey}: ${String(allowance.period)} ` +
-              `(expected one of ${[...ALLOWANCE_PERIODS].sort().join(", ")})`,
-          );
-        }
-      }
-      // Validate safety section
-      if (plan.safety != null) {
-        if (typeof plan.safety !== "object" || Array.isArray(plan.safety)) {
-          throw new ConfigError(`plans.${planKey}.safety must be a dict`);
-        }
-        assertKnownKeys(
-          plan.safety as Record<string, unknown>,
-          SAFETY_KEYS,
-          `plans.${planKey}.safety`,
-        );
-        const safety = plan.safety as Record<string, unknown>;
-        if (
-          safety.billingMode != null &&
-          safety.billingMode !== "strict" &&
-          safety.billingMode !== "overdraft"
-        ) {
-          throw new ConfigError(
-            `invalid billingMode in plans.${planKey}.safety: '${String(safety.billingMode)}' ` +
-              `(expected 'strict' or 'overdraft')`,
-          );
-        }
-      }
-      // Validate rate overrides
-      const overrides = plan.rateOverrides as Record<string, string> | undefined;
-      if (overrides) {
-        for (const [modelKey, expr] of Object.entries(overrides)) {
-          try {
-            validateExpression(expr, KNOWN_VARIABLES);
-          } catch (e) {
-            throw new ConfigError(
-              `invalid expression in plans.${planKey}.rateOverrides.${modelKey}: ${(e as Error).message}`,
-            );
-          }
-        }
-      }
-      // Normalise entitlements
-      if (plan.entitlements != null) {
-        if (typeof plan.entitlements !== "object" || Array.isArray(plan.entitlements)) {
-          throw new ConfigError(`plans.${planKey}.entitlements must be a dict`);
-        }
-        plan.entitlements = normaliseEntitlements(
-          planKey,
-          plan.entitlements as Record<string, unknown>,
-        );
-      }
-    }
-    const planLabels = Object.values(plans).map((p) => p.label as string);
-    if (new Set(planLabels).size !== planLabels.length) {
-      throw new ConfigError("duplicate plan labels in pricing config");
-    }
-  }
-
-  // ── Parse `ledger.buckets` (was `tiers`) ──
-
-  if (ledgerNormalised.buckets !== undefined && ledgerNormalised.buckets !== null) {
-    if (typeof ledgerNormalised.buckets !== "object" || Array.isArray(ledgerNormalised.buckets)) {
-      throw new ConfigError("ledger.buckets must be a dict of bucket definitions");
-    }
-    if (Object.keys(ledgerNormalised.buckets as object).length === 0) {
-      throw new ConfigError(
-        "ledger.buckets must not be an empty object; omit the `buckets` key entirely for no buckets",
-      );
-    }
-  }
-  const rawBuckets = ledgerNormalised.buckets as
-    Record<string, Record<string, unknown>> | undefined;
-  const buckets = rawBuckets
-    ? Object.fromEntries(Object.entries(rawBuckets).map(([k, v]) => [k, normaliseBucket(v)]))
-    : undefined;
-
-  if (buckets) {
-    let overdraftCount = 0;
-    let defaultCount = 0;
-    for (const [bucketKey, t] of Object.entries(buckets)) {
-      assertKnownKeys(t, BUCKET_KEYS, `ledger.buckets.${bucketKey}`);
-      if (t.allowOverdraft === true) overdraftCount++;
-      if (t["default"] === true) defaultCount++;
-      if (t.ttlDays != null && (t.ttlDays as number) <= 0) {
-        throw new ConfigError(
-          `ledger.buckets.${bucketKey}.ttlDays must be > 0, got ${String(t.ttlDays)}`,
-        );
-      }
-    }
-    if (overdraftCount > 1) {
-      throw new ConfigError("at most one bucket may set allowOverdraft: true");
-    }
-    if (defaultCount > 1) {
-      throw new ConfigError('at most one bucket may set "default": true');
-    }
-  }
-
-  const config: PricingConfig = {
-    version,
-    metering,
-    ledger,
-  };
-
-  // Populate ledger.buckets
-  if (buckets) {
-    const bucketDefs: Record<string, BucketDefinition> = {};
-    for (const [key, t] of Object.entries(buckets)) {
-      bucketDefs[key] = {
-        label: (t.label as string | undefined) ?? key,
-        priority: Number(t.priority ?? 0),
-        expires: Boolean(t.expires ?? false),
-        ttlDays: t.ttlDays != null ? Number(t.ttlDays) : null,
-        allowOverdraft: Boolean(t.allowOverdraft ?? false),
-        default: Boolean(t["default"] ?? false),
-      };
-    }
-    config.ledger.buckets = bucketDefs;
-  }
-
-  if (plans) {
-    const planDefs: Record<string, PlanDefinition> = {};
-    for (const [key, p] of Object.entries(plans)) {
-      const allowanceRaw = (p.allowance as Record<string, unknown>) ?? {};
-      const allowanceAmount = new Decimal(
-        (allowanceRaw["amount"] as number | string | undefined) ?? 0,
-      );
-      if (allowanceAmount.isNegative()) {
-        throw new ConfigError(
-          `plans.${key}.allowance.amount must be >= 0, got ${allowanceAmount.toString()}`,
-        );
-      }
-      const safetyRaw = (p.safety as Record<string, unknown>) ?? {};
-      const billingMode = (safetyRaw.billingMode ?? "strict") as "strict" | "overdraft";
-      const perOperationRaw = safetyRaw.perOperation as Record<string, unknown> | undefined;
-
-      planDefs[key] = {
-        label: p.label as string,
-        allowance: {
-          amount: allowanceAmount,
-          period: ((allowanceRaw["period"] as AllowancePeriod) ??
-            "calendar_month") as AllowancePeriod,
-        },
-        safety: {
-          billingMode,
-          perOperation:
-            perOperationRaw != null
-              ? normalisePerOperation(key, perOperationRaw as Record<string, unknown>)
-              : undefined,
-          maxConcurrent: (safetyRaw.maxConcurrent as number | null) ?? null,
-          overdraftFloor:
-            safetyRaw.overdraftFloor != null
-              ? new Decimal(safetyRaw.overdraftFloor as number | string)
-              : null,
-        },
-        rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
-        entitlements: (p.entitlements as Record<string, FeatureLimit>) ?? null,
-      };
-    }
-    config.plans = planDefs;
-  }
-
-  if (billing) {
-    config.billing = billing;
-  }
+  const config: PricingConfig = { version, metering, ledger };
+  if (plans) config.plans = plans;
+  if (billing) config.billing = billing;
 
   validateExpressions(config);
   return config;

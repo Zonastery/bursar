@@ -3,7 +3,7 @@
 Credit billing engine for AI SaaS — TypeScript-first mirror of the Python SDK. Same public API surface, same money semantics, same lease lifecycle; all async, all `Decimal` (decimal.js).
 
 ## Stack
-TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests. Three store backends: `MemoryStore` (testing), `PostgresStore` (`pg`), `HttpxSupabaseStore` (native fetch, zero extra deps). Exports: `@zonastery/bursar` (main), `@zonastery/bursar/node` (Node-only: `MemoryStore`, `PostgresStore`, `loadPricingFile`).
+TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests. One store backend: `PostgresStore` (`pg`). Exports: `@zonastery/bursar` (main), `@zonastery/bursar/node` (Node-only: `loadPricingFile`).
 
 ## Key source files
 
@@ -11,14 +11,13 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 |------|---------|
 | `src/manager.ts` | `CreditManager` — full public API, all methods `async`. |
 | `src/stores/credit-store.ts` | `CreditStore` abstract class — interface every store implements. |
-| `src/stores/memory-store.ts` | `MemoryStore` — reference implementation; parity baseline. |
-| `src/stores/postgres-store.ts` | `PostgresStore` — calls same SQL RPCs as Python via `pg`. |
-| `src/stores/supabase-store.ts` | `HttpxSupabaseStore` — Supabase REST + service role key. |
+| `src/stores/postgres-store.ts` | `PostgresStore` — calls SQL RPCs via `pg`. |
+| `src/stores/events.ts` (re-exported from `stores/`) | `CreditEventEmitter`, `CreditEvent`, event types. |
 | `src/types.ts` | All exported types: result types, `PlanDefinition`, `OperationPolicy`, `LeaseResult`, etc. |
 | `src/engine.ts` | `PricingEngine` — expression evaluation, same logic as Python. |
 | `src/errors.ts` | All error classes: `InsufficientCreditsError`, `ConcurrencyLimitError`, `FeatureNotEntitledError`, `LeaseExpiredError`, `LeaseNotFoundError`, etc. |
-| `src/events.ts` (re-exported from `stores/`) | `CreditEventEmitter`, `CreditEvent`, 14 event types. |
 | `src/metrics.ts` | `UsageMetrics`, `ToolCall`. |
+| `src/config.ts` | `loadConfigFromDict` — pricing config loading and validation. |
 | `src/index.ts` | Package exports — everything users `import from "@zonastery/bursar"`. |
 | `src/node.ts` | Node-only subpath exports. |
 
@@ -27,7 +26,7 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 ```
 CreditManager
   ├── PricingEngine              (calculate cost from UsageMetrics)
-  ├── CreditStore                (abstract — memory / postgres / supabase)
+  ├── CreditStore                (abstract — PostgresStore is the only implementation)
   │     ├── deductWithAllowance()   atomic: allowance→cap→floor→debit
   │     ├── createLease / settleLease / releaseLease / renewLease
   │     └── ... (30+ abstract methods)
@@ -52,7 +51,7 @@ CreditManager
 ```typescript
 new CreditManager(store, engine?, emitter?, options?)
 // options: { policy?, overdraftFloor?, maxConcurrent?,
-//            lowBalanceThreshold?, lowBalanceThresholds?,
+//            lowBalance?, lowBalanceThresholds?,
 //            onLowBalance?, defaultTtlSeconds? }
 ```
 
@@ -60,17 +59,18 @@ new CreditManager(store, engine?, emitter?, options?)
 
 | File | What it covers |
 |------|----------------|
-| `tests/memory-store.test.ts` | MemoryStore unit tests |
-| `tests/credit-manager.test.ts` | CreditManager happy-path |
-| `tests/lease.test.ts` | Lease lifecycle (27 tests, mirrors Python) |
-| `tests/lease-adversarial.test.ts` | Concurrency invariants (30 tests) |
-| `tests/tiers.test.ts` | Credit tiers — happy-path priority walk, refund LIFO, expiry, overdraft sink |
-| `tests/tiers-adversarial.test.ts` | Credit tiers — concurrency, idempotent replay, config drift |
-| `tests/postgres-store.test.ts` | `PostgresStore` unit tests against a mocked `pg.Pool` (no real DB) |
-| `tests/store-integration.test.ts` | Real Postgres tests incl. `CreditManager` end-to-end tier coverage |
-| `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks `store-integration.test.ts` bypasses by connecting as a superuser |
-| `tests/invariants.property.test.ts` | fast-check model-based property test — ledger conservation across grant/deduct/lease/refund sequences |
+| `tests/allowance.test.ts` | Allowance window resolution |
+| `tests/billing-integration.test.ts` | Billing lifecycle against real Postgres |
+| `tests/config-parity.test.ts` | Config loading parity with Python |
+| `tests/config.test.ts` | Config validation edge cases |
+| `tests/dodo-webhook-signature.test.ts` | Dodo webhook signature verification |
 | `tests/engine.test.ts` | PricingEngine expression evaluation |
+| `tests/events.test.ts` | CreditEventEmitter pub/sub |
+| `tests/expr.test.ts` | Expression parser/evaluator edge cases |
+| `tests/load-pricing-file.test.ts` | File loading for JSON/YAML |
+| `tests/postgres-store.test.ts` | PostgresStore unit tests against a mocked `pg.Pool` (no real DB) |
+| `tests/store-integration.test.ts` | Real Postgres tests incl. `CreditManager` end-to-end |
+| `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles |
 
 Run: `npm test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
 service container) or, failing that, a testcontainers-managed `postgres:16`
@@ -80,4 +80,4 @@ Typecheck: `npm run typecheck`.
 Lint: `npm run lint`.
 
 ## Parity rule
-Behavior must match the Python SDK exactly. `MemoryStore` is the reference. JS Sets compare by reference — use `.toString()` keys when storing `Decimal` values in `Set`/`Map`. `Promise.all` in tests is sequential (single-threaded); concurrency tests assert invariants rather than race outcomes.
+Behavior must match the Python SDK exactly. `PostgresStore` is the reference. JS Sets compare by reference — use `.toString()` keys when storing `Decimal` values in `Set`/`Map`. `Promise.all` in tests is sequential (single-threaded); concurrency tests assert invariants rather than race outcomes.

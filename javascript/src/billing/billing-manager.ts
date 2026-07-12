@@ -8,8 +8,10 @@ import type {
   BillingEventResult,
   BillingOfferResult,
   BillingSubscriptionState,
+  BillingSubscriptionStatus,
   BillingTopupResult,
 } from "./billing-types.js";
+import type { ProviderLogger } from "../providers/types.js";
 
 interface OfferCacheValue {
   offer: BillingOfferResult | null;
@@ -32,6 +34,7 @@ export interface BillingManagerOptions {
   resolveUser?: ResolveUserFn | null;
   onTrialWillEnd?: (event: BillingEvent) => void | Promise<void>;
   cancelPriorProviders?: boolean;
+  logger?: ProviderLogger | null;
 }
 
 /**
@@ -44,6 +47,7 @@ export class BillingManager {
   private resolveUser: ResolveUserFn | null;
   private onTrialWillEnd: ((event: BillingEvent) => void | Promise<void>) | null;
   private cancelPriorProviders: boolean;
+  private logger: ProviderLogger | null;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
@@ -54,6 +58,7 @@ export class BillingManager {
     this.resolveUser = options?.resolveUser ?? null;
     this.onTrialWillEnd = options?.onTrialWillEnd ?? null;
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
+    this.logger = options?.logger ?? null;
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
       ttl: 60_000,
@@ -69,7 +74,7 @@ export class BillingManager {
     });
     this.handlerMap = {
       "customer.created": this.handleCustomerCreated.bind(this),
-      "customer.updated": this.handleCustomerUpdated.bind(this),
+      "customer.updated": this.handleCustomerCreated.bind(this),
       "customer.deleted": this.handleCustomerDeleted.bind(this),
       "checkout.completed": this.handleCheckoutCompleted.bind(this),
       "subscription.created": this.handleSubscriptionCreated.bind(this),
@@ -130,9 +135,9 @@ export class BillingManager {
       await this.store.completeBillingEvent(event.provider, event.eventId);
       return result;
     } catch (err) {
-      console.error(
+      this.logger?.error?.(
         `[BillingManager] failed to handle billing event ${event.provider}/${event.eventId}`,
-        err,
+        { error: err instanceof Error ? err.message : String(err) },
       );
       await this.store.failBillingEvent(event.provider, event.eventId);
       return {
@@ -206,21 +211,6 @@ export class BillingManager {
     return { handled: true, action: "customer_created" };
   }
 
-  private async handleCustomerUpdated(event: BillingEvent): Promise<BillingEventResult> {
-    if (event.customer?.providerCustomerId) {
-      const uid = await this.resolveUserId(event);
-      if (uid) {
-        await this.store.upsertBillingCustomer(
-          event.provider,
-          event.customer.providerCustomerId,
-          uid,
-          event.customer.email ?? null,
-        );
-      }
-    }
-    return { handled: true, action: "customer_updated" };
-  }
-
   private async handleCustomerDeleted(event: BillingEvent): Promise<BillingEventResult> {
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveUserId(event);
@@ -264,7 +254,7 @@ export class BillingManager {
     userId: string,
     existing: BillingSubscriptionState | null,
     overrides?: {
-      status?: string | null;
+      status?: BillingSubscriptionStatus | null;
       cancelAtPeriodEnd?: boolean | null;
       offerKey?: string | null;
       plan?: string | null;
@@ -332,7 +322,7 @@ export class BillingManager {
         };
       }
 
-      console.error(
+      this.logger?.error?.(
         `[BillingManager] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}`,
       );
     }
@@ -558,9 +548,9 @@ export class BillingManager {
       try {
         await this.onTrialWillEnd(event);
       } catch (err) {
-        console.error(
+        this.logger?.error?.(
           `[BillingManager] onTrialWillEnd callback failed for ${event.provider}/${event.eventId}`,
-          err,
+          { error: err instanceof Error ? err.message : String(err) },
         );
       }
     }
@@ -571,18 +561,18 @@ export class BillingManager {
     if (event.invoice) {
       const uid = await this.resolveUserId(event);
       if (uid) {
-        await this.store.upsertBillingInvoice(
-          event.provider,
-          event.invoice.providerInvoiceId,
-          event.subscription?.providerSubscriptionId,
-          uid,
-          event.invoice.status,
-          event.invoice.amountPaidMinor,
-          event.invoice.amountDueMinor,
-          event.invoice.currency,
-          event.invoice.periodStart,
-          event.invoice.periodEnd,
-        );
+        await this.store.upsertBillingInvoice({
+          provider: event.provider,
+          providerInvoiceId: event.invoice.providerInvoiceId,
+          providerSubscriptionId: event.subscription?.providerSubscriptionId,
+          userId: uid,
+          status: event.invoice.status,
+          amountPaidMinor: event.invoice.amountPaidMinor,
+          amountDueMinor: event.invoice.amountDueMinor,
+          currency: event.invoice.currency,
+          periodStart: event.invoice.periodStart,
+          periodEnd: event.invoice.periodEnd,
+        });
       }
     }
     if (event.subscription) return this.handleSubscriptionRenewed(event);
@@ -608,17 +598,16 @@ export class BillingManager {
         topupConfig && event.payment.purpose === "credit_topup"
           ? { creditsPerUnit: Number(topupConfig.creditsPerUnit ?? 1000) }
           : null;
-      await this.store.upsertBillingPayment(
-        event.provider,
-        event.payment.providerPaymentId,
-        undefined,
-        uid,
-        event.payment.amountMinor,
-        event.payment.taxMinor,
-        event.payment.currency,
-        event.payment.purpose,
-        paymentMetadata,
-      );
+      await this.store.upsertBillingPayment({
+        provider: event.provider,
+        providerPaymentId: event.payment.providerPaymentId,
+        userId: uid,
+        amountMinor: event.payment.amountMinor,
+        taxMinor: event.payment.taxMinor,
+        currency: event.payment.currency,
+        purpose: event.payment.purpose,
+        metadata: paymentMetadata,
+      });
     }
 
     if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
@@ -637,16 +626,14 @@ export class BillingManager {
   private async handlePaymentFailed(event: BillingEvent): Promise<BillingEventResult> {
     const uid = await this.resolveUserId(event);
     if (uid && event.payment) {
-      await this.store.upsertBillingPayment(
-        event.provider,
-        event.payment.providerPaymentId,
-        undefined,
-        uid,
-        event.payment.amountMinor,
-        undefined,
-        event.payment.currency,
-        event.payment.purpose,
-      );
+      await this.store.upsertBillingPayment({
+        provider: event.provider,
+        providerPaymentId: event.payment.providerPaymentId,
+        userId: uid,
+        amountMinor: event.payment.amountMinor,
+        currency: event.payment.currency,
+        purpose: event.payment.purpose,
+      });
     }
     if (uid && event.subscription && this.cm) {
       const existing = await this.getExistingSubscription(event);
@@ -661,15 +648,15 @@ export class BillingManager {
   private async handleRefundCreated(event: BillingEvent): Promise<BillingEventResult> {
     const uid = await this.resolveUserId(event);
     if (uid && event.refund) {
-      await this.store.upsertBillingRefund(
-        event.provider,
-        event.refund.providerRefundId,
-        event.refund.providerPaymentId,
-        uid,
-        event.refund.amountMinor,
-        event.refund.currency,
-        event.refund.reason,
-      );
+      await this.store.upsertBillingRefund({
+        provider: event.provider,
+        providerRefundId: event.refund.providerRefundId,
+        providerPaymentId: event.refund.providerPaymentId,
+        userId: uid,
+        amountMinor: event.refund.amountMinor,
+        currency: event.refund.currency,
+        reason: event.refund.reason,
+      });
       if (event.refund.providerPaymentId && this.cm) {
         const payment = await this.store.getBillingPayment(
           event.provider,
@@ -679,7 +666,7 @@ export class BillingManager {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
           const creditsPerUnit = Number(payMeta.creditsPerUnit ?? 0);
           if (!creditsPerUnit) {
-            console.warn(
+            this.logger?.warn?.(
               `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerUnit in payment metadata`,
             );
             return { handled: true, action: "refund_recorded_no_clawback" };
@@ -700,14 +687,14 @@ export class BillingManager {
   private async handleDisputeCreated(event: BillingEvent): Promise<BillingEventResult> {
     const uid = await this.resolveUserId(event);
     if (uid && event.dispute) {
-      await this.store.upsertBillingDispute(
-        event.provider,
-        event.dispute.providerDisputeId,
-        event.dispute.providerPaymentId ?? undefined,
-        uid,
-        "needs_response",
-        event.dispute.reason ?? undefined,
-      );
+      await this.store.upsertBillingDispute({
+        provider: event.provider,
+        providerDisputeId: event.dispute.providerDisputeId,
+        providerPaymentId: event.dispute.providerPaymentId,
+        userId: uid,
+        status: "needs_response",
+        reason: event.dispute.reason,
+      });
     }
     return { handled: true, action: "dispute_recorded" };
   }
@@ -715,14 +702,14 @@ export class BillingManager {
   private async handleDisputeClosed(event: BillingEvent): Promise<BillingEventResult> {
     const uid = await this.resolveUserId(event);
     if (uid && event.dispute) {
-      await this.store.upsertBillingDispute(
-        event.provider,
-        event.dispute.providerDisputeId,
-        event.dispute.providerPaymentId ?? undefined,
-        uid,
-        "closed",
-        event.dispute.reason ?? undefined,
-      );
+      await this.store.upsertBillingDispute({
+        provider: event.provider,
+        providerDisputeId: event.dispute.providerDisputeId,
+        providerPaymentId: event.dispute.providerPaymentId,
+        userId: uid,
+        status: "closed",
+        reason: event.dispute.reason,
+      });
     }
     return { handled: true, action: "dispute_closed" };
   }
@@ -734,12 +721,14 @@ export class BillingManager {
     planKeyOverride?: string,
   ): Promise<void> {
     if (!this.cm) {
-      console.log(`[BillingManager] provisionSubscription: no creditManager for user ${uid}`);
+      this.logger?.debug?.(
+        `[BillingManager] provisionSubscription: no creditManager for user ${uid}`,
+      );
       return;
     }
     const plan = planKeyOverride ?? offer?.plan;
     if (!plan) {
-      console.log(`[BillingManager] provisionSubscription: no plan for user ${uid}`);
+      this.logger?.debug?.(`[BillingManager] provisionSubscription: no plan for user ${uid}`);
       return;
     }
     const periodStart = event.subscription?.periodStart;
@@ -755,7 +744,7 @@ export class BillingManager {
     if (this.cancelPriorProviders && event.provider) {
       const result = await this.store.deactivateOtherProviderSubscriptions(uid, event.provider);
       if (result.deactivatedCount > 0) {
-        console.log(
+        this.logger?.debug?.(
           `[BillingManager] deactivated ${result.deactivatedCount} prior provider subscription(s) for user ${uid}`,
         );
       }

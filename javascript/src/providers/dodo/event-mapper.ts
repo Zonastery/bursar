@@ -1,14 +1,11 @@
-import type {
-  BillingManager,
-  BillingEventResult,
-  BillingSubscriptionStatus,
-} from "../../billing/index.js";
+import type { BillingManager, BillingSubscriptionStatus } from "../../billing/index.js";
 import type {
   BillingPaymentInfo,
   BillingRefundInfo,
   BillingDisputeInfo,
 } from "../../billing/billing-types.js";
 import type { ProviderLogger } from "../types.js";
+import { callBillingManager } from "../_shared.js";
 
 // Dodo dispute statuses that indicate the dispute is closed (resolved).
 // Maps to the internal "dispute.closed" event type.
@@ -20,26 +17,6 @@ const DISPUTE_CLOSED_TYPES = new Set([
   "dispute.challenged",
   "dispute.expired",
 ]);
-
-/**
- * Wrapper around bm.handleEvent that throws on unhandled results (except
- * "unhandled_event_type" which is a permanent no-op). Ensures the provider
- * receives a retryable signal when the event could not be processed.
- */
-async function callBillingManager(
-  bm: BillingManager,
-  event: Parameters<BillingManager["handleEvent"]>[0],
-): Promise<BillingEventResult> {
-  const result = await bm.handleEvent(event);
-  if (
-    !result.handled &&
-    result.error !== "unhandled_event_type" &&
-    result.error !== "user_not_found"
-  ) {
-    throw new Error(`BillingManager failed to handle event: ${result.error}`);
-  }
-  return result;
-}
 
 export async function handleDodoBillingEvent(
   type: string,

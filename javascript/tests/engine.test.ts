@@ -250,7 +250,7 @@ describe("PricingEngine", () => {
   });
 
   describe("pricingSchema", () => {
-    it("returns config as PricingConfigData", () => {
+    it("returns config schema", () => {
       const engine = PricingEngine.fromDict(TEST_CONFIG);
       const schema = engine.pricingSchema();
       expect(schema.metering.models["gpt-4"]).toBeTruthy();

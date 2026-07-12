@@ -1299,11 +1299,10 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
       const now = new Date();
       const expected = resolveAllowanceWindow(now, allowancePeriod, anchor);
-      const expectedPeriodEnd = new Date(expected.end.getTime() - 86_400_000);
 
       const result = await manager.checkAllowance(PG_USER5);
       expect(result.periodStart).toBe(expected.start.toISOString());
-      expect(result.periodEnd).toBe(expectedPeriodEnd.toISOString());
+      expect(result.periodEnd).toBe(expected.end.toISOString());
       expect(result.allowanceRemaining.toString()).toBe("13");
     },
   );

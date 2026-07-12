@@ -179,7 +179,7 @@ export interface BillingDisputeInfo {
 export interface BillingEvent {
   provider: string;
   eventId: string;
-  eventType: string;
+  eventType: BillingEventType;
   occurredAt: string;
 
   userId?: string | null;
@@ -216,7 +216,7 @@ export interface BillingSubscriptionState {
   providerCustomerId?: string | null;
   offerKey?: string | null;
   plan?: string | null;
-  status?: string;
+  status?: BillingSubscriptionStatus;
   currentPeriodStart?: string | null;
   currentPeriodEnd?: string | null;
   cancelAtPeriodEnd?: boolean;
@@ -245,7 +245,6 @@ export interface BillingOfferResult {
 export interface BillingTopupResult {
   topupKey: string;
   creditsPerUnit?: number;
-  creditsPerMajorUnit?: number;
   depositTo?: string;
 }
 

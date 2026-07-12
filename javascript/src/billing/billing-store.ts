@@ -60,75 +60,59 @@ export abstract class BillingStore {
     lookupKey: string,
   ): Promise<BillingOfferResult | null>;
 
-  abstract resolveCreditTopupByLookup(
-    provider: string,
-    lookupKey: string,
-  ): Promise<BillingTopupResult | null>;
-
   abstract computeTopupCredits(
     amountMinor: number,
     topupConfig: BillingTopupResult,
   ): Promise<number>;
 
-  abstract upsertBillingPayment(
-    provider: string,
-    providerPaymentId: string,
-    providerInvoiceId?: string | null,
-    userId?: string | null,
-    amountMinor?: number,
-    taxMinor?: number | null,
-    currency?: string | null,
-    purpose?: string,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void>;
+  abstract upsertBillingPayment(options: {
+    provider: string;
+    providerPaymentId: string;
+    providerInvoiceId?: string | null;
+    userId?: string | null;
+    amountMinor?: number;
+    taxMinor?: number | null;
+    currency?: string | null;
+    purpose?: string;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void>;
 
-  abstract upsertBillingRefund(
-    provider: string,
-    providerRefundId: string,
-    providerPaymentId?: string | null,
-    userId?: string | null,
-    amountMinor?: number,
-    currency?: string | null,
-    reason?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void>;
+  abstract upsertBillingRefund(options: {
+    provider: string;
+    providerRefundId: string;
+    providerPaymentId?: string | null;
+    userId?: string | null;
+    amountMinor?: number;
+    currency?: string | null;
+    reason?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void>;
 
-  abstract upsertBillingInvoice(
-    provider: string,
-    providerInvoiceId: string,
-    providerSubscriptionId?: string | null,
-    userId?: string | null,
-    status?: string | null,
-    amountPaidMinor?: number | null,
-    amountDueMinor?: number | null,
-    currency?: string | null,
-    periodStart?: string | null,
-    periodEnd?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void>;
+  abstract upsertBillingInvoice(options: {
+    provider: string;
+    providerInvoiceId: string;
+    providerSubscriptionId?: string | null;
+    userId?: string | null;
+    status?: string | null;
+    amountPaidMinor?: number | null;
+    amountDueMinor?: number | null;
+    currency?: string | null;
+    periodStart?: string | null;
+    periodEnd?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void>;
 
-  abstract upsertBillingDispute(
-    provider: string,
-    providerDisputeId: string,
-    providerPaymentId?: string | null,
-    userId?: string | null,
-    status?: string,
-    reason?: string | null,
-    metadata?: Record<string, unknown> | null,
-  ): Promise<void>;
+  abstract upsertBillingDispute(options: {
+    provider: string;
+    providerDisputeId: string;
+    providerPaymentId?: string | null;
+    userId?: string | null;
+    status?: string;
+    reason?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }): Promise<void>;
 
   abstract getBillingPayment(
-    provider: string,
-    providerPaymentId: string,
-  ): Promise<Record<string, unknown> | null>;
-
-  /**
-   * Fallback: query billing_payments directly (including metadata).
-   * Some BillingStore implementations may reuse the same RPC as
-   * getBillingPayment; those that use a dedicated function that omits
-   * metadata should override this to include the metadata column.
-   */
-  abstract getBillingPaymentDirect(
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null>;

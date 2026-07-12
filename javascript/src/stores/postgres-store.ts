@@ -11,7 +11,6 @@ import type {
   AvailableResult,
   BalanceResult,
   BillingMode,
-  CapCheckResult,
   CheckFeatureResult,
   CreateTeamResult,
   CreditMetadata,
@@ -65,7 +64,7 @@ function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
   try {
     return new Decimal(typeof value === "string" ? value : String(value));
   } catch {
-    return fallback;
+    throw new StoreError(`Failed to parse Decimal value: ${String(value)}`);
   }
 }
 
@@ -207,12 +206,8 @@ export class PostgresStore extends CreditStore {
     return this._bucketRepo;
   }
 
-  constructor(
-    databaseUrl: string,
-    poolOrCtor?: PgPool | PgPoolConstructor,
-    pricingCacheTtl: number = 300,
-  ) {
-    super(pricingCacheTtl);
+  constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
+    super();
     this.databaseUrl = databaseUrl;
     if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
       this.pool = poolOrCtor as PgPool;
@@ -591,24 +586,27 @@ export class PostgresStore extends CreditStore {
   }
 
   async getActivePricing(): Promise<PricingConfigResult | null> {
-    return this._getCachedPricing(() => this._loadActivePricing());
+    return this._loadActivePricing();
   }
 
-  private async _loadActivePricing(): Promise<PricingConfigResult | null> {
-    const row = await this.pricingRepo.getActivePricing();
-    if (!row || !row.config) return null;
-
-    const rawConfig = row.config as Record<string, unknown>;
+  private normalizePricingConfig(
+    row: Record<string, unknown>,
+    defaultVersion: number,
+  ): PricingConfigResult {
+    const config = row.config as Record<string, unknown> | undefined;
+    if (!config) {
+      return { id: String(row.id ?? ""), config: {}, version: defaultVersion };
+    }
 
     const rawFlatJobs: unknown =
-      rawConfig && typeof rawConfig.metering === "object" && rawConfig.metering !== null
-        ? (rawConfig.metering as Record<string, unknown>).flat_jobs
+      config && typeof config.metering === "object" && config.metering !== null
+        ? (config.metering as Record<string, unknown>).flat_jobs
         : undefined;
 
     const result: PricingConfigResult = {
       id: String(row.id ?? ""),
-      config: snakeToCamelKeys(rawConfig),
-      version: Number(row.version ?? 0),
+      config: snakeToCamelKeys(config),
+      version: Number(row.version ?? defaultVersion),
     };
 
     if (rawFlatJobs) {
@@ -619,12 +617,17 @@ export class PostgresStore extends CreditStore {
     return result;
   }
 
+  private async _loadActivePricing(): Promise<PricingConfigResult | null> {
+    const row = await this.pricingRepo.getActivePricing();
+    if (!row || !row.config) return null;
+    return this.normalizePricingConfig(row, 0);
+  }
+
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     const row = await this.pricingRepo.setActivePricing(
       JSON.stringify(camelToSnakeKeys(config)),
       label ?? null,
     );
-    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 
@@ -643,30 +646,11 @@ export class PostgresStore extends CreditStore {
   async getPricingConfig(version: number): Promise<PricingConfigResult | null> {
     const row = await this.pricingRepo.getPricingConfig(version);
     if (!row || !row.config) return null;
-    const config = row.config as Record<string, unknown>;
-
-    const rawFlatJobs: unknown =
-      config && typeof config.metering === "object" && config.metering !== null
-        ? (config.metering as Record<string, unknown>).flat_jobs
-        : undefined;
-
-    const result: PricingConfigResult = {
-      id: String(row.id ?? ""),
-      config: snakeToCamelKeys(config),
-      version: Number(row.version ?? version),
-    };
-
-    if (rawFlatJobs) {
-      const metering = result.config.metering as Record<string, unknown> | undefined;
-      if (metering) metering.flatJobs = rawFlatJobs;
-    }
-
-    return result;
+    return this.normalizePricingConfig(row, version);
   }
 
   async activatePricing(version: number): Promise<string> {
     const row = await this.pricingRepo.activatePricing(version);
-    this.invalidatePricingCache();
     return String(row.id ?? "");
   }
 
@@ -772,10 +756,6 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async incrementUsageWindow(userId: string, planId: string, amount: Decimal): Promise<void> {
-    await this.planRepo.incrementUsageWindow(userId, planId, decParam(amount));
-  }
-
   async checkFeatureLimit(
     userId: string,
     feature: string,
@@ -813,24 +793,6 @@ export class PostgresStore extends CreditStore {
       periodStart: String(row.period_start ?? ""),
       periodEnd: String(row.period_end ?? ""),
       action: (row.action as FeatureLimitResult["action"]) ?? null,
-    };
-  }
-
-  async checkSpendCap(
-    userId: string,
-    model?: string | null,
-    amount?: Decimal,
-  ): Promise<CapCheckResult> {
-    const row = await this.planRepo.checkSpendCap(userId, model ?? null, decParam(amount ?? ZERO));
-    if (!row) {
-      return { capped: false, currentSpend: ZERO, limit: ZERO, action: null };
-    }
-    return {
-      capped: Boolean(row.capped),
-      currentSpend: dec(row.current_spend),
-      limit: dec(row.cap_limit),
-      action: (row.action as CapCheckResult["action"]) ?? null,
-      model: row.model ? String(row.model) : undefined,
     };
   }
 

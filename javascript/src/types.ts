@@ -1,9 +1,6 @@
 import type { Decimal } from "decimal.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 
-/** @deprecated Use raw `Record<string, unknown>` or `PricingConfig` instead. */
-export type PricingConfigData = Record<string, unknown>;
-
 /**
  * Billing mode for an operation. ``strict`` never lets the balance fall below
  * the floor at admission (lease worst-case ⇒ zero debt); ``overdraft`` permits

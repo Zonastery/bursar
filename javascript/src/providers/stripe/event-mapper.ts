@@ -1,7 +1,8 @@
 import Stripe from "stripe";
-import type { BillingManager, BillingEventResult } from "../../billing/index.js";
-import type { BillingPaymentInfo } from "../../billing/billing-types.js";
+import type { BillingManager } from "../../billing/index.js";
+import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/billing-types.js";
 import type { ProviderLogger } from "../types.js";
+import { callBillingManager } from "../_shared.js";
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
 
@@ -27,19 +28,11 @@ function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
     : new Date().toISOString();
 }
 
-async function callBillingManager(
-  bm: BillingManager,
-  event: Parameters<BillingManager["handleEvent"]>[0],
-): Promise<BillingEventResult> {
-  const result = await bm.handleEvent(event);
-  if (
-    !result.handled &&
-    result.error !== "unhandled_event_type" &&
-    result.error !== "user_not_found"
-  ) {
-    throw new Error(`BillingManager failed to handle event: ${result.error}`);
-  }
-  return result;
+function customerId(
+  customer: string | Stripe.Customer | Stripe.DeletedCustomer | null,
+): string | null {
+  if (!customer) return null;
+  return typeof customer === "string" ? customer : customer.id;
 }
 
 export async function handleStripeWebhook(
@@ -73,8 +66,7 @@ export async function handleStripeWebhook(
             ? null
             : (session.customer as Stripe.Customer | null);
         const customerInfo = {
-          providerCustomerId:
-            typeof session.customer === "string" ? session.customer : customer?.id,
+          providerCustomerId: customerId(session.customer),
           email: customer?.email ?? null,
         };
 
@@ -98,16 +90,7 @@ export async function handleStripeWebhook(
               customer: customerInfo,
               subscription: {
                 providerSubscriptionId: subId,
-                status: sub.status as
-                  | "active"
-                  | "trialing"
-                  | "incomplete"
-                  | "past_due"
-                  | "canceled"
-                  | "unpaid"
-                  | "paused"
-                  | "expired"
-                  | "incomplete_expired",
+                status: sub.status as BillingSubscriptionStatus,
                 cancelAtPeriodEnd: sub.cancel_at_period_end,
                 periodEnd: end,
                 periodStart: currentPeriodStart,
@@ -174,20 +157,11 @@ export async function handleStripeWebhook(
           occurredAt: new Date().toISOString(),
           userId,
           customer: {
-            providerCustomerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
+            providerCustomerId: customerId(sub.customer),
           },
           subscription: {
             providerSubscriptionId: sub.id,
-            status: sub.status as
-              | "active"
-              | "trialing"
-              | "incomplete"
-              | "past_due"
-              | "canceled"
-              | "unpaid"
-              | "paused"
-              | "expired"
-              | "incomplete_expired",
+            status: sub.status as BillingSubscriptionStatus,
             cancelAtPeriodEnd: sub.cancel_at_period_end,
             periodEnd: end,
           },
@@ -203,7 +177,7 @@ export async function handleStripeWebhook(
           eventType: "subscription.canceled",
           occurredAt: new Date().toISOString(),
           customer: {
-            providerCustomerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
+            providerCustomerId: customerId(sub.customer),
           },
           subscription: { providerSubscriptionId: sub.id },
         });
@@ -259,21 +233,11 @@ export async function handleStripeWebhook(
           occurredAt: new Date().toISOString(),
           userId,
           customer: {
-            providerCustomerId:
-              typeof invoice.customer === "string" ? invoice.customer : invoice.customer?.id,
+            providerCustomerId: customerId(invoice.customer),
           },
           subscription: {
             providerSubscriptionId: subscriptionId,
-            status: subStatus as
-              | "active"
-              | "trialing"
-              | "incomplete"
-              | "past_due"
-              | "canceled"
-              | "unpaid"
-              | "paused"
-              | "expired"
-              | "incomplete_expired",
+            status: subStatus as BillingSubscriptionStatus,
             periodEnd,
             periodStart,
           },
