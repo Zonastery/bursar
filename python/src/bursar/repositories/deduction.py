@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
-from bursar.repositories._utils import validate_non_empty
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_amount, validate_non_empty
 from bursar.repositories.schemas import DeductionRow, DeductParams, RefundRow, RevokeRow
 
 
@@ -13,7 +13,7 @@ class DeductionRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def deduct_with_allowance(self, params: DeductParams) -> DeductionRow | None:
@@ -28,6 +28,7 @@ class DeductionRepository:
             DeductionRow if successful, None if the RPC returned no rows.
         """
         validate_non_empty(params.user_id, "user_id")
+        validate_amount(params.amount, "amount")
         rows = self._callproc(
             "deduct_with_allowance",
             [
@@ -69,6 +70,8 @@ class DeductionRepository:
             RefundRow if successful, None if the RPC returned no rows.
         """
         validate_non_empty(transaction_id, "transaction_id")
+        if amount is not None:
+            validate_amount(amount, "amount")
         rows = self._callproc("refund_credits", [transaction_id, amount, reason, metadata])
         if not rows:
             return None

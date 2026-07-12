@@ -22,6 +22,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from pydantic import ValidationError
+
+from bursar.expr import ExpressionError
+
 _T = TypeVar("_T")
 
 if TYPE_CHECKING:
@@ -229,9 +233,9 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
 
     result = run_migrations(database_url)
     for t in result.tables_created:
-        print(f"  ✓ {t}")
+        print(f"  + {t}")
     for e in result.errors:
-        print(f"  ✗ {e}", file=sys.stderr)
+        print(f"  - {e}", file=sys.stderr)
 
     if result.success:
         print("Migration complete.")
@@ -246,7 +250,7 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
     data = _load_pricing_file(args.file)
     try:
         PricingConfig.model_validate(data)
-    except Exception as exc:
+    except (ValidationError, ExpressionError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     print("Pricing config is valid.")
@@ -258,7 +262,7 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
     data = _load_pricing_file(args.file)
     try:
         PricingConfig.model_validate(data)
-    except Exception as exc:
+    except (ValidationError, ExpressionError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
 
@@ -304,15 +308,19 @@ def _cmd_config_activate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_export(args: argparse.Namespace) -> None:
+    from bursar.config import PricingConfig
+
     store = _store_from_env(args.store)
     result = _retry_transient(lambda: store.get_pricing_config(args.version), what="fetch pricing")
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
         raise SystemExit(1)
-    print(json.dumps(result.config, indent=2, default=str))
+    print(json.dumps(PricingConfig.model_validate(result.config).model_dump(mode="json"), indent=2))
 
 
 def _cmd_config_diff(args: argparse.Namespace) -> None:
+    from bursar.config import PricingConfig
+
     store = _store_from_env(args.store)
 
     def _fetch() -> tuple[PricingConfigResult | None, PricingConfigResult | None]:
@@ -326,8 +334,8 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
         print(f"Version {args.version_b} not found.", file=sys.stderr)
         raise SystemExit(1)
 
-    a_json = json.dumps(a.config, indent=2, default=str)
-    b_json = json.dumps(b.config, indent=2, default=str)
+    a_json = json.dumps(PricingConfig.model_validate(a.config).model_dump(mode="json"), indent=2)
+    b_json = json.dumps(PricingConfig.model_validate(b.config).model_dump(mode="json"), indent=2)
     diff = difflib.unified_diff(
         a_json.splitlines(keepends=True),
         b_json.splitlines(keepends=True),

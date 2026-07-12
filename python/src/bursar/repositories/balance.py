@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
-from bursar.repositories._utils import validate_non_empty
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_amount, validate_non_empty
 from bursar.repositories.schemas import AddCreditsRow, AvailableRow, BalanceRow
 
 
@@ -13,7 +13,7 @@ class BalanceRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def get_balance(self, user_id: str) -> BalanceRow | None:
@@ -57,6 +57,9 @@ class BalanceRepository:
             StoreError: If the RPC returns an error field.
         """
         validate_non_empty(user_id, "user_id")
+        validate_amount(amount, "amount")
+        validate_non_empty(type_, "type_")
+        validate_non_empty(metadata, "metadata")
         rows = self._callproc("credits_add", [user_id, amount, type_, metadata, bucket, idempotency_key])
         if not rows:
             return None

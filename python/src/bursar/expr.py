@@ -1,7 +1,16 @@
 """Safe expression evaluator using Python's ast module.
 
-Allows mathematical expressions with whitelisted variables and functions.
-Rejects any AST node type not in the allowlist (no eval/exec).
+Evaluates via ``compile()`` + ``eval()`` over a pre-validated AST and a
+locked-down namespace (no builtins). Security model:
+
+1. Source is parsed via ``ast.parse(..., mode="eval")``.
+2. The AST is recursively validated against ``ALLOWED_NODES`` — no attribute
+   access, no imports, no unknown functions.
+3. Numeric literals are rewritten to exact-``Decimal`` constructor calls
+   (``_bursar_dec``) via an ``ast.NodeTransformer`` before compilation,
+   so money arithmetic never touches binary float.
+4. The namespace has ``__builtins__`` = ``{}``, preventing any built-in
+   access at ``eval`` time.
 
 Money safety (REFACTOR_CONTRACT §1):
 - All arithmetic is performed in :class:`decimal.Decimal`. Numeric literals are
@@ -12,8 +21,8 @@ Money safety (REFACTOR_CONTRACT §1):
   carve-out). See ``ALLOWED_NODES`` (``ast.Pow`` is intentionally absent).
 - Division / modulo by zero raise :class:`ExpressionError` (never ``inf``/``nan``).
 - After evaluation the result is asserted finite; non-finite -> ``ExpressionError``.
-- ``OverflowError`` / ``ValueError`` / ``InvalidOperation`` are converted to
-  ``ExpressionError``.
+- ``OverflowError`` / ``ValueError`` / ``InvalidOperation`` / ``TypeError`` are
+  converted to ``ExpressionError``.
 """
 
 import ast
@@ -22,7 +31,7 @@ import re
 from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
 from typing import Any
 
-ALLOWED_FUNCTIONS = {"ceil", "floor", "min", "max", "round", "if", "tier", "clamp", "percentile", "_bursar_if"}
+ALLOWED_FUNCTIONS = {"ceil", "floor", "min", "max", "round", "tier", "clamp", "percentile", "_bursar_if"}
 
 # Note: ``ast.Pow`` is deliberately NOT in this set -- exponentiation is rejected
 # entirely (DoS hardening, C5). Rejection therefore surfaces as a "disallowed
@@ -343,7 +352,10 @@ def _fix_in_operator(tree: ast.AST) -> ast.AST:
                 end_col_offset=getattr(node, "end_col_offset", getattr(node, "col_offset", 0)),
             )
 
-    return InTransformer().visit(tree)  # type: ignore[return-value, union-attr]
+    result = InTransformer().visit(tree)
+    if result is None:
+        raise ExpressionError("internal error: InTransformer returned None")
+    return result
 
 
 class _NotPrecedenceTransformer(ast.NodeTransformer):
@@ -377,7 +389,10 @@ class _NotPrecedenceTransformer(ast.NodeTransformer):
 
 
 def _fix_not_precedence(tree: ast.AST) -> ast.AST:
-    return _NotPrecedenceTransformer().visit(tree)  # type: ignore[return-value, union-attr]
+    result = _NotPrecedenceTransformer().visit(tree)
+    if result is None:
+        raise ExpressionError("internal error: _NotPrecedenceTransformer returned None")
+    return result
 
 
 # Anchor the ``if(`` rewrite with ``\b`` so identifiers ending in ``if`` (e.g.
@@ -423,6 +438,11 @@ def _validate_expression_tree(expr: str, known_variables: set[str] | None = None
     if not variables_seen:
         raise ExpressionError("expression references no variables -- must use at least one metric")
 
+    # Reject bare references to _bursar_dec and str (they are not variables)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in (_DECIMAL_CTOR, "str"):
+            raise ExpressionError(f"'{node.id}' cannot be used as a bare variable — it is a function")
+
     if known_variables is not None:
         unknown = variables_seen - known_variables
         if unknown:
@@ -461,7 +481,8 @@ def evaluate_expression(expr: str, variables: dict[str, Any]) -> Decimal:
     tree = _fix_not_precedence(tree)
     # Fix In/NotIn operators to str() both sides (match JS String.includes behavior)
     tree = _fix_in_operator(tree)
-    assert isinstance(tree, ast.Expression), "tree must be an Expression after fix"
+    if not isinstance(tree, ast.Expression):
+        raise ExpressionError("internal error: AST transformation did not produce an Expression node")
     ast.fix_missing_locations(tree)
 
     # Check all referenced variables exist in provided variables
@@ -483,7 +504,7 @@ def evaluate_expression(expr: str, variables: dict[str, Any]) -> Decimal:
         # Covers both float ZeroDivisionError and decimal.DivisionByZero
         # (a subclass), e.g. ``x / 0`` and ``x // 0``.
         raise ExpressionError("division or modulo by zero") from e
-    except (OverflowError, InvalidOperation) as e:
+    except (OverflowError, InvalidOperation, TypeError) as e:
         raise ExpressionError(f"arithmetic error: {e}") from e
     except ValueError as e:
         raise ExpressionError(f"value error: {e}") from e

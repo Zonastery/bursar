@@ -58,11 +58,14 @@ def _clamped_day(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, last_day))
 
 
+_ROLLING_WINDOW_DAYS = 30
+
+
 def _rolling_30d_window(now: date, anchor_date: date) -> tuple[date, date]:
     elapsed_days = (now - anchor_date).days
-    window_index = elapsed_days // 30
-    start = anchor_date + timedelta(days=30 * window_index)
-    end = start + timedelta(days=30)
+    window_index = elapsed_days // _ROLLING_WINDOW_DAYS
+    start = anchor_date + timedelta(days=_ROLLING_WINDOW_DAYS * window_index)
+    end = start + timedelta(days=_ROLLING_WINDOW_DAYS)
     return start, end
 
 

@@ -1245,13 +1245,13 @@ export class CreditManager {
 
   /** Emit overdraft + multi-level low_balance after a balance-decreasing op. */
   private async postChargeSignals(userId: string, result: DeductionResult): Promise<void> {
+    if (result.idempotent) return;
     if (result.balanceAfter.lt(0)) {
       this.emit("credits.overdraft", userId, {
         balance: result.balanceAfter,
         amount: result.amount,
       });
     }
-    if (result.idempotent) return;
     const balanceAfter = result.balanceAfter;
     const balanceBefore = balanceAfter.plus(result.amount);
     await this.emitLowBalance(userId, balanceBefore, balanceAfter);

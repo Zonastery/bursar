@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
+from bursar.repositories._types import DbQuery
 from bursar.repositories.schemas import ActivePricingRow, PricingConfigHistoryItemRow
 
 
@@ -12,7 +12,7 @@ class PricingRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def get_active_pricing(self) -> ActivePricingRow | None:

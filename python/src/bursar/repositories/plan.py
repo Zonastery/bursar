@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
-from bursar.repositories._utils import validate_non_empty
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_amount, validate_non_empty
 from bursar.repositories.schemas import (
     AllowanceRow,
     CapCheckRow,
@@ -21,7 +21,7 @@ class PlanRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def get_user_plan(self, user_id: str) -> UserPlanRow | None:
@@ -121,6 +121,8 @@ class PlanRepository:
             amount: The amount to increment as a string (Decimal-safe).
         """
         validate_non_empty(user_id, "user_id")
+        validate_non_empty(plan_id, "plan_id")
+        validate_amount(amount, "amount")
         self._callproc("increment_usage_window", [user_id, plan_id, amount])
 
     def check_feature_limit(

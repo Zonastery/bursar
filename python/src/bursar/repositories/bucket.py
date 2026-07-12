@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import validate_non_empty
 from bursar.repositories.schemas import BucketEnvelopeRow, SweepRow
 
@@ -13,7 +13,7 @@ class BucketRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def get_bucket_balances(self, user_id: str) -> BucketEnvelopeRow | None:

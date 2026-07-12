@@ -11,7 +11,6 @@ from bursar.providers.types import (
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
-    ProviderLogger,
     ProviderResolveUserFn,
     UpdatePaymentMethodParams,
     WebhookRequest,
@@ -25,11 +24,9 @@ class MockPaymentProvider(PaymentProvider):
         self,
         bm: BillingManager,
         resolve_user: ProviderResolveUserFn | None = None,
-        logger: ProviderLogger | None = None,
     ) -> None:
         self._bm = bm
         self._resolve_user = resolve_user
-        self._logger = logger
 
     async def create_checkout_session(self, params: CheckoutParams) -> dict:
         return {"url": params.return_url}
@@ -83,7 +80,6 @@ class MockPaymentProvider(PaymentProvider):
             user_id,
             metadata,
             self._bm,
-            self._logger,
         )
 
         return {"received": True}

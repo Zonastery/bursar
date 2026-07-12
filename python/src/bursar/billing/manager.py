@@ -14,10 +14,9 @@ from bursar.billing.models import (
     BillingOfferResult,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
-    BillingTopupResult,
+    BillingSubscriptionStatus,
 )
 from bursar.billing.store import BillingStore
-from bursar.events import CreditEventEmitter
 from bursar.manager import CreditManager
 
 logger = logging.getLogger(__name__)
@@ -55,7 +54,6 @@ class BillingManager:
         self,
         billing_store: BillingStore,
         credit_manager: CreditManager | None = None,
-        emitter: CreditEventEmitter | None = None,
         resolve_user: ResolveUserFn | None = None,
         config: BillingConfig | None = None,
         on_trial_will_end: Callable[[BillingEvent], None] | None = None,
@@ -63,13 +61,12 @@ class BillingManager:
     ) -> None:
         self._store = billing_store
         self._cm = credit_manager
-        self._emitter = emitter
         self._resolve_user = resolve_user
         self._on_trial_will_end = on_trial_will_end
         self._cancel_prior_providers = cancel_prior_providers
         self._handlers = {
-            "customer.created": self._handle_customer_created,
-            "customer.updated": self._handle_customer_updated,
+            "customer.created": self._handle_customer_upserted,
+            "customer.updated": self._handle_customer_upserted,
             "customer.deleted": self._handle_customer_deleted,
             "checkout.completed": self._handle_checkout_completed,
             "subscription.created": self._handle_subscription_created,
@@ -110,14 +107,9 @@ class BillingManager:
             logger.debug("duplicate billing event %s/%s", event.provider, event.event_id)
             return BillingEventResult(handled=True, action="duplicate")
 
-        if claim.status in ("retry", "max_retries_exceeded"):
-            logger.warning(
-                "billing event %s/%s %s — skipping",
-                event.provider,
-                event.event_id,
-                claim.status,
-            )
-            return BillingEventResult(handled=True, action=claim.status)
+        if claim.status == "retry":
+            logger.warning("billing event %s/%s retry — skipping", event.provider, event.event_id)
+            return BillingEventResult(handled=False, error="claim_failed_retry")
 
         try:
             result = self._route_event(event)
@@ -138,9 +130,8 @@ class BillingManager:
         return handler(event)
 
     @staticmethod
-    def _compute_topup_credits(amount_minor: int, topup_config: BillingTopupResult) -> int:
-        credits_per = int(topup_config.credits_per_unit or 1000)
-        return (amount_minor * credits_per) // 100
+    def _compute_topup_credits(amount_minor: int, credits_per_unit: int) -> int:
+        return (amount_minor * credits_per_unit) // 100
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
         if event.user_id:
@@ -152,6 +143,13 @@ class BillingManager:
             )
             if uid:
                 return uid
+        if event.subscription and event.subscription.provider_subscription_id:
+            existing = self._store.get_billing_subscription(
+                event.provider,
+                event.subscription.provider_subscription_id,
+            )
+            if existing and existing.user_id:
+                return existing.user_id
         if self._resolve_user and event.customer:
             return self._resolve_user(
                 event.provider,
@@ -203,7 +201,7 @@ class BillingManager:
         if _status is None and sub.status is not None:
             _status = sub.status.value
         if _status is None and existing is not None:
-            _status = existing.status
+            _status = existing.status.value if existing.status else None
         if _status is None:
             _status = "incomplete"
 
@@ -215,7 +213,7 @@ class BillingManager:
             or (existing.provider_customer_id if existing else None),
             offer_key=merger.resolve(offer_key, "offer_key"),
             plan=merger.resolve(plan_key, "plan"),
-            status=_status,
+            status=BillingSubscriptionStatus(_status),
             current_period_start=sub.period_start or (existing.current_period_start if existing else None),
             current_period_end=sub.period_end or (existing.current_period_end if existing else None),
             cancel_at_period_end=merger.resolve(cancel_at_period_end, "cancel_at_period_end", False),
@@ -274,7 +272,7 @@ class BillingManager:
 
         return BillingEventResult(handled=True, action=action)
 
-    def _handle_customer_created(self, event: BillingEvent) -> BillingEventResult:
+    def _handle_customer_upserted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
             uid = self._resolve_user_id(event)
             if uid:
@@ -284,19 +282,8 @@ class BillingManager:
                     uid,
                     event.customer.email,
                 )
-        return BillingEventResult(handled=True, action="customer_created")
-
-    def _handle_customer_updated(self, event: BillingEvent) -> BillingEventResult:
-        if event.customer and event.customer.provider_customer_id:
-            uid = self._resolve_user_id(event)
-            if uid:
-                self._store.upsert_billing_customer(
-                    event.provider,
-                    event.customer.provider_customer_id,
-                    uid,
-                    event.customer.email,
-                )
-        return BillingEventResult(handled=True, action="customer_updated")
+        action = "customer_created" if event.event_type == "customer.created" else "customer_updated"
+        return BillingEventResult(handled=True, action=action)
 
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
@@ -315,6 +302,8 @@ class BillingManager:
                     uid,
                     event.customer.email,
                 )
+        if event.subscription:
+            return self._handle_subscription_created(event)
         return BillingEventResult(handled=True, action="checkout_recorded")
 
     def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
@@ -468,16 +457,16 @@ class BillingManager:
         uid = self._resolve_user_id(event)
         if uid and event.invoice:
             self._store.upsert_billing_invoice(
-                event.provider,
-                event.invoice.provider_invoice_id,
+                provider=event.provider,
+                provider_invoice_id=event.invoice.provider_invoice_id,
                 provider_subscription_id=event.subscription.provider_subscription_id if event.subscription else None,
                 user_id=uid,
-                status=event.invoice.status if event.invoice else "paid",
-                amount_paid_minor=event.invoice.amount_paid_minor if event.invoice else None,
-                amount_due_minor=event.invoice.amount_due_minor if event.invoice else None,
-                currency=(event.invoice.currency if event.invoice else None) or "USD",
-                period_start=event.invoice.period_start if event.invoice else None,
-                period_end=event.invoice.period_end if event.invoice else None,
+                status=event.invoice.status or "paid",
+                amount_paid_minor=event.invoice.amount_paid_minor,
+                amount_due_minor=event.invoice.amount_due_minor,
+                currency=event.invoice.currency or "USD",
+                period_start=event.invoice.period_start,
+                period_end=event.invoice.period_end,
             )
         if event.subscription:
             return self._handle_subscription_renewed(event)
@@ -488,21 +477,24 @@ class BillingManager:
             return BillingEventResult(handled=False, error="no_payment_data")
 
         uid = self._resolve_user_id(event)
+
+        topup_config = None
+        if event.payment.purpose == "credit_topup" and event.payment.refs:
+            topup_config = self._store.resolve_credit_topup(
+                event.provider,
+                product_id=event.payment.refs.product_id,
+                price_id=event.payment.refs.price_id,
+            )
+
         if uid:
             payment_metadata: dict | None = None
-            if event.payment.purpose == "credit_topup" and event.payment.refs:
-                topup_config = self._store.resolve_credit_topup(
-                    event.provider,
-                    product_id=event.payment.refs.product_id,
-                    price_id=event.payment.refs.price_id,
-                )
-                if topup_config:
-                    payment_metadata = {
-                        "credits_per_unit": int(topup_config.credits_per_unit or 1000),
-                    }
+            if topup_config:
+                payment_metadata = {
+                    "credits_per_unit": int(topup_config.credits_per_unit or 1000),
+                }
             self._store.upsert_billing_payment(
-                event.provider,
-                event.payment.provider_payment_id,
+                provider=event.provider,
+                provider_payment_id=event.payment.provider_payment_id,
                 provider_invoice_id=None,
                 user_id=uid,
                 amount_minor=event.payment.amount_minor,
@@ -512,21 +504,18 @@ class BillingManager:
                 metadata=payment_metadata,
             )
 
-        refs = event.payment.refs
-        topup_config = None
-        if refs:
-            topup_config = self._store.resolve_credit_topup(
-                event.provider,
-                product_id=refs.product_id,
-                price_id=refs.price_id,
-            )
-
         if topup_config and self._cm and event.payment.purpose == "credit_topup" and uid:
-            min_amount = 0
-            max_amount = 10**18
-            if event.payment.amount_minor < min_amount or event.payment.amount_minor > max_amount:
+            amt = event.payment.amount_minor
+            if amt < topup_config.min_amount_minor or amt > topup_config.max_amount_minor:
+                logger.warning(
+                    "topup amount %d outside bounds [%d, %d]",
+                    amt,
+                    topup_config.min_amount_minor,
+                    topup_config.max_amount_minor,
+                )
                 return BillingEventResult(handled=True, action="payment_succeeded")
-            credits = self._compute_topup_credits(event.payment.amount_minor, topup_config)
+            cps = int(topup_config.credits_per_unit or 1000)
+            credits = self._compute_topup_credits(amt, cps)
             if credits > 0:
                 self._cm.add_credits(
                     uid,
@@ -547,8 +536,8 @@ class BillingManager:
         uid = self._resolve_user_id(event)
         if uid and event.payment:
             self._store.upsert_billing_payment(
-                event.provider,
-                event.payment.provider_payment_id,
+                provider=event.provider,
+                provider_payment_id=event.payment.provider_payment_id,
                 user_id=uid,
                 amount_minor=event.payment.amount_minor,
                 currency=event.payment.currency,
@@ -565,8 +554,8 @@ class BillingManager:
         if uid and event.refund:
             refund = event.refund
             self._store.upsert_billing_refund(
-                event.provider,
-                refund.provider_refund_id,
+                provider=event.provider,
+                provider_refund_id=refund.provider_refund_id,
                 provider_payment_id=refund.provider_payment_id,
                 user_id=uid,
                 amount_minor=refund.amount_minor,
@@ -585,10 +574,7 @@ class BillingManager:
                         )
                         return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
                     credits_per_unit = int(credits_per_unit)
-                    credits = self._compute_topup_credits(
-                        refund.amount_minor,
-                        BillingTopupResult(topup_key="", credits_per_unit=Decimal(credits_per_unit)),
-                    )
+                    credits = self._compute_topup_credits(refund.amount_minor, credits_per_unit)
                     if credits > 0:
                         self._cm.deduct_credits(
                             uid,
@@ -608,11 +594,12 @@ class BillingManager:
         uid = self._resolve_user_id(event)
         if uid and event.dispute:
             self._store.upsert_billing_dispute(
-                event.provider,
-                event.dispute.provider_dispute_id,
+                provider=event.provider,
+                provider_dispute_id=event.dispute.provider_dispute_id,
                 provider_payment_id=event.dispute.provider_payment_id,
                 user_id=uid,
                 status="needs_response",
+                reason=event.dispute.reason,
             )
         return BillingEventResult(handled=True, action="dispute_recorded")
 
@@ -620,10 +607,12 @@ class BillingManager:
         uid = self._resolve_user_id(event)
         if uid and event.dispute:
             self._store.upsert_billing_dispute(
-                event.provider,
-                event.dispute.provider_dispute_id,
+                provider=event.provider,
+                provider_dispute_id=event.dispute.provider_dispute_id,
+                provider_payment_id=event.dispute.provider_payment_id,
                 user_id=uid,
                 status="closed",
+                reason=event.dispute.reason,
             )
         return BillingEventResult(handled=True, action="dispute_closed")
 

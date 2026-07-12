@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import validate_non_empty
 
 
@@ -11,7 +11,7 @@ class BillingCustomerRepository:
     Returns None when the query returns no rows.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def upsert(
@@ -29,6 +29,9 @@ class BillingCustomerRepository:
             user_id: The internal user ID.
             email: The customer email address, or None.
         """
+        validate_non_empty(provider, "provider")
+        validate_non_empty(provider_customer_id, "provider_customer_id")
+        validate_non_empty(user_id, "user_id")
         self._execute(
             """INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
                VALUES (%s, %s, %s, %s)
@@ -58,8 +61,6 @@ class BillingCustomerRepository:
         if not rows:
             return None
         row = rows[0]
-        if isinstance(row, (list, tuple)):
-            return str(row[0])
         if isinstance(row, dict):
             user_id = row.get("user_id")
             return str(user_id) if user_id is not None else None

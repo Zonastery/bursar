@@ -33,6 +33,8 @@ def _stripe_dict(obj: Any) -> dict:
         return {}
     if isinstance(obj, dict):
         return obj
+    if hasattr(obj, "to_dict_recursive"):
+        return obj.to_dict_recursive()
     return {k: _stripe_val(obj, k) for k in dir(obj) if not k.startswith("_")}
 
 
@@ -63,9 +65,10 @@ class StripeProvider(PaymentProvider):
             )
             customer_id = customer["id"]
 
+        quantity = params.quantity if params.quantity is not None else 1
         common = {
             "customer": customer_id,
-            "line_items": [{"price": params.product_id, "quantity": params.quantity or 1}],
+            "line_items": [{"price": params.product_id, "quantity": quantity}],
             "success_url": params.return_url,
             "cancel_url": params.cancel_url,
             "client_reference_id": params.user_id,
@@ -146,16 +149,16 @@ class StripeProvider(PaymentProvider):
             )
         except stripe_mod.error.SignatureVerificationError:  # type: ignore[attr-defined]
             return {"received": False, "retryable": False}
-        except Exception:
-            return {"received": False, "retryable": True}
+        except stripe_mod.error.APIError as e:  # type: ignore[attr-defined]
+            return {"received": False, "retryable": True, "error": str(e)}
+        except Exception as e:
+            return {"received": False, "retryable": False, "error": str(e)}
 
         data = event.data.object
         data_dict = _stripe_dict(data)
-        user_id = data_dict.get("client_reference_id")
         md = data_dict.get("metadata", {}) or {}
         metadata = {str(k): str(v) for k, v in md.items()}
-        if not user_id:
-            user_id = metadata.get("userId")
+        user_id = metadata.get("userId")
 
         await handle_stripe_billing_event(
             event.type,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import unwrap_jsonb, validate_non_empty
 from bursar.repositories.schemas import BillingEventRow
 
@@ -12,7 +12,7 @@ class BillingEventRepository:
     Returns None when the query returns no rows.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def claim(
@@ -50,7 +50,7 @@ class BillingEventRepository:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT * FROM public.complete_billing_event(%s, %s)", [provider, event_id])
+        self._execute("SELECT public.complete_billing_event(%s, %s)", [provider, event_id])
 
     def fail(self, provider: str, event_id: str) -> None:
         """Mark a billing event as failed.
@@ -59,4 +59,4 @@ class BillingEventRepository:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT * FROM public.fail_billing_event(%s, %s)", [provider, event_id])
+        self._execute("SELECT public.fail_billing_event(%s, %s)", [provider, event_id])

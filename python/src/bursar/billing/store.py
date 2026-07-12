@@ -93,11 +93,10 @@ class BillingStore(ABC):
         lookup_key: str,
     ) -> BillingTopupResult | None: ...
 
-    # compute_topup_credits moved to BillingManager._compute_topup_credits
-
     @abstractmethod
     def upsert_billing_payment(
         self,
+        *,
         provider: str,
         provider_payment_id: str,
         provider_invoice_id: str | None = None,
@@ -112,6 +111,7 @@ class BillingStore(ABC):
     @abstractmethod
     def upsert_billing_refund(
         self,
+        *,
         provider: str,
         provider_refund_id: str,
         provider_payment_id: str | None = None,
@@ -125,6 +125,7 @@ class BillingStore(ABC):
     @abstractmethod
     def upsert_billing_invoice(
         self,
+        *,
         provider: str,
         provider_invoice_id: str,
         provider_subscription_id: str | None = None,
@@ -141,6 +142,7 @@ class BillingStore(ABC):
     @abstractmethod
     def upsert_billing_dispute(
         self,
+        *,
         provider: str,
         provider_dispute_id: str,
         provider_payment_id: str | None = None,

@@ -8,24 +8,6 @@ The expression namespace includes per-step ``METRIC_VARIABLES`` and a per-tool
 
 from pydantic import BaseModel, Field
 
-# Canonical metric-variable set exposed to pricing expressions. This is the
-# single authority used both to build the evaluation namespace (engine
-# ``_build_variables``) and to validate expression variable names at
-# config-load time (M5). Keep in sync with ``UsageMetrics`` / ``_build_variables``.
-METRIC_VARIABLES: frozenset[str] = frozenset(
-    {
-        "input_tokens",
-        "output_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "tool_calls",
-        "search_queries",
-        "search_results",
-        "web_search_calls",
-        "code_exec_calls",
-    }
-)
-
 
 class ToolCall(BaseModel):
     """A single tool invocation recorded during an agent step."""
@@ -54,3 +36,13 @@ class UsageMetrics(BaseModel):
     web_search_calls: int = 0
     code_exec_calls: int = 0
     flat_job: str | None = None
+
+
+# Canonical metric-variable set exposed to pricing expressions. This is the
+# single authority used both to build the evaluation namespace (engine
+# ``_build_variables``) and to validate expression variable names at
+# config-load time (M5). Derived from ``UsageMetrics.model_fields`` so it
+# stays in sync automatically.
+METRIC_VARIABLES: frozenset[str] = frozenset(
+    name for name, field in UsageMetrics.model_fields.items() if name not in ("model", "flat_job")
+)

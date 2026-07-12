@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -41,7 +41,7 @@ class LeaseResult(BaseModel):
     available: Decimal = Decimal(0)
     reserved_total: Decimal = Decimal(0)
     billing_mode: BillingMode = "strict"
-    expires_at: str = ""
+    expires_at: datetime | None = None
     error: str | None = None
 
 
@@ -167,8 +167,8 @@ class BucketDefinition(BaseModel):
 class AllowanceResult(BaseModel):
     plan_id: str
     allowance_remaining: Decimal
-    period_start: str
-    period_end: str
+    period_start: date | None = None
+    period_end: date | None = None
 
 
 class GetUserPlanResult(BaseModel):
@@ -208,15 +208,15 @@ class FeatureLimitResult(BaseModel):
     limit: int = 0
     used: int = 0
     remaining: int = 0
-    period_start: str = ""
-    period_end: str = ""
+    period_start: date | None = None
+    period_end: date | None = None
     action: Literal["deny", "warn", "notify"] | None = None
 
 
 class SetUserPlanResult(BaseModel):
     user_id: str
     plan_id: str
-    plan_assigned_at: str | None = None
+    plan_assigned_at: datetime | None = None
 
 
 class MigratePlanUsersResult(BaseModel):

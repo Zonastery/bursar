@@ -20,7 +20,7 @@ import threading
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -52,10 +52,6 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.reservation_released",
         "credits.lease_expired",
         "credits.overdraft",
-        # Non-blocking signal emitted by _post_charge_signals when a settle/deduct
-        # leaves the balance below min_balance without going negative (manager.py).
-        # Pre-existing gap: this was emitted but missing from this frozenset.
-        "credits.floor_breach",
         # Emitted by CreditManager.grant_subscription_cycle (webhook renewal/signup
         # grant helper).
         "credits.cycle_renewed",
@@ -64,7 +60,26 @@ CREDIT_EVENT_TYPES = frozenset(
     }
 )
 
-CreditEventType = str
+CreditEventType = Literal[
+    "credits.deducted",
+    "credits.deduct_failed",
+    "credits.added",
+    "credits.refunded",
+    "credits.refund_failed",
+    "credits.expired",
+    "credits.cap_reached",
+    "credits.cap_warning",
+    "credits.feature_limit_reached",
+    "credits.feature_limit_warning",
+    "credits.low_balance",
+    "credits.plan_changed",
+    "credits.reserved",
+    "credits.reservation_released",
+    "credits.lease_expired",
+    "credits.overdraft",
+    "credits.cycle_renewed",
+    "credits.revoked",
+]
 
 
 class CreditEvent(BaseModel):
@@ -117,6 +132,8 @@ class CreditEventEmitter:
         can safely call ``on()``/``off()`` without risk of deadlock or
         iterator corruption.
         """
+        if event.type not in CREDIT_EVENT_TYPES:
+            raise ValueError(f"unknown credit event type: {event.type!r}")
         with self._lock:
             handlers = list(self._listeners.get(event.type) or [])
         for handler in handlers:

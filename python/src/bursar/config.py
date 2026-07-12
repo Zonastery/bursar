@@ -8,6 +8,8 @@ from bursar.expr import ExpressionError, validate_expression
 from bursar.interface.models import BucketDefinition, PlanDefinition
 from bursar.metrics import METRIC_VARIABLES
 
+DEFAULT_TOOL_EXPR = "calls * 0"
+
 
 class ConfigError(Exception):
     """Raised on config parsing or validation failures."""
@@ -17,7 +19,7 @@ class MeteringConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     models: dict[str, str]
-    tools: dict[str, str] = Field(default_factory=lambda: {"*": "calls * 0"})
+    tools: dict[str, str] = Field(default_factory=lambda: {"*": DEFAULT_TOOL_EXPR})
     search: str | None = None
     cache_discount: str | None = None
     flat_jobs: dict[str, Decimal] = Field(default_factory=dict)

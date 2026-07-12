@@ -7,8 +7,9 @@ schema installed. Wraps all billing repositories under a single store class.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any
 
 import psycopg2
 import psycopg2.extras
@@ -20,6 +21,7 @@ from bursar.billing.models import (
     BillingGrantResult,
     BillingOfferResult,
     BillingSubscriptionState,
+    BillingSubscriptionStatus,
     BillingTopupResult,
 )
 from bursar.billing.store import BillingStore
@@ -45,7 +47,10 @@ def _dec_credits(value: str | Decimal | None) -> Decimal | None:
 def _to_utc_iso(dt_str: str | None) -> str | None:
     if dt_str is None:
         return None
-    return dt_str
+    try:
+        return datetime.fromisoformat(dt_str).isoformat()
+    except (ValueError, TypeError):
+        return dt_str
 
 
 class PostgresBillingStore(BillingStore):
@@ -68,6 +73,12 @@ class PostgresBillingStore(BillingStore):
         """Close all connections in the pool."""
         self._pool.closeall()
 
+    def __enter__(self) -> PostgresBillingStore:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
     def _execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
         """Execute raw SQL and return all result rows as dicts via the connection pool."""
         conn = self._pool.getconn()
@@ -80,7 +91,8 @@ class PostgresBillingStore(BillingStore):
                     rows = []
             conn.commit()
             return rows
-        except psycopg2.Error:
+        except BaseException:
+            # Pool corruption — rollback and re-raise to protect connection state
             conn.rollback()
             raise
         finally:
@@ -88,63 +100,63 @@ class PostgresBillingStore(BillingStore):
 
     @property
     def _offer_repo(self) -> BillingOfferRepository:
-        if not hasattr(self, "__offer_repo"):
-            self.__offer_repo = BillingOfferRepository(self._execute)
-        return self.__offer_repo
+        if not hasattr(self, "_offer_repo_cache"):
+            self._offer_repo_cache = BillingOfferRepository(self._execute)
+        return self._offer_repo_cache
 
     @property
     def _topup_repo(self) -> BillingTopupRepository:
-        if not hasattr(self, "__topup_repo"):
-            self.__topup_repo = BillingTopupRepository(self._execute)
-        return self.__topup_repo
+        if not hasattr(self, "_topup_repo_cache"):
+            self._topup_repo_cache = BillingTopupRepository(self._execute)
+        return self._topup_repo_cache
 
     @property
     def _customer_repo(self) -> BillingCustomerRepository:
-        if not hasattr(self, "__customer_repo"):
-            self.__customer_repo = BillingCustomerRepository(self._execute)
-        return self.__customer_repo
+        if not hasattr(self, "_customer_repo_cache"):
+            self._customer_repo_cache = BillingCustomerRepository(self._execute)
+        return self._customer_repo_cache
 
     @property
     def _subscription_repo(self) -> BillingSubscriptionRepository:
-        if not hasattr(self, "__subscription_repo"):
-            self.__subscription_repo = BillingSubscriptionRepository(self._execute)
-        return self.__subscription_repo
+        if not hasattr(self, "_subscription_repo_cache"):
+            self._subscription_repo_cache = BillingSubscriptionRepository(self._execute)
+        return self._subscription_repo_cache
 
     @property
     def _event_repo(self) -> BillingEventRepository:
-        if not hasattr(self, "__event_repo"):
-            self.__event_repo = BillingEventRepository(self._execute)
-        return self.__event_repo
+        if not hasattr(self, "_event_repo_cache"):
+            self._event_repo_cache = BillingEventRepository(self._execute)
+        return self._event_repo_cache
 
     @property
     def _payment_repo(self) -> BillingPaymentRepository:
-        if not hasattr(self, "__payment_repo"):
-            self.__payment_repo = BillingPaymentRepository(self._execute)
-        return self.__payment_repo
+        if not hasattr(self, "_payment_repo_cache"):
+            self._payment_repo_cache = BillingPaymentRepository(self._execute)
+        return self._payment_repo_cache
 
     @property
     def _refund_repo(self) -> BillingRefundRepository:
-        if not hasattr(self, "__refund_repo"):
-            self.__refund_repo = BillingRefundRepository(self._execute)
-        return self.__refund_repo
+        if not hasattr(self, "_refund_repo_cache"):
+            self._refund_repo_cache = BillingRefundRepository(self._execute)
+        return self._refund_repo_cache
 
     @property
     def _invoice_repo(self) -> BillingInvoiceRepository:
-        if not hasattr(self, "__invoice_repo"):
-            self.__invoice_repo = BillingInvoiceRepository(self._execute)
-        return self.__invoice_repo
+        if not hasattr(self, "_invoice_repo_cache"):
+            self._invoice_repo_cache = BillingInvoiceRepository(self._execute)
+        return self._invoice_repo_cache
 
     @property
     def _dispute_repo(self) -> BillingDisputeRepository:
-        if not hasattr(self, "__dispute_repo"):
-            self.__dispute_repo = BillingDisputeRepository(self._execute)
-        return self.__dispute_repo
+        if not hasattr(self, "_dispute_repo_cache"):
+            self._dispute_repo_cache = BillingDisputeRepository(self._execute)
+        return self._dispute_repo_cache
 
     @property
     def _config_repo(self) -> BillingConfigRepository:
-        if not hasattr(self, "__config_repo"):
-            self.__config_repo = BillingConfigRepository(self._execute)
-        return self.__config_repo
+        if not hasattr(self, "_config_repo_cache"):
+            self._config_repo_cache = BillingConfigRepository(self._execute)
+        return self._config_repo_cache
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -159,13 +171,53 @@ class PostgresBillingStore(BillingStore):
             provider_customer_id=str(r.provider_customer_id) if r.provider_customer_id else None,
             offer_key=str(r.offer_key) if r.offer_key else None,
             plan=str(r.plan) if r.plan else None,
-            status=str(r.status),
+            status=BillingSubscriptionStatus(str(r.status)) if r.status else BillingSubscriptionStatus.incomplete,
             current_period_start=str(r.current_period_start) if r.current_period_start else None,
             current_period_end=str(r.current_period_end) if r.current_period_end else None,
             cancel_at_period_end=bool(r.cancel_at_period_end),
             interval=str(r.interval) if r.interval else None,
             interval_count=int(r.interval_count) if r.interval_count is not None else None,
             metadata=r.metadata if isinstance(r.metadata, dict) else None,
+        )
+
+    @staticmethod
+    def _row_to_offer(result: Any) -> BillingOfferResult | None:
+        if result is None:
+            return None
+        return BillingOfferResult(
+            offer_key=str(result.offer_key),
+            plan=result.plan,
+            interval=result.interval,
+            interval_count=result.interval_count,
+            grant=BillingGrantResult(
+                mode=result.grant_mode,
+                credits=result.grant_credits,
+                bucket=result.grant_bucket,
+                replace_prior=result.grant_replace_prior,
+            ),
+        )
+
+    @staticmethod
+    @staticmethod
+    def _row_to_topup(result: Any) -> BillingTopupResult | None:
+        if result is None:
+            return None
+        min_amt = (
+            int(result.min_amount_minor)
+            if hasattr(result, "min_amount_minor") and result.min_amount_minor is not None
+            else 500
+        )
+        max_amt = (
+            int(result.max_amount_minor)
+            if hasattr(result, "max_amount_minor") and result.max_amount_minor is not None
+            else 500000
+        )
+        return BillingTopupResult(
+            topup_key=str(result.topup_key),
+            credits_per_unit=_dec_credits(result.credits_per_unit),
+            deposit_to=result.deposit_to or "purchased",
+            min_amount_minor=min_amt,
+            max_amount_minor=max_amt,
         )
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -197,20 +249,7 @@ class PostgresBillingStore(BillingStore):
             BillingOfferResult if found, None otherwise.
         """
         result = self._offer_repo.resolve_by_price(provider, price_id, product_id)
-        if result and result.offer_key:
-            return BillingOfferResult(
-                offer_key=result.offer_key,
-                plan=result.plan,
-                interval=result.interval,
-                interval_count=result.interval_count,
-                grant=BillingGrantResult(
-                    mode=result.grant_mode,
-                    credits=result.grant_credits,
-                    bucket=result.grant_bucket,
-                    replace_prior=result.grant_replace_prior,
-                ),
-            )
-        return None
+        return self._row_to_offer(result)
 
     def claim_billing_event(
         self,
@@ -236,8 +275,10 @@ class PostgresBillingStore(BillingStore):
         )
         if result is None:
             return BillingEventClaim(status="retry")
-        status = result.status or "retry"
-        return BillingEventClaim(status=cast(Any, status))
+        raw_status = (result.status or "retry").lower()
+        if raw_status not in ("claimed", "duplicate", "retry"):
+            raw_status = "retry"
+        return BillingEventClaim(status=raw_status)
 
     def complete_billing_event(self, provider: str, event_id: str) -> None:
         """Mark a billing event as completed.
@@ -363,14 +404,7 @@ class PostgresBillingStore(BillingStore):
             BillingTopupResult if found, None otherwise.
         """
         result = self._topup_repo.resolve_by_price(provider, price_id, product_id)
-        if result and result.topup_key:
-            return BillingTopupResult(
-                topup_key=result.topup_key,
-                credits_per_unit=_dec_credits(result.credits_per_unit),
-                credits_per_major_unit=_dec_credits(result.credits_per_major_unit),
-                deposit_to=result.deposit_to or "purchased",
-            )
-        return None
+        return self._row_to_topup(result)
 
     def resolve_billing_offer_by_lookup(
         self,
@@ -387,20 +421,7 @@ class PostgresBillingStore(BillingStore):
             BillingOfferResult if found, None otherwise.
         """
         result = self._offer_repo.resolve_by_lookup(provider, lookup_key)
-        if result and result.offer_key:
-            return BillingOfferResult(
-                offer_key=result.offer_key,
-                plan=result.plan,
-                interval=result.interval,
-                interval_count=result.interval_count,
-                grant=BillingGrantResult(
-                    mode=result.grant_mode,
-                    credits=result.grant_credits,
-                    bucket=result.grant_bucket,
-                    replace_prior=result.grant_replace_prior,
-                ),
-            )
-        return None
+        return self._row_to_offer(result)
 
     def resolve_credit_topup_by_lookup(
         self,
@@ -417,17 +438,11 @@ class PostgresBillingStore(BillingStore):
             BillingTopupResult if found, None otherwise.
         """
         result = self._topup_repo.resolve_by_lookup(provider, lookup_key)
-        if result and result.topup_key:
-            return BillingTopupResult(
-                topup_key=result.topup_key,
-                credits_per_unit=_dec_credits(result.credits_per_unit),
-                credits_per_major_unit=_dec_credits(result.credits_per_major_unit),
-                deposit_to=result.deposit_to or "purchased",
-            )
-        return None
+        return self._row_to_topup(result)
 
     def upsert_billing_payment(
         self,
+        *,
         provider: str,
         provider_payment_id: str,
         provider_invoice_id: str | None = None,
@@ -465,6 +480,7 @@ class PostgresBillingStore(BillingStore):
 
     def upsert_billing_refund(
         self,
+        *,
         provider: str,
         provider_refund_id: str,
         provider_payment_id: str | None = None,
@@ -499,6 +515,7 @@ class PostgresBillingStore(BillingStore):
 
     def upsert_billing_invoice(
         self,
+        *,
         provider: str,
         provider_invoice_id: str,
         provider_subscription_id: str | None = None,
@@ -542,6 +559,7 @@ class PostgresBillingStore(BillingStore):
 
     def upsert_billing_dispute(
         self,
+        *,
         provider: str,
         provider_dispute_id: str,
         provider_payment_id: str | None = None,
@@ -585,7 +603,8 @@ class PostgresBillingStore(BillingStore):
         Returns:
             Payment details dict if found, None otherwise.
         """
-        return self._payment_repo.get_for_refund(provider, provider_payment_id)
+        result = self._payment_repo.get_for_refund(provider, provider_payment_id)
+        return result.model_dump(exclude_none=True) if result else None
 
     def get_user_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]:
         """Get all subscriptions for a user.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
-from bursar.repositories._utils import validate_non_empty
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_amount, validate_non_empty
 from bursar.repositories.schemas import CreateLeaseParams, DeductionRow, LeaseRow, ReleaseRow, SettleLeaseParams
 
 
@@ -13,7 +13,7 @@ class LeaseRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def create_lease(self, params: CreateLeaseParams) -> LeaseRow | None:
@@ -29,6 +29,7 @@ class LeaseRepository:
             LeaseRow if created, None if the RPC returned no rows.
         """
         validate_non_empty(params.user_id, "user_id")
+        validate_amount(params.amount, "amount")
         rows = self._callproc(
             "create_lease",
             [

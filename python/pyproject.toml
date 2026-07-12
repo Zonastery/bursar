@@ -7,12 +7,9 @@ readme = "README.md"
 # stdlib, so no new runtime dependency is needed.
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "dodopayments>=1.0.0",
     "pydantic>=2.0.0",
-    "pytest-timeout>=2.4.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.3",
-    "stripe>=10.0.0",
 ]
 keywords = ["credits", "billing", "llm", "usage-metering", "pricing"]
 classifiers = [
@@ -44,7 +41,7 @@ where = ["src"]
 
 [project.optional-dependencies]
 providers = [
-    "stripe>=7.0.0",
+    "stripe>=10.0.0",
     "dodopayments>=1.0.0",
 ]
 postgres = [
@@ -137,6 +134,7 @@ dev = [
 ]
 # Mirror of the `test` optional-dependency extra for `uv`'s dependency-group
 # resolver (extras and groups are separate namespaces in uv).
+# Source of truth: the `test` extra above. Keep these two lists in sync.
 test-deps = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

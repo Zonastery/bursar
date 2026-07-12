@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
-from bursar.repositories._utils import validate_non_empty
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_amount, validate_non_empty
 from bursar.repositories.schemas import (
     AddTeamMemberRow,
     CreateTeamRow,
@@ -19,7 +19,7 @@ class TeamRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def create_team(self, name: str, initial_balance: str) -> CreateTeamRow | None:
@@ -32,6 +32,8 @@ class TeamRepository:
         Returns:
             CreateTeamRow if created, None if the RPC returned no rows.
         """
+        validate_non_empty(name, "name")
+        validate_amount(initial_balance, "initial_balance")
         rows = self._callproc("create_team", [name, initial_balance])
         if not rows:
             return None
@@ -110,6 +112,7 @@ class TeamRepository:
         """
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
+        validate_amount(amount, "amount")
         rows = self._callproc("deduct_team", [team_id, user_id, amount, metadata])
         if not rows:
             return None

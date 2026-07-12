@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from bursar.repositories._types import CallProc
+from typing import Any
+
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import validate_non_empty, validate_non_negative
 from bursar.repositories.schemas import (
     AggregateStatsRow,
@@ -19,7 +21,7 @@ class AnalyticsRepository:
     Returns typed Pydantic models for each result row.
     """
 
-    def __init__(self, callproc: CallProc) -> None:
+    def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     def spend_by_user(self, start: str, end: str) -> list[SpendByUserRow]:
@@ -86,10 +88,24 @@ class AnalyticsRepository:
         Returns:
             AggregateStatsRow if data exists, None otherwise.
         """
-        rows = self._callproc("aggregate_stats", [start, end])
+        rows = self._callproc("aggregate_stats", [start, end]) or []
         if not rows:
             return None
         return AggregateStatsRow.model_validate(rows[0])
+
+    def _list_transactions(
+        self,
+        rpc_name: str,
+        params: list[Any],
+        user_id: str,
+        limit: int,
+        offset: int,
+    ) -> list[TransactionRow]:
+        validate_non_empty(user_id, "user_id")
+        validate_non_negative(limit, "limit")
+        validate_non_negative(offset, "offset")
+        rows = self._callproc(rpc_name, params) or []
+        return [TransactionRow.model_validate(r) for r in rows if isinstance(r, dict)]
 
     def list_user_transactions(
         self,
@@ -113,24 +129,13 @@ class AnalyticsRepository:
         Returns:
             List of TransactionRow (may be empty).
         """
-        validate_non_empty(user_id, "user_id")
-        validate_non_negative(limit, "limit")
-        validate_non_negative(offset, "offset")
-        rows = (
-            self._callproc(
-                "list_user_transactions",
-                [
-                    user_id,
-                    types,
-                    from_date,
-                    to_date,
-                    limit,
-                    offset,
-                ],
-            )
-            or []
+        return self._list_transactions(
+            "list_user_transactions",
+            [user_id, types, from_date, to_date, limit, offset],
+            user_id,
+            limit,
+            offset,
         )
-        return [TransactionRow.model_validate(r) for r in rows if isinstance(r, dict)]
 
     def list_usage_events(
         self,
@@ -152,20 +157,10 @@ class AnalyticsRepository:
         Returns:
             List of TransactionRow (may be empty).
         """
-        validate_non_empty(user_id, "user_id")
-        validate_non_negative(limit, "limit")
-        validate_non_negative(offset, "offset")
-        rows = (
-            self._callproc(
-                "list_usage_events",
-                [
-                    user_id,
-                    from_date,
-                    to_date,
-                    limit,
-                    offset,
-                ],
-            )
-            or []
+        return self._list_transactions(
+            "list_usage_events",
+            [user_id, from_date, to_date, limit, offset],
+            user_id,
+            limit,
+            offset,
         )
-        return [TransactionRow.model_validate(r) for r in rows if isinstance(r, dict)]

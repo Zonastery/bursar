@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import unwrap_jsonb, validate_non_empty
 from bursar.repositories.schemas import BillingTopupRow
 
@@ -12,7 +12,7 @@ class BillingTopupRepository:
     Returns None when the query returns no rows.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def resolve_by_price(

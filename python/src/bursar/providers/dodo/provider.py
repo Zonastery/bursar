@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any
 
 from bursar.billing.manager import BillingManager
@@ -38,8 +39,9 @@ class DodoProvider(PaymentProvider):
 
     async def create_checkout_session(self, params: CheckoutParams) -> dict:
         client = self._get_client()
+        quantity = params.quantity if params.quantity is not None else 1
         session_kwargs: dict[str, Any] = {
-            "product_cart": [{"product_id": params.product_id, "quantity": params.quantity or 1}],
+            "product_cart": [{"product_id": params.product_id, "quantity": quantity}],
             "return_url": params.return_url,
         }
         if params.metadata:
@@ -72,7 +74,7 @@ class DodoProvider(PaymentProvider):
                 key=webhook_key,
             )
         except Exception:
-            return {"received": False, "retryable": False}
+            return {"received": False, "retryable": True}
 
         event_type = getattr(event, "type", None) or event.get("type", "")
         event_data = getattr(event, "data", None) or event.get("data", {})
@@ -83,10 +85,8 @@ class DodoProvider(PaymentProvider):
         elif isinstance(event_data, dict):
             data_dict = event_data
         else:
-            try:  # noqa: SIM105
+            with suppress(TypeError, ValueError):
                 data_dict = dict(event_data)
-            except (TypeError, ValueError):
-                pass
 
         raw_metadata = data_dict.get("metadata", {})
         if hasattr(raw_metadata, "model_dump"):
@@ -158,24 +158,21 @@ class DodoProvider(PaymentProvider):
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         client = self._get_client()
-        try:
-            response = await client.customers.wallets.list(customer_id)
-            items = getattr(response, "items", None) or response.get("items", [])
-            result: list[PaymentMethodInfo] = []
-            for w in items:
-                w_dict = w.model_dump() if hasattr(w, "model_dump") else w
-                result.append(
-                    PaymentMethodInfo(
-                        id=str(w_dict.get("payment_method_id", w_dict.get("id", ""))),
-                        last4=str(w_dict.get("last4", "")),
-                        brand=str(w_dict.get("brand", "unknown")),
-                        expiry_month=int(w_dict.get("exp_month", w_dict.get("expiry_month", 0))),
-                        expiry_year=int(w_dict.get("exp_year", w_dict.get("expiry_year", 0))),
-                    )
+        response = await client.customers.wallets.list(customer_id)
+        items = getattr(response, "items", None) or response.get("items", [])
+        result: list[PaymentMethodInfo] = []
+        for w in items:
+            w_dict = w.model_dump() if hasattr(w, "model_dump") else w
+            result.append(
+                PaymentMethodInfo(
+                    id=str(w_dict.get("payment_method_id", w_dict.get("id", ""))),
+                    last4=str(w_dict.get("last4", "")),
+                    brand=str(w_dict.get("brand", "unknown")),
+                    expiry_month=int(w_dict.get("exp_month", w_dict.get("expiry_month", 0))),
+                    expiry_year=int(w_dict.get("exp_year", w_dict.get("expiry_year", 0))),
                 )
-            return result
-        except Exception:
-            return []
+            )
+        return result
 
     async def create_customer(self, params: CreateCustomerParams) -> dict:
         client = self._get_client()

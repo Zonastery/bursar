@@ -7,10 +7,7 @@ stores for testing.
 
 from __future__ import annotations
 
-import threading
-import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -23,7 +20,6 @@ from bursar.interface.models import (
     AvailableResult,
     BalanceResult,
     BucketBalancesResult,
-    CapCheckResult,
     CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
@@ -99,59 +95,9 @@ class CreditStore(ABC):
     or in-memory stores.
     """
 
-    def __init__(self, pricing_cache_ttl: int = 300) -> None:
-        """Initialize the store.
-
-        Args:
-            pricing_cache_ttl: Seconds to cache ``get_active_pricing()``
-                results. Set to ``0`` to disable caching. Default 300.
-        """
-        self._pricing_cache_ttl = pricing_cache_ttl
-        self._pricing_cache_result: PricingConfigResult | None = None
-        self._pricing_cache_time: float = 0.0
-        self._pricing_cache_lock = threading.Lock()
-        self._pricing_load_lock = threading.Lock()
-
-    # ── Pricing cache ──────────────────────────────────────────────────
-
-    def _get_cached_pricing(
-        self,
-        loader: Callable[[], PricingConfigResult | None],
-    ) -> PricingConfigResult | None:
-        """Return cached pricing if within TTL, else call *loader* and cache.
-
-        Thread-safe with stampede protection (double-checked locking).
-        ``None`` results are **not** cached — a missing config triggers a
-        backend call on every invocation so that newly-published pricing is
-        picked up immediately.
-        """
-        now = time.monotonic()
-        with self._pricing_cache_lock:
-            if self._pricing_cache_result is not None and (now - self._pricing_cache_time) < self._pricing_cache_ttl:
-                return self._pricing_cache_result
-
-        with self._pricing_load_lock:
-            # Double-check: another thread may have loaded while we waited
-            now = time.monotonic()
-            with self._pricing_cache_lock:
-                if (
-                    self._pricing_cache_result is not None
-                    and (now - self._pricing_cache_time) < self._pricing_cache_ttl
-                ):
-                    return self._pricing_cache_result
-
-            result = loader()
-            now = time.monotonic()  # re-read after loader to avoid TTL erosion
-            with self._pricing_cache_lock:
-                self._pricing_cache_result = result
-                self._pricing_cache_time = now
-            return result
-
-    def invalidate_pricing_cache(self) -> None:
-        """Force the next ``get_active_pricing()`` call to reload from the backend."""
-        with self._pricing_cache_lock:
-            self._pricing_cache_result = None
-            self._pricing_cache_time = 0.0
+    def __init__(self) -> None:
+        """Initialize the store."""
+        super().__init__()
 
     # ── Schema management ──────────────────────────────────────────────
 
@@ -576,11 +522,6 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
-        """Record allowance consumption for current billing period."""
-        ...
-
-    @abstractmethod
     def check_feature_limit(
         self,
         user_id: str,
@@ -591,7 +532,7 @@ class CreditStore(ABC):
     ) -> FeatureLimitResult:
         """Advisory, non-locking read of invocation-count usage (UI only).
 
-        Mirrors :meth:`check_spend_cap`/:meth:`check_allowance`: the caller (the
+        Mirrors :meth:`check_allowance`: the caller (the
         manager) has already resolved the ``FeatureLimit`` from the user's plan
         and the calendar window via :func:`bursar.allowance.resolve_calendar_window`
         — this method only counts. Counting is ledger-derived (see
@@ -608,27 +549,6 @@ class CreditStore(ABC):
 
         Returns:
             ``FeatureLimitResult`` with ``limited=True`` and the count/remaining.
-        """
-        ...
-
-    # ── Spend caps and rate limiting ────────────────────────────────────
-
-    @abstractmethod
-    def check_spend_cap(
-        self,
-        user_id: str,
-        model: str | None = None,
-        amount: Decimal | None = None,
-    ) -> CapCheckResult:
-        """Check whether a pending deduction would exceed any configured cap.
-
-        Args:
-            user_id: The user to check caps for.
-            model: Optional model name for per-model caps.
-            amount: The pending deduction amount.
-
-        Returns:
-            ``CapCheckResult`` with the check result.
         """
         ...
 

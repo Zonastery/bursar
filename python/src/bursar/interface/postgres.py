@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
 import psycopg2
@@ -26,7 +26,6 @@ from bursar.interface.models import (
     BalanceResult,
     BucketBalance,
     BucketBalancesResult,
-    CapCheckResult,
     CreateTeamResult,
     CreditMetadata,
     DailySpendRow,
@@ -78,13 +77,16 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
     """
     if value is None:
         return default
-    if isinstance(value, bool):
-        return default
     if isinstance(value, Decimal):
         return value
-    if isinstance(value, float):
-        return Decimal(str(value))
-    return Decimal(value)
+    try:
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, float):
+            return Decimal(str(value))
+        return Decimal(value)
+    except (InvalidOperation, ArithmeticError, ValueError) as e:
+        raise StoreError(f"Failed to parse Decimal value: {value!r}") from e
 
 
 def _feature_period_end(feature_limit: FeatureLimit | None, feature_period_start: date | None) -> date | None:
@@ -118,12 +120,28 @@ def _dec_map(value: Any) -> dict[str, Decimal] | None:
     return {str(k): _dec(v) for k, v in value.items()}
 
 
+BillingMode = Literal["strict", "overdraft"]
+
+
+def _safe_billing_mode(v: Any, default: BillingMode = "strict") -> BillingMode:
+    s = str(v) if v is not None else default
+    return cast(BillingMode, s) if s in ("strict", "overdraft") else default
+
+
+AllowancePeriod = Literal["calendar_month", "rolling_30d", "anniversary"]
+
+
+def _safe_allowance_period(v: Any, default: AllowancePeriod = "calendar_month") -> AllowancePeriod:
+    s = str(v) if v is not None else default
+    return cast(AllowancePeriod, s) if s in ("calendar_month", "rolling_30d", "anniversary") else default
+
+
 class DecimalEncoder(json.JSONEncoder):
-    """Custom JSON encoder that converts ``Decimal`` to a float for JSONB storage."""
+    """Custom JSON encoder that converts ``Decimal`` to a string for JSONB storage."""
 
     def default(self, o: object) -> object:
         if isinstance(o, Decimal):
-            return float(o)
+            return str(o)
         return super().default(o)
 
 
@@ -135,60 +153,59 @@ class PostgresStore(CreditStore):
             (e.g. ``postgresql://user:pass@host:5432/db``).
     """
 
-    def __init__(self, database_url: str, *, pricing_cache_ttl: int = 300) -> None:
-        super().__init__(pricing_cache_ttl=pricing_cache_ttl)
+    def __init__(self, database_url: str) -> None:
+        super().__init__()
         self._database_url = database_url
         self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, database_url)
 
     # ── Repository getters ─────────────────────────────────────────────
-
     @property
     def _balance_repo(self) -> BalanceRepository:
-        if not hasattr(self, "__balance_repo"):
-            self.__balance_repo = BalanceRepository(self._callproc)
-        return self.__balance_repo
+        if not hasattr(self, "_balance_repo_cache"):
+            self._balance_repo_cache = BalanceRepository(self._callproc)
+        return self._balance_repo_cache
 
     @property
     def _deduction_repo(self) -> DeductionRepository:
-        if not hasattr(self, "__deduction_repo"):
-            self.__deduction_repo = DeductionRepository(self._callproc)
-        return self.__deduction_repo
+        if not hasattr(self, "_deduction_repo_cache"):
+            self._deduction_repo_cache = DeductionRepository(self._callproc)
+        return self._deduction_repo_cache
 
     @property
     def _lease_repo(self) -> LeaseRepository:
-        if not hasattr(self, "__lease_repo"):
-            self.__lease_repo = LeaseRepository(self._callproc)
-        return self.__lease_repo
+        if not hasattr(self, "_lease_repo_cache"):
+            self._lease_repo_cache = LeaseRepository(self._callproc)
+        return self._lease_repo_cache
 
     @property
     def _pricing_repo(self) -> PricingRepository:
-        if not hasattr(self, "__pricing_repo"):
-            self.__pricing_repo = PricingRepository(self._callproc)
-        return self.__pricing_repo
+        if not hasattr(self, "_pricing_repo_cache"):
+            self._pricing_repo_cache = PricingRepository(self._callproc)
+        return self._pricing_repo_cache
 
     @property
     def _plan_repo(self) -> PlanRepository:
-        if not hasattr(self, "__plan_repo"):
-            self.__plan_repo = PlanRepository(self._callproc)
-        return self.__plan_repo
+        if not hasattr(self, "_plan_repo_cache"):
+            self._plan_repo_cache = PlanRepository(self._callproc)
+        return self._plan_repo_cache
 
     @property
     def _analytics_repo(self) -> AnalyticsRepository:
-        if not hasattr(self, "__analytics_repo"):
-            self.__analytics_repo = AnalyticsRepository(self._callproc)
-        return self.__analytics_repo
+        if not hasattr(self, "_analytics_repo_cache"):
+            self._analytics_repo_cache = AnalyticsRepository(self._callproc)
+        return self._analytics_repo_cache
 
     @property
     def _team_repo(self) -> TeamRepository:
-        if not hasattr(self, "__team_repo"):
-            self.__team_repo = TeamRepository(self._callproc)
-        return self.__team_repo
+        if not hasattr(self, "_team_repo_cache"):
+            self._team_repo_cache = TeamRepository(self._callproc)
+        return self._team_repo_cache
 
     @property
     def _bucket_repo(self) -> BucketRepository:
-        if not hasattr(self, "__bucket_repo"):
-            self.__bucket_repo = BucketRepository(self._callproc)
-        return self.__bucket_repo
+        if not hasattr(self, "_bucket_repo_cache"):
+            self._bucket_repo_cache = BucketRepository(self._callproc)
+        return self._bucket_repo_cache
 
     def close(self) -> None:
         """Close all connections in the pool."""
@@ -205,7 +222,8 @@ class PostgresStore(CreditStore):
                 rows = cur.fetchall()
             conn.commit()
             return [r[0] if isinstance(r, (list, tuple)) else r for r in (rows or [])]
-        except psycopg2.Error:
+        except BaseException:
+            # Rollback on any exception to avoid pool poisoning
             conn.rollback()
             raise
         finally:
@@ -497,7 +515,7 @@ class PostgresStore(CreditStore):
                 user_id=user_id,
                 available=_dec(result.available),
                 reserved_total=_dec(result.reserved),
-                billing_mode=billing_mode,  # type: ignore[arg-type]
+                billing_mode=_safe_billing_mode(billing_mode),
                 error=str(result.error),
             )
         return LeaseResult(
@@ -506,8 +524,8 @@ class PostgresStore(CreditStore):
             amount=_dec(result.amount),
             available=_dec(result.available),
             reserved_total=_dec(result.reserved),
-            billing_mode=str(getattr(result, "billing_mode", billing_mode)),  # type: ignore[arg-type]
-            expires_at=str(getattr(result, "expires_at", "")),
+            billing_mode=_safe_billing_mode(str(getattr(result, "billing_mode", billing_mode))),
+            expires_at=getattr(result, "expires_at", None),
         )
 
     def settle_lease(
@@ -634,8 +652,8 @@ class PostgresStore(CreditStore):
             amount=_dec(result.amount),
             available=_dec(result.available),
             reserved_total=_dec(result.reserved),
-            billing_mode=str(getattr(result, "billing_mode", "strict")),  # type: ignore[arg-type]
-            expires_at=str(getattr(result, "expires_at", "")),
+            billing_mode=_safe_billing_mode(str(getattr(result, "billing_mode", "strict"))),
+            expires_at=getattr(result, "expires_at", None),
         )
 
     def get_available(self, user_id: str) -> AvailableResult:
@@ -660,13 +678,16 @@ class PostgresStore(CreditStore):
     # ── Pricing configuration ──────────────────────────────────────────
 
     def get_active_pricing(self) -> PricingConfigResult | None:
-        return self._get_cached_pricing(self._load_active_pricing)
+        return self._load_active_pricing()
 
-    def _load_active_pricing(self) -> PricingConfigResult | None:
-        result = self._pricing_repo.get_active_pricing()
+    def _normalize_pricing_config(self, result: Any) -> PricingConfigResult | None:
+        """Normalize a raw pricing config DB result into PricingConfigResult."""
         if result is None:
             return None
         return PricingConfigResult.model_validate(result.model_dump())
+
+    def _load_active_pricing(self) -> PricingConfigResult | None:
+        return self._normalize_pricing_config(self._pricing_repo.get_active_pricing())
 
     def set_active_pricing(
         self,
@@ -688,7 +709,6 @@ class PostgresStore(CreditStore):
         result = self._pricing_repo.set_active_pricing(json.dumps(config, cls=DecimalEncoder), label)
         if result is None:
             raise StoreError("set_active_pricing returned no result")
-        self.invalidate_pricing_cache()
         return str(getattr(result, "id", ""))
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
@@ -718,10 +738,7 @@ class PostgresStore(CreditStore):
         Returns:
             PricingConfigResult if found, None otherwise.
         """
-        result = self._pricing_repo.get_pricing_config(version)
-        if result is None:
-            return None
-        return PricingConfigResult.model_validate(result.model_dump())
+        return self._normalize_pricing_config(self._pricing_repo.get_pricing_config(version))
 
     def activate_pricing(self, version: int) -> str:
         """Activate a specific pricing configuration version.
@@ -739,7 +756,6 @@ class PostgresStore(CreditStore):
         if result is None:
             msg = f"Version {version} not found"
             raise StoreError(msg)
-        self.invalidate_pricing_cache()
         return str(getattr(result, "id", ""))
 
     # ── Plan management ────────────────────────────────────────────────
@@ -761,9 +777,9 @@ class PostgresStore(CreditStore):
             plan_id=result.plan_id or None,
             plan_label=result.plan_label or None,
             allowance_amount=_dec(result.allowance_amount) if result.allowance_amount is not None else _dec(0),
-            allowance_period=str(result.allowance_period or "calendar_month"),  # type: ignore[arg-type]
+            allowance_period=_safe_allowance_period(str(result.allowance_period or "calendar_month")),
             entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
-            billing_mode=str(result.billing_mode or "strict"),  # type: ignore[arg-type]
+            billing_mode=_safe_billing_mode(str(result.billing_mode or "strict")),
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (result.per_operation or {}).items()},
             max_concurrent=result.max_concurrent,
             overdraft_floor=_dec(result.overdraft_floor) if result.overdraft_floor is not None else None,
@@ -802,7 +818,7 @@ class PostgresStore(CreditStore):
         return SetUserPlanResult(
             user_id=str(getattr(result, "user_id", user_id)),
             plan_id=str(getattr(result, "plan_id", plan_id)),
-            plan_assigned_at=str(result.plan_assigned_at) if result.plan_assigned_at else None,
+            plan_assigned_at=getattr(result, "plan_assigned_at", None),
         )
 
     def unset_user_plan(self, user_id: str) -> dict:
@@ -867,23 +883,13 @@ class PostgresStore(CreditStore):
             period_start.isoformat() if period_start is not None else None,
         )
         if result is None:
-            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
+            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start=None, period_end=None)
         return AllowanceResult(
             plan_id=str(getattr(result, "plan_id", "")),
             allowance_remaining=_dec(result.allowance_remaining),
-            period_start=str(getattr(result, "period_start", "")),
-            period_end=str(getattr(result, "period_end", "")),
+            period_start=getattr(result, "period_start", None),
+            period_end=getattr(result, "period_end", None),
         )
-
-    def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
-        """Increment the usage counter for a user's plan window.
-
-        Args:
-            user_id: The user ID.
-            plan_id: The plan ID.
-            amount: The amount to increment.
-        """
-        self._plan_repo.increment_usage_window(user_id, plan_id, str(_dec(amount)))
 
     def check_feature_limit(
         self,
@@ -893,7 +899,7 @@ class PostgresStore(CreditStore):
         period_start: date,
         period_end: date,
     ) -> FeatureLimitResult:
-        """Call the advisory ``check_feature_limit`` RPC (mirrors ``check_spend_cap``)."""
+        """Call the advisory ``check_feature_limit`` RPC."""
         result = self._plan_repo.check_feature_limit(
             user_id,
             feature,
@@ -910,42 +916,13 @@ class PostgresStore(CreditStore):
             limit=int(result.limit or 0),
             used=int(result.used or 0),
             remaining=int(result.remaining or 0),
-            period_start=str(getattr(result, "period_start", "")),
-            period_end=str(getattr(result, "period_end", "")),
-            action=cast(
-                "Literal['deny', 'warn', 'notify'] | None",
-                str(result.action) if result.action is not None else None,
+            period_start=getattr(result, "period_start", None),
+            period_end=getattr(result, "period_end", None),
+            action=(
+                result.action
+                if isinstance(result.action, str) and result.action in ("deny", "warn", "notify")
+                else None
             ),
-        )
-
-    # ── Spend caps and rate limiting ────────────────────────────────────
-
-    def check_spend_cap(
-        self,
-        user_id: str,
-        model: str | None = None,
-        amount: Decimal | None = None,
-    ) -> CapCheckResult:
-        """Check if a proposed spend would exceed a user's spend cap.
-
-        Args:
-            user_id: The user ID.
-            model: The model being used, or None.
-            amount: The proposed spend amount, or None.
-
-        Returns:
-            CapCheckResult indicating whether the spend is capped.
-        """
-        result = self._plan_repo.check_spend_cap(user_id, model, str(_dec(amount)))
-        if result is None:
-            return CapCheckResult(capped=False, current_spend=Decimal(0), cap_limit=Decimal(0), action=None)
-        action = result.action
-        return CapCheckResult(
-            capped=bool(getattr(result, "capped", False)),
-            current_spend=_dec(result.current_spend),
-            cap_limit=_dec(result.cap_limit),
-            action=action if action in ("deny", "warn", "notify") else None,
-            model=str(result.model) if result.model else None,
         )
 
     # ── Refunds ─────────────────────────────────────────────────────────
@@ -1016,9 +993,9 @@ class PostgresStore(CreditStore):
             return {"user_id": user_id, "amount": 0, "new_balance": "", "bucket": None}
         return {
             "user_id": str(getattr(result, "user_id", user_id)),
-            "amount": getattr(result, "amount", 0),
-            "new_balance": getattr(result, "new_balance", ""),
-            "bucket": result.bucket,
+            "amount": str(_dec(getattr(result, "amount", 0))),
+            "new_balance": str(_dec(getattr(result, "new_balance", 0))),
+            "bucket": getattr(result, "bucket", None) if hasattr(result, "bucket") else None,
         }
 
     # ── Usage analytics ─────────────────────────────────────────────────
@@ -1207,7 +1184,7 @@ class PostgresStore(CreditStore):
         if result is None:
             return TeamBalanceResult(team_id=team_id)
         if result.error is not None:
-            return TeamBalanceResult(team_id=team_id)
+            raise StoreError(f"get_team_balance failed: {result.error}")
         return TeamBalanceResult(
             team_id=str(getattr(result, "team_id", team_id)),
             name=str(getattr(result, "name", "")),

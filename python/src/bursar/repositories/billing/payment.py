@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
-
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import unwrap_jsonb, validate_non_empty
 from bursar.repositories.schemas import BillingPaymentRow
 
@@ -14,7 +12,7 @@ class BillingPaymentRepository:
     Returns None when the query returns no rows.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def upsert(
@@ -42,6 +40,8 @@ class BillingPaymentRepository:
             purpose: The payment purpose, or None.
             metadata: JSON metadata string, or None.
         """
+        validate_non_empty(provider, "provider")
+        validate_non_empty(provider_payment_id, "provider_payment_id")
         self._execute(
             "SELECT public.upsert_billing_payment(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
@@ -57,7 +57,7 @@ class BillingPaymentRepository:
             ],
         )
 
-    def get_for_refund(self, provider: str, provider_payment_id: str) -> dict[str, Any] | None:
+    def get_for_refund(self, provider: str, provider_payment_id: str) -> BillingPaymentRow | None:
         """Get payment details for refund processing.
 
         Args:
@@ -65,16 +65,17 @@ class BillingPaymentRepository:
             provider_payment_id: The provider payment ID.
 
         Returns:
-            Payment details dict if found, None otherwise.
+            BillingPaymentRow if found, None otherwise.
         """
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_payment_id, "provider_payment_id")
-        return unwrap_jsonb(
+        row = unwrap_jsonb(
             self._execute(
                 "SELECT * FROM public.get_billing_payment_for_refund(%s, %s)",
                 [provider, provider_payment_id],
             )
         )
+        return BillingPaymentRow.model_validate(row) if row else None
 
     def get_direct(self, provider: str, provider_payment_id: str) -> BillingPaymentRow | None:
         """Get a billing payment directly from the payments table.

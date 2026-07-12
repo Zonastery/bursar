@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
+from bursar.repositories._utils import validate_non_empty
 
 
 class BillingRefundRepository:
@@ -9,7 +10,7 @@ class BillingRefundRepository:
     All methods call Postgres via raw SQL queries through the query function.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def upsert(
@@ -35,6 +36,8 @@ class BillingRefundRepository:
             reason: The refund reason, or None.
             metadata: JSON metadata string, or None.
         """
+        validate_non_empty(provider, "provider")
+        validate_non_empty(provider_refund_id, "provider_refund_id")
         self._execute(
             "SELECT public.upsert_billing_refund(%s, %s, %s, %s, %s, %s, %s, %s)",
             [provider, provider_refund_id, provider_payment_id, user_id, amount_minor, currency, reason, metadata],

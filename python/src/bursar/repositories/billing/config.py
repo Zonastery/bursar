@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 
 
 class BillingConfigRepository:
@@ -9,7 +9,7 @@ class BillingConfigRepository:
     All methods call Postgres via raw SQL queries through the query function.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def sync_from_config(self, config_json: str) -> None:

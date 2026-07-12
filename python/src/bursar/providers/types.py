@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -8,8 +9,24 @@ from typing import Any, Literal, Protocol
 
 class ProviderLogger(Protocol):
     def debug(self, msg: str, ctx: dict | None = None) -> None: ...
-    def warn(self, msg: str, ctx: dict | None = None) -> None: ...
+    def warning(self, msg: str, ctx: dict | None = None) -> None: ...
     def error(self, msg: str, ctx: dict | None = None) -> None: ...
+
+
+class StdlibProviderLogger:
+    """Concrete ProviderLogger wrapper around a standard library logger."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self._logger = logger
+
+    def debug(self, msg: str, ctx: dict | None = None) -> None:
+        self._logger.debug(msg, extra={"ctx": ctx} if ctx else None)
+
+    def warning(self, msg: str, ctx: dict | None = None) -> None:
+        self._logger.warning(msg, extra={"ctx": ctx} if ctx else None)
+
+    def error(self, msg: str, ctx: dict | None = None) -> None:
+        self._logger.error(msg, extra={"ctx": ctx} if ctx else None)
 
 
 ProviderResolveUserFn = Callable[[dict[str, Any], dict[str, str]], Awaitable[str | None]]

@@ -40,8 +40,9 @@ from decimal import Decimal
 from typing import Any
 
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.config import ConfigError
 from bursar.engine import PricingEngine
-from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
 from bursar.interface.models import (
     AddCreditsResult,
@@ -126,6 +127,23 @@ POLICY_PRESETS = frozenset({"strict_prepaid", "overdraft"})
 
 
 @dataclass
+@dataclass
+class _FeatureLimitResult:
+    """Named result from :meth:`_resolve_feature_limit`."""
+
+    limit: FeatureLimit | None
+    period_start: date | None
+    period_end: date | None
+
+
+@dataclass
+class RunBilledResult:
+    """Typed result from :meth:`run_billed`."""
+
+    result: Any
+    deduction: DeductionResult
+
+
 class LowBalanceConfig:
     """Configuration for the ``credits.low_balance`` signal (interface plan §6 / WS7).
 
@@ -231,7 +249,7 @@ class CreditManager:
         # acquiring the lock) prevents stampede when the TTL expires concurrently.
         self._pricing_refresh_lock = threading.Lock()
 
-    def _emit(self, type_: str, user_id: str, data: dict[str, Any] | None = None) -> None:
+    def _emit(self, type_: CreditEventType, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
         if self._emitter:
             self._emitter.emit(
@@ -242,6 +260,15 @@ class CreditManager:
                     data=data,
                 )
             )
+
+    @staticmethod
+    def _to_decimal(value: Decimal | int | float | str) -> Decimal:
+        """Safely coerce a value to Decimal, avoiding float precision loss."""
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, float):
+            return Decimal(str(value))
+        return Decimal(value)
 
     def _resolve_low_balance_threshold(self) -> Decimal:
         """Resolve the low-balance threshold when no explicit thresholds are
@@ -340,7 +367,7 @@ class CreditManager:
         :meth:`get_bucket_balances`); omitted resolves to the configured
         ``is_default`` bucket, or ``"default"`` when no buckets are configured.
         """
-        result = self._store.add_credits(user_id, Decimal(amount), tx_type, metadata, expires_at, bucket)
+        result = self._store.add_credits(user_id, self._to_decimal(amount), tx_type, metadata, expires_at, bucket)
         self._emit(
             "credits.added",
             user_id,
@@ -386,8 +413,8 @@ class CreditManager:
         """
         result = self._store.add_credits(
             user_id,
-            -Decimal(amount),
-            "adjustment",
+            -self._to_decimal(amount),
+            tx_type,
             metadata,
             None,
             bucket,
@@ -458,7 +485,7 @@ class CreditManager:
         if ttl_days is not None:
             expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
 
-        amount_dec = Decimal(amount)
+        amount_dec = self._to_decimal(amount)
 
         prior_leftover = Decimal(0)
         pre_lifetime_purchased = Decimal(0)
@@ -611,7 +638,8 @@ class CreditManager:
         plan — never used for admission control; that is exclusively the
         atomic check-and-increment inside ``deduct``/``reserve``.
         """
-        limit, period_start, period_end = self._resolve_feature_limit(user_id, feature)
+        flr = self._resolve_feature_limit(user_id, feature)
+        limit, period_start, period_end = flr.limit, flr.period_start, flr.period_end
         if limit is None or period_start is None or period_end is None:
             return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
         result = self._store.check_feature_limit(user_id, feature, limit.max_calls, period_start, period_end)
@@ -620,11 +648,15 @@ class CreditManager:
         # check_allowance overrides period_end after the store call).
         return result.model_copy(update={"limited": True, "action": limit.action})
 
-    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict[str, Any]:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
         Returns ``{"user_id": ..., "amount": ..., "new_balance": ..., "bucket": ...}``.
+
+        Note: the JS equivalent does **not** emit a ``credits.revoked`` event —
+        it delegates directly to the store with no event emission. This divergence
+        is intentional (Python adds observability).
         """
         result = self._store.revoke_credits_by_tx_type(user_id, tx_type)
         amount = abs(Decimal(str(result.get("amount", 0))))
@@ -721,21 +753,17 @@ class CreditManager:
         )
         return period_start
 
-    def _resolve_feature_limit(
-        self, user_id: str, feature: str | None
-    ) -> tuple[FeatureLimit | None, date | None, date | None]:
+    def _resolve_feature_limit(self, user_id: str, feature: str | None) -> _FeatureLimitResult:
         """Resolve the configured ``FeatureLimit`` (if any) and its calendar window."""
         if feature is None:
-            return None, None, None
+            return _FeatureLimitResult(limit=None, period_start=None, period_end=None)
         plan = self._store.get_user_plan(user_id)
         entitlement = plan.entitlements.get(feature)
         if entitlement is None or entitlement.max_calls is None:
-            return None, None, None
-        from bursar.interface.models import FeatureLimit as _FeatureLimit
-
-        limit = _FeatureLimit(max_calls=entitlement.max_calls, period=entitlement.period, action=entitlement.on_exceed)
+            return _FeatureLimitResult(limit=None, period_start=None, period_end=None)
+        limit = FeatureLimit(max_calls=entitlement.max_calls, period=entitlement.period, action=entitlement.on_exceed)
         period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
-        return limit, period_start, period_end
+        return _FeatureLimitResult(limit=limit, period_start=period_start, period_end=period_end)
 
     def _cost_of(self, metrics_or_amount: UsageMetrics | Decimal | int) -> tuple[Decimal, str | None]:
         """Compute the credit cost and model from metrics, or pass a raw amount.
@@ -825,7 +853,8 @@ class CreditManager:
         effective_model = derived_model if derived_model is not None else model
         ttl_seconds = ttl if ttl is not None else self._default_ttl
         period_start = self._resolve_allowance_period_start(user_id)
-        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
+        flr = self._resolve_feature_limit(user_id, feature)
+        feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
 
         result = self._store.create_lease(
             user_id,
@@ -910,7 +939,8 @@ class CreditManager:
                 base["idempotency_key"] = idempotency_key
             tx_meta = CreditMetadata(**base)
 
-        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
+        flr = self._resolve_feature_limit(user_id, feature)
+        feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
 
         result = self._store.settle_lease(
             user_id,
@@ -1053,7 +1083,7 @@ class CreditManager:
             ar = self._store.check_allowance(user_id)
             allowance_credit = ar.allowance_remaining
         except Exception:
-            pass  # advisory check: fail open if allowance fetch fails
+            logger.debug("allowance fetch failed in can_afford", exc_info=True)  # advisory: fail open
 
         spendable = avail.available + allowance_credit
 
@@ -1105,20 +1135,10 @@ class CreditManager:
             datetime.now(UTC), plan.allowance_period, plan.plan_assigned_at
         )
         result = self._store.check_allowance(user_id, period_start=period_start)
-        # The store/SQL layer only knows a generic calendar-month period_end
-        # (see 004_plans.sql / 009_deduct_and_leases.sql); override it here with the
-        # authoritative window this manager resolved.
-        period_end_inclusive = period_end_exclusive - timedelta(days=1)
-        period_start_dt = datetime(period_start.year, period_start.month, period_start.day, tzinfo=UTC)
         return result.model_copy(
             update={
-                "period_start": period_start_dt.isoformat(),
-                "period_end": datetime(
-                    period_end_inclusive.year,
-                    period_end_inclusive.month,
-                    period_end_inclusive.day,
-                    tzinfo=UTC,
-                ).isoformat(),
+                "period_start": period_start,
+                "period_end": period_end_exclusive,
             }
         )
 
@@ -1134,7 +1154,7 @@ class CreditManager:
         idempotency_key: str | None = None,
         ttl: int | None = None,
         feature: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunBilledResult:
         """One-call shortcut wiring reserve → do_work → settle (interface plan §4).
 
         ``do_work`` runs the operation and returns ``(result, actual)`` where
@@ -1164,7 +1184,7 @@ class CreditManager:
             raise
 
         deduction = self.settle(user_id, lease.lease_id, actual, idempotency_key=idempotency_key, feature=feature)
-        return {"result": work_result, "deduction": deduction}
+        return RunBilledResult(result=work_result, deduction=deduction)
 
     # ── Low-balance / overdraft signals (interface plan §6) ─────────────
 
@@ -1185,16 +1205,6 @@ class CreditManager:
 
         if result.balance_after < 0:
             self._emit("credits.overdraft", user_id, {"balance": result.balance_after, "amount": result.amount})
-        else:
-            # Emit a non-blocking floor breach when balance slipped below min_balance
-            # without going negative (strict-mode under-estimate of worst-case cost).
-            min_bal = self._engine.min_balance if self._engine else Decimal(0)
-            if min_bal > 0 and result.balance_after < min_bal:
-                self._emit(
-                    "credits.floor_breach",
-                    user_id,
-                    {"balance": result.balance_after, "min_balance": min_bal, "amount": result.amount},
-                )
 
         # balance_before must account for BOTH the net charge (result.amount) AND any
         # free-allowance consumption (result.allowance_consumed).  result.amount is the
@@ -1265,6 +1275,32 @@ class CreditManager:
         if idempotency_key:
             base["idempotency_key"] = idempotency_key
         return CreditMetadata(**base)
+
+    def _raise_deduct_error(
+        self,
+        error: str,
+        user_id: str,
+        cost: Decimal,
+        metrics: UsageMetrics,
+        feature: str | None = None,
+    ) -> None:
+        self._emit(
+            "credits.deduct_failed",
+            user_id,
+            {
+                "amount": cost,
+                "model": metrics.model,
+                "error": error,
+                "feature": feature,
+            },
+        )
+        if error == "cap_reached":
+            raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={cost}")
+        if error == "feature_limit_reached":
+            raise FeatureLimitReachedError(f"Feature limit exceeded for {feature!r}. User={user_id}")
+        if error == "insufficient_credits":
+            raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
+        raise InsufficientCreditsError(f"Deduction failed: {error}. User={user_id}, requested={cost}")
 
     def deduct(
         self,
@@ -1345,7 +1381,8 @@ class CreditManager:
 
         # 3) One atomic transaction in the store: allowance → cap → floor → debit.
         tx_meta = self._build_tx_metadata(metrics, breakdown.total, idempotency_key, metadata)
-        feature_limit, feature_period_start, _feature_period_end = self._resolve_feature_limit(user_id, feature)
+        flr = self._resolve_feature_limit(user_id, feature)
+        feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
         result = self._store.deduct_with_allowance(
             user_id,
             cost,
@@ -1363,40 +1400,7 @@ class CreditManager:
         # 4) Error path: emit a failure event and raise the typed exception.
         #    Never emit a success event here.
         if result.error:
-            self._emit(
-                "credits.deduct_failed",
-                user_id,
-                {
-                    "error": result.error,
-                    "amount": cost,
-                    "model": metrics.model,
-                },
-            )
-            if result.error == "cap_reached":
-                self._emit(
-                    "credits.cap_reached",
-                    user_id,
-                    {
-                        "amount": cost,
-                        "model": metrics.model,
-                    },
-                )
-                raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={cost}")
-            if result.error == "feature_limit_reached":
-                self._emit(
-                    "credits.feature_limit_reached",
-                    user_id,
-                    {
-                        "feature": feature,
-                        "amount": cost,
-                        "model": metrics.model,
-                    },
-                )
-                raise FeatureLimitReachedError(f"Feature limit exceeded for {feature!r}. User={user_id}")
-            if result.error == "insufficient_credits":
-                raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
-            # Any other business code (e.g. invalid_amount): surface it generically.
-            raise InsufficientCreditsError(f"Deduction failed: {result.error}. User={user_id}, requested={cost}")
+            self._raise_deduct_error(result.error, user_id, cost, metrics, feature)
 
         # 5) Success path.
         self._emit(
@@ -1443,8 +1447,9 @@ class CreditManager:
         # Edge-triggered low_balance (M18): multi-level if configured (WS7), else
         # single-threshold — see _emit_low_balance for the shared logic used by
         # both the direct-deduct path and the lease/settle path.
-        balance_before = result.balance_after + result.amount
-        self._emit_low_balance(user_id, balance_before, result.balance_after)
+        if not result.idempotent:
+            balance_before = result.balance_after + result.amount
+            self._emit_low_balance(user_id, balance_before, result.balance_after)
 
         return result
 
@@ -1471,7 +1476,7 @@ class CreditManager:
             ``result.error`` (codes: ``over_refund``, ``already_refunded``,
             ``not_found``) to handle the failure.
         """
-        refund_amount = Decimal(amount) if amount is not None else None
+        refund_amount = self._to_decimal(amount) if amount is not None else None
         result = self._store.refund_credits(transaction_id, refund_amount, reason, metadata)
 
         # Check the error BEFORE emitting (H3): a failed/duplicate/over-refund
@@ -1701,7 +1706,7 @@ class CreditManager:
                 "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
             )
         if self._engine.get_flat_job_cost(job_name) is None:
-            raise ValueError(f"Unknown fixed-cost job: {job_name!r}")
+            raise ConfigError(f"Unknown fixed-cost job: {job_name!r}")
 
         if required_feature is not None:
             check = self.check_feature(user_id, required_feature)

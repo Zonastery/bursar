@@ -596,7 +596,7 @@ export class BillingManager {
     if (uid) {
       const paymentMetadata: Record<string, unknown> | null =
         topupConfig && event.payment.purpose === "credit_topup"
-          ? { creditsPerUnit: Number(topupConfig.creditsPerUnit ?? 1000) }
+          ? { credits_per_unit: Number(topupConfig.creditsPerUnit ?? 1000) }
           : null;
       await this.store.upsertBillingPayment({
         provider: event.provider,
@@ -664,7 +664,7 @@ export class BillingManager {
         );
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const creditsPerUnit = Number(payMeta.creditsPerUnit ?? 0);
+          const creditsPerUnit = Number(payMeta.credits_per_unit ?? 0);
           if (!creditsPerUnit) {
             this.logger?.warn?.(
               `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerUnit in payment metadata`,

@@ -4,7 +4,7 @@ import json
 from decimal import Decimal
 from typing import Any
 
-from bursar.repositories._types import QueryFn
+from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import validate_non_empty
 from bursar.repositories.schemas import SubscriptionRow
 
@@ -36,7 +36,7 @@ class BillingSubscriptionRepository:
     Returns None when the query returns no rows.
     """
 
-    def __init__(self, execute: QueryFn) -> None:
+    def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def upsert(self, state: dict[str, Any]) -> None:
@@ -95,7 +95,7 @@ class BillingSubscriptionRepository:
                 state.get("cancel_at_period_end", False),
                 state.get("interval"),
                 state.get("interval_count"),
-                json.dumps(state.get("metadata"), cls=DecimalEncoder) if state.get("metadata") is not None else None,
+                json.dumps(md, cls=DecimalEncoder) if (md := state.get("metadata")) is not None else None,
             ],
         )
 
@@ -123,8 +123,19 @@ class BillingSubscriptionRepository:
     def get_user_subscription(
         self,
         user_id: str,
-        status: tuple[str, ...] = (SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING),
+        status: tuple[str, ...] | None = None,
     ) -> SubscriptionRow | None:
+        """Get the most recent subscription for a user matching the given statuses.
+
+        Args:
+            user_id: The user ID.
+            status: Tuple of allowed status values. Defaults to active and trialing.
+
+        Returns:
+            SubscriptionRow if found, None otherwise.
+        """
+        if status is None:
+            status = (SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING)
         """Get the most recent subscription for a user matching the given statuses.
 
         Args:
@@ -183,9 +194,8 @@ class BillingSubscriptionRepository:
         rows = self._execute(
             "UPDATE public.billing_subscriptions"
             " SET status = 'canceled', cancel_at_period_end = true, updated_at = now()"
-            " WHERE user_id = %s AND provider != %s"
-            f" AND status IN ('{SUBSCRIPTION_STATUS_ACTIVE}', '{SUBSCRIPTION_STATUS_TRIALING}')"
+            " WHERE user_id = %s AND provider != %s AND status = ANY(%s)"
             " RETURNING provider_subscription_id",
-            [user_id, keep_provider],
+            [user_id, keep_provider, [SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING]],
         )
         return [str(r["provider_subscription_id"]) for r in rows if isinstance(r, dict)]

@@ -11,11 +11,12 @@ is clamped to ``>= 0`` exactly once. There is **no** integer truncation of
 costs anywhere -- a 0.4-credit operation costs 0.4, not 0.
 """
 
+from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from bursar.breakdown import CostBreakdown
-from bursar.config import PricingConfig, load_config_from_dict
+from bursar.config import DEFAULT_TOOL_EXPR, PricingConfig, load_config_from_dict
 from bursar.expr import evaluate_expression
 from bursar.metrics import METRIC_VARIABLES, UsageMetrics
 
@@ -181,7 +182,18 @@ class PricingEngine:
         }
 
     def _calc_model(self, model_name: str | None, variables: dict[str, int]) -> Decimal:
-        """Evaluate model expression for the given model name."""
+        """Evaluate model expression for the given model name.
+
+        Resolution order:
+        1. Exact match on ``model_name`` in the config.
+        2. ``"*"`` wildcard entry.
+        3. ``"_default"`` fallback key (migration helper for configs that
+           did not have a ``*`` wildcard).
+
+        ``None`` and the string ``"none"`` are normalised to ``"*"`` so that
+        callers passing an unset/unavailable model fall through to the
+        wildcard or ``_default``.
+        """
         if model_name is None or model_name == "none":
             model_name = "*"
 
@@ -210,21 +222,17 @@ class PricingEngine:
         is never overridden here (WS2).
         """
         tools_config = self._config.metering.tools
-        default_expr = tools_config.get("*", "calls * 0")
+        default_expr = tools_config.get("*", DEFAULT_TOOL_EXPR)
         total = Decimal(0)
-
-        tool_names = {t.name for t in metrics.tool_calls}
-
+        counts = Counter(t.name for t in metrics.tool_calls)
         seen_specific = set()
-        for tool_name in tool_names:
+        for tool_name, count in counts.items():
             if tool_name in tools_config:
-                this_tool_count = sum(1 for t in metrics.tool_calls if t.name == tool_name)
                 local_vars = dict(variables)
-                local_vars["calls"] = this_tool_count
+                local_vars["calls"] = count
                 total += evaluate_expression(tools_config[tool_name], local_vars)
                 seen_specific.add(tool_name)
-
-        unknown_tool_count = sum(1 for t in metrics.tool_calls if t.name not in seen_specific)
+        unknown_tool_count = sum(c for n, c in counts.items() if n not in seen_specific)
         if unknown_tool_count > 0:
             local_vars = dict(variables)
             local_vars["calls"] = unknown_tool_count
@@ -256,4 +264,4 @@ class PricingEngine:
         job = metrics.flat_job
         if job in flat_jobs:
             return flat_jobs[job]
-        return Decimal(0)
+        raise ValueError(f"unknown flat job: {job!r} — use get_flat_job_cost() to check first")

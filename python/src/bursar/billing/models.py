@@ -123,7 +123,7 @@ class BillingDisputeInfo(BaseModel):
 class BillingEvent(BaseModel):
     provider: str
     event_id: str
-    event_type: str
+    event_type: BillingEventType
     occurred_at: str
 
     user_id: str | None = None
@@ -234,7 +234,7 @@ class BillingSubscriptionState(BaseModel):
     provider_customer_id: str | None = None
     offer_key: str | None = None
     plan: str | None = None
-    status: str = "incomplete"
+    status: BillingSubscriptionStatus = BillingSubscriptionStatus.incomplete
     current_period_start: str | None = None
     current_period_end: str | None = None
     cancel_at_period_end: bool = False
@@ -267,5 +267,6 @@ class BillingTopupResult(BaseModel):
 
     topup_key: str
     credits_per_unit: Decimal | int | None = None
-    credits_per_major_unit: Decimal | int | None = None
     deposit_to: str = "purchased"
+    min_amount_minor: int = 500
+    max_amount_minor: int = 500000
