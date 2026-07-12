@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -18,6 +19,8 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DodoProvider(PaymentProvider):
@@ -73,8 +76,16 @@ class DodoProvider(PaymentProvider):
                 headers=req.headers,
                 key=webhook_key,
             )
-        except Exception:
-            return {"received": False, "retryable": True}
+        except Exception as exc:
+            logger.error("Dodo webhook unwrap failed: %s", exc)
+            is_transient = isinstance(exc, (ConnectionError, TimeoutError))
+            if not is_transient:
+                err_str = str(exc).lower()
+                is_transient = any(
+                    kw in err_str
+                    for kw in ("timeout", "connection refused", "connection reset", "eof", "name resolution")
+                )
+            return {"received": False, "retryable": is_transient, "error": str(exc)}
 
         event_type = getattr(event, "type", None) or event.get("type", "")
         event_data = getattr(event, "data", None) or event.get("data", {})
