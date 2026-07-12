@@ -317,18 +317,7 @@ CREATE TABLE IF NOT EXISTS public.billing_payments (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public'
-        AND table_name = 'billing_payments'
-        AND column_name = 'updated_at'
-    ) THEN
-        ALTER TABLE public.billing_payments ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-    END IF;
-END;
-$$;
+-- updated_at is already defined in CREATE TABLE IF NOT EXISTS public.billing_payments above.
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_payments_provider
     ON public.billing_payments (provider, provider_payment_id);
@@ -381,18 +370,7 @@ CREATE TABLE IF NOT EXISTS public.billing_refunds (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = 'public'
-        AND table_name = 'billing_refunds'
-        AND column_name = 'updated_at'
-    ) THEN
-        ALTER TABLE public.billing_refunds ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
-    END IF;
-END;
-$$;
+-- updated_at is already defined in CREATE TABLE IF NOT EXISTS public.billing_refunds above.
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_refunds_provider
     ON public.billing_refunds (provider, provider_refund_id);
@@ -481,304 +459,32 @@ BEGIN
     END LOOP;
 END $$;
 
-CREATE OR REPLACE FUNCTION public.set_user_plan(
-    p_user_id UUID,
-    p_plan_key TEXT,
-    p_plan_assigned_at TIMESTAMPTZ DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_plan_id UUID;
-    v_assigned_at TIMESTAMPTZ;
-BEGIN
-    SELECT id INTO v_plan_id
-    FROM public.credit_plans
-    WHERE plan_key = p_plan_key;
-
-    IF v_plan_id IS NULL THEN
-        RETURN jsonb_build_object('error', 'plan_not_found');
-    END IF;
-
-    v_assigned_at := COALESCE(p_plan_assigned_at, now());
-
-    INSERT INTO public.user_credits (user_id, plan_id, plan_assigned_at)
-    VALUES (p_user_id, v_plan_id, v_assigned_at)
-    ON CONFLICT (user_id) DO UPDATE SET
-        plan_id = v_plan_id,
-        plan_assigned_at = v_assigned_at,
-        updated_at = now();
-
-    RETURN jsonb_build_object(
-        'user_id', p_user_id,
-        'plan_id', v_plan_id,
-        'plan_assigned_at', v_assigned_at
-    );
-END;
+-- SUPERSEDED by 016_plan_versioning.sql -- this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.set_user_plan(UUID, TEXT, TIMESTAMPTZ)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: sync_billing_from_config ───────────────────────────────────────
-
+-- SUPERSEDED by 017_billing_lifecycle.sql -- this stub is immediately overwritten.
 CREATE OR REPLACE FUNCTION public.sync_billing_from_config(p_config JSONB)
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_key TEXT;
-    v_item JSONB;
-    v_ref JSONB;
-    v_provider TEXT;
-BEGIN
-    -- Sync billing offers (subscription plans)
-    -- Note: offers are upserted, not deleted+rebuilt. Removing an offer from
-    -- the config leaves a stale row, but this is intentional — active
-    -- subscriptions reference offers via FK (billing_subscriptions.offer_key)
-    -- and deleting would break them. Use resolve_billing_offer_by_price to
-    -- find offers; absent keys simply won't resolve.
-    IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
-        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'subscriptions')) > 0 THEN
-            DELETE FROM public.billing_provider_refs
-            WHERE resource_type = 'offer';
-        END IF;
-        FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
-        LOOP
-            INSERT INTO public.billing_offers (
-                offer_key, plan, interval, interval_count,
-                grant_mode, grant_credits, grant_bucket,
-                grant_replace_prior
-            )
-            VALUES (
-                v_key,
-                v_item->>'plan',
-                COALESCE(v_item->>'interval', 'month'),
-                COALESCE((v_item->>'interval_count')::INTEGER, 1),
-                COALESCE(v_item#>>'{grant,mode}', 'allowance'),
-                (v_item#>>'{grant,credits}')::INTEGER,
-                v_item#>>'{grant,bucket}',
-                COALESCE((v_item#>>'{grant,replace_prior}')::BOOLEAN, true)
-            )
-            ON CONFLICT (offer_key) DO UPDATE SET
-                plan = EXCLUDED.plan,
-                interval = EXCLUDED.interval,
-                interval_count = EXCLUDED.interval_count,
-                grant_mode = EXCLUDED.grant_mode,
-                grant_credits = EXCLUDED.grant_credits,
-                grant_bucket = EXCLUDED.grant_bucket,
-                grant_replace_prior = EXCLUDED.grant_replace_prior,
-                updated_at = now();
-
-            -- Sync provider refs for this offer
-            IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
-                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
-                LOOP
-                    INSERT INTO public.billing_provider_refs (
-                        provider, price_id, product_id, variant_id,
-                        lookup_key, resource_type, resource_key
-                    )
-                    VALUES (
-                        v_provider,
-                        v_ref->>'price_id',
-                        v_ref->>'product_id',
-                        v_ref->>'variant_id',
-                        v_ref->>'lookup_key',
-                        'offer',
-                        v_key
-                    )
-                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
-                    DO UPDATE SET
-                        product_id = EXCLUDED.product_id,
-                        variant_id = EXCLUDED.variant_id,
-                        lookup_key = EXCLUDED.lookup_key,
-                        resource_type = EXCLUDED.resource_type,
-                        resource_key = EXCLUDED.resource_key;
-                END LOOP;
-            END IF;
-        END LOOP;
-    END IF;
-
-    -- Sync credit topups
-    IF p_config ? 'topups' AND jsonb_typeof(p_config->'topups') = 'object' THEN
-        IF (SELECT count(*) FROM jsonb_object_keys(p_config->'topups')) > 0 THEN
-            DELETE FROM public.billing_provider_refs
-            WHERE resource_type = 'topup';
-        END IF;
-        FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'topups')
-        LOOP
-            INSERT INTO public.billing_credit_topups (
-                topup_key, deposit_to, credits_per_unit,
-                min_amount_minor, max_amount_minor, tax_behavior
-            )
-            VALUES (
-                v_key,
-                COALESCE(v_item->>'deposit_to', 'purchased'),
-                COALESCE((v_item->>'credits_per_unit')::INTEGER, 1000),
-                COALESCE((v_item->>'min_amount_minor')::INTEGER, 500),
-                COALESCE((v_item->>'max_amount_minor')::INTEGER, 500000),
-                COALESCE(v_item->>'tax_behavior', 'exclude_tax')
-            )
-            ON CONFLICT (topup_key) DO UPDATE SET
-                deposit_to = EXCLUDED.deposit_to,
-                credits_per_unit = EXCLUDED.credits_per_unit,
-                min_amount_minor = EXCLUDED.min_amount_minor,
-                max_amount_minor = EXCLUDED.max_amount_minor,
-                tax_behavior = EXCLUDED.tax_behavior,
-                updated_at = now();
-
-            -- Sync provider refs for this topup
-            IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
-                FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
-                LOOP
-                    INSERT INTO public.billing_provider_refs (
-                        provider, price_id, product_id, variant_id,
-                        lookup_key, resource_type, resource_key
-                    )
-                    VALUES (
-                        v_provider,
-                        v_ref->>'price_id',
-                        v_ref->>'product_id',
-                        v_ref->>'variant_id',
-                        v_ref->>'lookup_key',
-                        'topup',
-                        v_key
-                    )
-                    ON CONFLICT (provider, price_id) WHERE price_id IS NOT NULL
-                    DO UPDATE SET
-                        product_id = EXCLUDED.product_id,
-                        variant_id = EXCLUDED.variant_id,
-                        lookup_key = EXCLUDED.lookup_key,
-                        resource_type = EXCLUDED.resource_type,
-                        resource_key = EXCLUDED.resource_key;
-                END LOOP;
-            END IF;
-        END LOOP;
-    END IF;
-END;
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN NULL; END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.sync_billing_from_config(JSONB) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: resolve_billing_offer_by_price ─────────────────────────────────
-
-CREATE OR REPLACE FUNCTION public.resolve_billing_offer_by_price(
-    p_provider TEXT,
-    p_price_id TEXT DEFAULT NULL,
-    p_product_id TEXT DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_ref RECORD;
-    v_offer RECORD;
-BEGIN
-    IF p_price_id IS NULL AND p_product_id IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    IF p_price_id IS NOT NULL THEN
-        SELECT * INTO v_ref
-        FROM public.billing_provider_refs
-        WHERE provider = p_provider AND price_id = p_price_id AND resource_type = 'offer'
-        LIMIT 1;
-    ELSIF p_product_id IS NOT NULL THEN
-        SELECT * INTO v_ref
-        FROM public.billing_provider_refs
-        WHERE provider = p_provider AND product_id = p_product_id AND resource_type = 'offer'
-        LIMIT 1;
-    END IF;
-
-    IF v_ref.resource_key IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT * INTO v_offer
-    FROM public.billing_offers
-    WHERE offer_key = v_ref.resource_key;
-
-    IF v_offer.offer_key IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN jsonb_build_object(
-        'offer_key', v_offer.offer_key,
-        'plan', v_offer.plan,
-        'interval', v_offer.interval,
-        'interval_count', v_offer.interval_count,
-        'grant_mode', v_offer.grant_mode,
-        'grant_credits', v_offer.grant_credits,
-        'grant_bucket', v_offer.grant_bucket,
-        'grant_replace_prior', v_offer.grant_replace_prior
-    );
-END;
+-- SUPERSEDED by 017_billing_lifecycle.sql -- this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.resolve_billing_offer_by_price(p_provider TEXT, p_price_id TEXT DEFAULT NULL, p_product_id TEXT DEFAULT NULL)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.resolve_billing_offer_by_price(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: resolve_credit_topup_by_price ──────────────────────────────────
-
-CREATE OR REPLACE FUNCTION public.resolve_credit_topup_by_price(
-    p_provider TEXT,
-    p_price_id TEXT DEFAULT NULL,
-    p_product_id TEXT DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_ref RECORD;
-    v_topup RECORD;
-BEGIN
-    IF p_price_id IS NULL AND p_product_id IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    IF p_price_id IS NOT NULL THEN
-        SELECT * INTO v_ref
-        FROM public.billing_provider_refs
-        WHERE provider = p_provider AND price_id = p_price_id AND resource_type = 'topup'
-        LIMIT 1;
-    ELSIF p_product_id IS NOT NULL THEN
-        SELECT * INTO v_ref
-        FROM public.billing_provider_refs
-        WHERE provider = p_provider AND product_id = p_product_id AND resource_type = 'topup'
-        LIMIT 1;
-    END IF;
-
-    IF v_ref.resource_key IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT * INTO v_topup
-    FROM public.billing_credit_topups
-    WHERE topup_key = v_ref.resource_key;
-
-    IF v_topup.topup_key IS NULL THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN jsonb_build_object(
-        'topup_key', v_topup.topup_key,
-        'deposit_to', v_topup.deposit_to,
-        'credits_per_unit', v_topup.credits_per_unit,
-        'min_amount_minor', v_topup.min_amount_minor,
-        'max_amount_minor', v_topup.max_amount_minor,
-        'tax_behavior', v_topup.tax_behavior
-    );
-END;
+-- SUPERSEDED by 017_billing_lifecycle.sql -- this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.resolve_credit_topup_by_price(p_provider TEXT, p_price_id TEXT DEFAULT NULL, p_product_id TEXT DEFAULT NULL)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.resolve_credit_topup_by_price(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: upsert_billing_customer ──────────────────────────────────────────
 
@@ -977,6 +683,9 @@ BEGIN
             END IF;
 
             IF v_existing.status = 'processing' THEN
+                IF v_existing.retry_count >= 3 THEN
+                    RETURN jsonb_build_object('status', 'max_retries_exceeded');
+                END IF;
                 IF v_existing.updated_at < now() - interval '5 minutes' THEN
                     UPDATE public.billing_events
                     SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
@@ -1028,6 +737,12 @@ BEGIN
 
     IF v_existing.status = 'completed' THEN
         RETURN jsonb_build_object('status', 'already_completed');
+    END IF;
+
+    IF v_existing.status = 'processing' THEN
+        IF v_existing.updated_at >= now() - interval '5 minutes' THEN
+            RETURN jsonb_build_object('status', 'retry');
+        END IF;
     END IF;
 
     IF v_existing.status = 'failed' AND v_existing.retry_count >= 3 THEN
@@ -1085,93 +800,22 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.fail_billing_event(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
 -- ── RPC: get_user_billing_subscription ────────────────────────────────────
-
-CREATE OR REPLACE FUNCTION public.get_user_billing_subscription(
-    p_user_id UUID
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_row RECORD;
-BEGIN
-    SELECT * INTO v_row
-    FROM public.billing_subscriptions
-    WHERE user_id = p_user_id
-    ORDER BY current_period_start DESC NULLS LAST, created_at DESC
-    LIMIT 1;
-
-    IF NOT FOUND THEN
-        RETURN NULL;
-    END IF;
-
-    RETURN jsonb_build_object(
-        'user_id', v_row.user_id,
-        'provider', v_row.provider,
-        'provider_subscription_id', v_row.provider_subscription_id,
-        'provider_customer_id', v_row.provider_customer_id,
-        'offer_key', v_row.offer_key,
-        'plan', v_row.plan,
-        'status', v_row.status,
-        'current_period_start', v_row.current_period_start,
-        'current_period_end', v_row.current_period_end,
-        'cancel_at_period_end', v_row.cancel_at_period_end,
-        'interval', v_row.interval,
-        'interval_count', v_row.interval_count,
-        'metadata', v_row.metadata
-    );
-END;
+-- SUPERSEDED by 018_multi_provider_subs.sql -- this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.get_user_billing_subscription(UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.get_user_billing_subscription(UUID) FROM PUBLIC, anon, authenticated;
 
 -- ── Extend set_active_pricing_config to also sync billing config ────────
-
-CREATE OR REPLACE FUNCTION public.set_active_pricing_config(
-    p_config JSONB,
-    p_label TEXT DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_new_id UUID;
-    v_next_version INTEGER;
-BEGIN
-    PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
-
-    SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
-
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
-
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
-    VALUES (p_config, true, v_next_version, p_label)
-    RETURNING id INTO v_new_id;
-
-    PERFORM public.sync_plans_from_config(p_config);
-    PERFORM public.sync_buckets_from_config(p_config);
-    PERFORM public.sync_billing_from_config(p_config->'billing');
-
-    RETURN jsonb_build_object(
-        'id', v_new_id,
-        'version', v_next_version,
-        'active', true
-    );
-END;
+-- SUPERSEDED by 016_plan_versioning.sql -- this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.set_active_pricing_config(p_config JSONB, p_label TEXT DEFAULT NULL)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
--- Grant EXECUTE to service_role for each billing function individually rather
--- than using "ALL FUNCTIONS IN SCHEMA public", which would accidentally expose
--- non-billing functions through the Supabase REST API gateway.
-GRANT EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT, TIMESTAMPTZ) TO service_role;
-GRANT EXECUTE ON FUNCTION public.sync_billing_from_config(JSONB) TO service_role;
-GRANT EXECUTE ON FUNCTION public.resolve_billing_offer_by_price(TEXT, TEXT, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.resolve_credit_topup_by_price(TEXT, TEXT, TEXT) TO service_role;
+-- Per-function GRANTs to service_role for LIVE billing RPCs in this migration.
+-- The 012 migration handles GRANTs for all bursar functions via per-function
+-- GRANTs (replacing the old blanket GRANT).
 GRANT EXECUTE ON FUNCTION public.upsert_billing_customer(TEXT, TEXT, UUID, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_billing_customer(TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_billing_subscription(JSONB) TO service_role;
@@ -1180,7 +824,5 @@ GRANT EXECUTE ON FUNCTION public.claim_billing_event(TEXT, TEXT, TEXT, JSONB) TO
 GRANT EXECUTE ON FUNCTION public.reclaim_billing_event(TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_billing_event(TEXT, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.fail_billing_event(TEXT, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION public.get_user_billing_subscription(UUID) TO service_role;
-GRANT EXECUTE ON FUNCTION public.set_active_pricing_config(JSONB, TEXT) TO service_role;
 
 NOTIFY pgrst, 'reload schema';

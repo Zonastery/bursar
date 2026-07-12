@@ -1,8 +1,13 @@
 import type { QueryFn } from "../types.js";
 
+const BILLING_CUSTOMER_GET_SQL =
+  "SELECT user_id FROM public.billing_customers WHERE provider = $1 AND provider_customer_id = $2";
+
+/** Repository for billing customer operations. */
 export class BillingCustomerRepository {
   constructor(private query: QueryFn) {}
 
+  /** Upsert a billing customer record. */
   async upsert(
     provider: string,
     providerCustomerId: string,
@@ -20,12 +25,17 @@ export class BillingCustomerRepository {
     );
   }
 
+  /** Fetch a user_id by provider identifiers. Returns null when no customer found.
+   *
+   * Guards against undefined/null user_id values that would produce the string
+   * "undefined" or "null" instead of null.
+   */
   async get(provider: string, providerCustomerId: string): Promise<string | null> {
-    const rows = await this.query(
-      "SELECT user_id FROM public.billing_customers WHERE provider = $1 AND provider_customer_id = $2",
-      [provider, providerCustomerId],
-    );
+    const rows = await this.query(BILLING_CUSTOMER_GET_SQL, [provider, providerCustomerId]);
     if (rows.length === 0) return null;
-    return String((rows[0] as Record<string, unknown>).user_id);
+    const row = rows[0] as Record<string, unknown>;
+    const userId = row.user_id;
+    if (userId == null) return null;
+    return String(userId);
   }
 }

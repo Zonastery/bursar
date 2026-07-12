@@ -43,17 +43,21 @@ DECLARE
   v_cap RECORD;
   v_spend NUMERIC;
   v_window TIMESTAMPTZ;
+  v_capped TEXT := NULL;
 BEGIN
-  -- Check deny caps first (hard limit)
+  -- Single pass over ALL caps (deny first by ORDER BY, then warn/notify).
+  -- First matched breach wins; deny takes precedence over soft.
   FOR v_cap IN
     SELECT action, cap_type, model, cap_limit
     FROM public.credit_spend_caps
     WHERE user_id = p_user_id
-      AND action = 'deny'
       AND (model IS NULL OR model = p_model)
-    ORDER BY cap_limit ASC
+    ORDER BY (action = 'deny') DESC, cap_limit ASC
   LOOP
-    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC') ELSE date_trunc('month', now() AT TIME ZONE 'UTC') END;
+    v_window := CASE v_cap.cap_type
+      WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC')
+      ELSE date_trunc('month', now() AT TIME ZONE 'UTC')
+    END;
 
     SELECT COALESCE(SUM(ABS(ct.amount)), 0) INTO v_spend
     FROM public.credit_transactions ct
@@ -64,33 +68,20 @@ BEGIN
       AND (v_cap.model IS NULL OR ct.metadata->>'model' = v_cap.model);
 
     IF v_spend + p_amount > v_cap.cap_limit THEN
-      RETURN jsonb_build_object('capped', true, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_cap.action, 'model', v_cap.model);
+      IF v_cap.action = 'deny' THEN
+        RETURN jsonb_build_object('capped', true, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_cap.action, 'model', v_cap.model);
+      ELSE
+        -- First soft breach wins (warn/notify).
+        IF v_capped IS NULL THEN
+          v_capped := v_cap.action;
+        END IF;
+      END IF;
     END IF;
   END LOOP;
 
-  -- Check warn/notify caps (soft limit)
-  FOR v_cap IN
-    SELECT action, cap_type, model, cap_limit
-    FROM public.credit_spend_caps
-    WHERE user_id = p_user_id
-      AND action IN ('warn', 'notify')
-      AND (model IS NULL OR model = p_model)
-    ORDER BY cap_limit ASC
-  LOOP
-    v_window := CASE v_cap.cap_type WHEN 'daily' THEN date_trunc('day', now() AT TIME ZONE 'UTC') ELSE date_trunc('month', now() AT TIME ZONE 'UTC') END;
-
-    SELECT COALESCE(SUM(ABS(ct.amount)), 0) INTO v_spend
-    FROM public.credit_transactions ct
-    WHERE ct.user_id = p_user_id
-      AND ct.type IN ('usage', 'team_usage')
-      AND ct.amount < 0
-      AND ct.created_at >= v_window
-      AND (v_cap.model IS NULL OR ct.metadata->>'model' = v_cap.model);
-
-    IF v_spend + p_amount > v_cap.cap_limit THEN
-      RETURN jsonb_build_object('capped', false, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_cap.action, 'model', v_cap.model);
-    END IF;
-  END LOOP;
+  IF v_capped IS NOT NULL THEN
+    RETURN jsonb_build_object('capped', false, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_capped, 'model', v_cap.model);
+  END IF;
 
   RETURN jsonb_build_object('capped', false, 'current_spend', 0, 'cap_limit', 0, 'action', null);
 END;

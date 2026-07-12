@@ -145,7 +145,7 @@ export class PostgresBillingStore extends BillingStore {
         mode: r.grant_mode,
         credits: r.grant_credits != null ? Number(r.grant_credits) : null,
         bucket: r.grant_bucket ?? undefined,
-        replacePrior: r.grant_replace_prior === true || r.grant_replace_prior === "true",
+        replacePrior: r.grant_replace_prior === true,
       },
     };
   }
@@ -165,7 +165,7 @@ export class PostgresBillingStore extends BillingStore {
         mode: r.grant_mode,
         credits: r.grant_credits != null ? Number(r.grant_credits) : null,
         bucket: r.grant_bucket ?? undefined,
-        replacePrior: r.grant_replace_prior === true || r.grant_replace_prior === "true",
+        replacePrior: r.grant_replace_prior === true,
       },
     };
   }

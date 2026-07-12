@@ -49,6 +49,63 @@ END;
 $$;
 
 
+-- ── Helper: upsert a single billing provider ref (offers + topups) ──────
+CREATE OR REPLACE FUNCTION public._upsert_billing_provider_ref(
+    p_resource_type TEXT,
+    p_provider TEXT,
+    p_price_id TEXT DEFAULT NULL,
+    p_product_id TEXT DEFAULT NULL,
+    p_variant_id TEXT DEFAULT NULL,
+    p_lookup_key TEXT DEFAULT NULL,
+    p_resource_key TEXT DEFAULT NULL
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_ref_id UUID;
+    v_price_id TEXT := p_price_id;
+    v_product_id TEXT := p_product_id;
+    v_variant_id TEXT := p_variant_id;
+    v_lookup_key TEXT := p_lookup_key;
+BEGIN
+    SELECT id INTO v_ref_id FROM public.billing_provider_refs
+    WHERE provider = p_provider AND resource_type = p_resource_type
+    AND (
+        (v_price_id IS NOT NULL AND price_id = v_price_id)
+        OR (v_product_id IS NOT NULL AND product_id = v_product_id)
+        OR (v_lookup_key IS NOT NULL AND lookup_key = v_lookup_key)
+    )
+    ORDER BY updated_at DESC
+    LIMIT 1;
+
+    IF v_ref_id IS NOT NULL THEN
+        UPDATE public.billing_provider_refs SET
+            price_id = COALESCE(v_price_id, price_id),
+            product_id = COALESCE(v_product_id, product_id),
+            variant_id = COALESCE(v_variant_id, variant_id),
+            lookup_key = COALESCE(v_lookup_key, lookup_key),
+            resource_key = COALESCE(p_resource_key, resource_key),
+            active = true,
+            updated_at = now()
+        WHERE id = v_ref_id;
+    ELSE
+        INSERT INTO public.billing_provider_refs (
+            provider, price_id, product_id, variant_id,
+            lookup_key, resource_type, resource_key, active
+        ) VALUES (
+            p_provider, v_price_id, v_product_id, v_variant_id,
+            v_lookup_key, p_resource_type, COALESCE(p_resource_key, ''), true
+        );
+    END IF;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public._upsert_billing_provider_ref(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public._upsert_billing_provider_ref(TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) TO service_role;
+
 -- ── Drop old sync_billing_from_config and both resolve RPCs ─────────────
 
 DO $$ DECLARE r RECORD;
@@ -87,32 +144,25 @@ DECLARE
     v_item JSONB;
     v_ref JSONB;
     v_provider TEXT;
-    v_ref_id UUID;
-    v_price_id TEXT;
-    v_product_id TEXT;
-    v_variant_id TEXT;
-    v_lookup_key TEXT;
+    v_resource_type TEXT;
     v_config_keys TEXT[];
 BEGIN
+    -- ── Helper for provider-ref upsert (one code path for offers + topups) ──
+    -- Uses a nested inner function via a local block.
     -- ── Sync billing offers ─────────────────────────────────────────────
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
-        -- Collect config offer keys for archiving absent offers
         SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(p_config->'subscriptions') k;
 
-        -- Archive offers not in config
         IF v_config_keys IS NOT NULL THEN
             UPDATE public.billing_offers SET status = 'archived', updated_at = now()
-            WHERE offer_key != ALL(v_config_keys)
-              AND status = 'active';
+            WHERE offer_key != ALL(v_config_keys) AND status = 'active';
         END IF;
 
-        -- Soft-deactivate all existing offer refs (will be re-activated below)
         UPDATE public.billing_provider_refs SET active = false, updated_at = now()
         WHERE resource_type = 'offer';
 
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
-            -- Upsert offer (activate/reactivate)
             INSERT INTO public.billing_offers (
                 offer_key, plan, interval, interval_count,
                 grant_mode, grant_credits, grant_bucket, grant_replace_prior
@@ -138,45 +188,15 @@ BEGIN
                 status = 'active',
                 updated_at = now();
 
-            -- Sync provider refs for this offer
             IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
                 FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
                 LOOP
-                    v_price_id := v_ref->>'price_id';
-                    v_product_id := v_ref->>'product_id';
-                    v_variant_id := v_ref->>'variant_id';
-                    v_lookup_key := v_ref->>'lookup_key';
-
-                    -- Try to find existing ref by any unique identifier
-                    SELECT id INTO v_ref_id FROM public.billing_provider_refs
-                    WHERE provider = v_provider AND resource_type = 'offer'
-                    AND (
-                        (v_price_id IS NOT NULL AND price_id = v_price_id)
-                        OR (v_product_id IS NOT NULL AND product_id = v_product_id)
-                        OR (v_lookup_key IS NOT NULL AND lookup_key = v_lookup_key)
-                    )
-                    ORDER BY updated_at DESC
-                    LIMIT 1;
-
-                    IF v_ref_id IS NOT NULL THEN
-                        UPDATE public.billing_provider_refs SET
-                            price_id = COALESCE(v_price_id, price_id),
-                            product_id = COALESCE(v_product_id, product_id),
-                            variant_id = COALESCE(v_variant_id, variant_id),
-                            lookup_key = COALESCE(v_lookup_key, lookup_key),
-                            resource_key = v_key,
-                            active = true,
-                            updated_at = now()
-                        WHERE id = v_ref_id;
-                    ELSE
-                        INSERT INTO public.billing_provider_refs (
-                            provider, price_id, product_id, variant_id,
-                            lookup_key, resource_type, resource_key, active
-                        ) VALUES (
-                            v_provider, v_price_id, v_product_id, v_variant_id,
-                            v_lookup_key, 'offer', v_key, true
-                        );
-                    END IF;
+                    PERFORM public._upsert_billing_provider_ref(
+                        'offer', v_provider,
+                        v_ref->>'price_id', v_ref->>'product_id',
+                        v_ref->>'variant_id', v_ref->>'lookup_key',
+                        v_key
+                    );
                 END LOOP;
             END IF;
         END LOOP;
@@ -184,23 +204,18 @@ BEGIN
 
     -- ── Sync credit topups ──────────────────────────────────────────────
     IF p_config ? 'topups' AND jsonb_typeof(p_config->'topups') = 'object' THEN
-        -- Collect config topup keys for archiving absent topups
         SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(p_config->'topups') k;
 
-        -- Archive topups not in config
         IF v_config_keys IS NOT NULL THEN
             UPDATE public.billing_credit_topups SET status = 'archived', updated_at = now()
-            WHERE topup_key != ALL(v_config_keys)
-              AND status = 'active';
+            WHERE topup_key != ALL(v_config_keys) AND status = 'active';
         END IF;
 
-        -- Soft-deactivate all existing topup refs
         UPDATE public.billing_provider_refs SET active = false, updated_at = now()
         WHERE resource_type = 'topup';
 
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'topups')
         LOOP
-            -- Upsert topup (activate/reactivate)
             INSERT INTO public.billing_credit_topups (
                 topup_key, deposit_to, credits_per_unit,
                 min_amount_minor, max_amount_minor, tax_behavior
@@ -222,44 +237,15 @@ BEGIN
                 status = 'active',
                 updated_at = now();
 
-            -- Sync provider refs for this topup
             IF v_item ? 'providers' AND jsonb_typeof(v_item->'providers') = 'object' THEN
                 FOR v_provider, v_ref IN SELECT * FROM jsonb_each(v_item->'providers')
                 LOOP
-                    v_price_id := v_ref->>'price_id';
-                    v_product_id := v_ref->>'product_id';
-                    v_variant_id := v_ref->>'variant_id';
-                    v_lookup_key := v_ref->>'lookup_key';
-
-                    SELECT id INTO v_ref_id FROM public.billing_provider_refs
-                    WHERE provider = v_provider AND resource_type = 'topup'
-                    AND (
-                        (v_price_id IS NOT NULL AND price_id = v_price_id)
-                        OR (v_product_id IS NOT NULL AND product_id = v_product_id)
-                        OR (v_lookup_key IS NOT NULL AND lookup_key = v_lookup_key)
-                    )
-                    ORDER BY updated_at DESC
-                    LIMIT 1;
-
-                    IF v_ref_id IS NOT NULL THEN
-                        UPDATE public.billing_provider_refs SET
-                            price_id = COALESCE(v_price_id, price_id),
-                            product_id = COALESCE(v_product_id, product_id),
-                            variant_id = COALESCE(v_variant_id, variant_id),
-                            lookup_key = COALESCE(v_lookup_key, lookup_key),
-                            resource_key = v_key,
-                            active = true,
-                            updated_at = now()
-                        WHERE id = v_ref_id;
-                    ELSE
-                        INSERT INTO public.billing_provider_refs (
-                            provider, price_id, product_id, variant_id,
-                            lookup_key, resource_type, resource_key, active
-                        ) VALUES (
-                            v_provider, v_price_id, v_product_id, v_variant_id,
-                            v_lookup_key, 'topup', v_key, true
-                        );
-                    END IF;
+                    PERFORM public._upsert_billing_provider_ref(
+                        'topup', v_provider,
+                        v_ref->>'price_id', v_ref->>'product_id',
+                        v_ref->>'variant_id', v_ref->>'lookup_key',
+                        v_key
+                    );
                 END LOOP;
             END IF;
         END LOOP;

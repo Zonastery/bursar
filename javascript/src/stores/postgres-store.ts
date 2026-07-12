@@ -56,6 +56,9 @@ import { BucketRepository } from "../repositories/bucket.js";
 
 const ZERO = new Decimal(0);
 
+const DEFAULT_LEASE_TTL_SECONDS = 600;
+const DEFAULT_PAGE_SIZE = 50;
+
 function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
   if (value === null || value === undefined) return fallback;
   if (value instanceof Decimal) return value;
@@ -135,6 +138,8 @@ export class PostgresStore extends CreditStore {
   private databaseUrl: string;
   private poolCtor: PgPoolConstructor | null = null;
   private pool: PgPool | null = null;
+  private poolPromise: Promise<PgPool> | null = null;
+  private closed = false;
   private ownsPool: boolean;
 
   private _balanceRepo: BalanceRepository | null = null;
@@ -219,11 +224,15 @@ export class PostgresStore extends CreditStore {
   }
 
   private async getPool(): Promise<PgPool> {
-    if (!this.pool) {
-      const Pool = await this.getPoolCtor();
-      this.pool = new Pool({ connectionString: this.databaseUrl });
+    if (this.closed) throw new StoreError("Store has been closed");
+    if (!this.poolPromise) {
+      this.poolPromise = (async () => {
+        const Pool = await this.getPoolCtor();
+        this.pool = new Pool({ connectionString: this.databaseUrl });
+        return this.pool;
+      })();
     }
-    return this.pool;
+    return this.poolPromise;
   }
 
   private async getPoolCtor(): Promise<PgPoolConstructor> {
@@ -240,15 +249,22 @@ export class PostgresStore extends CreditStore {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     if (this.pool && this.ownsPool) {
       await this.pool.end();
       this.pool = null;
+      this.poolPromise = null;
     }
   }
 
+  private static readonly RPC_NAME_RE = /^[a-z_][a-z0-9_]*$/;
+
   private async callproc(name: string, params: unknown[]): Promise<unknown[]> {
+    if (!PostgresStore.RPC_NAME_RE.test(name)) {
+      throw new StoreError(`Invalid RPC name: ${name}`);
+    }
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
-    const rows = await this.query(`SELECT * FROM ${name}(${placeholders})`, params);
+    const rows = await this.query(`SELECT * FROM public.${name}(${placeholders})`, params);
     if (rows.length === 1) {
       const row = rows[0] as Record<string, unknown>;
       const keys = Object.keys(row);
@@ -336,21 +352,23 @@ export class PostgresStore extends CreditStore {
         ? featureWindowEnd(featurePeriodStart, featureLimit.period)
         : null;
 
-    const row = await this.deductionRepo.deductWithAllowance(
+    const row = await this.deductionRepo.deductWithAllowance({
       userId,
-      decParam(amount),
+      amount: decParam(amount),
       idempotencyKey,
-      decParam(minBalance),
+      minBalance: decParam(minBalance),
       model,
-      JSON.stringify(metadata ?? {}),
-      false,
-      periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
+      metadata: JSON.stringify(metadata ?? {}),
+      skipAllowance: false,
+      periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureLimit != null ? featureLimit.maxCalls : null,
-      featureLimit != null ? featureLimit.onExceed : null,
-      featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
-      featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
-    );
+      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
+      featurePeriodStart:
+        featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
+      featurePeriodEnd:
+        featurePeriodEnd != null ? featurePeriodEnd.toISOString().slice(0, 10) : null,
+    });
 
     if ("error" in row && row.error) {
       return {
@@ -404,7 +422,7 @@ export class PostgresStore extends CreditStore {
       billingMode,
       floor: decParam(floor),
       maxConcurrent: options?.maxConcurrent ?? null,
-      ttlSeconds: options?.ttlSeconds ?? 600,
+      ttlSeconds: options?.ttlSeconds ?? DEFAULT_LEASE_TTL_SECONDS,
       model: options?.model ?? null,
       overdraftFloor: overdraftFloor != null ? decParam(overdraftFloor) : null,
       metadata: JSON.stringify(options?.metadata ?? {}),
@@ -579,22 +597,23 @@ export class PostgresStore extends CreditStore {
   private async _loadActivePricing(): Promise<PricingConfigResult | null> {
     const row = await this.pricingRepo.getActivePricing();
     if (!row || !row.config) return null;
-    const result = row as unknown as PricingConfigResult;
-    const config = result.config as Record<string, unknown> | undefined;
+
+    const rawConfig = row.config as Record<string, unknown>;
 
     const rawFlatJobs: unknown =
-      config && typeof config.metering === "object" && config.metering !== null
-        ? (config.metering as Record<string, unknown>).flat_jobs
+      rawConfig && typeof rawConfig.metering === "object" && rawConfig.metering !== null
+        ? (rawConfig.metering as Record<string, unknown>).flat_jobs
         : undefined;
 
-    result.config = snakeToCamelKeys(result.config as Record<string, unknown>);
+    const result: PricingConfigResult = {
+      id: String(row.id ?? ""),
+      config: snakeToCamelKeys(rawConfig),
+      version: Number(row.version ?? 0),
+    };
 
     if (rawFlatJobs) {
-      const metering = (result.config as Record<string, unknown>).metering as Record<
-        string,
-        unknown
-      >;
-      metering.flatJobs = rawFlatJobs;
+      const metering = result.config.metering as Record<string, unknown> | undefined;
+      if (metering) metering.flatJobs = rawFlatJobs;
     }
 
     return result;
@@ -787,7 +806,7 @@ export class PostgresStore extends CreditStore {
     return {
       userId: String(row.user_id ?? userId),
       feature: String(row.feature ?? feature),
-      limited: Boolean(row.limited ?? true),
+      limited: Boolean(row.limited ?? false),
       limit: Number(row.limit ?? maxCalls),
       used: Number(row.used ?? 0),
       remaining: Number(row.remaining ?? Math.max(maxCalls - Number(row.used ?? 0), 0)),
@@ -895,7 +914,7 @@ export class PostgresStore extends CreditStore {
       options?.types ?? null,
       options?.fromDate?.toISOString() ?? null,
       options?.toDate?.toISOString() ?? null,
-      options?.limit ?? 50,
+      options?.limit ?? DEFAULT_PAGE_SIZE,
       options?.offset ?? 0,
     );
     const items = (rows ?? []).map((r) => ({
@@ -920,7 +939,7 @@ export class PostgresStore extends CreditStore {
       userId,
       options?.fromDate?.toISOString() ?? null,
       options?.toDate?.toISOString() ?? null,
-      options?.limit ?? 50,
+      options?.limit ?? DEFAULT_PAGE_SIZE,
       options?.offset ?? 0,
     );
     const items = (rows ?? []).map((r) => ({

@@ -60,6 +60,11 @@ from bursar.repositories.deduction import DeductionRepository
 from bursar.repositories.lease import LeaseRepository
 from bursar.repositories.plan import PlanRepository
 from bursar.repositories.pricing import PricingRepository
+from bursar.repositories.schemas import (
+    CreateLeaseParams,
+    DeductParams,
+    SettleLeaseParams,
+)
 from bursar.repositories.team import TeamRepository
 from bursar.sql import _get_sql_files
 
@@ -260,6 +265,15 @@ class PostgresStore(CreditStore):
     # ── Runtime operations ─────────────────────────────────────────────
 
     def get_balance(self, user_id: str) -> BalanceResult:
+        """Get the current balance for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            BalanceResult with user_id, balance, and lifetime_purchased.
+            Returns zero balance when the user has no balance record.
+        """
         result_dict = self._balance_repo.get_balance(user_id)
         if result_dict is None:
             return BalanceResult(user_id=user_id, balance=Decimal(0))
@@ -280,11 +294,28 @@ class PostgresStore(CreditStore):
         bucket: str | None = None,
         idempotency_key: str | None = None,
     ) -> AddCreditsResult:
+        """Add credits to a user's balance.
+
+        Args:
+            user_id: The user ID.
+            amount: The credit amount.
+            type: The transaction type (default "adjustment").
+            metadata: Optional structured metadata.
+            expires_at: Optional expiry datetime for the credits.
+            bucket: Target bucket key, or None for default.
+            idempotency_key: Idempotency key for replay protection.
+
+        Returns:
+            AddCreditsResult with transaction details.
+
+        Raises:
+            StoreError: If the RPC returns no result or an error.
+        """
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json") if metadata else {}
         if expires_at:
             meta["expires_at"] = expires_at.isoformat()
-        result_dict = self._balance_repo.add_credits(
+        result = self._balance_repo.add_credits(
             user_id,
             str(amount),
             type,
@@ -292,15 +323,17 @@ class PostgresStore(CreditStore):
             bucket,
             idempotency_key,
         )
-        if result_dict.error is not None:
-            raise StoreError(f"credits_add failed: {result_dict['error']}")
+        if result is None:
+            raise StoreError("credits_add returned no result")
+        if result.error is not None:
+            raise StoreError(f"credits_add failed: {result.error}")
         return AddCreditsResult(
-            transaction_id=str(getattr(result_dict, "id", "")),
-            user_id=str(getattr(result_dict, "user_id", user_id)),
-            amount=_dec(result_dict.amount, amount),
-            new_balance=_dec(result_dict.new_balance),
-            lifetime_purchased=_dec(result_dict.lifetime_purchased),
-            bucket=str(getattr(result_dict, "bucket", "default")),
+            transaction_id=str(getattr(result, "id", "")),
+            user_id=str(getattr(result, "user_id", user_id)),
+            amount=_dec(result.amount, amount),
+            new_balance=_dec(result.new_balance),
+            lifetime_purchased=_dec(result.lifetime_purchased),
+            bucket=str(getattr(result, "bucket", "default")),
         )
 
     def deduct_with_allowance(
@@ -342,23 +375,24 @@ class PostgresStore(CreditStore):
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
 
-        result_dict = self._deduction_repo.deduct_with_allowance(
-            user_id,
-            str(amount),
-            idempotency_key,
-            str(min_balance),
-            model,
-            json.dumps(meta),
-            skip_allowance,
-            period_start.isoformat() if period_start is not None else None,
-            feature,
-            feature_limit.max_calls if feature_limit is not None else None,
-            feature_limit.action if feature_limit is not None else None,
-            feature_period_start.isoformat() if feature_period_start is not None else None,
-            feature_period_end.isoformat() if feature_period_end is not None else None,
+        params = DeductParams(
+            user_id=user_id,
+            amount=str(amount),
+            idempotency_key=idempotency_key,
+            min_balance=str(min_balance),
+            model=model,
+            metadata=json.dumps(meta),
+            skip_allowance=skip_allowance,
+            period_start=period_start.isoformat() if period_start is not None else None,
+            feature=feature,
+            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
+            feature_action=feature_limit.action if feature_limit is not None else None,
+            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
+            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
         )
+        result = self._deduction_repo.deduct_with_allowance(params)
 
-        if not result_dict:
+        if result is None:
             return DeductionResult(
                 transaction_id="",
                 user_id=user_id,
@@ -366,25 +400,25 @@ class PostgresStore(CreditStore):
                 balance_after=Decimal(0),
                 error="no result",
             )
-        if result_dict.error is not None:
+        if result.error is not None:
             return DeductionResult(
                 transaction_id="",
                 user_id=user_id,
                 amount=Decimal(0),
-                balance_after=_dec(result_dict.balance_after),
-                error=str(result_dict.error),
+                balance_after=_dec(result.balance_after),
+                error=str(result.error),
             )
 
         return DeductionResult(
-            transaction_id=str(getattr(result_dict, "transaction_id", "")),
+            transaction_id=str(getattr(result, "transaction_id", "")),
             user_id=user_id,
-            amount=_dec(result_dict.amount),
-            allowance_consumed=_dec(result_dict.allowance_consumed),
-            balance_after=_dec(result_dict.balance_after),
-            idempotent=bool(getattr(result_dict, "idempotent", False)),
-            cap_warning=result_dict.cap_warning or None,
-            feature_limit_warning=result_dict.feature_limit_warning or None,
-            bucket_breakdown=_dec_map(result_dict.bucket_breakdown),
+            amount=_dec(result.amount),
+            allowance_consumed=_dec(result.allowance_consumed),
+            balance_after=_dec(result.balance_after),
+            idempotent=bool(getattr(result, "idempotent", False)),
+            cap_warning=result.cap_warning or None,
+            feature_limit_warning=result.feature_limit_warning or None,
+            bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -407,49 +441,73 @@ class PostgresStore(CreditStore):
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
     ) -> LeaseResult:
+        """Create a credit lease (reservation) for admission control.
+
+        Args:
+            user_id: The user ID.
+            amount: The worst-case amount to reserve.
+            operation_type: The operation type key.
+            billing_mode: Billing mode policy ("strict", "overdraft").
+            floor: Minimum balance floor during lease.
+            max_concurrent: Max concurrent leases for this user, or None.
+            ttl_seconds: Time-to-live for the lease in seconds.
+            model: The AI model identifier, or None.
+            overdraft_floor: Overdraft floor, or None.
+            metadata: Optional structured metadata.
+            period_start: Calendar period start date, or None.
+            feature: Feature key for feature limit enforcement, or None.
+            feature_limit: Feature limit configuration, or None.
+            feature_period_start: Feature limit period start, or None.
+
+        Returns:
+            LeaseResult with lease_id and reservation details.
+
+        Raises:
+            StoreError: If the RPC returns no result (admission denied).
+        """
         amount = _dec(amount)
         floor = _dec(floor)
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
 
-        params = {
-            "user_id": user_id,
-            "amount": str(amount),
-            "operation_type": operation_type,
-            "billing_mode": billing_mode,
-            "floor": str(floor),
-            "max_concurrent": max_concurrent,
-            "ttl_seconds": ttl_seconds,
-            "model": model,
-            "overdraft_floor": str(overdraft_floor) if overdraft_floor is not None else None,
-            "metadata": json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
-            "period_start": period_start.isoformat() if period_start is not None else None,
-            "feature": feature,
-            "feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
-            "feature_action": feature_limit.action if feature_limit is not None else None,
-            "feature_period_start": feature_period_start.isoformat() if feature_period_start is not None else None,
-            "feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
-        }
+        params = CreateLeaseParams(
+            user_id=user_id,
+            amount=str(amount),
+            operation_type=operation_type,
+            billing_mode=billing_mode,
+            floor=str(floor),
+            max_concurrent=str(max_concurrent) if max_concurrent is not None else None,
+            ttl_seconds=ttl_seconds,
+            model=model,
+            overdraft_floor=str(overdraft_floor) if overdraft_floor is not None else None,
+            metadata=json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
+            period_start=period_start.isoformat() if period_start is not None else None,
+            feature=feature,
+            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
+            feature_action=feature_limit.action if feature_limit is not None else None,
+            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
+            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
+        )
         result = self._lease_repo.create_lease(params)
 
-        if not result:
+        if result is None:
             return LeaseResult(lease_id="", user_id=user_id, error="no result")
-        if "error" in result:
+        if result.error is not None:
             return LeaseResult(
                 lease_id="",
                 user_id=user_id,
-                available=_dec(result.get("available")),
-                reserved_total=_dec(result.get("reserved")),
+                available=_dec(result.available),
+                reserved_total=_dec(result.reserved),
                 billing_mode=billing_mode,  # type: ignore[arg-type]
-                error=str(result["error"]),
+                error=str(result.error),
             )
         return LeaseResult(
-            lease_id=str(result.get("lease_id", "")),
-            user_id=str(result.get("user_id", user_id)),
-            amount=_dec(result.get("amount")),
-            available=_dec(result.get("available")),
-            reserved_total=_dec(result.get("reserved")),
-            billing_mode=str(result.get("billing_mode", billing_mode)),  # type: ignore[arg-type]
-            expires_at=str(result.get("expires_at", "")),
+            lease_id=str(getattr(result, "lease_id", "")),
+            user_id=user_id,
+            amount=_dec(result.amount),
+            available=_dec(result.available),
+            reserved_total=_dec(result.reserved),
+            billing_mode=str(getattr(result, "billing_mode", billing_mode)),  # type: ignore[arg-type]
+            expires_at=str(getattr(result, "expires_at", "")),
         )
 
     def settle_lease(
@@ -468,83 +526,135 @@ class PostgresStore(CreditStore):
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
     ) -> DeductionResult:
+        """Settle a lease by deducting the actual amount used.
+
+        Args:
+            user_id: The user ID.
+            lease_id: The lease ID to settle.
+            amount: The actual amount to charge.
+            idempotency_key: Idempotency key for replay protection.
+            min_balance: Minimum balance floor after deduction.
+            model: The AI model identifier, or None.
+            metadata: Optional structured metadata.
+            skip_allowance: If True, skip plan allowance checks.
+            period_start: Calendar period start date, or None.
+            feature: Feature key for feature limit enforcement, or None.
+            feature_limit: Feature limit configuration, or None.
+            feature_period_start: Feature limit period start, or None.
+
+        Returns:
+            DeductionResult with transaction details.
+        """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
         feature_period_end = _feature_period_end(feature_limit, feature_period_start)
 
-        params = {
-            "user_id": user_id,
-            "lease_id": lease_id,
-            "amount": str(amount),
-            "idempotency_key": idempotency_key,
-            "min_balance": str(min_balance),
-            "model": model,
-            "metadata": json.dumps(meta),
-            "skip_allowance": skip_allowance,
-            "period_start": period_start.isoformat() if period_start is not None else None,
-            "feature": feature,
-            "feature_max_calls": feature_limit.max_calls if feature_limit is not None else None,
-            "feature_action": feature_limit.action if feature_limit is not None else None,
-            "feature_period_start": feature_period_start.isoformat() if feature_period_start is not None else None,
-            "feature_period_end": feature_period_end.isoformat() if feature_period_end is not None else None,
-        }
+        params = SettleLeaseParams(
+            user_id=user_id,
+            lease_id=lease_id,
+            amount=str(amount),
+            idempotency_key=idempotency_key,
+            min_balance=str(min_balance),
+            model=model,
+            metadata=json.dumps(meta),
+            skip_allowance=skip_allowance,
+            period_start=period_start.isoformat() if period_start is not None else None,
+            feature=feature,
+            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
+            feature_action=feature_limit.action if feature_limit is not None else None,
+            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
+            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
+        )
         result = self._lease_repo.settle_lease(params)
 
-        if not result:
+        if result is None:
             return DeductionResult(
                 transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
             )
-        if "error" in result:
+        if result.error is not None:
             return DeductionResult(
                 transaction_id="",
                 user_id=user_id,
                 amount=Decimal(0),
-                balance_after=_dec(result.get("balance_after")),
-                error=str(result["error"]),
+                balance_after=_dec(result.balance_after),
+                error=str(result.error),
             )
         return DeductionResult(
-            transaction_id=str(result.get("transaction_id", "")),
+            transaction_id=str(getattr(result, "transaction_id", "")),
             user_id=user_id,
-            amount=_dec(result.get("amount")),
-            allowance_consumed=_dec(result.get("allowance_consumed")),
-            balance_after=_dec(result.get("balance_after")),
-            idempotent=bool(result.get("idempotent", False)),
-            cap_warning=result.get("cap_warning") or None,
-            feature_limit_warning=result.get("feature_limit_warning") or None,
-            bucket_breakdown=_dec_map(result.get("bucket_breakdown")),
+            amount=_dec(result.amount),
+            allowance_consumed=_dec(result.allowance_consumed),
+            balance_after=_dec(result.balance_after),
+            idempotent=bool(getattr(result, "idempotent", False)),
+            cap_warning=result.cap_warning or None,
+            feature_limit_warning=result.feature_limit_warning or None,
+            bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
+        """Release a lease without deducting credits (cancels the reservation).
+
+        Args:
+            user_id: The user ID.
+            lease_id: The lease ID to release.
+
+        Returns:
+            ReleaseResult indicating whether the release was successful.
+        """
         result = self._lease_repo.release_lease(user_id, lease_id)
+        if result is None:
+            return ReleaseResult(lease_id=lease_id, user_id=user_id, released=False)
         return ReleaseResult(
             lease_id=lease_id,
             user_id=user_id,
-            released=bool(result.get("released", False)),
-            reason=result.get("reason"),
+            released=bool(getattr(result, "released", False)),
+            reason=result.reason,
         )
 
     def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        """Extend the TTL of an existing lease.
+
+        Args:
+            user_id: The user ID.
+            lease_id: The lease ID to renew.
+            ttl_seconds: The new TTL in seconds from now.
+
+        Returns:
+            LeaseResult with updated expiry information.
+        """
         result = self._lease_repo.renew_lease(user_id, lease_id, ttl_seconds)
-        if "error" in result:
-            return LeaseResult(lease_id=lease_id, user_id=user_id, error=str(result["error"]))
+        if result is None:
+            return LeaseResult(lease_id=lease_id, user_id=user_id, error="no result")
+        if result.error is not None:
+            return LeaseResult(lease_id=lease_id, user_id=user_id, error=str(result.error))
         return LeaseResult(
-            lease_id=str(result.get("lease_id", lease_id)),
+            lease_id=str(getattr(result, "lease_id", lease_id)),
             user_id=user_id,
-            amount=_dec(result.get("amount")),
-            available=_dec(result.get("available")),
-            reserved_total=_dec(result.get("reserved")),
-            billing_mode=str(result.get("billing_mode", "strict")),  # type: ignore[arg-type]
-            expires_at=str(result.get("expires_at", "")),
+            amount=_dec(result.amount),
+            available=_dec(result.available),
+            reserved_total=_dec(result.reserved),
+            billing_mode=str(getattr(result, "billing_mode", "strict")),  # type: ignore[arg-type]
+            expires_at=str(getattr(result, "expires_at", "")),
         )
 
     def get_available(self, user_id: str) -> AvailableResult:
+        """Get the available (unreserved) credit balance for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            AvailableResult with balance, reserved, and available amounts.
+        """
         result = self._balance_repo.get_available(user_id)
+        if result is None:
+            return AvailableResult(user_id=user_id, balance=Decimal(0), reserved=Decimal(0), available=Decimal(0))
         return AvailableResult(
             user_id=user_id,
-            balance=_dec(result.get("balance")),
-            reserved=_dec(result.get("reserved")),
-            available=_dec(result.get("available")),
+            balance=_dec(result.balance),
+            reserved=_dec(result.reserved),
+            available=_dec(result.available),
         )
 
     # ── Pricing configuration ──────────────────────────────────────────
@@ -563,51 +673,104 @@ class PostgresStore(CreditStore):
         config: dict[str, Any],
         label: str | None = None,
     ) -> str:
-        result_dict = self._pricing_repo.set_active_pricing(json.dumps(config, cls=DecimalEncoder), label)
+        """Set a new active pricing configuration.
+
+        Args:
+            config: The pricing configuration dict.
+            label: Optional human-readable label.
+
+        Returns:
+            The ID of the newly activated pricing config.
+
+        Raises:
+            StoreError: If the RPC returns no result.
+        """
+        result = self._pricing_repo.set_active_pricing(json.dumps(config, cls=DecimalEncoder), label)
+        if result is None:
+            raise StoreError("set_active_pricing returned no result")
         self.invalidate_pricing_cache()
-        return str(getattr(result_dict, "id", ""))
+        return str(getattr(result, "id", ""))
 
     def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
+        """Get all pricing configuration versions.
+
+        Returns:
+            List of PricingConfigHistoryItem (may be empty).
+        """
         rows = self._pricing_repo.get_pricing_history()
-        return [PricingConfigHistoryItem.model_validate(r) for r in rows]
+        return [
+            PricingConfigHistoryItem(
+                id=str(r.id),
+                version=r.version,
+                label=r.label,
+                active=r.active,
+                created_at=str(r.created_at),
+            )
+            for r in rows
+        ]
 
     def get_pricing_config(self, version: int) -> PricingConfigResult | None:
+        """Get a specific pricing configuration by version number.
+
+        Args:
+            version: The version number to retrieve.
+
+        Returns:
+            PricingConfigResult if found, None otherwise.
+        """
         result = self._pricing_repo.get_pricing_config(version)
         if result is None:
             return None
         return PricingConfigResult.model_validate(result.model_dump())
 
     def activate_pricing(self, version: int) -> str:
-        result_dict = self._pricing_repo.activate_pricing(version)
-        if not result_dict:
+        """Activate a specific pricing configuration version.
+
+        Args:
+            version: The version number to activate.
+
+        Returns:
+            The ID of the activated config.
+
+        Raises:
+            StoreError: If the version is not found.
+        """
+        result = self._pricing_repo.activate_pricing(version)
+        if result is None:
             msg = f"Version {version} not found"
             raise StoreError(msg)
         self.invalidate_pricing_cache()
-        return str(getattr(result_dict, "id", ""))
+        return str(getattr(result, "id", ""))
 
     # ── Plan management ────────────────────────────────────────────────
 
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
-        result_dict = self._plan_repo.get_user_plan(user_id)
-        if result_dict is None:
+        """Get the current plan for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            GetUserPlanResult with plan details or defaults if no plan assigned.
+        """
+        result = self._plan_repo.get_user_plan(user_id)
+        if result is None:
             return GetUserPlanResult(user_id=user_id)
         return GetUserPlanResult(
-            user_id=str(getattr(result_dict, "user_id", user_id)),
-            plan_id=result_dict.plan_id or None,
-            plan_label=result_dict.plan_label or None,
-            allowance_amount=_dec(result_dict.allowance_amount)
-            if result_dict.allowance_amount is not None
-            else _dec(0),
-            allowance_period=str(result_dict.allowance_period or "calendar_month"),  # type: ignore[arg-type]
-            entitlements={k: Entitlement.model_validate(v) for k, v in (result_dict.entitlements or {}).items()},
-            billing_mode=str(result_dict.billing_mode or "strict"),  # type: ignore[arg-type]
-            per_operation={k: OperationPolicy.model_validate(v) for k, v in (result_dict.per_operation or {}).items()},
-            max_concurrent=result_dict.max_concurrent,
-            overdraft_floor=_dec(result_dict.overdraft_floor) if result_dict.overdraft_floor is not None else None,
+            user_id=str(getattr(result, "user_id", user_id)),
+            plan_id=result.plan_id or None,
+            plan_label=result.plan_label or None,
+            allowance_amount=_dec(result.allowance_amount) if result.allowance_amount is not None else _dec(0),
+            allowance_period=str(result.allowance_period or "calendar_month"),  # type: ignore[arg-type]
+            entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
+            billing_mode=str(result.billing_mode or "strict"),  # type: ignore[arg-type]
+            per_operation={k: OperationPolicy.model_validate(v) for k, v in (result.per_operation or {}).items()},
+            max_concurrent=result.max_concurrent,
+            overdraft_floor=_dec(result.overdraft_floor) if result.overdraft_floor is not None else None,
             plan_assigned_at=(
-                datetime.fromisoformat(str(result_dict.plan_assigned_at)) if result_dict.plan_assigned_at else None
+                datetime.fromisoformat(str(result.plan_assigned_at)) if result.plan_assigned_at else None
             ),
-            config_version=result_dict.config_version or None,
+            config_version=result.config_version or None,
         )
 
     def set_user_plan(
@@ -616,57 +779,110 @@ class PostgresStore(CreditStore):
         plan_id: str,
         plan_assigned_at: datetime | None = None,
     ) -> SetUserPlanResult:
-        result_dict = self._plan_repo.set_user_plan(
+        """Assign a plan to a user.
+
+        Args:
+            user_id: The user ID.
+            plan_id: The plan identifier.
+            plan_assigned_at: The assignment datetime, or None for now.
+
+        Returns:
+            SetUserPlanResult with assignment details.
+
+        Raises:
+            StoreError: If the RPC returns no result.
+        """
+        result = self._plan_repo.set_user_plan(
             user_id,
             plan_id,
             plan_assigned_at.isoformat() if plan_assigned_at else None,
         )
+        if result is None:
+            raise StoreError("set_user_plan returned no result")
         return SetUserPlanResult(
-            user_id=str(getattr(result_dict, "user_id", user_id)),
-            plan_id=str(getattr(result_dict, "plan_id", plan_id)),
-            plan_assigned_at=str(result_dict.plan_assigned_at) if result_dict.plan_assigned_at else None,
+            user_id=str(getattr(result, "user_id", user_id)),
+            plan_id=str(getattr(result, "plan_id", plan_id)),
+            plan_assigned_at=str(result.plan_assigned_at) if result.plan_assigned_at else None,
         )
 
     def unset_user_plan(self, user_id: str) -> dict:
-        result_dict = self._plan_repo.unset_user_plan(user_id)
-        return {"user_id": str(getattr(result_dict, "user_id", user_id))}
+        """Remove the plan assignment from a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            Dict with the user_id.
+        """
+        result = self._plan_repo.unset_user_plan(user_id)
+        if result is None:
+            return {"user_id": user_id}
+        return {"user_id": str(getattr(result, "user_id", user_id))}
 
     def migrate_plan_users(
         self,
         plan_key: str,
         target_config_version: int | None = None,
     ) -> MigratePlanUsersResult:
+        """Migrate all users on a plan key to a new config version.
+
+        Args:
+            plan_key: The plan key to migrate users from.
+            target_config_version: The target config version, or None.
+
+        Returns:
+            MigratePlanUsersResult with migration counts.
+
+        Raises:
+            StoreError: If the RPC fails or returns no data.
+        """
         try:
-            result_dict = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
+            result = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
         except psycopg2.Error as e:
             raise StoreError(f"migrate_plan_users failed: {e}") from e
 
-        if not result_dict:
+        if result is None:
             raise StoreError("migrate_plan_users returned no data")
-        if result_dict.error is not None:
-            raise StoreError(result_dict.error)
+        if result.error is not None:
+            raise StoreError(result.error)
         return MigratePlanUsersResult(
-            plan_key=str(getattr(result_dict, "plan_key", plan_key)),
-            target_plan_id=str(getattr(result_dict, "target_plan_id", "")),
-            target_config_version=int(getattr(result_dict, "target_config_version", 0)),
-            migrated_count=int(getattr(result_dict, "migrated_count", 0)),
+            plan_key=str(getattr(result, "plan_key", plan_key)),
+            target_plan_id=str(getattr(result, "target_plan_id", "")),
+            target_config_version=int(getattr(result, "target_config_version", 0)),
+            migrated_count=int(getattr(result, "migrated_count", 0)),
         )
 
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
-        result_dict = self._plan_repo.check_allowance(
+        """Check the remaining plan allowance for a user.
+
+        Args:
+            user_id: The user ID.
+            period_start: The period start date, or None for current period.
+
+        Returns:
+            AllowanceResult with remaining allowance or zero defaults.
+        """
+        result = self._plan_repo.check_allowance(
             user_id,
             period_start.isoformat() if period_start is not None else None,
         )
-        if result_dict is None:
+        if result is None:
             return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
         return AllowanceResult(
-            plan_id=str(getattr(result_dict, "plan_id", "")),
-            allowance_remaining=_dec(result_dict.allowance_remaining),
-            period_start=str(getattr(result_dict, "period_start", "")),
-            period_end=str(getattr(result_dict, "period_end", "")),
+            plan_id=str(getattr(result, "plan_id", "")),
+            allowance_remaining=_dec(result.allowance_remaining),
+            period_start=str(getattr(result, "period_start", "")),
+            period_end=str(getattr(result, "period_end", "")),
         )
 
     def increment_usage_window(self, user_id: str, plan_id: str, amount: Decimal) -> None:
+        """Increment the usage counter for a user's plan window.
+
+        Args:
+            user_id: The user ID.
+            plan_id: The plan ID.
+            amount: The amount to increment.
+        """
         self._plan_repo.increment_usage_window(user_id, plan_id, str(_dec(amount)))
 
     def check_feature_limit(
@@ -678,27 +894,27 @@ class PostgresStore(CreditStore):
         period_end: date,
     ) -> FeatureLimitResult:
         """Call the advisory ``check_feature_limit`` RPC (mirrors ``check_spend_cap``)."""
-        result_dict = self._plan_repo.check_feature_limit(
+        result = self._plan_repo.check_feature_limit(
             user_id,
             feature,
             max_calls,
             period_start.isoformat(),
             period_end.isoformat(),
         )
-        if result_dict is None:
+        if result is None:
             return FeatureLimitResult(user_id=user_id, feature=feature, limited=False)
         return FeatureLimitResult(
             user_id=user_id,
             feature=feature,
-            limited=bool(getattr(result_dict, "limited", False)),
-            limit=int(result_dict.limit or 0),
-            used=int(result_dict.used or 0),
-            remaining=int(result_dict.remaining or 0),
-            period_start=str(getattr(result_dict, "period_start", "")),
-            period_end=str(getattr(result_dict, "period_end", "")),
+            limited=bool(getattr(result, "limited", False)),
+            limit=int(result.limit or 0),
+            used=int(result.used or 0),
+            remaining=int(result.remaining or 0),
+            period_start=str(getattr(result, "period_start", "")),
+            period_end=str(getattr(result, "period_end", "")),
             action=cast(
                 "Literal['deny', 'warn', 'notify'] | None",
-                str(result_dict.action) if "action" in result_dict else None,
+                str(result.action) if result.action is not None else None,
             ),
         )
 
@@ -710,16 +926,26 @@ class PostgresStore(CreditStore):
         model: str | None = None,
         amount: Decimal | None = None,
     ) -> CapCheckResult:
-        result_dict = self._plan_repo.check_spend_cap(user_id, model, str(_dec(amount)))
-        if result_dict is None:
+        """Check if a proposed spend would exceed a user's spend cap.
+
+        Args:
+            user_id: The user ID.
+            model: The model being used, or None.
+            amount: The proposed spend amount, or None.
+
+        Returns:
+            CapCheckResult indicating whether the spend is capped.
+        """
+        result = self._plan_repo.check_spend_cap(user_id, model, str(_dec(amount)))
+        if result is None:
             return CapCheckResult(capped=False, current_spend=Decimal(0), cap_limit=Decimal(0), action=None)
-        action = result_dict.action
+        action = result.action
         return CapCheckResult(
-            capped=bool(getattr(result_dict, "capped", False)),
-            current_spend=_dec(result_dict.current_spend),
-            cap_limit=_dec(result_dict.cap_limit),
+            capped=bool(getattr(result, "capped", False)),
+            current_spend=_dec(result.current_spend),
+            cap_limit=_dec(result.cap_limit),
             action=action if action in ("deny", "warn", "notify") else None,
-            model=str(result_dict.model) if result_dict.model else None,
+            model=str(result.model) if result.model else None,
         )
 
     # ── Refunds ─────────────────────────────────────────────────────────
@@ -731,98 +957,171 @@ class PostgresStore(CreditStore):
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:
-        result_dict = self._deduction_repo.refund_credits(
+        """Refund a previous credit transaction.
+
+        Args:
+            transaction_id: The original transaction ID to refund.
+            amount: The amount to refund, or None for full refund.
+            reason: The refund reason, or None.
+            metadata: Optional structured metadata.
+
+        Returns:
+            RefundResult with refund transaction details.
+        """
+        result = self._deduction_repo.refund_credits(
             transaction_id,
             str(_dec(amount)) if amount is not None else None,
             reason,
             json.dumps(metadata.model_dump(mode="json") if metadata else {}),
         )
-        if result_dict.error is not None:
+        if result is None:
             return RefundResult(
                 refund_transaction_id="",
                 original_transaction_id=transaction_id,
-                user_id=str(getattr(result_dict, "user_id", "")),
+                user_id="",
                 amount=Decimal(0),
-                new_balance=_dec(result_dict.new_balance),
-                error=str(result_dict.error),
+                new_balance=Decimal(0),
+                error="no result",
+            )
+        if result.error is not None:
+            return RefundResult(
+                refund_transaction_id="",
+                original_transaction_id=transaction_id,
+                user_id=str(getattr(result, "user_id", "")),
+                amount=Decimal(0),
+                new_balance=_dec(result.new_balance),
+                error=str(result.error),
             )
         return RefundResult(
-            refund_transaction_id=str(getattr(result_dict, "refund_transaction_id", "")),
+            refund_transaction_id=str(getattr(result, "refund_transaction_id", "")),
             original_transaction_id=transaction_id,
-            user_id=str(getattr(result_dict, "user_id", "")),
-            amount=_dec(result_dict.amount),
-            new_balance=_dec(result_dict.new_balance),
-            bucket_breakdown=_dec_map(result_dict.bucket_breakdown),
+            user_id=str(getattr(result, "user_id", "")),
+            amount=_dec(result.amount),
+            new_balance=_dec(result.new_balance),
+            bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
     def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
-        result_dict = self._deduction_repo.revoke_credits_by_tx_type(user_id, tx_type)
+        """Revoke credits for all transactions of a given type for a user.
+
+        Args:
+            user_id: The user ID.
+            tx_type: The transaction type to revoke.
+
+        Returns:
+            Dict with user_id, amount, new_balance, and bucket.
+        """
+        result = self._deduction_repo.revoke_credits_by_tx_type(user_id, tx_type)
+        if result is None:
+            return {"user_id": user_id, "amount": 0, "new_balance": "", "bucket": None}
         return {
-            "user_id": str(getattr(result_dict, "user_id", user_id)),
-            "amount": getattr(result_dict, "amount", 0),
-            "new_balance": getattr(result_dict, "new_balance", ""),
-            "bucket": result_dict.bucket,
+            "user_id": str(getattr(result, "user_id", user_id)),
+            "amount": getattr(result, "amount", 0),
+            "new_balance": getattr(result, "new_balance", ""),
+            "bucket": result.bucket,
         }
 
     # ── Usage analytics ─────────────────────────────────────────────────
 
     def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
+        """Get total spend grouped by user within a date range.
+
+        Args:
+            start: The range start datetime.
+            end: The range end datetime.
+
+        Returns:
+            List of SpendByUserRow (may be empty).
+        """
         rows = self._analytics_repo.spend_by_user(start.isoformat(), end.isoformat())
         return [
             SpendByUserRow(
-                user_id=str(r.get("user_id", "")),
-                total_spend=_dec(r.get("total_spend")),
-                transaction_count=int(r.get("transaction_count", 0)),
+                user_id=str(r.user_id),
+                total_spend=_dec(r.total_spend),
+                transaction_count=int(r.transaction_count),
             )
-            for r in (rows or [])
-            if isinstance(r, dict)
+            for r in rows
         ]
 
     def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
+        """Get total spend grouped by model within a date range.
+
+        Args:
+            start: The range start datetime.
+            end: The range end datetime.
+
+        Returns:
+            List of SpendByModelRow (may be empty).
+        """
         rows = self._analytics_repo.spend_by_model(start.isoformat(), end.isoformat())
         return [
             SpendByModelRow(
-                model=str(r.get("model", "")),
-                total_spend=_dec(r.get("total_spend")),
-                transaction_count=int(r.get("transaction_count", 0)),
+                model=str(r.model),
+                total_spend=_dec(r.total_spend),
+                transaction_count=int(r.transaction_count),
             )
-            for r in (rows or [])
-            if isinstance(r, dict)
+            for r in rows
         ]
 
     def top_users(self, limit: int, start: datetime, end: datetime) -> list[TopUserRow]:
+        """Get the top users by spend within a date range.
+
+        Args:
+            limit: Maximum number of users to return.
+            start: The range start datetime.
+            end: The range end datetime.
+
+        Returns:
+            List of TopUserRow (may be empty).
+        """
         rows = self._analytics_repo.top_users(limit, start.isoformat(), end.isoformat())
         return [
             TopUserRow(
-                user_id=str(r.get("user_id", "")),
-                total_spend=_dec(r.get("total_spend")),
+                user_id=str(r.user_id),
+                total_spend=_dec(r.total_spend),
             )
-            for r in (rows or [])
-            if isinstance(r, dict)
+            for r in rows
         ]
 
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
+        """Get total spend broken down by day within a date range.
+
+        Args:
+            start: The range start datetime.
+            end: The range end datetime.
+
+        Returns:
+            List of DailySpendRow (may be empty).
+        """
         rows = self._analytics_repo.daily_spend(start.isoformat(), end.isoformat())
         return [
             DailySpendRow(
-                date=str(r.get("date", "")),
-                total_spend=_dec(r.get("total_spend")),
-                transaction_count=int(r.get("transaction_count", 0)),
+                date=str(r.date),
+                total_spend=_dec(r.total_spend),
+                transaction_count=int(r.transaction_count),
             )
-            for r in (rows or [])
-            if isinstance(r, dict)
+            for r in rows
         ]
 
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
+        """Get aggregate usage statistics for a date range.
+
+        Args:
+            start: The range start datetime.
+            end: The range end datetime.
+
+        Returns:
+            AggregateStatsRow with summary statistics.
+        """
         result = self._analytics_repo.aggregate_stats(start.isoformat(), end.isoformat())
-        if not result:
+        if result is None:
             return AggregateStatsRow()
         return AggregateStatsRow(
-            total_credits_consumed=_dec(result.get("total_credits_consumed")),
-            active_users=int(result.get("active_users", 0)),
-            avg_daily_spend=_dec(result.get("avg_daily_spend")),
-            top_model=str(result.get("top_model", "")),
-            top_user=str(result.get("top_user", "")),
+            total_credits_consumed=_dec(result.total_credits_consumed),
+            active_users=int(result.active_users),
+            avg_daily_spend=_dec(result.avg_daily_spend),
+            top_model=str(result.top_model),
+            top_user=str(result.top_user),
         )
 
     # ── Transaction listing ─────────────────────────────────────────────────
@@ -836,59 +1135,84 @@ class PostgresStore(CreditStore):
         limit: int = 50,
         offset: int = 0,
     ) -> list[TransactionRow]:
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM public.list_user_transactions(%s, %s, %s, %s, %s, %s)",
-                    [
-                        user_id,
-                        types,
-                        from_date.isoformat() if from_date else None,
-                        to_date.isoformat() if to_date else None,
-                        limit,
-                        offset,
-                    ],
-                )
-                rows = cur.fetchall()
-            conn.commit()
-        finally:
-            self._pool.putconn(conn)
+        """List credit transactions for a user with optional filters.
+
+        Args:
+            user_id: The user ID.
+            types: Filter by transaction types, or None for all.
+            from_date: Start of date range, or None.
+            to_date: End of date range, or None.
+            limit: Maximum number of rows to return (default 50).
+            offset: Number of rows to skip (default 0).
+
+        Returns:
+            List of TransactionRow (may be empty).
+        """
+        rows = self._analytics_repo.list_user_transactions(
+            user_id,
+            types,
+            from_date.isoformat() if from_date else None,
+            to_date.isoformat() if to_date else None,
+            limit,
+            offset,
+        )
         return [
             TransactionRow(
-                id=str(r["id"]),
-                user_id=str(r["user_id"]),
-                amount=_dec(r["amount"]),
-                type=str(r["type"]),
-                reference_type=str(r["reference_type"]) if r.get("reference_type") else None,
-                reference_id=str(r["reference_id"]) if r.get("reference_id") else None,
-                metadata=r.get("metadata"),
-                created_at=str(r["created_at"]),
-                total_count=int(r["total_count"]),
+                id=str(r.id),
+                user_id=str(r.user_id),
+                amount=_dec(r.amount),
+                type=str(r.type),
+                reference_type=r.reference_type,
+                reference_id=r.reference_id,
+                metadata=r.metadata,
+                created_at=str(r.created_at),
+                total_count=int(r.total_count),
             )
-            for r in (rows or [])
+            for r in rows
         ]
 
     # ── Team/shared balance pools ─────────────────────────────────────────
 
     def create_team(self, name: str, initial_balance: Decimal = Decimal(0)) -> CreateTeamResult:
-        result_dict = self._team_repo.create_team(name, str(_dec(initial_balance)))
+        """Create a new team with an initial credit balance.
+
+        Args:
+            name: The team name.
+            initial_balance: The initial credit balance (default 0).
+
+        Returns:
+            CreateTeamResult with team_id and name.
+
+        Raises:
+            StoreError: If the RPC returns no result.
+        """
+        result = self._team_repo.create_team(name, str(_dec(initial_balance)))
+        if result is None:
+            raise StoreError("create_team returned no result")
         return CreateTeamResult(
-            team_id=str(getattr(result_dict, "team_id", "")),
-            name=str(getattr(result_dict, "name", name)),
+            team_id=str(getattr(result, "team_id", "")),
+            name=str(getattr(result, "name", name)),
         )
 
     def get_team_balance(self, team_id: str) -> TeamBalanceResult:
-        result_dict = self._team_repo.get_team_balance(team_id)
-        if result_dict is None:
+        """Get the credit balance and member count for a team.
+
+        Args:
+            team_id: The team ID.
+
+        Returns:
+            TeamBalanceResult with balance details or defaults if team not found.
+        """
+        result = self._team_repo.get_team_balance(team_id)
+        if result is None:
             return TeamBalanceResult(team_id=team_id)
-        if result_dict.error is not None:
+        if result.error is not None:
             return TeamBalanceResult(team_id=team_id)
         return TeamBalanceResult(
-            team_id=str(getattr(result_dict, "team_id", team_id)),
-            name=str(getattr(result_dict, "name", "")),
-            balance=_dec(result_dict.balance),
-            member_count=int(getattr(result_dict, "member_count", 0)),
+            team_id=str(getattr(result, "team_id", team_id)),
+            name=str(getattr(result, "name", "")),
+            balance=_dec(result.balance),
+            member_count=int(getattr(result, "member_count", 0)),
         )
 
     def add_team_member(
@@ -898,29 +1222,52 @@ class PostgresStore(CreditStore):
         role: str = "member",
         spend_cap: Decimal | None = None,
     ) -> AddTeamMemberResult:
-        result_dict = self._team_repo.add_team_member(
+        """Add a member to a team with an optional spend cap.
+
+        Args:
+            team_id: The team ID.
+            user_id: The user ID to add.
+            role: The member role (default "member").
+            spend_cap: The spend cap, or None for unlimited.
+
+        Returns:
+            AddTeamMemberResult with team_id, user_id, and role.
+
+        Raises:
+            StoreError: If the RPC returns no result.
+        """
+        result = self._team_repo.add_team_member(
             team_id,
             user_id,
             role,
             str(_dec(spend_cap)) if spend_cap is not None else None,
         )
+        if result is None:
+            raise StoreError("add_team_member returned no result")
         return AddTeamMemberResult(
-            team_id=str(getattr(result_dict, "team_id", team_id)),
-            user_id=str(getattr(result_dict, "user_id", user_id)),
-            role=str(getattr(result_dict, "role", role)),
+            team_id=str(getattr(result, "team_id", team_id)),
+            user_id=str(getattr(result, "user_id", user_id)),
+            role=str(getattr(result, "role", role)),
         )
 
     def get_team_members(self, team_id: str) -> list[TeamMember]:
+        """Get all members of a team.
+
+        Args:
+            team_id: The team ID.
+
+        Returns:
+            List of TeamMember (may be empty).
+        """
         rows = self._team_repo.get_team_members(team_id)
         return [
             TeamMember(
-                user_id=str(r.get("user_id", "")),
-                role=str(r.get("role", "member")),
-                spend_cap=_dec(r["spend_cap"]) if r.get("spend_cap") is not None else None,
-                total_spent=_dec(r.get("total_spent")),
+                user_id=str(r.user_id),
+                role=str(r.role),
+                spend_cap=_dec(r.spend_cap) if r.spend_cap is not None else None,
+                total_spent=_dec(r.total_spent),
             )
-            for r in (rows or [])
-            if isinstance(r, dict)
+            for r in rows
         ]
 
     def deduct_team(
@@ -931,45 +1278,83 @@ class PostgresStore(CreditStore):
         metadata: CreditMetadata | None = None,
         idempotency_key: str | None = None,
     ) -> TeamDeductionResult:
+        """Deduct credits from a team's balance on behalf of a member.
+
+        Args:
+            team_id: The team ID.
+            user_id: The user ID making the deduction.
+            amount: The amount to deduct.
+            metadata: Optional structured metadata.
+            idempotency_key: Idempotency key threaded through metadata.
+
+        Returns:
+            TeamDeductionResult with transaction details.
+
+        Raises:
+            StoreError: If the RPC returns no result.
+        """
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
         # Thread the idempotency key through metadata (the RPC reads it from
         # metadata->>'idempotency_key') for idempotent replay (H12).
         if idempotency_key:
             meta["idempotency_key"] = idempotency_key
-        result_dict = self._team_repo.deduct_team(team_id, user_id, str(amount), json.dumps(meta))
-        if result_dict.error is not None:
+        result = self._team_repo.deduct_team(team_id, user_id, str(amount), json.dumps(meta))
+        if result is None:
+            raise StoreError("deduct_team returned no result")
+        if result.error is not None:
             return TeamDeductionResult(
                 transaction_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=Decimal(0),
-                team_balance_after=_dec(result_dict.team_balance_after),
-                error=str(result_dict.error),
+                team_balance_after=_dec(result.team_balance_after),
+                error=str(result.error),
             )
         return TeamDeductionResult(
-            transaction_id=str(getattr(result_dict, "transaction_id", "")),
-            team_id=str(getattr(result_dict, "team_id", team_id)),
-            user_id=str(getattr(result_dict, "user_id", user_id)),
-            amount=_dec(result_dict.amount, -amount),
-            team_balance_after=_dec(result_dict.team_balance_after),
+            transaction_id=str(getattr(result, "transaction_id", "")),
+            team_id=str(getattr(result, "team_id", team_id)),
+            user_id=str(getattr(result, "user_id", user_id)),
+            amount=_dec(result.amount, -amount),
+            team_balance_after=_dec(result.team_balance_after),
         )
 
     # ── Credit expiry ───────────────────────────────────────────────────
 
     def sweep_expired_credits(self, dry_run: bool = False, user_id: str | None = None) -> SweepResult:
-        result_dict = self._bucket_repo.sweep_expired_credits(dry_run, user_id)
+        """Sweep (expire) credits that have passed their expiry date.
+
+        Args:
+            dry_run: If True, report what would be expired without modifying data.
+            user_id: If set, only sweep credits for this user; otherwise sweep all.
+
+        Returns:
+            SweepResult with expiry counts and amounts.
+        """
+        result = self._bucket_repo.sweep_expired_credits(dry_run, user_id)
+        if result is None:
+            return SweepResult(expired_count=0, expired_amount=Decimal(0), dry_run=dry_run)
         return SweepResult(
-            expired_count=int(getattr(result_dict, "expired_count", 0)),
-            expired_amount=_dec(result_dict.expired_amount),
+            expired_count=int(getattr(result, "expired_count", 0)),
+            expired_amount=_dec(result.expired_amount),
             dry_run=dry_run,
-            expired_by_bucket=_dec_map(result_dict.expired_by_bucket),
+            expired_by_bucket=_dec_map(result.expired_by_bucket),
         )
 
     # ── Credit buckets ────────────────────────────────────────────────
 
     def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
-        result_dict = self._bucket_repo.get_bucket_balances(user_id)
+        """Get all credit bucket balances for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            BucketBalancesResult with list of bucket balances and total.
+        """
+        result = self._bucket_repo.get_bucket_balances(user_id)
+        if result is None:
+            return BucketBalancesResult(user_id=user_id, buckets=[], total_balance=Decimal(0))
         buckets = [
             BucketBalance(
                 bucket_key=str(t.get("bucket_key", "")),
@@ -978,12 +1363,12 @@ class PostgresStore(CreditStore):
                 expires=bool(t.get("expires", False)),
                 balance=_dec(t.get("balance")),
             )
-            for t in (result_dict.buckets or [])
+            for t in (result.buckets or [])
         ]
         return BucketBalancesResult(
-            user_id=str(getattr(result_dict, "user_id", user_id)),
+            user_id=str(getattr(result, "user_id", user_id)),
             buckets=buckets,
-            total_balance=_dec(result_dict.total_balance),
+            total_balance=_dec(result.total_balance),
         )
 
 

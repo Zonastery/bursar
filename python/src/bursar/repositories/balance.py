@@ -1,18 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
-
+from bursar.repositories._types import CallProc
+from bursar.repositories._utils import validate_non_empty
 from bursar.repositories.schemas import AddCreditsRow, AvailableRow, BalanceRow
-
-CallProc = Callable[[str, list[Any]], list[Any]]
 
 
 class BalanceRepository:
+    """Repository for user credit balance operations.
+
+    All methods call Postgres RPCs via the callproc function.
+    Returns None when the RPC returns no rows (no result).
+    Returns typed Pydantic models for successful results.
+    """
+
     def __init__(self, callproc: CallProc) -> None:
         self._callproc = callproc
 
     def get_balance(self, user_id: str) -> BalanceRow | None:
+        """Get the credit balance for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            BalanceRow if found, None if the user has no balance record.
+        """
+        validate_non_empty(user_id, "user_id")
         rows = self._callproc("get_credits_balance", [user_id])
         if not rows:
             return None
@@ -26,10 +39,40 @@ class BalanceRepository:
         metadata: str,
         bucket: str | None,
         idempotency_key: str | None,
-    ) -> AddCreditsRow:
-        rows = self._callproc("credits_add", [user_id, amount, type_, metadata, bucket, idempotency_key])
-        return AddCreditsRow.model_validate(rows[0] if rows else {})
+    ) -> AddCreditsRow | None:
+        """Add credits to a user's balance.
 
-    def get_available(self, user_id: str) -> AvailableRow:
+        Args:
+            user_id: The user ID.
+            amount: The credit amount as a string (Decimal-safe).
+            type_: The transaction type (e.g. "purchase", "adjustment").
+            metadata: JSON metadata string.
+            bucket: The target bucket key, or None for default.
+            idempotency_key: Idempotency key for replay protection, or None.
+
+        Returns:
+            AddCreditsRow if successful, None if the RPC returned no rows.
+
+        Raises:
+            StoreError: If the RPC returns an error field.
+        """
+        validate_non_empty(user_id, "user_id")
+        rows = self._callproc("credits_add", [user_id, amount, type_, metadata, bucket, idempotency_key])
+        if not rows:
+            return None
+        return AddCreditsRow.model_validate(rows[0])
+
+    def get_available(self, user_id: str) -> AvailableRow | None:
+        """Get the available (unreserved) credit balance for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            AvailableRow if found, None if the user has no balance.
+        """
+        validate_non_empty(user_id, "user_id")
         rows = self._callproc("get_available_credits", [user_id])
-        return AvailableRow.model_validate(rows[0] if rows else {})
+        if not rows:
+            return None
+        return AvailableRow.model_validate(rows[0])

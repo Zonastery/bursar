@@ -67,13 +67,44 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.check_feature_limit(UUID, TEXT, INT, DATE, DATE) FROM PUBLIC, anon, authenticated;
 
--- Grant EXECUTE on all bursar functions to service_role. Bursar revokes EXECUTE
--- from PUBLIC/anon/authenticated so regular users can't call these via the
--- Supabase REST API (PostgREST), but service_role (the backend role that web
--- and agent-py use) must have explicit EXECUTE to invoke them through PostgREST.
--- A schema-level GRANT is used rather than per-function to avoid missing any
--- RPC as new migrations are added — SECURITY DEFINER + auth.role() checks in
--- each function body provide defense-in-depth.
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+-- Per-function GRANTs to service_role for all bursar functions. REVOKE is
+-- already issued against anon/authenticated in each migration; these GRANTs
+-- ensure service_role (the backend role) can call them via PostgREST.
+GRANT EXECUTE ON FUNCTION public.handle_updated_at() TO service_role;
+GRANT EXECUTE ON FUNCTION public.grant_signup_bonus() TO service_role;
+GRANT EXECUTE ON FUNCTION public.credits_add(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.credits_add_internal(UUID, NUMERIC, public.credit_tx_type, JSONB, TEXT, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_credits_balance(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.check_spend_cap(UUID, TEXT, NUMERIC) TO service_role;
+GRANT EXECUTE ON FUNCTION public.refund_credits(UUID, NUMERIC, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.expire_credits(BOOLEAN, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.spend_by_user(TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.spend_by_model(TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.top_users(INTEGER, TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.daily_spend(TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.aggregate_stats(TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.list_user_transactions(UUID, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.list_usage_events(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INTEGER, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_team(TEXT, NUMERIC) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_team_balance(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.add_team_member(UUID, UUID, TEXT, NUMERIC) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_team_members(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.deduct_team(UUID, UUID, NUMERIC, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.deduct_with_allowance(UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_lease(UUID, NUMERIC, TEXT, TEXT, NUMERIC, INTEGER, INTEGER, TEXT, NUMERIC, JSONB, DATE, TEXT, INT, TEXT, DATE, DATE) TO service_role;
+GRANT EXECUTE ON FUNCTION public.settle_lease(UUID, UUID, NUMERIC, TEXT, NUMERIC, TEXT, JSONB, BOOLEAN, DATE, TEXT, INT, TEXT, DATE, DATE) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_lease(UUID, UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.renew_lease(UUID, UUID, INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_available_credits(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.expire_due_leases() TO service_role;
+GRANT EXECUTE ON FUNCTION public._walk_and_debit_buckets(UUID, NUMERIC) TO service_role;
+GRANT EXECUTE ON FUNCTION public.sync_buckets_from_config(JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_user_credit_buckets(UUID) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_active_pricing_config() TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_pricing_configs() TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_pricing_config(INTEGER) TO service_role;
+GRANT EXECUTE ON FUNCTION public.check_plan_allowance(UUID, DATE) TO service_role;
+GRANT EXECUTE ON FUNCTION public.increment_usage_window(UUID, UUID, NUMERIC, DATE) TO service_role;
+GRANT EXECUTE ON FUNCTION public.check_feature_limit(UUID, TEXT, INT, DATE, DATE) TO service_role;
 
 NOTIFY pgrst, 'reload schema';

@@ -38,7 +38,12 @@ CREATE INDEX IF NOT EXISTS idx_user_credit_buckets_user ON public.user_credit_bu
 
 -- At most one default bucket: credit_add / grant_signup_bonus resolves via
 -- `is_default = true` when no explicit bucket_key is given.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_buckets_single_default
+    ON public.credit_buckets (is_default) WHERE is_default = true;
+
 -- At most one allow_overdraft bucket: the overdraft sink.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_buckets_single_overdraft
+    ON public.credit_buckets (allow_overdraft) WHERE allow_overdraft = true;
 
 -- Triggers for updated_at (mirrors other tables)
 DO $$
@@ -148,13 +153,21 @@ REVOKE EXECUTE ON FUNCTION public.sync_buckets_from_config(JSONB) FROM PUBLIC, a
 -- Guarded so a re-run of setup() (which re-executes every migration file on
 -- every deploy) is always a no-op the second time.
 
-UPDATE public.credit_transactions
-SET metadata = COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('bucket','default')
-WHERE type IN ('purchase','subscription','signup_bonus','adjustment') AND amount >= 0 AND NOT (metadata ? 'bucket');
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM public.credit_transactions WHERE type IN ('purchase','subscription','signup_bonus','adjustment') AND amount >= 0 AND NOT (metadata ? 'bucket') LIMIT 1) THEN
+        UPDATE public.credit_transactions
+        SET metadata = COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('bucket','default')
+        WHERE type IN ('purchase','subscription','signup_bonus','adjustment') AND amount >= 0 AND NOT (metadata ? 'bucket');
+    END IF;
+END $$;
 
-UPDATE public.credit_transactions
-SET metadata = COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('bucket_breakdown', jsonb_build_object('default', to_jsonb(ABS(amount))))
-WHERE type IN ('usage','team_usage') AND amount < 0 AND NOT (metadata ? 'bucket_breakdown');
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM public.credit_transactions WHERE type IN ('usage','team_usage') AND amount < 0 AND NOT (metadata ? 'bucket_breakdown') LIMIT 1) THEN
+        UPDATE public.credit_transactions
+        SET metadata = COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('bucket_breakdown', jsonb_build_object('default', to_jsonb(ABS(amount))))
+        WHERE type IN ('usage','team_usage') AND amount < 0 AND NOT (metadata ? 'bucket_breakdown');
+    END IF;
+END $$;
 
 INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
 SELECT user_id, 'default', balance FROM public.user_credits

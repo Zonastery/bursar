@@ -1,15 +1,13 @@
 import { z } from "zod";
 import type { CallProc } from "./types.js";
+import { pgBoolean, safeParse } from "./_shared.js";
 
 export const BucketBalanceRowSchema = z
   .object({
     bucket_key: z.string().optional(),
     label: z.string().optional(),
     priority: z.number().optional(),
-    expires: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    expires: pgBoolean.nullable().optional(),
     balance: z
       .union([z.string(), z.number()] as const)
       .nullable()
@@ -46,16 +44,23 @@ export type BucketBalanceRow = z.infer<typeof BucketBalanceRowSchema>;
 export type BucketEnvelopeRow = z.infer<typeof BucketEnvelopeRowSchema>;
 export type SweepRow = z.infer<typeof SweepRowSchema>;
 
+/** Repository for credit bucket operations. */
 export class BucketRepository {
   constructor(private callproc: CallProc) {}
 
+  /** Fetch per-bucket credit balances for a user. */
   async getBucketBalances(userId: string): Promise<BucketEnvelopeRow> {
     const rows = await this.callproc("get_user_credit_buckets", [userId]);
-    return BucketEnvelopeRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(
+      BucketEnvelopeRowSchema,
+      rows?.[0] ?? {},
+      "BucketRepository.getBucketBalances",
+    );
   }
 
+  /** Sweep expired credit grants. */
   async sweepExpiredCredits(dryRun: boolean, userId: string | null): Promise<SweepRow> {
     const rows = await this.callproc("expire_credits", [dryRun, userId]);
-    return SweepRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(SweepRowSchema, rows?.[0] ?? {}, "BucketRepository.sweepExpiredCredits");
   }
 }

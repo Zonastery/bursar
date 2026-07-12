@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../types.js";
+import { unwrapJsonb, safeParse } from "../_shared.js";
 
 export const BillingPaymentRowSchema = z
   .object({
@@ -42,19 +43,11 @@ export const ForRefundRowSchema = z
 export type BillingPaymentRow = z.infer<typeof BillingPaymentRowSchema>;
 export type ForRefundRow = z.infer<typeof ForRefundRowSchema>;
 
-function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
-  if (rows.length !== 1) return null;
-  const row = rows[0] as Record<string, unknown>;
-  const keys = Object.keys(row);
-  if (keys.length !== 1) return null;
-  const v = row[keys[0]];
-  if (v !== null && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
-  return null;
-}
-
+/** Repository for billing payment operations. */
 export class BillingPaymentRepository {
   constructor(private query: QueryFn) {}
 
+  /** Upsert a billing payment record. */
   async upsert(
     provider: string,
     providerPaymentId: string,
@@ -79,15 +72,19 @@ export class BillingPaymentRepository {
     ]);
   }
 
+  /** Fetch billing payment data needed for refund calculation. */
   async getForRefund(provider: string, providerPaymentId: string): Promise<ForRefundRow | null> {
     const rows = await this.query("SELECT * FROM public.get_billing_payment_for_refund($1, $2)", [
       provider,
       providerPaymentId,
     ]);
     const data = unwrapJsonb(rows);
-    return data ? ForRefundRowSchema.parse(data) : null;
+    return data
+      ? safeParse(ForRefundRowSchema, data, "BillingPaymentRepository.getForRefund")
+      : null;
   }
 
+  /** Fetch a billing payment record directly from the table. */
   async getDirect(provider: string, providerPaymentId: string): Promise<BillingPaymentRow | null> {
     const rows = await this.query(
       `SELECT provider, provider_payment_id, user_id, amount_minor,
@@ -97,6 +94,6 @@ export class BillingPaymentRepository {
       [provider, providerPaymentId],
     );
     if (rows.length === 0) return null;
-    return BillingPaymentRowSchema.parse(rows[0]);
+    return safeParse(BillingPaymentRowSchema, rows[0], "BillingPaymentRepository.getDirect");
   }
 }

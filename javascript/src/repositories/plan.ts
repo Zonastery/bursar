@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CallProc } from "./types.js";
+import { pgBoolean, safeParse } from "./_shared.js";
 
 export const UserPlanRowSchema = z
   .object({
@@ -57,10 +58,7 @@ export const FeatureLimitRowSchema = z
   .object({
     user_id: z.string().optional(),
     feature: z.string().optional(),
-    limited: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    limited: pgBoolean.nullable().optional(),
     limit: z.number().optional(),
     used: z.number().optional(),
     remaining: z.number().optional(),
@@ -72,10 +70,7 @@ export const FeatureLimitRowSchema = z
 
 export const CapCheckRowSchema = z
   .object({
-    capped: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    capped: pgBoolean.nullable().optional(),
     current_spend: z
       .union([z.string(), z.number()] as const)
       .nullable()
@@ -103,15 +98,18 @@ export type AllowanceRow = z.infer<typeof AllowanceRowSchema>;
 export type FeatureLimitRow = z.infer<typeof FeatureLimitRowSchema>;
 export type CapCheckRow = z.infer<typeof CapCheckRowSchema>;
 
+/** Repository for plan management operations. */
 export class PlanRepository {
   constructor(private callproc: CallProc) {}
 
+  /** Fetch a user's current plan. Returns null if user has no plan. */
   async getUserPlan(userId: string): Promise<UserPlanRow | null> {
     const rows = await this.callproc("get_user_plan", [userId]);
     if (!rows || rows.length === 0) return null;
-    return UserPlanRowSchema.parse(rows[0]);
+    return safeParse(UserPlanRowSchema, rows[0], "PlanRepository.getUserPlan");
   }
 
+  /** Assign a plan to a user. */
   async setUserPlan(
     userId: string,
     planId: string,
@@ -119,32 +117,37 @@ export class PlanRepository {
   ): Promise<SetUserPlanRow> {
     const params = planAssignedAt ? [userId, planId, planAssignedAt] : [userId, planId];
     const rows = await this.callproc("set_user_plan", params);
-    return SetUserPlanRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(SetUserPlanRowSchema, rows?.[0] ?? {}, "PlanRepository.setUserPlan");
   }
 
+  /** Remove a user's plan assignment. */
   async unsetUserPlan(userId: string): Promise<UnsetPlanRow> {
     const rows = await this.callproc("unset_user_plan", [userId]);
-    return UnsetPlanRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(UnsetPlanRowSchema, rows?.[0] ?? {}, "PlanRepository.unsetUserPlan");
   }
 
+  /** Migrate all users on a plan_key to a target config version. */
   async migratePlanUsers(
     planKey: string,
     targetConfigVersion: number | null,
   ): Promise<MigratePlanRow> {
     const rows = await this.callproc("migrate_plan_users", [planKey, targetConfigVersion]);
-    return MigratePlanRowSchema.parse(rows[0] as Record<string, unknown>);
+    return safeParse(MigratePlanRowSchema, rows?.[0] ?? {}, "PlanRepository.migratePlanUsers");
   }
 
+  /** Check a user's remaining free allowance. */
   async checkAllowance(userId: string, periodStart: string | null): Promise<AllowanceRow | null> {
     const rows = await this.callproc("check_plan_allowance", [userId, periodStart]);
     if (!rows || rows.length === 0) return null;
-    return AllowanceRowSchema.parse(rows[0]);
+    return safeParse(AllowanceRowSchema, rows[0], "PlanRepository.checkAllowance");
   }
 
+  /** Increment a user's usage window. */
   async incrementUsageWindow(userId: string, planId: string, amount: string): Promise<void> {
     await this.callproc("increment_usage_window", [userId, planId, amount]);
   }
 
+  /** Check a per-feature invocation limit. */
   async checkFeatureLimit(
     userId: string,
     feature: string,
@@ -160,9 +163,10 @@ export class PlanRepository {
       periodEnd,
     ]);
     if (!rows || rows.length === 0) return null;
-    return FeatureLimitRowSchema.parse(rows[0]);
+    return safeParse(FeatureLimitRowSchema, rows[0], "PlanRepository.checkFeatureLimit");
   }
 
+  /** Check a user's spend cap. */
   async checkSpendCap(
     userId: string,
     model: string | null,
@@ -170,6 +174,6 @@ export class PlanRepository {
   ): Promise<CapCheckRow | null> {
     const rows = await this.callproc("check_spend_cap", [userId, model, amount]);
     if (!rows || rows.length === 0) return null;
-    return CapCheckRowSchema.parse(rows[0]);
+    return safeParse(CapCheckRowSchema, rows[0], "PlanRepository.checkSpendCap");
   }
 }

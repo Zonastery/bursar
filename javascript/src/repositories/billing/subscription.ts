@@ -1,5 +1,17 @@
 import { z } from "zod";
 import type { QueryFn } from "../types.js";
+import { pgBoolean, safeParse } from "../_shared.js";
+
+const SUBSCRIPTION_COLS = `user_id, provider, provider_subscription_id, provider_customer_id,
+    offer_key, plan, status, current_period_start,
+    current_period_end, cancel_at_period_end, interval, interval_count, metadata`;
+
+const SUBSCRIPTION_STATUS = {
+  ACTIVE: "active",
+  TRIALING: "trialing",
+  CANCELED: "canceled",
+  INCOMPLETE: "incomplete",
+} as const;
 
 export const SubscriptionRowSchema = z
   .object({
@@ -12,10 +24,7 @@ export const SubscriptionRowSchema = z
     status: z.string().optional(),
     current_period_start: z.unknown().optional(),
     current_period_end: z.unknown().optional(),
-    cancel_at_period_end: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    cancel_at_period_end: pgBoolean.nullable().optional(),
     interval: z.string().nullable().optional(),
     interval_count: z.number().nullable().optional(),
     metadata: z.record(z.string(), z.unknown()).nullable().optional(),
@@ -24,16 +33,21 @@ export const SubscriptionRowSchema = z
 
 export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 
+/** Repository for billing subscription operations. */
 export class BillingSubscriptionRepository {
   constructor(private query: QueryFn) {}
 
+  /** Upsert a billing subscription record.
+   *
+   * Requires userId, provider, and providerSubscriptionId in the state object.
+   */
   async upsert(state: Record<string, unknown>): Promise<void> {
+    const required = ["userId", "provider", "providerSubscriptionId"];
+    for (const key of required) {
+      if (!state[key]) throw new Error(`subscription.upsert: ${key} is required`);
+    }
     await this.query(
-      `INSERT INTO public.billing_subscriptions (
-         user_id, provider, provider_subscription_id, provider_customer_id,
-         offer_key, plan, status, current_period_start,
-         current_period_end, cancel_at_period_end, interval, interval_count, metadata
-       )
+      `INSERT INTO public.billing_subscriptions (${SUBSCRIPTION_COLS})
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
@@ -55,7 +69,7 @@ export class BillingSubscriptionRepository {
         state.providerCustomerId ?? null,
         state.offerKey ?? null,
         state.plan ?? null,
-        state.status ?? "incomplete",
+        state.status ?? SUBSCRIPTION_STATUS.INCOMPLETE,
         state.currentPeriodStart ?? null,
         state.currentPeriodEnd ?? null,
         state.cancelAtPeriodEnd ?? false,
@@ -66,47 +80,55 @@ export class BillingSubscriptionRepository {
     );
   }
 
+  /** Fetch a subscription by provider identifiers. */
   async get(provider: string, providerSubscriptionId: string): Promise<SubscriptionRow | null> {
     const rows = await this.query(
-      `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-              offer_key, plan, status, current_period_start,
-              current_period_end, cancel_at_period_end, interval, interval_count, metadata
+      `SELECT ${SUBSCRIPTION_COLS}
        FROM public.billing_subscriptions
        WHERE provider = $1 AND provider_subscription_id = $2`,
       [provider, providerSubscriptionId],
     );
     if (rows.length === 0) return null;
-    return SubscriptionRowSchema.parse(rows[0]);
+    return safeParse(SubscriptionRowSchema, rows[0], "BillingSubscriptionRepository.get");
   }
 
-  async getUserSubscription(userId: string): Promise<SubscriptionRow | null> {
+  /** Fetch a user's most recent subscription, filtered by status.
+   *
+   * @param statuses - Allowed statuses to return, defaults to active/trialing.
+   */
+  async getUserSubscription(userId: string, statuses?: string[]): Promise<SubscriptionRow | null> {
+    const activeStatuses = statuses ?? [SUBSCRIPTION_STATUS.ACTIVE, SUBSCRIPTION_STATUS.TRIALING];
     const rows = await this.query(
-      `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-              offer_key, plan, status, current_period_start,
-              current_period_end, cancel_at_period_end, interval, interval_count, metadata
+      `SELECT ${SUBSCRIPTION_COLS}
        FROM public.billing_subscriptions
-       WHERE user_id = $1
+       WHERE user_id = $1 AND status = ANY($2::text[])
        ORDER BY current_period_start DESC NULLS LAST, created_at DESC
        LIMIT 1`,
-      [userId],
+      [userId, activeStatuses],
     );
     if (rows.length === 0) return null;
-    return SubscriptionRowSchema.parse(rows[0]);
+    return safeParse(
+      SubscriptionRowSchema,
+      rows[0],
+      "BillingSubscriptionRepository.getUserSubscription",
+    );
   }
 
+  /** Fetch all subscriptions for a user. */
   async getUserSubscriptions(userId: string): Promise<SubscriptionRow[]> {
     const rows = await this.query(
-      `SELECT user_id, provider, provider_subscription_id, provider_customer_id,
-              offer_key, plan, status, current_period_start,
-              current_period_end, cancel_at_period_end, interval, interval_count, metadata
+      `SELECT ${SUBSCRIPTION_COLS}
        FROM public.billing_subscriptions
        WHERE user_id = $1
        ORDER BY current_period_start DESC NULLS LAST`,
       [userId],
     );
-    return rows.map((r) => SubscriptionRowSchema.parse(r));
+    return rows.map((r) =>
+      safeParse(SubscriptionRowSchema, r, "BillingSubscriptionRepository.getUserSubscriptions"),
+    );
   }
 
+  /** Deactivate subscriptions from other providers, keeping the current one. */
   async deactivateOtherProviderSubscriptions(
     userId: string,
     keepProvider: string,

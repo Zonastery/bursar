@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../types.js";
+import { unwrapJsonb, safeParse } from "../_shared.js";
 
 export const BillingEventRowSchema = z
   .object({
@@ -9,19 +10,11 @@ export const BillingEventRowSchema = z
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
 
-function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
-  if (rows.length !== 1) return null;
-  const row = rows[0] as Record<string, unknown>;
-  const keys = Object.keys(row);
-  if (keys.length !== 1) return null;
-  const v = row[keys[0]];
-  if (v !== null && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
-  return null;
-}
-
+/** Repository for billing event lifecycle operations. */
 export class BillingEventRepository {
   constructor(private query: QueryFn) {}
 
+  /** Claim a billing event for processing (idempotent claim). */
   async claim(
     provider: string,
     eventId: string,
@@ -35,13 +28,15 @@ export class BillingEventRepository {
       metadata,
     ]);
     const data = unwrapJsonb(rows);
-    return data ? BillingEventRowSchema.parse(data) : null;
+    return data ? safeParse(BillingEventRowSchema, data, "BillingEventRepository.claim") : null;
   }
 
+  /** Mark a billing event as completed. */
   async complete(provider: string, eventId: string): Promise<void> {
     await this.query("SELECT * FROM public.complete_billing_event($1, $2)", [provider, eventId]);
   }
 
+  /** Mark a billing event as failed. */
   async fail(provider: string, eventId: string): Promise<void> {
     await this.query("SELECT * FROM public.fail_billing_event($1, $2)", [provider, eventId]);
   }

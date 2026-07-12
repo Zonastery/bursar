@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../types.js";
+import { unwrapJsonb, safeParse } from "../_shared.js";
 
 export const BillingTopupRowSchema = z
   .object({
@@ -19,19 +20,11 @@ export const BillingTopupRowSchema = z
 
 export type BillingTopupRow = z.infer<typeof BillingTopupRowSchema>;
 
-function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
-  if (rows.length !== 1) return null;
-  const row = rows[0] as Record<string, unknown>;
-  const keys = Object.keys(row);
-  if (keys.length !== 1) return null;
-  const v = row[keys[0]];
-  if (v !== null && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
-  return null;
-}
-
+/** Repository for credit top-up resolution. */
 export class BillingTopupRepository {
   constructor(private query: QueryFn) {}
 
+  /** Resolve a credit top-up by price ID and product ID. */
   async resolveByPrice(
     provider: string,
     priceId: string | null,
@@ -42,15 +35,20 @@ export class BillingTopupRepository {
       [provider, priceId, productId],
     );
     const data = unwrapJsonb(rows);
-    return data ? BillingTopupRowSchema.parse(data) : null;
+    return data
+      ? safeParse(BillingTopupRowSchema, data, "BillingTopupRepository.resolveByPrice")
+      : null;
   }
 
+  /** Resolve a credit top-up by provider lookup key. */
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingTopupRow | null> {
     const rows = await this.query("SELECT * FROM public.resolve_credit_topup_by_lookup($1, $2)", [
       provider,
       lookupKey,
     ]);
     const data = unwrapJsonb(rows);
-    return data ? BillingTopupRowSchema.parse(data) : null;
+    return data
+      ? safeParse(BillingTopupRowSchema, data, "BillingTopupRepository.resolveByLookup")
+      : null;
   }
 }

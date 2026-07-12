@@ -138,7 +138,9 @@ BEGIN
         SELECT id, amount, COALESCE(metadata->>'bucket', 'default')
         INTO v_transaction_id, v_existing_amount, v_existing_bucket
         FROM public.credit_transactions
-        WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
+        WHERE user_id = p_user_id
+          AND type = p_type
+          AND metadata->>'idempotency_key' = p_idempotency_key
         LIMIT 1;
 
         IF FOUND THEN

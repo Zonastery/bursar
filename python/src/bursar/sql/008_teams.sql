@@ -203,12 +203,14 @@ BEGIN
 
   v_idempotency_key := p_metadata->>'idempotency_key';
 
-  -- Idempotency replay (user-scoped): return the original team_usage tx.
+  -- Idempotency replay (user + team scoped): return the original team_usage tx.
   IF v_idempotency_key IS NOT NULL THEN
     SELECT id INTO v_tx_id
     FROM public.credit_transactions
     WHERE user_id = p_user_id
-      AND metadata->>'idempotency_key' = v_idempotency_key;
+      AND type = 'team_usage'
+      AND metadata->>'idempotency_key' = v_idempotency_key
+      AND metadata->>'team_id' = p_team_id::text;
     IF FOUND THEN
       RETURN jsonb_build_object(
         'transaction_id', v_tx_id,
@@ -265,21 +267,21 @@ BEGIN
     RETURN jsonb_build_object('error', 'insufficient_credits');
   END IF;
 
-  -- Deduct from team balance
-  UPDATE public.credit_teams
-  SET balance = balance - p_amount,
-      updated_at = now()
-  WHERE id = p_team_id
-  RETURNING balance INTO v_balance;
-
-  -- Keep the lifetime attribution counter in sync (informational only;
-  -- cap enforcement uses the monthly window above).
-  UPDATE public.credit_team_members
-  SET total_spent = total_spent + p_amount
-  WHERE team_id = p_team_id AND user_id = p_user_id;
-
-  -- Log transaction; concurrent duplicate idempotency key -> return original.
+  -- Log transaction + update team balance atomically. Both the balance UPDATEs
+  -- and the INSERT sit inside the BEGIN/EXCEPTION block so a unique_violation
+  -- (concurrent idempotency key) rolls back the balance change — preventing
+  -- the double-deduction bug that existed when the UPDATE ran outside.
   BEGIN
+    UPDATE public.credit_teams
+    SET balance = balance - p_amount,
+        updated_at = now()
+    WHERE id = p_team_id
+    RETURNING balance INTO v_balance;
+
+    UPDATE public.credit_team_members
+    SET total_spent = total_spent + p_amount
+    WHERE team_id = p_team_id AND user_id = p_user_id;
+
     INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
     VALUES (p_user_id, -p_amount, 'team_usage', p_metadata || jsonb_build_object('team_id', p_team_id))
     RETURNING id INTO v_tx_id;
@@ -287,6 +289,8 @@ BEGIN
     SELECT id INTO v_tx_id
     FROM public.credit_transactions
     WHERE user_id = p_user_id
+      AND type = 'team_usage'
+      AND metadata->>'team_id' = p_team_id::text
       AND metadata->>'idempotency_key' = v_idempotency_key;
     RETURN jsonb_build_object(
       'transaction_id', v_tx_id,

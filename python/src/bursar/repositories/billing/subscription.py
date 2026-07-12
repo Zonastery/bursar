@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
+from bursar.repositories._types import QueryFn
+from bursar.repositories._utils import validate_non_empty
 from bursar.repositories.schemas import SubscriptionRow
 
-QueryFn = Callable[[str, list[Any]], list[Any]]
+SUBSCRIPTION_STATUS_ACTIVE = "active"
+SUBSCRIPTION_STATUS_TRIALING = "trialing"
+SUBSCRIPTION_STATUS_CANCELED = "canceled"
+SUBSCRIPTION_STATUS_INCOMPLETE = "incomplete"
 
 SUBSCRIPTION_COLS = (
     "user_id, provider, provider_subscription_id, provider_customer_id, "
@@ -15,11 +20,40 @@ SUBSCRIPTION_COLS = (
 )
 
 
+class DecimalEncoder(json.JSONEncoder):
+    """Custom JSON encoder that converts ``Decimal`` to a string for JSONB storage."""
+
+    def default(self, o: object) -> object:
+        if isinstance(o, Decimal):
+            return str(o)
+        return super().default(o)
+
+
 class BillingSubscriptionRepository:
+    """Repository for billing subscription operations.
+
+    All methods call Postgres via raw SQL queries through the query function.
+    Returns None when the query returns no rows.
+    """
+
     def __init__(self, execute: QueryFn) -> None:
         self._execute = execute
 
     def upsert(self, state: dict[str, Any]) -> None:
+        """Insert or update a billing subscription record.
+
+        Args:
+            state: Dict with keys including user_id, provider,
+                provider_subscription_id, status, and optional fields.
+
+        Raises:
+            ValueError: If user_id, provider, or provider_subscription_id
+                is missing or empty.
+        """
+        required = ["user_id", "provider", "provider_subscription_id"]
+        for key in required:
+            if key not in state or not state[key]:
+                raise ValueError(f"subscription.upsert: {key} is required")
         self._execute(
             """INSERT INTO public.billing_subscriptions (
                  user_id, provider, provider_subscription_id, provider_customer_id,
@@ -55,17 +89,28 @@ class BillingSubscriptionRepository:
                 state.get("provider_customer_id"),
                 state.get("offer_key"),
                 state.get("plan"),
-                state.get("status", "incomplete"),
+                state.get("status", SUBSCRIPTION_STATUS_INCOMPLETE),
                 state.get("current_period_start"),
                 state.get("current_period_end"),
                 state.get("cancel_at_period_end", False),
                 state.get("interval"),
                 state.get("interval_count"),
-                json.dumps(state["metadata"]) if state.get("metadata") else None,
+                json.dumps(state.get("metadata"), cls=DecimalEncoder) if state.get("metadata") is not None else None,
             ],
         )
 
     def get(self, provider: str, provider_subscription_id: str) -> SubscriptionRow | None:
+        """Get a subscription by provider and provider subscription ID.
+
+        Args:
+            provider: The billing provider identifier.
+            provider_subscription_id: The provider subscription ID.
+
+        Returns:
+            SubscriptionRow if found, None otherwise.
+        """
+        validate_non_empty(provider, "provider")
+        validate_non_empty(provider_subscription_id, "provider_subscription_id")
         rows = self._execute(
             f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
             " WHERE provider = %s AND provider_subscription_id = %s",
@@ -75,19 +120,42 @@ class BillingSubscriptionRepository:
             return None
         return SubscriptionRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
 
-    def get_user_subscription(self, user_id: str) -> SubscriptionRow | None:
+    def get_user_subscription(
+        self,
+        user_id: str,
+        status: tuple[str, ...] = (SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING),
+    ) -> SubscriptionRow | None:
+        """Get the most recent subscription for a user matching the given statuses.
+
+        Args:
+            user_id: The user ID.
+            status: Tuple of allowed status values. Defaults to active and trialing.
+
+        Returns:
+            SubscriptionRow if found, None otherwise.
+        """
+        validate_non_empty(user_id, "user_id")
         rows = self._execute(
             f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
-            " WHERE user_id = %s"
+            " WHERE user_id = %s AND status = ANY(%s)"
             " ORDER BY current_period_start DESC NULLS LAST, created_at DESC"
             " LIMIT 1",
-            [user_id],
+            [user_id, list(status)],
         )
         if not rows:
             return None
         return SubscriptionRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
 
     def get_user_subscriptions(self, user_id: str) -> list[SubscriptionRow]:
+        """Get all subscriptions for a user, ordered by period start descending.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            List of SubscriptionRow objects (may be empty).
+        """
+        validate_non_empty(user_id, "user_id")
         rows = self._execute(
             f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
             " WHERE user_id = %s"
@@ -100,12 +168,24 @@ class BillingSubscriptionRepository:
         self,
         user_id: str,
         keep_provider: str,
-    ) -> int:
+    ) -> list[str]:
+        """Cancel all active/trialing subscriptions for a user except the given provider.
+
+        Args:
+            user_id: The user ID.
+            keep_provider: The provider whose subscriptions should be preserved.
+
+        Returns:
+            List of deactivated provider subscription IDs.
+        """
+        validate_non_empty(user_id, "user_id")
+        validate_non_empty(keep_provider, "keep_provider")
         rows = self._execute(
             "UPDATE public.billing_subscriptions"
             " SET status = 'canceled', cancel_at_period_end = true, updated_at = now()"
-            " WHERE user_id = %s AND provider != %s AND status IN ('active', 'trialing')"
-            " RETURNING 1",
+            " WHERE user_id = %s AND provider != %s"
+            f" AND status IN ('{SUBSCRIPTION_STATUS_ACTIVE}', '{SUBSCRIPTION_STATUS_TRIALING}')"
+            " RETURNING provider_subscription_id",
             [user_id, keep_provider],
         )
-        return len(rows)
+        return [str(r["provider_subscription_id"]) for r in rows if isinstance(r, dict)]

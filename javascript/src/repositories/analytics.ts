@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { CallProc } from "./types.js";
+import { safeParse } from "./_shared.js";
 
 export const SpendByUserRowSchema = z
   .object({
@@ -99,34 +100,55 @@ export type DailySpendRow = z.infer<typeof DailySpendRowSchema>;
 export type AggregateStatsRow = z.infer<typeof AggregateStatsRowSchema>;
 export type TransactionRow = z.infer<typeof TransactionRowSchema>;
 
+/** Repository for analytics/aggregation queries.
+ *
+ * All methods call Postgres RPCs via the callproc function.
+ * Returns typed Pydantic-model-like rows for each query type.
+ */
 export class AnalyticsRepository {
   constructor(private callproc: CallProc) {}
 
+  /** Aggregate spend grouped by user within a date range. */
   async spendByUser(start: string, end: string): Promise<SpendByUserRow[]> {
     const rows = await this.callproc("spend_by_user", [start, end]);
-    return (rows ?? []).map((r) => SpendByUserRowSchema.parse(r));
+    return (rows ?? []).map((r) =>
+      safeParse(SpendByUserRowSchema, r, "AnalyticsRepository.spendByUser"),
+    );
   }
 
+  /** Aggregate spend grouped by model within a date range. */
   async spendByModel(start: string, end: string): Promise<SpendByModelRow[]> {
     const rows = await this.callproc("spend_by_model", [start, end]);
-    return (rows ?? []).map((r) => SpendByModelRowSchema.parse(r));
+    return (rows ?? []).map((r) =>
+      safeParse(SpendByModelRowSchema, r, "AnalyticsRepository.spendByModel"),
+    );
   }
 
+  /** Top users by total spend within a date range. */
   async topUsers(limit: number, start: string, end: string): Promise<TopUserRow[]> {
     const rows = await this.callproc("top_users", [limit, start, end]);
-    return (rows ?? []).map((r) => TopUserRowSchema.parse(r));
+    return (rows ?? []).map((r) => safeParse(TopUserRowSchema, r, "AnalyticsRepository.topUsers"));
   }
 
+  /** Daily spend breakdown within a date range. */
   async dailySpend(start: string, end: string): Promise<DailySpendRow[]> {
     const rows = await this.callproc("daily_spend", [start, end]);
-    return (rows ?? []).map((r) => DailySpendRowSchema.parse(r));
+    return (rows ?? []).map((r) =>
+      safeParse(DailySpendRowSchema, r, "AnalyticsRepository.dailySpend"),
+    );
   }
 
+  /** Aggregate statistics (total credits, active users, avg daily spend, top model/user). */
   async aggregateStats(start: string, end: string): Promise<AggregateStatsRow> {
     const rows = await this.callproc("aggregate_stats", [start, end]);
-    return AggregateStatsRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(
+      AggregateStatsRowSchema,
+      rows?.[0] ?? {},
+      "AnalyticsRepository.aggregateStats",
+    );
   }
 
+  /** Paginated list of user transactions filtered by type and date range. */
   async listUserTransactions(
     userId: string,
     types: string[] | null,
@@ -143,9 +165,12 @@ export class AnalyticsRepository {
       limit,
       offset,
     ]);
-    return (rows ?? []).map((r) => TransactionRowSchema.parse(r));
+    return (rows ?? []).map((r) =>
+      safeParse(TransactionRowSchema, r, "AnalyticsRepository.listUserTransactions"),
+    );
   }
 
+  /** Paginated list of usage events for a user within a date range. */
   async listUsageEvents(
     userId: string,
     fromDate: string | null,
@@ -160,6 +185,8 @@ export class AnalyticsRepository {
       limit,
       offset,
     ]);
-    return (rows ?? []).map((r) => TransactionRowSchema.parse(r));
+    return (rows ?? []).map((r) =>
+      safeParse(TransactionRowSchema, r, "AnalyticsRepository.listUsageEvents"),
+    );
   }
 }

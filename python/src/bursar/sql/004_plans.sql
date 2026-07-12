@@ -70,100 +70,18 @@ BEGIN
 END;
 $$;
 
--- sync_plans_from_config: upsert plan definitions (incl. financial-safety
--- policy and allowance_period) into credit_plans from the pricing config JSONB.
-CREATE OR REPLACE FUNCTION public.sync_plans_from_config(p_config JSONB)
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_plan_key TEXT;
-    v_plan_def JSONB;
-BEGIN
-    IF p_config ? 'plans' AND jsonb_typeof(p_config->'plans') = 'object' THEN
-        FOR v_plan_key, v_plan_def IN SELECT * FROM jsonb_each(p_config->'plans')
-        LOOP
-            INSERT INTO public.credit_plans (
-                plan_key, label, allowance_amount, rate_overrides, entitlements,
-                billing_mode, per_operation, max_concurrent, overdraft_floor,
-                allowance_period
-            )
-            VALUES (
-                v_plan_key,
-                v_plan_def->>'label',
-                COALESCE((v_plan_def #>> '{allowance,amount}')::NUMERIC, 0),
-                COALESCE(v_plan_def->'rate_overrides', v_plan_def->'rateOverrides', '{}'::jsonb),
-                COALESCE(v_plan_def->'entitlements', '{}'::jsonb),
-                COALESCE(v_plan_def #>> '{safety,billing_mode}', 'strict'),
-                v_plan_def #> '{safety,per_operation}',
-                (v_plan_def #>> '{safety,max_concurrent}')::INTEGER,
-                (v_plan_def #>> '{safety,overdraft_floor}')::NUMERIC,
-                COALESCE(v_plan_def #>> '{allowance,period}', 'calendar_month')
-            )
-            ON CONFLICT (plan_key) WHERE plan_key IS NOT NULL
-            DO UPDATE SET
-                label = EXCLUDED.label,
-                allowance_amount = EXCLUDED.allowance_amount,
-                rate_overrides = EXCLUDED.rate_overrides,
-                entitlements = EXCLUDED.entitlements,
-                billing_mode = EXCLUDED.billing_mode,
-                per_operation = EXCLUDED.per_operation,
-                max_concurrent = EXCLUDED.max_concurrent,
-                overdraft_floor = EXCLUDED.overdraft_floor,
-                allowance_period = EXCLUDED.allowance_period,
-                updated_at = now();
-        END LOOP;
-    END IF;
-END;
+-- SUPERSEDED by 016_plan_versioning.sql — this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.sync_plans_from_config(JSONB)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN NULL; END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.sync_plans_from_config(JSONB) FROM PUBLIC, anon, authenticated;
 
--- get_user_plan: Fetch user's current plan, including policy + allowance-window fields.
+-- SUPERSEDED by 016_plan_versioning.sql — this stub is immediately overwritten.
 CREATE OR REPLACE FUNCTION public.get_user_plan(p_user_id UUID)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_plan_id UUID;
-    v_plan_label TEXT;
-    v_allowance_amount NUMERIC;
-    v_entitlements JSONB;
-    v_billing_mode TEXT;
-    v_per_operation JSONB;
-    v_max_concurrent INTEGER;
-    v_overdraft_floor NUMERIC;
-    v_allowance_period TEXT;
-    v_plan_assigned_at TIMESTAMPTZ;
-BEGIN
-    SELECT uc.plan_id, cp.label, cp.allowance_amount, cp.entitlements,
-           cp.billing_mode, cp.per_operation, cp.max_concurrent, cp.overdraft_floor,
-           cp.allowance_period, uc.plan_assigned_at
-    INTO v_plan_id, v_plan_label, v_allowance_amount, v_entitlements,
-         v_billing_mode, v_per_operation, v_max_concurrent, v_overdraft_floor,
-         v_allowance_period, v_plan_assigned_at
-    FROM public.user_credits uc
-    LEFT JOIN public.credit_plans cp ON cp.id = uc.plan_id
-    WHERE uc.user_id = p_user_id;
-
-    RETURN jsonb_build_object(
-        'user_id', p_user_id,
-        'plan_id', v_plan_id,
-        'plan_label', v_plan_label,
-        'allowance_amount', COALESCE(v_allowance_amount, 0),
-        'entitlements', COALESCE(v_entitlements, '{}'::jsonb),
-        'billing_mode', COALESCE(v_billing_mode, 'strict'),
-        'per_operation', COALESCE(v_per_operation, '{}'::jsonb),
-        'max_concurrent', v_max_concurrent,
-        'overdraft_floor', v_overdraft_floor,
-        'allowance_period', COALESCE(v_allowance_period, 'calendar_month'),
-        'plan_assigned_at', v_plan_assigned_at
-    );
-END;
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_user_plan(UUID) FROM PUBLIC, anon, authenticated;
@@ -182,42 +100,10 @@ BEGIN
     END LOOP;
 END $$;
 
--- set_user_plan: Assign a plan to a user by plan_key (upsert). Every
--- (re-)assignment re-anchors plan_assigned_at, which the allowance-window
--- resolution logic (rolling_30d / anniversary) uses as its epoch.
-CREATE OR REPLACE FUNCTION public.set_user_plan(
-    p_user_id UUID,
-    p_plan_key TEXT
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_plan_id UUID;
-BEGIN
-    -- Resolve plan_key to credit_plans UUID
-    SELECT id INTO v_plan_id
-    FROM public.credit_plans
-    WHERE plan_key = p_plan_key;
-
-    IF v_plan_id IS NULL THEN
-        RETURN jsonb_build_object('error', 'plan_not_found');
-    END IF;
-
-    INSERT INTO public.user_credits (user_id, plan_id, plan_assigned_at)
-    VALUES (p_user_id, v_plan_id, now())
-    ON CONFLICT (user_id) DO UPDATE SET
-        plan_id = v_plan_id,
-        plan_assigned_at = now(),
-        updated_at = now();
-
-    RETURN jsonb_build_object(
-        'user_id', p_user_id,
-        'plan_id', v_plan_id
-    );
-END;
+-- SUPERSEDED by 016_plan_versioning.sql — this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.set_user_plan(UUID, TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
 -- unset_user_plan: Clear a user's plan (pauses the allowance period).
@@ -241,7 +127,6 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.set_user_plan(UUID, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.unset_user_plan(UUID) FROM PUBLIC, anon, authenticated;
 
 -- check_plan_allowance gained a trailing p_period_start DATE parameter. Drop

@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
-
+from bursar.repositories._types import QueryFn
+from bursar.repositories._utils import unwrap_jsonb, validate_non_empty
 from bursar.repositories.schemas import BillingEventRow
-
-QueryFn = Callable[[str, list[Any]], list[Any]]
 
 
 class BillingEventRepository:
+    """Repository for billing event lifecycle operations.
+
+    All methods call Postgres via raw SQL queries through the query function.
+    Returns None when the query returns no rows.
+    """
+
     def __init__(self, execute: QueryFn) -> None:
         self._execute = execute
 
@@ -19,7 +22,20 @@ class BillingEventRepository:
         event_type: str,
         metadata: str,
     ) -> BillingEventRow | None:
-        row = self._unwrap_jsonb(
+        """Claim a billing event for processing (idempotent).
+
+        Args:
+            provider: The billing provider identifier.
+            event_id: The provider event ID.
+            event_type: The event type string.
+            metadata: JSON metadata string.
+
+        Returns:
+            BillingEventRow if claimed successfully, None if already claimed.
+        """
+        validate_non_empty(provider, "provider")
+        validate_non_empty(event_id, "event_id")
+        row = unwrap_jsonb(
             self._execute(
                 "SELECT * FROM public.claim_billing_event(%s, %s, %s, %s)",
                 [provider, event_id, event_type, metadata],
@@ -28,21 +44,19 @@ class BillingEventRepository:
         return BillingEventRow.model_validate(row) if row else None
 
     def complete(self, provider: str, event_id: str) -> None:
+        """Mark a billing event as completed.
+
+        Args:
+            provider: The billing provider identifier.
+            event_id: The provider event ID.
+        """
         self._execute("SELECT * FROM public.complete_billing_event(%s, %s)", [provider, event_id])
 
     def fail(self, provider: str, event_id: str) -> None:
-        self._execute("SELECT * FROM public.fail_billing_event(%s, %s)", [provider, event_id])
+        """Mark a billing event as failed.
 
-    @staticmethod
-    def _unwrap_jsonb(rows: list[Any]) -> dict[str, Any] | None:
-        if not rows or len(rows) != 1:
-            return None
-        row = rows[0]
-        if isinstance(row, dict):
-            keys = list(row.keys())
-            if len(keys) == 1:
-                v = row[keys[0]]
-                if isinstance(v, dict):
-                    return v
-            return row
-        return None
+        Args:
+            provider: The billing provider identifier.
+            event_id: The provider event ID.
+        """
+        self._execute("SELECT * FROM public.fail_billing_event(%s, %s)", [provider, event_id])

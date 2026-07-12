@@ -56,6 +56,87 @@ BEGIN
     END LOOP;
 END $$;
 
+-- ── Shared bucket-walk helper ──────────────────────────────────────────
+-- Called by both deduct_with_allowance and settle_lease to debit from
+-- priority-ordered credit buckets + handle the overdraft sink. Returns
+-- the bucket_breakdown JSONB and the amount that could not be allocated.
+-- REVOKEd from anon/authenticated — backend-only.
+CREATE OR REPLACE FUNCTION public._walk_and_debit_buckets(
+    p_user_id UUID,
+    p_amount NUMERIC
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_bucket_breakdown JSONB := '{}'::jsonb;
+    v_bucket_remaining NUMERIC;
+    v_walk RECORD;
+    v_bucket_balance NUMERIC;
+    v_take NUMERIC;
+    v_sink_bucket TEXT;
+BEGIN
+    v_bucket_remaining := p_amount;
+
+    FOR v_walk IN
+        SELECT bucket_key, priority, 0 AS grp FROM public.credit_buckets
+        UNION ALL
+        SELECT uct.bucket_key, 0, 1 AS grp
+        FROM public.user_credit_buckets uct
+        WHERE uct.user_id = p_user_id
+          AND NOT EXISTS (SELECT 1 FROM public.credit_buckets ct WHERE ct.bucket_key = uct.bucket_key)
+        ORDER BY grp ASC, priority ASC, bucket_key ASC
+    LOOP
+        EXIT WHEN v_bucket_remaining <= 0;
+
+        SELECT balance INTO v_bucket_balance
+        FROM public.user_credit_buckets
+        WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key
+        FOR UPDATE;
+        v_bucket_balance := COALESCE(v_bucket_balance, 0);
+
+        v_take := LEAST(v_bucket_balance, v_bucket_remaining);
+        IF v_take > 0 THEN
+            UPDATE public.user_credit_buckets
+            SET balance = balance - v_take, updated_at = now()
+            WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key;
+
+            v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(v_walk.bucket_key, v_take);
+            v_bucket_remaining := v_bucket_remaining - v_take;
+        END IF;
+    END LOOP;
+
+    IF v_bucket_remaining > 0 THEN
+        SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets WHERE allow_overdraft = true ORDER BY priority DESC, bucket_key DESC LIMIT 1;
+        IF v_sink_bucket IS NULL THEN
+            SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets ORDER BY priority DESC, bucket_key DESC LIMIT 1;
+        END IF;
+        IF v_sink_bucket IS NULL THEN
+            v_sink_bucket := 'default';
+        END IF;
+
+        INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
+        VALUES (p_user_id, v_sink_bucket, -v_bucket_remaining)
+        ON CONFLICT (user_id, bucket_key) DO UPDATE SET
+            balance = public.user_credit_buckets.balance - v_bucket_remaining,
+            updated_at = now();
+
+        v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
+            v_sink_bucket, COALESCE((v_bucket_breakdown->>v_sink_bucket)::numeric, 0) + v_bucket_remaining
+        );
+        v_bucket_remaining := 0;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'bucket_breakdown', v_bucket_breakdown
+    );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public._walk_and_debit_buckets(UUID, NUMERIC) FROM PUBLIC, anon, authenticated;
+
 -- deduct_with_allowance gained BOOLEAN/DATE trailing params across its
 -- history. Drop every overload by name first so the current signature is
 -- unambiguous (no-op on fresh installs).
@@ -247,66 +328,13 @@ BEGIN
             RAISE EXCEPTION 'bursa_insufficient_credits' USING ERRCODE = 'DU002';
         END IF;
 
-        -- ── Bucket walk: decide WHICH bucket balance(s) fund this debit. The
-        -- aggregate UPDATE below is unchanged and remains authoritative; this
-        -- only decides how user_credit_buckets is split. Walk order: configured
-        -- buckets by priority ASC, then any bucket_keys this user holds balance
-        -- under that are no longer in credit_buckets (config drift safety net),
-        -- appended last.
-        v_bucket_remaining := v_net;
-
-        FOR v_walk IN
-            SELECT bucket_key, priority, 0 AS grp FROM public.credit_buckets
-            UNION ALL
-            SELECT uct.bucket_key, 0, 1 AS grp
-            FROM public.user_credit_buckets uct
-            WHERE uct.user_id = p_user_id
-              AND NOT EXISTS (SELECT 1 FROM public.credit_buckets ct WHERE ct.bucket_key = uct.bucket_key)
-            ORDER BY grp ASC, priority ASC, bucket_key ASC
-        LOOP
-            EXIT WHEN v_bucket_remaining <= 0;
-
-            SELECT balance INTO v_bucket_balance
-            FROM public.user_credit_buckets
-            WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key
-            FOR UPDATE;
-            v_bucket_balance := COALESCE(v_bucket_balance, 0);
-
-            v_take := LEAST(v_bucket_balance, v_bucket_remaining);
-            IF v_take > 0 THEN
-                UPDATE public.user_credit_buckets
-                SET balance = balance - v_take, updated_at = now()
-                WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key;
-
-                v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(v_walk.bucket_key, v_take);
-                v_bucket_remaining := v_bucket_remaining - v_take;
-            END IF;
-        END LOOP;
-
-        -- Overdraft sink: only reachable when a negative floor sanctioned
-        -- going negative (the floor check above already guarantees
-        -- v_balance - v_net >= p_min_balance, so configured-bucket balances,
-        -- which sum to v_balance, always fully cover v_net in strict mode).
-        IF v_bucket_remaining > 0 THEN
-            SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets WHERE allow_overdraft = true ORDER BY priority DESC, bucket_key DESC LIMIT 1;
-            IF v_sink_bucket IS NULL THEN
-                SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets ORDER BY priority DESC, bucket_key DESC LIMIT 1;
-            END IF;
-            IF v_sink_bucket IS NULL THEN
-                v_sink_bucket := 'default';
-            END IF;
-
-            INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
-            VALUES (p_user_id, v_sink_bucket, -v_bucket_remaining)
-            ON CONFLICT (user_id, bucket_key) DO UPDATE SET
-                balance = public.user_credit_buckets.balance - v_bucket_remaining,
-                updated_at = now();
-
-            v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
-                v_sink_bucket, COALESCE((v_bucket_breakdown->>v_sink_bucket)::numeric, 0) + v_bucket_remaining
-            );
-            v_bucket_remaining := 0;
-        END IF;
+        -- ── Bucket walk (delegated to shared helper) ─────────────────────
+        -- Uses _walk_and_debit_buckets for the priority-ordered walk + overdraft sink.
+        -- The helper returns bucket_breakdown; the amount was already floor-clamped
+        -- by the checks above, so remaining > 0 after the walk should not occur
+        -- in strict mode (handled via the overdraft sink path inside the helper).
+        SELECT (result->>'bucket_breakdown')::jsonb INTO v_bucket_breakdown
+        FROM public._walk_and_debit_buckets(p_user_id, v_net) AS result;
 
         UPDATE public.user_credits
         SET balance = balance - v_net, updated_at = now()
@@ -330,6 +358,10 @@ BEGIN
 
     EXCEPTION
         WHEN SQLSTATE 'DU001' THEN
+            -- Custom SQLSTATE: DU001 = spend cap reached (deny), DU002 = insufficient credits,
+            -- DU003 = feature limit reached. These are raised WITHIN the subtransaction so
+            -- the EXCEPTION block rolls back any partial changes (allowance consumption,
+            -- bucket debits) before returning a structured error envelope.
             RETURN jsonb_build_object('error', 'cap_reached', 'action', 'deny');
         WHEN SQLSTATE 'DU002' THEN
             RETURN jsonb_build_object('error', 'insufficient_credits');
@@ -619,6 +651,7 @@ DECLARE
     v_existing_id    UUID;
     v_existing_amt   NUMERIC;
     v_existing_cons  NUMERIC;
+    v_existing_bal_after NUMERIC;
     v_existing_bucket_bd JSONB;
     -- Bucket walk
     v_bucket_breakdown JSONB := '{}'::jsonb;
@@ -645,15 +678,16 @@ BEGIN
     -- Idempotency replay (user-scoped).
     IF p_idempotency_key IS NOT NULL THEN
         SELECT id, ABS(amount), COALESCE((metadata->>'allowance_consumed')::numeric, 0),
+               COALESCE((metadata->>'balance_after')::numeric, v_balance),
                COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
-        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bucket_bd
+        INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
         FROM public.credit_transactions
-        WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
+        WHERE user_id = p_user_id AND type = 'usage' AND metadata->>'idempotency_key' = p_idempotency_key
         LIMIT 1;
         IF FOUND THEN
             RETURN jsonb_build_object(
                 'transaction_id', v_existing_id, 'amount', v_existing_amt,
-                'allowance_consumed', v_existing_cons, 'balance_after', v_balance,
+                'allowance_consumed', v_existing_cons, 'balance_after', v_existing_bal_after,
                 'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'bucket_breakdown', v_existing_bucket_bd
             );
         END IF;
@@ -671,13 +705,14 @@ BEGIN
     IF v_status = 'settled' THEN
         IF v_settle_tx IS NOT NULL THEN
             SELECT id, ABS(amount), COALESCE((metadata->>'allowance_consumed')::numeric, 0),
+                   COALESCE((metadata->>'balance_after')::numeric, v_balance),
                    COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
-            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bucket_bd
+            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
             FROM public.credit_transactions WHERE id = v_settle_tx;
             IF FOUND THEN
                 RETURN jsonb_build_object(
                     'transaction_id', v_existing_id, 'amount', v_existing_amt,
-                    'allowance_consumed', v_existing_cons, 'balance_after', v_balance,
+                    'allowance_consumed', v_existing_cons, 'balance_after', v_existing_bal_after,
                     'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL, 'bucket_breakdown', v_existing_bucket_bd
                 );
             END IF;
@@ -775,58 +810,9 @@ BEGIN
         DO UPDATE SET usage = public.credit_usage_window.usage + v_consume, updated_at = now();
     END IF;
 
-    -- ── Bucket walk: identical algorithm to deduct_with_allowance, applied to
-    -- this already-floor-clamped v_net. No special-casing.
-    v_bucket_remaining := v_net;
-
-    FOR v_walk IN
-        SELECT bucket_key, priority, 0 AS grp FROM public.credit_buckets
-        UNION ALL
-        SELECT uct.bucket_key, 0, 1 AS grp
-        FROM public.user_credit_buckets uct
-        WHERE uct.user_id = p_user_id
-          AND NOT EXISTS (SELECT 1 FROM public.credit_buckets ct WHERE ct.bucket_key = uct.bucket_key)
-        ORDER BY grp ASC, priority ASC, bucket_key ASC
-    LOOP
-        EXIT WHEN v_bucket_remaining <= 0;
-
-        SELECT balance INTO v_bucket_balance
-        FROM public.user_credit_buckets
-        WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key
-        FOR UPDATE;
-        v_bucket_balance := COALESCE(v_bucket_balance, 0);
-
-        v_take := LEAST(v_bucket_balance, v_bucket_remaining);
-        IF v_take > 0 THEN
-            UPDATE public.user_credit_buckets
-            SET balance = balance - v_take, updated_at = now()
-            WHERE user_id = p_user_id AND bucket_key = v_walk.bucket_key;
-
-            v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(v_walk.bucket_key, v_take);
-            v_bucket_remaining := v_bucket_remaining - v_take;
-        END IF;
-    END LOOP;
-
-    IF v_bucket_remaining > 0 THEN
-        SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets WHERE allow_overdraft = true ORDER BY priority DESC, bucket_key DESC LIMIT 1;
-        IF v_sink_bucket IS NULL THEN
-            SELECT bucket_key INTO v_sink_bucket FROM public.credit_buckets ORDER BY priority DESC, bucket_key DESC LIMIT 1;
-        END IF;
-        IF v_sink_bucket IS NULL THEN
-            v_sink_bucket := 'default';
-        END IF;
-
-        INSERT INTO public.user_credit_buckets (user_id, bucket_key, balance)
-        VALUES (p_user_id, v_sink_bucket, -v_bucket_remaining)
-        ON CONFLICT (user_id, bucket_key) DO UPDATE SET
-            balance = public.user_credit_buckets.balance - v_bucket_remaining,
-            updated_at = now();
-
-        v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
-            v_sink_bucket, COALESCE((v_bucket_breakdown->>v_sink_bucket)::numeric, 0) + v_bucket_remaining
-        );
-        v_bucket_remaining := 0;
-    END IF;
+    -- ── Bucket walk (delegated to shared helper) ─────────────────────
+    SELECT (result->>'bucket_breakdown')::jsonb INTO v_bucket_breakdown
+    FROM public._walk_and_debit_buckets(p_user_id, v_net) AS result;
 
     -- Tag metadata.feature whenever p_feature is given (mirrors
     -- deduct_with_allowance) — this is what makes the call countable for

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../types.js";
+import { pgBoolean, unwrapJsonb, safeParse } from "../_shared.js";
 
 export const BillingOfferRowSchema = z
   .object({
@@ -13,28 +14,17 @@ export const BillingOfferRowSchema = z
       .nullable()
       .optional(),
     grant_bucket: z.string().nullable().optional(),
-    grant_replace_prior: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    grant_replace_prior: pgBoolean.nullable().optional(),
   })
   .passthrough();
 
 export type BillingOfferRow = z.infer<typeof BillingOfferRowSchema>;
 
-function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
-  if (rows.length !== 1) return null;
-  const row = rows[0] as Record<string, unknown>;
-  const keys = Object.keys(row);
-  if (keys.length !== 1) return null;
-  const v = row[keys[0]];
-  if (v !== null && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
-  return null;
-}
-
+/** Repository for billing offer resolution. */
 export class BillingOfferRepository {
   constructor(private query: QueryFn) {}
 
+  /** Resolve a billing offer by price ID and product ID. */
   async resolveByPrice(
     provider: string,
     priceId: string | null,
@@ -45,15 +35,20 @@ export class BillingOfferRepository {
       [provider, priceId, productId],
     );
     const data = unwrapJsonb(rows);
-    return data ? BillingOfferRowSchema.parse(data) : null;
+    return data
+      ? safeParse(BillingOfferRowSchema, data, "BillingOfferRepository.resolveByPrice")
+      : null;
   }
 
+  /** Resolve a billing offer by provider lookup key. */
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingOfferRow | null> {
     const rows = await this.query("SELECT * FROM public.resolve_billing_offer_by_lookup($1, $2)", [
       provider,
       lookupKey,
     ]);
     const data = unwrapJsonb(rows);
-    return data ? BillingOfferRowSchema.parse(data) : null;
+    return data
+      ? safeParse(BillingOfferRowSchema, data, "BillingOfferRepository.resolveByLookup")
+      : null;
   }
 }

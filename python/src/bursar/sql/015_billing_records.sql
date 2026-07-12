@@ -261,6 +261,11 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_billing_payment_for_refund(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+-- Per-function GRANTs to service_role for all billing-record RPCs in this migration.
+GRANT EXECUTE ON FUNCTION public.upsert_billing_payment(TEXT, TEXT, TEXT, UUID, INTEGER, INTEGER, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_billing_refund(TEXT, TEXT, TEXT, UUID, INTEGER, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_billing_invoice(TEXT, TEXT, TEXT, UUID, TEXT, INTEGER, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_billing_dispute(TEXT, TEXT, TEXT, UUID, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_billing_payment_for_refund(TEXT, TEXT) TO service_role;
 
 NOTIFY pgrst, 'reload schema';

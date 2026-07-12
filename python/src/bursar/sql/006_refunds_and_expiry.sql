@@ -71,7 +71,7 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object(
             'error', 'not_found',
-            'user_id', '',
+            'user_id', NULL::UUID,
             'new_balance', 0
         );
     END IF;
@@ -227,114 +227,10 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.refund_credits FROM PUBLIC, anon, authenticated;
 
--- expire_credits: sweep expired credits from all users' balances, grouped
--- per-(user_id, bucket). Returns count, amount, and per-bucket breakdown of
--- expired credits. When p_dry_run is true, reports without modifying state.
+-- SUPERSEDED by 011_lazy_expiry.sql — this stub is immediately overwritten.
 CREATE OR REPLACE FUNCTION public.expire_credits(p_dry_run BOOLEAN DEFAULT false)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = ''
-AS $$
-DECLARE
-    v_expired_count INTEGER := 0;
-    v_expired_amount NUMERIC := 0;
-    v_expired_by_bucket JSONB := '{}'::jsonb;
-    v_group RECORD;
-    v_group_expired NUMERIC;
-    v_current_bucket_balance NUMERIC;
-    v_current_balance NUMERIC;
-BEGIN
-    -- A grant is "sweepable" when it has an expires_at in the past AND has not
-    -- already been swept (no 'swept_at' marker). Marking swept grants is what
-    -- makes the sweep idempotent: a second run finds nothing and never
-    -- double-debits. Mirrors MemoryStore, which nulls expires_at on sweep.
-    -- Grouping is per-(user_id, bucket) instead of per-user_id, reading bucket
-    -- straight off each grant's own metadata->>'bucket' (a bucket's `expires` flag
-    -- is only consulted at add_credits time; once stamped, a transaction's
-    -- fate is fixed regardless of later config changes).
-    FOR v_group IN
-        SELECT DISTINCT user_id, COALESCE(metadata->>'bucket', 'default') AS bucket_key
-        FROM public.credit_transactions
-        WHERE type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
-          AND metadata ? 'expires_at'
-          AND NOT (metadata ? 'swept_at')
-          AND (metadata->>'expires_at')::timestamptz <= now()
-    LOOP
-        -- Total un-swept expired grants for this (user, bucket).
-        SELECT COALESCE(SUM(amount), 0) INTO v_group_expired
-        FROM public.credit_transactions
-        WHERE user_id = v_group.user_id
-          AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
-          AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
-          AND metadata ? 'expires_at'
-          AND NOT (metadata ? 'swept_at')
-          AND (metadata->>'expires_at')::timestamptz <= now();
-
-        -- Lock the aggregate balance row (prevents racing a concurrent deduction).
-        SELECT COALESCE(balance, 0) INTO v_current_balance
-        FROM public.user_credits
-        WHERE user_id = v_group.user_id
-        FOR UPDATE;
-
-        -- Lock (if present) this bucket's own balance row for this user.
-        SELECT balance INTO v_current_bucket_balance
-        FROM public.user_credit_buckets
-        WHERE user_id = v_group.user_id AND bucket_key = v_group.bucket_key
-        FOR UPDATE;
-        v_current_bucket_balance := COALESCE(v_current_bucket_balance, 0);
-
-        -- Cap at both the bucket's own balance and the aggregate (never expire
-        -- money that isn't actually there under either ceiling).
-        v_group_expired := LEAST(v_group_expired, v_current_bucket_balance, v_current_balance);
-
-        IF v_group_expired > 0 THEN
-            v_expired_count := v_expired_count + 1;
-            v_expired_amount := v_expired_amount + v_group_expired;
-            v_expired_by_bucket := v_expired_by_bucket || jsonb_build_object(
-                v_group.bucket_key,
-                COALESCE((v_expired_by_bucket->>v_group.bucket_key)::numeric, 0) + v_group_expired
-            );
-
-            IF NOT p_dry_run THEN
-                -- Deduct expired amount from both the bucket and aggregate balances.
-                UPDATE public.user_credit_buckets
-                SET balance = balance - v_group_expired, updated_at = now()
-                WHERE user_id = v_group.user_id AND bucket_key = v_group.bucket_key;
-
-                UPDATE public.user_credits
-                SET balance = balance - v_group_expired,
-                    updated_at = now()
-                WHERE user_id = v_group.user_id;
-
-                -- Log one adjustment transaction per (user, bucket).
-                INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
-                VALUES (v_group.user_id, -v_group_expired, 'adjustment',
-                        jsonb_build_object('reason', 'credit_expired', 'expired_amount', v_group_expired, 'bucket', v_group.bucket_key));
-            END IF;
-        END IF;
-
-        -- Mark the grants we just considered as swept so they're never
-        -- re-swept (only on a real run; a dry run must not mutate state).
-        IF NOT p_dry_run THEN
-            UPDATE public.credit_transactions
-            SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
-            WHERE user_id = v_group.user_id
-              AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
-              AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
-              AND metadata ? 'expires_at'
-              AND NOT (metadata ? 'swept_at')
-              AND (metadata->>'expires_at')::timestamptz <= now();
-        END IF;
-    END LOOP;
-
-    RETURN jsonb_build_object(
-        'expired_count', v_expired_count,
-        'expired_amount', v_expired_amount,
-        'expired_by_bucket', v_expired_by_bucket,
-        'dry_run', p_dry_run
-    );
-END;
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
 -- Index for expiry sweep (finds un-swept expired grants without full scan)
@@ -349,11 +245,7 @@ CREATE INDEX IF NOT EXISTS idx_credit_transactions_reference_id
     ON public.credit_transactions (reference_id)
     WHERE reference_id IS NOT NULL;
 
--- Qualified with the exact signature defined above (011_lazy_expiry.sql adds a
--- p_user_id-scoped overload; an unqualified REVOKE here would become ambiguous
--- ("function name is not unique") the moment that second overload exists,
--- breaking idempotent re-migration exactly like the credits_add bug fixed in
--- 002_credit_rpcs.sql — see 011_lazy_expiry.sql for the full explanation).
-REVOKE EXECUTE ON FUNCTION public.expire_credits(BOOLEAN) FROM PUBLIC, anon, authenticated;
+-- This function is SUPERSEDED and its REVOKE is removed. The live
+-- expire_credits(BOOLEAN, UUID) is in 011_lazy_expiry.sql with its own REVOKE.
 
 NOTIFY pgrst, 'reload schema';

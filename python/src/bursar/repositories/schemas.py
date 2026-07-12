@@ -64,6 +64,7 @@ class RevokeRow(BaseModel):
     amount: str | Decimal | None = None
     new_balance: str | Decimal | None = None
     bucket: str | None = None
+    error: str | None = None
 
 
 class LeaseRow(BaseModel):
@@ -92,6 +93,7 @@ class ActivePricingRow(BaseModel):
     label: str | None = None
     active: bool = False
     created_at: str = ""
+    error: str | None = None
 
 
 class UserPlanRow(BaseModel):
@@ -123,6 +125,7 @@ class MigratePlanRow(BaseModel):
     target_plan_id: str = ""
     target_config_version: int = 0
     migrated_count: int = 0
+    error: str | None = None
 
 
 class AllowanceRow(BaseModel):
@@ -208,6 +211,7 @@ class CreateTeamRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     team_id: str = ""
     name: str = ""
+    error: str | None = None
 
 
 class TeamBalanceRow(BaseModel):
@@ -224,6 +228,7 @@ class AddTeamMemberRow(BaseModel):
     team_id: str = ""
     user_id: str = ""
     role: str = "member"
+    error: str | None = None
 
 
 class TeamMemberRow(BaseModel):
@@ -249,6 +254,7 @@ class BucketEnvelopeRow(BaseModel):
     user_id: str = ""
     buckets: list[dict[str, Any]] | None = None
     total_balance: str | Decimal | None = None
+    error: str | None = None
 
 
 class SweepRow(BaseModel):
@@ -256,6 +262,7 @@ class SweepRow(BaseModel):
     expired_count: int = 0
     expired_amount: str | Decimal | None = None
     expired_by_bucket: dict[str, str | Decimal] | None = None
+    error: str | None = None
 
 
 # Billing schemas
@@ -291,8 +298,8 @@ class SubscriptionRow(BaseModel):
     offer_key: str | None = None
     plan: str | None = None
     status: str = "incomplete"
-    current_period_start: Any = None
-    current_period_end: Any = None
+    current_period_start: str | None = None
+    current_period_end: str | None = None
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None
@@ -301,6 +308,8 @@ class SubscriptionRow(BaseModel):
 
 class BillingEventRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    event_id: str = ""
+    provider: str = ""
     status: str = "retry"
 
 
@@ -314,7 +323,80 @@ class BillingPaymentRow(BaseModel):
     currency: str = "USD"
     purpose: str | None = None
     metadata: dict[str, Any] | None = None
-    created_at: Any = None
-    updated_at: Any = None
+    created_at: str | None = None
+    updated_at: str | None = None
     credits_per_unit: str | Decimal | None = None
     credits_per_major_unit: str | Decimal | None = None
+
+
+class UnsetUserPlanRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    user_id: str = ""
+    plan_key: str | None = None
+
+
+class PricingConfigHistoryItemRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = ""
+    version: int = 0
+    label: str | None = None
+    active: bool = False
+    created_at: str = ""
+
+
+class DeductParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = ""
+    amount: str = "0"
+    idempotency_key: str | None = None
+    min_balance: str = "0"
+    model: str | None = None
+    metadata: str = "{}"
+    skip_allowance: bool = False
+    period_start: str | None = None
+    feature: str | None = None
+    feature_max_calls: int | None = None
+    feature_action: str | None = None
+    feature_period_start: str | None = None
+    feature_period_end: str | None = None
+
+
+class CreateLeaseParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = ""
+    amount: str = "0"
+    operation_type: str = ""
+    billing_mode: str = ""
+    floor: str = "0"
+    ceiling: str = "0"
+    model: str | None = None
+    metadata: str = "{}"
+    ttl_seconds: int = 600
+    skip_allowance: bool = False
+    period_start: str | None = None
+    feature: str | None = None
+    feature_max_calls: int | None = None
+    feature_action: str | None = None
+    feature_period_start: str | None = None
+    feature_period_end: str | None = None
+    max_concurrent: str | None = None
+    overdraft_floor: str | None = None
+
+
+class SettleLeaseParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = ""
+    lease_id: str = ""
+    amount: str = "0"
+    metadata: str = "{}"
+    billing_mode: str = ""
+    skip_allowance: bool = False
+    period_start: str | None = None
+    feature: str | None = None
+    feature_max_calls: int | None = None
+    feature_action: str | None = None
+    feature_period_start: str | None = None
+    feature_period_end: str | None = None
+    idempotency_key: str | None = None
+    min_balance: str = "0"
+    model: str | None = None

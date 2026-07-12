@@ -14,8 +14,9 @@
 ALTER TABLE public.credit_plans ADD COLUMN IF NOT EXISTS config_version INTEGER;
 
 UPDATE public.credit_plans
-SET config_version = (
-    SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1
+SET config_version = COALESCE(
+    (SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1),
+    1
 )
 WHERE config_version IS NULL;
 

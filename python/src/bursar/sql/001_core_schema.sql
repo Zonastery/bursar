@@ -75,8 +75,11 @@ CREATE TABLE IF NOT EXISTS public.credit_transactions (
 -- are unique per (user, operation), e.g. by prefixing with the operation name
 -- or using the upstream event id verbatim only when it is already
 -- operation-specific (the common case: payment-provider webhook event ids).
+-- User+type-scoped idempotency: the same key may be used across different
+-- operation types (e.g. a purchase and a deduction) without collision.
+DROP INDEX IF EXISTS public.idx_credit_transactions_idempotency_user;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_idempotency_user
-    ON public.credit_transactions (user_id, (metadata ->> 'idempotency_key'))
+    ON public.credit_transactions (user_id, type, (metadata ->> 'idempotency_key'))
     WHERE metadata ->> 'idempotency_key' IS NOT NULL;
 
 -- Index for user lookups (most recent first)

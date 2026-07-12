@@ -39,7 +39,7 @@ BEGIN
     SELECT COALESCE(SUM(amount), 0) INTO v_total_granted
     FROM public.credit_transactions
     WHERE user_id = p_user_id
-      AND type::text = p_tx_type
+      AND type = p_tx_type::public.credit_tx_type
       AND amount > 0;
 
     -- Total already revoked for this tx_type
@@ -52,9 +52,11 @@ BEGIN
     v_revocable := v_total_granted - v_total_revoked;
 
     -- Cap at the user's current balance (parity with MemoryStore).
+    -- FOR UPDATE prevents concurrent revoke calls from over-deducting.
     SELECT COALESCE(balance, 0) INTO v_current_balance
     FROM public.user_credits
-    WHERE user_id = p_user_id;
+    WHERE user_id = p_user_id
+    FOR UPDATE;
 
     v_revocable := LEAST(v_revocable, v_current_balance);
 
@@ -77,6 +79,7 @@ BEGIN
         LEFT JOIN public.credit_buckets ct ON ct.bucket_key = uct.bucket_key
         WHERE uct.user_id = p_user_id AND uct.balance > 0
         ORDER BY COALESCE(ct.priority, 999999) ASC, uct.bucket_key ASC
+        FOR UPDATE OF uct
     LOOP
         v_to_deduct := LEAST(v_bucket_row.balance, v_remaining);
         UPDATE public.user_credit_buckets
@@ -134,6 +137,6 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.revoke_credits_by_tx_type(UUID, TEXT) FROM PUBLIC, anon, authenticated;
 
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+GRANT EXECUTE ON FUNCTION public.revoke_credits_by_tx_type(UUID, TEXT) TO service_role;
 
 NOTIFY pgrst, 'reload schema';

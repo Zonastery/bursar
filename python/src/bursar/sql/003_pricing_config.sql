@@ -70,47 +70,10 @@ END;
 $$;
 
 
--- set_active_pricing_config: Publish a new pricing config, deactivate the old
--- one, and sync plan/tier definitions derived from the config.
-CREATE OR REPLACE FUNCTION public.set_active_pricing_config(
-    p_config JSONB,
-    p_label TEXT DEFAULT NULL
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_new_id UUID;
-    v_next_version INTEGER;
-BEGIN
-    -- Serialize concurrent publishers so version assignment can't race.
-    PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
-
-    SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
-
-    -- Deactivate all existing active configs
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
-
-    -- Insert new active config
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
-    VALUES (p_config, true, v_next_version, p_label)
-    RETURNING id INTO v_new_id;
-
-    -- Sync plan definitions into credit_plans (see 004_plans.sql).
-    PERFORM public.sync_plans_from_config(p_config);
-
-    -- Sync bucket definitions into credit_buckets (see 010_credit_tiers.sql).
-    PERFORM public.sync_buckets_from_config(p_config);
-
-    RETURN jsonb_build_object(
-        'id', v_new_id,
-        'version', v_next_version,
-        'active', true
-    );
-END;
+-- SUPERSEDED by 016_plan_versioning.sql — this stub is immediately overwritten.
+CREATE OR REPLACE FUNCTION public.set_active_pricing_config(p_config JSONB, p_label TEXT DEFAULT NULL)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
 -- get_pricing_configs: List all pricing configs ordered by version.
@@ -166,46 +129,10 @@ BEGIN
 END;
 $$;
 
--- activate_pricing_config: Switch to a specific version and deactivate all others.
+-- SUPERSEDED by 016_plan_versioning.sql — this stub is immediately overwritten.
 CREATE OR REPLACE FUNCTION public.activate_pricing_config(p_version INTEGER)
-RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_target_version INTEGER;
-    v_target_id UUID;
-BEGIN
-    -- Serialize concurrent activations (same lock/key as set_active_pricing_config)
-    -- so two racing activate_pricing_config calls can't both pass the
-    -- version_not_found check and then both try to flip `active`, tripping the
-    -- partial-unique index as a raw unique_violation instead of a clean error.
-    PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
-
-    -- Verify the target version exists
-    SELECT id INTO v_target_id
-    FROM public.credit_pricing_config
-    WHERE version = p_version;
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('error', 'version_not_found');
-    END IF;
-
-    -- Deactivate all configs
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
-
-    -- Activate the target version
-    UPDATE public.credit_pricing_config SET active = true
-    WHERE version = p_version
-    RETURNING id INTO v_target_id;
-
-    RETURN jsonb_build_object(
-        'id', v_target_id,
-        'version', p_version,
-        'active', true
-    );
-END;
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN RETURN NULL; END;
 $$;
 
 REVOKE EXECUTE ON FUNCTION public.get_active_pricing_config FROM PUBLIC, anon, authenticated;

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { CallProc } from "./types.js";
 import { DeductionRowSchema } from "./deduction.js";
 import type { DeductionRow } from "./deduction.js";
+import { pgBoolean, safeParse } from "./_shared.js";
 
 export const LeaseRowSchema = z
   .object({
@@ -27,10 +28,7 @@ export const LeaseRowSchema = z
 
 export const ReleaseRowSchema = z
   .object({
-    released: z
-      .union([z.boolean(), z.string()] as const)
-      .nullable()
-      .optional(),
+    released: pgBoolean.nullable().optional(),
     reason: z.string().nullable().optional(),
   })
   .passthrough();
@@ -38,9 +36,11 @@ export const ReleaseRowSchema = z
 export type LeaseRow = z.infer<typeof LeaseRowSchema>;
 export type ReleaseRow = z.infer<typeof ReleaseRowSchema>;
 
+/** Repository for lease lifecycle operations (admission control). */
 export class LeaseRepository {
   constructor(private callproc: CallProc) {}
 
+  /** Atomically acquire a lease (hold) — admission control. */
   async createLease(params: {
     userId: string;
     amount: string;
@@ -77,9 +77,10 @@ export class LeaseRepository {
       params.featurePeriodStart,
       params.featurePeriodEnd,
     ]);
-    return LeaseRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(LeaseRowSchema, rows?.[0] ?? {}, "LeaseRepository.createLease");
   }
 
+  /** Charge the actual cost against a lease and mark it settled. */
   async settleLease(params: {
     userId: string;
     leaseId: string;
@@ -112,16 +113,18 @@ export class LeaseRepository {
       params.featurePeriodStart,
       params.featurePeriodEnd,
     ]);
-    return DeductionRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(DeductionRowSchema, rows?.[0] ?? {}, "LeaseRepository.settleLease");
   }
 
+  /** Release a lease without charging — idempotent. */
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseRow> {
     const rows = await this.callproc("release_lease", [userId, leaseId]);
-    return ReleaseRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(ReleaseRowSchema, rows?.[0] ?? {}, "LeaseRepository.releaseLease");
   }
 
+  /** Extend an active lease's TTL. */
   async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseRow> {
     const rows = await this.callproc("renew_lease", [userId, leaseId, ttlSeconds]);
-    return LeaseRowSchema.parse(rows?.[0] ?? {});
+    return safeParse(LeaseRowSchema, rows?.[0] ?? {}, "LeaseRepository.renewLease");
   }
 }

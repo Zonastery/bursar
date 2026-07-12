@@ -125,7 +125,7 @@ REVOKE EXECUTE ON FUNCTION public.daily_spend FROM PUBLIC, anon, authenticated;
 
 -- aggregate_stats: aggregate statistics across all users.
 CREATE OR REPLACE FUNCTION public.aggregate_stats(p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
-RETURNS JSON
+RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -146,7 +146,7 @@ BEGIN
     -- avg_daily_spend uses NUMERIC division (not integer division) so sub-credit
     -- daily averages are not truncated to 0. The SUM is cast to NUMERIC
     -- explicitly so dividing by a BIGINT day_count yields a NUMERIC quotient.
-    SELECT json_build_object(
+    SELECT jsonb_build_object(
         'total_credits_consumed', COALESCE(SUM(ABS(amount)), 0)::NUMERIC,
         'active_users', COUNT(DISTINCT user_id)::BIGINT,
         'avg_daily_spend', CASE WHEN day_count > 0
@@ -221,17 +221,15 @@ AS $$
 DECLARE
   v_total BIGINT;
 BEGIN
-  -- Authorization: execute is REVOKEd from anon/authenticated below, so in
-  -- practice only service_role reaches this. The in-body guard additionally
-  -- ensures that even if execute were granted to an end-user role, a caller
-  -- can only read their OWN rows.
+  -- Authorization: only service_role may call this function (execute is
+  -- REVOKEd from anon/authenticated below).
   -- First, count total matching rows for pagination
   SELECT COUNT(*) INTO v_total
   FROM public.credit_transactions ct
   WHERE ct.user_id = p_user_id
     AND (p_types IS NULL OR ct.type::TEXT = ANY(p_types))
     AND (p_from_date IS NULL OR ct.created_at >= p_from_date)
-    AND (p_to_date IS NULL OR ct.created_at <= p_to_date);
+    AND (p_to_date IS NULL OR ct.created_at < p_to_date);
 
   -- Return paginated results with total_count on each row
   RETURN QUERY
@@ -249,7 +247,7 @@ BEGIN
   WHERE ct.user_id = p_user_id
     AND (p_types IS NULL OR ct.type::TEXT = ANY(p_types))
     AND (p_from_date IS NULL OR ct.created_at >= p_from_date)
-    AND (p_to_date IS NULL OR ct.created_at <= p_to_date)
+    AND (p_to_date IS NULL OR ct.created_at < p_to_date)
   ORDER BY ct.created_at DESC
   LIMIT p_limit
   OFFSET p_offset;
@@ -290,15 +288,14 @@ AS $$
 DECLARE
   v_total BIGINT;
 BEGIN
-  -- Authorization: execute is REVOKEd from anon/authenticated below; the
-  -- in-body guard additionally limits any non-service_role caller to their
-  -- OWN rows.
+  -- Authorization: only service_role may call this function (execute is
+  -- REVOKEd from anon/authenticated below).
   SELECT COUNT(*) INTO v_total
   FROM public.credit_transactions ct
   WHERE ct.user_id = p_user_id
     AND ct.type = 'usage'
     AND (p_from_date IS NULL OR ct.created_at >= p_from_date)
-    AND (p_to_date IS NULL OR ct.created_at <= p_to_date);
+    AND (p_to_date IS NULL OR ct.created_at < p_to_date);
 
   RETURN QUERY
   SELECT
@@ -315,7 +312,7 @@ BEGIN
   WHERE ct.user_id = p_user_id
     AND ct.type = 'usage'
     AND (p_from_date IS NULL OR ct.created_at >= p_from_date)
-    AND (p_to_date IS NULL OR ct.created_at <= p_to_date)
+    AND (p_to_date IS NULL OR ct.created_at < p_to_date)
   ORDER BY ct.created_at DESC
   LIMIT p_limit
   OFFSET p_offset;
