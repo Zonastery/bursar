@@ -1,7 +1,4 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, inject } from "vitest";
-import { readdirSync, readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
@@ -11,11 +8,10 @@ import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
 import { resolveAllowanceWindow } from "../src/allowance.js";
 import type { AllowancePeriod } from "../src/allowance.js";
+import { BOOTSTRAP_SQL, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const ALLOWANCE_PERIODS: AllowancePeriod[] = ["calendar_month", "rolling_30d", "anniversary"];
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SQL_DIR = join(__dirname, "../../python/src/bursar/sql");
 // CI sets DATABASE_URL directly (its own service container, fast path);
 // locally, tests/global-setup.ts starts a disposable testcontainer and hands
 // its connection string down via `inject` (see that file for why not
@@ -56,36 +52,6 @@ if (!DATABASE_URL) {
     "[store-integration] SKIPPING PostgresStore integration tests: DATABASE_URL is not set. " +
       "Start postgres:16 on a non-default port and export DATABASE_URL to run them.",
   );
-}
-
-const BOOTSTRAP_SQL = `
--- Roles are cluster-global, so creating them must be idempotent: the suite may
--- run twice against the same cluster, or share a cluster with the Python suite.
-DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
-
-CREATE OR REPLACE FUNCTION auth.role() RETURNS text
-LANGUAGE SQL IMMUTABLE AS $func$ SELECT 'service_role'::text $func$;
-
-CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-LANGUAGE SQL IMMUTABLE AS $func$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $func$;
-`;
-
-function migrationFiles(): string[] {
-  return readdirSync(SQL_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-}
-
-async function applyMigrations(pool: pg.Pool): Promise<void> {
-  for (const file of migrationFiles()) {
-    const sql = readFileSync(join(SQL_DIR, file), "utf8");
-    await pool.query(sql);
-  }
 }
 
 describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () => {
@@ -129,17 +95,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   }, 60000);
 
   afterEach(async () => {
-    if (pool) {
-      await pool.query("DELETE FROM public.credit_reservations");
-      await pool.query("DELETE FROM public.credit_team_members");
-      await pool.query("DELETE FROM public.credit_teams");
-      await pool.query("DELETE FROM public.credit_usage_window");
-      await pool.query("DELETE FROM public.credit_transactions");
-      await pool.query("DELETE FROM public.credit_spend_caps");
-      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
-      await pool.query("DELETE FROM public.user_credits");
-      await pool.query("DELETE FROM public.credit_plans");
-    }
+    if (pool) await truncateBursarTables(pool);
   });
 
   afterAll(async () => {
@@ -1055,17 +1011,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   }, 60000);
 
   afterEach(async () => {
-    if (pool) {
-      await pool.query("DELETE FROM public.credit_reservations");
-      await pool.query("DELETE FROM public.credit_team_members");
-      await pool.query("DELETE FROM public.credit_teams");
-      await pool.query("DELETE FROM public.credit_usage_window");
-      await pool.query("DELETE FROM public.credit_transactions");
-      await pool.query("DELETE FROM public.credit_spend_caps");
-      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
-      await pool.query("DELETE FROM public.user_credits");
-      await pool.query("DELETE FROM public.credit_plans");
-    }
+    if (pool) await truncateBursarTables(pool);
   });
 
   afterAll(async () => {
@@ -1556,20 +1502,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   }, 60000);
 
   afterEach(async () => {
-    if (pool) {
-      await pool.query("DELETE FROM public.credit_reservations");
-      await pool.query("DELETE FROM public.credit_transactions");
-      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
-      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
-      await pool.query("DELETE FROM public.user_credits");
-      await pool.query("DELETE FROM public.credit_plans");
-      // credit_tiers is upsert-only (sync_tiers_from_config never deletes a
-      // stale row, matching MemoryStore's own accumulate-only semantics — see
-      // tiers-adversarial.test.ts's config-drift test) — clear it explicitly
-      // between tests so one test's tier config never leaks into the next.
-      await pool.query("DELETE FROM public.user_credit_buckets");
-      await pool.query("DELETE FROM public.credit_buckets");
-    }
+    if (pool) await truncateBursarTables(pool);
   });
 
   afterAll(async () => {
@@ -1745,16 +1678,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
   }, 60000);
 
   afterEach(async () => {
-    if (pool) {
-      await pool.query("DELETE FROM public.credit_reservations");
-      await pool.query("DELETE FROM public.credit_transactions");
-      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
-      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
-      await pool.query("DELETE FROM public.user_credits");
-      await pool.query("DELETE FROM public.credit_plans");
-      await pool.query("DELETE FROM public.user_credit_buckets");
-      await pool.query("DELETE FROM public.credit_buckets");
-    }
+    if (pool) await truncateBursarTables(pool);
   });
 
   afterAll(async () => {
@@ -1977,16 +1901,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
 
   afterEach(async () => {
     await store.close();
-    if (pool) {
-      await pool.query("DELETE FROM public.credit_reservations");
-      await pool.query("DELETE FROM public.credit_transactions");
-      await pool.query("UPDATE public.user_credits SET plan_id = NULL");
-      // user_credit_tiers cascades away via ON DELETE CASCADE on user_credits.
-      await pool.query("DELETE FROM public.user_credits");
-      await pool.query("DELETE FROM public.credit_plans");
-      await pool.query("DELETE FROM public.user_credit_buckets");
-      await pool.query("DELETE FROM public.credit_buckets");
-    }
+    if (pool) await truncateBursarTables(pool);
   });
 
   afterAll(async () => {

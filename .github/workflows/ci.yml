@@ -67,7 +67,7 @@ jobs:
           --health-retries 5
     env:
       # conftest.py resolves a real Postgres from DATABASE_URL first, then the
-      # legacy DUCTO_TEST_PG_URL. Setting it makes the integration tests
+      # legacy BURSAR_TEST_PG_URL. Setting it makes the integration tests
       # (concurrency / double-spend / idempotency / migration idempotency)
       # FAIL rather than skip when something regresses (acceptance §8).
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bursar

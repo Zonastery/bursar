@@ -153,10 +153,15 @@ class PostgresStore(CreditStore):
             (e.g. ``postgresql://user:pass@host:5432/db``).
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, max_pool_size: int = 20) -> None:
         super().__init__()
         self._database_url = database_url
-        self._pool = psycopg2.pool.ThreadedConnectionPool(1, 20, database_url)
+        self._pool = psycopg2.pool.ThreadedConnectionPool(1, max_pool_size, database_url)
+
+    @property
+    def database_url(self) -> str:
+        """Postgres connection string for this store (read-only)."""
+        return self._database_url
 
     # ── Repository getters ─────────────────────────────────────────────
     @property
@@ -209,25 +214,40 @@ class PostgresStore(CreditStore):
 
     def close(self) -> None:
         """Close all connections in the pool."""
+        if self._pool is None:
+            return
         self._pool.closeall()
+        self._pool = None
+
+    def __del__(self) -> None:
+        if hasattr(self, "_pool") and self._pool is not None:
+            self.close()
 
     # ── RPC dispatcher ─────────────────────────────────────────────────
 
     def _callproc(self, name: str, params: list[Any]) -> list[Any]:
-        """Execute an RPC and return all result rows, using the connection pool."""
-        conn = self._pool.getconn()
+        """Execute an RPC and return all result rows, using the connection pool.
+
+        For single-column results (e.g. JSONB functions), each row is unwrapped
+        to its scalar value. For multi-column results (TABLE functions), rows
+        are returned as tuples.
+        """
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("cannot call RPC on a closed PostgresStore")
+        conn = pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.callproc(name, params)
                 rows = cur.fetchall()
             conn.commit()
-            return [r[0] if isinstance(r, (list, tuple)) else r for r in (rows or [])]
+            return [r[0] if isinstance(r, (list, tuple)) and len(r) == 1 else r for r in (rows or [])]
         except BaseException:
             # Rollback on any exception to avoid pool poisoning
             conn.rollback()
             raise
         finally:
-            self._pool.putconn(conn)
+            pool.putconn(conn)
 
     def _conn(self):
         """Create a dedicated connection for one-time operations (e.g. setup)."""

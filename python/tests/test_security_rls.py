@@ -158,7 +158,7 @@ class TestRpcPrivilegeLockdown:
     def test_non_service_role_denied(self, rls_store: PostgresStore, rpc_name: str, role: str) -> None:
         sql, params = _RPC_CALLS[rpc_name]
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
-            _run_as(rls_store._database_url, role, sql, params, jwt_role=role)
+            _run_as(rls_store.database_url, role, sql, params, jwt_role=role)
 
     @pytest.mark.parametrize("rpc_name", sorted(_RPC_CALLS))
     def test_service_role_allowed(self, rls_store: PostgresStore, rpc_name: str) -> None:
@@ -168,7 +168,7 @@ class TestRpcPrivilegeLockdown:
         # a 200-with-error-envelope or a non-privilege exception, not a
         # privilege denial, and this test only asserts the latter never fires.
         try:
-            _run_as(rls_store._database_url, "service_role", sql, params, jwt_role="service_role")
+            _run_as(rls_store.database_url, "service_role", sql, params, jwt_role="service_role")
         except psycopg2.errors.InsufficientPrivilege:
             pytest.fail(f"service_role was denied EXECUTE on {rpc_name} — lockdown is over-broad")
         except psycopg2.errors.UndefinedFunction as exc:
@@ -187,15 +187,7 @@ class TestRpcPrivilegeLockdown:
 
 class TestRlsTenantIsolation:
     def _grant(self, dsn: str, user_id: str, amount: int) -> None:
-        _run_as(
-            dsn,
-            "service_role",
-            "SELECT public.credits_add(%s, %s, 'purchase', '{}'::jsonb, NULL)",
-            (user_id, amount),
-            jwt_role="service_role",
-        )
-        # _run_as always rolls back (it's a read/assert helper) — commit this
-        # one deliberately since we need the row to persist for later queries.
+        """Grant credits as service_role and COMMIT so the row persists."""
         conn = psycopg2.connect(dsn)
         try:
             conn.autocommit = False
@@ -211,7 +203,7 @@ class TestRlsTenantIsolation:
             conn.close()
 
     def test_authenticated_user_cannot_see_another_users_credits(self, rls_store: PostgresStore) -> None:
-        dsn = rls_store._database_url
+        dsn = rls_store.database_url
         user_a, user_b = str(uuid4()), str(uuid4())
         self._grant(dsn, user_a, 10)
         self._grant(dsn, user_b, 20)
@@ -238,7 +230,7 @@ class TestRlsTenantIsolation:
         assert str(rows_own[0][0]) == user_a
 
     def test_authenticated_user_cannot_see_another_users_transactions(self, rls_store: PostgresStore) -> None:
-        dsn = rls_store._database_url
+        dsn = rls_store.database_url
         user_a, user_b = str(uuid4()), str(uuid4())
         self._grant(dsn, user_a, 10)
         self._grant(dsn, user_b, 20)
@@ -258,7 +250,7 @@ class TestRlsTenantIsolation:
         claim, so `auth.uid()` is NULL and the RLS predicate
         (`auth.uid() = user_id`) can never match — anon sees nothing,
         regardless of how many rows exist."""
-        dsn = rls_store._database_url
+        dsn = rls_store.database_url
         self._grant(dsn, str(uuid4()), 10)
 
         rows = _run_as(dsn, "anon", "SELECT user_id FROM public.user_credits", jwt_role="anon")
@@ -274,7 +266,7 @@ class TestRlsTenantIsolation:
 
 class TestSchemaDriftGuard:
     def test_every_public_function_is_revoked_from_anon_and_authenticated(self, rls_store: PostgresStore) -> None:
-        conn = psycopg2.connect(rls_store._database_url)
+        conn = psycopg2.connect(rls_store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(

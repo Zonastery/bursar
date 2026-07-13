@@ -12,67 +12,10 @@
  */
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { randomUUID } from "crypto";
-import { readdirSync, readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
 import pg from "pg";
+import { BOOTSTRAP_SQL, applyMigrations } from "./helpers/bootstrap.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SQL_DIR = join(__dirname, "../../python/src/bursar/sql");
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
-
-const BOOTSTRAP_SQL = `
-DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
-
-CREATE OR REPLACE FUNCTION auth.role() RETURNS text
-LANGUAGE SQL STABLE AS $func$
-  SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), 'service_role')
-$func$;
-
-CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-LANGUAGE SQL STABLE AS $func$
-  SELECT nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
-$func$;
-
--- Platform-level privilege defaults a real hosted Supabase project grants
--- automatically (via its own bootstrap migrations, not bursar's). Without
--- reproducing them here, \`SET ROLE service_role\` would fail on every RPC —
--- not because bursar's lockdown is broken, but because this bare Postgres
--- never gave service_role the platform privileges it has in production.
-ALTER ROLE service_role BYPASSRLS;
-GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
--- Real Supabase also grants schema access on \`auth\` to these roles (app/RPC
--- code calls auth.uid()/auth.jwt() directly, not just from within RLS policy
--- predicates — those are resolved at policy-definition time and don't need
--- this, but a direct SELECT auth.uid() from application code does).
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
-`;
-
-function migrationFiles(): string[] {
-  return readdirSync(SQL_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-}
-
-async function applyMigrations(pool: pg.Pool): Promise<void> {
-  for (const file of migrationFiles()) {
-    await pool.query(readFileSync(join(SQL_DIR, file), "utf8"));
-  }
-}
 
 /**
  * Run `sql` in a fresh transaction impersonating `role`, mirroring what

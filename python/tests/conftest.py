@@ -41,9 +41,31 @@ import atexit
 import os
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 
+import psycopg2
 import pytest
+
+from bursar.interface.postgres import PostgresStore
+
+
+def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
+    """Context manager yielding a fresh psycopg2 connection — auto-closes."""
+    conn = psycopg2.connect(dsn)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _insert_deny_cap(conn: psycopg2.connection, user_id: str, limit: int) -> None:
+    """Insert a daily deny spend cap at ``limit`` for ``user_id``."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+            "VALUES (%s, 'daily', %s, 'deny')",
+            (user_id, limit),
+        )
 
 
 def _preseed_supabase_objects(dsn: str) -> None:
@@ -280,3 +302,17 @@ def pg_database_url() -> Iterator[str]:
     # the per-store fixtures then applies all migrations idempotently).
     _truncate_bursar_tables(dsn)
     yield dsn
+
+
+@pytest.fixture(scope="function")
+def pg_store(pg_database_url: str) -> Iterator[PostgresStore]:
+    """Yield a ``PostgresStore`` with migrations applied against a real Postgres.
+
+    Depends on ``pg_database_url``, so this fixture auto-skips when no Postgres
+    is available. The store's cleanup (migration replay) is idempotent.
+    """
+    store = PostgresStore(pg_database_url, max_pool_size=2)
+    result = store.setup()
+    assert result.success
+    yield store
+    store.close()

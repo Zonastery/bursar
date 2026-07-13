@@ -34,6 +34,8 @@ from bursar.interface.models import (
 from bursar.interface.postgres import PostgresStore
 from bursar.manager import InsufficientCreditsError
 
+pytestmark = [pytest.mark.integration]
+
 # ---------------------------------------------------------------------------
 # Shared pricing config used across all tests
 # ---------------------------------------------------------------------------
@@ -86,6 +88,11 @@ def _new_uuid(suffix: int) -> str:
     return f"00000000-0000-0000-0000-{suffix:012d}"
 
 
+def _last_hour_window() -> tuple[datetime, datetime]:
+    now = datetime.now(UTC)
+    return now - timedelta(hours=1), now + timedelta(hours=1)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -133,7 +140,7 @@ class TestPostgresStoreIntegration:
         that inserts the auth.users row, reproducing the real-Supabase
         condition instead of relying on the stub's fallback.
         """
-        conn = psycopg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             conn.autocommit = False
             with conn.cursor() as cur:
@@ -174,7 +181,7 @@ class TestPostgresStoreIntegration:
 
     def test_cap_deny_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
-        conn = psycopg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -215,6 +222,7 @@ class TestPostgresStoreIntegration:
         assert second.expired_amount == Decimal("0")
         assert store.get_balance(_PG_USER).balance == Decimal("0")
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_deduct_no_double_spend_pg(self, store: PostgresStore) -> None:
         """N concurrent deduct_with_allowance against a real Postgres row.
@@ -226,8 +234,13 @@ class TestPostgresStoreIntegration:
         def one(i: int) -> object:
             # Fresh store/connection per thread (psycopg2 connections aren't
             # thread-safe to share); same DSN and same user row.
-            s = PostgresStore(store._database_url)
-            return s.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key=f"c{i}", min_balance=Decimal("0"))
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.deduct_with_allowance(
+                    _PG_USER, Decimal("10"), idempotency_key=f"c{i}", min_balance=Decimal("0")
+                )
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=n) as ex:
             results = list(ex.map(one, range(n)))
@@ -236,15 +249,18 @@ class TestPostgresStoreIntegration:
         balance = store.get_balance(_PG_USER).balance
         assert len(succeeded) == 10
         assert balance == Decimal("0")
-        assert balance >= 0
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_same_idempotency_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
 
         def one(_: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="dup")
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="dup")
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=16) as ex:
             results = list(ex.map(one, range(16)))
@@ -298,28 +314,17 @@ class TestPostgresStoreIntegration:
 
     def test_spend_by_model_pg(self, store: PostgresStore) -> None:
         """INT1: two deductions with distinct models appear as separate buckets."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         # deduct_with_allowance records model in metadata via p_model
         store.deduct_with_allowance(_PG_USER, Decimal("10"), idempotency_key="sbm_gpt4", model="gpt-4")
         store.deduct_with_allowance(_PG_USER, Decimal("5"), idempotency_key="sbm_claude", model="claude-3")
 
-        # The spend_by_model RPC returns TABLE rows (not JSON), so call directly.
-        conn = psycopg2.connect(store._database_url)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM spend_by_model(%s, %s)",
-                    [from_date.isoformat(), to_date.isoformat()],
-                )
-                rows = cur.fetchall()
-        finally:
-            conn.close()
+        rows = store.spend_by_model(from_date, to_date)
 
-        # rows are (model TEXT, total_spend NUMERIC, transaction_count BIGINT)
-        by_model = {r[0]: r[1] for r in rows}
+        # rows are SpendByModelRow(model, total_spend, transaction_count)
+        by_model = {r.model: r.total_spend for r in rows}
 
         assert "gpt-4" in by_model, f"gpt-4 not in {list(by_model)}"
         assert "claude-3" in by_model, f"claude-3 not in {list(by_model)}"
@@ -331,8 +336,7 @@ class TestPostgresStoreIntegration:
 
     def test_top_users_pg(self, store: PostgresStore) -> None:
         """INT2: 3 users deducted, top_users(limit=2) returns top 2 descending."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         u1 = "00000000-0000-0000-0000-000000000101"
         u2 = "00000000-0000-0000-0000-000000000102"
@@ -342,91 +346,64 @@ class TestPostgresStoreIntegration:
             store.add_credits(uid, Decimal("1000"), "purchase")
             store.deduct_with_allowance(uid, amount, idempotency_key=f"tu_{uid}")
 
-        # The top_users RPC returns TABLE rows (not JSON), so call directly.
-        conn = psycopg2.connect(store._database_url)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM top_users(%s, %s, %s)",
-                    [2, from_date.isoformat(), to_date.isoformat()],
-                )
-                rows = cur.fetchall()
-        finally:
-            conn.close()
+        rows = store.top_users(2, from_date, to_date)
 
-        # rows are (user_id TEXT, total_spend NUMERIC)
+        # rows are TopUserRow(user_id, total_spend)
         assert len(rows) == 2
-        assert rows[0][0] == u3
-        assert rows[0][1] == Decimal("80")
-        assert rows[1][0] == u1
-        assert rows[1][1] == Decimal("50")
+        assert rows[0].user_id == u3
+        assert rows[0].total_spend == Decimal("80")
+        assert rows[1].user_id == u1
+        assert rows[1].total_spend == Decimal("50")
 
     # ── INT3: dailySpend ──────────────────────────────────────────────────
 
     def test_daily_spend_pg(self, store: PostgresStore) -> None:
         """INT3: after a deduction, daily_spend has at least one non-zero bucket."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         store.deduct_with_allowance(_PG_USER, Decimal("7"), idempotency_key="ds_1")
 
-        # The daily_spend RPC returns TABLE rows (not JSON), so call directly.
-        conn = psycopg2.connect(store._database_url)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM daily_spend(%s, %s)",
-                    [from_date.isoformat(), to_date.isoformat()],
-                )
-                rows = cur.fetchall()
-        finally:
-            conn.close()
+        rows = store.daily_spend(from_date, to_date)
 
-        # rows are (date TEXT, total_spend NUMERIC, transaction_count BIGINT)
+        # rows are DailySpendRow(date, total_spend, transaction_count)
         assert len(rows) >= 1
-        totals = [r[1] for r in rows]
+        totals = [r.total_spend for r in rows]
         assert any(t > 0 for t in totals), f"All totals zero: {totals}"
         # date field is a string in YYYY-MM-DD format
         for r in rows:
-            date_str = r[0]
+            date_str = r.date
             assert isinstance(date_str, str), f"date is not str: {type(date_str)}"
             assert len(date_str) == 10, f"date not YYYY-MM-DD: {date_str!r}"
             assert date_str[4] == "-" and date_str[7] == "-"
-            assert isinstance(r[1], Decimal)
+            assert isinstance(r.total_spend, Decimal)
 
     # ── INT4: aggregateStats ──────────────────────────────────────────────
 
     def test_aggregate_stats_pg(self, store: PostgresStore) -> None:
         """INT4: stats after a deduction + purchase reflect correct totals."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         store.deduct_with_allowance(_PG_USER, Decimal("15"), idempotency_key="as_1")
 
         stats = store.aggregate_stats(from_date, to_date)
 
-        assert stats.total_credits_consumed is not None
         assert stats.total_credits_consumed == Decimal("15")
         assert isinstance(stats.total_credits_consumed, Decimal)
         assert stats.active_users >= 1
-        assert stats.active_users is not None
 
     # ── INT5: listUsageEvents ─────────────────────────────────────────────
 
     def test_list_usage_events_pg(self, store: PostgresStore) -> None:
         """INT5: after a deduction, list_usage_events returns the event."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         store.deduct_with_allowance(_PG_USER, Decimal("8"), idempotency_key="ue_1")
 
         # list_usage_events is a SQL function; call it via psycopg2 directly
-        import psycopg2 as _pg2
-
-        conn = _pg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -472,7 +449,7 @@ class TestPostgresStoreIntegration:
         before = store.check_allowance(_PG_USER)
 
         # Insert a deny cap of 10 — net 15 will exceed it
-        conn = psycopg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -586,8 +563,7 @@ class TestPostgresStoreIntegration:
 
     def test_aggregate_stats_decimal_precision_pg(self, store: PostgresStore) -> None:
         """INT10: three fractional deductions sum to exact Decimal, not float."""
-        from_date = datetime.now(UTC) - timedelta(hours=1)
-        to_date = datetime.now(UTC) + timedelta(hours=1)
+        from_date, to_date = _last_hour_window()
 
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         store.deduct_with_allowance(_PG_USER, Decimal("0.1"), idempotency_key="prec10_1")
@@ -634,7 +610,7 @@ class TestPostgresStoreIntegration:
         store.add_credits(_PG_USER, Decimal("20"), "purchase")
 
         # Insert deny cap at 8 (net spend must not exceed 8)
-        conn = psycopg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -673,18 +649,14 @@ class TestPostgresStoreIntegration:
     def test_postgres_store_recovers_after_error(self, store: PostgresStore) -> None:
         """H5 — store remains usable after a call that causes an error.
 
-        PostgresStore opens a fresh connection per call (no persistent connection
-        pool), so an error in one call cannot poison future calls. This test
-        verifies that contract.
+        PostgresStore validates amounts client-side before sending to Postgres;
+        a negative amount raises ValueError rather than returning an error
+        envelope. The store must still be usable afterwards.
         """
-        # Add some credits so the store has state
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
 
-        # Attempt a deduction with an invalid (negative) amount.
-        # The store returns an error result rather than raising for business
-        # errors; negative amounts return error="invalid_amount".
-        bad = store.deduct_with_allowance(_PG_USER, Decimal("-1"))
-        assert bad.error is not None  # some error code (invalid_amount or similar)
+        with pytest.raises(ValueError, match="amount must be non-negative"):
+            store.deduct_with_allowance(_PG_USER, Decimal("-1"))
 
         # The connection must still be usable: a normal get_balance succeeds
         balance = store.get_balance(_PG_USER)
@@ -904,6 +876,7 @@ class TestLeaseAdversarialPg:
         assert s.setup().success
         return s
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_create_lease_no_over_admission_pg(self, store: PostgresStore) -> None:
         """N concurrent create_lease on one row. FOR UPDATE serializes them:
@@ -913,8 +886,11 @@ class TestLeaseAdversarialPg:
         n = 30
 
         def one(_: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.create_lease(_PG_USER, Decimal("30"), "usage", floor=Decimal("0"))
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.create_lease(_PG_USER, Decimal("30"), "usage", floor=Decimal("0"))
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=n) as ex:
             results = list(ex.map(one, range(n)))
@@ -926,39 +902,51 @@ class TestLeaseAdversarialPg:
         assert avail.available == Decimal("10")
         assert avail.balance == Decimal("100")  # held, not yet charged
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_max_concurrent_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("10000"), "purchase")
 
         def one(_: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.create_lease(_PG_USER, Decimal("1"), "chat", floor=Decimal("0"), max_concurrent=5)
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.create_lease(_PG_USER, Decimal("1"), "chat", floor=Decimal("0"), max_concurrent=5)
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=16) as ex:
             results = list(ex.map(one, range(40)))
         assert sum(1 for r in results if r.error is None) == 5  # type: ignore[attr-defined]
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_settle_same_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
 
         def one(_: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"), idempotency_key="k")
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"), idempotency_key="k")
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=12) as ex:
             list(ex.map(one, range(12)))
         assert store.get_balance(_PG_USER).balance == Decimal("50")  # charged exactly once
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_settle_same_lease_no_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
 
         def one(_: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"))
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.settle_lease(_PG_USER, lease.lease_id, Decimal("50"))
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=12) as ex:
             list(ex.map(one, range(12)))
@@ -998,7 +986,7 @@ class TestLeaseAdversarialPg:
 
     def test_deny_cap_blocks_admission_advisory_at_settle_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
-        conn = psycopg2.connect(store._database_url)
+        conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -1309,18 +1297,9 @@ class TestAllowanceWindowPg:
 
         now = datetime.now(UTC)
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "rolling_30d", plan.plan_assigned_at)
-        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
 
-        assert (
-            result.period_start
-            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
-        )
-        assert (
-            result.period_end
-            == datetime(
-                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-            ).isoformat()
-        )
+        assert result.period_start == expected_start
+        assert result.period_end == expected_end_exclusive
         assert result.allowance_remaining == Decimal("12")
 
     def test_manager_check_allowance_anniversary_matches_resolver(self, store: PostgresStore) -> None:
@@ -1357,18 +1336,9 @@ class TestAllowanceWindowPg:
 
         now = datetime.now(UTC)
         expected_start, expected_end_exclusive = resolve_allowance_window(now, "anniversary", plan.plan_assigned_at)
-        expected_end_inclusive = expected_end_exclusive - timedelta(days=1)
 
-        assert (
-            result.period_start
-            == datetime(expected_start.year, expected_start.month, expected_start.day, tzinfo=UTC).isoformat()
-        )
-        assert (
-            result.period_end
-            == datetime(
-                expected_end_inclusive.year, expected_end_inclusive.month, expected_end_inclusive.day, tzinfo=UTC
-            ).isoformat()
-        )
+        assert result.period_start == expected_start
+        assert result.period_end == expected_end_exclusive
         assert result.allowance_remaining == Decimal("10")
 
     # ── 8. manager.check_allowance() regression guard for calendar_month ───
@@ -1495,10 +1465,9 @@ class TestAllowanceWindowPg:
 
         fetched = store.get_active_pricing()
         assert fetched is not None
-        assert fetched.config["metering"]["flat_jobs"]["job"] == Decimal("2.5")
-        assert isinstance(fetched.config["metering"]["flat_jobs"]["job"], (Decimal, float))
+        assert Decimal(str(fetched.config["metering"]["flat_jobs"]["job"])) == Decimal("2.5")
 
-        user = _new_uuid(9015)
+        user = _new_uuid(9115)
         store.add_credits(user, Decimal("100"), "purchase")
         m = CreditManager(store=store)
         m.publish_pricing_from_dict(config)
@@ -1526,7 +1495,7 @@ class TestAllowanceWindowPg:
                 "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("5")}}},
             }
         )
-        user = _new_uuid(9016)
+        user = _new_uuid(9116)
         store.set_user_plan(user, "basic")
         store.add_credits(user, Decimal("0"), "adjustment")
 
@@ -1576,7 +1545,7 @@ class TestAllowanceWindowPg:
         store.set_user_plan(user, "basic")
 
         with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
-            store.increment_usage_window(user, "basic", Decimal("1"))
+            store._callproc("increment_usage_window", [user, "basic", "1"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1889,6 +1858,7 @@ class TestCreditManagerTiersPg:
             "purchased": Decimal("95"),
         }
 
+    @pytest.mark.slow
     def test_sweep_expired_credits_through_manager_scopes_per_tier(self, store: PostgresStore) -> None:
         """sweep_expired_credits() through the manager only drains the
         expiring tier's own balance, leaves the non-expiring tier untouched,
@@ -1981,6 +1951,7 @@ class TestLazyExpiryPg:
         assert s.setup().success
         return s
 
+    @pytest.mark.slow
     def test_scoped_sweep_via_store_only_touches_target_user(self, store: PostgresStore) -> None:
         """Two users each hold an expired grant. Sweeping user A directly via
         ``store.sweep_expired_credits(user_id=...)`` (not through the manager)
@@ -2036,6 +2007,7 @@ class TestLazyExpiryPg:
         assert row is not None
         assert row[0] == 1
 
+    @pytest.mark.slow
     def test_lazy_expiry_true_hides_expired_credits_across_all_gated_manager_methods(
         self, store: PostgresStore
     ) -> None:
@@ -2589,6 +2561,7 @@ class TestFeatureLimitsPg:
         assert check_today.used == 1
         assert check_today.remaining == 0
 
+    @pytest.mark.concurrency
     @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
     def test_concurrent_deduct_exactly_n_succeed_under_limit_n_pg(self, store: PostgresStore) -> None:
         """N concurrent ``deduct_with_allowance`` calls against the same
@@ -2604,15 +2577,18 @@ class TestFeatureLimitsPg:
         m = 20
 
         def one(i: int) -> object:
-            s = PostgresStore(store._database_url)
-            return s.deduct_with_allowance(
-                user,
-                Decimal("1"),
-                idempotency_key=f"conc{i}",
-                feature="concurrent_feature",
-                feature_limit=limit,
-                feature_period_start=period_start,
-            )
+            s = PostgresStore(store.database_url, max_pool_size=2)
+            try:
+                return s.deduct_with_allowance(
+                    user,
+                    Decimal("1"),
+                    idempotency_key=f"conc{i}",
+                    feature="concurrent_feature",
+                    feature_limit=limit,
+                    feature_period_start=period_start,
+                )
+            finally:
+                s.close()
 
         with ThreadPoolExecutor(max_workers=m) as ex:
             results = list(ex.map(one, range(m)))

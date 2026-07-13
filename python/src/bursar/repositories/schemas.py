@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -130,10 +131,11 @@ class MigratePlanRow(BaseModel):
 
 class AllowanceRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    plan_id: str = ""
+    plan_id: str | None = None
+    allowance_amount: str | Decimal | None = None
     allowance_remaining: str | Decimal | None = None
-    period_start: str = ""
-    period_end: str = ""
+    period_start: str | datetime | date | None = None
+    period_end: str | datetime | date | None = None
 
 
 class FeatureLimitRow(BaseModel):
@@ -203,7 +205,7 @@ class TransactionRow(BaseModel):
     reference_type: str | None = None
     reference_id: str | None = None
     metadata: dict[str, Any] | None = None
-    created_at: str = ""
+    created_at: str | datetime = ""
     total_count: int = 0
 
 
@@ -276,7 +278,7 @@ class BillingOfferRow(BaseModel):
     interval_count: int = 0
     grant_mode: str = ""
     grant_credits: str | Decimal | None = None
-    grant_bucket: str = ""
+    grant_bucket: str | None = None
     grant_replace_prior: bool = False
 
 
@@ -298,8 +300,8 @@ class SubscriptionRow(BaseModel):
     offer_key: str | None = None
     plan: str | None = None
     status: str = "incomplete"
-    current_period_start: str | None = None
-    current_period_end: str | None = None
+    current_period_start: str | datetime | None = None
+    current_period_end: str | datetime | None = None
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None

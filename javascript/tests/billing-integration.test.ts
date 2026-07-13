@@ -1,6 +1,5 @@
 /**
- * Integration tests for billing stores — MemoryBillingStore (always) and
- * PostgresBillingStore (when a real Postgres is available).
+ * Integration tests for PostgresBillingStore against a real Postgres.
  *
  * Mirrors Python test_billing_integration.py.
  */
@@ -11,6 +10,7 @@ import { PostgresStore } from "../src/stores/postgres-store.js";
 import { CreditManager } from "../src/manager.js";
 import { PostgresBillingStore, BillingManager } from "../src/billing/index.js";
 import type { BillingConfig, BillingSubscriptionState } from "../src/billing/index.js";
+import { BOOTSTRAP_SQL, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
@@ -125,63 +125,18 @@ async function makePgComponents(pool: pg.Pool) {
 
 // ── PostgresBillingStore (requires real Postgres) ────────────────────────
 
-const describePg = DATABASE_URL ? describe : describe.skip;
-
-describePg("PostgresBillingStore integration (real Postgres 16)", () => {
+describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16)", () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    // Bootstrap roles + auth schema + stubs + seed test users
-    await pool.query(
-      `DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-    );
-    await pool.query(
-      `DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-    );
-    await pool.query(
-      `DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
-    );
-    await pool.query("CREATE SCHEMA IF NOT EXISTS auth");
-    await pool.query("CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY)");
-    await pool.query(
-      `CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE SQL IMMUTABLE AS $$ SELECT 'service_role'::text $$`,
-    );
-    await pool.query(
-      `CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE SQL IMMUTABLE AS $$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $$`,
-    );
+    await pool.query(BOOTSTRAP_SQL);
     await pool.query(
       "INSERT INTO auth.users (id) VALUES ($1), ($2), ($3), ($4) ON CONFLICT DO NOTHING",
       [USER_ID, USER_ID2, USER_ID3, USER_ID4],
     );
-    // Apply all bundled SQL migrations (assumes python/src/bursar/sql/ is
-    // accessible via relative path — same as store-integration.test.ts).
-    const { readdirSync, readFileSync } = await import("fs");
-    const { join, dirname } = await import("path");
-    const { fileURLToPath } = await import("url");
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const sqlDir = join(__dirname, "../../python/src/bursar/sql");
-    const files = readdirSync(sqlDir)
-      .filter((f: string) => f.endsWith(".sql"))
-      .sort();
-    for (const file of files) {
-      const sql = readFileSync(join(sqlDir, file), "utf8");
-      await pool.query(sql);
-    }
-    // Clean up any billing/credit data from previous runs (now that tables exist)
-    // Order matters: child tables (FKs) before parent tables
-    await pool.query("DELETE FROM public.billing_disputes");
-    await pool.query("DELETE FROM public.billing_refunds");
-    await pool.query("DELETE FROM public.billing_payments");
-    await pool.query("DELETE FROM public.billing_invoices");
-    await pool.query("DELETE FROM public.billing_events");
-    await pool.query("DELETE FROM public.billing_subscriptions");
-    await pool.query("DELETE FROM public.billing_provider_refs");
-    await pool.query("DELETE FROM public.billing_credit_topups");
-    await pool.query("DELETE FROM public.billing_offers");
-    await pool.query("DELETE FROM public.billing_customers");
-    await pool.query("DELETE FROM public.credit_transactions");
-    await pool.query("DELETE FROM public.user_credits");
+    await applyMigrations(pool);
+    await truncateBursarTables(pool);
   }, 60000);
 
   afterAll(async () => {
@@ -190,7 +145,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   // ── Sync + Resolve ───────────────────────────────────────────────────
 
-  it("sync_billing_config_roundtrip", async () => {
+  it("sync billing config round-trip", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const offer = await bs.resolveBillingOffer(PROVIDER, null, PRICE_ID);
@@ -199,7 +154,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(offer!.plan).toBe("pro");
   });
 
-  it("sync_billing_config_resolve_by_product_id", async () => {
+  it("sync billing config resolve by product id", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const offer = await bs.resolveBillingOffer(PROVIDER, "prod_monthly");
@@ -207,7 +162,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(offer!.offerKey).toBe("pro_monthly");
   });
 
-  it("sync_topup_config_roundtrip", async () => {
+  it("sync topup config round-trip", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const topup = await bs.resolveCreditTopup(PROVIDER, null, PRICE_ID_TOPUP);
@@ -216,13 +171,13 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(topup!.creditsPerUnit).toBe(1000);
   });
 
-  it("unresolved_offer_returns_null", async () => {
+  it("unresolved offer returns null", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     expect(await bs.resolveBillingOffer(PROVIDER, null, "nonexistent")).toBeNull();
   });
 
-  it("resolve_billing_offer_no_match", async () => {
+  it("resolve billing offer no match", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     expect(await bs.resolveBillingOffer("nonexistent_provider", null, PRICE_ID)).toBeNull();
@@ -230,26 +185,26 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   // ── Customer CRUD ────────────────────────────────────────────────────
 
-  it("customer_created_roundtrip", async () => {
+  it("customer created roundtrip", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID, "test@example.com");
     const uid = await bs.getBillingCustomer(PROVIDER, CUSTOMER_ID);
     expect(uid).toBe(USER_ID);
   });
 
-  it("customer_not_found", async () => {
+  it("customer not found", async () => {
     const { bs } = await makePgComponents(pool);
     expect(await bs.getBillingCustomer(PROVIDER, "nonexistent_cus")).toBeNull();
   });
 
-  it("customer_updated_replaces_user_id", async () => {
+  it("customer updated replaces user id", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID);
     await bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID2);
     expect(await bs.getBillingCustomer(PROVIDER, CUSTOMER_ID)).toBe(USER_ID2);
   });
 
-  it("multiple_providers_same_customer_id", async () => {
+  it("multiple providers same customer id", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.upsertBillingCustomer("stripe", CUSTOMER_ID, USER_ID);
     await bs.upsertBillingCustomer("dodo", CUSTOMER_ID, USER_ID2);
@@ -259,7 +214,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   // ── Subscription CRUD ────────────────────────────────────────────────
 
-  it("subscription_upsert_and_read", async () => {
+  it("subscription upsert and read", async () => {
     const { bs } = await makePgComponents(pool);
     const state: BillingSubscriptionState = {
       userId: USER_ID,
@@ -280,12 +235,12 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(result!.plan).toBe("pro");
   });
 
-  it("subscription_not_found", async () => {
+  it("subscription not found", async () => {
     const { bs } = await makePgComponents(pool);
     expect(await bs.getBillingSubscription(PROVIDER, "nonexistent_sub")).toBeNull();
   });
 
-  it("subscription_update", async () => {
+  it("subscription update", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.upsertBillingSubscription({
       userId: USER_ID,
@@ -305,7 +260,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   // ── Event idempotency ────────────────────────────────────────────────
 
-  it("event_idempotency", async () => {
+  it("event idempotency", async () => {
     const { bs, bm } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const event = {
@@ -321,7 +276,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(r2.action).toBe("duplicate");
   });
 
-  it("event_claim_complete_fail_cycle", async () => {
+  it("event claim complete fail cycle", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
@@ -331,7 +286,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(c2.status).toBe("duplicate");
   });
 
-  it("event_fail_then_reclaim", async () => {
+  it("event fail then reclaim", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
@@ -343,19 +298,19 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
 
   // ── Topup credits ────────────────────────────────────────────────────
 
-  it("compute_topup_credits", async () => {
+  it("compute topup credits", async () => {
     const { bs } = await makePgComponents(pool);
     expect(await bs.computeTopupCredits(2000, { creditsPerUnit: 1000 })).toBe(20000);
   });
 
-  it("compute_topup_credits_odd_amount", async () => {
+  it("compute topup credits odd amount", async () => {
     const { bs } = await makePgComponents(pool);
     expect(await bs.computeTopupCredits(1999, { creditsPerUnit: 1000 })).toBe(19990);
   });
 
   // ── BillingManager lifecycle ─────────────────────────────────────────
 
-  it("subscription_lifecycle_full", async () => {
+  it("subscription lifecycle full", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
@@ -411,7 +366,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(plan2.planId).toBeNull();
   });
 
-  it("topup_credit_grant", async () => {
+  it("topup credit grant", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
@@ -441,7 +396,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(balance.balance.toString()).toBe("20000");
   });
 
-  it("subscription_pause_resume", async () => {
+  it("subscription pause resume", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
@@ -494,7 +449,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect((await cm.getUserPlan(USER_ID2)).planId).not.toBeNull();
   });
 
-  it("unknown_event_type_is_ignored", async () => {
+  it("unknown event type is ignored", async () => {
     const { bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const result = await bm.handleEvent({
@@ -508,7 +463,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(result.error).toBe("unhandled_event_type");
   });
 
-  it("duplicate_event_skips_side_effects", async () => {
+  it("duplicate event skips side effects", async () => {
     const { bs, bm } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
@@ -531,7 +486,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(await bs.getBillingCustomer(PROVIDER, "cus_dup_test")).toBe(USER_ID);
   });
 
-  it("provider_scoped_event_id", async () => {
+  it("provider scoped event id", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     expect((await bs.claimBillingEvent("stripe", "evt_prov_scope", "test.event")).status).toBe(
@@ -542,7 +497,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     );
   });
 
-  it("sync_offers_adds_new", async () => {
+  it("sync offers adds new", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bs.syncBillingFromConfig({
@@ -561,7 +516,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(newOffer!.offerKey).toBe("new_offer");
   });
 
-  it("cycle_grant_credits_granted", async () => {
+  it("cycle grant credits granted", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
@@ -593,7 +548,7 @@ describePg("PostgresBillingStore integration (real Postgres 16)", () => {
     expect(balance.balance.toString()).toBe("5000");
   });
 
-  it("cycle_grant_replace_prior", async () => {
+  it("cycle grant replace prior", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.handleEvent({
