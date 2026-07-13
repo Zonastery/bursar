@@ -3,8 +3,10 @@ from typing import Any
 
 from bursar.billing.models import (
     BillingConfig,
+    BillingCustomerRecord,
     BillingEventClaim,
     BillingOfferResult,
+    BillingPreferences,
     BillingSubscriptionState,
     BillingTopupResult,
 )
@@ -168,3 +170,16 @@ class BillingStore(ABC):
         user_id: str,
         keep_provider: str,
     ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_billing_preferences(self, user_id: str) -> BillingPreferences | None: ...
+
+    @abstractmethod
+    def upsert_billing_preferences(self, prefs: BillingPreferences) -> None: ...
+
+    @abstractmethod
+    def get_billing_customer_by_user_id(
+        self,
+        user_id: str,
+        provider: str | None = None,
+    ) -> BillingCustomerRecord | None: ...

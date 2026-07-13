@@ -270,3 +270,22 @@ class BillingTopupResult(BaseModel):
     deposit_to: str = "purchased"
     min_amount_minor: int = 500
     max_amount_minor: int = 500000
+
+
+class BillingPreferences(BaseModel):
+    """Per-user billing preferences (auto-recharge, notification toggles, overage protection)."""
+
+    user_id: str
+    auto_recharge: bool = False
+    overage_protection: bool = True
+    email_notifications: bool = True
+    usage_alerts: bool = True
+    invoice_reminders: bool = False
+    usage_limit_alerts: bool = True
+
+
+class BillingCustomerRecord(BaseModel):
+    """Reverse-lookup result: provider + provider_customer_id for a user."""
+
+    provider: str
+    provider_customer_id: str

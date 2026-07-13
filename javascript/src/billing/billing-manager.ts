@@ -5,7 +5,9 @@ import type { BillingStore } from "./billing-store.js";
 import type {
   BillingEvent,
   BillingEventResult,
+  BillingCustomerRecord,
   BillingOfferResult,
+  BillingPreferences,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   BillingTopupResult,
@@ -107,6 +109,46 @@ export class BillingManager {
       SUBSCRIPTION_STATUS.INCOMPLETE,
       // EXPIRED excluded — expired subscriptions are not "current" for billing purposes.
     ]);
+  }
+
+  async getUserPreferences(userId: string): Promise<BillingPreferences | null> {
+    return this.store.getBillingPreferences(userId);
+  }
+
+  async updateUserPreferences(prefs: BillingPreferences): Promise<void> {
+    await this.store.upsertBillingPreferences(prefs);
+  }
+
+  async getCustomerByUserId(
+    userId: string,
+    provider?: string | null,
+  ): Promise<BillingCustomerRecord | null> {
+    return this.store.getBillingCustomerByUserId(userId, provider);
+  }
+
+  async resolveOffer(
+    provider: string,
+    productId?: string | null,
+    priceId?: string | null,
+  ): Promise<BillingOfferResult | null> {
+    return this.store.resolveBillingOffer(provider, productId, priceId);
+  }
+
+  async resolveTopup(
+    provider: string,
+    productId?: string | null,
+    priceId?: string | null,
+  ): Promise<BillingTopupResult | null> {
+    return this.store.resolveCreditTopup(provider, productId, priceId);
+  }
+
+  async upsertCustomer(
+    provider: string,
+    providerCustomerId: string,
+    userId: string,
+    email?: string | null,
+  ): Promise<void> {
+    await this.store.upsertBillingCustomer(provider, providerCustomerId, userId, email);
   }
 
   /** Invalidate the offer cache so the next resolution call re-fetches fresh data. */
@@ -785,7 +827,7 @@ export class BillingManager {
     if (!this.cm || !event.subscription) return;
     const status = event.subscription.status;
     if (status && ["active", "trialing"].includes(status)) {
-      const offer = await this.resolveOffer(event);
+      const offer = await this.resolveOfferFromEvent(event);
       if (offer) {
         await this.provisionSubscription(uid, offer, event);
       } else {
@@ -805,7 +847,7 @@ export class BillingManager {
     }
   }
 
-  private async resolveOffer(event: BillingEvent): Promise<BillingOfferResult | null> {
+  private async resolveOfferFromEvent(event: BillingEvent): Promise<BillingOfferResult | null> {
     const refs = event.subscription?.refs;
     if (!refs) return null;
     return this.resolveBillingOfferCached(

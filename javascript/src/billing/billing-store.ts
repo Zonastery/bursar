@@ -1,7 +1,9 @@
 import type {
   BillingConfig,
+  BillingCustomerRecord,
   BillingEventClaim,
   BillingOfferResult,
+  BillingPreferences,
   BillingSubscriptionState,
   BillingTopupResult,
 } from "./billing-types.js";
@@ -128,4 +130,13 @@ export abstract class BillingStore {
     userId: string,
     keepProvider: string,
   ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }>;
+
+  abstract getBillingPreferences(userId: string): Promise<BillingPreferences | null>;
+
+  abstract upsertBillingPreferences(prefs: BillingPreferences): Promise<void>;
+
+  abstract getBillingCustomerByUserId(
+    userId: string,
+    provider?: string | null,
+  ): Promise<BillingCustomerRecord | null>;
 }

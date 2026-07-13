@@ -63,6 +63,7 @@ from bursar.interface.models import (
     LeaseResult,
     MigratePlanUsersResult,
     OperationPolicy,
+    PricingConfigResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -344,6 +345,16 @@ class CreditManager:
     def engine(self) -> PricingEngine | None:
         """The current PricingEngine, or None if not loaded."""
         return self._engine
+
+    def get_active_pricing(self) -> PricingConfigResult | None:
+        """Fetch the active pricing config directly from the store.
+
+        Unlike load_pricing_from_store (which loads into the engine),
+        this returns the raw PricingConfigResult without updating engine state.
+        Callers that need the engine should use the engine property or
+        load_pricing_from_store.
+        """
+        return self._store.get_active_pricing()
 
     # -- Credit operations -----------------------------------------------
 

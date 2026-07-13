@@ -17,9 +17,11 @@ import psycopg2.pool
 
 from bursar.billing.models import (
     BillingConfig,
+    BillingCustomerRecord,
     BillingEventClaim,
     BillingGrantResult,
     BillingOfferResult,
+    BillingPreferences,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
@@ -32,6 +34,7 @@ from bursar.repositories.billing.event import BillingEventRepository
 from bursar.repositories.billing.invoice import BillingInvoiceRepository
 from bursar.repositories.billing.offer import BillingOfferRepository
 from bursar.repositories.billing.payment import BillingPaymentRepository
+from bursar.repositories.billing.preferences import BillingPreferencesRepository
 from bursar.repositories.billing.refund import BillingRefundRepository
 from bursar.repositories.billing.subscription import BillingSubscriptionRepository
 from bursar.repositories.billing.topup import BillingTopupRepository
@@ -157,6 +160,12 @@ class PostgresBillingStore(BillingStore):
         if not hasattr(self, "_config_repo_cache"):
             self._config_repo_cache = BillingConfigRepository(self._execute)
         return self._config_repo_cache
+
+    @property
+    def _preferences_repo(self) -> BillingPreferencesRepository:
+        if not hasattr(self, "_preferences_repo_cache"):
+            self._preferences_repo_cache = BillingPreferencesRepository(self._execute)
+        return self._preferences_repo_cache
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -634,3 +643,55 @@ class PostgresBillingStore(BillingStore):
         """
         ids = self._subscription_repo.deactivate_other_provider_subscriptions(user_id, keep_provider)
         return {"deactivated_count": len(ids), "deactivated_ids": ids}
+
+    def get_billing_preferences(self, user_id: str) -> BillingPreferences | None:
+        """Get billing preferences for a user.
+
+        Args:
+            user_id: The user ID.
+
+        Returns:
+            BillingPreferences if found, None otherwise.
+        """
+        row = self._preferences_repo.get(user_id)
+        if row is None:
+            return None
+        return BillingPreferences(
+            user_id=str(row.get("user_id", "")),
+            auto_recharge=bool(row.get("auto_recharge", False)),
+            overage_protection=bool(row.get("overage_protection", True)),
+            email_notifications=bool(row.get("email_notifications", True)),
+            usage_alerts=bool(row.get("usage_alerts", True)),
+            invoice_reminders=bool(row.get("invoice_reminders", False)),
+            usage_limit_alerts=bool(row.get("usage_limit_alerts", True)),
+        )
+
+    def upsert_billing_preferences(self, prefs: BillingPreferences) -> None:
+        """Insert or update billing preferences for a user.
+
+        Args:
+            prefs: The billing preferences to persist.
+        """
+        self._preferences_repo.upsert(prefs.model_dump())
+
+    def get_billing_customer_by_user_id(
+        self,
+        user_id: str,
+        provider: str | None = None,
+    ) -> BillingCustomerRecord | None:
+        """Reverse lookup: find a customer record by user ID.
+
+        Args:
+            user_id: The user ID.
+            provider: Optional provider filter.
+
+        Returns:
+            BillingCustomerRecord if found, None otherwise.
+        """
+        row = self._customer_repo.get_by_user_id(user_id, provider)
+        if row is None:
+            return None
+        return BillingCustomerRecord(
+            provider=str(row.get("provider", "")),
+            provider_customer_id=str(row.get("provider_customer_id", "")),
+        )

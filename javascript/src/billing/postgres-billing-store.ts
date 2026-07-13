@@ -1,7 +1,9 @@
 import type {
   BillingConfig,
+  BillingCustomerRecord,
   BillingEventClaim,
   BillingOfferResult,
+  BillingPreferences,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   BillingTopupResult,
@@ -19,6 +21,7 @@ import { BillingRefundRepository } from "../repositories/billing/refund.js";
 import { BillingInvoiceRepository } from "../repositories/billing/invoice.js";
 import { BillingDisputeRepository } from "../repositories/billing/dispute.js";
 import { BillingConfigRepository } from "../repositories/billing/config.js";
+import { BillingPreferencesRepository } from "../repositories/billing/preferences.js";
 
 function toIso(value: unknown): string | null {
   if (!value) return null;
@@ -44,6 +47,7 @@ export class PostgresBillingStore extends BillingStore {
   private _invoice: BillingInvoiceRepository | null = null;
   private _dispute: BillingDisputeRepository | null = null;
   private _config: BillingConfigRepository | null = null;
+  private _preferences: BillingPreferencesRepository | null = null;
   private ownsPool: boolean = false;
 
   constructor(poolOrUrl: import("pg").Pool | string) {
@@ -134,6 +138,11 @@ export class PostgresBillingStore extends BillingStore {
   private get billingConfig(): BillingConfigRepository {
     if (!this._config) this._config = new BillingConfigRepository(this.queryFn);
     return this._config;
+  }
+
+  private get billingPreferences(): BillingPreferencesRepository {
+    if (!this._preferences) this._preferences = new BillingPreferencesRepository(this.queryFn);
+    return this._preferences;
   }
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
@@ -406,5 +415,43 @@ export class PostgresBillingStore extends BillingStore {
     );
     if (!rows || rows.length === 0) return null;
     return ((rows[0] as Record<string, unknown>)?.config as Record<string, unknown> | null) ?? null;
+  }
+
+  async getBillingPreferences(userId: string): Promise<BillingPreferences | null> {
+    const row = await this.billingPreferences.get(userId);
+    if (!row) return null;
+    return {
+      userId: String(row.user_id),
+      autoRecharge: Boolean(row.auto_recharge),
+      overageProtection: Boolean(row.overage_protection),
+      emailNotifications: Boolean(row.email_notifications),
+      usageAlerts: Boolean(row.usage_alerts),
+      invoiceReminders: Boolean(row.invoice_reminders),
+      usageLimitAlerts: Boolean(row.usage_limit_alerts),
+    };
+  }
+
+  async upsertBillingPreferences(prefs: BillingPreferences): Promise<void> {
+    await this.billingPreferences.upsert({
+      userId: prefs.userId,
+      autoRecharge: prefs.autoRecharge,
+      overageProtection: prefs.overageProtection,
+      emailNotifications: prefs.emailNotifications,
+      usageAlerts: prefs.usageAlerts,
+      invoiceReminders: prefs.invoiceReminders,
+      usageLimitAlerts: prefs.usageLimitAlerts,
+    });
+  }
+
+  async getBillingCustomerByUserId(
+    userId: string,
+    provider?: string | null,
+  ): Promise<BillingCustomerRecord | null> {
+    const result = await this.billingCustomer.getByUserId(userId, provider ?? null);
+    if (!result) return null;
+    return {
+      provider: result.provider,
+      providerCustomerId: result.providerCustomerId,
+    };
   }
 }

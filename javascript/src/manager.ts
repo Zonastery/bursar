@@ -33,6 +33,7 @@ import type {
   LeaseResult,
   MigratePlanUsersResult,
   OperationPolicy,
+  PricingConfigResult,
   RefundResult,
   ReleaseResult,
   SetupResult,
@@ -407,6 +408,15 @@ export class CreditManager {
   /** The current PricingEngine, or null if not loaded. */
   get pricingEngine(): PricingEngine | null {
     return this.engine;
+  }
+
+  /** Fetch the active pricing config directly from the store.
+   *
+   * Unlike loadPricingFromStore (which loads into the engine),
+   * this returns the raw PricingConfigResult without updating engine state.
+   */
+  async getActivePricing(): Promise<PricingConfigResult | null> {
+    return this.store.getActivePricing();
   }
 
   /** Fetch a user's current plan (including feature entitlements). */

@@ -9,12 +9,15 @@ from typing import Any
 
 from bursar.billing.models import (
     BillingConfig,
+    BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
     BillingOfferResult,
+    BillingPreferences,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
+    BillingTopupResult,
 )
 from bursar.billing.store import BillingStore
 from bursar.manager import CreditManager
@@ -96,6 +99,73 @@ class BillingManager:
         user_id: str,
     ) -> BillingSubscriptionState | None:
         return self._store.get_user_subscription(user_id)
+
+    def get_user_preferences(self, user_id: str) -> BillingPreferences | None:
+        """Get billing preferences for a user.
+
+        Returns None if no preferences row exists.
+        """
+        return self._store.get_billing_preferences(user_id)
+
+    def update_user_preferences(self, prefs: BillingPreferences) -> None:
+        """Insert or update billing preferences for a user."""
+        self._store.upsert_billing_preferences(prefs)
+
+    def get_customer_by_user_id(
+        self,
+        user_id: str,
+        provider: str | None = None,
+    ) -> BillingCustomerRecord | None:
+        """Reverse lookup: find a user's billing customer record.
+
+        Args:
+            user_id: The user ID.
+            provider: Optional provider filter. If None, returns the most recently updated.
+
+        Returns:
+            BillingCustomerRecord if found, None otherwise.
+        """
+        return self._store.get_billing_customer_by_user_id(user_id, provider)
+
+    def resolve_offer(
+        self,
+        provider: str,
+        product_id: str | None = None,
+        price_id: str | None = None,
+    ) -> BillingOfferResult | None:
+        """Resolve a billing offer by provider and product/price IDs.
+
+        This is a convenience wrapper around the store's resolveBillingOffer,
+        so callers don't need to access the store directly.
+        """
+        return self._store.resolve_billing_offer(provider, product_id, price_id)
+
+    def resolve_topup(
+        self,
+        provider: str,
+        product_id: str | None = None,
+        price_id: str | None = None,
+    ) -> BillingTopupResult | None:
+        """Resolve a credit topup by provider and product/price IDs.
+
+        This is a convenience wrapper around the store's resolveCreditTopup,
+        so callers don't need to access the store directly.
+        """
+        return self._store.resolve_credit_topup(provider, product_id, price_id)
+
+    def upsert_customer(
+        self,
+        provider: str,
+        provider_customer_id: str,
+        user_id: str,
+        email: str | None = None,
+    ) -> None:
+        """Insert or update a billing customer record.
+
+        This is a convenience wrapper around the store's upsert_billing_customer,
+        so callers don't need to access the store directly.
+        """
+        self._store.upsert_billing_customer(provider, provider_customer_id, user_id, email)
 
     def handle_event(self, event: BillingEvent) -> BillingEventResult:
         claim = self._store.claim_billing_event(

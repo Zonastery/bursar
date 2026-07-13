@@ -38,4 +38,39 @@ export class BillingCustomerRepository {
     if (userId == null) return null;
     return String(userId);
   }
+
+  /** Reverse lookup: find a customer record by user_id. Returns null if not found. */
+  async getByUserId(
+    userId: string,
+    provider?: string | null,
+  ): Promise<{ provider: string; providerCustomerId: string } | null> {
+    if (provider) {
+      const rows = await this.query(
+        `SELECT provider, provider_customer_id
+         FROM public.billing_customers
+         WHERE user_id = $1 AND provider = $2
+         ORDER BY updated_at DESC LIMIT 1`,
+        [userId, provider],
+      );
+      if (rows.length === 0) return null;
+      const row = rows[0] as Record<string, unknown>;
+      return {
+        provider: String(row.provider),
+        providerCustomerId: String(row.provider_customer_id),
+      };
+    }
+    const rows = await this.query(
+      `SELECT provider, provider_customer_id
+       FROM public.billing_customers
+       WHERE user_id = $1
+       ORDER BY updated_at DESC LIMIT 1`,
+      [userId],
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      provider: String(row.provider),
+      providerCustomerId: String(row.provider_customer_id),
+    };
+  }
 }

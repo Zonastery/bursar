@@ -273,3 +273,22 @@ export interface BillingConfig {
   subscriptions?: Record<string, BillingOffer>;
   topups?: Record<string, BillingCreditTopup>;
 }
+
+// ── Billing preferences ──────────────────────────────────────────────────
+
+export interface BillingPreferences {
+  userId: string;
+  autoRecharge: boolean;
+  overageProtection: boolean;
+  emailNotifications: boolean;
+  usageAlerts: boolean;
+  invoiceReminders: boolean;
+  usageLimitAlerts: boolean;
+}
+
+// ── Billing customer record (reverse lookup) ──────────────────────────────
+
+export interface BillingCustomerRecord {
+  provider: string;
+  providerCustomerId: string;
+}

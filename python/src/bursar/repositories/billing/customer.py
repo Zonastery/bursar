@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from bursar.repositories._types import DbQuery
 from bursar.repositories._utils import validate_non_empty
 
@@ -65,3 +67,40 @@ class BillingCustomerRepository:
             user_id = row.get("user_id")
             return str(user_id) if user_id is not None else None
         return None
+
+    def get_by_user_id(
+        self,
+        user_id: str,
+        provider: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Reverse lookup: find a customer record by user_id.
+
+        Args:
+            user_id: The internal user ID.
+            provider: Optional provider filter.
+
+        Returns:
+            Dict with 'provider' and 'provider_customer_id' if found, None otherwise.
+        """
+        validate_non_empty(user_id, "user_id")
+        if provider is not None:
+            validate_non_empty(provider, "provider")
+            rows = self._execute(
+                """SELECT provider, provider_customer_id
+                   FROM public.billing_customers
+                   WHERE user_id = %s AND provider = %s
+                   ORDER BY updated_at DESC LIMIT 1""",
+                [user_id, provider],
+            )
+        else:
+            rows = self._execute(
+                """SELECT provider, provider_customer_id
+                   FROM public.billing_customers
+                   WHERE user_id = %s
+                   ORDER BY updated_at DESC LIMIT 1""",
+                [user_id],
+            )
+        if not rows:
+            return None
+        row = rows[0]
+        return row if isinstance(row, dict) else None
