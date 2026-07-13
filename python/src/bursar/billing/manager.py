@@ -579,7 +579,7 @@ class BillingManager:
                         self._cm.deduct_credits(
                             uid,
                             Decimal(str(credits)),
-                            tx_type="refund_clawback",
+                            tx_type="refund",
                             bucket="purchased",
                         )
                         logger.info(

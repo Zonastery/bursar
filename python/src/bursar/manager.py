@@ -399,15 +399,15 @@ class CreditManager:
     ) -> AddCreditsResult:
         """Deduct a raw credit amount from a user's account.
 
-        Uses the store's ``add_credits`` with ``type='adjustment'`` and a
-        negative amount — the existing validation path for negative/zero
-        adjustments. Use this for refund clawbacks and other administrative
+        Uses the store's ``add_credits`` with the given ``tx_type`` and a
+        negative amount. Use this for refund clawbacks and other administrative
         deductions that bypass the usage-based ``deduct()`` flow.
 
         Args:
             user_id: The user to deduct from.
             amount: The positive amount to deduct (internally negated).
-            tx_type: Semantic label for the emitted event (e.g. ``"refund_clawback"``).
+            tx_type: Semantic label (e.g. ``"adjustment"``, ``"refund"``). Must be
+                in the SQL allow-list for negative amounts (currently ``adjustment``, ``refund``).
             bucket: The bucket to deduct from.
             metadata: Extra metadata (Pydantic model, passed through to the store).
         """

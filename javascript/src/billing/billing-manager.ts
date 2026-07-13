@@ -3,7 +3,6 @@ import { LRUCache } from "lru-cache";
 import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
 import type {
-  BillingConfig,
   BillingEvent,
   BillingEventResult,
   BillingOfferResult,
@@ -52,7 +51,6 @@ export class BillingManager {
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
-  private billingConfigSynced = false;
 
   constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
@@ -109,30 +107,6 @@ export class BillingManager {
       SUBSCRIPTION_STATUS.INCOMPLETE,
       // EXPIRED excluded — expired subscriptions are not "current" for billing purposes.
     ]);
-  }
-
-  /**
-   * Sync billing configuration (offers, topups, provider refs) from a config object.
-   * Delegates to the store's sync method. Idempotent — safe to call on every
-   * BillingManager initialization.
-   */
-  async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    await this.store.syncBillingFromConfig(config);
-  }
-
-  private async ensureBillingConfigSynced(): Promise<void> {
-    if (this.billingConfigSynced) return;
-    try {
-      const config = await this.store.getActivePricingConfig();
-      if (config?.billing) {
-        await this.syncBillingFromConfig(config.billing as Record<string, unknown>);
-      }
-    } catch (err) {
-      this.logger?.warn?.(
-        `[BillingManager] failed to sync billing config from active pricing: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    this.billingConfigSynced = true;
   }
 
   /** Invalidate the offer cache so the next resolution call re-fetches fresh data. */
@@ -315,7 +289,6 @@ export class BillingManager {
     offerKey: string | null;
     plan: string | null;
   }> {
-    await this.ensureBillingConfigSynced();
     const refs = event.subscription?.refs;
     if (!refs) return { offer: null, offerKey: null, plan: null };
 
@@ -697,11 +670,10 @@ export class BillingManager {
           event.provider,
           event.refund.providerPaymentId,
         );
+
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const rawCpu =
-            (payment.credits_per_unit as string | number | null | undefined) ??
-            (payMeta.credits_per_unit as string | number | null | undefined);
+          const rawCpu = payMeta.creditsPerUnit as string | number | null | undefined;
           const cpu = Number(rawCpu);
           if (!Number.isFinite(cpu) || cpu <= 0) {
             this.logger?.warn?.(

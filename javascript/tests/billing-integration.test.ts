@@ -548,6 +548,56 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect(balance.balance.toString()).toBe("5000");
   });
 
+  it("refund clawback deducts credits", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const uid = "00000000-0000-0000-0000-000000000005";
+    const paymentId = "py_refund_clawback";
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_refund",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: uid,
+      customer: { providerCustomerId: "cus_refund_test" },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_refund",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      userId: uid,
+      customer: { providerCustomerId: "cus_refund_test" },
+      payment: {
+        providerPaymentId: paymentId,
+        amountMinor: 2000,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+      },
+    });
+    const balanceAfterGrant = await cm.getBalance(uid);
+    expect(balanceAfterGrant.balance.toString()).toBe("20000");
+
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_refund_1",
+      eventType: "refund.created",
+      occurredAt: new Date().toISOString(),
+      userId: uid,
+      customer: { providerCustomerId: "cus_refund_test" },
+      refund: {
+        providerRefundId: "refund_1",
+        providerPaymentId: paymentId,
+        amountMinor: 2000,
+        currency: "USD",
+      },
+    });
+    expect(result.handled).toBe(true);
+    const balanceAfterRefund = await cm.getBalance(uid);
+    expect(balanceAfterRefund.balance.toString()).toBe("0");
+  });
+
   it("cycle grant replace prior", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);

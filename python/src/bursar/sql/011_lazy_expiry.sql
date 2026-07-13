@@ -125,8 +125,8 @@ BEGIN
     END IF;
 
     -- Purchases (and other credit grants) must be strictly positive.
-    -- Negative/zero amounts are only allowed via an explicit 'adjustment'.
-    IF p_type <> 'adjustment' AND p_amount <= 0 THEN
+    -- Negative/zero amounts are only allowed via an explicit 'adjustment' or 'refund'.
+    IF p_type NOT IN ('adjustment', 'refund') AND p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 

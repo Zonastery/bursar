@@ -23,6 +23,7 @@ from bursar.billing.models import (
     BillingEvent,
     BillingOffer,
     BillingPaymentInfo,
+    BillingRefundInfo,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
@@ -444,6 +445,63 @@ class TestBillingManagerLifecycle:
 
         balance = cm.get_balance(USER_ID2)
         assert balance.balance == Decimal("20000")
+
+    def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+        uid = "00000000-0000-0000-0000-000000000005"
+        payment_id = "py_refund_clawback"
+
+        bm.handle_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_cus_refund",
+                event_type="customer.created",
+                occurred_at=_now(),
+                user_id=uid,
+                customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
+            )
+        )
+        bm.handle_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_pay_refund",
+                event_type="payment.succeeded",
+                occurred_at=_now(),
+                user_id=uid,
+                customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
+                payment=BillingPaymentInfo(
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    currency="USD",
+                    refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
+                    purpose="credit_topup",
+                ),
+            )
+        )
+        balance_after_grant = cm.get_balance(uid)
+        assert balance_after_grant.balance == Decimal("20000")
+
+        result = bm.handle_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_refund_1",
+                event_type="refund.created",
+                occurred_at=_now(),
+                user_id=uid,
+                customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
+                refund=BillingRefundInfo(
+                    provider_refund_id="refund_1",
+                    provider_payment_id=payment_id,
+                    amount_minor=2000,
+                    currency="USD",
+                ),
+            )
+        )
+        assert result.handled is True
+        balance_after_refund = cm.get_balance(uid)
+        assert balance_after_refund.balance == Decimal("0")
 
     def test_subscription_pause_resume(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
