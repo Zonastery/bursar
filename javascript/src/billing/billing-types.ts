@@ -246,6 +246,7 @@ export interface BillingTopupResult {
   topupKey: string;
   creditsPerUnit?: number;
   depositTo?: string;
+  maxAmountMinor?: number;
 }
 
 // ── Config models ───────────────────────────────────────────────────────

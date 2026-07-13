@@ -307,8 +307,8 @@ class TestConfigValidation:
 
     # ── SB1: signup_bonus default and validation ──────────────────────────
 
-    def test_signup_bonus_defaults_to_50(self) -> None:
-        """signup_grant defaults to 50 (millicredits = $0.05)."""
+    def test_signup_bonus_defaults_to_0(self) -> None:
+        """signup_grant defaults to 0 (no bonus unless configured)."""
         config = load_config_from_dict(
             {
                 "version": 1,
@@ -316,7 +316,7 @@ class TestConfigValidation:
                 "ledger": {},
             }
         )
-        assert config.ledger.signup_grant == 50
+        assert config.ledger.signup_grant == 0
 
     def test_signup_bonus_custom_value(self) -> None:
         """signup_grant accepts a custom positive int."""

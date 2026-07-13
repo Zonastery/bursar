@@ -407,7 +407,7 @@ function parseLedger(raw: Record<string, unknown>): LedgerConfig {
 
   return {
     minBalance,
-    signupGrant: signupGrant ?? 50,
+    signupGrant: signupGrant ?? 0,
     buckets: undefined,
   };
 }

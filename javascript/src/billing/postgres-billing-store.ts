@@ -226,8 +226,11 @@ export class PostgresBillingStore extends BillingStore {
     return this.rowToSubscriptionState(r);
   }
 
-  async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
-    const r = await this.billingSubscription.getUserSubscription(userId);
+  async getUserSubscription(
+    userId: string,
+    statuses?: string[],
+  ): Promise<BillingSubscriptionState | null> {
+    const r = await this.billingSubscription.getUserSubscription(userId, statuses);
     if (!r) return null;
     return this.rowToSubscriptionState(r);
   }
@@ -254,6 +257,7 @@ export class PostgresBillingStore extends BillingStore {
       topupKey: r.topup_key as string,
       creditsPerUnit: Number(r.credits_per_unit ?? r.credits_per_major_unit ?? 1000),
       depositTo: (r.deposit_to as string | undefined) || "purchased",
+      maxAmountMinor: r.max_amount_minor != null ? Number(r.max_amount_minor) : undefined,
     };
   }
 
@@ -393,5 +397,14 @@ export class PostgresBillingStore extends BillingStore {
           ? (r.metadata as Record<string, unknown>)
           : null,
     };
+  }
+
+  async getActivePricingConfig(): Promise<Record<string, unknown> | null> {
+    const rows = await this.queryFn(
+      "SELECT config FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1",
+      [],
+    );
+    if (!rows || rows.length === 0) return null;
+    return ((rows[0] as Record<string, unknown>)?.config as Record<string, unknown> | null) ?? null;
   }
 }

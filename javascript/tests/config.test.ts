@@ -103,9 +103,9 @@ describe("loadConfigFromDict", () => {
     ).toThrow(ConfigError);
   });
 
-  it("defaults signupGrant to 50 (default value)", () => {
+  it("defaults signupGrant to 0 (no bonus)", () => {
     const config = loadConfigFromDict({ metering: { models: { a: "input_tokens * 1" } } });
-    expect(config.ledger.signupGrant).toBe(50);
+    expect(config.ledger.signupGrant).toBe(0);
   });
 
   it("accepts a custom signupBonus value", () => {

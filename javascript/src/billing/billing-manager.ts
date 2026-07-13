@@ -12,6 +12,7 @@ import type {
   BillingTopupResult,
 } from "./billing-types.js";
 import type { ProviderLogger } from "../providers/types.js";
+import { SUBSCRIPTION_STATUS } from "../repositories/billing/subscription.js";
 
 interface OfferCacheValue {
   offer: BillingOfferResult | null;
@@ -51,6 +52,7 @@ export class BillingManager {
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
+  private billingConfigSynced = false;
 
   constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
@@ -99,7 +101,14 @@ export class BillingManager {
   }
 
   async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
-    return this.store.getUserSubscription(userId);
+    return this.store.getUserSubscription(userId, [
+      SUBSCRIPTION_STATUS.ACTIVE,
+      SUBSCRIPTION_STATUS.TRIALING,
+      SUBSCRIPTION_STATUS.CANCELED,
+      SUBSCRIPTION_STATUS.PAST_DUE,
+      SUBSCRIPTION_STATUS.INCOMPLETE,
+      // EXPIRED excluded — expired subscriptions are not "current" for billing purposes.
+    ]);
   }
 
   /**
@@ -109,6 +118,21 @@ export class BillingManager {
    */
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     await this.store.syncBillingFromConfig(config);
+  }
+
+  private async ensureBillingConfigSynced(): Promise<void> {
+    if (this.billingConfigSynced) return;
+    try {
+      const config = await this.store.getActivePricingConfig();
+      if (config?.billing) {
+        await this.syncBillingFromConfig(config.billing as Record<string, unknown>);
+      }
+    } catch (err) {
+      this.logger?.warn?.(
+        `[BillingManager] failed to sync billing config from active pricing: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.billingConfigSynced = true;
   }
 
   /** Invalidate the offer cache so the next resolution call re-fetches fresh data. */
@@ -291,6 +315,7 @@ export class BillingManager {
     offerKey: string | null;
     plan: string | null;
   }> {
+    await this.ensureBillingConfigSynced();
     const refs = event.subscription?.refs;
     if (!refs) return { offer: null, offerKey: null, plan: null };
 
@@ -433,7 +458,8 @@ export class BillingManager {
       }),
     );
     if (this.cm && (plan ?? existing?.plan)) {
-      await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
+      // Plan-change: prefer new plan over existing (renewal at L422 correctly keeps existing).
+      await this.provisionSubscription(uid, offer, event, plan ?? existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
@@ -611,6 +637,15 @@ export class BillingManager {
     }
 
     if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
+      if (
+        topupConfig.maxAmountMinor != null &&
+        event.payment.amountMinor > topupConfig.maxAmountMinor
+      ) {
+        this.logger?.warn?.(
+          `[BillingManager] topup amount ${event.payment.amountMinor} exceeds cap ${topupConfig.maxAmountMinor} for topup key ${topupConfig.topupKey} (user ${uid})`,
+        );
+        return { handled: true, action: "payment_succeeded_out_of_bounds" };
+      }
       const credits = await this.store.computeTopupCredits(event.payment.amountMinor, topupConfig);
       if (credits > 0) {
         await this.cm.addCredits(uid, new Decimal(credits), {
@@ -664,17 +699,20 @@ export class BillingManager {
         );
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const creditsPerUnit = Number(payMeta.credits_per_unit ?? 0);
-          if (!creditsPerUnit) {
+          const rawCpu =
+            (payment.credits_per_unit as string | number | null | undefined) ??
+            (payMeta.credits_per_unit as string | number | null | undefined);
+          const cpu = Number(rawCpu);
+          if (!Number.isFinite(cpu) || cpu <= 0) {
             this.logger?.warn?.(
-              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no creditsPerUnit in payment metadata`,
+              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no valid creditsPerUnit in payment metadata`,
             );
             return { handled: true, action: "refund_recorded_no_clawback" };
           }
-          const credits = Math.trunc((event.refund.amountMinor * creditsPerUnit) / 100);
+          const credits = Math.trunc((event.refund.amountMinor * cpu) / 100);
           if (credits > 0) {
             await this.cm.deductCredits(uid, credits, {
-              txType: "refund_clawback",
+              txType: "refund",
               bucket: "purchased",
             });
           }

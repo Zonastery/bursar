@@ -47,7 +47,10 @@ export abstract class BillingStore {
     providerSubscriptionId: string,
   ): Promise<BillingSubscriptionState | null>;
 
-  abstract getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
+  abstract getUserSubscription(
+    userId: string,
+    statuses?: string[],
+  ): Promise<BillingSubscriptionState | null>;
 
   abstract resolveCreditTopup(
     provider: string,
@@ -116,6 +119,8 @@ export abstract class BillingStore {
     provider: string,
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null>;
+
+  abstract getActivePricingConfig(): Promise<Record<string, unknown> | null>;
 
   abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
 

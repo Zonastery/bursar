@@ -37,7 +37,7 @@ class LedgerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_balance: Decimal = Field(default=Decimal(0), ge=0)
-    signup_grant: int = Field(default=50, ge=0)
+    signup_grant: int = Field(default=0, ge=0)
     buckets: dict[str, BucketDefinition] | None = None
 
 

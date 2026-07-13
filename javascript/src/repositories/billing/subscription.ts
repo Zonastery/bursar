@@ -6,11 +6,13 @@ const SUBSCRIPTION_COLS = `user_id, provider, provider_subscription_id, provider
     offer_key, plan, status, current_period_start,
     current_period_end, cancel_at_period_end, interval, interval_count, metadata`;
 
-const SUBSCRIPTION_STATUS = {
+export const SUBSCRIPTION_STATUS = {
   ACTIVE: "active",
   TRIALING: "trialing",
   CANCELED: "canceled",
   INCOMPLETE: "incomplete",
+  PAST_DUE: "past_due",
+  EXPIRED: "expired",
 } as const;
 
 export const SubscriptionRowSchema = z

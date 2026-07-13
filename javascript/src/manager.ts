@@ -345,7 +345,6 @@ export class CreditManager {
     const ledger = (config.ledger ?? {}) as Record<string, unknown>;
     const cacheDiscount = metering["cacheDiscount"] ?? metering["cache_discount"] ?? null;
     const flatJobs = metering["flatJobs"] ?? metering["flat_jobs"] ?? {};
-    const signupGrant = ledger["signupGrant"] ?? ledger["signup_grant"] ?? 50;
     const engineDict: Record<string, unknown> = {
       version: config.version ?? 1,
       metering: {
@@ -357,7 +356,7 @@ export class CreditManager {
       },
       ledger: {
         minBalance: ledger.minBalance ?? 0,
-        signupGrant,
+        signupGrant: ledger["signupGrant"] ?? ledger["signup_grant"],
         buckets: ledger.buckets ?? null,
       },
       ...(config.plans ? { plans: config.plans } : {}),
