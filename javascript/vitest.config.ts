@@ -13,6 +13,12 @@ export default defineConfig({
     // cross-file parallelism rather than rearchitect DB isolation for a
     // suite that runs in a few seconds either way.
     fileParallelism: false,
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        singleFork: true,
+      },
+    },
     coverage: {
       provider: "v8",
       all: true,
