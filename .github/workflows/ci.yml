@@ -113,16 +113,16 @@ jobs:
     env:
       # store-integration.test.ts runs under describe.runIf(DATABASE_URL); with
       # this set the PostgresStore integration + concurrency tests RUN, not skip.
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/bursar
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Install postgresql-client (for diagnostics)
+      - name: Install postgresql-client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
       - name: Connection check before tests
-        run: PGPASSWORD=postgres psql -h localhost -U postgres -c "SELECT count(*) FROM pg_stat_activity;" -t
+        run: PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -c "SELECT count(*) FROM pg_stat_activity;" -t
       # Also loads tests/parity/expression_cases.json (parity gate, §7).
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
@@ -131,9 +131,7 @@ jobs:
           npx vitest run --coverage
       - name: Connection check after tests
         if: always()
-        run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "SELECT state, count(*) FROM pg_stat_activity GROUP BY state;" -t
-          PGPASSWORD=postgres psql -h localhost -U postgres -c "SELECT application_name, count(*) FROM pg_stat_activity GROUP BY application_name ORDER BY count DESC;" -t
+        run: PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -c "SELECT state, count(*) FROM pg_stat_activity GROUP BY state;" -t
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
         with:
