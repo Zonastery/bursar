@@ -56,7 +56,10 @@ class PlanRepository:
             SetUserPlanRow if successful, None if the RPC returned no rows.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("set_user_plan", [user_id, plan_id, plan_assigned_at])
+        rows = self._callproc(
+            "set_user_plan",
+            [user_id, plan_id, plan_assigned_at, None, False],
+        )
         if not rows:
             return None
         return SetUserPlanRow.model_validate(rows[0])
@@ -91,7 +94,10 @@ class PlanRepository:
             MigratePlanRow with migration results, or None on failure.
         """
         validate_non_empty(plan_key, "plan_key")
-        rows = self._callproc("migrate_plan_users", [plan_key, target_config_version])
+        rows = self._callproc(
+            "migrate_plan_users",
+            [plan_key, target_config_version, None],
+        )
         if not rows:
             return None
         return MigratePlanRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None

@@ -178,7 +178,8 @@ export interface OperationPolicy {
 export interface FeatureLimit {
   /** For value-based entitlements (e.g. `{ value: true }`, `{ value: 20 }`). */
   value?: unknown;
-  maxCalls: number;
+  /** `null` means unlimited (no invocation-count cap). */
+  maxCalls: number | null;
   period: FeatureLimitPeriod;
   onExceed: "deny" | "warn" | "notify";
 }
@@ -205,7 +206,7 @@ export interface PlanDefinition {
     string,
     {
       value?: unknown;
-      maxCalls?: number;
+      maxCalls?: number | null;
       period?: FeatureLimitPeriod;
       onExceed?: "deny" | "warn" | "notify";
     }
@@ -237,11 +238,12 @@ export interface GetUserPlanResult {
     string,
     {
       value?: unknown;
-      maxCalls?: number;
+      maxCalls?: number | null;
       period?: FeatureLimitPeriod;
       onExceed?: "deny" | "warn" | "notify";
     }
   >;
+  rateOverrides?: Record<string, string>;
   billingMode: BillingMode;
   perOperation?: Record<string, OperationPolicy>;
   maxConcurrent?: number | null;
@@ -249,6 +251,7 @@ export interface GetUserPlanResult {
   /** Timestamp the current plan was assigned — the anchor for non-calendar periods. */
   planAssignedAt?: Date | null;
   configVersion?: number | null;
+  catalogVersion?: number | null;
 }
 
 /**

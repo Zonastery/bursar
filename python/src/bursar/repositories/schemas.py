@@ -105,12 +105,14 @@ class UserPlanRow(BaseModel):
     allowance_amount: str | Decimal | None = None
     allowance_period: str = "calendar_month"
     entitlements: dict[str, Any] | None = None
+    rate_overrides: dict[str, Any] | None = None
     billing_mode: str = "strict"
     per_operation: dict[str, Any] | None = None
     max_concurrent: int | None = None
     overdraft_floor: str | Decimal | None = None
     plan_assigned_at: str | None = None
     config_version: int | None = None
+    catalog_version: int | None = None
 
 
 class SetUserPlanRow(BaseModel):
@@ -306,6 +308,8 @@ class SubscriptionRow(BaseModel):
     interval: str | None = None
     interval_count: int | None = None
     metadata: dict[str, Any] | None = None
+    catalog_version: int | None = None
+    plan_version_id: str | None = None
 
 
 class BillingEventRow(BaseModel):

@@ -67,11 +67,16 @@ class PricingEngine:
         config = load_config_from_dict(data)
         return cls(config)
 
-    def calculate(self, metrics: UsageMetrics) -> CostBreakdown:
+    def calculate(
+        self,
+        metrics: UsageMetrics,
+        rate_overrides: dict[str, str] | None = None,
+    ) -> CostBreakdown:
         """Calculate credit cost for a single usage event.
 
         Args:
             metrics: Usage metrics including model, tokens, tool calls.
+            rate_overrides: Optional per-plan model expression overrides.
 
         Returns:
             CostBreakdown with per-dimension and total costs, all ``Decimal``
@@ -85,7 +90,7 @@ class PricingEngine:
         """
         variables = self._build_variables(metrics)
 
-        model_credits = self._calc_model(metrics.model, variables)
+        model_credits = self._calc_model(metrics.model, variables, rate_overrides)
         tool_credits = self._calc_tools(metrics, variables)
         search_credits = self._calc_search(variables)
         cache_savings = self._calc_cache(variables)
@@ -181,21 +186,29 @@ class PricingEngine:
             "code_exec_calls": metrics.code_exec_calls,
         }
 
-    def _calc_model(self, model_name: str | None, variables: dict[str, int]) -> Decimal:
+    def _calc_model(
+        self,
+        model_name: str | None,
+        variables: dict[str, int],
+        rate_overrides: dict[str, str] | None = None,
+    ) -> Decimal:
         """Evaluate model expression for the given model name.
 
         Resolution order:
-        1. Exact match on ``model_name`` in the config.
-        2. ``"*"`` wildcard entry.
-        3. ``"_default"`` fallback key (migration helper for configs that
-           did not have a ``*`` wildcard).
-
-        ``None`` and the string ``"none"`` are normalised to ``"*"`` so that
-        callers passing an unset/unavailable model fall through to the
-        wildcard or ``_default``.
+        1. Plan ``rate_overrides`` for resolved model key (or ``*``).
+        2. Exact match on ``model_name`` in the config.
+        3. Prefix match, then ``"*"`` wildcard entry.
+        4. ``"_default"`` fallback key (migration helper).
         """
         if model_name is None or model_name == "none":
             model_name = "*"
+
+        if rate_overrides:
+            resolved = self.resolve_model(model_name)
+            if resolved and resolved in rate_overrides:
+                return evaluate_expression(rate_overrides[resolved], variables)
+            if "*" in rate_overrides:
+                return evaluate_expression(rate_overrides["*"], variables)
 
         models = self._config.metering.models
         if model_name in models:

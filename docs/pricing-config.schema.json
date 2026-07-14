@@ -1,0 +1,723 @@
+{
+  "$defs": {
+    "Allowance": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Amount"
+        },
+        "period": {
+          "default": "calendar_month",
+          "enum": [
+            "calendar_month",
+            "rolling_30d",
+            "anniversary"
+          ],
+          "title": "Period",
+          "type": "string"
+        }
+      },
+      "title": "Allowance",
+      "type": "object"
+    },
+    "AllowanceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "allowance",
+          "default": "allowance",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "AllowanceGrant",
+      "type": "object"
+    },
+    "BillingCreditTopup": {
+      "additionalProperties": false,
+      "properties": {
+        "deposit_to": {
+          "title": "Deposit To",
+          "type": "string"
+        },
+        "credits_per_unit": {
+          "default": 1000,
+          "title": "Credits Per Unit",
+          "type": "integer"
+        },
+        "min_amount_minor": {
+          "default": 500,
+          "title": "Min Amount Minor",
+          "type": "integer"
+        },
+        "max_amount_minor": {
+          "default": 500000,
+          "title": "Max Amount Minor",
+          "type": "integer"
+        },
+        "tax_behavior": {
+          "default": "exclude_tax",
+          "enum": [
+            "exclude_tax",
+            "include_tax"
+          ],
+          "title": "Tax Behavior",
+          "type": "string"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderRef"
+          },
+          "title": "Providers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "deposit_to"
+      ],
+      "title": "BillingCreditTopup",
+      "type": "object"
+    },
+    "BillingOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "plan": {
+          "title": "Plan",
+          "type": "string"
+        },
+        "interval": {
+          "$ref": "#/$defs/BillingOfferInterval",
+          "default": "month"
+        },
+        "interval_count": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Interval Count",
+          "type": "integer"
+        },
+        "grant": {
+          "discriminator": {
+            "mapping": {
+              "allowance": "#/$defs/AllowanceGrant",
+              "cycle_grant": "#/$defs/CycleGrant"
+            },
+            "propertyName": "mode"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AllowanceGrant"
+            },
+            {
+              "$ref": "#/$defs/CycleGrant"
+            }
+          ],
+          "title": "Grant"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderRef"
+          },
+          "title": "Providers",
+          "type": "object"
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid From"
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid To"
+        }
+      },
+      "required": [
+        "plan"
+      ],
+      "title": "BillingOffer",
+      "type": "object"
+    },
+    "BillingOfferInterval": {
+      "enum": [
+        "day",
+        "week",
+        "month",
+        "year"
+      ],
+      "title": "BillingOfferInterval",
+      "type": "string"
+    },
+    "BillingSection": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "default": "USD",
+          "title": "Currency",
+          "type": "string"
+        },
+        "subscriptions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BillingOffer"
+          },
+          "title": "Subscriptions",
+          "type": "object"
+        },
+        "topups": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BillingCreditTopup"
+          },
+          "title": "Topups",
+          "type": "object"
+        }
+      },
+      "title": "BillingSection",
+      "type": "object"
+    },
+    "BucketDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "priority": {
+          "default": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "expires": {
+          "default": false,
+          "title": "Expires",
+          "type": "boolean"
+        },
+        "ttl_days": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ttl Days"
+        },
+        "default": {
+          "type": "boolean",
+          "default": false,
+          "title": "Default"
+        },
+        "allow_overdraft": {
+          "default": false,
+          "title": "Allow Overdraft",
+          "type": "boolean"
+        }
+      },
+      "title": "BucketDefinition",
+      "type": "object"
+    },
+    "CycleGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "cycle_grant",
+          "default": "cycle_grant",
+          "title": "Mode",
+          "type": "string"
+        },
+        "credits": {
+          "minimum": 0,
+          "title": "Credits",
+          "type": "integer"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "replace_prior": {
+          "default": true,
+          "title": "Replace Prior",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "credits",
+        "bucket"
+      ],
+      "title": "CycleGrant",
+      "type": "object"
+    },
+    "Entitlement": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        },
+        "max_calls": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Calls"
+        },
+        "period": {
+          "default": "monthly",
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly",
+            "yearly"
+          ],
+          "title": "Period",
+          "type": "string"
+        },
+        "on_exceed": {
+          "default": "deny",
+          "enum": [
+            "deny",
+            "warn",
+            "notify"
+          ],
+          "title": "On Exceed",
+          "type": "string"
+        }
+      },
+      "title": "Entitlement",
+      "type": "object"
+    },
+    "LedgerConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "min_balance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Min Balance"
+        },
+        "signup_grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SignupGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "buckets": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/BucketDefinition"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Buckets"
+        }
+      },
+      "title": "LedgerConfig",
+      "type": "object"
+    },
+    "MeteringConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "object"
+        },
+        "tools": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "object"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Search"
+        },
+        "cache_discount": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cache Discount"
+        },
+        "flat_jobs": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Flat Jobs",
+          "type": "object"
+        }
+      },
+      "required": [
+        "models"
+      ],
+      "title": "MeteringConfig",
+      "type": "object"
+    },
+    "OperationPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "billing_mode": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "overdraft"
+          ],
+          "title": "Billing Mode",
+          "type": "string"
+        },
+        "max_concurrent": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Concurrent"
+        },
+        "overdraft_floor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overdraft Floor"
+        }
+      },
+      "title": "OperationPolicy",
+      "type": "object"
+    },
+    "PlanDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "allowance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Allowance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rate_overrides": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Overrides"
+        },
+        "safety": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanSafety"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "entitlements": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/Entitlement"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entitlements"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "title": "PlanDefinition",
+      "type": "object"
+    },
+    "PlanSafety": {
+      "additionalProperties": false,
+      "properties": {
+        "billing_mode": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "overdraft"
+          ],
+          "title": "Billing Mode",
+          "type": "string"
+        },
+        "max_concurrent": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Concurrent"
+        },
+        "overdraft_floor": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overdraft Floor"
+        },
+        "per_operation": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/OperationPolicy"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Per Operation"
+        }
+      },
+      "title": "PlanSafety",
+      "type": "object"
+    },
+    "ProviderRef": {
+      "additionalProperties": false,
+      "properties": {
+        "product_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Product Id"
+        },
+        "price_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Price Id"
+        },
+        "variant_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Variant Id"
+        },
+        "lookup_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lookup Key"
+        }
+      },
+      "title": "ProviderRef",
+      "type": "object"
+    },
+    "SignupGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "minimum": 0,
+          "title": "Amount",
+          "type": "integer"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount",
+        "bucket"
+      ],
+      "title": "SignupGrant",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "default": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "metering": {
+      "$ref": "#/$defs/MeteringConfig"
+    },
+    "ledger": {
+      "$ref": "#/$defs/LedgerConfig"
+    },
+    "plans": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/PlanDefinition"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Plans"
+    },
+    "billing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BillingSection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "metering"
+  ],
+  "title": "PricingConfig",
+  "type": "object"
+}

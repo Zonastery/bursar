@@ -55,7 +55,7 @@ BEGIN
   v_remaining := GREATEST(p_max_calls - v_used, 0);
 
   RETURN jsonb_build_object(
-    'limited', true,
+    'limited', v_used >= p_max_calls,
     'limit', p_max_calls,
     'used', v_used,
     'remaining', v_remaining,

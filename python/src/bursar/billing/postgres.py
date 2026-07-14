@@ -187,6 +187,8 @@ class PostgresBillingStore(BillingStore):
             interval=str(r.interval) if r.interval else None,
             interval_count=int(r.interval_count) if r.interval_count is not None else None,
             metadata=r.metadata if isinstance(r.metadata, dict) else None,
+            catalog_version=int(r.catalog_version) if getattr(r, "catalog_version", None) is not None else None,
+            plan_version_id=str(r.plan_version_id) if getattr(r, "plan_version_id", None) else None,
         )
 
     @staticmethod
@@ -206,7 +208,6 @@ class PostgresBillingStore(BillingStore):
             ),
         )
 
-    @staticmethod
     @staticmethod
     def _row_to_topup(result: Any) -> BillingTopupResult | None:
         if result is None:
@@ -313,16 +314,9 @@ class PostgresBillingStore(BillingStore):
         provider_customer_id: str,
         user_id: str,
         email: str | None = None,
-    ) -> None:
-        """Insert or update a billing customer record.
-
-        Args:
-            provider: The billing provider identifier.
-            provider_customer_id: The provider customer ID.
-            user_id: The internal user ID.
-            email: The customer email address, or None.
-        """
-        self._customer_repo.upsert(provider, provider_customer_id, user_id, email)
+    ) -> dict[str, Any]:
+        """Insert or update a billing customer record."""
+        return self._customer_repo.upsert(provider, provider_customer_id, user_id, email)
 
     def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
         """Insert or update a billing subscription record.
@@ -345,6 +339,8 @@ class PostgresBillingStore(BillingStore):
                 "interval": state.interval,
                 "interval_count": state.interval_count,
                 "metadata": state.metadata,
+                "catalog_version": state.catalog_version,
+                "plan_version_id": state.plan_version_id,
             }
         )
 

@@ -233,6 +233,7 @@ BEGIN
         INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
         FROM public.credit_transactions
         WHERE user_id = p_user_id
+          AND type = 'usage'
           AND metadata->>'idempotency_key' = p_idempotency_key
         LIMIT 1;
         IF FOUND THEN
@@ -375,7 +376,9 @@ BEGIN
                    COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
             INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
             FROM public.credit_transactions
-            WHERE user_id = p_user_id AND metadata->>'idempotency_key' = p_idempotency_key
+            WHERE user_id = p_user_id
+              AND type = 'usage'
+              AND metadata->>'idempotency_key' = p_idempotency_key
             LIMIT 1;
             RETURN jsonb_build_object(
                 'transaction_id', v_existing_id, 'amount', v_existing_amt,
@@ -810,25 +813,41 @@ BEGIN
         DO UPDATE SET usage = public.credit_usage_window.usage + v_consume, updated_at = now();
     END IF;
 
-    -- ── Bucket walk (delegated to shared helper) ─────────────────────
-    SELECT (result->>'bucket_breakdown')::jsonb INTO v_bucket_breakdown
-    FROM public._walk_and_debit_buckets(p_user_id, v_net) AS result;
+    BEGIN
+        -- ── Bucket walk (delegated to shared helper) ─────────────────────
+        SELECT (result->>'bucket_breakdown')::jsonb INTO v_bucket_breakdown
+        FROM public._walk_and_debit_buckets(p_user_id, v_net) AS result;
 
-    -- Tag metadata.feature whenever p_feature is given (mirrors
-    -- deduct_with_allowance) — this is what makes the call countable for
-    -- future feature-limit checks, regardless of whether a limit is
-    -- currently configured.
-    v_metadata := COALESCE(p_metadata, '{}'::jsonb)
-        || jsonb_strip_nulls(jsonb_build_object('idempotency_key', p_idempotency_key, 'model', p_model, 'feature', p_feature))
-        || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_balance - v_net, 'bucket_breakdown', v_bucket_breakdown);
+        v_metadata := COALESCE(p_metadata, '{}'::jsonb)
+            || jsonb_strip_nulls(jsonb_build_object('idempotency_key', p_idempotency_key, 'model', p_model, 'feature', p_feature))
+            || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_balance - v_net, 'bucket_breakdown', v_bucket_breakdown);
 
-    UPDATE public.user_credits SET balance = balance - v_net, updated_at = now()
-    WHERE user_id = p_user_id RETURNING balance INTO v_new_balance;
+        UPDATE public.user_credits SET balance = balance - v_net, updated_at = now()
+        WHERE user_id = p_user_id RETURNING balance INTO v_new_balance;
 
-    INSERT INTO public.credit_transactions (user_id, amount, type, reference_type, metadata)
-    VALUES (p_user_id, -v_net, 'usage', p_metadata->>'reference_type', v_metadata) RETURNING id INTO v_tx_id;
+        INSERT INTO public.credit_transactions (user_id, amount, type, reference_type, metadata)
+        VALUES (p_user_id, -v_net, 'usage', p_metadata->>'reference_type', v_metadata) RETURNING id INTO v_tx_id;
 
-    UPDATE public.credit_reservations SET status = 'settled', settle_tx_id = v_tx_id WHERE id = p_lease_id;
+        UPDATE public.credit_reservations SET status = 'settled', settle_tx_id = v_tx_id WHERE id = p_lease_id;
+
+    EXCEPTION
+        WHEN unique_violation THEN
+            SELECT id, ABS(amount), COALESCE((metadata->>'allowance_consumed')::numeric, 0),
+                   COALESCE((metadata->>'balance_after')::numeric, v_balance),
+                   COALESCE(metadata->'bucket_breakdown', '{}'::jsonb)
+            INTO v_existing_id, v_existing_amt, v_existing_cons, v_existing_bal_after, v_existing_bucket_bd
+            FROM public.credit_transactions
+            WHERE user_id = p_user_id
+              AND type = 'usage'
+              AND metadata->>'idempotency_key' = p_idempotency_key
+            LIMIT 1;
+            RETURN jsonb_build_object(
+                'transaction_id', v_existing_id, 'amount', v_existing_amt,
+                'allowance_consumed', v_existing_cons, 'balance_after', v_existing_bal_after,
+                'idempotent', true, 'cap_warning', NULL, 'feature_limit_warning', NULL,
+                'bucket_breakdown', v_existing_bucket_bd
+            );
+    END;
 
     RETURN jsonb_build_object(
         'transaction_id', v_tx_id, 'amount', v_net, 'allowance_consumed', v_consume,

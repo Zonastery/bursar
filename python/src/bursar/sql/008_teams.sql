@@ -196,6 +196,7 @@ DECLARE
   v_tx_id UUID;
   v_idempotency_key TEXT;
   v_window TIMESTAMPTZ;
+  v_replay_amount NUMERIC;
 BEGIN
   IF p_amount IS NULL OR p_amount <= 0 THEN
     RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
@@ -205,7 +206,7 @@ BEGIN
 
   -- Idempotency replay (user + team scoped): return the original team_usage tx.
   IF v_idempotency_key IS NOT NULL THEN
-    SELECT id INTO v_tx_id
+    SELECT id, ABS(amount) INTO v_tx_id, v_replay_amount
     FROM public.credit_transactions
     WHERE user_id = p_user_id
       AND type = 'team_usage'
@@ -216,7 +217,7 @@ BEGIN
         'transaction_id', v_tx_id,
         'team_id', p_team_id,
         'user_id', p_user_id,
-        'amount', -p_amount,
+        'amount', -v_replay_amount,
         'team_balance_after', (SELECT balance FROM public.credit_teams WHERE id = p_team_id),
         'idempotent', true
       );
@@ -286,7 +287,7 @@ BEGIN
     VALUES (p_user_id, -p_amount, 'team_usage', p_metadata || jsonb_build_object('team_id', p_team_id))
     RETURNING id INTO v_tx_id;
   EXCEPTION WHEN unique_violation THEN
-    SELECT id INTO v_tx_id
+    SELECT id, ABS(amount) INTO v_tx_id, v_replay_amount
     FROM public.credit_transactions
     WHERE user_id = p_user_id
       AND type = 'team_usage'
@@ -296,7 +297,7 @@ BEGIN
       'transaction_id', v_tx_id,
       'team_id', p_team_id,
       'user_id', p_user_id,
-      'amount', -p_amount,
+      'amount', -v_replay_amount,
       'team_balance_after', (SELECT balance FROM public.credit_teams WHERE id = p_team_id),
       'idempotent', true
     );

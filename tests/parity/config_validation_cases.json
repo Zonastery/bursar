@@ -55,12 +55,55 @@
     {
       "name": "negative_signup_bonus_rejected",
       "expect": "reject",
+      "reason": "scalar signup_grant is no longer accepted",
       "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "signup_grant": -1 } }
     },
     {
-      "name": "zero_signup_bonus_accepted",
-      "expect": "accept",
+      "name": "zero_signup_bonus_scalar_rejected",
+      "expect": "reject",
+      "reason": "scalar signup_grant is no longer accepted; omit the key for no bonus",
       "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "signup_grant": 0 } }
+    },
+    {
+      "name": "signup_grant_object_accepted",
+      "expect": "accept",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "signup_grant": { "amount": 50, "bucket": "gifted" },
+          "buckets": {
+            "gifted": { "label": "Gifted", "priority": 10 },
+            "purchased": { "label": "Purchased", "priority": 30, "default": true }
+          }
+        }
+      }
+    },
+    {
+      "name": "signup_grant_scalar_rejected",
+      "expect": "reject",
+      "reason": "signup_grant must be an object { amount, bucket }",
+      "config": { "metering": { "models": { "*": "input_tokens * 1" } }, "ledger": { "signup_grant": 50 } }
+    },
+    {
+      "name": "signup_grant_unknown_bucket_rejected",
+      "expect": "reject",
+      "reason": "signup_grant.bucket must reference a configured ledger.buckets key",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": {
+          "signup_grant": { "amount": 50, "bucket": "missing" },
+          "buckets": { "gifted": { "label": "Gifted", "priority": 10 } }
+        }
+      }
+    },
+    {
+      "name": "signup_grant_without_buckets_rejected",
+      "expect": "reject",
+      "reason": "ledger.buckets must be defined when signup_grant is set",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "ledger": { "signup_grant": { "amount": 50, "bucket": "gifted" } }
+      }
     },
     {
       "name": "negative_fixed_cost_rejected",
@@ -168,7 +211,7 @@
       "name": "plan_rate_overrides_accepted",
       "expect": "accept",
       "config": {
-        "metering": { "models": { "*": "input_tokens * 1" } },
+        "metering": { "models": { "gpt-4": "input_tokens * 1", "*": "input_tokens * 1" } },
         "plans": { "pro": { "label": "Pro", "rate_overrides": { "gpt-4": "input_tokens * 0.003" } } }
       }
     },
@@ -241,14 +284,147 @@
       "config": { "metering": { "models": { "*": "input_tokens * 1" } } }
     },
     {
-      "name": "tools_provided_without_default_accepted",
-      "expect": "accept",
-      "reason": "a user-supplied tools map without * is used as-is, not merged with the default",
+      "name": "plan_rate_overrides_unknown_model_rejected",
+      "expect": "reject",
+      "reason": "rate_overrides keys must reference metering.models or '*'",
       "config": {
-        "metering": {
-          "models": { "*": "input_tokens * 1" },
-          "tools": { "code_exec": "calls * 10 / 1000" }
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": {
+          "pro": { "label": "Pro", "rate_overrides": { "unknown-model": "input_tokens * 0.003" } }
         }
+      }
+    },
+    {
+      "name": "plan_rate_overrides_wildcard_accepted",
+      "expect": "accept",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro", "rate_overrides": { "*": "input_tokens * 0.003" } } }
+      }
+    },
+    {
+      "name": "entitlement_missing_max_calls_unlimited",
+      "expect": "accept",
+      "reason": "missing max_calls means unlimited (no invocation cap)",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro", "entitlements": { "ai_chat": { "value": true } } } }
+      }
+    },
+    {
+      "name": "entitlement_negative_max_calls_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": {
+          "pro": { "label": "Pro", "entitlements": { "export": { "max_calls": -1 } } }
+        }
+      }
+    },
+    {
+      "name": "billing_section_valid_accepted",
+      "expect": "accept",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": {
+            "pro-monthly": {
+              "plan": "pro",
+              "interval": "month",
+              "grant": { "mode": "allowance" },
+              "providers": { "stripe": { "price_id": "price_pro" } }
+            }
+          },
+          "topups": {
+            "credits": {
+              "deposit_to": "purchased",
+              "credits_per_unit": 1000,
+              "providers": { "stripe": { "price_id": "price_topup" } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "subscription_plan_dangling_no_plans_rejected",
+      "expect": "reject",
+      "reason": "billing.subscriptions plan must reference an existing plans key",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "billing": {
+          "subscriptions": { "pro-monthly": { "plan": "pro", "grant": { "mode": "allowance" } } }
+        }
+      }
+    },
+    {
+      "name": "subscription_plan_dangling_unknown_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": { "pro-monthly": { "plan": "nope", "grant": { "mode": "allowance" } } }
+        }
+      }
+    },
+    {
+      "name": "grant_cycle_missing_credits_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": { "annual": { "plan": "pro", "grant": { "mode": "cycle_grant" } } }
+        }
+      }
+    },
+    {
+      "name": "grant_allowance_extra_fields_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": {
+            "monthly": { "plan": "pro", "grant": { "mode": "allowance", "credits": 500 } }
+          }
+        }
+      }
+    },
+    {
+      "name": "grant_cycle_missing_bucket_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": { "annual": { "plan": "pro", "grant": { "mode": "cycle_grant", "credits": 500 } } }
+        }
+      }
+    },
+    {
+      "name": "topup_missing_deposit_to_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "billing": { "topups": { "x": { "credits_per_unit": 1000 } } }
+      }
+    },
+    {
+      "name": "topups_deposit_to_accepted",
+      "expect": "accept",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "billing": { "topups": { "x": { "deposit_to": "purchased" } } }
+      }
+    },
+    {
+      "name": "topups_old_tier_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "billing": { "topups": { "x": { "tier": "purchased" } } }
       }
     }
   ]

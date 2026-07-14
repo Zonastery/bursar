@@ -260,8 +260,8 @@ export interface BillingOffer {
 }
 
 export interface BillingCreditTopup {
+  depositTo: string;
   creditsPerUnit?: number;
-  depositTo?: string;
   minAmountMinor?: number;
   maxAmountMinor?: number;
   taxBehavior?: "exclude_tax" | "include_tax";

@@ -103,25 +103,41 @@ describe("loadConfigFromDict", () => {
     ).toThrow(ConfigError);
   });
 
-  it("defaults signupGrant to 0 (no bonus)", () => {
+  it("defaults signupGrant to null (no bonus)", () => {
     const config = loadConfigFromDict({ metering: { models: { a: "input_tokens * 1" } } });
-    expect(config.ledger.signupGrant).toBe(0);
+    expect(config.ledger.signupGrant).toBeNull();
   });
 
-  it("accepts a custom signupBonus value", () => {
+  it("accepts a signupGrant object with bucket reference", () => {
     const config = loadConfigFromDict({
       metering: { models: { a: "input_tokens * 1" } },
-      ledger: { signupGrant: 200 },
+      ledger: {
+        signupGrant: { amount: 200, bucket: "gifted" },
+        buckets: {
+          gifted: { label: "Gifted", priority: 10 },
+          purchased: { label: "Purchased", priority: 30, default: true },
+        },
+      },
     });
-    expect(config.ledger.signupGrant).toBe(200);
+    expect(config.ledger.signupGrant).toEqual({ amount: 200, bucket: "gifted" });
   });
 
-  it("accepts signupBonus of 0 (no bonus)", () => {
-    const config = loadConfigFromDict({
-      metering: { models: { a: "input_tokens * 1" } },
-      ledger: { signupGrant: 0 },
-    });
-    expect(config.ledger.signupGrant).toBe(0);
+  it("rejects scalar signupGrant", () => {
+    expect(() =>
+      loadConfigFromDict({
+        metering: { models: { a: "input_tokens * 1" } },
+        ledger: { signupGrant: 200 },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects signupGrant zero scalar", () => {
+    expect(() =>
+      loadConfigFromDict({
+        metering: { models: { a: "input_tokens * 1" } },
+        ledger: { signupGrant: 0 },
+      }),
+    ).toThrow(ConfigError);
   });
 
   it("accepts all canonical metric variables", () => {
@@ -318,11 +334,35 @@ describe("loadConfigFromDict", () => {
     ).not.toThrow();
   });
 
-  it("rejects a negative signupBonus", () => {
+  it("rejects a negative signupGrant amount", () => {
     expect(() =>
       loadConfigFromDict({
         metering: { models: { "gpt-4": "input_tokens * 0.001" } },
-        ledger: { signupGrant: -1 },
+        ledger: {
+          signupGrant: { amount: -1, bucket: "gifted" },
+          buckets: { gifted: { label: "Gifted", priority: 10 } },
+        },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects signupGrant without ledger buckets", () => {
+    expect(() =>
+      loadConfigFromDict({
+        metering: { models: { a: "input_tokens * 1" } },
+        ledger: { signupGrant: { amount: 50, bucket: "gifted" } },
+      }),
+    ).toThrow(ConfigError);
+  });
+
+  it("rejects signupGrant referencing unknown bucket", () => {
+    expect(() =>
+      loadConfigFromDict({
+        metering: { models: { a: "input_tokens * 1" } },
+        ledger: {
+          signupGrant: { amount: 50, bucket: "missing" },
+          buckets: { gifted: { label: "Gifted", priority: 10 } },
+        },
       }),
     ).toThrow(ConfigError);
   });
@@ -604,6 +644,204 @@ describe("loadConfigFromDict", () => {
         },
       });
       expect(Object.keys(config.ledger.buckets!)).toEqual(["c", "a", "b"]);
+    });
+  });
+
+  describe("billing", () => {
+    const metering = { models: { "*": "input_tokens * 1" } } as const;
+
+    it("accepts a valid billing section with subscriptions and topups", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: { pro: { label: "Pro" } },
+          billing: {
+            currency: "USD",
+            subscriptions: {
+              "pro-monthly": {
+                plan: "pro",
+                interval: "month",
+                grant: { mode: "allowance" },
+                providers: { stripe: { price_id: "price_pro" } },
+              },
+            },
+            topups: {
+              credits: {
+                deposit_to: "purchased",
+                credits_per_unit: 1000,
+                providers: { stripe: { price_id: "price_topup" } },
+              },
+            },
+          },
+        }),
+      ).not.toThrow();
+    });
+
+    it("rejects billing subscription referencing unknown plan", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: { pro: { label: "Pro" } },
+          billing: {
+            subscriptions: { "pro-monthly": { plan: "nope", grant: { mode: "allowance" } } },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects billing subscription when plans section is absent", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          billing: {
+            subscriptions: { "pro-monthly": { plan: "pro", grant: { mode: "allowance" } } },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects cycle_grant without credits", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: { pro: { label: "Pro" } },
+          billing: {
+            subscriptions: {
+              annual: { plan: "pro", grant: { mode: "cycle_grant" } },
+            },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects cycle_grant without bucket", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: { pro: { label: "Pro" } },
+          billing: {
+            subscriptions: {
+              annual: { plan: "pro", grant: { mode: "cycle_grant", credits: 500 } },
+            },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects topup without depositTo", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          billing: { topups: { x: { creditsPerUnit: 1000 } } },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects topup depositTo referencing unknown bucket when buckets defined", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          ledger: {
+            buckets: { gifted: { label: "Gifted", priority: 10 } },
+          },
+          billing: { topups: { x: { depositTo: "purchased" } } },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects allowance grant with extra fields", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: { pro: { label: "Pro" } },
+          billing: {
+            subscriptions: {
+              monthly: { plan: "pro", grant: { mode: "allowance", credits: 500 } },
+            },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects unknown key in billing topup", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          billing: { topups: { x: { tier: "purchased" } } },
+        }),
+      ).toThrow(ConfigError);
+    });
+  });
+
+  describe("entitlements", () => {
+    const metering = { models: { "*": "input_tokens * 1" } } as const;
+
+    it("treats missing maxCalls as unlimited (null)", () => {
+      const config = loadConfigFromDict({
+        metering,
+        plans: {
+          pro: {
+            label: "Pro",
+            entitlements: { ai_chat: { value: true } },
+          },
+        },
+      });
+      expect(config.plans!.pro.entitlements!.ai_chat.maxCalls).toBeNull();
+    });
+
+    it("accepts explicit max_calls limit", () => {
+      const config = loadConfigFromDict({
+        metering,
+        plans: {
+          pro: {
+            label: "Pro",
+            entitlements: { export: { max_calls: 5, period: "monthly", on_exceed: "deny" } },
+          },
+        },
+      });
+      expect(config.plans!.pro.entitlements!.export.maxCalls).toBe(5);
+    });
+
+    it("rejects negative maxCalls", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: {
+            pro: {
+              label: "Pro",
+              entitlements: { export: { max_calls: -1 } },
+            },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("rejects plan rateOverrides referencing unknown model", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: {
+            pro: {
+              label: "Pro",
+              rateOverrides: { "unknown-model": "input_tokens * 0.003" },
+            },
+          },
+        }),
+      ).toThrow(ConfigError);
+    });
+
+    it("accepts wildcard rateOverrides key", () => {
+      expect(() =>
+        loadConfigFromDict({
+          metering,
+          plans: {
+            pro: {
+              label: "Pro",
+              rateOverrides: { "*": "input_tokens * 0.003" },
+            },
+          },
+        }),
+      ).not.toThrow();
     });
   });
 });

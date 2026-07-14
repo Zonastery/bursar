@@ -4,8 +4,8 @@ export { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
-export type { PricingConfig, MeteringConfig, LedgerConfig, BillingSection } from "./config.js";
-export { loadConfigFromDict } from "./config.js";
+export type { PricingConfig, MeteringConfig, LedgerConfig, SignupGrant, BillingSection } from "./config.js";
+export { loadConfigFromDict, canonicalPricingConfigDict } from "./config.js";
 export {
   CapabilityNotSupportedError,
   CapReachedError,

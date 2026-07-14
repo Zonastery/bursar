@@ -2,6 +2,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ValidationError
 
 from bursar.billing.models import BillingCreditTopup, BillingOffer
 from bursar.expr import ExpressionError, validate_expression
@@ -11,7 +12,7 @@ from bursar.metrics import METRIC_VARIABLES
 DEFAULT_TOOL_EXPR = "calls * 0"
 
 
-class ConfigError(Exception):
+class ConfigError(ValueError):
     """Raised on config parsing or validation failures."""
 
 
@@ -33,11 +34,18 @@ class MeteringConfig(BaseModel):
         return v
 
 
+class SignupGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount: int = Field(ge=0)
+    bucket: str
+
+
 class LedgerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_balance: Decimal = Field(default=Decimal(0), ge=0)
-    signup_grant: int = Field(default=0, ge=0)
+    signup_grant: SignupGrant | None = None
     buckets: dict[str, BucketDefinition] | None = None
 
 
@@ -88,8 +96,22 @@ class PricingConfig(BaseModel):
             if len(plan_labels) != len(set(plan_labels)):
                 raise ConfigError("duplicate plan labels in pricing config")
 
-        cls._validate_buckets(data.get("ledger") if isinstance(data.get("ledger"), dict) else None)
+        ledger = data.get("ledger") if isinstance(data.get("ledger"), dict) else None
+        cls._validate_buckets(ledger)
+        cls._reject_scalar_signup_grant(ledger)
         return data
+
+    @staticmethod
+    def _reject_scalar_signup_grant(ledger: dict | None) -> None:
+        if not ledger:
+            return
+        raw = ledger.get("signup_grant")
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            raise ConfigError(
+                "ledger.signup_grant must be an object { amount, bucket } — omit the key to disable signup grants"
+            )
 
     @staticmethod
     def _validate_buckets(ledger: dict | None) -> None:
@@ -122,14 +144,76 @@ class PricingConfig(BaseModel):
             raise ConfigError("at most one bucket may set allow_overdraft=True")
 
     @model_validator(mode="after")
+    def validate_grant_bucket_references(self) -> "PricingConfig":
+        buckets = self.ledger.buckets
+        bucket_keys = set(buckets.keys()) if buckets else set()
+
+        grant = self.ledger.signup_grant
+        if grant is not None:
+            if not bucket_keys:
+                raise ConfigError(
+                    "ledger.signup_grant requires ledger.buckets — define the target bucket before enabling signup grants"
+                )
+            if grant.bucket not in bucket_keys:
+                raise ConfigError(
+                    f"ledger.signup_grant.bucket references unknown bucket '{grant.bucket}' "
+                    f"(must be one of {sorted(bucket_keys)})"
+                )
+            target = buckets[grant.bucket]
+            if target.expires and target.ttl_days is None:
+                raise ConfigError(
+                    f"ledger.buckets.{grant.bucket} expires but has no ttl_days — "
+                    "signup grants into expiring buckets require ttl_days"
+                )
+
+        billing = self.billing
+        if billing is None or not bucket_keys:
+            return self
+
+        for offer_key, offer in billing.subscriptions.items():
+            cycle = offer.grant
+            if cycle.mode == "cycle_grant" and cycle.bucket not in bucket_keys:
+                raise ConfigError(
+                    f"billing.subscriptions.{offer_key}.grant.bucket references unknown bucket "
+                    f"'{cycle.bucket}' (must be one of {sorted(bucket_keys)})"
+                )
+
+        for topup_key, topup in billing.topups.items():
+            if topup.deposit_to not in bucket_keys:
+                raise ConfigError(
+                    f"billing.topups.{topup_key}.deposit_to references unknown bucket "
+                    f"'{topup.deposit_to}' (must be one of {sorted(bucket_keys)})"
+                )
+
+        return self
+
+    @model_validator(mode="after")
     def validate_plan_references(self) -> "PricingConfig":
         billing = self.billing
         if billing is not None and billing.subscriptions:
             plans = self.plans or {}
             for offer_key, offer in billing.subscriptions.items():
                 plan_ref = offer.plan
-                if plan_ref is not None and plan_ref not in plans:
-                    raise ConfigError(f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'")
+                if plan_ref not in plans:
+                    raise ConfigError(
+                        f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'"
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def validate_rate_override_keys(self) -> "PricingConfig":
+        if not self.plans:
+            return self
+        model_keys = set(self.metering.models.keys())
+        for plan_id, plan_def in self.plans.items():
+            if not plan_def.rate_overrides:
+                continue
+            for override_key in plan_def.rate_overrides:
+                if override_key != "*" and override_key not in model_keys:
+                    raise ConfigError(
+                        f"plans.{plan_id}.rate_overrides.{override_key} references unknown model "
+                        f"(must be one of {sorted(model_keys)} or '*')"
+                    )
         return self
 
     @model_validator(mode="after")
@@ -174,4 +258,24 @@ class PricingConfig(BaseModel):
 
 
 def load_config_from_dict(data: dict) -> PricingConfig:
-    return PricingConfig.model_validate(data)
+    try:
+        return PricingConfig.model_validate(data)
+    except ValidationError as exc:
+        for err in exc.errors():
+            if err.get("type") != "value_error":
+                continue
+            msg = err.get("msg", "")
+            if not isinstance(msg, str):
+                continue
+            if msg.startswith("Value error, "):
+                raise ConfigError(msg.removeprefix("Value error, ")) from exc
+            # Custom ConfigError raised inside validators is serialized into ctx
+            ctx = err.get("ctx") or {}
+            if isinstance(ctx.get("error"), ConfigError):
+                raise ctx["error"] from exc
+        raise
+
+
+def canonical_pricing_config_dict(data: dict) -> dict:
+    """Validate and return a canonical snake_case config dict for persistence."""
+    return load_config_from_dict(data).model_dump(mode="json")

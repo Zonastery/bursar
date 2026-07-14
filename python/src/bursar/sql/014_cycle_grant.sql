@@ -32,6 +32,7 @@ DECLARE
     v_to_deduct NUMERIC;
     v_bucket_row RECORD;
     v_first_bucket TEXT;
+    v_bucket_breakdown JSONB := '{}'::jsonb;
     v_transaction_id UUID;
     v_new_balance NUMERIC;
 BEGIN
@@ -87,6 +88,11 @@ BEGIN
         WHERE user_id = p_user_id AND bucket_key = v_bucket_row.bucket_key;
         v_remaining := v_remaining - v_to_deduct;
 
+        v_bucket_breakdown := v_bucket_breakdown || jsonb_build_object(
+            v_bucket_row.bucket_key,
+            COALESCE((v_bucket_breakdown->>v_bucket_row.bucket_key)::numeric, 0) + v_to_deduct
+        );
+
         IF v_first_bucket IS NULL THEN
             v_first_bucket := v_bucket_row.bucket_key;
         END IF;
@@ -114,7 +120,8 @@ BEGIN
         jsonb_build_object(
             'revoked_tx_type', p_tx_type,
             'revoked_amount', v_revocable,
-            'bucket', v_first_bucket
+            'bucket', v_first_bucket,
+            'bucket_breakdown', v_bucket_breakdown
         )
     )
     RETURNING id INTO v_transaction_id;

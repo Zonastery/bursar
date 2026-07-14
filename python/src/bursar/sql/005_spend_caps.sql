@@ -44,6 +44,10 @@ DECLARE
   v_spend NUMERIC;
   v_window TIMESTAMPTZ;
   v_capped TEXT := NULL;
+  v_soft_spend NUMERIC := 0;
+  v_soft_limit NUMERIC := 0;
+  v_soft_model TEXT := NULL;
+  v_soft_action TEXT := NULL;
 BEGIN
   -- Single pass over ALL caps (deny first by ORDER BY, then warn/notify).
   -- First matched breach wins; deny takes precedence over soft.
@@ -71,16 +75,26 @@ BEGIN
       IF v_cap.action = 'deny' THEN
         RETURN jsonb_build_object('capped', true, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_cap.action, 'model', v_cap.model);
       ELSE
-        -- First soft breach wins (warn/notify).
+        -- First soft breach wins (warn/notify); capture that cap's metadata.
         IF v_capped IS NULL THEN
           v_capped := v_cap.action;
+          v_soft_spend := v_spend;
+          v_soft_limit := v_cap.cap_limit;
+          v_soft_model := v_cap.model;
+          v_soft_action := v_cap.action;
         END IF;
       END IF;
     END IF;
   END LOOP;
 
   IF v_capped IS NOT NULL THEN
-    RETURN jsonb_build_object('capped', false, 'current_spend', v_spend, 'cap_limit', v_cap.cap_limit, 'action', v_capped, 'model', v_cap.model);
+    RETURN jsonb_build_object(
+      'capped', false,
+      'current_spend', v_soft_spend,
+      'cap_limit', v_soft_limit,
+      'action', v_soft_action,
+      'model', v_soft_model
+    );
   END IF;
 
   RETURN jsonb_build_object('capped', false, 'current_spend', 0, 'cap_limit', 0, 'action', null);

@@ -290,6 +290,16 @@ class BillingManager:
             interval=merger.resolve(None, "interval"),
             interval_count=merger.resolve(None, "interval_count"),
             metadata=event.metadata or (existing.metadata if existing else None),
+            catalog_version=(
+                existing.catalog_version
+                if existing and existing.catalog_version is not None
+                else None
+            ),
+            plan_version_id=(
+                existing.plan_version_id
+                if existing and existing.plan_version_id is not None
+                else None
+            ),
         )
 
     def _apply_subscription_event(

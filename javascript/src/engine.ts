@@ -26,9 +26,9 @@ export class PricingEngine {
   }
 
   /** Calculate credit cost for a single usage event. */
-  calculate(metrics: UsageMetrics): CostBreakdown {
+  calculate(metrics: UsageMetrics, rateOverrides?: Record<string, string> | null): CostBreakdown {
     const variables = this.buildVariables(metrics);
-    const modelCredits = this.calcModel(metrics.model ?? null, variables);
+    const modelCredits = this.calcModel(metrics.model ?? null, variables, rateOverrides);
     const toolCredits = this.calcTools(metrics, variables);
     const searchCredits = this.calcSearch(variables);
     const cacheSavings = this.calcCache(variables);
@@ -131,15 +131,32 @@ export class PricingEngine {
     };
   }
 
-  private calcModel(modelName: string | null, variables: Record<string, number>): Decimal {
-    const models = this.config.metering.models;
+  private calcModel(
+    modelName: string | null,
+    variables: Record<string, number>,
+    rateOverrides?: Record<string, string> | null,
+  ): Decimal {
     const name = modelName === null || modelName === "none" ? "*" : modelName;
+
+    if (rateOverrides) {
+      const resolved = this.resolveModel(name);
+      if (resolved && Object.prototype.hasOwnProperty.call(rateOverrides, resolved)) {
+        return evaluateExpression(rateOverrides[resolved], variables);
+      }
+      if (Object.prototype.hasOwnProperty.call(rateOverrides, "*")) {
+        return evaluateExpression(rateOverrides["*"], variables);
+      }
+    }
+
+    const models = this.config.metering.models;
     let expr: string | undefined;
 
     if (Object.prototype.hasOwnProperty.call(models, name)) {
       expr = models[name];
     } else if (Object.prototype.hasOwnProperty.call(models, "*")) {
       expr = models["*"];
+    } else if (Object.prototype.hasOwnProperty.call(models, "_default")) {
+      expr = models["_default"];
     }
 
     if (!expr) {

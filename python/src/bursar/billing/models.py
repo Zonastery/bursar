@@ -162,7 +162,7 @@ class CycleGrant(BaseModel):
 
     mode: Literal["cycle_grant"] = "cycle_grant"
     credits: int = Field(ge=0)
-    bucket: str = "purchased"
+    bucket: str
     replace_prior: bool = True
 
 
@@ -177,12 +177,14 @@ class BillingOffer(BaseModel):
     interval_count: int = Field(default=1, ge=1)
     grant: Grant = Field(default_factory=lambda: AllowanceGrant())
     providers: dict[str, ProviderRef] = Field(default_factory=dict)
+    valid_from: str | None = None
+    valid_to: str | None = None
 
 
 class BillingCreditTopup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    deposit_to: str = "purchased"
+    deposit_to: str
     credits_per_unit: int = 1000
     min_amount_minor: int = 500
     max_amount_minor: int = 500000
@@ -241,6 +243,8 @@ class BillingSubscriptionState(BaseModel):
     interval: str | None = None
     interval_count: int | None = None
     metadata: dict[str, Any] | None = None
+    catalog_version: int | None = None
+    plan_version_id: str | None = None
 
 
 class BillingGrantResult(BaseModel):

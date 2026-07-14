@@ -499,11 +499,23 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
+DECLARE
+    v_existing_user UUID;
 BEGIN
+    SELECT user_id INTO v_existing_user
+    FROM public.billing_customers
+    WHERE provider = p_provider AND provider_customer_id = p_provider_customer_id;
+
+    IF v_existing_user IS NOT NULL AND v_existing_user <> p_user_id THEN
+        RETURN jsonb_build_object(
+            'error', 'user_id_mismatch',
+            'message', 'provider customer already mapped to a different user'
+        );
+    END IF;
+
     INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
     VALUES (p_provider, p_provider_customer_id, p_user_id, p_email)
     ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
-        user_id = EXCLUDED.user_id,
         email = COALESCE(EXCLUDED.email, billing_customers.email),
         updated_at = now();
 
@@ -552,7 +564,22 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
+DECLARE
+    v_existing_user UUID;
 BEGIN
+    SELECT user_id INTO v_existing_user
+    FROM public.billing_subscriptions
+    WHERE provider = p_state->>'provider'
+      AND provider_subscription_id = p_state->>'provider_subscription_id';
+
+    IF v_existing_user IS NOT NULL
+       AND v_existing_user <> (p_state->>'user_id')::UUID THEN
+        RETURN jsonb_build_object(
+            'error', 'user_id_mismatch',
+            'message', 'provider subscription already mapped to a different user'
+        );
+    END IF;
+
     INSERT INTO public.billing_subscriptions (
         user_id, provider, provider_subscription_id, provider_customer_id,
         offer_key, plan, status, current_period_start,
@@ -574,7 +601,6 @@ BEGIN
         (p_state->>'metadata')::JSONB
     )
     ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
-        user_id = EXCLUDED.user_id,
         provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
         offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
         plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),

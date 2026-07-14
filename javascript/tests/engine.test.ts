@@ -432,13 +432,9 @@ describe("model resolution: exact match over prefix", () => {
   });
 });
 
-// ── C4: Plan rate overrides — document actual behavior ──
-describe("plan rate overrides (C4)", () => {
-  it("documents that plan rateOverrides are stored but NOT applied by the engine", () => {
-    // The engine's calcModel() uses config.models directly and does not look up
-    // any active user plan's rateOverrides. The overrides are validated at
-    // config-load time but the engine has no concept of per-user plan context.
-    // TODO: plan rate overrides are stored but not yet applied by the engine.
+// ── Plan rate overrides ──
+describe("plan rate overrides", () => {
+  it("applies rateOverrides when passed to calculate()", () => {
     const engine = PricingEngine.fromDict({
       metering: {
         models: {
@@ -446,18 +442,28 @@ describe("plan rate overrides (C4)", () => {
           "*": "input_tokens * 0.001",
         },
       },
-      plans: {
-        pro: {
-          label: "Pro",
-          rateOverrides: { "gpt-4": "input_tokens * 0.005" },
+    });
+    const result = engine.calculate(
+      { model: "gpt-4", inputTokens: 1000 },
+      { "gpt-4": "input_tokens * 0.005" },
+    );
+    expect(result.modelCredits.toFixed(4)).toBe("5.0000");
+  });
+
+  it("resolves prefix model keys for rateOverrides", () => {
+    const engine = PricingEngine.fromDict({
+      metering: {
+        models: {
+          "gpt-4": "input_tokens * 0.002",
+          "*": "input_tokens * 0.001",
         },
       },
     });
-    // The override rate is 0.005, but the engine applies the base rate 0.002.
-    // 1000 * 0.002 = 2.0000 (not 1000 * 0.005 = 5.0000).
-    const result = engine.calculate({ model: "gpt-4", inputTokens: 1000 });
-    // Overrides are NOT applied: expect base rate result (2.0000), not override (5.0000).
-    expect(result.modelCredits.toFixed(4)).toBe("2.0000");
+    const result = engine.calculate(
+      { model: "gpt-4-turbo", inputTokens: 1000 },
+      { "gpt-4": "input_tokens * 0.004" },
+    );
+    expect(result.modelCredits.toFixed(4)).toBe("4.0000");
   });
 });
 

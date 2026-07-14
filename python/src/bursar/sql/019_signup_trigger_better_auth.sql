@@ -12,6 +12,7 @@ SET search_path = ''
 AS $$
 DECLARE
   v_bonus NUMERIC;
+  v_result JSONB;
 BEGIN
   SELECT COALESCE(
     (SELECT (config->'ledger'->>'signup_grant')::numeric FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1),
@@ -22,7 +23,10 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
+  v_result := public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
+  IF v_result ? 'error' THEN
+    RAISE WARNING 'grant_signup_bonus failed for user %: %', NEW.id, v_result;
+  END IF;
   RETURN NEW;
 END;
 $$;

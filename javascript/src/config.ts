@@ -1,14 +1,20 @@
 import Decimal from "decimal.js";
+import { camelToSnakeKeys } from "./case-utils.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 import type {
   BillingMode,
-  FeatureLimit,
   OperationPolicy,
   PlanDefinition,
   BucketDefinition,
 } from "./types.js";
+import type {
+  BillingCreditTopup,
+  BillingOffer,
+  BillingOfferInterval,
+  SubscriptionGrant,
+} from "./billing/billing-types.js";
 
 /** Valid `allowancePeriod` values (WS9b). */
 const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
@@ -55,18 +61,32 @@ export interface MeteringConfig {
   flatJobs: Record<string, Decimal>;
 }
 
+/** Credits granted to new users on signup, routed to a configured bucket. */
+export interface SignupGrant {
+  amount: number;
+  bucket: string;
+}
+
 /** Ledger configuration section. */
 export interface LedgerConfig {
   minBalance: Decimal;
-  signupGrant?: number | null;
+  signupGrant?: SignupGrant | null;
   buckets?: Record<string, BucketDefinition> | null;
+}
+
+/** Parsed entitlement entry (missing `maxCalls` means unlimited). */
+export interface PlanEntitlement {
+  value?: unknown;
+  maxCalls: number | null;
+  period: FeatureLimitPeriod;
+  onExceed: "deny" | "warn" | "notify";
 }
 
 /** Billing configuration section. */
 export interface BillingSection {
-  currency?: string;
-  subscriptions?: Record<string, unknown>;
-  topups?: Record<string, unknown>;
+  currency: string;
+  subscriptions: Record<string, BillingOffer>;
+  topups: Record<string, BillingCreditTopup>;
 }
 
 /** Internal validated pricing configuration. */
@@ -122,6 +142,42 @@ const OPERATION_POLICY_KEYS: ReadonlySet<string> = new Set([
   "maxConcurrent",
   "overdraftFloor",
 ]);
+
+/** Known billing-section keys. */
+const BILLING_KEYS: ReadonlySet<string> = new Set(["currency", "subscriptions", "topups"]);
+
+/** Known billing-offer keys. */
+const BILLING_OFFER_KEYS: ReadonlySet<string> = new Set([
+  "plan",
+  "interval",
+  "intervalCount",
+  "grant",
+  "providers",
+]);
+
+/** Known billing-topup keys. */
+const BILLING_TOPUP_KEYS: ReadonlySet<string> = new Set([
+  "depositTo",
+  "creditsPerUnit",
+  "minAmountMinor",
+  "maxAmountMinor",
+  "taxBehavior",
+  "providers",
+]);
+
+/** Known provider-ref keys. */
+const PROVIDER_REF_KEYS: ReadonlySet<string> = new Set([
+  "productId",
+  "priceId",
+  "variantId",
+  "lookupKey",
+]);
+
+const BILLING_OFFER_INTERVALS: ReadonlySet<string> = new Set(["day", "week", "month", "year"]);
+const TAX_BEHAVIORS: ReadonlySet<string> = new Set(["exclude_tax", "include_tax"]);
+
+/** Known signup-grant keys. */
+const SIGNUP_GRANT_KEYS: ReadonlySet<string> = new Set(["amount", "bucket"]);
 
 /** Known bucket-definition keys. */
 const BUCKET_KEYS: ReadonlySet<string> = new Set([
@@ -280,27 +336,23 @@ function normaliseBucket(t: Record<string, unknown>): Record<string, unknown> {
 function normaliseEntitlements(
   planKey: string,
   raw: Record<string, unknown>,
-): Record<
-  string,
-  {
-    value?: unknown;
-    maxCalls: number;
-    period: FeatureLimitPeriod;
-    onExceed: "deny" | "warn" | "notify";
-  }
-> {
-  const out: Record<string, FeatureLimit> = {};
+): Record<string, PlanEntitlement> {
+  const out: Record<string, PlanEntitlement> = {};
   for (const [featureKey, rawLimit] of Object.entries(raw)) {
     const limit = normaliseKeys((rawLimit ?? {}) as Record<string, unknown>);
     assertKnownKeys(limit, FEATURE_LIMIT_KEYS, `plans.${planKey}.entitlements.${featureKey}`);
-    const maxCalls = Number(limit.maxCalls ?? 0);
+    const rawMax = limit.maxCalls;
+    let maxCalls: number | null = null;
+    if (rawMax !== undefined && rawMax !== null) {
+      maxCalls = Number(rawMax);
+      if (!Number.isFinite(maxCalls) || maxCalls < 0) {
+        throw new ConfigError(
+          `invalid entitlements in plans.${planKey}.${featureKey}: maxCalls must be >= 0, got ${String(limit.maxCalls)}`,
+        );
+      }
+    }
     const period = (limit.period as string | undefined) ?? "monthly";
     const onExceed = (limit.onExceed as string | undefined) ?? "deny";
-    if (!Number.isFinite(maxCalls) || maxCalls < 0) {
-      throw new ConfigError(
-        `invalid entitlements in plans.${planKey}.${featureKey}: maxCalls must be >= 0, got ${String(limit.maxCalls)}`,
-      );
-    }
     if (!FEATURE_LIMIT_PERIODS.has(period)) {
       throw new ConfigError(
         `invalid entitlements in plans.${planKey}.${featureKey}: unknown period '${period}' ` +
@@ -316,7 +368,7 @@ function normaliseEntitlements(
     out[featureKey] = {
       maxCalls,
       period: period as FeatureLimitPeriod,
-      onExceed: onExceed as FeatureLimit["onExceed"],
+      onExceed: onExceed as PlanEntitlement["onExceed"],
       value: limit.value,
     };
   }
@@ -393,6 +445,30 @@ function parseMetering(raw: Record<string, unknown>): MeteringConfig {
   return metering;
 }
 
+function parseSignupGrant(raw: unknown): SignupGrant | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "number") {
+    throw new ConfigError(
+      "ledger.signupGrant must be an object { amount, bucket }, not a scalar number",
+    );
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ConfigError("ledger.signupGrant must be an object { amount, bucket }");
+  }
+  const grant = normaliseKeys(raw as Record<string, unknown>);
+  assertKnownKeys(grant, SIGNUP_GRANT_KEYS, "ledger.signupGrant");
+  const amount = Number(grant.amount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new ConfigError(
+      `ledger.signupGrant.amount must be >= 0, got ${String(grant.amount)}`,
+    );
+  }
+  if (grant.bucket == null || grant.bucket === "") {
+    throw new ConfigError("ledger.signupGrant.bucket is required");
+  }
+  return { amount, bucket: String(grant.bucket) };
+}
+
 function parseLedger(raw: Record<string, unknown>): LedgerConfig {
   const normalised = normaliseKeys(raw);
   assertKnownKeys(normalised, LEDGER_KEYS, "ledger");
@@ -400,14 +476,9 @@ function parseLedger(raw: Record<string, unknown>): LedgerConfig {
   const minBalance = new Decimal((normalised.minBalance as number | string | undefined) ?? 0);
   if (minBalance.isNegative()) throw new ConfigError("ledger.minBalance must be >= 0");
 
-  const signupGrant = normalised.signupGrant as number | undefined;
-  if (signupGrant != null && signupGrant < 0) {
-    throw new ConfigError(`ledger.signupGrant must be >= 0, got ${signupGrant}`);
-  }
-
   return {
     minBalance,
-    signupGrant: signupGrant ?? 0,
+    signupGrant: parseSignupGrant(normalised.signupGrant),
     buckets: undefined,
   };
 }
@@ -573,10 +644,372 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
             : null,
       },
       rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
-      entitlements: (p.entitlements as Record<string, FeatureLimit>) ?? null,
+      entitlements: (p.entitlements as Record<string, PlanEntitlement>) ?? null,
     };
   }
   return planDefs;
+}
+
+function parseProviderRefs(
+  raw: unknown,
+  context: string,
+): Record<string, { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }> {
+  if (raw == null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ConfigError(`${context} must be a dict of provider refs`);
+  }
+  const out: Record<string, { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }> =
+    {};
+  for (const [providerKey, providerVal] of Object.entries(raw as Record<string, unknown>)) {
+    const ref = normaliseKeys((providerVal ?? {}) as Record<string, unknown>);
+    assertKnownKeys(ref, PROVIDER_REF_KEYS, `${context}.${providerKey}`);
+    out[providerKey] = {
+      ...(ref.productId != null ? { productId: String(ref.productId) } : {}),
+      ...(ref.priceId != null ? { priceId: String(ref.priceId) } : {}),
+      ...(ref.variantId != null ? { variantId: String(ref.variantId) } : {}),
+      ...(ref.lookupKey != null ? { lookupKey: String(ref.lookupKey) } : {}),
+    };
+  }
+  return out;
+}
+
+function parseGrant(raw: unknown, context: string): SubscriptionGrant {
+  const grant = normaliseKeys((raw ?? { mode: "allowance" }) as Record<string, unknown>);
+  const mode = (grant.mode as string | undefined) ?? "allowance";
+  if (mode === "allowance") {
+    assertKnownKeys(grant, new Set(["mode"]), context);
+    return { mode: "allowance" };
+  }
+  if (mode === "cycle_grant") {
+    assertKnownKeys(grant, new Set(["mode", "credits", "bucket", "replacePrior"]), context);
+    const credits = Number(grant.credits);
+    if (!Number.isFinite(credits) || credits < 0) {
+      throw new ConfigError(`${context}.credits must be >= 0, got ${String(grant.credits)}`);
+    }
+    if (grant.bucket == null || grant.bucket === "") {
+      throw new ConfigError(`${context}.bucket is required for cycle_grant`);
+    }
+    return {
+      mode: "cycle_grant",
+      credits,
+      bucket: String(grant.bucket),
+      replacePrior: Boolean(grant.replacePrior ?? true),
+    };
+  }
+  throw new ConfigError(`unknown grant mode in ${context}: '${mode}'`);
+}
+
+function parseBillingOffer(raw: unknown, context: string): BillingOffer {
+  const offer = normaliseKeys((raw ?? {}) as Record<string, unknown>);
+  assertKnownKeys(offer, BILLING_OFFER_KEYS, context);
+  if (offer.plan == null || offer.plan === "") {
+    throw new ConfigError(`${context} is missing required 'plan' field`);
+  }
+  const interval = (offer.interval as string | undefined) ?? "month";
+  if (!BILLING_OFFER_INTERVALS.has(interval)) {
+    throw new ConfigError(
+      `invalid interval in ${context}: '${interval}' ` +
+        `(expected one of ${[...BILLING_OFFER_INTERVALS].sort().join(", ")})`,
+    );
+  }
+  const intervalCount = Number(offer.intervalCount ?? 1);
+  if (!Number.isFinite(intervalCount) || intervalCount < 1) {
+    throw new ConfigError(`${context}.intervalCount must be >= 1, got ${String(offer.intervalCount)}`);
+  }
+  return {
+    plan: String(offer.plan),
+    interval: interval as BillingOfferInterval,
+    intervalCount,
+    grant: parseGrant(offer.grant, `${context}.grant`),
+    providers: parseProviderRefs(offer.providers, `${context}.providers`),
+  };
+}
+
+function parseBillingTopup(raw: unknown, context: string): BillingCreditTopup {
+  const topup = normaliseKeys((raw ?? {}) as Record<string, unknown>);
+  assertKnownKeys(topup, BILLING_TOPUP_KEYS, context);
+  const creditsPerUnit = Number(topup.creditsPerUnit ?? 1000);
+  if (!Number.isFinite(creditsPerUnit) || creditsPerUnit < 0) {
+    throw new ConfigError(`${context}.creditsPerUnit must be >= 0, got ${String(topup.creditsPerUnit)}`);
+  }
+  const minAmountMinor = Number(topup.minAmountMinor ?? 500);
+  const maxAmountMinor = Number(topup.maxAmountMinor ?? 500_000);
+  if (!Number.isFinite(minAmountMinor) || minAmountMinor < 0) {
+    throw new ConfigError(`${context}.minAmountMinor must be >= 0, got ${String(topup.minAmountMinor)}`);
+  }
+  if (!Number.isFinite(maxAmountMinor) || maxAmountMinor < 0) {
+    throw new ConfigError(`${context}.maxAmountMinor must be >= 0, got ${String(topup.maxAmountMinor)}`);
+  }
+  const taxBehavior = (topup.taxBehavior as string | undefined) ?? "exclude_tax";
+  if (!TAX_BEHAVIORS.has(taxBehavior)) {
+    throw new ConfigError(
+      `invalid taxBehavior in ${context}: '${taxBehavior}' ` +
+        `(expected one of ${[...TAX_BEHAVIORS].sort().join(", ")})`,
+    );
+  }
+  if (topup.depositTo == null || topup.depositTo === "") {
+    throw new ConfigError(`${context} is missing required 'depositTo' field`);
+  }
+  return {
+    depositTo: String(topup.depositTo),
+    creditsPerUnit,
+    minAmountMinor,
+    maxAmountMinor,
+    taxBehavior: taxBehavior as BillingCreditTopup["taxBehavior"],
+    providers: parseProviderRefs(topup.providers, `${context}.providers`),
+  };
+}
+
+function parseBilling(raw: unknown): BillingSection | undefined {
+  if (raw == null) return undefined;
+  const section = normaliseKeys(raw as Record<string, unknown>);
+  assertKnownKeys(section, BILLING_KEYS, "billing");
+  const subscriptions: Record<string, BillingOffer> = {};
+  if (section.subscriptions != null) {
+    if (typeof section.subscriptions !== "object" || Array.isArray(section.subscriptions)) {
+      throw new ConfigError("billing.subscriptions must be a dict");
+    }
+    for (const [key, val] of Object.entries(section.subscriptions as Record<string, unknown>)) {
+      subscriptions[key] = parseBillingOffer(val, `billing.subscriptions.${key}`);
+    }
+  }
+  const topups: Record<string, BillingCreditTopup> = {};
+  if (section.topups != null) {
+    if (typeof section.topups !== "object" || Array.isArray(section.topups)) {
+      throw new ConfigError("billing.topups must be a dict");
+    }
+    for (const [key, val] of Object.entries(section.topups as Record<string, unknown>)) {
+      topups[key] = parseBillingTopup(val, `billing.topups.${key}`);
+    }
+  }
+  return {
+    currency: String(section.currency ?? "USD"),
+    subscriptions,
+    topups,
+  };
+}
+
+function validatePlanReferences(config: PricingConfig): void {
+  const billing = config.billing;
+  if (!billing?.subscriptions || Object.keys(billing.subscriptions).length === 0) return;
+  const plans = config.plans ?? {};
+  for (const [offerKey, offer] of Object.entries(billing.subscriptions)) {
+    if (!Object.prototype.hasOwnProperty.call(plans, offer.plan)) {
+      throw new ConfigError(
+        `billing.subscriptions.${offerKey}.plan references unknown plan '${offer.plan}'`,
+      );
+    }
+  }
+}
+
+function validateRateOverrideKeys(config: PricingConfig): void {
+  if (!config.plans) return;
+  const modelKeys = new Set(Object.keys(config.metering.models));
+  for (const [planId, planDef] of Object.entries(config.plans)) {
+    if (!planDef.rateOverrides) continue;
+    for (const overrideKey of Object.keys(planDef.rateOverrides)) {
+      if (overrideKey !== "*" && !modelKeys.has(overrideKey)) {
+        throw new ConfigError(
+          `plans.${planId}.rateOverrides.${overrideKey} references unknown model ` +
+            `(must be one of ${[...modelKeys].sort().join(", ")} or '*')`,
+        );
+      }
+    }
+  }
+}
+
+function validateBucketReferences(config: PricingConfig): void {
+  const buckets = config.ledger.buckets;
+  const bucketKeys = buckets ? new Set(Object.keys(buckets)) : null;
+
+  const signupGrant = config.ledger.signupGrant;
+  if (signupGrant != null) {
+    if (!bucketKeys) {
+      throw new ConfigError("ledger.buckets must be defined when ledger.signupGrant is set");
+    }
+    if (!bucketKeys.has(signupGrant.bucket)) {
+      throw new ConfigError(
+        `ledger.signupGrant.bucket references unknown bucket '${signupGrant.bucket}' ` +
+          `(must be one of ${[...bucketKeys].sort().join(", ")})`,
+      );
+    }
+  }
+
+  if (!bucketKeys) return;
+
+  const billing = config.billing;
+  if (!billing) return;
+
+  for (const [offerKey, offer] of Object.entries(billing.subscriptions)) {
+    const grant = offer.grant;
+    if (grant?.mode === "cycle_grant" && grant.bucket != null) {
+      if (!bucketKeys.has(grant.bucket)) {
+        throw new ConfigError(
+          `billing.subscriptions.${offerKey}.grant.bucket references unknown bucket '${grant.bucket}' ` +
+            `(must be one of ${[...bucketKeys].sort().join(", ")})`,
+        );
+      }
+    }
+  }
+
+  for (const [topupKey, topup] of Object.entries(billing.topups)) {
+    if (topup.depositTo != null && !bucketKeys.has(topup.depositTo)) {
+      throw new ConfigError(
+        `billing.topups.${topupKey}.depositTo references unknown bucket '${topup.depositTo}' ` +
+          `(must be one of ${[...bucketKeys].sort().join(", ")})`,
+      );
+    }
+  }
+}
+
+function decToJson(value: Decimal): number | string {
+  return value.isInteger() ? value.toNumber() : value.toString();
+}
+
+/** Convert a validated config to a plain camelCase dict (JSON-safe). */
+function pricingConfigToDict(config: PricingConfig): Record<string, unknown> {
+  const plans = config.plans
+    ? Object.fromEntries(
+        Object.entries(config.plans).map(([key, plan]) => [
+          key,
+          {
+            label: plan.label,
+            allowance: {
+              amount: decToJson(plan.allowance.amount),
+              period: plan.allowance.period,
+            },
+            safety: {
+              billingMode: plan.safety.billingMode,
+              ...(plan.safety.maxConcurrent != null
+                ? { maxConcurrent: plan.safety.maxConcurrent }
+                : {}),
+              ...(plan.safety.overdraftFloor != null
+                ? { overdraftFloor: decToJson(plan.safety.overdraftFloor) }
+                : {}),
+              ...(plan.safety.perOperation
+                ? {
+                    perOperation: Object.fromEntries(
+                      Object.entries(plan.safety.perOperation).map(([op, policy]) => [
+                        op,
+                        {
+                          billingMode: policy.billingMode,
+                          ...(policy.maxConcurrent != null
+                            ? { maxConcurrent: policy.maxConcurrent }
+                            : {}),
+                          ...(policy.overdraftFloor != null
+                            ? { overdraftFloor: decToJson(policy.overdraftFloor) }
+                            : {}),
+                        },
+                      ]),
+                    ),
+                  }
+                : {}),
+            },
+            ...(plan.rateOverrides ? { rateOverrides: plan.rateOverrides } : {}),
+            ...(plan.entitlements
+              ? {
+                  entitlements: Object.fromEntries(
+                    Object.entries(plan.entitlements).map(([fk, ent]) => [
+                      fk,
+                      {
+                        ...(ent.value !== undefined ? { value: ent.value } : {}),
+                        ...(ent.maxCalls != null ? { maxCalls: ent.maxCalls } : {}),
+                        period: ent.period,
+                        onExceed: ent.onExceed,
+                      },
+                    ]),
+                  ),
+                }
+              : {}),
+          },
+        ]),
+      )
+    : undefined;
+
+  const billing = config.billing
+    ? {
+        currency: config.billing.currency,
+        subscriptions: Object.fromEntries(
+          Object.entries(config.billing.subscriptions).map(([key, offer]) => [
+            key,
+            {
+              plan: offer.plan,
+              interval: offer.interval ?? "month",
+              intervalCount: offer.intervalCount ?? 1,
+              grant:
+                offer.grant?.mode === "cycle_grant"
+                  ? {
+                      mode: "cycle_grant",
+                      credits: offer.grant.credits,
+                      bucket: offer.grant.bucket,
+                      replacePrior: offer.grant.replacePrior ?? true,
+                    }
+                  : (offer.grant ?? { mode: "allowance" }),
+              ...(offer.providers && Object.keys(offer.providers).length > 0
+                ? { providers: offer.providers }
+                : {}),
+            },
+          ]),
+        ),
+        topups: Object.fromEntries(
+          Object.entries(config.billing.topups).map(([key, topup]) => [
+            key,
+            {
+              depositTo: topup.depositTo,
+              creditsPerUnit: topup.creditsPerUnit ?? 1000,
+              minAmountMinor: topup.minAmountMinor ?? 500,
+              maxAmountMinor: topup.maxAmountMinor ?? 500_000,
+              taxBehavior: topup.taxBehavior ?? "exclude_tax",
+              ...(topup.providers && Object.keys(topup.providers).length > 0
+                ? { providers: topup.providers }
+                : {}),
+            },
+          ]),
+        ),
+      }
+    : undefined;
+
+  return {
+    version: config.version,
+    metering: {
+      models: config.metering.models,
+      tools: config.metering.tools,
+      search: config.metering.search,
+      cacheDiscount: config.metering.cacheDiscount,
+      flatJobs: Object.fromEntries(
+        Object.entries(config.metering.flatJobs).map(([job, cost]) => [job, decToJson(cost)]),
+      ),
+    },
+    ledger: {
+      minBalance: decToJson(config.ledger.minBalance),
+      ...(config.ledger.signupGrant ? { signupGrant: config.ledger.signupGrant } : {}),
+      ...(config.ledger.buckets
+        ? {
+            buckets: Object.fromEntries(
+              Object.entries(config.ledger.buckets).map(([bk, bucket]) => [
+                bk,
+                {
+                  label: bucket.label,
+                  priority: bucket.priority,
+                  expires: bucket.expires,
+                  ...(bucket.ttlDays != null ? { ttlDays: bucket.ttlDays } : {}),
+                  ...(bucket.allowOverdraft ? { allowOverdraft: true } : {}),
+                  ...(bucket.default ? { default: true } : {}),
+                },
+              ]),
+            ),
+          }
+        : {}),
+    },
+    ...(plans ? { plans } : {}),
+    ...(billing ? { billing } : {}),
+  };
+}
+
+/** Validate and return a canonical snake_case config dict for persistence. */
+export function canonicalPricingConfigDict(data: Record<string, unknown>): Record<string, unknown> {
+  const config = loadConfigFromDict(data);
+  return camelToSnakeKeys(pricingConfigToDict(config)) as Record<string, unknown>;
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
@@ -595,14 +1028,15 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
   if (buckets) ledger.buckets = buckets;
 
   const plans = parsePlans(d as Record<string, unknown>);
-
-  const billing: BillingSection | undefined =
-    d.billing != null ? { currency: "USD", ...(d.billing as Record<string, unknown>) } : undefined;
+  const billing = parseBilling(d.billing);
 
   const config: PricingConfig = { version, metering, ledger };
   if (plans) config.plans = plans;
   if (billing) config.billing = billing;
 
   validateExpressions(config);
+  validatePlanReferences(config);
+  validateRateOverrideKeys(config);
+  validateBucketReferences(config);
   return config;
 }

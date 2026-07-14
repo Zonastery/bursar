@@ -148,7 +148,7 @@ class TestPostgresStoreIntegration:
             **pricing,
             "ledger": {
                 **pricing["ledger"],
-                "signup_grant": 50,
+                "signup_grant": {"amount": 50, "bucket": "gifted"},
                 "buckets": {
                     "gifted": {
                         "label": "Gifted Credits",
@@ -1223,7 +1223,7 @@ class TestAllowanceWindowPg:
             {
                 "version": 1,
                 "metering": {"models": {"*": "input_tokens * 1"}},
-                "ledger": {"min_balance": 0, "signup_grant": 0},
+                "ledger": {"min_balance": 0},
             }
         )
         m_roll.deduct(roll_user, UsageMetrics(input_tokens=10))

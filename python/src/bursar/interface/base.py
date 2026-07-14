@@ -434,6 +434,15 @@ class CreditStore(ABC):
         """
         ...
 
+    @abstractmethod
+    def publish_pricing(
+        self,
+        config: dict[str, Any],
+        label: str | None = None,
+    ) -> str:
+        """Publish an inactive pricing draft without changing the live catalog."""
+        ...
+
     # ── Plan management ────────────────────────────────────────────────
 
     @abstractmethod

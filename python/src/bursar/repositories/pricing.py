@@ -65,15 +65,15 @@ class PricingRepository:
         return ActivePricingRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
 
     def activate_pricing(self, version: int) -> ActivePricingRow | None:
-        """Activate a specific pricing configuration version.
-
-        Args:
-            version: The version number to activate.
-
-        Returns:
-            ActivePricingRow for the activated config, or None if version not found.
-        """
+        """Activate a specific pricing configuration version."""
         rows = self._callproc("activate_pricing_config", [version])
+        if not rows:
+            return None
+        return ActivePricingRow.model_validate(rows[0])
+
+    def publish_pricing(self, config: str, label: str | None) -> ActivePricingRow | None:
+        """Publish an inactive pricing configuration draft."""
+        rows = self._callproc("publish_pricing_config", [config, label])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0])

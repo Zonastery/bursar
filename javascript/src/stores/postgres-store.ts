@@ -1,8 +1,9 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
+import { canonicalPricingConfigDict } from "../config.js";
 import { resolveCalendarWindow } from "../allowance.js";
-import { camelToSnakeKeys, snakeToCamelKeys } from "../case-utils.js";
-import type { AllowancePeriod, FeatureLimitPeriod } from "../allowance.js";
+import { snakeToCamelKeys } from "../case-utils.js";
+import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
@@ -92,19 +93,20 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
     if (v === null || typeof v !== "object" || Object.getPrototypeOf(v) !== Object.prototype) {
       out[k] = {
         value: v,
-        maxCalls: 0,
+        maxCalls: null,
         period: "monthly",
         onExceed: "deny",
-      } as FeatureLimit;
+      };
     } else {
-      const fl = v as Record<string, unknown>;
+      const fl = snakeToCamelKeys(v as Record<string, unknown>);
       const valueRaw = fl["value"];
+      const rawMax = fl["maxCalls"];
       out[k] = {
         ...(valueRaw !== undefined ? { value: valueRaw } : {}),
-        maxCalls: Number(fl.max_calls ?? 0),
+        maxCalls: rawMax === undefined || rawMax === null ? null : Number(rawMax),
         period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-        onExceed: (String(fl.on_exceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
-      } as FeatureLimit;
+        onExceed: (String(fl.onExceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+      };
     }
   }
   return out;
@@ -364,7 +366,8 @@ export class PostgresStore extends CreditStore {
       skipAllowance: false,
       periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureMaxCalls:
+        featureLimit != null && featureLimit.maxCalls != null ? featureLimit.maxCalls : null,
       featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
       featurePeriodStart:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
@@ -430,7 +433,8 @@ export class PostgresStore extends CreditStore {
       metadata: JSON.stringify(options?.metadata ?? {}),
       periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureMaxCalls:
+        featureLimit != null && featureLimit.maxCalls != null ? featureLimit.maxCalls : null,
       featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
       featurePeriodStart:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
@@ -499,7 +503,8 @@ export class PostgresStore extends CreditStore {
       skipAllowance: false,
       periodStart: periodStart != null ? periodStart.toISOString().slice(0, 10) : null,
       feature,
-      featureMaxCalls: featureLimit != null ? featureLimit.maxCalls : null,
+      featureMaxCalls:
+        featureLimit != null && featureLimit.maxCalls != null ? featureLimit.maxCalls : null,
       featureOnExceed: featureLimit != null ? featureLimit.onExceed : null,
       featurePeriodStart:
         featurePeriodStart != null ? featurePeriodStart.toISOString().slice(0, 10) : null,
@@ -631,10 +636,8 @@ export class PostgresStore extends CreditStore {
   }
 
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
-    const row = await this.pricingRepo.setActivePricing(
-      JSON.stringify(camelToSnakeKeys(config)),
-      label ?? null,
-    );
+    const canonical = canonicalPricingConfigDict(config);
+    const row = await this.pricingRepo.setActivePricing(JSON.stringify(canonical), label ?? null);
     return String(row.id ?? "");
   }
 
@@ -692,15 +695,16 @@ export class PostgresStore extends CreditStore {
       planId: (row.plan_id as string) ?? null,
       planLabel: (row.plan_label as string) ?? null,
       allowanceAmount: dec(row.allowance_amount),
-      entitlements: parseFeatureLimits(row.entitlements) as unknown as Record<
-        string,
-        {
-          value?: unknown;
-          maxCalls?: number;
-          period?: FeatureLimitPeriod;
-          onExceed?: "deny" | "warn" | "notify";
-        }
-      >,
+      entitlements: parseFeatureLimits(row.entitlements),
+      rateOverrides:
+        row.rate_overrides != null && typeof row.rate_overrides === "object"
+          ? Object.fromEntries(
+              Object.entries(row.rate_overrides as Record<string, unknown>).map(([k, v]) => [
+                k,
+                String(v),
+              ]),
+            )
+          : {},
       billingMode: (String(row.billing_mode ?? "strict") as BillingMode) ?? "strict",
       perOperation: parsePerOperation(row.per_operation),
       maxConcurrent: row.max_concurrent != null ? Number(row.max_concurrent) : null,
@@ -708,6 +712,12 @@ export class PostgresStore extends CreditStore {
       allowancePeriod: (row.allowance_period as AllowancePeriod | undefined) ?? "calendar_month",
       planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
       configVersion: row.config_version != null ? Number(row.config_version) : null,
+      catalogVersion:
+        row.catalog_version != null
+          ? Number(row.catalog_version)
+          : row.config_version != null
+            ? Number(row.config_version)
+            : null,
     };
   }
 

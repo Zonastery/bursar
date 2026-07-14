@@ -62,7 +62,7 @@ class TestConfigValidation:
 
     def test_negative_flat_job_raises_error(self) -> None:
         """Negative flat_jobs values raise pydantic ValidationError."""
-        with pytest.raises(ValidationError):
+        with pytest.raises((ConfigError, ValidationError)):
             load_config_from_dict(
                 {
                     "version": 1,
@@ -307,8 +307,8 @@ class TestConfigValidation:
 
     # ── SB1: signup_bonus default and validation ──────────────────────────
 
-    def test_signup_bonus_defaults_to_0(self) -> None:
-        """signup_grant defaults to 0 (no bonus unless configured)."""
+    def test_signup_grant_defaults_to_none(self) -> None:
+        """Omitted signup_grant disables signup bonuses."""
         config = load_config_from_dict(
             {
                 "version": 1,
@@ -316,40 +316,61 @@ class TestConfigValidation:
                 "ledger": {},
             }
         )
-        assert config.ledger.signup_grant == 0
+        assert config.ledger.signup_grant is None
 
-    def test_signup_bonus_custom_value(self) -> None:
-        """signup_grant accepts a custom positive int."""
+    def test_signup_grant_object_accepted(self) -> None:
         config = load_config_from_dict(
             {
                 "version": 1,
                 "metering": {"models": {"*": "input_tokens * 1"}},
-                "ledger": {"signup_grant": 200},
+                "ledger": {
+                    "signup_grant": {"amount": 200, "bucket": "gifted"},
+                    "buckets": {
+                        "gifted": {"label": "Gifted", "priority": 10, "expires": True, "ttl_days": 7},
+                        "purchased": {"label": "Purchased", "priority": 20, "default": True},
+                    },
+                },
             }
         )
-        assert config.ledger.signup_grant == 200
+        assert config.ledger.signup_grant is not None
+        assert config.ledger.signup_grant.amount == 200
+        assert config.ledger.signup_grant.bucket == "gifted"
 
-    def test_signup_bonus_negative_rejected(self) -> None:
-        """Negative signup_grant raises ValidationError (field ge=0)."""
+    def test_signup_grant_scalar_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="object"):
+            load_config_from_dict(
+                {
+                    "version": 1,
+                    "metering": {"models": {"*": "input_tokens * 1"}},
+                    "ledger": {"signup_grant": 200},
+                }
+            )
+
+    def test_signup_grant_negative_amount_rejected(self) -> None:
         with pytest.raises(ValidationError):
             load_config_from_dict(
                 {
                     "version": 1,
                     "metering": {"models": {"*": "input_tokens * 1"}},
-                    "ledger": {"signup_grant": -1},
+                    "ledger": {
+                        "signup_grant": {"amount": -1, "bucket": "gifted"},
+                        "buckets": {"gifted": {"label": "Gifted", "priority": 10}},
+                    },
                 }
             )
 
-    def test_signup_bonus_zero_accepted(self) -> None:
-        """signup_grant of 0 is valid (no signup bonus)."""
-        config = load_config_from_dict(
-            {
-                "version": 1,
-                "metering": {"models": {"*": "input_tokens * 1"}},
-                "ledger": {"signup_grant": 0},
-            }
-        )
-        assert config.ledger.signup_grant == 0
+    def test_signup_grant_unknown_bucket_rejected(self) -> None:
+        with pytest.raises(ConfigError, match="unknown bucket"):
+            load_config_from_dict(
+                {
+                    "version": 1,
+                    "metering": {"models": {"*": "input_tokens * 1"}},
+                    "ledger": {
+                        "signup_grant": {"amount": 50, "bucket": "missing"},
+                        "buckets": {"gifted": {"label": "Gifted", "priority": 10}},
+                    },
+                }
+            )
 
     # ── CF1: Plan rate_overrides accepted ──────────────────────────────────
 
@@ -358,7 +379,7 @@ class TestConfigValidation:
         config = load_config_from_dict(
             {
                 "version": 1,
-                "metering": {"models": {"*": "input_tokens * 1"}},
+                "metering": {"models": {"*": "input_tokens * 1", "gpt-4": "input_tokens * 0.01"}},
                 "ledger": {"min_balance": "0"},
                 "plans": {
                     "pro": {

@@ -83,7 +83,14 @@ class PricingConfigResult(BaseModel):
     id: str
     config: dict[str, Any] | None = None
     version: int = 1
+    publication_version: int | None = None
     label: str | None = None
+
+    @model_validator(mode="after")
+    def _sync_publication_version(self) -> "PricingConfigResult":
+        if self.publication_version is None:
+            self.publication_version = self.version
+        return self
 
 
 class PricingConfigHistoryItem(BaseModel):
@@ -178,12 +185,14 @@ class GetUserPlanResult(BaseModel):
     allowance_amount: Decimal = Decimal(0)
     allowance_period: Literal["calendar_month", "rolling_30d", "anniversary"] = "calendar_month"
     entitlements: dict[str, Entitlement] = Field(default_factory=dict)
+    rate_overrides: dict[str, str] = Field(default_factory=dict)
     billing_mode: BillingMode = "strict"
     per_operation: dict[str, OperationPolicy] = Field(default_factory=dict)
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
     plan_assigned_at: datetime | None = None
     config_version: int | None = None
+    catalog_version: int | None = None
 
 
 class FeatureLimit(BaseModel):

@@ -16,7 +16,8 @@ SUBSCRIPTION_STATUS_INCOMPLETE = "incomplete"
 SUBSCRIPTION_COLS = (
     "user_id, provider, provider_subscription_id, provider_customer_id, "
     "offer_key, plan, status, current_period_start, "
-    "current_period_end, cancel_at_period_end, interval, interval_count, metadata"
+    "current_period_end, cancel_at_period_end, interval, interval_count, metadata, "
+    "catalog_version, plan_version_id"
 )
 
 
@@ -30,85 +31,44 @@ class DecimalEncoder(json.JSONEncoder):
 
 
 class BillingSubscriptionRepository:
-    """Repository for billing subscription operations.
-
-    All methods call Postgres via raw SQL queries through the query function.
-    Returns None when the query returns no rows.
-    """
+    """Repository for billing subscription operations."""
 
     def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
     def upsert(self, state: dict[str, Any]) -> None:
-        """Insert or update a billing subscription record.
-
-        Args:
-            state: Dict with keys including user_id, provider,
-                provider_subscription_id, status, and optional fields.
-
-        Raises:
-            ValueError: If user_id, provider, or provider_subscription_id
-                is missing or empty.
-        """
+        """Insert or update a billing subscription via upsert_billing_subscription RPC."""
         required = ["user_id", "provider", "provider_subscription_id"]
         for key in required:
             if key not in state or not state[key]:
                 raise ValueError(f"subscription.upsert: {key} is required")
-        self._execute(
-            """INSERT INTO public.billing_subscriptions (
-                 user_id, provider, provider_subscription_id, provider_customer_id,
-                 offer_key, plan, status, current_period_start,
-                 current_period_end, cancel_at_period_end, interval, interval_count, metadata
-               )
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
-                 user_id = EXCLUDED.user_id,
-                 provider_customer_id = COALESCE(EXCLUDED.provider_customer_id,
-                   billing_subscriptions.provider_customer_id),
-                 offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
-                 plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
-                 status = EXCLUDED.status,
-                 current_period_start = COALESCE(EXCLUDED.current_period_start,
-                   billing_subscriptions.current_period_start),
-                 current_period_end = COALESCE(EXCLUDED.current_period_end,
-                   billing_subscriptions.current_period_end),
-                 cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                 interval = COALESCE(EXCLUDED.interval, billing_subscriptions.interval),
-                 interval_count = COALESCE(EXCLUDED.interval_count,
-                   billing_subscriptions.interval_count),
-                 metadata = CASE
-                   WHEN EXCLUDED.metadata IS NOT NULL
-                   THEN EXCLUDED.metadata
-                   ELSE billing_subscriptions.metadata
-                 END,
-                 updated_at = now()""",
-            [
-                state["user_id"],
-                state["provider"],
-                state["provider_subscription_id"],
-                state.get("provider_customer_id"),
-                state.get("offer_key"),
-                state.get("plan"),
-                state.get("status", SUBSCRIPTION_STATUS_INCOMPLETE),
-                state.get("current_period_start"),
-                state.get("current_period_end"),
-                state.get("cancel_at_period_end", False),
-                state.get("interval"),
-                state.get("interval_count"),
-                json.dumps(md, cls=DecimalEncoder) if (md := state.get("metadata")) is not None else None,
-            ],
+
+        payload = {
+            "user_id": state["user_id"],
+            "provider": state["provider"],
+            "provider_subscription_id": state["provider_subscription_id"],
+            "provider_customer_id": state.get("provider_customer_id"),
+            "offer_key": state.get("offer_key"),
+            "plan": state.get("plan"),
+            "status": state.get("status", SUBSCRIPTION_STATUS_INCOMPLETE),
+            "current_period_start": state.get("current_period_start"),
+            "current_period_end": state.get("current_period_end"),
+            "cancel_at_period_end": state.get("cancel_at_period_end", False),
+            "interval": state.get("interval"),
+            "interval_count": state.get("interval_count"),
+            "metadata": state.get("metadata"),
+            "catalog_version": state.get("catalog_version"),
+            "plan_version_id": state.get("plan_version_id"),
+        }
+        rows = self._execute(
+            "SELECT public.upsert_billing_subscription(%s::jsonb) AS result",
+            [json.dumps(payload, cls=DecimalEncoder)],
         )
+        if rows and isinstance(rows[0], dict) and rows[0].get("result", {}).get("error"):
+            err = rows[0]["result"]
+            raise ValueError(err.get("message") or err.get("error"))
 
     def get(self, provider: str, provider_subscription_id: str) -> SubscriptionRow | None:
-        """Get a subscription by provider and provider subscription ID.
-
-        Args:
-            provider: The billing provider identifier.
-            provider_subscription_id: The provider subscription ID.
-
-        Returns:
-            SubscriptionRow if found, None otherwise.
-        """
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_subscription_id, "provider_subscription_id")
         rows = self._execute(
@@ -125,26 +85,8 @@ class BillingSubscriptionRepository:
         user_id: str,
         status: tuple[str, ...] | None = None,
     ) -> SubscriptionRow | None:
-        """Get the most recent subscription for a user matching the given statuses.
-
-        Args:
-            user_id: The user ID.
-            status: Tuple of allowed status values. Defaults to active and trialing.
-
-        Returns:
-            SubscriptionRow if found, None otherwise.
-        """
         if status is None:
             status = (SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING)
-        """Get the most recent subscription for a user matching the given statuses.
-
-        Args:
-            user_id: The user ID.
-            status: Tuple of allowed status values. Defaults to active and trialing.
-
-        Returns:
-            SubscriptionRow if found, None otherwise.
-        """
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
             f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
@@ -158,14 +100,6 @@ class BillingSubscriptionRepository:
         return SubscriptionRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
 
     def get_user_subscriptions(self, user_id: str) -> list[SubscriptionRow]:
-        """Get all subscriptions for a user, ordered by period start descending.
-
-        Args:
-            user_id: The user ID.
-
-        Returns:
-            List of SubscriptionRow objects (may be empty).
-        """
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
             f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
@@ -180,15 +114,6 @@ class BillingSubscriptionRepository:
         user_id: str,
         keep_provider: str,
     ) -> list[str]:
-        """Cancel all active/trialing subscriptions for a user except the given provider.
-
-        Args:
-            user_id: The user ID.
-            keep_provider: The provider whose subscriptions should be preserved.
-
-        Returns:
-            List of deactivated provider subscription IDs.
-        """
         validate_non_empty(user_id, "user_id")
         validate_non_empty(keep_provider, "keep_provider")
         rows = self._execute(

@@ -249,6 +249,40 @@ class CreditManager:
         # at a time. Double-checked locking (the time check runs before AND after
         # acquiring the lock) prevents stampede when the TTL expires concurrently.
         self._pricing_refresh_lock = threading.Lock()
+        self._version_engines: dict[int, PricingEngine] = {}
+
+    def _engine_for_user(self, user_id: str | None) -> PricingEngine:
+        """Return the pricing engine pinned to the user's catalog version."""
+        if user_id is None:
+            if not self._engine:
+                raise PricingNotLoadedError(
+                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
+                )
+            return self._engine
+
+        plan = self._store.get_user_plan(user_id)
+        catalog_version = getattr(plan, "catalog_version", None) or plan.config_version
+        if catalog_version is None:
+            self.refresh_if_stale()
+            if not self._engine:
+                raise PricingNotLoadedError(
+                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
+                )
+            return self._engine
+
+        cached = self._version_engines.get(catalog_version)
+        if cached is not None:
+            return cached
+
+        cfg = self._store.get_pricing_config(catalog_version)
+        if cfg is None or cfg.config is None:
+            raise PricingNotLoadedError(
+                f"No pricing config for pinned catalog version {catalog_version}"
+            )
+
+        engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
+        self._version_engines[catalog_version] = engine
+        return engine
 
     def _emit(self, type_: CreditEventType, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
@@ -290,10 +324,14 @@ class CreditManager:
 
     def publish_pricing_from_dict(self, data: dict[str, Any]) -> None:
         """Load pricing from a raw dict and sync it."""
-        engine = PricingEngine.from_dict(data)
+        from bursar.config import canonical_pricing_config_dict
+
+        canonical = canonical_pricing_config_dict(data)
+        engine = PricingEngine.from_dict(canonical)
         self._engine = engine
+        self._version_engines.clear()
         self._last_loaded = time.monotonic()
-        self._store.set_active_pricing(data)
+        self._store.set_active_pricing(canonical)
 
     def load_pricing_from_store(self) -> None:
         """Load the active pricing config from the store."""
@@ -305,6 +343,7 @@ class CreditManager:
             )
         engine_dict = active.config if isinstance(active.config, dict) else {}
         self._engine = PricingEngine.from_dict(engine_dict)
+        self._version_engines.clear()
         self._last_loaded = time.monotonic()
 
     def publish_pricing(
@@ -313,9 +352,24 @@ class CreditManager:
         label: str | None = None,
     ) -> None:
         """Publish new pricing and update the engine in one call."""
-        self._engine = PricingEngine.from_dict(config)
+        from bursar.config import canonical_pricing_config_dict
+
+        canonical = canonical_pricing_config_dict(config)
+        self._engine = PricingEngine.from_dict(canonical)
+        self._version_engines.clear()
         self._last_loaded = time.monotonic()
-        self._store.set_active_pricing(config, label=label)
+        self._store.set_active_pricing(canonical, label)
+
+    def publish_pricing_draft(
+        self,
+        config: dict[str, Any],
+        label: str | None = None,
+    ) -> str:
+        """Publish an inactive pricing draft without mutating the live catalog."""
+        from bursar.config import canonical_pricing_config_dict
+
+        canonical = canonical_pricing_config_dict(config)
+        return self._store.publish_pricing(canonical, label)
 
     def refresh_if_stale(self) -> None:
         """If the cached ``PricingEngine`` is stale (TTL expired), reload it
@@ -776,18 +830,21 @@ class CreditManager:
         period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
         return _FeatureLimitResult(limit=limit, period_start=period_start, period_end=period_end)
 
-    def _cost_of(self, metrics_or_amount: UsageMetrics | Decimal | int) -> tuple[Decimal, str | None]:
-        """Compute the credit cost and model from metrics, or pass a raw amount.
-
-        For :class:`UsageMetrics` the cost is ``engine.calculate(...).total`` (exact
-        ``Decimal``, no truncation); a raw amount is used as-is with no model.
-        """
+    def _cost_of(
+        self,
+        metrics_or_amount: UsageMetrics | Decimal | int,
+        user_id: str | None = None,
+    ) -> tuple[Decimal, str | None]:
+        """Compute the credit cost and model from metrics, or pass a raw amount."""
         if isinstance(metrics_or_amount, UsageMetrics):
-            if not self._engine:
-                raise PricingNotLoadedError(
-                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
-                )
-            breakdown = self._engine.calculate(metrics_or_amount)
+            engine = self._engine_for_user(user_id)
+            rate_overrides: dict[str, str] | None = None
+            if user_id is not None:
+                plan = self._store.get_user_plan(user_id)
+                raw_overrides = getattr(plan, "rate_overrides", None)
+                if raw_overrides:
+                    rate_overrides = {str(k): str(v) for k, v in raw_overrides.items()}
+            breakdown = engine.calculate(metrics_or_amount, rate_overrides=rate_overrides)
             return breakdown.total, metrics_or_amount.model
         return Decimal(metrics_or_amount), None
 
@@ -858,7 +915,7 @@ class CreditManager:
 
         policy = self._resolve_policy(user_id, operation_type, billing_mode)
         floor = self._resolve_floor(policy)
-        amount, derived_model = self._cost_of(metrics_or_amount)
+        amount, derived_model = self._cost_of(metrics_or_amount, user_id)
         # When caller passes a raw Decimal/int (no model in metrics), fall back to
         # the explicit ``model`` kwarg so cap checks and analytics are not blind.
         effective_model = derived_model if derived_model is not None else model
@@ -940,7 +997,7 @@ class CreditManager:
         signal, never a raised exception.
         """
         self._maybe_lazy_expire(user_id)
-        amount, model = self._cost_of(metrics_or_amount)
+        amount, model = self._cost_of(metrics_or_amount, user_id)
 
         if isinstance(metrics_or_amount, UsageMetrics):
             tx_meta = self._build_tx_metadata(metrics_or_amount, amount, idempotency_key, metadata)
@@ -1070,7 +1127,7 @@ class CreditManager:
         (Fix 1). Never use this as an admission gate; only ``reserve`` is authoritative.
         """
         self._maybe_lazy_expire(user_id)
-        worst_case, _ = self._cost_of(metrics_or_amount)
+        worst_case, _ = self._cost_of(metrics_or_amount, user_id)
         avail = self._store.get_available(user_id)
 
         # can_afford() is an advisory / UI method — it must never raise (#7).

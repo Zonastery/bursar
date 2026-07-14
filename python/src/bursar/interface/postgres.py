@@ -725,8 +725,12 @@ class PostgresStore(CreditStore):
 
         Raises:
             StoreError: If the RPC returns no result.
+            ConfigError: If the config fails validation.
         """
-        result = self._pricing_repo.set_active_pricing(json.dumps(config, cls=DecimalEncoder), label)
+        from bursar.config import canonical_pricing_config_dict
+
+        canonical = canonical_pricing_config_dict(config)
+        result = self._pricing_repo.set_active_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
         if result is None:
             raise StoreError("set_active_pricing returned no result")
         return str(getattr(result, "id", ""))
@@ -778,6 +782,20 @@ class PostgresStore(CreditStore):
             raise StoreError(msg)
         return str(getattr(result, "id", ""))
 
+    def publish_pricing(
+        self,
+        config: dict[str, Any],
+        label: str | None = None,
+    ) -> str:
+        """Publish an inactive pricing configuration draft."""
+        from bursar.config import canonical_pricing_config_dict
+
+        canonical = canonical_pricing_config_dict(config)
+        result = self._pricing_repo.publish_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
+        if result is None:
+            raise StoreError("publish_pricing returned no result")
+        return str(getattr(result, "id", ""))
+
     # ── Plan management ────────────────────────────────────────────────
 
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
@@ -799,6 +817,7 @@ class PostgresStore(CreditStore):
             allowance_amount=_dec(result.allowance_amount) if result.allowance_amount is not None else _dec(0),
             allowance_period=_safe_allowance_period(str(result.allowance_period or "calendar_month")),
             entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
+            rate_overrides={str(k): str(v) for k, v in (result.rate_overrides or {}).items()},
             billing_mode=_safe_billing_mode(str(result.billing_mode or "strict")),
             per_operation={k: OperationPolicy.model_validate(v) for k, v in (result.per_operation or {}).items()},
             max_concurrent=result.max_concurrent,
@@ -807,6 +826,7 @@ class PostgresStore(CreditStore):
                 datetime.fromisoformat(str(result.plan_assigned_at)) if result.plan_assigned_at else None
             ),
             config_version=result.config_version or None,
+            catalog_version=result.catalog_version or result.config_version or None,
         )
 
     def set_user_plan(
@@ -873,7 +893,9 @@ class PostgresStore(CreditStore):
             StoreError: If the RPC fails or returns no data.
         """
         try:
-            result = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
+            result = self._plan_repo.migrate_plan_users(
+                plan_key, target_config_version, None
+            )
         except psycopg2.Error as e:
             raise StoreError(f"migrate_plan_users failed: {e}") from e
 

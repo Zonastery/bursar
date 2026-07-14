@@ -13,6 +13,7 @@ import {
 import { LRUCache } from "lru-cache";
 import type { PricingEngine } from "./engine.js";
 import { PricingEngine as PricingEngineClass } from "./engine.js";
+import { canonicalPricingConfigDict } from "./config.js";
 import type {
   AddCreditsResult,
   AggregateStats,
@@ -53,7 +54,6 @@ import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
 import { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
-import type { FeatureLimitPeriod } from "./allowance.js";
 
 /**
  * Default `low_balance` threshold multiplier (contract §6 / M18). The event
@@ -259,6 +259,7 @@ export class CreditManager {
   // the store; concurrent callers are deduplicated by lru-cache's `fetch()`.
   private pricingTtl: number;
   private pricingCache: LRUCache<string, PricingEngine>;
+  private versionEngines = new Map<number, PricingEngine>();
 
   constructor(
     store: CreditStore,
@@ -331,9 +332,11 @@ export class CreditManager {
 
   /** Load pricing from a raw dict and sync it. */
   async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
-    this.engine = PricingEngineClass.fromDict(data);
+    const canonical = canonicalPricingConfigDict(data);
+    this.engine = PricingEngineClass.fromDict(canonical);
+    this.versionEngines.clear();
     this.pricingCache.set("pricing", this.engine);
-    await this.store.setActivePricing(data as Record<string, unknown>);
+    await this.store.setActivePricing(canonical);
   }
 
   /** Load the active pricing config from the store. */
@@ -341,30 +344,9 @@ export class CreditManager {
     const active = await this.store.getActivePricing();
     if (!active) throw new PricingNotLoadedError("no active pricing config in store");
 
-    const config = active.config as Record<string, unknown>;
-    const metering = (config.metering ?? {}) as Record<string, unknown>;
-    const ledger = (config.ledger ?? {}) as Record<string, unknown>;
-    const cacheDiscount = metering["cacheDiscount"] ?? metering["cache_discount"] ?? null;
-    const flatJobs = metering["flatJobs"] ?? metering["flat_jobs"] ?? {};
-    const engineDict: Record<string, unknown> = {
-      version: config.version ?? 1,
-      metering: {
-        models: metering.models ?? {},
-        tools: metering.tools ?? { "*": "calls * 0" },
-        search: metering.search ?? null,
-        cacheDiscount,
-        flatJobs,
-      },
-      ledger: {
-        minBalance: ledger.minBalance ?? 0,
-        signupGrant: ledger["signupGrant"] ?? ledger["signup_grant"],
-        buckets: ledger.buckets ?? null,
-      },
-      ...(config.plans ? { plans: config.plans } : {}),
-      ...(config.billing ? { billing: config.billing } : {}),
-    };
-
+    const engineDict = active.config as Record<string, unknown>;
     this.engine = PricingEngineClass.fromDict(engineDict);
+    this.versionEngines.clear();
     this.pricingCache.set("pricing", this.engine);
   }
 
@@ -391,6 +373,42 @@ export class CreditManager {
   invalidatePricing(): void {
     this.pricingCache.delete("pricing");
   }
+  private async engineForUser(userId: string | null): Promise<PricingEngine> {
+    if (userId == null) {
+      if (!this.engine) {
+        throw new PricingNotLoadedError(
+          "pricing not loaded: call loadPricingFromStore or publishPricing first",
+        );
+      }
+      return this.engine;
+    }
+
+    const plan = await this.store.getUserPlan(userId);
+    const catalogVersion = plan.catalogVersion ?? plan.configVersion ?? null;
+    if (catalogVersion == null) {
+      await this.refreshIfStale();
+      if (!this.engine) {
+        throw new PricingNotLoadedError(
+          "pricing not loaded: call loadPricingFromStore or publishPricing first",
+        );
+      }
+      return this.engine;
+    }
+
+    const cached = this.versionEngines.get(catalogVersion);
+    if (cached) return cached;
+
+    const cfg = await this.store.getPricingConfig(catalogVersion);
+    if (!cfg?.config) {
+      throw new PricingNotLoadedError(
+        `no pricing config for pinned catalog version ${catalogVersion}`,
+      );
+    }
+
+    const engine = PricingEngineClass.fromDict(cfg.config as Record<string, unknown>);
+    this.versionEngines.set(catalogVersion, engine);
+    return engine;
+  }
 
   /**
    * Publish new pricing and update the engine in one call.
@@ -400,9 +418,11 @@ export class CreditManager {
    * unhandled promise rejection.
    */
   async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
-    this.engine = PricingEngineClass.fromDict(config);
+    const canonical = canonicalPricingConfigDict(config);
+    this.engine = PricingEngineClass.fromDict(canonical);
+    this.versionEngines.clear();
     this.pricingCache.set("pricing", this.engine);
-    await this.store.setActivePricing(config, label);
+    await this.store.setActivePricing(canonical, label);
   }
 
   /** The current PricingEngine, or null if not loaded. */
@@ -835,12 +855,13 @@ export class CreditManager {
       return { limit: null, periodStart: null, periodEnd: null };
     }
     const rawLimit = plan?.entitlements?.[feature] ?? null;
-    if (rawLimit == null) return { limit: null, periodStart: null, periodEnd: null };
-    const raw = rawLimit as Record<string, unknown>;
+    if (rawLimit == null || rawLimit.maxCalls == null) {
+      return { limit: null, periodStart: null, periodEnd: null };
+    }
     const limit: FeatureLimit = {
-      maxCalls: Number(raw["maxCalls"] ?? 0),
-      period: (raw["period"] ?? "monthly") as FeatureLimitPeriod,
-      onExceed: (raw["onExceed"] ?? "deny") as "deny" | "warn" | "notify",
+      maxCalls: rawLimit.maxCalls,
+      period: rawLimit.period ?? "monthly",
+      onExceed: rawLimit.onExceed ?? "deny",
     };
     const { start, end } = resolveCalendarWindow(new Date(), limit.period ?? "monthly");
     return { limit, periodStart: start, periodEnd: end };
@@ -852,16 +873,23 @@ export class CreditManager {
    * For {@link UsageMetrics} the cost is ``engine.calculate(...).total`` (exact
    * `Decimal`, no truncation); a raw amount is used as-is with no model.
    */
-  private costOf(metricsOrAmount: MetricsOrAmount): { amount: Decimal; model: string | null } {
+  private async costOf(
+    metricsOrAmount: MetricsOrAmount,
+    userId?: string | null,
+  ): Promise<{ amount: Decimal; model: string | null }> {
     if (isAmount(metricsOrAmount)) {
       return { amount: toDecimal(metricsOrAmount), model: null };
     }
-    if (!this.engine) {
-      throw new PricingNotLoadedError(
-        "pricing not loaded: call loadPricingFromStore or publishPricing first",
-      );
+    const engine = await this.engineForUser(userId ?? null);
+    let rateOverrides: Record<string, string> | null = null;
+    if (userId != null) {
+      const plan = await this.store.getUserPlan(userId);
+      const rawOverrides = plan.rateOverrides;
+      if (rawOverrides && Object.keys(rawOverrides).length > 0) {
+        rateOverrides = rawOverrides;
+      }
     }
-    const breakdown = this.engine.calculate(metricsOrAmount);
+    const breakdown = engine.calculate(metricsOrAmount, rateOverrides);
     return { amount: breakdown.total, model: metricsOrAmount.model ?? null };
   }
 
@@ -942,7 +970,7 @@ export class CreditManager {
 
     const policy = await this.resolvePolicy(userId, operationType, options?.billingMode);
     const floor = this.resolveFloor(policy);
-    const { amount, model } = this.costOf(metricsOrAmount);
+    const { amount, model } = await this.costOf(metricsOrAmount, userId);
     const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
     const periodStart = await this.resolveAllowancePeriodStart(userId);
     const feature = options?.feature ?? null;
@@ -1003,7 +1031,7 @@ export class CreditManager {
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
     const idempotencyKey = options?.idempotencyKey ?? null;
-    const { amount, model } = this.costOf(metricsOrAmount);
+    const { amount, model } = await this.costOf(metricsOrAmount, userId);
 
     // Build transaction metadata: caller fields first, system fields last (M7).
     const txMeta: Record<string, unknown> = {};
@@ -1146,7 +1174,7 @@ export class CreditManager {
     await this.maybeLazyExpire(userId);
     const operationType = options?.operationType ?? "usage";
     const requiredFeature = options?.requiredFeature ?? null;
-    const { amount: worstCase } = this.costOf(metricsOrAmount);
+    const { amount: worstCase } = await this.costOf(metricsOrAmount, userId);
     const avail = await this.store.getAvailable(userId);
     const policy = await this.resolvePolicy(userId, operationType, options?.billingMode);
     const floor = this.resolveFloor(policy);
@@ -1347,13 +1375,15 @@ export class CreditManager {
     feature?: string | null,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
-    if (!this.engine)
-      throw new PricingNotLoadedError(
-        "pricing not loaded: call loadPricingFromStore or publishPricing first",
-      );
+    const engine = await this.engineForUser(userId);
+    let rateOverrides: Record<string, string> | null = null;
+    const plan = await this.store.getUserPlan(userId);
+    if (plan.rateOverrides && Object.keys(plan.rateOverrides).length > 0) {
+      rateOverrides = plan.rateOverrides;
+    }
 
     // 1) Calculate cost — exact Decimal, never truncated (H1).
-    const breakdown = this.engine.calculate(metrics);
+    const breakdown = engine.calculate(metrics, rateOverrides);
     const cost = breakdown.total;
 
     // 2) Zero-amount short-circuit (no balance touch, no store round-trip).
@@ -1530,12 +1560,9 @@ export class CreditManager {
     // Lazy expiry is scoped to the individual member's credits, not the team's
     // shared pool — there's no per-team expiry concept.
     await this.maybeLazyExpire(userId);
-    if (!this.engine)
-      throw new PricingNotLoadedError(
-        "pricing not loaded: call loadPricingFromStore or publishPricing first",
-      );
+    const engine = await this.engineForUser(userId);
 
-    const breakdown = this.engine.calculate(metrics);
+    const breakdown = engine.calculate(metrics);
     const cost = breakdown.total;
 
     if (cost.lte(0)) {

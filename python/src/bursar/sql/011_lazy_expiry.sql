@@ -393,20 +393,17 @@ BEGIN
                 INSERT INTO public.credit_transactions (user_id, amount, type, metadata)
                 VALUES (v_group.user_id, -v_group_expired, 'adjustment',
                         jsonb_build_object('reason', 'credit_expired', 'expired_amount', v_group_expired, 'bucket', v_group.bucket_key));
-            END IF;
-        END IF;
 
-        -- Mark the grants we just considered as swept so they're never
-        -- re-swept (only on a real run; a dry run must not mutate state).
-        IF NOT p_dry_run THEN
-            UPDATE public.credit_transactions
-            SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
-            WHERE user_id = v_group.user_id
-              AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
-              AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
-              AND metadata ? 'expires_at'
-              AND NOT (metadata ? 'swept_at')
-              AND (metadata->>'expires_at')::timestamptz <= now();
+                -- Mark swept only when we actually debited the expired amount.
+                UPDATE public.credit_transactions
+                SET metadata = metadata || jsonb_build_object('swept_at', to_jsonb(now()))
+                WHERE user_id = v_group.user_id
+                  AND COALESCE(metadata->>'bucket', 'default') = v_group.bucket_key
+                  AND type IN ('purchase', 'subscription', 'signup_bonus', 'adjustment')
+                  AND metadata ? 'expires_at'
+                  AND NOT (metadata ? 'swept_at')
+                  AND (metadata->>'expires_at')::timestamptz <= now();
+            END IF;
         END IF;
     END LOOP;
 

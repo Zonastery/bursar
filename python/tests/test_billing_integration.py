@@ -207,12 +207,13 @@ class TestCustomerCrud:
         bs, _cm, _bm = _make_components(pg_database_url, pg_store)
         assert bs.get_billing_customer(PROVIDER, "nonexistent_cus") is None
 
-    def test_customer_updated_replaces_user_id(self, pg_database_url: str, pg_store: object) -> None:
+    def test_customer_remap_to_different_user_rejected(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
         bs, _cm, _bm = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
-        bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
-        assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID2
+        result = bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
+        assert result.get("error") == "user_id_mismatch"
+        assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
