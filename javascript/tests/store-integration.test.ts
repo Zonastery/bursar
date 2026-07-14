@@ -58,7 +58,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   let pool: pg.Pool;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     // credit_team_members.user_id FKs into auth.users — seed the test users.
@@ -985,7 +985,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   let pool: pg.Pool;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     await pool.query(
@@ -1484,7 +1484,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
   };
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     // Ensure clean slate for tier tests: remove FKs, user data, bucket config.
@@ -1660,7 +1660,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
   }
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     await pool.query(
@@ -1880,7 +1880,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   };
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     await pool.query(

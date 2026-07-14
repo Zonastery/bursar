@@ -121,6 +121,19 @@ def _preseed_supabase_objects(dsn: str) -> None:
                 """
             )
 
+            # 2b. Minimal public.user table for the signup-bonus trigger
+            # (migration 018 moved the trigger from auth.users to
+            # better-auth's "user" table).
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public."user" (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    email TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+
             # 3. Standard Supabase roles
             for role in ("anon", "authenticated", "service_role"):
                 try:

@@ -1087,6 +1087,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     });
     expect(result.handled).toBe(true);
     expect(called).toBe(true);
+    await cs2.close();
     await pool2.end();
   });
 

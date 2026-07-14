@@ -128,18 +128,25 @@ class TestPostgresStoreIntegration:
 
     def test_signup_bonus_granted_when_auth_role_is_not_service_role_pg(self, store: PostgresStore) -> None:
         """Regression test for a production-only bug: grant_signup_bonus()
-        (the constraint trigger on auth.users) must call credits_add_internal,
-        NOT the guarded credits_add. On real Supabase, a GoTrue signup INSERT
-        into auth.users runs with no PostgREST/JWT request context, so
-        auth.role() reads NULL there — the guarded credits_add would reject
-        with {"error": "unauthorized"} (silently swallowed by the trigger's
-        PERFORM), dropping every signup bonus. The bundled test harness's
-        auth.role() stub (see conftest._preseed_supabase_objects) defaults to
-        'service_role' when unset, which would mask this regression — so this
-        test explicitly sets a non-service_role JWT role for the transaction
-        that inserts the auth.users row, reproducing the real-Supabase
-        condition instead of relying on the stub's fallback.
+        (migration 018 moved the constraint trigger from auth.users to
+        better-auth's "user" table) must call credits_add_internal, NOT the
+        guarded credits_add. On real Supabase / better-auth, the trigger fires
+        with no PostgREST/JWT request context, so auth.role() reads NULL there
+        — the guarded credits_add would reject with {"error": "unauthorized"}
+        (silently swallowed by the trigger's PERFORM), dropping every signup
+        bonus. The bundled test harness's auth.role() stub (see
+        conftest._preseed_supabase_objects) defaults to 'service_role' when
+        unset, which would mask this regression — so this test explicitly sets
+        a non-service_role JWT role for the transaction that inserts the user
+        row, reproducing the production condition instead of relying on the
+        stub's fallback.
         """
+        # Publish a pricing config with signup_grant so the trigger grants a bonus.
+        manager = CreditManager(store=store)
+        pricing = dict(_PRICING)
+        pricing = {**pricing, "ledger": {**pricing["ledger"], "signup_grant": 50}}
+        manager.publish_pricing_from_dict(pricing)
+
         conn = psycopg2.connect(store.database_url)
         try:
             conn.autocommit = False
@@ -149,7 +156,7 @@ class TestPostgresStoreIntegration:
                 # INITIALLY DEFERRED) fires during COMMIT processing, still
                 # inside this same transaction, so it sees this setting.
                 cur.execute("SET LOCAL request.jwt.claim.role = 'anon'")
-                cur.execute("INSERT INTO auth.users DEFAULT VALUES RETURNING id")
+                cur.execute('INSERT INTO "user" DEFAULT VALUES RETURNING id')
                 new_user_id = cur.fetchone()[0]
             conn.commit()
         finally:

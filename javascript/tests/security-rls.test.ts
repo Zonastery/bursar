@@ -140,7 +140,7 @@ describe.runIf(DATABASE_URL)("RLS / privilege lockdown (real Postgres 16)", () =
   let pool: pg.Pool;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 3 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
   }, 60000);
