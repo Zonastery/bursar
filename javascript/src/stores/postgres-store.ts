@@ -245,8 +245,15 @@ export class PostgresStore extends CreditStore {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.pool && this.ownsPool) {
-      await this.pool.end();
+    if (this.ownsPool && this.poolPromise) {
+      // poolPromise may still be pending (lazy getPool() awaiting dynamic
+      // import). Await it first so the pool is guaranteed to exist before
+      // we call .end(). Without this, checking `this.pool` alone would
+      // miss the case where the IIFE hasn't assigned the pool yet.
+      await this.poolPromise;
+      if (this.pool) {
+        await this.pool.end();
+      }
       this.pool = null;
       this.poolPromise = null;
     }

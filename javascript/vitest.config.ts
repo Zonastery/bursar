@@ -7,11 +7,18 @@ export default defineConfig({
     testTimeout: 30000,
     // store-integration.test.ts and security-rls.test.ts each open their own
     // pg.Pool against the SAME real Postgres and assume exclusive control of
-    // bursar's tables (DELETE/TRUNCATE between tests). Running test files in
-    // parallel races those two files against each other on the shared DB
-    // (cross-file FK violations / rows vanishing mid-assertion). Disable
-    // cross-file parallelism rather than rearchitect DB isolation for a
-    // suite that runs in a few seconds either way.
+    // bursar's tables (DELETE/TRUNCATE between tests). Parallel file execution
+    // races those files against each other on the shared DB.
+    //
+    // Use a single fork so files run sequentially in one process. Earlier
+    // attempts avoided `singleFork` because leaked pools (unguarded `try`
+    // blocks in billing-integration tests, and a race in PostgresStore.close()
+    // where `close()` could fire before the lazy pool initialised) accumulated
+    // connections across file boundaries. Those leaks are now fixed:
+    //   - billing-integration wraps every local pool creation in `try/finally`
+    //   - PostgresStore.close() now awaits `poolPromise` before checking `pool`
+    //   - All integration files use `max: 1` or `max: 3` — never the pg default
+    //   - `fileParallelism: false` + `singleFork: true` is a single process
     fileParallelism: false,
     pool: "forks",
     poolOptions: {

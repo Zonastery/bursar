@@ -1068,27 +1068,30 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     let called = false;
     const pool2 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     const cs2 = new PostgresStore(DATABASE_URL!);
-    const cm2 = new CreditManager(cs2);
-    await cm2.publishPricingFromDict(PRICING_DICT);
-    const bs2 = new PostgresBillingStore(pool2);
-    const bm2 = new BillingManager(bs2, {
-      creditManager: cm2,
-      onTrialWillEnd: async () => {
-        called = true;
-      },
-    });
-    await bs2.syncBillingFromConfig(BILLING_CONFIG);
-    const result = await bm2.handleEvent({
-      provider: PROVIDER,
-      eventId: "evt_twe_1",
-      eventType: "subscription.trial_will_end",
-      occurredAt: new Date().toISOString(),
-      userId: USER_ID,
-    });
-    expect(result.handled).toBe(true);
-    expect(called).toBe(true);
-    await cs2.close();
-    await pool2.end();
+    try {
+      const cm2 = new CreditManager(cs2);
+      await cm2.publishPricingFromDict(PRICING_DICT);
+      const bs2 = new PostgresBillingStore(pool2);
+      const bm2 = new BillingManager(bs2, {
+        creditManager: cm2,
+        onTrialWillEnd: async () => {
+          called = true;
+        },
+      });
+      await bs2.syncBillingFromConfig(BILLING_CONFIG);
+      const result = await bm2.handleEvent({
+        provider: PROVIDER,
+        eventId: "evt_twe_1",
+        eventType: "subscription.trial_will_end",
+        occurredAt: new Date().toISOString(),
+        userId: USER_ID,
+      });
+      expect(result.handled).toBe(true);
+      expect(called).toBe(true);
+    } finally {
+      await cs2.close().catch(() => {});
+      await pool2.end().catch(() => {});
+    }
   });
 
   // ── Subscription updated ────────────────────────────────────────────────
@@ -1221,23 +1224,26 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("subscription created without credit manager", async () => {
     const pool3 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    const bs3 = new PostgresBillingStore(pool3);
-    const bm3 = new BillingManager(bs3);
-    await bs3.syncBillingFromConfig(BILLING_CONFIG);
-    const result = await bm3.handleEvent({
-      provider: PROVIDER,
-      eventId: "evt_nocm_1",
-      eventType: "subscription.created",
-      occurredAt: new Date().toISOString(),
-      userId: "00000000-0000-0000-0000-000000000010",
-      subscription: {
-        providerSubscriptionId: "sub_nocm",
-        status: "active",
-        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
-      },
-    });
-    expect(result.handled).toBe(true);
-    await pool3.end();
+    try {
+      const bs3 = new PostgresBillingStore(pool3);
+      const bm3 = new BillingManager(bs3);
+      await bs3.syncBillingFromConfig(BILLING_CONFIG);
+      const result = await bm3.handleEvent({
+        provider: PROVIDER,
+        eventId: "evt_nocm_1",
+        eventType: "subscription.created",
+        occurredAt: new Date().toISOString(),
+        userId: "00000000-0000-0000-0000-000000000010",
+        subscription: {
+          providerSubscriptionId: "sub_nocm",
+          status: "active",
+          refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+        },
+      });
+      expect(result.handled).toBe(true);
+    } finally {
+      await pool3.end().catch(() => {});
+    }
   });
 
   it("dispute created without dispute data", async () => {

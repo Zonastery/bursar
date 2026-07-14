@@ -21,6 +21,18 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object TH
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
 
+-- Mirror of conftest.py::_preseed_supabase_objects: migration 018 moved the
+-- signup-bonus trigger from auth.users to better-auth's public."user" table.
+-- The migration's "IF to_regclass('public.user') IS NOT NULL" branch only
+-- installs the on_signup_credit_bonus constraint trigger WHEN this table
+-- exists at bootstrap time. Without it the trigger creation path silently
+-- no-ops in JS, so the two SDKs would test different DB topologies.
+CREATE TABLE IF NOT EXISTS public."user" (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE OR REPLACE FUNCTION auth.role() RETURNS text
 LANGUAGE SQL STABLE AS $$
   SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), 'service_role')

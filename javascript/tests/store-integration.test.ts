@@ -1577,8 +1577,11 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
       `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
       [[MGR_USER1, MGR_USER2, MGR_USER3, MGR_USER4]],
     );
-    // Fresh UUIDs trigger grant_signup_bonus() — wipe any resulting balance
-    // so every test starts from a true zero.
+    // Defensive zero-out of credit tables for these users. Signup-bonus
+    // trigger (`grant_signup_bonus()`) lives on `public."user"` (migration
+    // 018), so an `auth.users` INSERT cannot fire it — but the truncate in
+    // `afterEach` runs after this beforeAll, so wipe here too for the first
+    // test's clean slate.
     await pool.query("DELETE FROM public.credit_transactions");
     await pool.query("DELETE FROM public.user_credits");
   }, 60000);

@@ -96,43 +96,47 @@ jobs:
       matrix:
         # Supported window per javascript/README.md ("Works in Node.js 18+").
         node-version: ["18", "20", "22"]
+    # GitHub Actions `services:` manages the container lifecycle, health gate
+    # (pg_isready), and tear-down — no manual `docker run`/`docker stop` needed.
+    # Default `max_connections=100` is ample: store-integration.test.ts uses a
+    # SINGLE module-level `pg.Pool` with `max: 1` (see efeca43) and billing/
+    # rls suites cap at `max: 3`, and `vitest.config.ts` forces `singleFork: true`
+    # + `fileParallelism: false` so files run strictly sequentially. The real
+    # leak was a missing `cs2.close()` in billing-integration.test.ts (fixed
+    # 9fa7d72) — that's what eliminated the exhaustion, not raising the ceiling.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bursar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # store-integration.test.ts runs under describe.runIf(DATABASE_URL); with
       # this set the PostgresStore integration + concurrency tests RUN, not skip.
+      # 127.0.0.1 rather than `localhost` to avoid a dual-stack DNS issue on
+      # Node 20 where the IPv6 ::1 resolution sometimes fails (10bb89d).
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
-      PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Start Postgres with max_connections=500
-        run: |
-          docker run -d --name postgres \
-            -e POSTGRES_USER=postgres \
-            -e POSTGRES_PASSWORD=postgres \
-            -e POSTGRES_DB=bursar \
-            -p 5432:5432 \
-            postgres:16 \
-            -c max_connections=500
-          for i in $(seq 1 30); do
-            if docker exec postgres pg_isready -q 2>/dev/null; then
-              echo "Postgres ready (attempt $i)"
-              break
-            fi
-            sleep 1
-          done
-      - name: Install postgresql-client
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+          cache: npm
+          cache-dependency-path: javascript/package-lock.json
       # Also loads tests/parity/expression_cases.json (parity gate, §7).
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
         run: |
-          npm install
+          npm ci
           npx vitest run --coverage
-      - name: Stop Postgres
-        if: always()
-        run: docker stop postgres && docker rm postgres
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
         with:
