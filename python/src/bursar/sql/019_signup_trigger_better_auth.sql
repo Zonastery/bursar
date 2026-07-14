@@ -22,7 +22,7 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, NULL);
+  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
   RETURN NEW;
 END;
 $$;

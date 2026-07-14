@@ -150,11 +150,11 @@ BEGIN
     50
   ) INTO v_bonus;
 
-  -- p_bucket = NULL (not a hardcoded 'gifted'): credits_add_internal then
-  -- resolves the configured default bucket, or the synthetic 'default' bucket
-  -- when no buckets are configured. A hardcoded 'gifted' would make it return
-  -- bucket_not_found — silently swallowed by PERFORM — whenever that bucket
-  -- isn't defined (e.g. every bucket-less install), dropping the bonus entirely.
+  -- p_bucket = 'gifted': the signup grant lands in the gifted-credits tier
+  -- (expiring bucket with ttl_days from pricing config). If no gifted bucket
+  -- is configured, credits_add_internal returns tier_not_found (silently
+  -- discarded by PERFORM), so no bonus is granted — the zone of failure is
+  -- a missing pricing config, not a silent mis-routing to the purchased tier.
   --
   -- Calls credits_add_internal (defined in 011_lazy_expiry.sql), NOT the
   -- guarded credits_add: a real Supabase GoTrue signup INSERT runs with no
@@ -164,7 +164,7 @@ BEGIN
   -- because the test harness's auth.role() stub defaults to 'service_role').
   -- credits_add_internal has no such guard and is not independently
   -- reachable over the API (REVOKEd from PUBLIC/anon/authenticated).
-  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, NULL);
+  PERFORM public.credits_add_internal(NEW.id, v_bonus, 'signup_bonus', NULL, 'gifted');
 
   RETURN NEW;
 END;

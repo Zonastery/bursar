@@ -144,7 +144,27 @@ class TestPostgresStoreIntegration:
         # Publish a pricing config with signup_grant so the trigger grants a bonus.
         manager = CreditManager(store=store)
         pricing = dict(_PRICING)
-        pricing = {**pricing, "ledger": {**pricing["ledger"], "signup_grant": 50}}
+        pricing = {
+            **pricing,
+            "ledger": {
+                **pricing["ledger"],
+                "signup_grant": 50,
+                "buckets": {
+                    "gifted": {
+                        "label": "Gifted Credits",
+                        "priority": 10,
+                        "expires": True,
+                        "ttl_days": 7,
+                    },
+                    "purchased": {
+                        "label": "Purchased Credits",
+                        "priority": 20,
+                        "expires": False,
+                        "default": True,
+                    },
+                },
+            },
+        }
         manager.publish_pricing_from_dict(pricing)
 
         conn = psycopg2.connect(store.database_url)
