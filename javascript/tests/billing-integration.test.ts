@@ -9,7 +9,11 @@ import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { CreditManager } from "../src/manager.js";
 import { PostgresBillingStore, BillingManager } from "../src/billing/index.js";
-import type { BillingConfig, BillingSubscriptionState } from "../src/billing/index.js";
+import type {
+  BillingConfig,
+  BillingPreferences,
+  BillingSubscriptionState,
+} from "../src/billing/index.js";
 import { BOOTSTRAP_SQL, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
@@ -649,5 +653,711 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     });
     const balance2 = await cm.getBalance(USER_ID4);
     expect(balance2.balance.toString()).toBe("5000");
+  });
+
+  // ── Invoice + Dispute ───────────────────────────────────────────────────
+
+  it("invoice upsert and dispute upsert", async () => {
+    const { bs } = await makePgComponents(pool);
+    await bs.upsertBillingInvoice({
+      provider: PROVIDER,
+      providerInvoiceId: "in_001",
+      providerSubscriptionId: SUB_ID,
+      userId: USER_ID,
+      status: "paid",
+      amountPaidMinor: 1000,
+      amountDueMinor: 1000,
+      currency: "USD",
+      periodStart: "2025-06-01T00:00:00Z",
+      periodEnd: "2025-07-01T00:00:00Z",
+    });
+    await bs.upsertBillingDispute({
+      provider: PROVIDER,
+      providerDisputeId: "dp_001",
+      providerPaymentId: "py_001",
+      userId: USER_ID,
+      status: "needs_response",
+      reason: "fraudulent",
+    });
+    const payResult = await bs.getBillingPayment(PROVIDER, "py_001");
+    expect(payResult).toBeNull();
+  });
+
+  // ── Billing Preferences ─────────────────────────────────────────────────
+
+  it("billing preferences crud", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    const prefs: BillingPreferences = {
+      userId: USER_ID,
+      autoRecharge: true,
+      overageProtection: true,
+      emailNotifications: false,
+      usageAlerts: true,
+      invoiceReminders: false,
+      usageLimitAlerts: true,
+    };
+    await bs.upsertBillingPreferences(prefs);
+    const got = await bs.getBillingPreferences(USER_ID);
+    expect(got).not.toBeNull();
+    expect(got!.autoRecharge).toBe(true);
+    expect(got!.emailNotifications).toBe(false);
+
+    const viaManager = await bm.getUserPreferences(USER_ID);
+    expect(viaManager).not.toBeNull();
+    expect(viaManager!.autoRecharge).toBe(true);
+
+    await bm.updateUserPreferences({ ...prefs, autoRecharge: false });
+    const updated = await bs.getBillingPreferences(USER_ID);
+    expect(updated!.autoRecharge).toBe(false);
+  });
+
+  it("billing preferences not found", async () => {
+    const { bs } = await makePgComponents(pool);
+    expect(await bs.getBillingPreferences("00000000-0000-0000-0000-000000000099")).toBeNull();
+  });
+
+  // ── Customer reverse lookup ─────────────────────────────────────────────
+
+  it("customer reverse lookup by user id", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    await bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID, "test@example.com");
+
+    const found = await bs.getBillingCustomerByUserId(USER_ID);
+    expect(found).not.toBeNull();
+    expect(found!.provider).toBe(PROVIDER);
+    expect(found!.providerCustomerId).toBe(CUSTOMER_ID);
+
+    const foundScoped = await bs.getBillingCustomerByUserId(USER_ID, PROVIDER);
+    expect(foundScoped).not.toBeNull();
+    expect(foundScoped!.providerCustomerId).toBe(CUSTOMER_ID);
+
+    const viaManager = await bm.getCustomerByUserId(USER_ID);
+    expect(viaManager).not.toBeNull();
+    expect(viaManager!.provider).toBe(PROVIDER);
+  });
+
+  it("customer reverse lookup not found", async () => {
+    const { bs } = await makePgComponents(pool);
+    expect(await bs.getBillingCustomerByUserId("00000000-0000-0000-0000-000000000099")).toBeNull();
+  });
+
+  // ── Active pricing config ───────────────────────────────────────────────
+
+  it("get active pricing config", async () => {
+    const { bs } = await makePgComponents(pool);
+    const config = await bs.getActivePricingConfig();
+    expect(config).not.toBeNull();
+    expect((config as Record<string, unknown>)?.version).toBe(1);
+  });
+
+  // ── Manager public API ──────────────────────────────────────────────────
+
+  it("manager resolve offer and topup", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const offer = await bm.resolveOffer(PROVIDER, null, PRICE_ID);
+    expect(offer).not.toBeNull();
+    expect(offer!.offerKey).toBe("pro_monthly");
+
+    const topup = await bm.resolveTopup(PROVIDER, null, PRICE_ID_TOPUP);
+    expect(topup).not.toBeNull();
+    expect(topup!.topupKey).toBe("standard_topup");
+  });
+
+  it("manager upsert customer and invalidate cache", async () => {
+    const { bm } = await makePgComponents(pool);
+    await bm.upsertCustomer(PROVIDER, "cus_manager", USER_ID, "test@example.com");
+    const uid = await bm["store"].getBillingCustomer(PROVIDER, "cus_manager");
+    expect(uid).toBe(USER_ID);
+    bm.invalidateOfferCache();
+  });
+
+  // ── Customer deleted ────────────────────────────────────────────────────
+
+  it("customer deleted revokes plan", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_del_1",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_del_test" },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_del_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_del_test" },
+      subscription: {
+        providerSubscriptionId: "sub_del_test",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect((await cm.getUserPlan(USER_ID)).planId).not.toBeNull();
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_del_2",
+      eventType: "customer.deleted",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_del_test" },
+    });
+    expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+  });
+
+  // ── Checkout completed ──────────────────────────────────────────────────
+
+  it("checkout completed creates subscription", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_chk_1",
+      eventType: "checkout.completed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_chk_test" },
+      subscription: {
+        providerSubscriptionId: "sub_chk_test",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(result.handled).toBe(true);
+    const plan = await cm.getUserPlan(USER_ID);
+    expect(plan.planId).not.toBeNull();
+  });
+
+  it("checkout completed without subscription", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_chk_2",
+      eventType: "checkout.completed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_chk2" },
+    });
+    expect(result.action).toBe("checkout_completed");
+  });
+
+  // ── Subscription activated ──────────────────────────────────────────────
+
+  it("subscription activated provisions plan", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_act_1",
+      eventType: "subscription.activated",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_act" },
+      subscription: {
+        providerSubscriptionId: "sub_act",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect((await cm.getUserPlan(USER_ID)).planId).not.toBeNull();
+  });
+
+  // ── Cancellation schedule + unschedule ──────────────────────────────────
+
+  it("subscription cancellation scheduled and unscheduled", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cs_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_cs_test",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const schedResult = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cs_2",
+      eventType: "subscription.cancellation_scheduled",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: { providerSubscriptionId: "sub_cs_test" },
+    });
+    expect(schedResult.action).toBe("cancellation_scheduled");
+
+    const unschedResult = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cs_3",
+      eventType: "subscription.cancellation_unscheduled",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: { providerSubscriptionId: "sub_cs_test" },
+    });
+    expect(unschedResult.action).toBe("cancellation_unscheduled");
+  });
+
+  // ── Subscription expired ────────────────────────────────────────────────
+
+  it("subscription expired revokes plan", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_exp_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_exp_test",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_exp_2",
+      eventType: "subscription.expired",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: { providerSubscriptionId: "sub_exp_test" },
+    });
+    expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+  });
+
+  // ── Payment failed ──────────────────────────────────────────────────────
+
+  it("payment failed records and revokes", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pf_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pf_test",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pf_2",
+      eventType: "payment.failed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_pf" },
+      payment: {
+        providerPaymentId: "py_pf",
+        amountMinor: 1000,
+        currency: "USD",
+        purpose: "subscription",
+      },
+      subscription: { providerSubscriptionId: "sub_pf_test" },
+    });
+    expect(result.handled).toBe(true);
+    expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+  });
+
+  // ── Dispute lifecycle ───────────────────────────────────────────────────
+
+  it("dispute created and closed", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const created = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_disp_1",
+      eventType: "dispute.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_disp" },
+      dispute: {
+        providerDisputeId: "dp_cycle",
+        providerPaymentId: "py_disp",
+        reason: "fraudulent",
+      },
+    });
+    expect(created.action).toBe("dispute_recorded");
+    const closed = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_disp_2",
+      eventType: "dispute.closed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_disp" },
+      dispute: {
+        providerDisputeId: "dp_cycle",
+        providerPaymentId: "py_disp",
+        reason: "won",
+      },
+    });
+    expect(closed.action).toBe("dispute_closed");
+  });
+
+  // ── Invoice.paid ────────────────────────────────────────────────────────
+
+  it("invoice paid records invoice and renews subscription", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_ip_1",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_ip" },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_ip_2",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_ip" },
+      subscription: {
+        providerSubscriptionId: "sub_ip",
+        status: "active",
+        periodStart: "2025-06-01T00:00:00Z",
+        periodEnd: "2025-07-01T00:00:00Z",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_ip_3",
+      eventType: "invoice.paid",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_ip" },
+      subscription: {
+        providerSubscriptionId: "sub_ip",
+        status: "active",
+        periodStart: "2025-07-01T00:00:00Z",
+        periodEnd: "2025-08-01T00:00:00Z",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+      invoice: {
+        providerInvoiceId: "in_ip",
+        status: "paid",
+        amountPaidMinor: 1000,
+        amountDueMinor: 1000,
+        currency: "USD",
+        periodStart: "2025-07-01T00:00:00Z",
+        periodEnd: "2025-08-01T00:00:00Z",
+      },
+    });
+    expect(result.handled).toBe(true);
+    const plan = await cm.getUserPlan(USER_ID);
+    expect(plan.planId).not.toBeNull();
+  });
+
+  // ── Subscription trial_will_end ─────────────────────────────────────────
+
+  it("subscription trial will end callback", async () => {
+    let called = false;
+    const pool2 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    const cs2 = new PostgresStore(DATABASE_URL!);
+    const cm2 = new CreditManager(cs2);
+    await cm2.publishPricingFromDict(PRICING_DICT);
+    const bs2 = new PostgresBillingStore(pool2);
+    const bm2 = new BillingManager(bs2, {
+      creditManager: cm2,
+      onTrialWillEnd: async () => {
+        called = true;
+      },
+    });
+    await bs2.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm2.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_twe_1",
+      eventType: "subscription.trial_will_end",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+    });
+    expect(result.handled).toBe(true);
+    expect(called).toBe(true);
+    await pool2.end();
+  });
+
+  // ── Subscription updated ────────────────────────────────────────────────
+
+  it("subscription updated upserts state", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_up_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_up",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_up_2",
+      eventType: "subscription.updated",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_up",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const sub = await bs.getBillingSubscription(PROVIDER, "sub_up");
+    expect(sub!.status).toBe("active");
+  });
+
+  // ── Subscription plan changed ───────────────────────────────────────────
+
+  it("subscription plan changed", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pc_2",
+      eventType: "subscription.plan_changed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_pc",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(result.action).toBe("subscription_plan_changed");
+    const plan = await cm.getUserPlan(USER_ID);
+    expect(plan.planId).not.toBeNull();
+  });
+
+  // ── Ignored event types ─────────────────────────────────────────────────
+
+  it("checkout.expired is ignored", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_ign_1",
+      eventType: "checkout.expired",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+    });
+    expect(result.handled).toBe(true);
+    expect(result.action).toBe("ignored");
+  });
+
+  // ── Payment edge cases ──────────────────────────────────────────────────
+
+  it("payment succeeded without refs", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_norefs",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      payment: {
+        providerPaymentId: "py_norefs",
+        amountMinor: 500,
+        currency: "USD",
+        purpose: "subscription",
+      },
+    });
+    expect(result.handled).toBe(true);
+    expect(result.action).toBe("payment_succeeded");
+  });
+
+  it("payment succeeded amount exceeds topup cap", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_pay_cap",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_paycap" },
+      payment: {
+        providerPaymentId: "py_cap",
+        amountMinor: 99999,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+      },
+    });
+    expect(result.action).toBe("payment_succeeded_out_of_bounds");
+  });
+
+  // ── Manager no-creditManager edge cases ─────────────────────────────────
+
+  it("subscription created without credit manager", async () => {
+    const pool3 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
+    const bs3 = new PostgresBillingStore(pool3);
+    const bm3 = new BillingManager(bs3);
+    await bs3.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm3.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_nocm_1",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: "00000000-0000-0000-0000-000000000010",
+      subscription: {
+        providerSubscriptionId: "sub_nocm",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(result.handled).toBe(true);
+    await pool3.end();
+  });
+
+  it("dispute created without dispute data", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_disp_noop",
+      eventType: "dispute.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+    });
+    expect(result.action).toBe("dispute_recorded");
+  });
+
+  // ── Resolve offer by lookup key ─────────────────────────────────────────
+
+  it("resolve billing offer by lookup key", async () => {
+    const { bs } = await makePgComponents(pool);
+    const lookupCfg: BillingConfig = {
+      subscriptions: {
+        lookup_offer: {
+          plan: "pro",
+          interval: "month",
+          grant: { mode: "allowance" },
+          providers: {
+            stripe: {
+              priceId: "price_lookup",
+              lookupKey: "pro_monthly_lookup",
+            },
+          },
+        },
+      },
+    };
+    await bs.syncBillingFromConfig(lookupCfg);
+    const offer = await bs.resolveBillingOfferByLookup(PROVIDER, "pro_monthly_lookup");
+    expect(offer).not.toBeNull();
+    expect(offer!.offerKey).toBe("lookup_offer");
+  });
+
+  it("resolve billing offer by lookup key not found", async () => {
+    const { bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    expect(await bs.resolveBillingOfferByLookup(PROVIDER, "nonexistent")).toBeNull();
+  });
+
+  // ── User subscriptions ──────────────────────────────────────────────────
+
+  it("get user subscriptions lists all", async () => {
+    const { bs } = await makePgComponents(pool);
+    const listUid = "00000000-0000-0000-0000-000000000011";
+    await bs.upsertBillingSubscription({
+      userId: listUid,
+      provider: PROVIDER,
+      providerSubscriptionId: "sub_list_1",
+      status: "active",
+    });
+    await bs.upsertBillingSubscription({
+      userId: listUid,
+      provider: "dodo",
+      providerSubscriptionId: "sub_list_2",
+      status: "active",
+    });
+    const subs = await bs.getUserSubscriptions(listUid);
+    expect(subs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("get user subscription filters by status", async () => {
+    const { bs } = await makePgComponents(pool);
+    const statusUid = "00000000-0000-0000-0000-000000000012";
+    await bs.upsertBillingSubscription({
+      userId: statusUid,
+      provider: PROVIDER,
+      providerSubscriptionId: "sub_status_1",
+      status: "canceled",
+    });
+    const activeSub = await bs.getUserSubscription(statusUid, ["active"]);
+    expect(activeSub).toBeNull();
+    const canceledSub = await bs.getUserSubscription(statusUid, ["canceled"]);
+    expect(canceledSub).not.toBeNull();
+    expect(canceledSub!.status).toBe("canceled");
+  });
+
+  // ── Deactivate other provider subscriptions ─────────────────────────────
+
+  it("deactivate other provider subscriptions", async () => {
+    const { bs } = await makePgComponents(pool);
+    const daUid = "00000000-0000-0000-0000-000000000013";
+    await bs.upsertBillingSubscription({
+      userId: daUid,
+      provider: "stripe",
+      providerSubscriptionId: "sub_da_1",
+      status: "active",
+    });
+    await bs.upsertBillingSubscription({
+      userId: daUid,
+      provider: "dodo",
+      providerSubscriptionId: "sub_da_2",
+      status: "active",
+    });
+    const result = await bs.deactivateOtherProviderSubscriptions(daUid, "dodo");
+    expect(result.deactivatedCount).toBeGreaterThanOrEqual(1);
+    const stripeSub = await bs.getBillingSubscription("stripe", "sub_da_1");
+    expect(stripeSub!.status).toBe("canceled");
+  });
+
+  // ── Customer updated event ──────────────────────────────────────────────
+
+  it("customer updated upserts customer", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const result = await bm.handleEvent({
+      provider: PROVIDER,
+      eventId: "evt_cus_upd_1",
+      eventType: "customer.updated",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      customer: { providerCustomerId: "cus_upd", email: "updated@test.com" },
+    });
+    expect(result.handled).toBe(true);
+    const uid = await bs.getBillingCustomer(PROVIDER, "cus_upd");
+    expect(uid).toBe(USER_ID);
   });
 });
