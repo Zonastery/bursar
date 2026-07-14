@@ -58,6 +58,10 @@ let pool: pg.Pool;
 
 beforeAll(async () => {
   pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+  const { rows } = await pool.query("SHOW max_connections");
+  console.log("[store-integration] max_connections:", rows[0]?.max_connections);
+  const { rows: countRows } = await pool.query("SELECT count(*) AS cnt FROM pg_stat_activity");
+  console.log("[store-integration] connections before:", countRows[0]?.cnt);
   await pool.query(BOOTSTRAP_SQL);
   await applyMigrations(pool);
   await pool.query(`INSERT INTO auth.users (id) VALUES ($1), ($2) ON CONFLICT DO NOTHING`, [
