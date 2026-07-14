@@ -54,47 +54,44 @@ if (!DATABASE_URL) {
   );
 }
 
+let pool: pg.Pool;
+
+beforeAll(async () => {
+  pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
+  await pool.query(BOOTSTRAP_SQL);
+  await applyMigrations(pool);
+  await pool.query(`INSERT INTO auth.users (id) VALUES ($1), ($2) ON CONFLICT DO NOTHING`, [
+    PG_USER,
+    PG_USER2,
+  ]);
+  await pool.query(`INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`, [
+    [
+      PG_USER3,
+      PG_USER4,
+      PG_USER5,
+      PG_USER6,
+      PG_USER7,
+      PG_USER8,
+      PG_USER9,
+      PG_USER10,
+      PG_USER11,
+      PG_USER12,
+      PG_USER13,
+      PG_USER14,
+      PG_USER15,
+      PG_USER16,
+      PG_USER17,
+    ],
+  ]);
+}, 60000);
+
+afterAll(async () => {
+  if (pool) await pool.end();
+});
+
 describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () => {
-  let pool: pg.Pool;
-
-  beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await applyMigrations(pool);
-    await pool.query(`INSERT INTO auth.users (id) VALUES ($1), ($2) ON CONFLICT DO NOTHING`, [
-      PG_USER,
-      PG_USER2,
-    ]);
-    await pool.query(
-      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
-      [
-        [
-          PG_USER3,
-          PG_USER4,
-          PG_USER5,
-          PG_USER6,
-          PG_USER7,
-          PG_USER8,
-          PG_USER9,
-          PG_USER10,
-          PG_USER11,
-          PG_USER12,
-          PG_USER13,
-          PG_USER14,
-          PG_USER15,
-          PG_USER16,
-          PG_USER17,
-        ],
-      ],
-    );
-  }, 60000);
-
   afterEach(async () => {
     if (pool) await truncateBursarTables(pool);
-  });
-
-  afterAll(async () => {
-    if (pool) await pool.end();
   });
 
   // ── Migration idempotency ───────────────────────────────────────────
@@ -977,40 +974,8 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 // slot — only ever caught by a MOCKED test before this).
 // ───────────────────────────────────────────────────────────────────────────
 describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postgres", () => {
-  let pool: pg.Pool;
-
-  beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await applyMigrations(pool);
-    await pool.query(
-      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
-      [
-        [
-          PG_USER,
-          PG_USER2,
-          PG_USER3,
-          PG_USER4,
-          PG_USER5,
-          PG_USER6,
-          PG_USER7,
-          PG_USER8,
-          PG_USER9,
-          PG_USER10,
-          PG_USER11,
-          PG_USER12,
-          PG_USER13,
-        ],
-      ],
-    );
-  }, 60000);
-
   afterEach(async () => {
     if (pool) await truncateBursarTables(pool);
-  });
-
-  afterAll(async () => {
-    if (pool) await pool.end();
   });
   // ── 1/2: getUserPlan + plan-sync round-trip allowance_period ────────
   it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
@@ -1463,24 +1428,8 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 // skip-without-DATABASE_URL pattern as the rest of this file.
 // ───────────────────────────────────────────────────────────────────────────
 describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
-  let pool: pg.Pool;
-
-  beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await applyMigrations(pool);
-    await pool.query(
-      `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
-      [[PG_USER, PG_USER2, PG_USER3, PG_USER4, PG_USER5, PG_USER6]],
-    );
-  }, 60000);
-
   afterEach(async () => {
     if (pool) await truncateBursarTables(pool);
-  });
-
-  afterAll(async () => {
-    if (pool) await pool.end();
   });
 
   const TIER_CONFIG = {
@@ -1618,17 +1567,12 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 // MemoryStore).
 // ───────────────────────────────────────────────────────────────────────────
 describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Postgres", () => {
-  let pool: pg.Pool;
-
   const MGR_USER1 = "00000000-0000-0000-0000-000000000301";
   const MGR_USER2 = "00000000-0000-0000-0000-000000000302";
   const MGR_USER3 = "00000000-0000-0000-0000-000000000303";
   const MGR_USER4 = "00000000-0000-0000-0000-000000000304";
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await applyMigrations(pool);
     await pool.query(
       `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
       [[MGR_USER1, MGR_USER2, MGR_USER3, MGR_USER4]],
@@ -1641,10 +1585,6 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 
   afterEach(async () => {
     if (pool) await truncateBursarTables(pool);
-  });
-
-  afterAll(async () => {
-    if (pool) await pool.end();
   });
 
   const TIER_CONFIG = {
@@ -1827,7 +1767,6 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 // client/server logic mismatch could hide exactly there.
 // ───────────────────────────────────────────────────────────────────────────
 describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Postgres", () => {
-  let pool: pg.Pool;
   let store: PostgresStore;
 
   const SUB_USER1 = "00000000-0000-0000-0000-000000000401";
@@ -1836,9 +1775,6 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   const SUB_USER4 = "00000000-0000-0000-0000-000000000404";
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: DATABASE_URL, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await applyMigrations(pool);
     await pool.query(
       `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
       [[SUB_USER1, SUB_USER2, SUB_USER3, SUB_USER4]],
@@ -1849,10 +1785,6 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
 
   afterEach(async () => {
     if (pool) await truncateBursarTables(pool);
-  });
-
-  afterAll(async () => {
-    if (pool) await pool.end();
   });
 
   const SUBSCRIPTION_CONFIG = {
