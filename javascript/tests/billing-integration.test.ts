@@ -140,6 +140,14 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       [USER_ID, USER_ID2, USER_ID3, USER_ID4],
     );
     await applyMigrations(pool);
+    // Seed public.user for migration 021 FK from user_credits — range covers
+    // all fixed IDs (1–4) plus inline IDs (5, 10–13, 99) used in this suite.
+    await pool.query(
+      `INSERT INTO public."user" (id)
+       SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
+       FROM generate_series(1, 100) AS s
+       ON CONFLICT (id) DO NOTHING`,
+    );
     await truncateBursarTables(pool);
   }, 60000);
 

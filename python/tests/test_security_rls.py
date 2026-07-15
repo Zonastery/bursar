@@ -194,6 +194,12 @@ class TestRlsTenantIsolation:
             with conn.cursor() as cur:
                 cur.execute("SET LOCAL ROLE service_role")
                 cur.execute("SET LOCAL request.jwt.claim.role = 'service_role'")
+                # Ensure user exists in public.user before granting credits
+                # (migration 021 FK constraint from user_credits to public.user).
+                cur.execute(
+                    'INSERT INTO public."user" (id) VALUES (%s) ON CONFLICT (id) DO NOTHING',
+                    (user_id,),
+                )
                 cur.execute(
                     "SELECT public.credits_add(%s, %s, 'purchase', '{}'::jsonb, NULL)",
                     (user_id, amount),

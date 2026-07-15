@@ -301,7 +301,7 @@ class TestPostgresStoreIntegration:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
                     "pro": {
                         "label": "Pro Plan",
@@ -460,7 +460,7 @@ class TestPostgresStoreIntegration:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
                     "basic": {
                         "label": "Basic",
@@ -508,7 +508,7 @@ class TestPostgresStoreIntegration:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
                     "basic": {
                         "label": "Basic",
@@ -624,7 +624,7 @@ class TestPostgresStoreIntegration:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
                     "basic": {
                         "label": "Basic",
@@ -1073,7 +1073,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"pro": {"label": "Pro", "allowance": {"period": "rolling_30d"}}},
             }
         )
@@ -1087,7 +1087,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"basic": {"label": "Basic"}},
             }
         )
@@ -1100,7 +1100,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"pro": {"label": "Pro", "allowance": {"period": "rolling_30d"}}},
             }
         )
@@ -1113,7 +1113,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"elite": {"label": "Elite", "allowance": {"period": "anniversary"}}},
             }
         )
@@ -1129,7 +1129,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
             }
         )
@@ -1157,7 +1157,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
             }
         )
@@ -1421,7 +1421,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {
                     "planA": {"label": "Plan A", "allowance": {"period": "anniversary"}},
                     "planB": {"label": "Plan B", "allowance": {"period": "anniversary"}},
@@ -1459,7 +1459,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"pro": {"label": "Pro", "allowance": {"amount": Decimal(100)}}},
             }
         )
@@ -1517,7 +1517,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "ledger": {"min_balance": Decimal("0")},
                 "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("5")}}},
             }
@@ -1564,7 +1564,7 @@ class TestAllowanceWindowPg:
         store.set_active_pricing(
             {
                 "version": 1,
-                "metering": {"models": {"*": "1"}},
+                "metering": {"models": {"*": "input_tokens * 1"}},
                 "plans": {"basic": {"label": "Basic", "allowance": {"amount": Decimal("10")}}},
             }
         )
@@ -2489,7 +2489,7 @@ class TestFeatureLimitsPg:
             assert r.error is None
 
         check = store.check_feature_limit(user, "captioning", 3, period_start, period_end)
-        assert check.limited is True
+        assert check.limited is False  # 2 < 3, not yet over the limit
         assert check.limit == 3
         assert check.used == 2
         assert check.remaining == 1

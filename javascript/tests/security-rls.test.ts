@@ -88,6 +88,9 @@ async function grantCredits(pool: pg.Pool, userId: string, amount: number): Prom
     await client.query("BEGIN");
     await client.query("SET LOCAL ROLE service_role");
     await client.query("SET LOCAL request.jwt.claim.role = 'service_role'");
+    await client.query(`INSERT INTO public."user" (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, [
+      userId,
+    ]);
     await client.query("SELECT public.credits_add($1, $2, 'purchase', '{}'::jsonb, NULL)", [
       userId,
       amount,

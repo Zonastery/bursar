@@ -446,7 +446,9 @@ describe("PostgresStore", () => {
 
   it("setActivePricing returns empty id for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    const result = await store.setActivePricing({ models: { a: "1" } });
+    const result = await store.setActivePricing({
+      metering: { models: { a: "input_tokens * 1" } },
+    });
     expect(result).toBe("");
   });
 

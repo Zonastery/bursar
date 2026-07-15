@@ -83,11 +83,29 @@ beforeAll(async () => {
       PG_USER17,
     ],
   ]);
+  // Seed public.user for migration 021 FK from user_credits — insert a range
+  // covering all fixed IDs (1–17, 99) plus dynamic ranges (100–199, 301–404).
+  await pool.query(
+    `INSERT INTO public."user" (id)
+     SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
+     FROM generate_series(1, 500) AS s
+     ON CONFLICT (id) DO NOTHING`,
+  );
 }, 60000);
 
 afterAll(async () => {
   if (pool) await pool.end();
 });
+
+/** Ensure an active pricing config exists for the given version. */
+async function ensureActivePricingConfig(pool: pg.Pool, version: number): Promise<void> {
+  await pool.query(
+    `INSERT INTO public.credit_pricing_config (version, active, config)
+     VALUES ($1, true, '{}'::jsonb)
+     ON CONFLICT (version) DO UPDATE SET active = true`,
+    [version],
+  );
+}
 
 describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () => {
   afterEach(async () => {
@@ -208,6 +226,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(10), "adjustment");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const r = await store.deductWithAllowance(PG_USER, D(5), { idempotencyKey: "plan-1" });
@@ -225,6 +244,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(100), "adjustment");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const r = await store.deductWithAllowance(PG_USER, D(25), { idempotencyKey: "plan-2" });
@@ -617,6 +637,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_JI6, PLAN_JI6],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_JI6);
 
     await pool.query(
@@ -644,6 +665,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_JI7, PLAN_JI7],
     );
     await store.addCredits(PG_USER, D(500), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_JI7);
 
     // Check allowance before deduction
@@ -729,6 +751,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_H4, PLAN_H4],
     );
     await store.addCredits(PG_USER, D(50), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_H4);
 
     // Set a deny spend cap at 8. Attempt deduction of 20: allowance covers 10,
@@ -986,6 +1009,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     const before = new Date();
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
     const after = new Date();
 
@@ -1003,7 +1027,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       const planKey = `sync-${allowancePeriod}`;
       const config = {
         version: 1,
-        metering: { models: { "*": "1" } },
+        metering: { models: { "*": "input_tokens * 1" } },
         ledger: { minBalance: 0 },
         plans: {
           [planKey]: {
@@ -1035,6 +1059,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const day1 = new Date("2026-01-01T00:00:00.000Z");
@@ -1069,6 +1094,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const day1 = new Date("2026-01-01T00:00:00.000Z");
@@ -1287,6 +1313,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
     );
 
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER10, PLAN_X);
     const first = (await store.getUserPlan(PG_USER10)).planAssignedAt!;
 
@@ -1309,6 +1336,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
        ON CONFLICT (id) DO NOTHING`,
       [PURGE_PLAN, "purge-plan"],
     );
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER10, "purge-plan");
     let plan = await store.getUserPlan(PG_USER10);
     expect(plan.planId).toBeTruthy();
@@ -1341,7 +1369,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     await manager.publishPricingFromDict(config);
 
     const stored = await store.getActivePricing();
-    expect((stored?.config.metering as Record<string, unknown>)?.flatJobs?.job).toBe(2.5);
+    expect((stored?.config.metering as Record<string, unknown>)?.flatJobs?.job).toBe("2.5");
 
     await manager.addCredits(PG_USER11, 10);
     const result = await manager.deductFlatJob(PG_USER11, "job");
@@ -1380,6 +1408,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     // Balance of 8: floor 0 means settle can debit at most 8 net regardless of
     // the lease's nominal amount — this exercises the 021 floor-clamp fix.
     await store.addCredits(PG_USER13, D(8), "purchase");
+    await ensureActivePricingConfig(pool, 0);
     await store.setUserPlan(PG_USER13, PLAN_UUID);
 
     // Lease admission only needs to cover the worst-case hold — request a small
@@ -1891,7 +1920,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     // plan_key string).
     const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, 0)`,
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, 1)`,
       [SUB_PLAN, "pro-monthly"],
     );
 

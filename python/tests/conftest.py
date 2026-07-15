@@ -133,6 +133,26 @@ def _preseed_supabase_objects(dsn: str) -> None:
                 );
                 """
             )
+            # Seed test users so migration 021's FK from user_credits to
+            # public."user" does not reject credit operations. Insert a range
+            # covering the fixed IDs (1–17, 99) plus the dynamic _new_uuid
+            # range used across test_store_integration (9000–9514).
+            cur.execute(
+                """
+                INSERT INTO public."user" (id)
+                SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
+                FROM generate_series(1, 200) AS s
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO public."user" (id)
+                SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
+                FROM generate_series(9000, 9514) AS s
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
 
             # 3. Standard Supabase roles
             for role in ("anon", "authenticated", "service_role"):

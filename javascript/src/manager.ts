@@ -510,7 +510,7 @@ export class CreditManager {
    */
   async checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult> {
     const { limit, periodStart, periodEnd } = await this.resolveFeatureLimit(userId, feature);
-    if (limit == null || periodStart == null || periodEnd == null) {
+    if (limit == null || limit.maxCalls == null || periodStart == null || periodEnd == null) {
       return {
         userId,
         feature,
