@@ -2,6 +2,8 @@ export { BillingStore } from "./billing-store.js";
 export { PostgresBillingStore } from "./postgres-billing-store.js";
 export { BillingManager } from "./billing-manager.js";
 
+export { BillingEventType } from "./billing-types.js";
+
 export type {
   BillingConfig,
   BillingCreditTopup,
@@ -10,8 +12,8 @@ export type {
   BillingDisputeInfo,
   BillingEvent,
   BillingEventClaim,
+  BillingEventHandler,
   BillingEventResult,
-  BillingEventType,
   BillingInvoiceInfo,
   BillingOffer,
   BillingOfferInterval,

@@ -4,7 +4,13 @@ export { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
-export type { PricingConfig, MeteringConfig, LedgerConfig, SignupGrant, BillingSection } from "./config.js";
+export type {
+  PricingConfig,
+  MeteringConfig,
+  LedgerConfig,
+  SignupGrant,
+  BillingSection,
+} from "./config.js";
 export { loadConfigFromDict, canonicalPricingConfigDict } from "./config.js";
 export {
   CapabilityNotSupportedError,
@@ -95,6 +101,8 @@ export { CreditEventEmitter } from "./stores/events.js";
 
 // Billing
 export { BillingStore, PostgresBillingStore, BillingManager } from "./billing/index.js";
+export { BillingEventType } from "./billing/index.js";
+
 export type {
   BillingConfig,
   BillingCreditTopup,
@@ -103,8 +111,8 @@ export type {
   BillingDisputeInfo,
   BillingEvent,
   BillingEventClaim,
+  BillingEventHandler,
   BillingEventResult,
-  BillingEventType,
   BillingInvoiceInfo,
   BillingOffer,
   BillingOfferInterval,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from bursar.billing.models import (
     BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
+    BillingEventType,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionInfo,
@@ -26,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 ResolveUserFn = Callable[[str, str | None, str | None], str | None]
 
-IGNORED_EVENT_TYPES: frozenset[str] = frozenset(
+IGNORED_EVENT_TYPES: frozenset[BillingEventType] = frozenset(
     {
-        "checkout.expired",
-        "invoice.upcoming",
+        BillingEventType.checkout_expired,
+        BillingEventType.invoice_upcoming,
     }
 )
 
@@ -59,37 +61,37 @@ class BillingManager:
         credit_manager: CreditManager | None = None,
         resolve_user: ResolveUserFn | None = None,
         config: BillingConfig | None = None,
-        on_trial_will_end: Callable[[BillingEvent], None] | None = None,
+        event_handlers: dict[BillingEventType, Callable[[BillingEvent, str], None]] | None = None,
         cancel_prior_providers: bool = True,
     ) -> None:
         self._store = billing_store
         self._cm = credit_manager
         self._resolve_user = resolve_user
-        self._on_trial_will_end = on_trial_will_end
+        self._event_handlers = event_handlers or {}
         self._cancel_prior_providers = cancel_prior_providers
         self._handlers = {
-            "customer.created": self._handle_customer_upserted,
-            "customer.updated": self._handle_customer_upserted,
-            "customer.deleted": self._handle_customer_deleted,
-            "checkout.completed": self._handle_checkout_completed,
-            "subscription.created": self._handle_subscription_created,
-            "subscription.updated": self._handle_subscription_updated,
-            "subscription.activated": self._handle_subscription_activated,
-            "subscription.renewed": self._handle_subscription_renewed,
-            "subscription.plan_changed": self._handle_subscription_plan_changed,
-            "subscription.cancellation_scheduled": self._handle_cancellation_scheduled,
-            "subscription.cancellation_unscheduled": self._handle_cancellation_unscheduled,
-            "subscription.canceled": self._handle_subscription_canceled,
-            "subscription.expired": self._handle_subscription_expired,
-            "subscription.paused": self._handle_subscription_paused,
-            "subscription.resumed": self._handle_subscription_resumed,
-            "subscription.trial_will_end": self._handle_trial_will_end,
-            "invoice.paid": self._handle_invoice_paid,
-            "payment.succeeded": self._handle_payment_succeeded,
-            "payment.failed": self._handle_payment_failed,
-            "refund.created": self._handle_refund_created,
-            "dispute.created": self._handle_dispute_created,
-            "dispute.closed": self._handle_dispute_closed,
+            BillingEventType.customer_created: self._handle_customer_upserted,
+            BillingEventType.customer_updated: self._handle_customer_upserted,
+            BillingEventType.customer_deleted: self._handle_customer_deleted,
+            BillingEventType.checkout_completed: self._handle_checkout_completed,
+            BillingEventType.subscription_created: self._handle_subscription_created,
+            BillingEventType.subscription_updated: self._handle_subscription_updated,
+            BillingEventType.subscription_activated: self._handle_subscription_activated,
+            BillingEventType.subscription_renewed: self._handle_subscription_renewed,
+            BillingEventType.subscription_plan_changed: self._handle_subscription_plan_changed,
+            BillingEventType.subscription_cancellation_scheduled: self._handle_cancellation_scheduled,
+            BillingEventType.subscription_cancellation_unscheduled: self._handle_cancellation_unscheduled,
+            BillingEventType.subscription_canceled: self._handle_subscription_canceled,
+            BillingEventType.subscription_expired: self._handle_subscription_expired,
+            BillingEventType.subscription_paused: self._handle_subscription_paused,
+            BillingEventType.subscription_resumed: self._handle_subscription_resumed,
+            BillingEventType.subscription_trial_will_end: self._handle_trial_will_end,
+            BillingEventType.invoice_paid: self._handle_invoice_paid,
+            BillingEventType.payment_succeeded: self._handle_payment_succeeded,
+            BillingEventType.payment_failed: self._handle_payment_failed,
+            BillingEventType.refund_created: self._handle_refund_created,
+            BillingEventType.dispute_created: self._handle_dispute_created,
+            BillingEventType.dispute_closed: self._handle_dispute_closed,
         }
         if config is not None:
             self._store.sync_billing_from_config(config)
@@ -197,7 +199,31 @@ class BillingManager:
                 return BillingEventResult(handled=True, action="ignored")
             logger.warning("unhandled billing event type %s (marking as failed)", event.event_type)
             return BillingEventResult(handled=False, error="unhandled_event_type")
-        return handler(event)
+        result = handler(event)
+        if result.handled:
+            self._fire_event_handlers(event, event.user_id)
+        return result
+
+    def _fire_event_handlers(self, event: BillingEvent, user_id: str | None) -> None:
+        if not user_id:
+            return
+        handler = self._event_handlers.get(event.event_type)
+        if handler is None:
+            return
+        if inspect.iscoroutinefunction(handler):
+            logger.error(
+                "event handler for %s is async — BillingManager is synchronous, handler will not be called",
+                event.event_type,
+            )
+            return
+        try:
+            handler(event, user_id)
+        except Exception:
+            logger.exception(
+                "event handler failed for %s/%s",
+                event.provider,
+                event.event_id,
+            )
 
     @staticmethod
     def _compute_topup_credits(amount_minor: int, credits_per_unit: int) -> int:
@@ -212,6 +238,7 @@ class BillingManager:
                 event.customer.provider_customer_id,
             )
             if uid:
+                event.user_id = uid
                 return uid
         if event.subscription and event.subscription.provider_subscription_id:
             existing = self._store.get_billing_subscription(
@@ -219,13 +246,17 @@ class BillingManager:
                 event.subscription.provider_subscription_id,
             )
             if existing and existing.user_id:
+                event.user_id = existing.user_id
                 return existing.user_id
         if self._resolve_user and event.customer:
-            return self._resolve_user(
+            uid = self._resolve_user(
                 event.provider,
                 event.customer.provider_customer_id,
                 event.customer.email,
             )
+            if uid:
+                event.user_id = uid
+                return uid
         return None
 
     def _offer_for_event(self, event: BillingEvent) -> tuple[BillingOfferResult | None, str | None, str | None]:
@@ -354,7 +385,7 @@ class BillingManager:
                     uid,
                     event.customer.email,
                 )
-        action = "customer_created" if event.event_type == "customer.created" else "customer_updated"
+        action = "customer_created" if event.event_type == BillingEventType.customer_created else "customer_updated"
         return BillingEventResult(handled=True, action=action)
 
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
@@ -514,15 +545,7 @@ class BillingManager:
         )
 
     def _handle_trial_will_end(self, event: BillingEvent) -> BillingEventResult:
-        if self._on_trial_will_end:
-            try:
-                self._on_trial_will_end(event)
-            except Exception:
-                logger.exception(
-                    "on_trial_will_end callback failed for event %s/%s",
-                    event.provider,
-                    event.event_id,
-                )
+        self._resolve_user_id(event)
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
     def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:

@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { CreditManager } from "../src/manager.js";
-import { PostgresBillingStore, BillingManager } from "../src/billing/index.js";
+import { PostgresBillingStore, BillingManager, BillingEventType } from "../src/billing/index.js";
 import type {
   BillingConfig,
   BillingPreferences,
@@ -1086,8 +1086,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       const bs2 = new PostgresBillingStore(pool2);
       const bm2 = new BillingManager(bs2, {
         creditManager: cm2,
-        onTrialWillEnd: async () => {
-          called = true;
+        eventHandlers: {
+          [BillingEventType.SUBSCRIPTION_TRIAL_WILL_END]: async (_event, _userId) => {
+            called = true;
+          },
         },
       });
       await bs2.syncBillingFromConfig(BILLING_CONFIG);

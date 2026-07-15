@@ -21,6 +21,7 @@ from bursar.billing.models import (
     BillingCreditTopup,
     BillingCustomerInfo,
     BillingEvent,
+    BillingEventType,
     BillingOffer,
     BillingPaymentInfo,
     BillingRefundInfo,
@@ -323,6 +324,38 @@ class TestEventIdempotency:
         bs.fail_billing_event(PROVIDER, "evt_fail_retry")
         c2 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c2.status == "claimed"
+
+    def test_event_handler_dispatched_for_matching_event(self, pg_database_url: str, pg_store: object) -> None:
+        """Mirrors JavaScript test: eventHandlers dispatch on matching event type."""
+        _bootstrap_auth_users(pg_database_url)
+        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+
+        called = False
+
+        def handler(event: BillingEvent, user_id: str) -> None:
+            nonlocal called
+            called = True
+
+        bm = BillingManager(
+            bs,
+            credit_manager=_cm,
+            event_handlers={
+                BillingEventType.subscription_trial_will_end: handler,
+            },
+        )
+        bs.sync_billing_from_config(BILLING_CONFIG)
+        result = bm.handle_event(
+            BillingEvent(
+                provider=PROVIDER,
+                event_id="evt_handler_test",
+                event_type=BillingEventType.subscription_trial_will_end,
+                occurred_at=_now(),
+                user_id=USER_ID,
+            ),
+        )
+        assert result.handled is True
+        assert called is True
 
 
 # ── Topup credits ──────────────────────────────────────────────────────

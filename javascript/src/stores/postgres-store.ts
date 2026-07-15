@@ -42,6 +42,7 @@ import type {
   BucketBalance,
   BucketBalancesResult,
   TopUserRow,
+  UserTransactionRow,
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
 import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
@@ -882,6 +883,27 @@ export class PostgresStore extends CreditStore {
       totalSpend: dec(r.total_spend),
       transactionCount: Number(r.transaction_count ?? 0),
     }));
+  }
+
+  async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
+    const rows = await this.query(
+      `SELECT id, user_id, amount, type, reference_type, reference_id, metadata, created_at
+       FROM public.credit_transactions
+       WHERE id = $1 AND user_id = $2`,
+      [transactionId, userId],
+    );
+    if (rows.length === 0) return null;
+    const r = rows[0] as Record<string, unknown>;
+    return {
+      id: String(r.id ?? ""),
+      userId: String(r.user_id ?? ""),
+      amount: dec(r.amount),
+      type: String(r.type ?? ""),
+      referenceType: r.reference_type != null ? String(r.reference_type) : null,
+      referenceId: r.reference_id != null ? String(r.reference_id) : null,
+      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
+      createdAt: String(r.created_at ?? ""),
+    };
   }
 
   async listUserTransactions(

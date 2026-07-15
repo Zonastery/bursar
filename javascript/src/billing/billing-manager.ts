@@ -4,6 +4,7 @@ import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
 import type {
   BillingEvent,
+  BillingEventHandler,
   BillingEventResult,
   BillingCustomerRecord,
   BillingOfferResult,
@@ -12,6 +13,7 @@ import type {
   BillingSubscriptionStatus,
   BillingTopupResult,
 } from "./billing-types.js";
+import { BillingEventType } from "./billing-types.js";
 import type { ProviderLogger } from "../providers/types.js";
 import { SUBSCRIPTION_STATUS } from "../repositories/billing/subscription.js";
 
@@ -34,7 +36,7 @@ type ResolveUserFn = (
 export interface BillingManagerOptions {
   creditManager?: CreditManager | null;
   resolveUser?: ResolveUserFn | null;
-  onTrialWillEnd?: (event: BillingEvent) => void | Promise<void>;
+  eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   cancelPriorProviders?: boolean;
   logger?: ProviderLogger | null;
 }
@@ -47,18 +49,21 @@ export class BillingManager {
   private store: BillingStore;
   private cm: CreditManager | null;
   private resolveUser: ResolveUserFn | null;
-  private onTrialWillEnd: ((event: BillingEvent) => void | Promise<void>) | null;
+  private eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
   private cancelPriorProviders: boolean;
   private logger: ProviderLogger | null;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
-  private readonly IGNORED_EVENT_TYPES = new Set(["checkout.expired", "invoice.upcoming"]);
+  private readonly IGNORED_EVENT_TYPES: Set<BillingEventType> = new Set([
+    BillingEventType.CHECKOUT_EXPIRED,
+    BillingEventType.INVOICE_UPCOMING,
+  ]);
 
   constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
     this.cm = options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
-    this.onTrialWillEnd = options?.onTrialWillEnd ?? null;
+    this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
     this.logger = options?.logger ?? null;
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
@@ -75,28 +80,30 @@ export class BillingManager {
       },
     });
     this.handlerMap = {
-      "customer.created": this.handleCustomerCreated.bind(this),
-      "customer.updated": this.handleCustomerCreated.bind(this),
-      "customer.deleted": this.handleCustomerDeleted.bind(this),
-      "checkout.completed": this.handleCheckoutCompleted.bind(this),
-      "subscription.created": this.handleSubscriptionCreated.bind(this),
-      "subscription.updated": this.handleSubscriptionUpdated.bind(this),
-      "subscription.activated": this.handleSubscriptionActivated.bind(this),
-      "subscription.renewed": this.handleSubscriptionRenewed.bind(this),
-      "subscription.plan_changed": this.handleSubscriptionPlanChanged.bind(this),
-      "subscription.cancellation_scheduled": this.handleCancellationScheduled.bind(this),
-      "subscription.cancellation_unscheduled": this.handleCancellationUnscheduled.bind(this),
-      "subscription.canceled": this.handleSubscriptionCanceled.bind(this),
-      "subscription.expired": this.handleSubscriptionExpired.bind(this),
-      "subscription.paused": this.handleSubscriptionPaused.bind(this),
-      "subscription.resumed": this.handleSubscriptionResumed.bind(this),
-      "subscription.trial_will_end": this.handleTrialWillEnd.bind(this),
-      "invoice.paid": this.handleInvoicePaid.bind(this),
-      "payment.succeeded": this.handlePaymentSucceeded.bind(this),
-      "payment.failed": this.handlePaymentFailed.bind(this),
-      "refund.created": this.handleRefundCreated.bind(this),
-      "dispute.created": this.handleDisputeCreated.bind(this),
-      "dispute.closed": this.handleDisputeClosed.bind(this),
+      [BillingEventType.CUSTOMER_CREATED]: this.handleCustomerCreated.bind(this),
+      [BillingEventType.CUSTOMER_UPDATED]: this.handleCustomerCreated.bind(this),
+      [BillingEventType.CUSTOMER_DELETED]: this.handleCustomerDeleted.bind(this),
+      [BillingEventType.CHECKOUT_COMPLETED]: this.handleCheckoutCompleted.bind(this),
+      [BillingEventType.SUBSCRIPTION_CREATED]: this.handleSubscriptionCreated.bind(this),
+      [BillingEventType.SUBSCRIPTION_UPDATED]: this.handleSubscriptionUpdated.bind(this),
+      [BillingEventType.SUBSCRIPTION_ACTIVATED]: this.handleSubscriptionActivated.bind(this),
+      [BillingEventType.SUBSCRIPTION_RENEWED]: this.handleSubscriptionRenewed.bind(this),
+      [BillingEventType.SUBSCRIPTION_PLAN_CHANGED]: this.handleSubscriptionPlanChanged.bind(this),
+      [BillingEventType.SUBSCRIPTION_CANCELLATION_SCHEDULED]:
+        this.handleCancellationScheduled.bind(this),
+      [BillingEventType.SUBSCRIPTION_CANCELLATION_UNSCHEDULED]:
+        this.handleCancellationUnscheduled.bind(this),
+      [BillingEventType.SUBSCRIPTION_CANCELED]: this.handleSubscriptionCanceled.bind(this),
+      [BillingEventType.SUBSCRIPTION_EXPIRED]: this.handleSubscriptionExpired.bind(this),
+      [BillingEventType.SUBSCRIPTION_PAUSED]: this.handleSubscriptionPaused.bind(this),
+      [BillingEventType.SUBSCRIPTION_RESUMED]: this.handleSubscriptionResumed.bind(this),
+      [BillingEventType.SUBSCRIPTION_TRIAL_WILL_END]: this.handleTrialWillEnd.bind(this),
+      [BillingEventType.INVOICE_PAID]: this.handleInvoicePaid.bind(this),
+      [BillingEventType.PAYMENT_SUCCEEDED]: this.handlePaymentSucceeded.bind(this),
+      [BillingEventType.PAYMENT_FAILED]: this.handlePaymentFailed.bind(this),
+      [BillingEventType.REFUND_CREATED]: this.handleRefundCreated.bind(this),
+      [BillingEventType.DISPUTE_CREATED]: this.handleDisputeCreated.bind(this),
+      [BillingEventType.DISPUTE_CLOSED]: this.handleDisputeClosed.bind(this),
     };
   }
 
@@ -195,9 +202,32 @@ export class BillingManager {
       }
       return { handled: false, error: "unhandled_event_type" };
     }
-    return handler(event);
+    const result = await handler(event);
+    if (result.handled) {
+      await this.fireEventHandlers(event, event.userId ?? null);
+    }
+    return result;
   }
 
+  private async fireEventHandlers(event: BillingEvent, userId: string | null): Promise<void> {
+    if (!userId) return;
+    const handler = this.eventHandlers[event.eventType];
+    if (!handler) return;
+    try {
+      await handler(event, userId);
+    } catch (err) {
+      this.logger?.error?.(
+        `[BillingManager] event handler failed for ${event.provider}/${event.eventId}`,
+        { error: err instanceof Error ? err.message : String(err) },
+      );
+    }
+  }
+
+  /**
+   * Resolve userId from the event, mutating event.userId so that
+   * routeEvent's blanket fireEventCallback can read it. Each handleEvent
+   * call creates a fresh event object, so mutation is safe.
+   */
   private async resolveUserId(event: BillingEvent): Promise<string | null> {
     if (event.userId) return event.userId;
     if (event.customer?.providerCustomerId) {
@@ -205,21 +235,31 @@ export class BillingManager {
         event.provider,
         event.customer.providerCustomerId,
       );
-      if (uid) return uid;
+      if (uid) {
+        event.userId = uid;
+        return uid;
+      }
     }
     if (this.resolveUser && event.customer?.providerCustomerId) {
-      return this.resolveUser(
+      const uid = this.resolveUser(
         event.provider,
         event.customer.providerCustomerId,
         event.customer.email ?? null,
       );
+      if (uid) {
+        event.userId = uid;
+        return uid;
+      }
     }
     if (event.subscription?.providerSubscriptionId) {
       const existing = await this.store.getBillingSubscription(
         event.provider,
         event.subscription.providerSubscriptionId,
       );
-      if (existing?.userId) return existing.userId;
+      if (existing?.userId) {
+        event.userId = existing.userId;
+        return existing.userId;
+      }
     }
     return null;
   }
@@ -585,16 +625,8 @@ export class BillingManager {
   }
 
   private async handleTrialWillEnd(event: BillingEvent): Promise<BillingEventResult> {
-    if (this.onTrialWillEnd) {
-      try {
-        await this.onTrialWillEnd(event);
-      } catch (err) {
-        this.logger?.error?.(
-          `[BillingManager] onTrialWillEnd callback failed for ${event.provider}/${event.eventId}`,
-          { error: err instanceof Error ? err.message : String(err) },
-        );
-      }
-    }
+    // Resolve userId so routeEvent's blanket fireEventCallback has a useful value.
+    await this.resolveUserId(event);
     return { handled: true, action: "trial_will_end_notified" };
   }
 

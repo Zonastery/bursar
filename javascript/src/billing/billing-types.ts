@@ -7,77 +7,80 @@
 
 export type BillingProvider = "stripe" | "dodo" | "mock";
 
-export type BillingEventType =
+export const BillingEventType = {
   /** @emitted by stripe, dodo */
-  | "customer.created"
+  CUSTOMER_CREATED: "customer.created",
   /** @emitted by stripe, dodo */
-  | "customer.updated"
+  CUSTOMER_UPDATED: "customer.updated",
   /** @emitted by stripe, dodo */
-  | "customer.deleted"
+  CUSTOMER_DELETED: "customer.deleted",
   /** @emitted by stripe, dodo */
-  | "checkout.completed"
+  CHECKOUT_COMPLETED: "checkout.completed",
   /** @aspirational */
-  | "checkout.expired"
+  CHECKOUT_EXPIRED: "checkout.expired",
   /** @emitted by stripe, dodo */
-  | "subscription.created"
+  SUBSCRIPTION_CREATED: "subscription.created",
   /** @emitted by stripe, dodo */
-  | "subscription.updated"
+  SUBSCRIPTION_UPDATED: "subscription.updated",
   /** @emitted by stripe, dodo */
-  | "subscription.activated"
+  SUBSCRIPTION_ACTIVATED: "subscription.activated",
   /** @emitted (mapped from invoice.paid by stripe) */
-  | "subscription.renewed"
+  SUBSCRIPTION_RENEWED: "subscription.renewed",
   /** @emitted by dodo */
-  | "subscription.plan_changed"
+  SUBSCRIPTION_PLAN_CHANGED: "subscription.plan_changed",
   /** @emitted by stripe, dodo */
-  | "subscription.cancellation_scheduled"
+  SUBSCRIPTION_CANCELLATION_SCHEDULED: "subscription.cancellation_scheduled",
   /** @aspirational */
-  | "subscription.cancellation_unscheduled"
+  SUBSCRIPTION_CANCELLATION_UNSCHEDULED: "subscription.cancellation_unscheduled",
   /** @emitted by stripe, dodo */
-  | "subscription.canceled"
+  SUBSCRIPTION_CANCELED: "subscription.canceled",
   /** @emitted by dodo */
-  | "subscription.expired"
+  SUBSCRIPTION_EXPIRED: "subscription.expired",
   /** @emitted by dodo */
-  | "subscription.paused"
+  SUBSCRIPTION_PAUSED: "subscription.paused",
   /** @aspirational */
-  | "subscription.resumed"
+  SUBSCRIPTION_RESUMED: "subscription.resumed",
   /** @aspirational */
-  | "subscription.trial_will_end"
+  SUBSCRIPTION_TRIAL_WILL_END: "subscription.trial_will_end",
   /** @aspirational */
-  | "invoice.created"
+  INVOICE_CREATED: "invoice.created",
   /** @aspirational */
-  | "invoice.finalized"
+  INVOICE_FINALIZED: "invoice.finalized",
   /** @aspirational */
-  | "invoice.finalization_failed"
+  INVOICE_FINALIZATION_FAILED: "invoice.finalization_failed",
   /** @aspirational */
-  | "invoice.upcoming"
+  INVOICE_UPCOMING: "invoice.upcoming",
   /** @emitted by stripe */
-  | "invoice.paid"
+  INVOICE_PAID: "invoice.paid",
   /** @aspirational */
-  | "invoice.payment_failed"
+  INVOICE_PAYMENT_FAILED: "invoice.payment_failed",
   /** @aspirational */
-  | "invoice.payment_action_required"
+  INVOICE_PAYMENT_ACTION_REQUIRED: "invoice.payment_action_required",
   /** @aspirational */
-  | "invoice.voided"
+  INVOICE_VOIDED: "invoice.voided",
   /** @emitted by stripe, dodo */
-  | "payment.succeeded"
+  PAYMENT_SUCCEEDED: "payment.succeeded",
   /** @emitted by stripe */
-  | "payment.failed"
+  PAYMENT_FAILED: "payment.failed",
   /** @emitted by stripe */
-  | "refund.created"
+  REFUND_CREATED: "refund.created",
   /** @aspirational */
-  | "refund.updated"
+  REFUND_UPDATED: "refund.updated",
   /** @aspirational */
-  | "refund.failed"
+  REFUND_FAILED: "refund.failed",
   /** @emitted by stripe */
-  | "dispute.created"
+  DISPUTE_CREATED: "dispute.created",
   /** @emitted by stripe */
-  | "dispute.closed"
+  DISPUTE_CLOSED: "dispute.closed",
   /** @aspirational */
-  | "payment_method.attached"
+  PAYMENT_METHOD_ATTACHED: "payment_method.attached",
   /** @aspirational */
-  | "payment_method.updated"
+  PAYMENT_METHOD_UPDATED: "payment_method.updated",
   /** @aspirational */
-  | "payment_method.detached";
+  PAYMENT_METHOD_DETACHED: "payment_method.detached",
+} as const;
+
+export type BillingEventType = (typeof BillingEventType)[keyof typeof BillingEventType];
 
 export type BillingSubscriptionStatus =
   | "incomplete"
@@ -194,6 +197,8 @@ export interface BillingEvent {
 }
 
 // ── Event result ────────────────────────────────────────────────────────
+
+export type BillingEventHandler = (event: BillingEvent, userId: string) => Promise<void>;
 
 export interface BillingEventResult {
   handled: boolean;
