@@ -156,6 +156,17 @@ export async function handleDodoBillingEvent(
       return;
     }
 
+    case "subscription.cancellation_unscheduled": {
+      const subId = String(data.subscription_id ?? "");
+      if (!subId) return;
+      await callBillingManager(bm, {
+        ...baseEvent(rawId),
+        eventType: "subscription.cancellation_unscheduled",
+        subscription: { providerSubscriptionId: subId, cancelAtPeriodEnd: false },
+      });
+      return;
+    }
+
     case "subscription.plan_changed": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;

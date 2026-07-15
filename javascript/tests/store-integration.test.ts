@@ -1934,9 +1934,12 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     // plan must actually exist (unlike MemoryStore, where planId IS the raw
     // plan_key string).
     const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
+    const { rows: activeCatalog } = await pool.query(
+      `SELECT version FROM public.bursar_config WHERE active = true LIMIT 1`,
+    );
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, 1)`,
-      [SUB_PLAN, "pro-monthly"],
+      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, $3)`,
+      [SUB_PLAN, "pro-monthly", activeCatalog[0]?.version ?? 1],
     );
 
     await manager.grantSubscriptionCycle(SUB_USER4, D(100), {

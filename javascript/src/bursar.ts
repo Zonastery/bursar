@@ -10,7 +10,7 @@ export interface BursarOptions {
   billingStore?: BillingStore | null;
   creditManager?: CreditManager | null;
   creditManagerOptions?: CreditManagerOptions | null;
-  billingManagerOptions?: Omit<BillingManagerOptions, "creditManager"> | null;
+  billingManagerOptions?: BillingManagerOptions | null;
   emitter?: CreditEventEmitter | null;
 }
 

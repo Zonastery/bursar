@@ -195,7 +195,6 @@ __all__ = [
     "PortalParams",
     "PostgresBillingStore",
     "BursarConfig",
-    "BursarConfig",
     "BursarConfigResult",
     "PricingEngine",
     "PricingNotLoadedError",

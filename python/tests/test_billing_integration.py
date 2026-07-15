@@ -149,7 +149,7 @@ def _make_components(
     bs = PostgresBillingStore(pg_database_url)
     cm = CreditManager(pg_store)  # type: ignore[arg-type]
     cm.publish_pricing_from_dict(PRICING_DICT)
-    bm = BillingManager(bs, credit_manager=cm)
+    bm = BillingManager(bs, provisioning=cm)
     return bs, cm, bm
 
 
@@ -339,7 +339,7 @@ class TestEventIdempotency:
 
         bm = BillingManager(
             bs,
-            credit_manager=_cm,
+            provisioning=_cm,
             event_handlers={
                 BillingEventType.subscription_trial_will_end: handler,
             },

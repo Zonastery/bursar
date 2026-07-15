@@ -87,14 +87,13 @@ class BillingManager:
     def __init__(
         self,
         billing_store: BillingStore,
-        credit_manager: BillingProvisioningPort | None = None,
         resolve_user: ResolveUserFn | None = None,
         event_handlers: dict[BillingEventType, Callable[[BillingEvent, str], None]] | None = None,
         cancel_prior_providers: bool = True,
         provisioning: BillingProvisioningPort | None = None,
     ) -> None:
         self._store = billing_store
-        self._provisioning = provisioning or credit_manager
+        self._provisioning = provisioning
         self._resolve_user = resolve_user
         self._event_handlers = event_handlers or {}
         self._cancel_prior_providers = cancel_prior_providers

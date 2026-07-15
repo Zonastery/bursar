@@ -879,7 +879,7 @@ function decToJson(value: Decimal): number | string {
 }
 
 /** Convert a validated config to a plain camelCase dict (JSON-safe). */
-function pricingConfigToDict(config: BursarConfig): Record<string, unknown> {
+function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
   const plans = config.plans
     ? Object.fromEntries(
         Object.entries(config.plans).map(([key, plan]) => [
@@ -1023,7 +1023,7 @@ function pricingConfigToDict(config: BursarConfig): Record<string, unknown> {
 /** Validate and return a canonical snake_case config dict for persistence. */
 export function canonicalBursarConfigDict(data: Record<string, unknown>): Record<string, unknown> {
   const config = loadConfigFromDict(data);
-  return camelToSnakeKeys(pricingConfigToDict(config)) as Record<string, unknown>;
+  return camelToSnakeKeys(bursarConfigToDict(config)) as Record<string, unknown>;
 }
 
 /** Load and validate a pricing config from a raw dictionary. */

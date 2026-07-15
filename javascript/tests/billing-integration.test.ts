@@ -127,7 +127,7 @@ async function makePgComponents(pool: pg.Pool) {
   const cm = new CreditManager(cs);
   await cm.publishPricingFromDict(PRICING_DICT);
   const bs = new PostgresBillingStore(pool);
-  const bm = new BillingManager(bs, { creditManager: cm });
+  const bm = new BillingManager(bs, { provisioning: cm });
   return { cs, cm, bs, bm };
 }
 
@@ -1085,7 +1085,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       await cm2.publishPricingFromDict(PRICING_DICT);
       const bs2 = new PostgresBillingStore(pool2);
       const bm2 = new BillingManager(bs2, {
-        creditManager: cm2,
+        provisioning: cm2,
         eventHandlers: {
           [BillingEventType.SUBSCRIPTION_TRIAL_WILL_END]: async (_event, _userId) => {
             called = true;

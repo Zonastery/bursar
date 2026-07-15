@@ -35,8 +35,6 @@ type ResolveUserFn = (
 export interface BillingManagerOptions {
   /** Narrow credit capability used by subscription provisioning. */
   provisioning?: BillingProvisioningPort | null;
-  /** @deprecated Use `provisioning`; retained temporarily for source compatibility. */
-  creditManager?: BillingProvisioningPort | null;
   resolveUser?: ResolveUserFn | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   cancelPriorProviders?: boolean;
@@ -87,7 +85,7 @@ export class BillingManager {
 
   constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
-    this.provisioning = options?.provisioning ?? options?.creditManager ?? null;
+    this.provisioning = options?.provisioning ?? null;
     this.resolveUser = options?.resolveUser ?? null;
     this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
