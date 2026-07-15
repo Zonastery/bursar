@@ -276,9 +276,7 @@ class CreditManager:
 
         cfg = self._store.get_pricing_config(catalog_version)
         if cfg is None or cfg.config is None:
-            raise PricingNotLoadedError(
-                f"No pricing config for pinned catalog version {catalog_version}"
-            )
+            raise PricingNotLoadedError(f"No pricing config for pinned catalog version {catalog_version}")
 
         engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
         self._version_engines[catalog_version] = engine

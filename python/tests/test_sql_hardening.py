@@ -56,9 +56,7 @@ class TestConfigHardening:
                     "ledger": {"min_balance": "0"},
                     "plans": {"pro": {"label": "Pro"}},
                     "billing": {
-                        "subscriptions": {
-                            "pro-monthly": {"plan": "enterprise", "grant": {"mode": "allowance"}}
-                        }
+                        "subscriptions": {"pro-monthly": {"plan": "enterprise", "grant": {"mode": "allowance"}}}
                     },
                 }
             )

@@ -30,10 +30,7 @@ class BillingCustomerRepository:
         if not rows:
             return {"status": "ok"}
         row = rows[0]
-        if isinstance(row, dict):
-            result = row.get("result")
-        else:
-            result = row[0]
+        result = row.get("result") if isinstance(row, dict) else row[0]
         if isinstance(result, dict):
             return result
         return {"status": "ok"}

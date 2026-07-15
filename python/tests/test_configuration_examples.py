@@ -137,7 +137,7 @@ def test_configuration_mdx_examples_validate(config: dict) -> None:
 
 def test_scalar_entitlement_shorthand_rejected() -> None:
     """Entitlements must be objects — plain scalars like chat: true are invalid."""
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         load_config_from_dict(
             {
                 "version": 1,

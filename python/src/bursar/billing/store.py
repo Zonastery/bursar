@@ -45,7 +45,7 @@ class BillingStore(ABC):
         provider_customer_id: str,
         user_id: str,
         email: str | None = None,
-    ) -> None: ...
+    ) -> dict[str, Any]: ...
 
     @abstractmethod
     def upsert_billing_subscription(

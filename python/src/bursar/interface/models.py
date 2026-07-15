@@ -87,7 +87,7 @@ class PricingConfigResult(BaseModel):
     label: str | None = None
 
     @model_validator(mode="after")
-    def _sync_publication_version(self) -> "PricingConfigResult":
+    def _sync_publication_version(self) -> PricingConfigResult:
         if self.publication_version is None:
             self.publication_version = self.version
         return self

@@ -893,9 +893,7 @@ class PostgresStore(CreditStore):
             StoreError: If the RPC fails or returns no data.
         """
         try:
-            result = self._plan_repo.migrate_plan_users(
-                plan_key, target_config_version, None
-            )
+            result = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
         except psycopg2.Error as e:
             raise StoreError(f"migrate_plan_users failed: {e}") from e
 

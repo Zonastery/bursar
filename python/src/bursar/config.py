@@ -151,8 +151,10 @@ class PricingConfig(BaseModel):
         if grant is not None:
             if not bucket_keys:
                 raise ConfigError(
-                    "ledger.signup_grant requires ledger.buckets — define the target bucket before enabling signup grants"
+                    "ledger.signup_grant requires ledger.buckets — "
+                    "define the target bucket before enabling signup grants"
                 )
+            assert buckets is not None  # narrowed by not bucket_keys above
             if grant.bucket not in bucket_keys:
                 raise ConfigError(
                     f"ledger.signup_grant.bucket references unknown bucket '{grant.bucket}' "
