@@ -20,6 +20,8 @@ from bursar.interface.models import (
     AvailableResult,
     BalanceResult,
     BucketBalancesResult,
+    BursarConfigHistoryItem,
+    BursarConfigResult,
     CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
@@ -30,8 +32,6 @@ from bursar.interface.models import (
     GetUserPlanResult,
     LeaseResult,
     MigratePlanUsersResult,
-    PricingConfigHistoryItem,
-    PricingConfigResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -395,7 +395,7 @@ class CreditStore(ABC):
     # ── Pricing configuration ──────────────────────────────────────────
 
     @abstractmethod
-    def get_active_pricing(self) -> PricingConfigResult | None:
+    def get_active_pricing(self) -> BursarConfigResult | None:
         """Fetch the active pricing configuration from the store."""
         ...
 
@@ -413,12 +413,12 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
+    def get_pricing_history(self) -> list[BursarConfigHistoryItem]:
         """List all pricing config versions (newest first)."""
         ...
 
     @abstractmethod
-    def get_pricing_config(self, version: int) -> PricingConfigResult | None:
+    def get_bursar_config(self, version: int) -> BursarConfigResult | None:
         """Fetch a specific pricing config by version number."""
         ...
 

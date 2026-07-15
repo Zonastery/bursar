@@ -85,7 +85,7 @@ export interface BillingSection {
 }
 
 /** Internal validated pricing configuration. */
-export interface PricingConfig {
+export interface BursarConfig {
   version: number;
   metering: MeteringConfig;
   ledger: LedgerConfig;
@@ -213,7 +213,7 @@ function assertKnownKeys(
 /** Variable set for validating `tools` expressions: base set + `calls` (WS2). */
 const TOOLS_VARIABLES: ReadonlySet<string> = new Set([...KNOWN_VARIABLES, "calls"]);
 
-function validateExpressions(raw: PricingConfig): void {
+function validateExpressions(raw: BursarConfig): void {
   for (const [key, expr] of Object.entries(raw.metering.models)) {
     try {
       validateExpression(expr, KNOWN_VARIABLES);
@@ -801,7 +801,7 @@ function parseBilling(raw: unknown): BillingSection | undefined {
   };
 }
 
-function validatePlanReferences(config: PricingConfig): void {
+function validatePlanReferences(config: BursarConfig): void {
   const billing = config.billing;
   if (!billing?.subscriptions || Object.keys(billing.subscriptions).length === 0) return;
   const plans = config.plans ?? {};
@@ -814,7 +814,7 @@ function validatePlanReferences(config: PricingConfig): void {
   }
 }
 
-function validateRateOverrideKeys(config: PricingConfig): void {
+function validateRateOverrideKeys(config: BursarConfig): void {
   if (!config.plans) return;
   const modelKeys = new Set(Object.keys(config.metering.models));
   for (const [planId, planDef] of Object.entries(config.plans)) {
@@ -830,7 +830,7 @@ function validateRateOverrideKeys(config: PricingConfig): void {
   }
 }
 
-function validateBucketReferences(config: PricingConfig): void {
+function validateBucketReferences(config: BursarConfig): void {
   const buckets = config.ledger.buckets;
   const bucketKeys = buckets ? new Set(Object.keys(buckets)) : null;
 
@@ -879,7 +879,7 @@ function decToJson(value: Decimal): number | string {
 }
 
 /** Convert a validated config to a plain camelCase dict (JSON-safe). */
-function pricingConfigToDict(config: PricingConfig): Record<string, unknown> {
+function pricingConfigToDict(config: BursarConfig): Record<string, unknown> {
   const plans = config.plans
     ? Object.fromEntries(
         Object.entries(config.plans).map(([key, plan]) => [
@@ -1021,13 +1021,13 @@ function pricingConfigToDict(config: PricingConfig): Record<string, unknown> {
 }
 
 /** Validate and return a canonical snake_case config dict for persistence. */
-export function canonicalPricingConfigDict(data: Record<string, unknown>): Record<string, unknown> {
+export function canonicalBursarConfigDict(data: Record<string, unknown>): Record<string, unknown> {
   const config = loadConfigFromDict(data);
   return camelToSnakeKeys(pricingConfigToDict(config)) as Record<string, unknown>;
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
-export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig {
+export function loadConfigFromDict(data: Record<string, unknown>): BursarConfig {
   const d = normaliseKeys(data);
   assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
 
@@ -1044,7 +1044,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): PricingConfig
   const plans = parsePlans(d as Record<string, unknown>);
   const billing = parseBilling(d.billing);
 
-  const config: PricingConfig = { version, metering, ledger };
+  const config: BursarConfig = { version, metering, ledger };
   if (plans) config.plans = plans;
   if (billing) config.billing = billing;
 

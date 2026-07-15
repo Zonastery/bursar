@@ -111,7 +111,7 @@ Grant = Annotated[AllowanceGrant | CycleGrant, Field(discriminator="mode")]
 ```
 - `BillingOffer.grant: Grant = Field(default_factory=lambda: AllowanceGrant())`
   (`billing/models.py:170`).
-- `BillingConfig.from_pricing_config` (`billing/models.py:192-215`) already
+- `BillingConfig.from_bursar_config` (`billing/models.py:192-215`) already
   forwards `billing_data.subscriptions` values; confirm dict→model construction
   uses the union (Pydantic discriminated union validates the `mode` tag).
 

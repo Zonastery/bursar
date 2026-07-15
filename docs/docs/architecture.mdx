@@ -5,7 +5,7 @@
 ```
 bursar/
 ├── expr.py              # Safe AST expression evaluator (exact Decimal math)
-├── config.py            # Pydantic model + dict loading for PricingConfig
+├── config.py            # Pydantic model + dict loading for BursarConfig
 ├── engine.py            # PricingEngine — core calculation logic (Decimal)
 ├── metrics.py           # UsageMetrics, ToolCall dataclasses
 ├── breakdown.py         # CostBreakdown model (Decimal components + total)
@@ -21,7 +21,7 @@ bursar/
 └── sql/
     ├── 001_core_schema.sql       # user_credits, credit_transactions, credit_reservations, RLS, signup bonus
     ├── 002_credit_rpcs.sql       # credits_add, get_credits_balance
-    ├── 003_pricing_config.sql   # pricing config table + get/set/list/activate RPCs
+    ├── 003_bursar_config.sql   # pricing config table + get/set/list/activate RPCs
     ├── 004_plans.sql             # subscription plans, usage windows, allowance RPCs
     ├── 005_spend_caps.sql        # spend cap table + check_spend_cap RPC
     ├── 006_refunds_and_expiry.sql # refund_credits, expire_credits
@@ -127,7 +127,7 @@ After a successful deduction the manager may emit `credits.low_balance`. The thr
 
 Implementing a custom `CreditStore` backend used to mean implementing every abstract method, including several feature areas many integrators never touch. The interface now separates **core** methods (required) from **optional capability groups** (each with a default implementation that raises `CapabilityNotSupportedError` unless you override it):
 
-- **Core (required):** credit balance / add / deduct (`get_balance`, `add_credits`, `deduct_with_allowance`), the full lease lifecycle (`create_lease` / `settle_lease` / `release_lease` / `renew_lease` / `get_available`), pricing config versioning (`get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing`), plan management (`set_user_plan`, `get_user_plan`, `check_feature`, `check_allowance`), spend cap checks (`check_spend_cap`), refunds (`refund_credits`), and the credit expiry sweep (`sweep_expired_credits`).
+- **Core (required):** credit balance / add / deduct (`get_balance`, `add_credits`, `deduct_with_allowance`), the full lease lifecycle (`create_lease` / `settle_lease` / `release_lease` / `renew_lease` / `get_available`), pricing config versioning (`get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_bursar_config`, `activate_pricing`), plan management (`set_user_plan`, `get_user_plan`, `check_feature`, `check_allowance`), spend cap checks (`check_spend_cap`), refunds (`refund_credits`), and the credit expiry sweep (`sweep_expired_credits`).
 - **Optional — Analytics:** `spend_by_user`/`spendByUser`, `spend_by_model`/`spendByModel`, `top_users`/`topUsers`, `daily_spend`/`dailySpend`, `aggregate_stats`/`aggregateStats`.
 - **Optional — Transaction listing:** `list_user_transactions`/`listUserTransactions`.
 - **Optional — Teams:** `create_team`/`createTeam`, `get_team_balance`/`getTeamBalance`, `add_team_member`/`addTeamMember`, `get_team_members`/`getTeamMembers`, `deduct_team`/`deductTeam`.

@@ -13,7 +13,7 @@ import {
 import { LRUCache } from "lru-cache";
 import type { PricingEngine } from "./engine.js";
 import { PricingEngine as PricingEngineClass } from "./engine.js";
-import { canonicalPricingConfigDict } from "./config.js";
+import { canonicalBursarConfigDict } from "./config.js";
 import type {
   AddCreditsResult,
   AggregateStats,
@@ -34,7 +34,7 @@ import type {
   LeaseResult,
   MigratePlanUsersResult,
   OperationPolicy,
-  PricingConfigResult,
+  BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetupResult,
@@ -332,7 +332,7 @@ export class CreditManager {
 
   /** Load pricing from a raw dict and sync it. */
   async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
-    const canonical = canonicalPricingConfigDict(data);
+    const canonical = canonicalBursarConfigDict(data);
     this.engine = PricingEngineClass.fromDict(canonical);
     this.versionEngines.clear();
     this.pricingCache.set("pricing", this.engine);
@@ -398,7 +398,7 @@ export class CreditManager {
     const cached = this.versionEngines.get(catalogVersion);
     if (cached) return cached;
 
-    const cfg = await this.store.getPricingConfig(catalogVersion);
+    const cfg = await this.store.getBursarConfig(catalogVersion);
     if (!cfg?.config) {
       throw new PricingNotLoadedError(
         `no pricing config for pinned catalog version ${catalogVersion}`,
@@ -418,11 +418,27 @@ export class CreditManager {
    * unhandled promise rejection.
    */
   async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
-    const canonical = canonicalPricingConfigDict(config);
+    const canonical = canonicalBursarConfigDict(config);
     this.engine = PricingEngineClass.fromDict(canonical);
     this.versionEngines.clear();
     this.pricingCache.set("pricing", this.engine);
     await this.store.setActivePricing(canonical, label);
+  }
+
+  /** Publish a validated, inactive catalog draft. */
+  async publishPricingDraft(
+    config: Record<string, unknown>,
+    label?: string | null,
+  ): Promise<string> {
+    const canonical = canonicalBursarConfigDict(config);
+    return this.store.publishPricing(canonical, label);
+  }
+
+  /** Activate an existing catalog version and reload the local engine. */
+  async activatePricing(version: number): Promise<string> {
+    const id = await this.store.activatePricing(version);
+    await this.loadPricingFromStore();
+    return id;
   }
 
   /** The current PricingEngine, or null if not loaded. */
@@ -433,9 +449,9 @@ export class CreditManager {
   /** Fetch the active pricing config directly from the store.
    *
    * Unlike loadPricingFromStore (which loads into the engine),
-   * this returns the raw PricingConfigResult without updating engine state.
+   * this returns the raw BursarConfigResult without updating engine state.
    */
-  async getActivePricing(): Promise<PricingConfigResult | null> {
+  async getActivePricing(): Promise<BursarConfigResult | null> {
     return this.store.getActivePricing();
   }
 

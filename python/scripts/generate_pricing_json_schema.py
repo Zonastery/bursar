@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate docs/pricing-config.schema.json from PricingConfig.model_json_schema()."""
+"""Generate docs/bursar-config.schema.json from BursarConfig.model_json_schema()."""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 
-from bursar.config import PricingConfig  # noqa: E402
+from bursar.config import BursarConfig  # noqa: E402
 
 _REPO_ROOT = _ROOT.parent
-OUTPUT = _REPO_ROOT / "docs" / "pricing-config.schema.json"
+OUTPUT = _REPO_ROOT / "docs" / "bursar-config.schema.json"
 
 
 def main() -> None:
-    schema = PricingConfig.model_json_schema()
+    schema = BursarConfig.model_json_schema()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
     print(f"Wrote {OUTPUT}")

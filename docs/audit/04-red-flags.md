@@ -8,7 +8,7 @@ Security concerns, data integrity risks, silent failures, and identity conflatio
 |---|---|---|
 | #8 — Mock declares `provider = "dodo"` | MEDIUM | ✅ Fixed |
 | #9 — NULL conflates "not found" vs "permission failure" | MEDIUM | ✅ Fixed |
-| #10 — `set_active_pricing_config` swallows billing errors | MEDIUM | ✅ Fixed |
+| #10 — `set_active_bursar_config` swallows billing errors | MEDIUM | ✅ Fixed |
 | #33 — `camelToSnake` lowercases all keys | LOW | ✅ Fixed |
 
 **4/4 fixed.**
@@ -160,7 +160,7 @@ This ensures permission failures are loud, not silent.
 
 ---
 
-## [MEDIUM] #10 — `set_active_pricing_config` swallows billing sync errors ✅ Fixed
+## [MEDIUM] #10 — `set_active_bursar_config` swallows billing sync errors ✅ Fixed
 
 ### Location
 
@@ -181,8 +181,8 @@ END;
 
 ### Impact
 
-When `set_active_pricing_config` is called (e.g. when publishing a new pricing config via the CLI or API), it:
-1. Inserts a new `credit_pricing_config` row ✅
+When `set_active_bursar_config` is called (e.g. when publishing a new pricing config via the CLI or API), it:
+1. Inserts a new `bursar_config` row ✅
 2. Syncs plans ✅
 3. Syncs tiers ✅
 4. Syncs billing offers/topups — **if this fails, it's swallowed as a WARNING**

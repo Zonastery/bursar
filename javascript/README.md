@@ -310,7 +310,7 @@ engine.calculateBatch(metrics: UsageMetrics[]): CostBreakdown[]
 engine.resolveModel(modelVersion: string): string | null
 engine.hasModel(modelName: string): boolean
 engine.getFixedCost(jobName: string): Decimal | null
-engine.pricingSchema(): PricingConfigData
+engine.pricingSchema(): BursarConfigData
 engine.knownVariables: Set<string>
 engine.minBalance: number
 ```

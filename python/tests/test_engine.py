@@ -294,7 +294,7 @@ class TestEmptyToolCallsNoToolsConfig:
     """EN2 — empty tool_calls=[] with a config that has no 'tools' section."""
 
     def test_empty_tool_calls_zero_cost(self) -> None:
-        # Config has no 'tools' key; PricingConfig defaults to {"_default": "tool_calls * 0"}.
+        # Config has no 'tools' key; BursarConfig defaults to {"_default": "tool_calls * 0"}.
         # tool_calls=[] -> tool_count=0, formula=0*0=0 -> tool_credits=0.
         engine = PricingEngine.from_dict(MINIMAL_PRICING)
         result = engine.calculate(UsageMetrics(model="_default", tool_calls=[]))

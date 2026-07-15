@@ -122,14 +122,14 @@ export interface DeductWithAllowanceOptions {
 }
 
 /** Pricing config fetched from store. */
-export interface PricingConfigResult {
+export interface BursarConfigResult {
   id: string;
   config: Record<string, unknown>;
   version: number;
 }
 
 /** Lightweight summary for pricing version listing (H8 parity with Python base.py). */
-export interface PricingConfigHistoryItem {
+export interface BursarConfigHistoryItem {
   id: string;
   version: number;
   label: string | null;

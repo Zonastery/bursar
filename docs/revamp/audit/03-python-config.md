@@ -52,8 +52,8 @@ A fully-typed `BillingConfig` already exists (`billing/models.py:185`).
   (including the `grant` discriminated union from C3) with `extra="forbid"`.
 - `validate_plan_references` (`config.py:154-163`): use
   `offer.plan` (attribute) instead of `offer.get("plan")`.
-- Confirm `PricingConfig.billing: BillingSection` still round-trips through
-  `BillingConfig.from_pricing_config` (`billing/models.py:192-215`).
+- Confirm `BursarConfig.billing: BillingSection` still round-trips through
+  `BillingConfig.from_bursar_config` (`billing/models.py:192-215`).
 
 ---
 
@@ -120,9 +120,9 @@ constraints live on the Pydantic models.
 
 ## 3.6 Note on `BillingSection` and `BillingConfig`
 
-After 3.2, `PricingConfig.billing` (`BillingSection`) and the standalone
+After 3.2, `BursarConfig.billing` (`BillingSection`) and the standalone
 `BillingConfig` (`billing/models.py:185`) share the same offer/topup model
-types. `BillingConfig.from_pricing_config` (`billing/models.py:192-215`) is the
+types. `BillingConfig.from_bursar_config` (`billing/models.py:192-215`) is the
 single bridge from the pricing config to the billing runtime — confirm it still
 constructs the typed `BillingOffer`/`BillingCreditTopup` (with the `grant`
 union) rather than passing raw dicts through.

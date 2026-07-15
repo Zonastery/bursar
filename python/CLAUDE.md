@@ -16,7 +16,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 | `src/bursar/engine.py` | `PricingEngine` — evaluates expression strings against `UsageMetrics`. |
 | `src/bursar/events.py` | `CreditEventEmitter` — typed pub/sub, 19 event types. |
 | `src/bursar/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
-| `src/bursar/config.py` | `PricingConfig` — validates expression strings at load time. |
+| `src/bursar/config.py` | `BursarConfig` — validates expression strings at load time. |
 | `src/bursar/expr.py` | Safe `ast`-based expression evaluator for pricing formulas. |
 | `src/bursar/billing/manager.py` | `BillingManager` — provider-agnostic billing orchestration. |
 | `src/bursar/billing/postgres.py` | `PostgresBillingStore` — billing state persistence via `psycopg2`. |

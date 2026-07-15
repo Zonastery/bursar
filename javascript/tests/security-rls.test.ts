@@ -128,8 +128,8 @@ function rpcCalls(): Record<string, { sql: string; params: unknown[] }> {
       sql: "SELECT public.deduct_team($1, $2, 10)",
       params: [randomUUID(), randomUUID()],
     },
-    set_active_pricing_config: {
-      sql: "SELECT public.set_active_pricing_config('{}'::jsonb)",
+    set_active_bursar_config: {
+      sql: "SELECT public.set_active_bursar_config('{}'::jsonb)",
       params: [],
     },
     spend_by_model: {

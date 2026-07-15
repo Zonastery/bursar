@@ -20,7 +20,7 @@ Every store implements `CreditStore`. All money arguments and return fields are 
 |----------|---------|
 | Balances | `get_balance`, `add_credits`, `deduct_with_allowance`, `get_credit_tiers` |
 | Leases | `create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available` |
-| Pricing | `get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_pricing_config`, `activate_pricing` |
+| Pricing | `get_active_pricing`, `set_active_pricing`, `get_pricing_history`, `get_bursar_config`, `activate_pricing` |
 | Plans | `get_user_plan`, `check_feature`, `set_user_plan`, `check_allowance`, `increment_usage_window` |
 | Spend caps | `check_spend_cap` |
 | Refunds | `refund_credits` |
@@ -140,7 +140,7 @@ The bundled SQL files create the required schema — 10 files, one per feature d
 |------|---------|
 | `001_core_schema.sql` | `user_credits`, `credit_transactions`, `credit_reservations` tables, RLS policies, signup bonus trigger |
 | `002_credit_rpcs.sql` | Core RPCs: `credits_add`, `get_credits_balance` (user-scoped, atomic idempotency) |
-| `003_pricing_config.sql` | `credit_pricing_config` table, get/set/list/activate RPCs |
+| `003_bursar_config.sql` | `bursar_config` table, get/set/list/activate RPCs |
 | `004_plans.sql` | `credit_plans`, `credit_usage_window` tables, plan + allowance-window RPCs |
 | `005_spend_caps.sql` | `credit_spend_caps` table, `check_spend_cap` RPC |
 | `006_refunds_and_expiry.sql` | `refund_credits` (duplicate detection, partial refunds, tier LIFO restoration) and `expire_credits` (dry-run support; marks swept grants so it never double-sweeps) |

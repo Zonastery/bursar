@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from bursar.billing.manager import BillingManager
+from bursar.billing.manager import BillingManager, BillingProvisioningPort
 from bursar.billing.models import (
     AllowanceGrant,
     BillingConfig,
@@ -58,6 +58,7 @@ __all__ = [
     "BillingOfferInterval",
     "BillingPaymentInfo",
     "BillingPreferences",
+    "BillingProvisioningPort",
     "BillingProvider",
     "ProviderRef",
     "BillingRefundInfo",

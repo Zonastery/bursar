@@ -22,8 +22,8 @@ The config grew feature-by-feature into 12 flat top-level keys that actually
 belong to four different domains, with no structural signal of what relates to
 what. Concrete problems found in the current code:
 
-- Two competing config models that silently drift: `PricingConfig`
-  (`python/src/bursar/config.py`) and `PricingConfigData`
+- Two competing config models that silently drift: `BursarConfig`
+  (`python/src/bursar/config.py`) and `BursarConfigData`
   (`python/src/bursar/interface/models.py`), kept in sync only by a field-set
   parity test. `PricingEngine.pricing_schema()` rebuilds one from the other and
   drops `tiers`/`subscriptions`/`credit_topups`/`signup_bonus`/`version`.
@@ -257,7 +257,7 @@ Billing:
 - `BillingCreditTopup.credits_per_major_unit` -> `credits_per_unit`; `.tier` -> `deposit_to`; per-topup `currency` -> global `billing.currency`.
 
 Models:
-- Delete `PricingConfigData`; single `PricingConfig` persisted and returned by `PricingEngine.pricing_schema()`.
+- Delete `BursarConfigData`; single `BursarConfig` persisted and returned by `PricingEngine.pricing_schema()`.
 
 ## 6. Validation rules
 

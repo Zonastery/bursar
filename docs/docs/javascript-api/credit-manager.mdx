@@ -52,7 +52,7 @@ const result = await manager.setup();
 
 ## Pricing
 
-### `publishPricingFromDict(data: PricingConfigData | Record<string, unknown>): Promise<void>`
+### `publishPricingFromDict(data: BursarConfigData | Record<string, unknown>): Promise<void>`
 
 Build a `PricingEngine` from a dict and persist it to the store in one call.
 
@@ -66,9 +66,9 @@ await manager.publishPricingFromDict({
 
 Load the active pricing config from the store and build the engine. Throws `PricingNotLoadedError` if no active config exists.
 
-### `publishPricing(config: PricingConfigData, label?: string | null): Promise<void>`
+### `publishPricing(config: BursarConfigData, label?: string | null): Promise<void>`
 
-Publish a typed `PricingConfigData` and update the in-memory engine. Awaits the store write so a persistence failure surfaces to the caller instead of becoming an unhandled rejection. Optional `label` tags the stored config version.
+Publish a typed `BursarConfigData` and update the in-memory engine. Awaits the store write so a persistence failure surfaces to the caller instead of becoming an unhandled rejection. Optional `label` tags the stored config version.
 
 ## Balance Operations
 

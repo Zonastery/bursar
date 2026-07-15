@@ -35,8 +35,8 @@ accept/reject case.
 ### Notebook (acceptance artifact)
 ```sh
 jupyter nbconvert --to notebook --execute \
-  samples/python/notebooks/15_pricing_config_schema.ipynb \
-  --output 15_pricing_config_schema.executed.ipynb
+  samples/python/notebooks/15_bursar_config_schema.ipynb \
+  --output 15_bursar_config_schema.executed.ipynb
 ```
 Must complete top-to-bottom with no errors.
 
@@ -89,8 +89,8 @@ Any other hit is an incomplete migration and must be fixed.
 
 ## 8.4 Acceptance criteria (from `implementation-plan.md`)
 
-1. ✅ (after Step 4) Single `PricingConfig` model in Python; no
-   `PricingConfigData`.
+1. ✅ (after Step 4) Single `BursarConfig` model in Python; no
+   `BursarConfigData`.
 2. ✅ (after Steps 2.2/3.2/3.3) `subscriptions`/`topups` fully typed; no
    `dict[str, dict]`; no `BillingOffer(offer_key=…)` hand-wrapping; `grant` is
    a discriminated union.

@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { evaluateExpression } from "./expr.js";
-import type { PricingConfig } from "./config.js";
+import type { BursarConfig } from "./config.js";
 import { loadConfigFromDict } from "./config.js";
 import type { CostBreakdown } from "./breakdown.js";
 import { makeCostBreakdown } from "./breakdown.js";
@@ -14,9 +14,9 @@ import { ConfigError } from "./errors.js";
  * breakdowns. All money values are exact `Decimal`s — never binary `number`.
  */
 export class PricingEngine {
-  private config: PricingConfig;
+  private config: BursarConfig;
 
-  constructor(config: PricingConfig) {
+  constructor(config: BursarConfig) {
     this.config = config;
   }
 
@@ -62,10 +62,16 @@ export class PricingEngine {
       version: this.config.version,
       metering: {
         models: { ...this.config.metering.models },
-        tools: Object.keys(this.config.metering.tools).length > 0 ? { ...this.config.metering.tools } : null,
+        tools:
+          Object.keys(this.config.metering.tools).length > 0
+            ? { ...this.config.metering.tools }
+            : null,
         search: this.config.metering.search ?? null,
         cacheDiscount: this.config.metering.cacheDiscount ?? null,
-        flatJobs: Object.keys(this.config.metering.flatJobs).length > 0 ? { ...this.config.metering.flatJobs } : null,
+        flatJobs:
+          Object.keys(this.config.metering.flatJobs).length > 0
+            ? { ...this.config.metering.flatJobs }
+            : null,
       },
       ledger: {
         minBalance: this.config.ledger.minBalance,

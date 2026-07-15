@@ -146,7 +146,7 @@ DECLARE
   v_bonus NUMERIC;
 BEGIN
   SELECT COALESCE(
-    (SELECT (config->'ledger'->>'signup_grant')::numeric FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1),
+    (SELECT (config->'ledger'->>'signup_grant')::numeric FROM public.bursar_config WHERE active = TRUE LIMIT 1),
     50
   ) INTO v_bonus;
 

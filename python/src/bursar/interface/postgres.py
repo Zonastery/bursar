@@ -26,6 +26,8 @@ from bursar.interface.models import (
     BalanceResult,
     BucketBalance,
     BucketBalancesResult,
+    BursarConfigHistoryItem,
+    BursarConfigResult,
     CreateTeamResult,
     CreditMetadata,
     DailySpendRow,
@@ -37,8 +39,6 @@ from bursar.interface.models import (
     LeaseResult,
     MigratePlanUsersResult,
     OperationPolicy,
-    PricingConfigHistoryItem,
-    PricingConfigResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -697,17 +697,17 @@ class PostgresStore(CreditStore):
 
     # ── Pricing configuration ──────────────────────────────────────────
 
-    def get_active_pricing(self) -> PricingConfigResult | None:
+    def get_active_pricing(self) -> BursarConfigResult | None:
         return self._load_active_pricing()
 
-    def _normalize_pricing_config(self, result: Any) -> PricingConfigResult | None:
-        """Normalize a raw pricing config DB result into PricingConfigResult."""
+    def _normalize_bursar_config(self, result: Any) -> BursarConfigResult | None:
+        """Normalize a raw pricing config DB result into BursarConfigResult."""
         if result is None:
             return None
-        return PricingConfigResult.model_validate(result.model_dump())
+        return BursarConfigResult.model_validate(result.model_dump())
 
-    def _load_active_pricing(self) -> PricingConfigResult | None:
-        return self._normalize_pricing_config(self._pricing_repo.get_active_pricing())
+    def _load_active_pricing(self) -> BursarConfigResult | None:
+        return self._normalize_bursar_config(self._pricing_repo.get_active_pricing())
 
     def set_active_pricing(
         self,
@@ -727,23 +727,23 @@ class PostgresStore(CreditStore):
             StoreError: If the RPC returns no result.
             ConfigError: If the config fails validation.
         """
-        from bursar.config import canonical_pricing_config_dict
+        from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_pricing_config_dict(config)
+        canonical = canonical_bursar_config_dict(config)
         result = self._pricing_repo.set_active_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
         if result is None:
             raise StoreError("set_active_pricing returned no result")
         return str(getattr(result, "id", ""))
 
-    def get_pricing_history(self) -> list[PricingConfigHistoryItem]:
+    def get_pricing_history(self) -> list[BursarConfigHistoryItem]:
         """Get all pricing configuration versions.
 
         Returns:
-            List of PricingConfigHistoryItem (may be empty).
+            List of BursarConfigHistoryItem (may be empty).
         """
         rows = self._pricing_repo.get_pricing_history()
         return [
-            PricingConfigHistoryItem(
+            BursarConfigHistoryItem(
                 id=str(r.id),
                 version=r.version,
                 label=r.label,
@@ -753,16 +753,16 @@ class PostgresStore(CreditStore):
             for r in rows
         ]
 
-    def get_pricing_config(self, version: int) -> PricingConfigResult | None:
+    def get_bursar_config(self, version: int) -> BursarConfigResult | None:
         """Get a specific pricing configuration by version number.
 
         Args:
             version: The version number to retrieve.
 
         Returns:
-            PricingConfigResult if found, None otherwise.
+            BursarConfigResult if found, None otherwise.
         """
-        return self._normalize_pricing_config(self._pricing_repo.get_pricing_config(version))
+        return self._normalize_bursar_config(self._pricing_repo.get_bursar_config(version))
 
     def activate_pricing(self, version: int) -> str:
         """Activate a specific pricing configuration version.
@@ -788,9 +788,9 @@ class PostgresStore(CreditStore):
         label: str | None = None,
     ) -> str:
         """Publish an inactive pricing configuration draft."""
-        from bursar.config import canonical_pricing_config_dict
+        from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_pricing_config_dict(config)
+        canonical = canonical_bursar_config_dict(config)
         result = self._pricing_repo.publish_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
         if result is None:
             raise StoreError("publish_pricing returned no result")

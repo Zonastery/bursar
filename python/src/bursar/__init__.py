@@ -34,11 +34,13 @@ from bursar.billing import (
     CycleGrant,
     ProviderRef,
 )
+from bursar.billing.manager import BillingProvisioningPort
 from bursar.breakdown import CostBreakdown
+from bursar.bursar import Bursar, CatalogService
 
 if TYPE_CHECKING:
     from bursar.billing import PostgresBillingStore
-from bursar.config import ConfigError, PricingConfig
+from bursar.config import BursarConfig, ConfigError
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter
 from bursar.expr import ExpressionError, evaluate_expression, validate_expression
@@ -59,6 +61,7 @@ from bursar.interface.models import (
     BucketBalance,
     BucketBalancesResult,
     BucketDefinition,
+    BursarConfigResult,
     CanAffordResult,
     CapCheckResult,
     CheckFeatureResult,
@@ -72,7 +75,6 @@ from bursar.interface.models import (
     LeaseResult,
     OperationPolicy,
     PlanDefinition,
-    PricingConfigResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -91,12 +93,10 @@ from bursar.interface.models import (
 from bursar.manager import (
     ConcurrencyLimitError,
     CreditError,
-    CreditManager,
     FeatureNotEntitledError,
     InsufficientCreditsError,
     LeaseExpiredError,
     LeaseNotFoundError,
-    LowBalanceConfig,
     PricingNotLoadedError,
 )
 from bursar.metrics import ToolCall, UsageMetrics
@@ -149,6 +149,9 @@ __all__ = [
     "BillingProvider",
     "BillingRefundInfo",
     "BillingStore",
+    "BillingProvisioningPort",
+    "Bursar",
+    "CatalogService",
     "BillingSubscriptionInfo",
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
@@ -169,7 +172,6 @@ __all__ = [
     "CreditError",
     "CreditEvent",
     "CreditEventEmitter",
-    "CreditManager",
     "CreditMetadata",
     "CycleGrant",
     "DailySpendRow",
@@ -185,7 +187,6 @@ __all__ = [
     "LeaseExpiredError",
     "LeaseNotFoundError",
     "LeaseResult",
-    "LowBalanceConfig",
     "OperationPolicy",
     "PaymentMethodInfo",
     "PaymentMethodSetupParams",
@@ -193,8 +194,9 @@ __all__ = [
     "PlanDefinition",
     "PortalParams",
     "PostgresBillingStore",
-    "PricingConfig",
-    "PricingConfigResult",
+    "BursarConfig",
+    "BursarConfig",
+    "BursarConfigResult",
     "PricingEngine",
     "PricingNotLoadedError",
     "ProviderLogger",

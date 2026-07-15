@@ -181,7 +181,7 @@ Same fallback removals (mirror of the above).
 ### `python/src/bursar/billing/models.py`
 - `BillingSubscriptionState` (`222-235`): rename `plan_key` → `plan` (`228`).
   Keep `offer_key`.
-- `BillingConfig.from_pricing_config` (`192-215`): no change (already builds the
+- `BillingConfig.from_bursar_config` (`192-215`): no change (already builds the
   new model); confirm `grant` is the new union (C3).
 
 ---

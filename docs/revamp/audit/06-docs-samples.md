@@ -17,7 +17,7 @@ is empty. The docs still describe the old flat schema (`_default`,
 | `expressions.mdx` | `calls` (not `this_tool_calls`); `calls` valid only in `metering.tools`; `cache_discount` is a **positive** number the engine subtracts (not the old negative `cache`); global variable list unchanged. |
 | `subscription-integration.mdx` | `grant: {mode: allowance}` vs `{mode: cycle_grant, credits, bucket, replace_prior}`; `providers` map (key = provider, value = `ProviderRef`); `deposit_to` (not `tier`); `credits_per_unit` (not `credits_per_major_unit`); global `billing.currency`. |
 | `cli.mdx` | `bursar config schema` emits the new JSON Schema; `bursar config set` validates the new shape. Update example output. |
-| `python-api/pricing-engine.mdx` | `pricing_schema()` returns the single `PricingConfig`; `get_flat_job_cost` (not `get_fixed_cost`); `UsageMetrics.flat_job` (not `fixed_job`). |
+| `python-api/pricing-engine.mdx` | `pricing_schema()` returns the single `BursarConfig`; `get_flat_job_cost` (not `get_fixed_cost`); `UsageMetrics.flat_job` (not `fixed_job`). |
 | `javascript-api/index.mdx` | `pricingSchema()`; `getFlatJobCost`; `UsageMetrics.flatJob`; `getBucketBalances` (not `getCreditTiers`); `bucket` param on `addCredits`/`deductCredits`. |
 | `python-api/index.mdx` | Update exported symbols: `BucketDefinition`, `BucketBalance`, `BucketBalancesResult`, `ProviderRef`, `AllowanceGrant`, `CycleGrant`. |
 
@@ -26,8 +26,8 @@ is empty. The docs still describe the old flat schema (`_default`,
 ## 6.2 READMEs + samples
 
 - `python/README.md`, `javascript/README.md`: config snippets in the new shape;
-  `python/README.md:313` currently says `engine.pricingSchema(): PricingConfigData`
-  → `Record<string, unknown>` (or the new `PricingConfig`).
+  `python/README.md:313` currently says `engine.pricingSchema(): BursarConfigData`
+  → `Record<string, unknown>` (or the new `BursarConfig`).
 - Locate and update sample `pricing.{yaml,json}` fixtures under `samples/` and
   any `docs/` example files: convert `models`/`tools`/`search`/`cache`/`fixed`
   top-level → `metering.*`; `min_balance`/`signup_bonus`/`tiers` → `ledger.*`
@@ -41,9 +41,9 @@ is empty. The docs still describe the old flat schema (`_default`,
 
 ## 6.3 Notebooks
 
-- `samples/python/notebooks/15_pricing_config_schema.ipynb` — **full rewrite**
+- `samples/python/notebooks/15_bursar_config_schema.ipynb` — **full rewrite**
   (acceptance artifact). Every cell must run against the new schema, including
-  the `BillingConfig.from_pricing_config` path replacing the old manual
+  the `BillingConfig.from_bursar_config` path replacing the old manual
   `BillingOffer(offer_key=…)` rewrap. Cover: four sections, `*` fallback,
   `calls`, `cache_discount` positive sign, `flat_jobs`, `ledger.buckets`,
   `plans.*.entitlements`, `billing.subscriptions.*.grant` (both modes),

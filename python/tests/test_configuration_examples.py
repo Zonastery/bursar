@@ -1,4 +1,4 @@
-"""Validate documentation example configs against PricingConfig."""
+"""Validate documentation example configs against BursarConfig."""
 
 from __future__ import annotations
 

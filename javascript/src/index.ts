@@ -5,13 +5,13 @@ export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
 export type {
-  PricingConfig,
+  BursarConfig,
   MeteringConfig,
   LedgerConfig,
   SignupGrant,
   BillingSection,
 } from "./config.js";
-export { loadConfigFromDict, canonicalPricingConfigDict } from "./config.js";
+export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
 export {
   CapabilityNotSupportedError,
   CapReachedError,
@@ -30,17 +30,12 @@ export {
 } from "./errors.js";
 export { validateExpression, evaluateExpression } from "./expr.js";
 
-// Manager
-export { CreditManager } from "./manager.js";
-export type {
-  CanAffordOptions,
-  CreditManagerOptions,
-  LowBalanceConfig,
-  PolicyPreset,
-  ReserveOptions,
-  RunBilledOptions,
-  SettleOptions,
-} from "./manager.js";
+// Application facade. Credit/billing orchestration is internal to Bursar.
+export { Bursar, CatalogService } from "./bursar.js";
+export type { BursarOptions } from "./bursar.js";
+
+// Internal types needed by compatibility adapters
+export type { CreditManager } from "./manager.js";
 
 // Types
 export type {
@@ -68,7 +63,7 @@ export type {
   LeaseResult,
   OperationPolicy,
   PlanDefinition,
-  PricingConfigResult,
+  BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -100,11 +95,12 @@ export type { CreditEvent, CreditEventType } from "./stores/events.js";
 export { CreditEventEmitter } from "./stores/events.js";
 
 // Billing
-export { BillingStore, PostgresBillingStore, BillingManager } from "./billing/index.js";
+export { BillingStore, PostgresBillingStore } from "./billing/index.js";
 export { BillingEventType } from "./billing/index.js";
 
 export type {
   BillingConfig,
+  BillingProvisioningPort,
   BillingCreditTopup,
   BillingCustomerInfo,
   BillingCustomerRecord,

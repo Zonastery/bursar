@@ -99,7 +99,7 @@ bursar migrate
 
 Creates all tables (`user_credits`, `credit_transactions`, `credit_reservations`,
 `credit_plans`, `credit_usage_window`, `credit_teams`, `credit_team_members`,
-`credit_spend_caps`, `credit_pricing_config`) and 20+ RPCs — all idempotent.
+`credit_spend_caps`, `bursar_config`) and 20+ RPCs — all idempotent.
 
 ### 2. Pricing version management
 
@@ -344,7 +344,7 @@ for callers that need a reservation step.
 |------|----------|
 | `001_core_schema.sql` | Core tables (`user_credits`, `credit_transactions`, `credit_reservations`) + RLS + signup bonus trigger |
 | `002_credit_rpcs.sql` | `credits_add`, `get_credits_balance` |
-| `003_pricing_config.sql` | Pricing config table + get/set/list/activate RPCs |
+| `003_bursar_config.sql` | Pricing config table + get/set/list/activate RPCs |
 | `004_plans.sql` | Subscription plans, usage windows, allowance RPCs |
 | `005_spend_caps.sql` | Spend cap table + `check_spend_cap` RPC |
 | `006_refunds_and_expiry.sql` | `refund_credits`, `expire_credits` |
@@ -358,7 +358,7 @@ for callers that need a reservation step.
 ```
 bursar/
   expr.py              # Safe AST expression evaluator
-  config.py            # PricingConfig loading + validation
+  config.py            # BursarConfig loading + validation
   engine.py            # PricingEngine — calculate, calculateBatch
   metrics.py           # UsageMetrics, ToolCall
   breakdown.py         # CostBreakdown

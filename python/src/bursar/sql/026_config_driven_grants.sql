@@ -42,7 +42,7 @@ DECLARE
   v_result JSONB;
 BEGIN
   SELECT config INTO v_config
-  FROM public.credit_pricing_config
+  FROM public.bursar_config
   WHERE active = TRUE
   LIMIT 1;
 
@@ -75,9 +75,9 @@ BEGIN
 END;
 $$;
 
--- ── publish_pricing_config — data-only draft (no live catalog mutation) ──
+-- ── publish_bursar_config — data-only draft (no live catalog mutation) ──
 
-CREATE OR REPLACE FUNCTION public.publish_pricing_config(
+CREATE OR REPLACE FUNCTION public.publish_bursar_config(
     p_config JSONB,
     p_label TEXT DEFAULT NULL
 )
@@ -93,9 +93,9 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
+    FROM public.bursar_config;
 
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
+    INSERT INTO public.bursar_config (config, active, version, label)
     VALUES (p_config, false, v_next_version, p_label)
     RETURNING id INTO v_new_id;
 
@@ -126,7 +126,7 @@ DECLARE
 BEGIN
     v_version := COALESCE(
         p_config_version,
-        (SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1),
+        (SELECT version FROM public.bursar_config WHERE active = true LIMIT 1),
         1
     );
 

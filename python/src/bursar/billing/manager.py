@@ -6,10 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from bursar.billing.models import (
-    BillingConfig,
     BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
@@ -22,11 +21,41 @@ from bursar.billing.models import (
     BillingTopupResult,
 )
 from bursar.billing.store import BillingStore
-from bursar.manager import CreditManager
 
 logger = logging.getLogger(__name__)
 
 ResolveUserFn = Callable[[str, str | None, str | None], str | None]
+
+
+class BillingProvisioningPort(Protocol):
+    """Credit operations required by billing provisioning only."""
+
+    def set_user_plan(self, user_id: str, plan_key: str, plan_assigned_at: datetime | None = None) -> Any: ...
+
+    def unset_user_plan(self, user_id: str) -> None: ...
+
+    def add_credits(
+        self,
+        user_id: str,
+        amount: Decimal | int,
+        tx_type: str = "adjustment",
+        metadata: Any = None,
+        expires_at: datetime | None = None,
+        bucket: str | None = None,
+    ) -> Any: ...
+
+    def deduct_credits(
+        self,
+        user_id: str,
+        amount: Decimal | int,
+        *,
+        tx_type: str = "adjustment",
+        bucket: str | None = None,
+        metadata: Any = None,
+    ) -> Any: ...
+
+    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> Any: ...
+
 
 IGNORED_EVENT_TYPES: frozenset[BillingEventType] = frozenset(
     {
@@ -58,14 +87,14 @@ class BillingManager:
     def __init__(
         self,
         billing_store: BillingStore,
-        credit_manager: CreditManager | None = None,
+        credit_manager: BillingProvisioningPort | None = None,
         resolve_user: ResolveUserFn | None = None,
-        config: BillingConfig | None = None,
         event_handlers: dict[BillingEventType, Callable[[BillingEvent, str], None]] | None = None,
         cancel_prior_providers: bool = True,
+        provisioning: BillingProvisioningPort | None = None,
     ) -> None:
         self._store = billing_store
-        self._cm = credit_manager
+        self._provisioning = provisioning or credit_manager
         self._resolve_user = resolve_user
         self._event_handlers = event_handlers or {}
         self._cancel_prior_providers = cancel_prior_providers
@@ -93,8 +122,10 @@ class BillingManager:
             BillingEventType.dispute_created: self._handle_dispute_created,
             BillingEventType.dispute_closed: self._handle_dispute_closed,
         }
-        if config is not None:
-            self._store.sync_billing_from_config(config)
+
+    @property
+    def has_provisioning(self) -> bool:
+        return self._provisioning is not None
 
     def get_user_subscription(
         self,
@@ -365,7 +396,7 @@ class BillingManager:
             )
         )
 
-        if self._cm and provision_on_positive:
+        if self._provisioning and provision_on_positive:
             self._provision_subscription(
                 uid,
                 offer,
@@ -391,7 +422,7 @@ class BillingManager:
     def _handle_customer_deleted(self, event: BillingEvent) -> BillingEventResult:
         if event.customer and event.customer.provider_customer_id:
             uid = self._resolve_user_id(event)
-            if uid and self._cm:
+            if uid and self._provisioning:
                 self._revoke_subscription(uid)
         return BillingEventResult(handled=True, action="customer_deleted")
 
@@ -496,7 +527,7 @@ class BillingManager:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._cm:
+            if uid and self._provisioning:
                 self._revoke_subscription(uid)
         return result
 
@@ -517,7 +548,7 @@ class BillingManager:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._cm:
+            if uid and self._provisioning:
                 self._revoke_subscription(uid)
         return result
 
@@ -531,7 +562,7 @@ class BillingManager:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._cm:
+            if uid and self._provisioning:
                 self._revoke_subscription(uid)
         return result
 
@@ -599,7 +630,7 @@ class BillingManager:
                 metadata=payment_metadata,
             )
 
-        if topup_config and self._cm and event.payment.purpose == "credit_topup" and uid:
+        if topup_config and self._provisioning and event.payment.purpose == "credit_topup" and uid:
             amt = event.payment.amount_minor
             if amt < topup_config.min_amount_minor or amt > topup_config.max_amount_minor:
                 logger.warning(
@@ -612,7 +643,7 @@ class BillingManager:
             cps = int(topup_config.credits_per_unit or 1000)
             credits = self._compute_topup_credits(amt, cps)
             if credits > 0:
-                self._cm.add_credits(
+                self._provisioning.add_credits(
                     uid,
                     Decimal(credits),
                     tx_type="purchase",
@@ -638,7 +669,7 @@ class BillingManager:
                 currency=event.payment.currency,
                 purpose=event.payment.purpose,
             )
-        if uid and event.subscription and self._cm:
+        if uid and event.subscription and self._provisioning:
             existing = self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
             self._store.upsert_billing_subscription(self._subscription_state(event, uid, existing, status="past_due"))
             self._revoke_subscription(uid)
@@ -657,7 +688,7 @@ class BillingManager:
                 currency=refund.currency,
                 reason=refund.reason,
             )
-            if refund.provider_payment_id and self._cm:
+            if refund.provider_payment_id and self._provisioning:
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
                 if payment and payment.get("purpose") == "credit_topup":
                     pay_meta = payment.get("metadata") or {}
@@ -671,7 +702,7 @@ class BillingManager:
                     credits_per_unit = int(credits_per_unit)
                     credits = self._compute_topup_credits(refund.amount_minor, credits_per_unit)
                     if credits > 0:
-                        self._cm.deduct_credits(
+                        self._provisioning.deduct_credits(
                             uid,
                             Decimal(str(credits)),
                             tx_type="refund",
@@ -719,7 +750,7 @@ class BillingManager:
         *,
         _plan_key: str | None = None,
     ) -> None:
-        if not self._cm:
+        if not self._provisioning:
             return
 
         plan_key = _plan_key or (offer.plan if offer else None)
@@ -736,7 +767,7 @@ class BillingManager:
                     logger.warning("invalid period_start timestamp %r for user %s, using now()", ps, uid)
                     period_start = None
 
-        self._cm.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
+        self._provisioning.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
 
         if self._cancel_prior_providers and event.provider:
             result = self._store.deactivate_other_provider_subscriptions(uid, event.provider)
@@ -745,14 +776,14 @@ class BillingManager:
                 logger.info("deactivated %d prior provider subscription(s) for user %s", count, uid)
 
         g = offer.grant if offer else None
-        if g and g.mode == "cycle_grant" and self._cm:
+        if g and g.mode == "cycle_grant" and self._provisioning:
             cycle_credits = g.credits
             if cycle_credits:
                 cycle_tier = g.bucket or "purchased"
                 replace_prior = g.replace_prior
                 if replace_prior:
-                    self._cm.revoke_credits_by_tx_type(uid, "cycle_grant")
-                self._cm.add_credits(
+                    self._provisioning.revoke_credits_by_tx_type(uid, "cycle_grant")
+                self._provisioning.add_credits(
                     uid,
                     Decimal(str(cycle_credits)),
                     tx_type="cycle_grant",
@@ -763,13 +794,13 @@ class BillingManager:
         logger.info("provisioned plan %s for user %s", plan_key, uid)
 
     def _revoke_subscription(self, uid: str) -> None:
-        if not self._cm:
+        if not self._provisioning:
             return
-        self._cm.unset_user_plan(uid)
+        self._provisioning.unset_user_plan(uid)
         logger.info("revoked plan for user %s", uid)
 
     def _re_evaluate_access(self, uid: str, event: BillingEvent) -> None:
-        if not self._cm or not event.subscription:
+        if not self._provisioning or not event.subscription:
             return
 
         status = event.subscription.status

@@ -24,7 +24,7 @@ except ModuleNotFoundError:
 
 import pytest
 
-from bursar import ConfigError, CreditManager, UsageMetrics
+from bursar import ConfigError, UsageMetrics
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from bursar.interface.base import StoreError
@@ -32,7 +32,7 @@ from bursar.interface.models import (
     FeatureLimit,
 )
 from bursar.interface.postgres import PostgresStore
-from bursar.manager import InsufficientCreditsError
+from bursar.manager import CreditManager, InsufficientCreditsError
 
 pytestmark = [pytest.mark.integration]
 

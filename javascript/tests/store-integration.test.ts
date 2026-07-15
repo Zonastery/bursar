@@ -98,9 +98,10 @@ afterAll(async () => {
 });
 
 /** Ensure an active pricing config exists for the given version. */
-async function ensureActivePricingConfig(pool: pg.Pool, version: number): Promise<void> {
+async function ensureActiveBursarConfig(pool: pg.Pool, version: number): Promise<void> {
+  await pool.query(`UPDATE public.bursar_config SET active = false WHERE active = true`);
   await pool.query(
-    `INSERT INTO public.credit_pricing_config (version, active, config)
+    `INSERT INTO public.bursar_config (version, active, config)
      VALUES ($1, true, '{}'::jsonb)
      ON CONFLICT (version) DO UPDATE SET active = true`,
     [version],
@@ -226,7 +227,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(10), "adjustment");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const r = await store.deductWithAllowance(PG_USER, D(5), { idempotencyKey: "plan-1" });
@@ -244,7 +245,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(100), "adjustment");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const r = await store.deductWithAllowance(PG_USER, D(25), { idempotencyKey: "plan-2" });
@@ -637,7 +638,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_JI6, PLAN_JI6],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_JI6);
 
     await pool.query(
@@ -665,7 +666,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_JI7, PLAN_JI7],
     );
     await store.addCredits(PG_USER, D(500), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_JI7);
 
     // Check allowance before deduction
@@ -751,7 +752,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
       [PLAN_H4, PLAN_H4],
     );
     await store.addCredits(PG_USER, D(50), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_H4);
 
     // Set a deny spend cap at 8. Attempt deduction of 20: allowance covers 10,
@@ -1009,7 +1010,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     const before = new Date();
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
     const after = new Date();
 
@@ -1059,7 +1060,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const day1 = new Date("2026-01-01T00:00:00.000Z");
@@ -1094,7 +1095,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER, PLAN_UUID);
 
     const day1 = new Date("2026-01-01T00:00:00.000Z");
@@ -1313,7 +1314,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
     );
 
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER10, PLAN_X);
     const first = (await store.getUserPlan(PG_USER10)).planAssignedAt!;
 
@@ -1336,7 +1337,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
        ON CONFLICT (id) DO NOTHING`,
       [PURGE_PLAN, "purge-plan"],
     );
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER10, "purge-plan");
     let plan = await store.getUserPlan(PG_USER10);
     expect(plan.planId).toBeTruthy();
@@ -1408,7 +1409,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     // Balance of 8: floor 0 means settle can debit at most 8 net regardless of
     // the lease's nominal amount — this exercises the 021 floor-clamp fix.
     await store.addCredits(PG_USER13, D(8), "purchase");
-    await ensureActivePricingConfig(pool, 0);
+    await ensureActiveBursarConfig(pool, 0);
     await store.setUserPlan(PG_USER13, PLAN_UUID);
 
     // Lease admission only needs to cover the worst-case hold — request a small

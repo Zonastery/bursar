@@ -54,7 +54,7 @@ All findings ranked by severity. The **Fix Status** column shows the current sta
 |---|---|---|---|---|
 | 8 | Mock provider declares `provider = "dodo"` — all mock billing rows indistinguishable from real Dodo data in production tables | `javascript/src/providers/mock/provider.ts:15` | ✅ Fixed | [04](./04-red-flags.md) |
 | 9 | `resolve_billing_offer_by_price` returns NULL for both "not found" AND "permission failure" — `lookupKey` fallback could grant wrong plan on RLS misconfiguration | `python/src/bursar/sql/013_billing.sql:581-583` | ✅ Fixed | [04](./04-red-flags.md) |
-| 10 | `set_active_pricing_config` swallows billing sync errors with `RAISE WARNING` — pricing succeeds, billing silently fails | `python/src/bursar/sql/013_billing.sql:816-820` | ✅ Fixed | [04](./04-red-flags.md) |
+| 10 | `set_active_bursar_config` swallows billing sync errors with `RAISE WARNING` — pricing succeeds, billing silently fails | `python/src/bursar/sql/013_billing.sql:816-820` | ✅ Fixed | [04](./04-red-flags.md) |
 | 11 | `lookupKey` fallback synthesizes fake offer `{planKey: lookupKey, entitlementMode: "allowance"}` — bypasses offer resolution, treats metadata string as plan key | `javascript/src/billing/billing-manager.ts:228-235` | ✅ Fixed (added to Python) | [06](./06-hacks-workarounds.md) |
 | 12 | 33 `BillingEventType`s defined; only ~10 emitted by mappers. 23 are aspirational. Handler dispatch silently ignores unknowns. | `javascript/src/billing/billing-types.ts:10-45` | ✅ Fixed | [01](./01-missing-implementations.md) |
 | 13 | `datetime.fromisoformat(ps)` in `_provision_subscription` — no try/except, crashes on malformed dates | `python/src/bursar/billing/manager.py:569` | ✅ Fixed | [03](./03-error-prone-code.md) |

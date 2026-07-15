@@ -832,9 +832,9 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN RETURN NULL; END;
 $$;
 
--- ── Extend set_active_pricing_config to also sync billing config ────────
+-- ── Extend set_active_bursar_config to also sync billing config ────────
 -- SUPERSEDED by 016_plan_versioning.sql -- this stub is immediately overwritten.
-CREATE OR REPLACE FUNCTION public.set_active_pricing_config(p_config JSONB, p_label TEXT DEFAULT NULL)
+CREATE OR REPLACE FUNCTION public.set_active_bursar_config(p_config JSONB, p_label TEXT DEFAULT NULL)
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN RETURN NULL; END;
 $$;

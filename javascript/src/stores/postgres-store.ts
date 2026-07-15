@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
-import { canonicalPricingConfigDict } from "../config.js";
+import { canonicalBursarConfigDict } from "../config.js";
 import { resolveCalendarWindow } from "../allowance.js";
 import { snakeToCamelKeys } from "../case-utils.js";
 import type { AllowancePeriod } from "../allowance.js";
@@ -27,8 +27,8 @@ import type {
   MigratePlanUsersResult,
   OperationPolicy,
   PaginatedTransactions,
-  PricingConfigHistoryItem,
-  PricingConfigResult,
+  BursarConfigHistoryItem,
+  BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -598,14 +598,14 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async getActivePricing(): Promise<PricingConfigResult | null> {
+  async getActivePricing(): Promise<BursarConfigResult | null> {
     return this._loadActivePricing();
   }
 
-  private normalizePricingConfig(
+  private normalizeBursarConfig(
     row: Record<string, unknown>,
     defaultVersion: number,
-  ): PricingConfigResult {
+  ): BursarConfigResult {
     const config = row.config as Record<string, unknown> | undefined;
     if (!config) {
       return { id: String(row.id ?? ""), config: {}, version: defaultVersion };
@@ -616,7 +616,7 @@ export class PostgresStore extends CreditStore {
         ? (config.metering as Record<string, unknown>).flat_jobs
         : undefined;
 
-    const result: PricingConfigResult = {
+    const result: BursarConfigResult = {
       id: String(row.id ?? ""),
       config: snakeToCamelKeys(config),
       version: Number(row.version ?? defaultVersion),
@@ -630,19 +630,25 @@ export class PostgresStore extends CreditStore {
     return result;
   }
 
-  private async _loadActivePricing(): Promise<PricingConfigResult | null> {
+  private async _loadActivePricing(): Promise<BursarConfigResult | null> {
     const row = await this.pricingRepo.getActivePricing();
     if (!row || !row.config) return null;
-    return this.normalizePricingConfig(row, 0);
+    return this.normalizeBursarConfig(row, 0);
   }
 
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
-    const canonical = canonicalPricingConfigDict(config);
+    const canonical = canonicalBursarConfigDict(config);
     const row = await this.pricingRepo.setActivePricing(JSON.stringify(canonical), label ?? null);
     return String(row.id ?? "");
   }
 
-  async getPricingHistory(): Promise<PricingConfigHistoryItem[]> {
+  async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
+    const canonical = canonicalBursarConfigDict(config);
+    const row = await this.pricingRepo.publishPricing(JSON.stringify(canonical), label ?? null);
+    return String(row.id ?? "");
+  }
+
+  async getPricingHistory(): Promise<BursarConfigHistoryItem[]> {
     const rows = await this.pricingRepo.getPricingHistory();
     if (!rows) return [];
     return (rows as Record<string, unknown>[]).map((r) => ({
@@ -654,10 +660,10 @@ export class PostgresStore extends CreditStore {
     }));
   }
 
-  async getPricingConfig(version: number): Promise<PricingConfigResult | null> {
-    const row = await this.pricingRepo.getPricingConfig(version);
+  async getBursarConfig(version: number): Promise<BursarConfigResult | null> {
+    const row = await this.pricingRepo.getBursarConfig(version);
     if (!row || !row.config) return null;
-    return this.normalizePricingConfig(row, version);
+    return this.normalizeBursarConfig(row, version);
   }
 
   async activatePricing(version: number): Promise<string> {

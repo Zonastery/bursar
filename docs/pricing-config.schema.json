@@ -723,6 +723,6 @@
   "required": [
     "metering"
   ],
-  "title": "PricingConfig",
+  "title": "BursarConfig",
   "type": "object"
 }

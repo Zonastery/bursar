@@ -219,7 +219,7 @@ Every control-plane mutation is recorded in `audit_log`. This is for security fo
 ### Request validation
 - All inputs validated against JSON Schema before reaching bursar.
 - `UsageMetrics` fields: `input_tokens` etc. must be non-negative integers, `amount` must be a valid decimal string.
-- Pricing config validation reuses bursar's existing `PricingConfig` Pydantic validation (or its JS equivalent).
+- Pricing config validation reuses bursar's existing `BursarConfig` Pydantic validation (or its JS equivalent).
 
 ## 8. Graceful degradation
 

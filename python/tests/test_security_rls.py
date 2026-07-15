@@ -141,8 +141,8 @@ _RPC_CALLS: dict[str, tuple[str, tuple]] = {
         "SELECT public.deduct_team(%s, %s, 10)",
         (str(uuid4()), str(uuid4())),
     ),
-    "set_active_pricing_config": (
-        "SELECT public.set_active_pricing_config('{}'::jsonb)",
+    "set_active_bursar_config": (
+        "SELECT public.set_active_bursar_config('{}'::jsonb)",
         (),
     ),
     "spend_by_model": (

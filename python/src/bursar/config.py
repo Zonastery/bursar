@@ -56,7 +56,7 @@ class BillingSection(BaseModel):
     topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
 
 
-class PricingConfig(BaseModel):
+class BursarConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1] = 1
@@ -143,7 +143,7 @@ class PricingConfig(BaseModel):
             raise ConfigError("at most one bucket may set allow_overdraft=True")
 
     @model_validator(mode="after")
-    def validate_grant_bucket_references(self) -> "PricingConfig":
+    def validate_grant_bucket_references(self) -> "BursarConfig":
         buckets = self.ledger.buckets
         bucket_keys = set(buckets.keys()) if buckets else set()
 
@@ -189,7 +189,7 @@ class PricingConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_plan_references(self) -> "PricingConfig":
+    def validate_plan_references(self) -> "BursarConfig":
         billing = self.billing
         if billing is not None and billing.subscriptions:
             plans = self.plans or {}
@@ -200,7 +200,7 @@ class PricingConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_rate_override_keys(self) -> "PricingConfig":
+    def validate_rate_override_keys(self) -> "BursarConfig":
         if not self.plans:
             return self
         model_keys = set(self.metering.models.keys())
@@ -216,7 +216,7 @@ class PricingConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_expressions(self) -> "PricingConfig":
+    def validate_expressions(self) -> "BursarConfig":
         known = set(METRIC_VARIABLES)
         self._validate_metering_exprs(known)
         self._validate_tool_exprs(known)
@@ -256,9 +256,14 @@ class PricingConfig(BaseModel):
             raise ConfigError(f"invalid expression in {path}: {e}") from e
 
 
-def load_config_from_dict(data: dict) -> PricingConfig:
+# Domain name for the complete document. BursarConfig remains an internal
+# compatibility name for existing storage and engine code.
+BursarConfig = BursarConfig
+
+
+def load_config_from_dict(data: dict) -> BursarConfig:
     try:
-        return PricingConfig.model_validate(data)
+        return BursarConfig.model_validate(data)
     except ValidationError as exc:
         for err in exc.errors():
             if err.get("type") != "value_error":
@@ -275,6 +280,6 @@ def load_config_from_dict(data: dict) -> PricingConfig:
         raise
 
 
-def canonical_pricing_config_dict(data: dict) -> dict:
+def canonical_bursar_config_dict(data: dict) -> dict:
     """Validate and return a canonical snake_case config dict for persistence."""
     return load_config_from_dict(data).model_dump(mode="json")

@@ -341,7 +341,7 @@ class UnsetUserPlanRow(BaseModel):
     plan_key: str | None = None
 
 
-class PricingConfigHistoryItemRow(BaseModel):
+class BursarConfigHistoryItemRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = ""
     version: int = 0

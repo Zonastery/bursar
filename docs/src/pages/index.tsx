@@ -58,7 +58,7 @@ export default function Home(): ReactNode {
             />
             <Feature
               title="Database-Backed"
-              description="Pricing lives in credit_pricing_config. Update live without redeploys. Dict loading for testing."
+              description="Pricing lives in bursar_config. Update live without redeploys. Dict loading for testing."
             />
             <Feature
               title="Credit Lifecycle"

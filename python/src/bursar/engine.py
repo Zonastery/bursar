@@ -1,7 +1,7 @@
 """Core engine that loads config and calculates credit costs.
 
 The ``PricingEngine`` class is the main entry point for the bursar
-package. It loads a validated ``PricingConfig`` from a dict or DB,
+package. It loads a validated ``BursarConfig`` from a dict or DB,
 then calculates credit costs from ``UsageMetrics``.
 
 Money safety (REFACTOR_CONTRACT §1): every cost is computed in
@@ -16,7 +16,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from bursar.breakdown import CostBreakdown
-from bursar.config import DEFAULT_TOOL_EXPR, PricingConfig, load_config_from_dict
+from bursar.config import DEFAULT_TOOL_EXPR, BursarConfig, load_config_from_dict
 from bursar.expr import evaluate_expression
 from bursar.metrics import METRIC_VARIABLES, UsageMetrics
 
@@ -48,7 +48,7 @@ class PricingEngine:
         print(result.total)  # Decimal('5.0000')
     """
 
-    def __init__(self, config: PricingConfig) -> None:
+    def __init__(self, config: BursarConfig) -> None:
         self._config = config
 
     @classmethod

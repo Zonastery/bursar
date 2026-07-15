@@ -16,7 +16,7 @@ place; no version bump, no backward-compat shim (module unreleased).
 - The four config sections are an authoring reshape, but because we chose FULL
   propagation, the internal runtime models, SQL identifiers, and public result
   types are renamed too — the config is not merely translated at the boundary.
-- One model per concept. Delete `PricingConfigData`; type the billing sections.
+- One model per concept. Delete `BursarConfigData`; type the billing sections.
 - Land Python fully green (Phases 1-3 + its tests) BEFORE porting to JS (Phase 4),
   so the shared parity fixture anchors the JS port.
 - Keep money semantics identical: Decimal everywhere, `ROUND_HALF_UP` at 4dp,
@@ -43,11 +43,11 @@ The module is unreleased, so:
 ```mermaid
 flowchart TD
   yaml["revamped YAML or JSON (version: 1)"] --> load["load_config_from_dict / loadConfigFromDict"]
-  load --> cfg["PricingConfig (single typed model)"]
+  load --> cfg["BursarConfig (single typed model)"]
   cfg --> eng["PricingEngine: metering"]
   cfg --> plans["PlanDefinition: plans"]
   cfg --> ledger["buckets + floors"]
-  cfg --> bill["BillingConfig.from_pricing_config"]
+  cfg --> bill["BillingConfig.from_bursar_config"]
   plans --> store["CreditStore + SQL RPCs"]
   ledger --> store
   bill --> bmgr["BillingManager.sync"]
@@ -60,7 +60,7 @@ flowchart TD
 Files:
 
 - `python/src/bursar/config.py`
-  - Replace flat `PricingConfig` with nested sub-models: `MeteringConfig`,
+  - Replace flat `BursarConfig` with nested sub-models: `MeteringConfig`,
     `LedgerConfig`, `BillingSection`, plus `plans: dict[str, PlanDefinition]`.
   - `version: Literal[1] = 1` (unchanged integer; new nested shape only).
   - `model_config = ConfigDict(extra="forbid")` on every sub-model.
@@ -69,7 +69,7 @@ Files:
     expression validation (global vars for models/search/cache_discount/rate_overrides,
     `calls` added only for tools); `flat_jobs` and `allowance.amount` `>= 0`;
     `billing.subscriptions.*.plan` referential check; discriminated `grant`.
-  - `load_config_from_dict` unchanged signature; returns the new `PricingConfig`.
+  - `load_config_from_dict` unchanged signature; returns the new `BursarConfig`.
 - `python/src/bursar/interface/models.py`
   - `BucketDefinition` (was `TierDefinition`): `label`, `priority`, `expires`,
     `ttl_days`, `default`, `allow_overdraft`.
@@ -84,15 +84,15 @@ Files:
     (`buckets`, `bucket_key`), `DeductionResult.bucket_breakdown`,
     `RefundResult.bucket_breakdown`, `SweepResult.expired_by_bucket`,
     `GetUserPlanResult` (allowance/safety/entitlements shape).
-  - Delete `PricingConfigData`. Update `PricingConfigResult.config` to
-    `PricingConfig`. Remove the field-parity test's dual-model premise.
+  - Delete `BursarConfigData`. Update `BursarConfigResult.config` to
+    `BursarConfig`. Remove the field-parity test's dual-model premise.
 - `python/src/bursar/billing/models.py`
   - `ProviderRef` (unify `BillingProviderRefs` + `BillingSubscriptionOfferRef`);
     provider is the map key.
   - `BillingOffer`: drop `offer_key`; `plan`; nested `grant: SubscriptionGrant`
     (discriminated `AllowanceGrant` | `CycleGrant`).
   - `BillingCreditTopup`: `credits_per_unit`, `deposit_to`, drop per-topup `currency`.
-  - `BillingConfig`: add `currency`; add `from_pricing_config(cfg: PricingConfig)`
+  - `BillingConfig`: add `currency`; add `from_bursar_config(cfg: BursarConfig)`
     classmethod so callers stop hand-wrapping `BillingOffer(offer_key=k, **v)`.
 
 ## Phase 2 — Python engine + manager + billing runtime
@@ -103,7 +103,7 @@ Files:
   - `_calc_cache`: read `metering.cache_discount`, subtract it (negate result).
   - `_calc_fixed` -> `_calc_flat_jobs`; `get_fixed_cost` -> `get_flat_job_cost`
     reading `metering.flat_jobs`.
-  - `pricing_schema()` returns the single `PricingConfig`.
+  - `pricing_schema()` returns the single `BursarConfig`.
   - Access config via `self._config.metering.*`, `self._config.ledger.min_balance`.
 - `python/src/bursar/metrics.py`: `fixed_job` -> `flat_job`; keep
   `METRIC_VARIABLES`; document `calls` as the tools-only variable.
@@ -198,10 +198,10 @@ Files:
 - `python/README.md`, `javascript/README.md`: config snippets.
 - Locate and update sample `pricing.{yaml,json}` fixtures under `samples/` and
   any `docs/` example files.
-- `samples/python/notebooks/15_pricing_config_schema.ipynb`: FULL rewrite to the
+- `samples/python/notebooks/15_bursar_config_schema.ipynb`: FULL rewrite to the
   revamped schema
   (acceptance artifact — every cell must run against the new schema, including
-  the `BillingConfig.from_pricing_config` path replacing the manual rewrap).
+  the `BillingConfig.from_bursar_config` path replacing the manual rewrap).
 - `samples/python/notebooks/12_cli_and_deployment.ipynb`: update if it prints or
   sets config.
 
@@ -212,7 +212,7 @@ Files:
   bucket tables/RPCs and merged-entitlement paths.
 - JS: `npm run typecheck`; `npm run lint`; `npm test` (testcontainers Postgres).
 - Cross-SDK: parity fixture green in both runners.
-- Notebook: execute `15_pricing_config_schema.ipynb` top-to-bottom with no errors.
+- Notebook: execute `15_bursar_config_schema.ipynb` top-to-bottom with no errors.
 
 ---
 
@@ -230,7 +230,7 @@ Files:
 
 ## Acceptance criteria
 
-1. Single `PricingConfig` model in Python; no `PricingConfigData`.
+1. Single `BursarConfig` model in Python; no `BursarConfigData`.
 2. `subscriptions`/`topups` fully typed; no `dict[str, dict]`; no
    `BillingOffer(offer_key=...)` hand-wrapping anywhere.
 3. No identifier duplicated as both dict key and inner field.

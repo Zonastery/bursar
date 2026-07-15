@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bursar.repositories._types import DbQuery
-from bursar.repositories.schemas import ActivePricingRow, PricingConfigHistoryItemRow
+from bursar.repositories.schemas import ActivePricingRow, BursarConfigHistoryItemRow
 
 
 class PricingRepository:
@@ -21,7 +21,7 @@ class PricingRepository:
         Returns:
             ActivePricingRow if found, None otherwise.
         """
-        rows = self._callproc("get_active_pricing_config", [])
+        rows = self._callproc("get_active_bursar_config", [])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
@@ -36,21 +36,21 @@ class PricingRepository:
         Returns:
             ActivePricingRow for the newly activated config, or None on failure.
         """
-        rows = self._callproc("set_active_pricing_config", [config, label])
+        rows = self._callproc("set_active_bursar_config", [config, label])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0])
 
-    def get_pricing_history(self) -> list[PricingConfigHistoryItemRow]:
+    def get_pricing_history(self) -> list[BursarConfigHistoryItemRow]:
         """Get all pricing configuration versions.
 
         Returns:
-            List of PricingConfigHistoryItemRow (may be empty).
+            List of BursarConfigHistoryItemRow (may be empty).
         """
-        rows = self._callproc("get_pricing_configs", []) or []
-        return [PricingConfigHistoryItemRow.model_validate(r) for r in rows if isinstance(r, dict)]
+        rows = self._callproc("get_bursar_configs", []) or []
+        return [BursarConfigHistoryItemRow.model_validate(r) for r in rows if isinstance(r, dict)]
 
-    def get_pricing_config(self, version: int) -> ActivePricingRow | None:
+    def get_bursar_config(self, version: int) -> ActivePricingRow | None:
         """Get a specific pricing configuration by version number.
 
         Args:
@@ -59,21 +59,21 @@ class PricingRepository:
         Returns:
             ActivePricingRow if found, None otherwise.
         """
-        rows = self._callproc("get_pricing_config", [version])
+        rows = self._callproc("get_bursar_config", [version])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
 
     def activate_pricing(self, version: int) -> ActivePricingRow | None:
         """Activate a specific pricing configuration version."""
-        rows = self._callproc("activate_pricing_config", [version])
+        rows = self._callproc("activate_bursar_config", [version])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0])
 
     def publish_pricing(self, config: str, label: str | None) -> ActivePricingRow | None:
         """Publish an inactive pricing configuration draft."""
-        rows = self._callproc("publish_pricing_config", [config, label])
+        rows = self._callproc("publish_bursar_config", [config, label])
         if not rows:
             return None
         return ActivePricingRow.model_validate(rows[0])

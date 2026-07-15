@@ -54,7 +54,7 @@ Each abstract method of `CreditStore` (`javascript/src/stores/credit-store.ts:10
 | `checkSpendCap(userId, model?, amount?)` | _(via spend caps API — or merged into deductWithAllowance)_ |
 | `getActivePricing()` | `GET /v1/config/active` |
 | `getPricingHistory()` | `GET /v1/config/versions` |
-| `getPricingConfig(version)` | `GET /v1/config/versions/:version` |
+| `getBursarConfig(version)` | `GET /v1/config/versions/:version` |
 | `activatePricing(version)` | ❌ not available on data plane (admin-only) |
 | `setActivePricing(config)` | ❌ not available on data plane (admin-only) |
 | `refundCredits(transactionId, amount?)` | `POST /v1/transactions/:txId/refund` |

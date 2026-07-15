@@ -16,7 +16,7 @@ Example::
     # One-time setup (creates tables + RPCs)
     manager.setup()
 
-    # Load pricing from store (credit_pricing_config table)
+    # Load pricing from store (bursar_config table)
     manager.load_pricing_from_store()
 
     # Deduct credits for a usage event
@@ -52,6 +52,7 @@ from bursar.interface.models import (
     BalanceResult,
     BillingMode,
     BucketBalancesResult,
+    BursarConfigResult,
     CanAffordResult,
     CheckFeatureResult,
     CreditMetadata,
@@ -63,7 +64,6 @@ from bursar.interface.models import (
     LeaseResult,
     MigratePlanUsersResult,
     OperationPolicy,
-    PricingConfigResult,
     RefundResult,
     ReleaseResult,
     SetupResult,
@@ -274,7 +274,7 @@ class CreditManager:
         if cached is not None:
             return cached
 
-        cfg = self._store.get_pricing_config(catalog_version)
+        cfg = self._store.get_bursar_config(catalog_version)
         if cfg is None or cfg.config is None:
             raise PricingNotLoadedError(f"No pricing config for pinned catalog version {catalog_version}")
 
@@ -322,9 +322,9 @@ class CreditManager:
 
     def publish_pricing_from_dict(self, data: dict[str, Any]) -> None:
         """Load pricing from a raw dict and sync it."""
-        from bursar.config import canonical_pricing_config_dict
+        from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_pricing_config_dict(data)
+        canonical = canonical_bursar_config_dict(data)
         engine = PricingEngine.from_dict(canonical)
         self._engine = engine
         self._version_engines.clear()
@@ -350,9 +350,9 @@ class CreditManager:
         label: str | None = None,
     ) -> None:
         """Publish new pricing and update the engine in one call."""
-        from bursar.config import canonical_pricing_config_dict
+        from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_pricing_config_dict(config)
+        canonical = canonical_bursar_config_dict(config)
         self._engine = PricingEngine.from_dict(canonical)
         self._version_engines.clear()
         self._last_loaded = time.monotonic()
@@ -364,10 +364,16 @@ class CreditManager:
         label: str | None = None,
     ) -> str:
         """Publish an inactive pricing draft without mutating the live catalog."""
-        from bursar.config import canonical_pricing_config_dict
+        from bursar.config import canonical_bursar_config_dict
 
-        canonical = canonical_pricing_config_dict(config)
+        canonical = canonical_bursar_config_dict(config)
         return self._store.publish_pricing(canonical, label)
+
+    def activate_pricing(self, version: int) -> str:
+        """Activate a previously published catalog version and reload it."""
+        result = self._store.activate_pricing(version)
+        self.load_pricing_from_store()
+        return result
 
     def refresh_if_stale(self) -> None:
         """If the cached ``PricingEngine`` is stale (TTL expired), reload it
@@ -398,11 +404,11 @@ class CreditManager:
         """The current PricingEngine, or None if not loaded."""
         return self._engine
 
-    def get_active_pricing(self) -> PricingConfigResult | None:
+    def get_active_pricing(self) -> BursarConfigResult | None:
         """Fetch the active pricing config directly from the store.
 
         Unlike load_pricing_from_store (which loads into the engine),
-        this returns the raw PricingConfigResult without updating engine state.
+        this returns the raw BursarConfigResult without updating engine state.
         Callers that need the engine should use the engine property or
         load_pricing_from_store.
         """

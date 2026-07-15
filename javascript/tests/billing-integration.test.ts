@@ -757,7 +757,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("get active pricing config", async () => {
     const { bs } = await makePgComponents(pool);
-    const config = await bs.getActivePricingConfig();
+    const config = await bs.getActiveBursarConfig();
     expect(config).not.toBeNull();
     expect((config as Record<string, unknown>)?.version).toBe(1);
   });

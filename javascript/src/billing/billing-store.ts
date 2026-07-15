@@ -122,7 +122,7 @@ export abstract class BillingStore {
     providerPaymentId: string,
   ): Promise<Record<string, unknown> | null>;
 
-  abstract getActivePricingConfig(): Promise<Record<string, unknown> | null>;
+  abstract getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
 
   abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
 

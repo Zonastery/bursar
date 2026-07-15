@@ -57,7 +57,7 @@ variable and public breakdown field still say "fixed":
 | `python/src/bursar/interface/base.py:661` | "across tiers" | "across buckets" |
 
 Also update stale test titles/labels:
-- `javascript/tests/engine.test.ts:253` — "returns config as PricingConfigData"
+- `javascript/tests/engine.test.ts:253` — "returns config as BursarConfigData"
   → "returns config as Record<string, unknown>".
 - `javascript/tests/memory-store.test.ts:2008-2010`,
   `credit-manager.test.ts:1666,1691` — `getCreditTiers` references in
@@ -65,11 +65,11 @@ Also update stale test titles/labels:
 
 ---
 
-## 7.4 L4 — Delete `PricingConfigData` (JS)
+## 7.4 L4 — Delete `BursarConfigData` (JS)
 
 `javascript/src/types.ts:4-5` is a `@deprecated` alias to
 `Record<string, unknown>` with **zero internal usages** (the old structured
-model was replaced by `PricingConfig` in `config.ts:73`). Delete it. Remove any
+model was replaced by `BursarConfig` in `config.ts:73`). Delete it. Remove any
 external-facing mention in `javascript/README.md:313` (already covered in
 `06-docs-samples.md`).
 

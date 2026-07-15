@@ -46,7 +46,7 @@ It grants into a **credit tier** (default tier name: `"subscription"`), and that
 ```python
 from bursar.interface.models import TierDefinition
 
-manager.publish_pricing_from_dict(PricingConfigData(
+manager.publish_pricing_from_dict(BursarConfigData(
     models={"_default": "input_tokens * 1"},
     tiers={
         "subscription": TierDefinition(name="Subscription Credits", priority=20),
@@ -95,9 +95,9 @@ By default (`replace_prior=True` / `replacePrior: true`), the call first expires
 This is the scenario that's easy to over-engineer. A customer pays once a year, but the product should still feel like a monthly quota. **Do not** model this as a granted balance that you top up every month with a scheduler — reuse the allowance engine that already exists for exactly this shape (Notebook 04):
 
 ```python
-from bursar.interface.models import PlanDefinition, PricingConfigData
+from bursar.interface.models import PlanDefinition, BursarConfigData
 
-manager.publish_pricing_from_dict(PricingConfigData(
+manager.publish_pricing_from_dict(BursarConfigData(
     models={"_default": "input_tokens * 1"},
     plans={
         "pro-annual": PlanDefinition(

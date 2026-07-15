@@ -22,7 +22,7 @@ Full `CreditStore` interface. All money arguments and result fields are `Decimal
 | Setup | `setup(database_url?)` |
 | Balances | `get_balance(user_id)`, `add_credits(user_id, amount, type?, metadata?, expires_at?)`, `deduct_with_allowance(user_id, amount, *, idempotency_key?, min_balance?, model?, metadata?)` |
 | Lease lifecycle | `create_lease(user_id, amount, operation_type, *, billing_mode?, floor?, max_concurrent?, ttl_seconds?, model?, overdraft_floor?, metadata?)`, `settle_lease(user_id, lease_id, amount, *, idempotency_key?, min_balance?, model?, metadata?)`, `release_lease(user_id, lease_id)`, `renew_lease(user_id, lease_id, ttl_seconds)`, `get_available(user_id)` |
-| Pricing | `get_active_pricing()`, `set_active_pricing(config, label?)`, `get_pricing_history()`, `get_pricing_config(version)`, `activate_pricing(version)` |
+| Pricing | `get_active_pricing()`, `set_active_pricing(config, label?)`, `get_pricing_history()`, `get_bursar_config(version)`, `activate_pricing(version)` |
 | Plans | `get_user_plan(user_id)`, `check_feature(user_id, feature)`, `set_user_plan(user_id, plan_id)`, `check_allowance(user_id)`, `increment_usage_window(user_id, plan_id, amount)` |
 | Spend caps | `check_spend_cap(user_id, model?, amount?)` |
 | Refunds | `refund_credits(transaction_id, amount?, reason?, metadata?)` |

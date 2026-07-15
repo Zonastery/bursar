@@ -12,8 +12,15 @@ endif
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: help test test-python test-js
+.PHONY: help test test-python test-js test-pg-up test-pg-down test-integration
 .DEFAULT_GOAL := help
+
+TEST_PG_NAME ?= bursar-test-pg
+TEST_PG_PORT ?= 55432
+TEST_PG_DATABASE ?= bursar
+TEST_PG_USER ?= postgres
+TEST_PG_PASSWORD ?= bursar
+TEST_PG_URL ?= postgresql://$(TEST_PG_USER):$(TEST_PG_PASSWORD)@localhost:$(TEST_PG_PORT)/$(TEST_PG_DATABASE)
 
 help:                                ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -29,7 +36,31 @@ install-hooks:                       ## Install lefthook git hooks (requires npm
 		exit 1; \
 	fi
 
-test: test-python test-js            ## All tests (Python + JS, incl. real-Postgres integration)
+test: test-integration               ## All tests (Python + JS, incl. real-Postgres integration)
+
+test-pg-up:                         ## Start an isolated Postgres database for integration tests
+	docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
+	docker run -d --name $(TEST_PG_NAME) \
+	  -e POSTGRES_USER=$(TEST_PG_USER) \
+	  -e POSTGRES_PASSWORD=$(TEST_PG_PASSWORD) \
+	  -e POSTGRES_DB=$(TEST_PG_DATABASE) \
+	  -p $(TEST_PG_PORT):5432 \
+	  postgres:16 -c max_connections=500
+	for i in $$(seq 1 30); do
+	  if docker exec $(TEST_PG_NAME) pg_isready -U $(TEST_PG_USER) -d $(TEST_PG_DATABASE) >/dev/null 2>&1; then exit 0; fi
+	  sleep 1
+	done
+	echo "Postgres did not become ready" >&2
+	exit 1
+
+test-pg-down:                       ## Stop and remove the isolated Postgres test database
+	docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
+
+test-integration:                  ## Run Python and JS tests against an isolated Postgres database
+	$(MAKE) test-pg-up
+	trap '$(MAKE) test-pg-down' EXIT
+	DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-python
+	DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-js
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
 # container / an already-running instance) or, failing that, via

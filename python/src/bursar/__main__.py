@@ -30,7 +30,7 @@ _T = TypeVar("_T")
 
 if TYPE_CHECKING:
     from bursar.interface.base import CreditStore
-    from bursar.interface.models import PricingConfigResult
+    from bursar.interface.models import BursarConfigResult
 
 try:
     from dotenv import load_dotenv
@@ -245,11 +245,11 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_validate(args: argparse.Namespace) -> None:
-    from bursar.config import PricingConfig
+    from bursar.config import BursarConfig
 
     data = _load_pricing_file(args.file)
     try:
-        PricingConfig.model_validate(data)
+        BursarConfig.model_validate(data)
     except (ValidationError, ExpressionError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -257,11 +257,11 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
-    from bursar.config import PricingConfig
+    from bursar.config import BursarConfig
 
     data = _load_pricing_file(args.file)
     try:
-        PricingConfig.model_validate(data)
+        BursarConfig.model_validate(data)
     except (ValidationError, ExpressionError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
@@ -277,14 +277,14 @@ def _cmd_config_set(args: argparse.Namespace) -> None:
         return
 
     _retry_transient(lambda: store.set_active_pricing(data, label=args.label), what="set pricing")
-    print("Pricing config set successfully.")
+    print("Bursar config set successfully.")
 
 
 def _cmd_config_get(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
     result = _retry_transient(store.get_active_pricing, what="get pricing")
     if result is None:
-        print("No active pricing config.", file=sys.stderr)
+        print("No active Bursar config.", file=sys.stderr)
         raise SystemExit(1)
     print(json.dumps(result.model_dump(mode="json"), indent=2))
 
@@ -293,7 +293,7 @@ def _cmd_config_list(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
     rows = _retry_transient(store.get_pricing_history, what="list pricing")
     if not rows:
-        print("No pricing configs found.", file=sys.stderr)
+        print("No Bursar configs found.", file=sys.stderr)
         raise SystemExit(1)
     for r in rows:
         marker = "*" if r.active else " "
@@ -308,23 +308,23 @@ def _cmd_config_activate(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_export(args: argparse.Namespace) -> None:
-    from bursar.config import PricingConfig
+    from bursar.config import BursarConfig
 
     store = _store_from_env(args.store)
-    result = _retry_transient(lambda: store.get_pricing_config(args.version), what="fetch pricing")
+    result = _retry_transient(lambda: store.get_bursar_config(args.version), what="fetch pricing")
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
         raise SystemExit(1)
-    print(json.dumps(PricingConfig.model_validate(result.config).model_dump(mode="json"), indent=2))
+    print(json.dumps(BursarConfig.model_validate(result.config).model_dump(mode="json"), indent=2))
 
 
 def _cmd_config_diff(args: argparse.Namespace) -> None:
-    from bursar.config import PricingConfig
+    from bursar.config import BursarConfig
 
     store = _store_from_env(args.store)
 
-    def _fetch() -> tuple[PricingConfigResult | None, PricingConfigResult | None]:
-        return store.get_pricing_config(args.version_a), store.get_pricing_config(args.version_b)
+    def _fetch() -> tuple[BursarConfigResult | None, BursarConfigResult | None]:
+        return store.get_bursar_config(args.version_a), store.get_bursar_config(args.version_b)
 
     a, b = _retry_transient(_fetch, what="fetch pricing configs")
     if a is None:
@@ -334,8 +334,8 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
         print(f"Version {args.version_b} not found.", file=sys.stderr)
         raise SystemExit(1)
 
-    a_json = json.dumps(PricingConfig.model_validate(a.config).model_dump(mode="json"), indent=2)
-    b_json = json.dumps(PricingConfig.model_validate(b.config).model_dump(mode="json"), indent=2)
+    a_json = json.dumps(BursarConfig.model_validate(a.config).model_dump(mode="json"), indent=2)
+    b_json = json.dumps(BursarConfig.model_validate(b.config).model_dump(mode="json"), indent=2)
     diff = difflib.unified_diff(
         a_json.splitlines(keepends=True),
         b_json.splitlines(keepends=True),
@@ -347,9 +347,9 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
 
 def _cmd_config_schema(_args: argparse.Namespace) -> None:
     """Print the pricing config JSON Schema (for editor autocompletion/validation)."""
-    from bursar.config import PricingConfig
+    from bursar.config import BursarConfig
 
-    print(json.dumps(PricingConfig.model_json_schema(), indent=2))
+    print(json.dumps(BursarConfig.model_json_schema(), indent=2))
 
 
 # ── Parser construction ──────────────────────────────────────────────────────
@@ -392,8 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
     # pricing
     p_config = sub.add_parser(
         "config",
-        help="Manage pricing config",
-        description="Manage immutable pricing-config versions.",
+        help="Manage Bursar config",
+        description="Manage immutable Bursar catalog versions.",
     )
     psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
 
@@ -402,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("--label", default=None, help="Optional label/message for this version")
     p_set.set_defaults(func=_cmd_config_set)
 
-    p_get = psub.add_parser("get", help="Show the active pricing config as JSON")
+    p_get = psub.add_parser("get", help="Show the active Bursar config as JSON")
     p_get.set_defaults(func=_cmd_config_get)
 
     p_list = psub.add_parser("list", help="List all pricing versions (* = active)")
@@ -416,7 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
     p_validate.set_defaults(func=_cmd_config_validate)
 
-    p_schema = psub.add_parser("schema", help="Print the pricing config JSON Schema")
+    p_schema = psub.add_parser("schema", help="Print the Bursar config JSON Schema")
     p_schema.set_defaults(func=_cmd_config_schema)
 
     p_diff = psub.add_parser("diff", help="Unified diff between two versions")

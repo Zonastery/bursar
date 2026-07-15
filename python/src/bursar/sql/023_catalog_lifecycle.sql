@@ -60,9 +60,9 @@ ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS plan_version_i
     REFERENCES public.credit_plans(id);
 
 -- ── Pricing config: allow inactive drafts ────────────────────────────────
--- (active flag already exists; publish_pricing_config inserts inactive rows)
+-- (active flag already exists; publish_bursar_config inserts inactive rows)
 
-CREATE OR REPLACE FUNCTION public.publish_pricing_config(
+CREATE OR REPLACE FUNCTION public.publish_bursar_config(
     p_config JSONB,
     p_label TEXT DEFAULT NULL
 )
@@ -78,9 +78,9 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
+    FROM public.bursar_config;
 
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
+    INSERT INTO public.bursar_config (config, active, version, label)
     VALUES (p_config, false, v_next_version, p_label)
     RETURNING id INTO v_new_id;
 
@@ -96,8 +96,8 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.publish_pricing_config(JSONB, TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.publish_pricing_config(JSONB, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.publish_bursar_config(JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.publish_bursar_config(JSONB, TEXT) TO service_role;
 
 -- ── sync_buckets_from_config — version + retire absent buckets ───────────
 
@@ -128,7 +128,7 @@ DECLARE
 BEGIN
     v_version := COALESCE(
         p_config_version,
-        (SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1),
+        (SELECT version FROM public.bursar_config WHERE active = true LIMIT 1),
         1
     );
 
@@ -197,8 +197,8 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.sync_buckets_from_config(JSONB, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sync_buckets_from_config(JSONB, INTEGER) TO service_role;
 
--- Update set_active_pricing_config to pass version to sync_buckets
-CREATE OR REPLACE FUNCTION public.set_active_pricing_config(
+-- Update set_active_bursar_config to pass version to sync_buckets
+CREATE OR REPLACE FUNCTION public.set_active_bursar_config(
     p_config JSONB,
     p_label TEXT DEFAULT NULL
 )
@@ -214,11 +214,11 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
+    FROM public.bursar_config;
 
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
+    UPDATE public.bursar_config SET active = false WHERE active = true;
 
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
+    INSERT INTO public.bursar_config (config, active, version, label)
     VALUES (p_config, true, v_next_version, p_label)
     RETURNING id INTO v_new_id;
 
@@ -234,8 +234,8 @@ BEGIN
 END;
 $$;
 
--- Update activate_pricing_config bucket sync call
-CREATE OR REPLACE FUNCTION public.activate_pricing_config(p_version INTEGER)
+-- Update activate_bursar_config bucket sync call
+CREATE OR REPLACE FUNCTION public.activate_bursar_config(p_version INTEGER)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -248,16 +248,16 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT id, config INTO v_target_id, v_config
-    FROM public.credit_pricing_config
+    FROM public.bursar_config
     WHERE version = p_version;
 
     IF NOT FOUND THEN
         RETURN jsonb_build_object('error', 'version_not_found');
     END IF;
 
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
+    UPDATE public.bursar_config SET active = false WHERE active = true;
 
-    UPDATE public.credit_pricing_config SET active = true
+    UPDATE public.bursar_config SET active = true
     WHERE version = p_version
     RETURNING id INTO v_target_id;
 
@@ -380,7 +380,7 @@ BEGIN
         FROM public.credit_plans cp
         WHERE cp.plan_key = p_plan_key
           AND cp.config_version = (
-              SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1
+              SELECT version FROM public.bursar_config WHERE active = true LIMIT 1
           )
           AND cp.status = 'active';
 

@@ -408,9 +408,9 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  async getActivePricingConfig(): Promise<Record<string, unknown> | null> {
+  async getActiveBursarConfig(): Promise<Record<string, unknown> | null> {
     const rows = await this.queryFn(
-      "SELECT config FROM public.credit_pricing_config WHERE active = TRUE LIMIT 1",
+      "SELECT config FROM public.bursar_config WHERE active = TRUE LIMIT 1",
       [],
     );
     if (!rows || rows.length === 0) return null;

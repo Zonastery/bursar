@@ -39,7 +39,7 @@ both SDKs unnecessary and it is deleted, yielding a symmetric sync contract.
 | L1 | Low | JS naming | `getTierBalance`/`adjustTierBalance`/`tierWalkOrder` private helpers un-renamed. |
 | L2 | Low | JS naming | `fixedCredits` field/var still "fixed". |
 | L3 | Low | Naming | `signup_bonus` tx-type + `grant_signup_bonus()` trigger retained (consistent; optional rename). |
-| L4 | Low | JS types | `PricingConfigData` is a benign `@deprecated` alias (delete optional). |
+| L4 | Low | JS types | `BursarConfigData` is a benign `@deprecated` alias (delete optional). |
 
 ---
 
@@ -107,7 +107,7 @@ for `safety.*` → flat `billing_mode` etc.
   and per-topup `currency`). No backward-compat shim. Fresh-DB only.
 - **`signup_bonus` tx-type:** leave as-is (consistent across SDK + SQL trigger);
   rename is optional and out of scope.
-- **`PricingConfigData` (JS):** delete (deprecated, zero internal usages).
+- **`BursarConfigData` (JS):** delete (deprecated, zero internal usages).
 - **`offer_key` / `topup_key` / `plan_key` SQL PKs:** kept — they store the
   config map key; the plan's "no duplicated identifier" rule is about the
   config/model shape, not the SQL PK.

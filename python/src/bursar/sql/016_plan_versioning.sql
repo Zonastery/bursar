@@ -1,6 +1,6 @@
 -- bursar: plan versioning — immutable plan rows per config version.
 --
--- Each call to set_active_pricing_config (or activate_pricing_config) creates
+-- Each call to set_active_bursar_config (or activate_bursar_config) creates
 -- new credit_plans rows keyed by (plan_key, config_version) instead of mutating
 -- rows in place. Existing users stay on their assigned plan version until
 -- explicitly migrated via migrate_plan_users().
@@ -15,7 +15,7 @@ ALTER TABLE public.credit_plans ADD COLUMN IF NOT EXISTS config_version INTEGER;
 
 UPDATE public.credit_plans
 SET config_version = COALESCE(
-    (SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1),
+    (SELECT version FROM public.bursar_config WHERE active = true LIMIT 1),
     1
 )
 WHERE config_version IS NULL;
@@ -110,13 +110,13 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.sync_plans_from_config(JSONB, INTEGER) FROM PUBLIC, anon, authenticated;
 
 
--- ── Redefine set_active_pricing_config — pass version to sync_plans ─────
+-- ── Redefine set_active_bursar_config — pass version to sync_plans ─────
 --
 -- The function is already defined in 013_billing.sql with the billing sync
 -- included. This version just changes the sync_plans_from_config call to
 -- pass the new version number. Everything else is identical.
 
-CREATE OR REPLACE FUNCTION public.set_active_pricing_config(
+CREATE OR REPLACE FUNCTION public.set_active_bursar_config(
     p_config JSONB,
     p_label TEXT DEFAULT NULL
 )
@@ -132,11 +132,11 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
-    FROM public.credit_pricing_config;
+    FROM public.bursar_config;
 
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
+    UPDATE public.bursar_config SET active = false WHERE active = true;
 
-    INSERT INTO public.credit_pricing_config (config, active, version, label)
+    INSERT INTO public.bursar_config (config, active, version, label)
     VALUES (p_config, true, v_next_version, p_label)
     RETURNING id INTO v_new_id;
 
@@ -191,7 +191,7 @@ BEGIN
     FROM public.credit_plans cp
     WHERE cp.plan_key = p_plan_key
       AND cp.config_version = (
-          SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1
+          SELECT version FROM public.bursar_config WHERE active = true LIMIT 1
       );
 
     -- Fallback: if plan_key not in active config, use the latest version
@@ -291,9 +291,9 @@ REVOKE EXECUTE ON FUNCTION public.migrate_plan_users(TEXT, INTEGER) FROM PUBLIC,
 GRANT EXECUTE ON FUNCTION public.migrate_plan_users(TEXT, INTEGER) TO service_role;
 
 
--- ── Fix activate_pricing_config — re-run syncs with target config ───────
+-- ── Fix activate_bursar_config — re-run syncs with target config ───────
 --
--- Previously, activate_pricing_config only flipped the active flag without
+-- Previously, activate_bursar_config only flipped the active flag without
 -- re-syncing the derived tables (plans, buckets, billing). This meant a
 -- rollback to an old config version left the derived tables in the "new"
 -- state — inconsistent.
@@ -301,7 +301,7 @@ GRANT EXECUTE ON FUNCTION public.migrate_plan_users(TEXT, INTEGER) TO service_ro
 -- Now it loads the target version's config and re-runs all three syncs,
 -- ensuring plans/buckets/billing are consistent with the activated config.
 
-CREATE OR REPLACE FUNCTION public.activate_pricing_config(p_version INTEGER)
+CREATE OR REPLACE FUNCTION public.activate_bursar_config(p_version INTEGER)
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -316,7 +316,7 @@ BEGIN
 
     -- Verify the target version exists and fetch its config
     SELECT id, config INTO v_target_id, v_config
-    FROM public.credit_pricing_config
+    FROM public.bursar_config
     WHERE version = p_version;
 
     IF NOT FOUND THEN
@@ -324,10 +324,10 @@ BEGIN
     END IF;
 
     -- Deactivate all configs
-    UPDATE public.credit_pricing_config SET active = false WHERE active = true;
+    UPDATE public.bursar_config SET active = false WHERE active = true;
 
     -- Activate the target version
-    UPDATE public.credit_pricing_config SET active = true
+    UPDATE public.bursar_config SET active = true
     WHERE version = p_version
     RETURNING id INTO v_target_id;
 

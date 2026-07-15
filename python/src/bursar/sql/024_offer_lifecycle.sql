@@ -152,7 +152,7 @@ BEGIN
 
     v_catalog_version := COALESCE(
         (p_state->>'catalog_version')::INTEGER,
-        (SELECT version FROM public.credit_pricing_config WHERE active = true LIMIT 1)
+        (SELECT version FROM public.bursar_config WHERE active = true LIMIT 1)
     );
 
     IF p_state->>'plan' IS NOT NULL AND v_catalog_version IS NOT NULL THEN

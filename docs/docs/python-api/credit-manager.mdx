@@ -68,7 +68,7 @@ Returns `SetupResult` with `tables_created`, `rpcs_created`, and `errors`. `resu
 
 ### `publish_pricing_from_dict(data)`
 
-Load pricing from a raw `dict` or `PricingConfigData`, build the internal engine, and persist the config to the store via `set_active_pricing`.
+Load pricing from a raw `dict` or `BursarConfigData`, build the internal engine, and persist the config to the store via `set_active_pricing`.
 
 ```python
 manager.publish_pricing_from_dict({
@@ -83,7 +83,7 @@ Fetch the active pricing config from the store and build the internal `PricingEn
 
 ### `publish_pricing(config, label=None)`
 
-Publish a `PricingConfigData` object as the active config and rebuild the internal engine. Optional `label` for version tagging.
+Publish a `BursarConfigData` object as the active config and rebuild the internal engine. Optional `label` for version tagging.
 
 ## Balance Operations
 
@@ -142,7 +142,7 @@ Get remaining free allowance for the current billing period (store-level, not on
 Example — full plan coverage skips balance deduction:
 
 ```python
-config = PricingConfigData(
+config = BursarConfigData(
     models={"_default": "input_tokens * 1"},
     plans={"free": PlanDefinition(id="free", name="Free", free_allowance=100)},
 )

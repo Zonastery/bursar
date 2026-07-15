@@ -6,8 +6,8 @@ import pytest
 from pydantic import ValidationError
 
 from bursar.config import (
+    BursarConfig,
     ConfigError,
-    PricingConfig,
     load_config_from_dict,
 )
 
@@ -293,15 +293,15 @@ class TestConfigValidation:
                 }
             )
 
-    def test_pricing_config_field_alignment(self) -> None:
-        """PricingConfig fields match the expected top-level schema keys.
+    def test_bursar_config_field_alignment(self) -> None:
+        """BursarConfig fields match the expected top-level schema keys.
 
         Prevents silent drift when fields are added to the model.
         """
         expected_top_level = {"version", "metering", "ledger", "plans", "billing"}
-        config_fields = set(PricingConfig.model_fields.keys())
+        config_fields = set(BursarConfig.model_fields.keys())
         assert config_fields == expected_top_level, (
-            f"Field drift: PricingConfig has {config_fields - expected_top_level}, "
+            f"Field drift: BursarConfig has {config_fields - expected_top_level}, "
             f"expected {expected_top_level - config_fields}"
         )
 
@@ -690,11 +690,11 @@ class TestConfigValidation:
         assert config.plans is not None
         assert config.plans["pro"].allowance is None
 
-    def test_pricing_config_field_alignment_unaffected_by_allowance_period(self) -> None:
+    def test_bursar_config_field_alignment_unaffected_by_allowance_period(self) -> None:
         """allowance_period is nested inside PlanDefinition, not a top-level
-        PricingConfig field, so the field-parity test must still pass."""
+        BursarConfig field, so the field-parity test must still pass."""
         expected = {"version", "metering", "ledger", "plans", "billing"}
-        config_fields = set(PricingConfig.model_fields.keys())
+        config_fields = set(BursarConfig.model_fields.keys())
         assert config_fields == expected
         assert "allowance_period" not in config_fields
 
@@ -959,8 +959,8 @@ class TestBucketConfigValidation:
         assert config.ledger.buckets is not None
         assert config.ledger.buckets["a"].priority == config.ledger.buckets["b"].priority == 5
 
-    def test_pricing_config_round_trips_buckets(self) -> None:
-        """PricingConfig (the validated model) carries the same
+    def test_bursar_config_round_trips_buckets(self) -> None:
+        """BursarConfig (the validated model) carries the same
         buckets shape as the raw config dict."""
         raw = {
             "version": 1,
@@ -971,7 +971,7 @@ class TestBucketConfigValidation:
             },
         }
         validated = load_config_from_dict(raw)
-        data = PricingConfig.model_validate(raw)
+        data = BursarConfig.model_validate(raw)
         assert validated.ledger.buckets is not None
         assert data.ledger.buckets is not None
         assert validated.ledger.buckets["gifted"].model_dump() == data.ledger.buckets["gifted"].model_dump()

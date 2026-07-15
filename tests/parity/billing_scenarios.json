@@ -1,6 +1,6 @@
 {
   "_comment": "Cross-SDK billing parity fixture. Python (MemoryStore) and JS (MemoryStore) MUST produce identical numeric results for every scenario. Both runners load this file; expected values are hand-verified. See plan Phase 2a.",
-  "pricing_config": {
+  "bursar_config": {
     "version": 1,
     "metering": {
       "models": {

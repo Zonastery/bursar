@@ -1,6 +1,5 @@
 import Decimal from "decimal.js";
 import { LRUCache } from "lru-cache";
-import type { CreditManager } from "../manager.js";
 import type { BillingStore } from "./billing-store.js";
 import type {
   BillingEvent,
@@ -34,11 +33,34 @@ type ResolveUserFn = (
 ) => string | null;
 
 export interface BillingManagerOptions {
-  creditManager?: CreditManager | null;
+  /** Narrow credit capability used by subscription provisioning. */
+  provisioning?: BillingProvisioningPort | null;
+  /** @deprecated Use `provisioning`; retained temporarily for source compatibility. */
+  creditManager?: BillingProvisioningPort | null;
   resolveUser?: ResolveUserFn | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   cancelPriorProviders?: boolean;
   logger?: ProviderLogger | null;
+}
+
+/**
+ * Credit operations billing is allowed to request. Keeping this port narrow
+ * prevents billing code from depending on the full credit manager surface.
+ */
+export interface BillingProvisioningPort {
+  setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void>;
+  unsetUserPlan(userId: string): Promise<void>;
+  addCredits(
+    userId: string,
+    amount: Decimal | number,
+    options?: { type?: string; bucket?: string | null },
+  ): Promise<unknown>;
+  deductCredits(
+    userId: string,
+    amount: Decimal | number,
+    options?: { txType?: string; bucket?: string | null },
+  ): Promise<unknown>;
+  revokeCreditsByTxType(userId: string, txType: string): Promise<unknown>;
 }
 
 /**
@@ -47,7 +69,7 @@ export interface BillingManagerOptions {
  */
 export class BillingManager {
   private store: BillingStore;
-  private cm: CreditManager | null;
+  private provisioning: BillingProvisioningPort | null;
   private resolveUser: ResolveUserFn | null;
   private eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
   private cancelPriorProviders: boolean;
@@ -59,9 +81,13 @@ export class BillingManager {
     BillingEventType.INVOICE_UPCOMING,
   ]);
 
+  get hasProvisioning(): boolean {
+    return this.provisioning !== null;
+  }
+
   constructor(store: BillingStore, options?: BillingManagerOptions) {
     this.store = store;
-    this.cm = options?.creditManager ?? null;
+    this.provisioning = options?.provisioning ?? options?.creditManager ?? null;
     this.resolveUser = options?.resolveUser ?? null;
     this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
@@ -294,7 +320,7 @@ export class BillingManager {
   private async handleCustomerDeleted(event: BillingEvent): Promise<BillingEventResult> {
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveUserId(event);
-      if (uid && this.cm) {
+      if (uid && this.provisioning) {
         await this.revokeSubscription(uid);
       }
     }
@@ -426,7 +452,7 @@ export class BillingManager {
       }),
     );
     if (
-      this.cm &&
+      this.provisioning &&
       event.subscription.status &&
       ["active", "trialing"].includes(event.subscription.status)
     ) {
@@ -451,7 +477,7 @@ export class BillingManager {
         plan: plan ?? existing?.plan ?? null,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.reEvaluateAccess(uid, event);
     }
     return { handled: true, action: "subscription_updated" };
@@ -471,7 +497,7 @@ export class BillingManager {
         plan: plan ?? existing?.plan ?? null,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_activated" };
@@ -492,7 +518,7 @@ export class BillingManager {
         plan: resolvedPlanKey,
       }),
     );
-    if (this.cm && resolvedPlanKey) {
+    if (this.provisioning && resolvedPlanKey) {
       await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_renewed" };
@@ -512,7 +538,7 @@ export class BillingManager {
         plan: plan ?? existing?.plan ?? null,
       }),
     );
-    if (this.cm && (plan ?? existing?.plan)) {
+    if (this.provisioning && (plan ?? existing?.plan)) {
       // Plan-change: prefer new plan over existing (renewal at L422 correctly keeps existing).
       await this.provisionSubscription(uid, offer, event, plan ?? existing?.plan ?? undefined);
     }
@@ -561,7 +587,7 @@ export class BillingManager {
         cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_canceled" };
@@ -579,7 +605,7 @@ export class BillingManager {
         cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_expired" };
@@ -597,7 +623,7 @@ export class BillingManager {
         cancelAtPeriodEnd: existing?.cancelAtPeriodEnd ?? false,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.revokeSubscription(uid);
     }
     return { handled: true, action: "subscription_paused" };
@@ -618,7 +644,7 @@ export class BillingManager {
         plan: plan ?? existing?.plan ?? null,
       }),
     );
-    if (this.cm) {
+    if (this.provisioning) {
       await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
     }
     return { handled: true, action: "subscription_resumed" };
@@ -683,7 +709,7 @@ export class BillingManager {
       });
     }
 
-    if (topupConfig && this.cm && event.payment.purpose === "credit_topup" && uid) {
+    if (topupConfig && this.provisioning && event.payment.purpose === "credit_topup" && uid) {
       if (
         topupConfig.maxAmountMinor != null &&
         event.payment.amountMinor > topupConfig.maxAmountMinor
@@ -695,7 +721,7 @@ export class BillingManager {
       }
       const credits = await this.store.computeTopupCredits(event.payment.amountMinor, topupConfig);
       if (credits > 0) {
-        await this.cm.addCredits(uid, new Decimal(credits), {
+        await this.provisioning.addCredits(uid, new Decimal(credits), {
           type: "purchase",
           bucket: topupConfig.depositTo ?? "purchased",
         });
@@ -717,7 +743,7 @@ export class BillingManager {
         purpose: event.payment.purpose,
       });
     }
-    if (uid && event.subscription && this.cm) {
+    if (uid && event.subscription && this.provisioning) {
       const existing = await this.getExistingSubscription(event);
       await this.store.upsertBillingSubscription(
         this.buildSubscriptionState(event, uid, existing, { status: "past_due" }),
@@ -739,7 +765,7 @@ export class BillingManager {
         currency: event.refund.currency,
         reason: event.refund.reason,
       });
-      if (event.refund.providerPaymentId && this.cm) {
+      if (event.refund.providerPaymentId && this.provisioning) {
         const payment = await this.store.getBillingPayment(
           event.provider,
           event.refund.providerPaymentId,
@@ -757,7 +783,7 @@ export class BillingManager {
           }
           const credits = Math.trunc((event.refund.amountMinor * cpu) / 100);
           if (credits > 0) {
-            await this.cm.deductCredits(uid, credits, {
+            await this.provisioning.deductCredits(uid, credits, {
               txType: "refund",
               bucket: "purchased",
             });
@@ -804,9 +830,9 @@ export class BillingManager {
     event: BillingEvent,
     planKeyOverride?: string,
   ): Promise<void> {
-    if (!this.cm) {
+    if (!this.provisioning) {
       this.logger?.debug?.(
-        `[BillingManager] provisionSubscription: no creditManager for user ${uid}`,
+        `[BillingManager] provisionSubscription: no provisioning capability for user ${uid}`,
       );
       return;
     }
@@ -822,7 +848,7 @@ export class BillingManager {
           return isNaN(d.getTime()) ? undefined : d;
         })()
       : undefined;
-    await this.cm.setUserPlan(uid, plan, planAssignedAt);
+    await this.provisioning.setUserPlan(uid, plan, planAssignedAt);
 
     // Cancel subscriptions from other providers (migration support)
     if (this.cancelPriorProviders && event.provider) {
@@ -835,14 +861,14 @@ export class BillingManager {
     }
 
     const g = offer?.grant;
-    if (g?.mode === "cycle_grant" && this.cm) {
+    if (g?.mode === "cycle_grant" && this.provisioning) {
       const cycleCredits = g.credits;
       if (cycleCredits && cycleCredits > 0) {
         const cycleBucket = g.bucket ?? "purchased";
         if (g.replacePrior) {
-          await this.cm.revokeCreditsByTxType(uid, "cycle_grant");
+          await this.provisioning.revokeCreditsByTxType(uid, "cycle_grant");
         }
-        await this.cm.addCredits(uid, new Decimal(cycleCredits), {
+        await this.provisioning.addCredits(uid, new Decimal(cycleCredits), {
           type: "cycle_grant",
           bucket: cycleBucket,
         });
@@ -851,12 +877,12 @@ export class BillingManager {
   }
 
   private async revokeSubscription(uid: string): Promise<void> {
-    if (!this.cm) return;
-    await this.cm.unsetUserPlan(uid);
+    if (!this.provisioning) return;
+    await this.provisioning.unsetUserPlan(uid);
   }
 
   private async reEvaluateAccess(uid: string, event: BillingEvent): Promise<void> {
-    if (!this.cm || !event.subscription) return;
+    if (!this.provisioning || !event.subscription) return;
     const status = event.subscription.status;
     if (status && ["active", "trialing"].includes(status)) {
       const offer = await this.resolveOfferFromEvent(event);

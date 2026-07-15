@@ -23,8 +23,8 @@ import type {
   ListUsageEventsOptions,
   MigratePlanUsersResult,
   PaginatedTransactions,
-  PricingConfigHistoryItem,
-  PricingConfigResult,
+  BursarConfigHistoryItem,
+  BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -89,7 +89,7 @@ export interface SettleLeaseOptions extends FeatureLimitOptions {
  *
  * Split into two tiers:
  *  - **Core** (abstract, must be implemented): balance/credit ops, the atomic
- *    lease lifecycle, pricing-config versioning, plan management, spend caps,
+ *    lease lifecycle, bursar-config versioning, plan management, spend caps,
  *    refunds, and expiry sweeping. Every backend needs these.
  *  - **Optional capabilities** (concrete, default-throwing): usage analytics,
  *    transaction listing, and shared team-balance pools. A custom store that
@@ -193,15 +193,16 @@ export abstract class CreditStore {
    */
   abstract getAvailable(userId: string): Promise<AvailableResult>;
 
-  abstract getActivePricing(): Promise<PricingConfigResult | null>;
+  abstract getActivePricing(): Promise<BursarConfigResult | null>;
   abstract setActivePricing(
     config: Record<string, unknown>,
     label?: string | null,
   ): Promise<string>;
+  abstract publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string>;
 
   // H8: pricing history / activation — parity with Python base.py:293-312.
-  abstract getPricingHistory(): Promise<PricingConfigHistoryItem[]>;
-  abstract getPricingConfig(version: number): Promise<PricingConfigResult | null>;
+  abstract getPricingHistory(): Promise<BursarConfigHistoryItem[]>;
+  abstract getBursarConfig(version: number): Promise<BursarConfigResult | null>;
   abstract activatePricing(version: number): Promise<string>;
 
   /**

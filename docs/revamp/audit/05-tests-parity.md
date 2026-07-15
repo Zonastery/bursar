@@ -79,7 +79,7 @@ Re-scan the updated test files for renamed-symbol correctness after Steps 1-4:
   raw objects: ensure they use the new shape (`plan`, `grant`, `providers`,
   `deposit_to`, `credits_per_unit`), not old keys.
 - `javascript/tests/engine.test.ts:253` — test title "returns config as
-  PricingConfigData" → "returns config as Record<string, unknown>" (cosmetic,
+  BursarConfigData" → "returns config as Record<string, unknown>" (cosmetic,
   but do it in this pass).
 
 ---

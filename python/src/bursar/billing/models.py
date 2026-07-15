@@ -200,7 +200,7 @@ class BillingConfig(BaseModel):
     topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
 
     @classmethod
-    def from_pricing_config(cls, cfg: Any) -> "BillingConfig":
+    def from_bursar_config(cls, cfg: Any) -> "BillingConfig":
         billing_data = getattr(cfg, "billing", None)
         if billing_data is None:
             return cls()

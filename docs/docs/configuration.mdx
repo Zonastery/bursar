@@ -1,6 +1,6 @@
 # Pricing Configuration
 
-The pricing config is stored in the `credit_pricing_config` table or loaded from a dict.
+The pricing config is stored in the `bursar_config` table or loaded from a dict.
 
 :::info Credits are fractional decimals
 Every credit amount — balances, costs, allowances, caps — is a **fractional decimal**, stored as `NUMERIC(18,4)` in Postgres and as `decimal.Decimal` (Python) / `Decimal` from `decimal.js` (JavaScript) in code. Costs are quantized to 4 decimal places with `ROUND_HALF_UP` at the cost boundary and when persisting. There is **no** integer truncation: an operation that costs `0.4` credits charges `0.4`, not `0`. Both SDKs round identically, so the same config bills the same amount regardless of language.
@@ -374,7 +374,7 @@ See [Subscription Integration: Feature call limits](/docs/subscription-integrati
 
 ## Catalog lifecycle
 
-Pricing config is **versioned and immutable**. Each publish creates a new row in `credit_pricing_config` with an incrementing `version` number. Plans and buckets are synced as versioned rows — existing users are never silently moved to a new version.
+Pricing config is **versioned and immutable**. Each publish creates a new row in `bursar_config` with an incrementing `version` number. Plans and buckets are synced as versioned rows — existing users are never silently moved to a new version.
 
 ### Adding and removing plans
 
@@ -421,17 +421,17 @@ Two database RPCs control how a new version enters the catalog:
 
 | RPC | `active` flag | Use case |
 |-----|---------------|----------|
-| `publish_pricing_config` | `false` | Create a **draft** version for review — does not affect live billing |
-| `set_active_pricing_config` | `true` | Publish **and** activate immediately — deactivates the prior active version |
+| `publish_bursar_config` | `false` | Create a **draft** version for review — does not affect live billing |
+| `set_active_bursar_config` | `true` | Publish **and** activate immediately — deactivates the prior active version |
 
-The SDK convenience methods (`publish_pricing_from_dict`, `publish_pricing`, `bursar pricing set`) call `set_active_pricing_config` — they publish and activate in one step. For draft-then-review workflows, call `publish_pricing_config` directly via SQL/RPC, validate the draft, then switch live traffic with `activate_pricing`:
+The SDK convenience methods (`publish_pricing_from_dict`, `publish_pricing`, `bursar pricing set`) call `set_active_bursar_config` — they publish and activate in one step. For draft-then-review workflows, call `publish_bursar_config` directly via SQL/RPC, validate the draft, then switch live traffic with `activate_pricing`:
 
 ```bash
 bursar pricing list          # find the draft version number
 bursar pricing activate 3    # make v3 the active catalog
 ```
 
-`activate_pricing` / `activate_pricing_config` re-runs `sync_plans_from_config`, `sync_buckets_from_config`, and `sync_billing_from_config` for the target version, ensuring the catalog tables match that version's config. It does not migrate users — use `migrate_plan_users` for that.
+`activate_pricing` / `activate_bursar_config` re-runs `sync_plans_from_config`, `sync_buckets_from_config`, and `sync_billing_from_config` for the target version, ensuring the catalog tables match that version's config. It does not migrate users — use `migrate_plan_users` for that.
 
 ## Loading
 
@@ -480,7 +480,7 @@ manager.load_pricing_from_store()
 
 ## Live Updates
 
-Pricing stored in `credit_pricing_config`. Update via CLI or RPC — no redeploy needed.
+Pricing stored in `bursar_config`. Update via CLI or RPC — no redeploy needed.
 
 ```bash
 bursar pricing set config.yaml --label "Q3 rates"
@@ -520,4 +520,4 @@ Or regenerate the checked-in schema file:
 python scripts/generate_pricing_json_schema.py
 ```
 
-This writes `docs/pricing-config.schema.json` from `PricingConfig.model_json_schema()`.
+This writes `docs/bursar-config.schema.json` from `BursarConfig.model_json_schema()`.
