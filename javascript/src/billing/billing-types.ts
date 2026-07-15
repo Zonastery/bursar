@@ -257,6 +257,8 @@ export interface BillingOffer {
   intervalCount?: number;
   grant?: SubscriptionGrant;
   providers?: Record<string, ProviderRef>;
+  validFrom?: string | null;
+  validTo?: string | null;
 }
 
 export interface BillingCreditTopup {

@@ -3,12 +3,7 @@ import { camelToSnakeKeys } from "./case-utils.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
-import type {
-  BillingMode,
-  OperationPolicy,
-  PlanDefinition,
-  BucketDefinition,
-} from "./types.js";
+import type { BillingMode, OperationPolicy, PlanDefinition, BucketDefinition } from "./types.js";
 import type {
   BillingCreditTopup,
   BillingOffer,
@@ -153,6 +148,8 @@ const BILLING_OFFER_KEYS: ReadonlySet<string> = new Set([
   "intervalCount",
   "grant",
   "providers",
+  "validFrom",
+  "validTo",
 ]);
 
 /** Known billing-topup keys. */
@@ -284,6 +281,8 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
     variant_id: "variantId",
     lookup_key: "lookupKey",
     replace_prior: "replacePrior",
+    valid_from: "validFrom",
+    valid_to: "validTo",
     allowance: "allowance",
     safety: "safety",
     entitlements: "entitlements",
@@ -459,9 +458,7 @@ function parseSignupGrant(raw: unknown): SignupGrant | null {
   assertKnownKeys(grant, SIGNUP_GRANT_KEYS, "ledger.signupGrant");
   const amount = Number(grant.amount);
   if (!Number.isFinite(amount) || amount < 0) {
-    throw new ConfigError(
-      `ledger.signupGrant.amount must be >= 0, got ${String(grant.amount)}`,
-    );
+    throw new ConfigError(`ledger.signupGrant.amount must be >= 0, got ${String(grant.amount)}`);
   }
   if (grant.bucket == null || grant.bucket === "") {
     throw new ConfigError("ledger.signupGrant.bucket is required");
@@ -653,13 +650,18 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
 function parseProviderRefs(
   raw: unknown,
   context: string,
-): Record<string, { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }> {
+): Record<
+  string,
+  { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }
+> {
   if (raw == null) return {};
   if (typeof raw !== "object" || Array.isArray(raw)) {
     throw new ConfigError(`${context} must be a dict of provider refs`);
   }
-  const out: Record<string, { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }> =
-    {};
+  const out: Record<
+    string,
+    { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }
+  > = {};
   for (const [providerKey, providerVal] of Object.entries(raw as Record<string, unknown>)) {
     const ref = normaliseKeys((providerVal ?? {}) as Record<string, unknown>);
     assertKnownKeys(ref, PROVIDER_REF_KEYS, `${context}.${providerKey}`);
@@ -714,7 +716,9 @@ function parseBillingOffer(raw: unknown, context: string): BillingOffer {
   }
   const intervalCount = Number(offer.intervalCount ?? 1);
   if (!Number.isFinite(intervalCount) || intervalCount < 1) {
-    throw new ConfigError(`${context}.intervalCount must be >= 1, got ${String(offer.intervalCount)}`);
+    throw new ConfigError(
+      `${context}.intervalCount must be >= 1, got ${String(offer.intervalCount)}`,
+    );
   }
   return {
     plan: String(offer.plan),
@@ -722,6 +726,8 @@ function parseBillingOffer(raw: unknown, context: string): BillingOffer {
     intervalCount,
     grant: parseGrant(offer.grant, `${context}.grant`),
     providers: parseProviderRefs(offer.providers, `${context}.providers`),
+    validFrom: offer.validFrom != null ? String(offer.validFrom) : null,
+    validTo: offer.validTo != null ? String(offer.validTo) : null,
   };
 }
 
@@ -730,15 +736,21 @@ function parseBillingTopup(raw: unknown, context: string): BillingCreditTopup {
   assertKnownKeys(topup, BILLING_TOPUP_KEYS, context);
   const creditsPerUnit = Number(topup.creditsPerUnit ?? 1000);
   if (!Number.isFinite(creditsPerUnit) || creditsPerUnit < 0) {
-    throw new ConfigError(`${context}.creditsPerUnit must be >= 0, got ${String(topup.creditsPerUnit)}`);
+    throw new ConfigError(
+      `${context}.creditsPerUnit must be >= 0, got ${String(topup.creditsPerUnit)}`,
+    );
   }
   const minAmountMinor = Number(topup.minAmountMinor ?? 500);
   const maxAmountMinor = Number(topup.maxAmountMinor ?? 500_000);
   if (!Number.isFinite(minAmountMinor) || minAmountMinor < 0) {
-    throw new ConfigError(`${context}.minAmountMinor must be >= 0, got ${String(topup.minAmountMinor)}`);
+    throw new ConfigError(
+      `${context}.minAmountMinor must be >= 0, got ${String(topup.minAmountMinor)}`,
+    );
   }
   if (!Number.isFinite(maxAmountMinor) || maxAmountMinor < 0) {
-    throw new ConfigError(`${context}.maxAmountMinor must be >= 0, got ${String(topup.maxAmountMinor)}`);
+    throw new ConfigError(
+      `${context}.maxAmountMinor must be >= 0, got ${String(topup.maxAmountMinor)}`,
+    );
   }
   const taxBehavior = (topup.taxBehavior as string | undefined) ?? "exclude_tax";
   if (!TAX_BEHAVIORS.has(taxBehavior)) {
@@ -948,6 +960,8 @@ function pricingConfigToDict(config: PricingConfig): Record<string, unknown> {
               ...(offer.providers && Object.keys(offer.providers).length > 0
                 ? { providers: offer.providers }
                 : {}),
+              ...(offer.validFrom != null ? { validFrom: offer.validFrom } : {}),
+              ...(offer.validTo != null ? { validTo: offer.validTo } : {}),
             },
           ]),
         ),

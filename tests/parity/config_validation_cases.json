@@ -347,6 +347,47 @@
       }
     },
     {
+      "name": "billing_offer_valid_from_to_accepted",
+      "expect": "accept",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "ledger": {
+          "buckets": {
+            "gifted": { "label": "Gifted", "priority": 10 }
+          }
+        },
+        "billing": {
+          "subscriptions": {
+            "pro-monthly": {
+              "plan": "pro",
+              "valid_from": "2025-01-01",
+              "valid_to": "2025-12-31",
+              "grant": { "mode": "allowance" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "billing_offer_unknown_key_rejected",
+      "expect": "reject",
+      "reason": "typo'd key must not be silently ignored",
+      "config": {
+        "metering": { "models": { "*": "input_tokens * 1" } },
+        "plans": { "pro": { "label": "Pro" } },
+        "billing": {
+          "subscriptions": {
+            "pro-monthly": {
+              "plan": "pro",
+              "valid_till": "2025-12-31",
+              "grant": { "mode": "allowance" }
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "subscription_plan_dangling_no_plans_rejected",
       "expect": "reject",
       "reason": "billing.subscriptions plan must reference an existing plans key",

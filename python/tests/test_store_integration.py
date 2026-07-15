@@ -49,7 +49,27 @@ _PRICING = {
         },
         "tools": {"*": "tool_calls * 0"},
     },
-    "ledger": {"min_balance": 5},
+    "ledger": {
+        "min_balance": 5,
+        "buckets": {
+            "gifted": {"label": "Gifted", "priority": 10},
+            "purchased": {"label": "Purchased", "priority": 20, "default": True},
+        },
+    },
+    "plans": {
+        "free": {"label": "Free"},
+    },
+    "billing": {
+        "subscriptions": {
+            "free_monthly": {
+                "plan": "free",
+                "interval": "month",
+                "grant": {"mode": "allowance"},
+                "valid_from": "2025-01-01",
+                "valid_to": "2026-12-31",
+            },
+        },
+    },
 }
 
 _PG_USER = "00000000-0000-0000-0000-000000000001"

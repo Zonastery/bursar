@@ -1471,6 +1471,20 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
         purchased: { label: "Purchased", priority: 20, expires: false, default: true },
       },
     },
+    plans: {
+      free: { label: "Free" },
+    },
+    billing: {
+      subscriptions: {
+        free_monthly: {
+          plan: "free",
+          interval: "month",
+          grant: { mode: "allowance" },
+          valid_from: "2025-01-01",
+          valid_to: "2026-12-31",
+        },
+      },
+    },
   };
 
   it("addCredits into an explicit tier is reflected by getBucketBalances, sorted by priority", async () => {

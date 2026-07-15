@@ -79,6 +79,8 @@ BILLING_CONFIG = BillingConfig(
             interval="month",
             interval_count=1,
             grant=AllowanceGrant(),
+            valid_from="2025-01-01",
+            valid_to="2026-12-31",
             providers={
                 "stripe": ProviderRef(product_id="prod_monthly", price_id="price_monthly_1000"),
             },
@@ -88,6 +90,7 @@ BILLING_CONFIG = BillingConfig(
             interval="year",
             interval_count=1,
             grant=AllowanceGrant(),
+            valid_from="2025-06-01",
             providers={
                 "stripe": ProviderRef(product_id="prod_yearly", price_id="price_yearly_10000"),
             },
@@ -97,6 +100,7 @@ BILLING_CONFIG = BillingConfig(
             interval="month",
             interval_count=1,
             grant=CycleGrant(credits=5000, bucket="purchased", replace_prior=True),
+            valid_to=None,
             providers={
                 "stripe": ProviderRef(
                     product_id="prod_cycle_grant",

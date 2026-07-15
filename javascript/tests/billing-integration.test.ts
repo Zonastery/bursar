@@ -65,6 +65,8 @@ const BILLING_CONFIG: BillingConfig = {
       interval: "month",
       intervalCount: 1,
       grant: { mode: "allowance" },
+      validFrom: "2025-01-01",
+      validTo: "2026-12-31",
       providers: {
         stripe: {
           productId: "prod_monthly",
@@ -77,6 +79,7 @@ const BILLING_CONFIG: BillingConfig = {
       interval: "year",
       intervalCount: 1,
       grant: { mode: "allowance" },
+      validFrom: "2025-06-01",
       providers: {
         stripe: {
           productId: "prod_yearly",
@@ -94,6 +97,7 @@ const BILLING_CONFIG: BillingConfig = {
         bucket: "purchased",
         replacePrior: true,
       },
+      validTo: null,
       providers: {
         stripe: {
           productId: "prod_cycle_grant",
