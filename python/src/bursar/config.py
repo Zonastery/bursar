@@ -1,8 +1,7 @@
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from bursar.billing.models import BillingCreditTopup, BillingOffer
 from bursar.expr import ExpressionError, validate_expression
@@ -195,9 +194,7 @@ class PricingConfig(BaseModel):
             for offer_key, offer in billing.subscriptions.items():
                 plan_ref = offer.plan
                 if plan_ref not in plans:
-                    raise ConfigError(
-                        f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'"
-                    )
+                    raise ConfigError(f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'")
         return self
 
     @model_validator(mode="after")

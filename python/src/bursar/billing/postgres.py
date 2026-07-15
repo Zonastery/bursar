@@ -187,8 +187,8 @@ class PostgresBillingStore(BillingStore):
             interval=str(r.interval) if r.interval else None,
             interval_count=int(r.interval_count) if r.interval_count is not None else None,
             metadata=r.metadata if isinstance(r.metadata, dict) else None,
-            catalog_version=int(r.catalog_version) if getattr(r, "catalog_version", None) is not None else None,
-            plan_version_id=str(r.plan_version_id) if getattr(r, "plan_version_id", None) else None,
+            catalog_version=int(cv) if (cv := getattr(r, "catalog_version", None)) is not None else None,
+            plan_version_id=str(pv) if (pv := getattr(r, "plan_version_id", None)) else None,
         )
 
     @staticmethod
