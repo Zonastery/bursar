@@ -1733,6 +1733,18 @@ class CreditsService:
         """List credit transactions for a user with pagination."""
         return self._store.list_user_transactions(user_id, types, from_date, to_date, limit, offset)
 
+    def list_user_transactions_cursor(
+        self,
+        user_id: str,
+        types: list[str] | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: tuple[datetime | str, str] | None = None,
+    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
+        """List mutable transaction history with a stable cursor."""
+        return self._store.list_user_transactions_cursor(user_id, types, from_date, to_date, limit, cursor)
+
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window."""
         return self._store.aggregate_stats(start, end)

@@ -62,7 +62,7 @@ def _insert_deny_cap(conn: psycopg2.connection, user_id: str, limit: int) -> Non
     """Insert a daily deny spend cap at ``limit`` for ``user_id``."""
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+            "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
             "VALUES (%s, 'daily', %s, 'deny')",
             (user_id, limit),
         )
@@ -131,6 +131,17 @@ def _preseed_supabase_objects(dsn: str) -> None:
                     email TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
+                """
+            )
+            cur.execute(
+                """
+                CREATE OR REPLACE FUNCTION public.handle_updated_at() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                    NEW.updated_at = now();
+                    RETURN NEW;
+                END;
+                $$;
                 """
             )
             # Seed test users so migration 021's FK from user_credits to
@@ -222,11 +233,12 @@ def _truncate_bursar_tables(dsn: str) -> None:
                 BEGIN
                     FOR t IN
                         SELECT tablename FROM pg_tables
-                        WHERE schemaname = 'public'
+                        WHERE schemaname = 'bursar'
                           AND (tablename LIKE 'credit_%' OR tablename = 'user_credits'
-                               OR tablename LIKE 'billing_%')
+                               OR tablename LIKE 'billing_%'
+                               OR tablename IN ('bursar_config', 'signup_grant_failures'))
                     LOOP
-                        EXECUTE format('TRUNCATE TABLE public.%I CASCADE', t);
+                        EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
                     END LOOP;
                 EXCEPTION WHEN undefined_table THEN NULL;
                 END $$;

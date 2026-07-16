@@ -12,7 +12,7 @@ export class BillingDisputeRepository {
     reason: string | null,
     metadata: string | null,
   ): Promise<void> {
-    await this.query(`SELECT public.upsert_billing_dispute($1, $2, $3, $4, $5, $6, $7)`, [
+    await this.query(`SELECT bursar.upsert_billing_dispute($1, $2, $3, $4, $5, $6, $7)`, [
       provider,
       providerDisputeId,
       providerPaymentId,

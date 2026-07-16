@@ -99,9 +99,9 @@ afterAll(async () => {
 
 /** Ensure an active pricing config exists for the given version. */
 async function ensureActiveBursarConfig(pool: pg.Pool, version: number): Promise<void> {
-  await pool.query(`UPDATE public.bursar_config SET active = false WHERE active = true`);
+  await pool.query(`UPDATE bursar.bursar_config SET active = false WHERE active = true`);
   await pool.query(
-    `INSERT INTO public.bursar_config (version, active, config)
+    `INSERT INTO bursar.bursar_config (version, active, config)
      VALUES ($1, true, '{}'::jsonb)
      ON CONFLICT (version) DO UPDATE SET active = true`,
     [version],
@@ -223,7 +223,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance fully covers cost, no balance debit; window incremented", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Free', 100, $2, 0)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Free', 100, $2, 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(10), "adjustment");
@@ -241,7 +241,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
   it("plan allowance partial, remainder charged to balance", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Starter', 10, $2, 0)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Starter', 10, $2, 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
     await store.addCredits(PG_USER, D(100), "adjustment");
@@ -258,7 +258,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
+      `INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
       [PG_USER],
     );
     const r = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "cap-1" });
@@ -270,7 +270,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(1000), "purchase");
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 30, 'deny')`,
+      `INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 30, 'deny')`,
       [PG_USER],
     );
     const a = await store.deductWithAllowance(PG_USER, D(20), { idempotencyKey: "acc-1" });
@@ -634,7 +634,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // The SQL BEGIN block increments the usage window by 5, then the RAISE rolls
     // it back — so allowanceRemaining stays at 5 (unchanged from the initial 5).
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI6', 5, $2, 0)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI6', 5, $2, 0)`,
       [PLAN_JI6, PLAN_JI6],
     );
     await store.addCredits(PG_USER, D(1000), "purchase");
@@ -642,7 +642,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     await store.setUserPlan(PG_USER, PLAN_JI6);
 
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
+      `INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
       [PG_USER],
     );
 
@@ -662,7 +662,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // take 15 from balance. This ensures the transaction has a real balance debit
     // (amount > 0) so the refund succeeds, while allowanceConsumed > 0.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI7', 5, $2, 0)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanJI7', 5, $2, 0)`,
       [PLAN_JI7, PLAN_JI7],
     );
     await store.addCredits(PG_USER, D(500), "purchase");
@@ -748,7 +748,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const PLAN_H4 = "00000000-0000-0000-0000-0000000000c1";
     // Plan with monthly allowance of 10.
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanH4', 10, $2, 0)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'PlanH4', 10, $2, 0)`,
       [PLAN_H4, PLAN_H4],
     );
     await store.addCredits(PG_USER, D(50), "purchase");
@@ -758,7 +758,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // Set a deny spend cap at 8. Attempt deduction of 20: allowance covers 10,
     // net = 10. Cap check: 0 + 10 > 8 → deny fires before any allowance is consumed.
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 8, 'deny')`,
+      `INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 8, 'deny')`,
       [PG_USER],
     );
 
@@ -816,7 +816,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 
     // Daily deny cap of 10.
     await pool.query(
-      `INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
+      `INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) VALUES ($1, 'daily', 10, 'deny')`,
       [PG_USER],
     );
 
@@ -936,7 +936,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     expect((await store.getBalance(PG_USER16)).balance.toString()).toBe("100");
 
     const { rows } = await pool.query(
-      `SELECT id FROM public.credit_transactions
+      `SELECT id FROM bursar.credit_transactions
        WHERE user_id = $1 AND metadata->>'idempotency_key' = $2`,
       [PG_USER16, "evt-1"],
     );
@@ -1005,7 +1005,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("getUserPlan returns allowancePeriod and planAssignedAt for a real Postgres row", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'Rolling', 20, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1044,7 +1044,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       expect(plan.allowancePeriod).toBe(allowancePeriod);
 
       const raw = await pool.query(
-        `SELECT allowance_period FROM public.credit_plans WHERE plan_key = $1`,
+        `SELECT allowance_period FROM bursar.credit_plans WHERE plan_key = $1`,
         [planKey],
       );
       expect((raw.rows[0] as { allowance_period: string }).allowance_period).toBe(allowancePeriod);
@@ -1055,7 +1055,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("deductWithAllowance with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'RollingIso', 10, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1090,7 +1090,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("createLease/settleLease with explicit periodStart isolates usage into that window", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'RollingLease', 10, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1138,7 +1138,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     // window, so the allowance must have reset to full (unlike a calendar_month
     // plan, which would key off the current calendar month instead).
     await pool.query(
-      `UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
+      `UPDATE bursar.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
       [PG_USER3],
     );
 
@@ -1190,7 +1190,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     // Backdate 35 days so the anniversary reset (monthly, on the anchor's
     // day-of-month) has already occurred — the allowance should be fresh.
     await pool.query(
-      `UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
+      `UPDATE bursar.user_credits SET plan_assigned_at = now() - interval '35 days' WHERE user_id = $1`,
       [PG_USER4],
     );
 
@@ -1244,7 +1244,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const manager = new CreditsService(store);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'Cal', 15, $2, 'calendar_month', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1309,7 +1309,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const PLAN_X = "00000000-0000-0000-0000-0000000000d1";
     const PLAN_Y = "00000000-0000-0000-0000-0000000000d2";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version)
        VALUES ($1, 'X', 5, $2, 0), ($3, 'Y', 5, $4, 0)`,
       [PLAN_X, PLAN_X, PLAN_Y, PLAN_Y],
     );
@@ -1332,7 +1332,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const store = new PostgresStore(DATABASE_URL!, pool);
     const PURGE_PLAN = "00000000-0000-0000-0000-0000000000f1";
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version)
        VALUES ($1, 'purge-test', 100, $2, 0)
        ON CONFLICT (id) DO NOTHING`,
       [PURGE_PLAN, "purge-plan"],
@@ -1402,7 +1402,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   it("settleLease jointly exercises floor-clamp (C1) and periodStart (WS9) against the canonical single signature", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'JointGuard', 5, $2, 'rolling_30d', 0)`,
       [PLAN_UUID, PLAN_UUID],
     );
@@ -1626,8 +1626,8 @@ describe.runIf(DATABASE_URL)("CreditsService end-to-end — credit tiers, real P
     // 018), so an `auth.users` INSERT cannot fire it — but the truncate in
     // `afterEach` runs after this beforeAll, so wipe here too for the first
     // test's clean slate.
-    await pool.query("DELETE FROM public.credit_transactions");
-    await pool.query("DELETE FROM public.user_credits");
+    await pool.query("DELETE FROM bursar.credit_transactions");
+    await pool.query("DELETE FROM bursar.user_credits");
   }, 60000);
 
   afterEach(async () => {
@@ -1826,8 +1826,8 @@ describe.runIf(DATABASE_URL)("CreditsService.grantSubscriptionCycle — real Pos
       `INSERT INTO auth.users (id) SELECT unnest($1::uuid[]) ON CONFLICT DO NOTHING`,
       [[SUB_USER1, SUB_USER2, SUB_USER3, SUB_USER4]],
     );
-    await pool.query("DELETE FROM public.credit_transactions");
-    await pool.query("DELETE FROM public.user_credits");
+    await pool.query("DELETE FROM bursar.credit_transactions");
+    await pool.query("DELETE FROM bursar.user_credits");
   }, 60000);
 
   afterEach(async () => {
@@ -1935,10 +1935,10 @@ describe.runIf(DATABASE_URL)("CreditsService.grantSubscriptionCycle — real Pos
     // plan_key string).
     const SUB_PLAN = "00000000-0000-0000-0000-0000000000e1";
     const { rows: activeCatalog } = await pool.query(
-      `SELECT version FROM public.bursar_config WHERE active = true LIMIT 1`,
+      `SELECT version FROM bursar.bursar_config WHERE active = true LIMIT 1`,
     );
     await pool.query(
-      `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, $3)`,
+      `INSERT INTO bursar.credit_plans (id, label, allowance_amount, plan_key, config_version) VALUES ($1, 'Pro', 0, $2, $3)`,
       [SUB_PLAN, "pro-monthly", activeCatalog[0]?.version ?? 1],
     );
 

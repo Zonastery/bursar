@@ -6,9 +6,9 @@
  * connects as the DSN's admin user (a superuser) via `pg.Pool`, which bypasses
  * every `REVOKE`/RLS check Postgres has, so bursar's actual privilege
  * lockdown has never been exercised by any JS test either. This file
- * connects as the literal Postgres roles `anon` / `authenticated` /
- * `service_role` (`SET LOCAL ROLE`, mirroring what PostgREST does per
- * request) with `request.jwt.claim.*` GUCs set the way a real JWT would.
+ * connects as the literal Postgres API roles (`SET LOCAL ROLE`, mirroring
+ * what PostgREST does per request) with `request.jwt.claim.*` GUCs set the
+ * way a real JWT would. Bursar is backend-only, so every API role is denied.
  */
 import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
 import { randomUUID } from "crypto";
@@ -81,17 +81,15 @@ async function runAs(
   }
 }
 
-/** Grant credits as service_role and COMMIT (runAs always rolls back). */
+/** Grant credits through the trusted direct database connection (runAs rolls back). */
 async function grantCredits(pool: pg.Pool, userId: string, amount: number): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL ROLE service_role");
-    await client.query("SET LOCAL request.jwt.claim.role = 'service_role'");
     await client.query(`INSERT INTO public."user" (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, [
       userId,
     ]);
-    await client.query("SELECT public.credits_add($1, $2, 'purchase', '{}'::jsonb, NULL)", [
+    await client.query("SELECT bursar.credits_add($1, $2, 'purchase', '{}'::jsonb, NULL)", [
       userId,
       amount,
     ]);
@@ -109,31 +107,31 @@ async function grantCredits(pool: pg.Pool, userId: string, amount: number): Prom
 function rpcCalls(): Record<string, { sql: string; params: unknown[] }> {
   return {
     credits_add: {
-      sql: "SELECT public.credits_add($1, 10, 'purchase', '{}'::jsonb, NULL)",
+      sql: "SELECT bursar.credits_add($1, 10, 'purchase', '{}'::jsonb, NULL)",
       params: [randomUUID()],
     },
     deduct_with_allowance: {
-      sql: "SELECT public.deduct_with_allowance($1, 10)",
+      sql: "SELECT bursar.deduct_with_allowance($1, 10)",
       params: [randomUUID()],
     },
     refund_credits: {
-      sql: "SELECT public.refund_credits($1)",
+      sql: "SELECT bursar.refund_credits($1)",
       params: [randomUUID()],
     },
     create_team: {
-      sql: "SELECT public.create_team('t', 100)",
+      sql: "SELECT bursar.create_team('t', 100)",
       params: [],
     },
     deduct_team: {
-      sql: "SELECT public.deduct_team($1, $2, 10)",
+      sql: "SELECT bursar.deduct_team($1, $2, 10)",
       params: [randomUUID(), randomUUID()],
     },
     set_active_bursar_config: {
-      sql: "SELECT public.set_active_bursar_config('{}'::jsonb)",
+      sql: "SELECT bursar.set_active_bursar_config('{}'::jsonb)",
       params: [],
     },
     spend_by_model: {
-      sql: "SELECT * FROM public.spend_by_model(now() - interval '1 day', now())",
+      sql: "SELECT * FROM bursar.spend_by_model(now() - interval '1 day', now())",
       params: [],
     },
   };
@@ -152,100 +150,46 @@ describe.runIf(DATABASE_URL)("RLS / privilege lockdown (real Postgres 16)", () =
     if (pool) await pool.end();
   });
 
-  describe("RPC privilege lockdown — anon/authenticated denied, service_role allowed", () => {
+  describe("RPC privilege lockdown — Bursar is inaccessible to every Data API role", () => {
     for (const [name, call] of Object.entries(rpcCalls())) {
-      for (const role of ["anon", "authenticated"]) {
+      for (const role of ["anon", "authenticated", "service_role"]) {
         it(`${role} is denied EXECUTE on ${name}`, async () => {
           await expect(runAs(pool, role, call.sql, call.params, { jwtRole: role })).rejects.toThrow(
             /permission denied/i,
           );
         });
       }
-
-      it(`service_role is allowed to call ${name}`, async () => {
-        // Must not throw a permission-denied error. The call may still fail
-        // for a business reason (e.g. refunding a nonexistent transaction) —
-        // that's a different error, not a privilege denial. Also fail
-        // explicitly (not just "didn't match permission denied") on an
-        // undefined-function error: a typo'd/renamed RPC in rpcCalls()
-        // would otherwise silently pass this test while giving zero real
-        // signal about the lockdown.
-        try {
-          await runAs(pool, "service_role", call.sql, call.params, { jwtRole: "service_role" });
-        } catch (err) {
-          expect(String(err)).not.toMatch(/permission denied/i);
-          expect(String(err)).not.toMatch(/does not exist/i);
-        }
-      });
     }
   });
 
-  describe("RLS tenant isolation on the raw tables", () => {
-    it("authenticated user cannot see another user's credits", async () => {
-      const userA = randomUUID();
-      const userB = randomUUID();
-      await grantCredits(pool, userA, 10);
-      await grantCredits(pool, userB, 20);
-
-      const rowsOther = await runAs(
-        pool,
-        "authenticated",
-        "SELECT user_id, balance FROM public.user_credits WHERE user_id = $1",
-        [userB],
-        { jwtRole: "authenticated", jwtSub: userA },
-      );
-      expect(rowsOther).toEqual([]);
-
-      const rowsOwn = await runAs(
-        pool,
-        "authenticated",
-        "SELECT user_id, balance FROM public.user_credits WHERE user_id = $1",
-        [userA],
-        { jwtRole: "authenticated", jwtSub: userA },
-      );
-      expect(rowsOwn).toHaveLength(1);
-      expect(rowsOwn[0].user_id).toBe(userA);
-    });
-
-    it("authenticated user cannot see another user's transactions", async () => {
-      const userA = randomUUID();
-      const userB = randomUUID();
-      await grantCredits(pool, userA, 10);
-      await grantCredits(pool, userB, 20);
-
-      const rowsOther = await runAs(
-        pool,
-        "authenticated",
-        "SELECT user_id FROM public.credit_transactions WHERE user_id = $1",
-        [userB],
-        { jwtRole: "authenticated", jwtSub: userA },
-      );
-      expect(rowsOther).toEqual([]);
-    });
-
-    it("anon with no jwt sub sees no rows", async () => {
-      // anon has table-level SELECT (platform default) but no `sub` claim,
-      // so auth.uid() is NULL and the RLS predicate (auth.uid() = user_id)
-      // can never match — anon sees nothing, regardless of how many rows
-      // exist.
-      await grantCredits(pool, randomUUID(), 10);
-
-      const rows = await runAs(pool, "anon", "SELECT user_id FROM public.user_credits", [], {
-        jwtRole: "anon",
-      });
-      expect(rows).toEqual([]);
+  describe("raw Bursar tables are inaccessible to Data API roles", () => {
+    it("authenticated cannot query a Bursar table, even for its own subject", async () => {
+      const userId = randomUUID();
+      await grantCredits(pool, userId, 10);
+      await expect(
+        runAs(
+          pool,
+          "authenticated",
+          "SELECT user_id FROM bursar.user_credits WHERE user_id = $1",
+          [userId],
+          {
+            jwtRole: "authenticated",
+            jwtSub: userId,
+          },
+        ),
+      ).rejects.toThrow(/permission denied/i);
     });
   });
 
   describe("Schema-drift guard", () => {
-    it("every non-trigger public function is revoked from anon and authenticated", async () => {
+    it("every Bursar function is revoked from every Data API role", async () => {
       const { rows } = await pool.query(`
         SELECT p.proname,
                has_function_privilege('anon', p.oid, 'EXECUTE') AS anon_exec,
                has_function_privilege('authenticated', p.oid, 'EXECUTE') AS auth_exec
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'public'
+        WHERE n.nspname = 'bursar'
           -- Trigger functions (e.g. grant_signup_bonus, handle_updated_at)
           -- are invoked internally by the executor on DML, never called
           -- directly by a role, so they're intentionally not part of the RPC
@@ -258,9 +202,9 @@ describe.runIf(DATABASE_URL)("RLS / privilege lockdown (real Postgres 16)", () =
       const leaks = rows.filter((r) => r.anon_exec || r.auth_exec).map((r) => r.proname);
       expect(
         leaks,
-        `function(s) callable by anon/authenticated without an explicit REVOKE: ${leaks.join(", ")}. ` +
+        `Bursar function(s) callable by anon/authenticated without an explicit REVOKE: ${leaks.join(", ")}. ` +
           "Every mutating or reading RPC must end with " +
-          "`REVOKE EXECUTE ON FUNCTION public.<name>(...) FROM PUBLIC, anon, authenticated;` " +
+          "`REVOKE EXECUTE ON FUNCTION bursar.<name>(...) FROM PUBLIC, anon, authenticated;` " +
           "qualified with its exact signature (see 002_credit_rpcs.sql for the pattern).",
       ).toEqual([]);
     });

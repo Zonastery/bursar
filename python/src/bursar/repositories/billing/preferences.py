@@ -29,7 +29,7 @@ class BillingPreferencesRepository:
         rows = self._execute(
             """SELECT user_id, auto_recharge, overage_protection,
                       email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
-               FROM public.billing_preferences WHERE user_id = %s""",
+               FROM bursar.billing_preferences WHERE user_id = %s""",
             [user_id],
         )
         if not rows:
@@ -45,7 +45,7 @@ class BillingPreferencesRepository:
         """
         validate_non_empty(str(prefs.get("user_id", "")), "user_id")
         self._execute(
-            """INSERT INTO public.billing_preferences (
+            """INSERT INTO bursar.billing_preferences (
                    user_id, auto_recharge, overage_protection,
                    email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
                )

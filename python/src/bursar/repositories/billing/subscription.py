@@ -61,7 +61,7 @@ class BillingSubscriptionRepository:
             "plan_version_id": state.get("plan_version_id"),
         }
         rows = self._execute(
-            "SELECT public.upsert_billing_subscription(%s::jsonb) AS result",
+            "SELECT bursar.upsert_billing_subscription(%s::jsonb) AS result",
             [json.dumps(payload, cls=DecimalEncoder)],
         )
         if rows and isinstance(rows[0], dict) and rows[0].get("result", {}).get("error"):
@@ -72,7 +72,7 @@ class BillingSubscriptionRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_subscription_id, "provider_subscription_id")
         rows = self._execute(
-            f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
+            f"SELECT {SUBSCRIPTION_COLS} FROM bursar.billing_subscriptions"
             " WHERE provider = %s AND provider_subscription_id = %s",
             [provider, provider_subscription_id],
         )
@@ -89,7 +89,7 @@ class BillingSubscriptionRepository:
             status = (SUBSCRIPTION_STATUS_ACTIVE, SUBSCRIPTION_STATUS_TRIALING)
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
-            f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
+            f"SELECT {SUBSCRIPTION_COLS} FROM bursar.billing_subscriptions"
             " WHERE user_id = %s AND status = ANY(%s)"
             " ORDER BY current_period_start DESC NULLS LAST, created_at DESC"
             " LIMIT 1",
@@ -102,7 +102,7 @@ class BillingSubscriptionRepository:
     def get_user_subscriptions(self, user_id: str) -> list[SubscriptionRow]:
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
-            f"SELECT {SUBSCRIPTION_COLS} FROM public.billing_subscriptions"
+            f"SELECT {SUBSCRIPTION_COLS} FROM bursar.billing_subscriptions"
             " WHERE user_id = %s"
             " ORDER BY current_period_start DESC NULLS LAST",
             [user_id],
@@ -117,7 +117,7 @@ class BillingSubscriptionRepository:
         validate_non_empty(user_id, "user_id")
         validate_non_empty(keep_provider, "keep_provider")
         rows = self._execute(
-            "UPDATE public.billing_subscriptions"
+            "UPDATE bursar.billing_subscriptions"
             " SET status = 'canceled', cancel_at_period_end = true, updated_at = now()"
             " WHERE user_id = %s AND provider != %s AND status = ANY(%s)"
             " RETURNING provider_subscription_id",

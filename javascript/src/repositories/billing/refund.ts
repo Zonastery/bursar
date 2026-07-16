@@ -13,7 +13,7 @@ export class BillingRefundRepository {
     reason: string | null,
     metadata: string | null,
   ): Promise<void> {
-    await this.query(`SELECT public.upsert_billing_refund($1, $2, $3, $4, $5, $6, $7, $8)`, [
+    await this.query(`SELECT bursar.upsert_billing_refund($1, $2, $3, $4, $5, $6, $7, $8)`, [
       provider,
       providerRefundId,
       providerPaymentId,

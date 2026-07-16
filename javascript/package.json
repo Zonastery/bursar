@@ -47,7 +47,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "lint": "eslint src/ tests/",

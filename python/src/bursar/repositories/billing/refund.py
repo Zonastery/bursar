@@ -39,6 +39,6 @@ class BillingRefundRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_refund_id, "provider_refund_id")
         self._execute(
-            "SELECT public.upsert_billing_refund(%s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT bursar.upsert_billing_refund(%s, %s, %s, %s, %s, %s, %s, %s)",
             [provider, provider_refund_id, provider_payment_id, user_id, amount_minor, currency, reason, metadata],
         )

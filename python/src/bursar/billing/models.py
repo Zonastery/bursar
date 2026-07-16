@@ -227,6 +227,7 @@ class BillingConfig(BaseModel):
 
 class BillingEventClaim(BaseModel):
     status: Literal["claimed", "duplicate", "retry"]
+    claim_token: str | None = None
 
 
 class BillingSubscriptionState(BaseModel):

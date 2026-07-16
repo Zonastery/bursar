@@ -203,14 +203,19 @@ export class BillingService {
 
     try {
       const result = await this.routeEvent(event);
-      await this.store.completeBillingEvent(event.provider, event.eventId);
+      await this.store.completeBillingEvent(event.provider, event.eventId, claim.claimToken);
       return result;
     } catch (err) {
       this.logger?.error?.(
         `[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`,
         { error: err instanceof Error ? err.message : String(err) },
       );
-      await this.store.failBillingEvent(event.provider, event.eventId);
+      await this.store.failBillingEvent(
+        event.provider,
+        event.eventId,
+        claim.claimToken,
+        err instanceof Error ? err.message : String(err),
+      );
       return {
         handled: false,
         error: err instanceof Error ? err.message : String(err),

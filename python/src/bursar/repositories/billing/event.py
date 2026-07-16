@@ -37,26 +37,28 @@ class BillingEventRepository:
         validate_non_empty(event_id, "event_id")
         row = unwrap_jsonb(
             self._execute(
-                "SELECT * FROM public.claim_billing_event(%s, %s, %s, %s)",
+                "SELECT * FROM bursar.claim_billing_event(%s, %s, %s, %s)",
                 [provider, event_id, event_type, metadata],
             )
         )
         return BillingEventRow.model_validate(row) if row else None
 
-    def complete(self, provider: str, event_id: str) -> None:
+    def complete(self, provider: str, event_id: str, claim_token: str) -> None:
         """Mark a billing event as completed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT public.complete_billing_event(%s, %s)", [provider, event_id])
+        self._execute("SELECT bursar.complete_billing_event(%s, %s, %s::uuid)", [provider, event_id, claim_token])
 
-    def fail(self, provider: str, event_id: str) -> None:
+    def fail(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> None:
         """Mark a billing event as failed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT public.fail_billing_event(%s, %s)", [provider, event_id])
+        self._execute(
+            "SELECT bursar.fail_billing_event(%s, %s, %s::uuid, %s)", [provider, event_id, claim_token, error]
+        )

@@ -157,16 +157,30 @@ export class AnalyticsRepository {
     limit: number,
     offset: number,
   ): Promise<TransactionRow[]> {
-    const rows = await this.callproc("list_user_transactions", [
+    return this.listOffsetCompat(userId, types, fromDate, toDate, limit, offset, false);
+  }
+
+  /** Stable cursor page for mutable transaction history. */
+  async listTransactionsCursor(
+    userId: string,
+    types: string[] | null,
+    fromDate: string | null,
+    toDate: string | null,
+    limit: number,
+    cursorCreatedAt: string | null,
+    cursorId: string | null,
+  ): Promise<TransactionRow[]> {
+    const rows = await this.callproc("list_transactions_cursor", [
       userId,
       types,
       fromDate,
       toDate,
       limit,
-      offset,
+      cursorCreatedAt,
+      cursorId,
     ]);
     return (rows ?? []).map((r) =>
-      safeParse(TransactionRowSchema, r, "AnalyticsRepository.listUserTransactions"),
+      safeParse(TransactionRowSchema, r, "AnalyticsRepository.listTransactionsCursor"),
     );
   }
 
@@ -178,15 +192,57 @@ export class AnalyticsRepository {
     limit: number,
     offset: number,
   ): Promise<TransactionRow[]> {
-    const rows = await this.callproc("list_usage_events", [
-      userId,
-      fromDate,
-      toDate,
-      limit,
-      offset,
-    ]);
-    return (rows ?? []).map((r) =>
-      safeParse(TransactionRowSchema, r, "AnalyticsRepository.listUsageEvents"),
-    );
+    return this.listOffsetCompat(userId, null, fromDate, toDate, limit, offset, true);
+  }
+
+  private async listOffsetCompat(
+    userId: string,
+    types: string[] | null,
+    fromDate: string | null,
+    toDate: string | null,
+    limit: number,
+    offset: number,
+    usageOnly: boolean,
+  ): Promise<TransactionRow[]> {
+    if (limit <= 0) return [];
+    let cursorCreatedAt: string | null = null;
+    let cursorId: string | null = null;
+    let remaining = Math.max(offset, 0);
+    let totalCount = 0;
+    const result: TransactionRow[] = [];
+    while (true) {
+      const pageLimit = Math.min(Math.max(limit + remaining, 1), 200);
+      const rows = await this.callproc(
+        usageOnly ? "list_usage_events_cursor" : "list_transactions_cursor_with_total",
+        usageOnly
+          ? [userId, fromDate, toDate, pageLimit, cursorCreatedAt, cursorId]
+          : [userId, types, fromDate, toDate, pageLimit, cursorCreatedAt, cursorId],
+      );
+      const parsed = (rows ?? []).map((r) =>
+        safeParse(
+          TransactionRowSchema,
+          r,
+          usageOnly
+            ? "AnalyticsRepository.listUsageEvents"
+            : "AnalyticsRepository.listUserTransactions",
+        ),
+      );
+      if (parsed.length > 0) totalCount = Number(parsed[0].total_count ?? 0);
+      if (remaining < parsed.length) {
+        result.push(...parsed.slice(remaining, remaining + limit));
+        break;
+      }
+      remaining -= parsed.length;
+      const marker = parsed[parsed.length - 1] as
+        | (TransactionRow & {
+            next_cursor_created_at?: string | Date | null;
+            next_cursor_id?: string | null;
+          })
+        | undefined;
+      if (!marker?.next_cursor_created_at || !marker.next_cursor_id) break;
+      cursorCreatedAt = String(marker.next_cursor_created_at);
+      cursorId = String(marker.next_cursor_id);
+    }
+    return result.map((row) => ({ ...row, total_count: totalCount }));
   }
 }

@@ -17,7 +17,7 @@ export class BillingInvoiceRepository {
     metadata: string | null,
   ): Promise<void> {
     await this.query(
-      `SELECT public.upsert_billing_invoice($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `SELECT bursar.upsert_billing_invoice($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         provider,
         providerInvoiceId,

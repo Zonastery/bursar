@@ -70,18 +70,28 @@ class AnalyticsRepository:
             return None
         return AggregateStatsRow.model_validate(rows[0])
 
-    def _list_transactions(
+    def _list_offset_compat(
         self,
-        rpc_name: str,
-        params: list[Any],
         user_id: str,
+        types: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
         limit: int,
         offset: int,
+        *,
+        usage_only: bool,
     ) -> list[TransactionRow]:
         validate_non_empty(user_id, "user_id")
         validate_non_negative(limit, "limit")
         validate_non_negative(offset, "offset")
-        rows = self._callproc(rpc_name, params) or []
+        if limit == 0:
+            return []
+
+        cursor_created_at: str | None = None
+        cursor_id: str | None = None
+        remaining = offset
+        result: list[TransactionRow] = []
+        total_count = 0
         fields = [
             "id",
             "user_id",
@@ -92,8 +102,41 @@ class AnalyticsRepository:
             "metadata",
             "created_at",
             "total_count",
+            "next_cursor_created_at",
+            "next_cursor_id",
         ]
-        return [TransactionRow.model_validate(_to_dict(r, fields)) for r in rows]
+        rpc_name = "list_usage_events_cursor" if usage_only else "list_transactions_cursor_with_total"
+        while True:
+            params = (
+                [user_id, from_date, to_date, min(max(limit + remaining, 1), 200), cursor_created_at, cursor_id]
+                if usage_only
+                else [
+                    user_id,
+                    types,
+                    from_date,
+                    to_date,
+                    min(max(limit + remaining, 1), 200),
+                    cursor_created_at,
+                    cursor_id,
+                ]
+            )
+            rows = self._callproc(rpc_name, params) or []
+            parsed = [TransactionRow.model_validate(_to_dict(r, fields)) for r in rows]
+            if parsed:
+                total_count = parsed[0].total_count
+            if remaining < len(parsed):
+                result.extend(parsed[remaining : remaining + limit])
+                break
+            remaining -= len(parsed)
+            marker = parsed[-1] if parsed else None
+            if marker is None or marker.next_cursor_created_at is None or marker.next_cursor_id is None:
+                break
+            cursor_created_at = str(marker.next_cursor_created_at)
+            cursor_id = str(marker.next_cursor_id)
+
+        for row in result:
+            row.total_count = total_count
+        return result
 
     def list_user_transactions(
         self,
@@ -117,13 +160,7 @@ class AnalyticsRepository:
         Returns:
             List of TransactionRow (may be empty).
         """
-        return self._list_transactions(
-            "list_user_transactions",
-            [user_id, types, from_date, to_date, limit, offset],
-            user_id,
-            limit,
-            offset,
-        )
+        return self._list_offset_compat(user_id, types, from_date, to_date, limit, offset, usage_only=False)
 
     def list_usage_events(
         self,
@@ -145,10 +182,39 @@ class AnalyticsRepository:
         Returns:
             List of TransactionRow (may be empty).
         """
-        return self._list_transactions(
-            "list_usage_events",
-            [user_id, from_date, to_date, limit, offset],
-            user_id,
-            limit,
-            offset,
+        return self._list_offset_compat(user_id, None, from_date, to_date, limit, offset, usage_only=True)
+
+    def list_transactions_cursor(
+        self,
+        user_id: str,
+        types: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
+        limit: int,
+        cursor_created_at: str | None,
+        cursor_id: str | None,
+    ) -> list[TransactionRow]:
+        validate_non_empty(user_id, "user_id")
+        validate_non_negative(limit, "limit")
+        if (cursor_created_at is None) != (cursor_id is None):
+            raise ValueError("transaction cursor requires both created_at and id")
+        rows = (
+            self._callproc(
+                "list_transactions_cursor",
+                [user_id, types, from_date, to_date, limit, cursor_created_at, cursor_id],
+            )
+            or []
         )
+        fields = [
+            "id",
+            "user_id",
+            "amount",
+            "type",
+            "reference_type",
+            "reference_id",
+            "metadata",
+            "created_at",
+            "next_cursor_created_at",
+            "next_cursor_id",
+        ]
+        return [TransactionRow.model_validate(_to_dict(r, fields)) for r in rows]

@@ -288,25 +288,25 @@ class PostgresBillingStore(BillingStore):
         raw_status = (result.status or "retry").lower()
         if raw_status not in ("claimed", "duplicate", "retry"):
             raw_status = "retry"
-        return BillingEventClaim(status=raw_status)
+        return BillingEventClaim(status=raw_status, claim_token=getattr(result, "claim_token", None))
 
-    def complete_billing_event(self, provider: str, event_id: str) -> None:
+    def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> None:
         """Mark a billing event as completed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._event_repo.complete(provider, event_id)
+        self._event_repo.complete(provider, event_id, claim_token)
 
-    def fail_billing_event(self, provider: str, event_id: str) -> None:
+    def fail_billing_event(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> None:
         """Mark a billing event as failed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._event_repo.fail(provider, event_id)
+        self._event_repo.fail(provider, event_id, claim_token, error)
 
     def upsert_billing_customer(
         self,

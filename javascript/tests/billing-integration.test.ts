@@ -297,7 +297,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
     expect(c1.status).toBe("claimed");
-    await bs.completeBillingEvent(PROVIDER, "evt_claim_cycle");
+    if (c1.status !== "claimed") throw new Error("expected event claim token");
+    await bs.completeBillingEvent(PROVIDER, "evt_claim_cycle", c1.claimToken);
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
     expect(c2.status).toBe("duplicate");
   });
@@ -307,7 +308,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
     expect(c1.status).toBe("claimed");
-    await bs.failBillingEvent(PROVIDER, "evt_fail_retry");
+    if (c1.status !== "claimed") throw new Error("expected event claim token");
+    await bs.failBillingEvent(PROVIDER, "evt_fail_retry", c1.claimToken, "retryable test failure");
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_fail_retry", "test.event");
     expect(c2.status).toBe("claimed");
   });

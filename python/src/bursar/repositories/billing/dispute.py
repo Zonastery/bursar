@@ -37,6 +37,6 @@ class BillingDisputeRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_dispute_id, "provider_dispute_id")
         self._execute(
-            "SELECT public.upsert_billing_dispute(%s, %s, %s, %s, %s, %s, %s)",
+            "SELECT bursar.upsert_billing_dispute(%s, %s, %s, %s, %s, %s, %s)",
             [provider, provider_dispute_id, provider_payment_id, user_id, status, reason, metadata],
         )

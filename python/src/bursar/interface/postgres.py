@@ -6,6 +6,7 @@ Postgres database that has the bursar schema installed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
@@ -238,6 +239,10 @@ class PostgresStore(CreditStore):
         conn = pool.getconn()
         try:
             with conn.cursor() as cur:
+                # Bursar is deliberately isolated from Supabase's API schema.
+                # Keep public as a trailing compatibility namespace for the
+                # small number of host-owned auth objects it references.
+                cur.execute("SET LOCAL search_path TO bursar, public")
                 cur.callproc(name, params)
                 rows = cur.fetchall()
             conn.commit()
@@ -259,43 +264,61 @@ class PostgresStore(CreditStore):
     # ── Schema management ──────────────────────────────────────────────
 
     def setup(self, database_url: str | None = None) -> SetupResult:
-        """Run bundled SQL migrations."""
+        """Apply bundled migrations exactly once, transactionally.
+
+        The old implementation replayed every SQL file and accumulated errors,
+        which could leave a partially upgraded database looking successful to
+        callers.  A small ledger records the filename and SHA-256 checksum;
+        an advisory transaction lock serializes concurrent deploys and any
+        failed migration aborts the whole setup transaction.
+        """
         result = SetupResult()
         conn = self._conn()
         try:
+            conn.autocommit = False
             with conn.cursor() as cur:
-                # Bootstrap auth.role() for standalone PG runs (no-op in Supabase)
+                cur.execute("CREATE SCHEMA IF NOT EXISTS bursar")
                 cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_proc p
-                            JOIN pg_namespace n ON n.oid = p.pronamespace
-                            WHERE n.nspname = 'auth' AND p.proname = 'role'
-                        ) THEN
-                            CREATE SCHEMA IF NOT EXISTS auth;
-                            CREATE FUNCTION auth.role() RETURNS text
-                            LANGUAGE SQL IMMUTABLE AS $func$ SELECT 'service_role'::text $func$;
-                            CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
-                            CREATE ROLE anon;
-                            CREATE ROLE authenticated;
-                            CREATE FUNCTION auth.uid() RETURNS uuid
-                            LANGUAGE SQL IMMUTABLE AS $func$ SELECT '00000000-0000-0000-0000-000000000000'::uuid $func$;
-                        END IF;
-                    END
-                    $$;
+                    CREATE TABLE IF NOT EXISTS bursar.schema_migrations (
+                        version text PRIMARY KEY,
+                        checksum text NOT NULL,
+                        applied_at timestamptz NOT NULL DEFAULT now()
+                    )
                 """)
-                conn.commit()
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
+                # Bursar consumes auth.uid()/auth.role() supplied by the host;
+                # it never creates Supabase schemas, users, or JWT roles.
+                cur.execute("""
+                    SELECT to_regnamespace('auth'), to_regprocedure('auth.uid()'), to_regprocedure('auth.role()')
+                """)
+                auth_schema, auth_uid, auth_role = cur.fetchone()
+                if auth_schema is None or auth_uid is None or auth_role is None:
+                    raise StoreError(
+                        "Bursar requires configured auth.uid()/auth.role(); refusing to bootstrap auth objects"
+                    )
 
                 for sql_file in _get_sql_files():
-                    sql = sql_file.read_text()
-                    try:
-                        cur.execute(sql)
-                        conn.commit()
-                        result.tables_created.append(sql_file.name)
-                    except Exception as exc:
-                        conn.rollback()
-                        result.errors.append(f"{sql_file.name}: {exc}")
+                    sql = sql_file.read_text(encoding="utf-8")
+                    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+                    cur.execute("SELECT checksum FROM bursar.schema_migrations WHERE version = %s", (sql_file.name,))
+                    row = cur.fetchone()
+                    if row:
+                        if row[0] != checksum:
+                            raise StoreError(f"migration checksum mismatch for {sql_file.name}")
+                        continue
+                    cur.execute(sql)
+                    cur.execute(
+                        "INSERT INTO bursar.schema_migrations(version, checksum) VALUES (%s, %s)",
+                        (sql_file.name, checksum),
+                    )
+                    result.tables_created.append(sql_file.name)
+            conn.commit()
+        except StoreError:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise StoreError(f"Bursar setup failed transactionally: {exc}") from exc
         finally:
             conn.close()
         return result
@@ -1187,6 +1210,48 @@ class PostgresStore(CreditStore):
             )
             for r in rows
         ]
+
+    def list_user_transactions_cursor(
+        self,
+        user_id: str,
+        types: list[str] | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: tuple[datetime | str, str] | None = None,
+    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
+        cursor_created_at = None if cursor is None else str(cursor[0])
+        cursor_id = None if cursor is None else cursor[1]
+        rows = self._analytics_repo.list_transactions_cursor(
+            user_id,
+            types,
+            from_date.isoformat() if from_date else None,
+            to_date.isoformat() if to_date else None,
+            limit,
+            cursor_created_at,
+            cursor_id,
+        )
+        transactions = [
+            TransactionRow(
+                id=str(r.id),
+                user_id=str(r.user_id),
+                amount=_dec(r.amount),
+                type=str(r.type),
+                reference_type=r.reference_type,
+                reference_id=r.reference_id,
+                metadata=r.metadata,
+                created_at=str(r.created_at),
+                total_count=0,
+            )
+            for r in rows
+        ]
+        marker = rows[-1] if rows else None
+        next_cursor = (
+            (str(marker.next_cursor_created_at), str(marker.next_cursor_id))
+            if marker and marker.next_cursor_created_at is not None and marker.next_cursor_id is not None
+            else None
+        )
+        return transactions, next_cursor
 
     # ── Team/shared balance pools ─────────────────────────────────────────
 

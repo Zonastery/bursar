@@ -723,6 +723,18 @@ class CreditStore(ABC):
         """
         raise CapabilityNotSupportedError("list_user_transactions is not supported by this store")
 
+    def list_user_transactions_cursor(
+        self,
+        user_id: str,
+        types: list[str] | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: tuple[datetime | str, str] | None = None,
+    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
+        """List transaction history with a stable timestamp-plus-ID cursor."""
+        raise CapabilityNotSupportedError("list_user_transactions_cursor is not supported by this store")
+
     # ── Team/shared balance pools (optional capability — WS8) ──────────────
 
     def create_team(

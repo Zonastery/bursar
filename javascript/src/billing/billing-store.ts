@@ -29,9 +29,18 @@ export abstract class BillingStore {
     eventType: string,
   ): Promise<BillingEventClaim>;
 
-  abstract completeBillingEvent(provider: string, eventId: string): Promise<void>;
+  abstract completeBillingEvent(
+    provider: string,
+    eventId: string,
+    claimToken: string,
+  ): Promise<void>;
 
-  abstract failBillingEvent(provider: string, eventId: string): Promise<void>;
+  abstract failBillingEvent(
+    provider: string,
+    eventId: string,
+    claimToken: string,
+    error?: string,
+  ): Promise<void>;
 
   abstract upsertBillingCustomer(
     provider: string,

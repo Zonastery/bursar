@@ -9,7 +9,7 @@ export class BillingPreferencesRepository {
     const rows = await this.query(
       `SELECT user_id, auto_recharge, overage_protection,
               email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
-       FROM public.billing_preferences WHERE user_id = $1`,
+       FROM bursar.billing_preferences WHERE user_id = $1`,
       [userId],
     );
     if (rows.length === 0) return null;
@@ -27,7 +27,7 @@ export class BillingPreferencesRepository {
     usageLimitAlerts?: boolean;
   }): Promise<void> {
     await this.query(
-      `INSERT INTO public.billing_preferences (
+      `INSERT INTO bursar.billing_preferences (
            user_id, auto_recharge, overage_protection,
            email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
        )

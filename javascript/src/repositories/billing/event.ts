@@ -5,6 +5,7 @@ import { unwrapJsonb, safeParse } from "../_shared.js";
 export const BillingEventRowSchema = z
   .object({
     status: z.string().optional(),
+    claim_token: z.string().uuid().optional(),
   })
   .passthrough();
 
@@ -21,7 +22,7 @@ export class BillingEventRepository {
     eventType: string,
     metadata: string,
   ): Promise<BillingEventRow | null> {
-    const rows = await this.query("SELECT * FROM public.claim_billing_event($1, $2, $3, $4)", [
+    const rows = await this.query("SELECT * FROM bursar.claim_billing_event($1, $2, $3, $4)", [
       provider,
       eventId,
       eventType,
@@ -32,12 +33,21 @@ export class BillingEventRepository {
   }
 
   /** Mark a billing event as completed. */
-  async complete(provider: string, eventId: string): Promise<void> {
-    await this.query("SELECT * FROM public.complete_billing_event($1, $2)", [provider, eventId]);
+  async complete(provider: string, eventId: string, claimToken: string): Promise<void> {
+    await this.query("SELECT * FROM bursar.complete_billing_event($1, $2, $3::uuid)", [
+      provider,
+      eventId,
+      claimToken,
+    ]);
   }
 
   /** Mark a billing event as failed. */
-  async fail(provider: string, eventId: string): Promise<void> {
-    await this.query("SELECT * FROM public.fail_billing_event($1, $2)", [provider, eventId]);
+  async fail(provider: string, eventId: string, claimToken: string, error?: string): Promise<void> {
+    await this.query("SELECT * FROM bursar.fail_billing_event($1, $2, $3::uuid, $4)", [
+      provider,
+      eventId,
+      claimToken,
+      error ?? null,
+    ]);
   }
 }

@@ -30,6 +30,7 @@ from bursar.credits_service import CreditsService, InsufficientCreditsError
 from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from bursar.interface.base import StoreError
 from bursar.interface.models import (
+    CreditMetadata,
     FeatureLimit,
 )
 from bursar.interface.postgres import PostgresStore
@@ -128,7 +129,8 @@ class TestPostgresStoreIntegration:
         store = PostgresStore(pg_database_url)
         result = store.setup()
         assert result.success
-        assert len(result.tables_created) > 0
+        # A newly bundled migration may be applied by the first test fixture;
+        # `test_setup_is_idempotent` verifies the subsequent no-op explicitly.
         return store
 
     @pytest.fixture
@@ -142,6 +144,136 @@ class TestPostgresStoreIntegration:
         result = store.setup()
         assert result.success
         assert not result.errors
+
+    def test_ledger_projection_and_lot_provenance_reconcile(self, store: PostgresStore) -> None:
+        """Every supported credit mutation has an auditable ledger/lot trail."""
+        user_id = _new_uuid(9514)
+        CreditsService(store=store).publish_pricing_from_dict(_PRICING)
+        store.add_credits(user_id, Decimal("100"), type="purchase", bucket="purchased")
+        debit = store.deduct_with_allowance(
+            user_id,
+            Decimal("30"),
+            skip_allowance=True,
+            idempotency_key="ledger-provenance-1",
+        )
+        assert debit.error is None
+
+        conn = psycopg2.connect(store.database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.id, a.balance, r->>'matches', r->>'ledger_balance'
+                    FROM bursar.credit_accounts a
+                    CROSS JOIN LATERAL bursar.reconcile_credit_account(a.id) r
+                    WHERE a.account_type = 'personal' AND a.user_id = %s
+                    """,
+                    [user_id],
+                )
+                account = cur.fetchone()
+                assert account is not None
+                assert account[1] == Decimal("70")
+                assert account[2] == "true"
+                assert Decimal(account[3]) == Decimal("70")
+
+                cur.execute(
+                    """
+                    SELECT COALESCE(sum(a.amount), 0), count(*)
+                    FROM bursar.credit_lot_allocations a
+                    JOIN bursar.credit_ledger_entries e ON e.id = a.debit_entry_id
+                    WHERE e.account_id = %s AND e.amount < 0
+                    """,
+                    [account[0]],
+                )
+                allocation = cur.fetchone()
+                assert allocation == (Decimal("30"), 1)
+        finally:
+            conn.close()
+
+    def test_team_charge_uses_team_account_with_actor_attribution(self, store: PostgresStore) -> None:
+        team_id = store.create_team("ledger-team", Decimal("100")).team_id
+        actor_id = _new_uuid(9513)
+        store.add_credits(actor_id, Decimal("1"), type="purchase")
+        store.add_team_member(team_id, actor_id)
+        result = store.deduct_team(team_id, actor_id, Decimal("30"), idempotency_key="team-ledger-1")
+        assert result.error is None
+
+        conn = psycopg2.connect(store.database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT a.id, a.balance,
+                           (SELECT sum(e.amount) FROM bursar.credit_ledger_entries e WHERE e.account_id = a.id),
+                           t.account_id, t.acting_user_id
+                    FROM bursar.credit_accounts a
+                    JOIN bursar.credit_transactions t ON t.account_id = a.id
+                    WHERE a.account_type = 'team' AND a.team_id = %s
+                      AND t.type = 'team_usage'
+                    """,
+                    [team_id],
+                )
+                row = cur.fetchone()
+                assert row is not None
+                assert row[1] == Decimal("70")
+                assert row[2] == Decimal("70")
+                assert row[3] == row[0]
+                assert str(row[4]) == actor_id
+        finally:
+            conn.close()
+
+    def test_lease_provenance_and_idempotency_replay(self, store: PostgresStore) -> None:
+        user_id = _new_uuid(9512)
+        store.add_credits(user_id, Decimal("50"), type="purchase")
+        metadata = CreditMetadata(idempotency_key="lease-provenance-1", model="test-model")
+        first = store.create_lease(user_id, Decimal("20"), "inference", metadata=metadata)
+        second = store.create_lease(user_id, Decimal("20"), "inference", metadata=metadata)
+        assert first.error is None and first.lease_id is not None
+        assert second.error is None and second.lease_id == first.lease_id
+
+        conn = psycopg2.connect(store.database_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT r.account_id, r.idempotency_key, r.status,
+                           a.account_type, a.user_id
+                    FROM bursar.credit_reservations r
+                    JOIN bursar.credit_accounts a ON a.id = r.account_id
+                    WHERE r.id = %s
+                    """,
+                    [first.lease_id],
+                )
+                row = cur.fetchone()
+                assert row is not None
+                assert row[0] is not None
+                assert row[1:] == ("lease-provenance-1", "active", "personal", user_id)
+                cur.execute(
+                    "SELECT count(*) FROM bursar.credit_reservations WHERE user_id = %s AND idempotency_key = %s",
+                    [user_id, "lease-provenance-1"],
+                )
+                assert cur.fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_concurrent_lease_idempotency_returns_original(self, store: PostgresStore) -> None:
+        user_id = _new_uuid(9511)
+        store.add_credits(user_id, Decimal("100"), type="purchase")
+
+        def create() -> str | None:
+            result = PostgresStore(store.database_url).create_lease(
+                user_id,
+                Decimal("10"),
+                "concurrent-inference",
+                metadata=CreditMetadata(idempotency_key="lease-concurrent-1"),
+            )
+            assert result.error is None
+            return result.lease_id
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            lease_ids = list(pool.map(lambda _: create(), range(8)))
+        assert lease_ids[0] is not None
+        assert set(lease_ids) == {lease_ids[0]}
 
     def test_full_flow_pg(self, manager: CreditsService) -> None:
         _add_and_deduct(manager, _PG_USER)
@@ -232,7 +364,7 @@ class TestPostgresStoreIntegration:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
                     "VALUES (%s, 'monthly', 50, 'deny')",
                     [_PG_USER],
                 )
@@ -449,12 +581,12 @@ class TestPostgresStoreIntegration:
         store.add_credits(_PG_USER, Decimal("1000"), "purchase")
         store.deduct_with_allowance(_PG_USER, Decimal("8"), idempotency_key="ue_1")
 
-        # list_usage_events is a SQL function; call it via psycopg2 directly
+        # Cursor-only SQL function; legacy store pagination is an adapter.
         conn = psycopg2.connect(store.database_url)
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM list_usage_events(%s, %s, %s)",
+                    "SELECT * FROM bursar.list_usage_events_cursor(%s, %s, %s)",
                     [_PG_USER, from_date.isoformat(), to_date.isoformat()],
                 )
                 rows = cur.fetchall()
@@ -500,7 +632,7 @@ class TestPostgresStoreIntegration:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
                     "VALUES (%s, 'monthly', 10, 'deny')",
                     [_PG_USER],
                 )
@@ -661,7 +793,7 @@ class TestPostgresStoreIntegration:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
                     "VALUES (%s, 'monthly', 8, 'deny')",
                     [_PG_USER],
                 )
@@ -769,7 +901,7 @@ class TestLeaseLifecyclePg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.credit_reservations SET expires_at = now() - interval '1 second' WHERE id = %s",
+                    "UPDATE bursar.credit_reservations SET expires_at = now() - interval '1 second' WHERE id = %s",
                     [lease_id],
                 )
             conn.commit()
@@ -1037,7 +1169,7 @@ class TestLeaseAdversarialPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO public.credit_spend_caps (user_id, cap_type, cap_limit, action) "
+                    "INSERT INTO bursar.credit_spend_caps (user_id, cap_type, cap_limit, action) "
                     "VALUES (%s, 'monthly', 100, 'deny')",
                     [_PG_USER],
                 )
@@ -1079,7 +1211,7 @@ class TestAllowanceWindowPg:
         conn = store._conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT allowance_period FROM public.credit_plans WHERE plan_key = %s", [plan_key])
+                cur.execute("SELECT allowance_period FROM bursar.credit_plans WHERE plan_key = %s", [plan_key])
                 row = cur.fetchone()
         finally:
             conn.close()
@@ -1230,7 +1362,7 @@ class TestAllowanceWindowPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '35 days' "
+                    "UPDATE bursar.user_credits SET plan_assigned_at = now() - interval '35 days' "
                     "WHERE user_id IN (%s, %s)",
                     [roll_user, cal_user],
                 )
@@ -1283,7 +1415,7 @@ class TestAllowanceWindowPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.user_credits SET plan_assigned_at = now() - interval '40 days' WHERE user_id = %s",
+                    "UPDATE bursar.user_credits SET plan_assigned_at = now() - interval '40 days' WHERE user_id = %s",
                     [user],
                 )
             conn.commit()
@@ -1460,7 +1592,7 @@ class TestAllowanceWindowPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.user_credits SET plan_assigned_at = plan_assigned_at - interval '1 second' "
+                    "UPDATE bursar.user_credits SET plan_assigned_at = plan_assigned_at - interval '1 second' "
                     "WHERE user_id = %s",
                     [user],
                 )
@@ -2044,7 +2176,7 @@ class TestLazyExpiryPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT count(*) FROM credit_transactions "
+                    "SELECT count(*) FROM bursar.credit_transactions "
                     "WHERE user_id = %s AND metadata ->> 'idempotency_key' = %s",
                     [user, "evt-1"],
                 )
@@ -2231,7 +2363,7 @@ class TestFeatureLimitsPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE public.credit_transactions SET created_at = %s WHERE id = %s",
+                    "UPDATE bursar.credit_transactions SET created_at = %s WHERE id = %s",
                     [when, transaction_id],
                 )
             conn.commit()
@@ -2286,7 +2418,7 @@ class TestFeatureLimitsPg:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT metadata->>'feature' FROM public.credit_transactions WHERE id = %s",
+                    "SELECT metadata->>'feature' FROM bursar.credit_transactions WHERE id = %s",
                     [r.transaction_id],
                 )
                 row = cur.fetchone()

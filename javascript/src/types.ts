@@ -402,6 +402,18 @@ export interface PaginatedTransactions {
   total: number;
 }
 
+/** Stable position in a mutable transaction history. */
+export interface TransactionCursor {
+  createdAt: string;
+  id: string;
+}
+
+/** Cursor-paginated transaction history. `nextCursor` is null at the end. */
+export interface CursorPaginatedTransactions {
+  items: UserTransactionRow[];
+  nextCursor: TransactionCursor | null;
+}
+
 /** Options for listing usage events. */
 export interface ListUsageEventsOptions {
   fromDate?: Date;

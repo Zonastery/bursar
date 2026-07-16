@@ -311,7 +311,8 @@ class TestEventIdempotency:
         bs.sync_billing_from_config(BILLING_CONFIG)
         c1 = bs.claim_billing_event(PROVIDER, "evt_claim_cycle", "test.event")
         assert c1.status == "claimed"
-        bs.complete_billing_event(PROVIDER, "evt_claim_cycle")
+        assert c1.claim_token is not None
+        bs.complete_billing_event(PROVIDER, "evt_claim_cycle", c1.claim_token)
         c2 = bs.claim_billing_event(PROVIDER, "evt_claim_cycle", "test.event")
         assert c2.status == "duplicate"
 
@@ -321,7 +322,8 @@ class TestEventIdempotency:
         bs.sync_billing_from_config(BILLING_CONFIG)
         c1 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c1.status == "claimed"
-        bs.fail_billing_event(PROVIDER, "evt_fail_retry")
+        assert c1.claim_token is not None
+        bs.fail_billing_event(PROVIDER, "evt_fail_retry", c1.claim_token, "retryable test failure")
         c2 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c2.status == "claimed"
 

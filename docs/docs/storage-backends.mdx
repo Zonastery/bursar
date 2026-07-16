@@ -134,19 +134,23 @@ The connection string is read from `DATABASE_URL` by the CLI; it is never passed
 
 ## SQL Migrations
 
-The bundled SQL files create the required schema — 10 files, one per feature domain:
+The bundled SQL files create the required schema in deterministic dependency order. They are grouped by object type and feature domain for reviewability; the migration runner applies every numeric-prefixed file transactionally and records its checksum:
 
 | File | Creates |
 |------|---------|
-| `001_core_schema.sql` | `user_credits`, `credit_transactions`, `credit_reservations` tables, RLS policies, signup bonus trigger |
-| `002_credit_rpcs.sql` | Core RPCs: `credits_add`, `get_credits_balance` (user-scoped, atomic idempotency) |
-| `003_bursar_config.sql` | `bursar_config` table, get/set/list/activate RPCs |
-| `004_plans.sql` | `credit_plans`, `credit_usage_window` tables, plan + allowance-window RPCs |
-| `005_spend_caps.sql` | `credit_spend_caps` table, `check_spend_cap` RPC |
-| `006_refunds_and_expiry.sql` | `refund_credits` (duplicate detection, partial refunds, tier LIFO restoration) and `expire_credits` (dry-run support; marks swept grants so it never double-sweeps) |
-| `007_analytics.sql` | `spend_by_user`, `spend_by_model`, `top_users`, `daily_spend`, `aggregate_stats`, `list_user_transactions`, `list_usage_events` |
-| `008_teams.sql` | `credit_teams`, `credit_team_members` tables, team RPCs |
-| `009_deduct_and_leases.sql` | `deduct_with_allowance` (atomic allowance + cap + floor + tier-aware debit) and the full lease lifecycle: `create_lease`, `settle_lease`, `release_lease`, `renew_lease`, `get_available_credits`, `expire_due_leases` |
-| `010_credit_tiers.sql` | `credit_tiers` config table, `user_credit_tiers` per-user-per-tier balances, `sync_tiers_from_config`, `get_user_credit_tiers` |
+| `001_schema_and_types.sql` | Bursar schema and shared enum types |
+| `010_tables.sql` | Bursar-owned tables |
+| `020_constraints.sql` | Primary keys and table checks |
+| `030_indexes.sql` | Query and uniqueness indexes |
+| `040_foreign_keys.sql` | Relational foreign keys |
+| `050_policies.sql` | RLS policies |
+| `060_rls.sql` | RLS enablement |
+| `070_credit_functions.sql` | Core credit, team, allowance, cap, and expiry functions |
+| `080_billing_functions.sql` | Billing event, customer, subscription, and configuration functions |
+| `090_lease_catalog_functions.sql` | Signup, ledger, refund, lease, provider, and catalog functions |
+| `100_plan_billing_functions.sql` | Plan lifecycle, billing synchronization, and catalog validation functions |
+| `110_triggers.sql` | Projection, lot allocation, timestamp, and catalog triggers |
+| `120_privileges.sql` | Function execution ACLs |
+| `130_compatibility_hardening.sql` | Signup compatibility, account provenance, cursor compatibility, and final hardening |
 
 All DDL is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE`, plus dynamic `DROP FUNCTION`-by-name guards for RPCs whose signature changed across releases). Migrations return a `SetupResult` with `tables_created` (list of applied files), `rpcs_created`, and `errors`. Check `result.success` (true when `errors` is empty) before going further.

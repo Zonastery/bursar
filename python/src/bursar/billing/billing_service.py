@@ -212,14 +212,16 @@ class BillingServiceImpl:
         if claim.status == "retry":
             logger.warning("billing event %s/%s retry — skipping", event.provider, event.event_id)
             return BillingEventResult(handled=False, error="claim_failed_retry")
+        if not claim.claim_token:
+            return BillingEventResult(handled=False, error="claim_token_missing")
 
         try:
             result = self._route_event(event)
-            self._store.complete_billing_event(event.provider, event.event_id)
+            self._store.complete_billing_event(event.provider, event.event_id, claim.claim_token)
             return result
         except Exception as exc:
             logger.exception("failed to handle billing event %s/%s", event.provider, event.event_id)
-            self._store.fail_billing_event(event.provider, event.event_id)
+            self._store.fail_billing_event(event.provider, event.event_id, claim.claim_token, str(exc))
             return BillingEventResult(handled=False, error=str(exc))
 
     def _route_event(self, event: BillingEvent) -> BillingEventResult:

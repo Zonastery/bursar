@@ -1,7 +1,7 @@
 import type { QueryFn } from "../types.js";
 
 const BILLING_CUSTOMER_GET_SQL =
-  "SELECT user_id FROM public.billing_customers WHERE provider = $1 AND provider_customer_id = $2";
+  "SELECT user_id FROM bursar.billing_customers WHERE provider = $1 AND provider_customer_id = $2";
 
 /** Repository for billing customer operations. */
 export class BillingCustomerRepository {
@@ -15,7 +15,7 @@ export class BillingCustomerRepository {
     email: string | null,
   ): Promise<void> {
     await this.query(
-      `INSERT INTO public.billing_customers (provider, provider_customer_id, user_id, email)
+      `INSERT INTO bursar.billing_customers (provider, provider_customer_id, user_id, email)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
@@ -47,7 +47,7 @@ export class BillingCustomerRepository {
     if (provider) {
       const rows = await this.query(
         `SELECT provider, provider_customer_id
-         FROM public.billing_customers
+         FROM bursar.billing_customers
          WHERE user_id = $1 AND provider = $2
          ORDER BY updated_at DESC LIMIT 1`,
         [userId, provider],
@@ -61,7 +61,7 @@ export class BillingCustomerRepository {
     }
     const rows = await this.query(
       `SELECT provider, provider_customer_id
-       FROM public.billing_customers
+       FROM bursar.billing_customers
        WHERE user_id = $1
        ORDER BY updated_at DESC LIMIT 1`,
       [userId],

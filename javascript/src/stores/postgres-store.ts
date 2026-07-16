@@ -269,7 +269,7 @@ export class PostgresStore extends CreditStore {
       throw new StoreError(`Invalid RPC name: ${name}`);
     }
     const placeholders = params.map((_, i) => `$${i + 1}`).join(", ");
-    const rows = await this.query(`SELECT * FROM public.${name}(${placeholders})`, params);
+    const rows = await this.query(`SELECT * FROM bursar.${name}(${placeholders})`, params);
     if (rows.length === 1) {
       const row = rows[0] as Record<string, unknown>;
       const keys = Object.keys(row);
@@ -894,7 +894,7 @@ export class PostgresStore extends CreditStore {
   async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
     const rows = await this.query(
       `SELECT id, user_id, amount, type, reference_type, reference_id, metadata, created_at
-       FROM public.credit_transactions
+       FROM bursar.credit_transactions
        WHERE id = $1 AND user_id = $2`,
       [transactionId, userId],
     );
@@ -936,6 +936,45 @@ export class PostgresStore extends CreditStore {
     }));
     const total = rows.length > 0 ? Number(rows[0].total_count ?? 0) : 0;
     return { items, total };
+  }
+
+  /**
+   * Read transaction history with a stable `(createdAt, id)` cursor.
+   * Prefer this to offset pagination for histories that can receive writes
+   * while callers are paging.
+   */
+  async listUserTransactionsCursor(
+    userId: string,
+    options?: Omit<ListTransactionsOptions, "offset"> & {
+      cursor?: { createdAt: string; id: string } | null;
+    },
+  ): Promise<import("../types.js").CursorPaginatedTransactions> {
+    const cursor = options?.cursor ?? null;
+    const rows = await this.analyticsRepo.listTransactionsCursor(
+      userId,
+      options?.types ?? null,
+      options?.fromDate?.toISOString() ?? null,
+      options?.toDate?.toISOString() ?? null,
+      options?.limit ?? DEFAULT_PAGE_SIZE,
+      cursor?.createdAt ?? null,
+      cursor?.id ?? null,
+    );
+    const items = rows.map((r) => ({
+      id: String(r.id ?? ""),
+      userId: String(r.user_id ?? ""),
+      amount: dec(r.amount),
+      type: String(r.type ?? ""),
+      referenceType: r.reference_type != null ? String(r.reference_type) : null,
+      referenceId: r.reference_id != null ? String(r.reference_id) : null,
+      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
+      createdAt: String(r.created_at ?? ""),
+    }));
+    const marker = rows[rows.length - 1];
+    const nextCursor =
+      marker?.next_cursor_created_at && marker?.next_cursor_id
+        ? { createdAt: String(marker.next_cursor_created_at), id: String(marker.next_cursor_id) }
+        : null;
+    return { items, nextCursor };
   }
 
   async listUsageEvents(

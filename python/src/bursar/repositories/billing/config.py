@@ -19,6 +19,6 @@ class BillingConfigRepository:
             config_json: JSON string containing the full billing configuration.
         """
         self._execute(
-            "SELECT public.sync_billing_from_config(%s::jsonb)",
+            "SELECT bursar.sync_billing_from_config(%s::jsonb)",
             [config_json],
         )

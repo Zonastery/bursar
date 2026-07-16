@@ -209,6 +209,8 @@ class TransactionRow(BaseModel):
     metadata: dict[str, Any] | None = None
     created_at: str | datetime = ""
     total_count: int = 0
+    next_cursor_created_at: str | datetime | None = None
+    next_cursor_id: str | None = None
 
 
 class CreateTeamRow(BaseModel):
@@ -317,6 +319,7 @@ class BillingEventRow(BaseModel):
     event_id: str = ""
     provider: str = ""
     status: str = "retry"
+    claim_token: str | None = None
 
 
 class BillingPaymentRow(BaseModel):

@@ -24,7 +24,7 @@ class BillingCustomerRepository:
         validate_non_empty(provider_customer_id, "provider_customer_id")
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
-            "SELECT public.upsert_billing_customer(%s, %s, %s::uuid, %s) AS result",
+            "SELECT bursar.upsert_billing_customer(%s, %s, %s::uuid, %s) AS result",
             [provider, provider_customer_id, user_id, email],
         )
         if not rows:
@@ -39,7 +39,7 @@ class BillingCustomerRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_customer_id, "provider_customer_id")
         rows = self._execute(
-            "SELECT user_id FROM public.billing_customers WHERE provider = %s AND provider_customer_id = %s",
+            "SELECT user_id FROM bursar.billing_customers WHERE provider = %s AND provider_customer_id = %s",
             [provider, provider_customer_id],
         )
         if not rows:
@@ -60,7 +60,7 @@ class BillingCustomerRepository:
             validate_non_empty(provider, "provider")
             rows = self._execute(
                 """SELECT provider, provider_customer_id
-                   FROM public.billing_customers
+                   FROM bursar.billing_customers
                    WHERE user_id = %s AND provider = %s
                    ORDER BY updated_at DESC LIMIT 1""",
                 [user_id, provider],
@@ -68,7 +68,7 @@ class BillingCustomerRepository:
         else:
             rows = self._execute(
                 """SELECT provider, provider_customer_id
-                   FROM public.billing_customers
+                   FROM bursar.billing_customers
                    WHERE user_id = %s
                    ORDER BY updated_at DESC LIMIT 1""",
                 [user_id],

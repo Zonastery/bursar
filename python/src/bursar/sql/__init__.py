@@ -20,10 +20,9 @@ def _get_sql_files() -> list[Path]:
       for every duplicate-free prefix set, the key here is ``(numeric_prefix,
       full_filename)`` — the lexicographic tie-break mirrors the JS sort.
 
-    Migrations are idempotent (``CREATE OR REPLACE`` / ``IF NOT EXISTS`` /
-    ``DO $$ ... EXCEPTION``) and ``PostgresStore.setup()`` re-applies them all
-    on every invocation, so renumbering a file does not leave any persistent
-    state on a previously-bootstrapped database.
+    Migrations are applied transactionally by ``PostgresStore.setup()`` and
+    tracked in ``bursar.schema_migrations`` with a SHA-256 checksum. Reusing a
+    version with changed contents is rejected instead of silently replayed.
     """
     return sorted(
         _SQL_DIR.glob("[0-9]*.sql"),

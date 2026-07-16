@@ -196,17 +196,23 @@ export class PostgresBillingStore extends BillingStore {
     if (!result) return { status: "retry" as const };
     const r = snakeToCamelKeys(result) as Record<string, unknown>;
     const s = r.status as string;
-    if (s === "claimed") return { status: "claimed" as const };
+    if (s === "claimed" && typeof r.claimToken === "string")
+      return { status: "claimed" as const, claimToken: r.claimToken };
     if (s === "duplicate") return { status: "duplicate" as const };
     return { status: "retry" as const };
   }
 
-  async completeBillingEvent(provider: string, eventId: string): Promise<void> {
-    await this.billingEvent.complete(provider, eventId);
+  async completeBillingEvent(provider: string, eventId: string, claimToken: string): Promise<void> {
+    await this.billingEvent.complete(provider, eventId, claimToken);
   }
 
-  async failBillingEvent(provider: string, eventId: string): Promise<void> {
-    await this.billingEvent.fail(provider, eventId);
+  async failBillingEvent(
+    provider: string,
+    eventId: string,
+    claimToken: string,
+    error?: string,
+  ): Promise<void> {
+    await this.billingEvent.fail(provider, eventId, claimToken, error);
   }
 
   async upsertBillingCustomer(
@@ -410,7 +416,7 @@ export class PostgresBillingStore extends BillingStore {
 
   async getActiveBursarConfig(): Promise<Record<string, unknown> | null> {
     const rows = await this.queryFn(
-      "SELECT config FROM public.bursar_config WHERE active = TRUE LIMIT 1",
+      "SELECT config FROM bursar.bursar_config WHERE active = TRUE LIMIT 1",
       [],
     );
     if (!rows || rows.length === 0) return null;

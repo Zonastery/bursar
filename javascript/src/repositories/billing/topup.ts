@@ -31,7 +31,7 @@ export class BillingTopupRepository {
     productId: string | null,
   ): Promise<BillingTopupRow | null> {
     const rows = await this.query(
-      "SELECT * FROM public.resolve_credit_topup_by_price($1, $2, $3)",
+      "SELECT * FROM bursar.resolve_credit_topup_by_price($1, $2, $3)",
       [provider, priceId, productId],
     );
     const data = unwrapJsonb(rows);
@@ -42,7 +42,7 @@ export class BillingTopupRepository {
 
   /** Resolve a credit top-up by provider lookup key. */
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingTopupRow | null> {
-    const rows = await this.query("SELECT * FROM public.resolve_credit_topup_by_lookup($1, $2)", [
+    const rows = await this.query("SELECT * FROM bursar.resolve_credit_topup_by_lookup($1, $2)", [
       provider,
       lookupKey,
     ]);

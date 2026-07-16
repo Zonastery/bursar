@@ -59,7 +59,7 @@ export class BillingPaymentRepository {
     purpose: string | null,
     metadata: string | null,
   ): Promise<void> {
-    await this.query(`SELECT public.upsert_billing_payment($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+    await this.query(`SELECT bursar.upsert_billing_payment($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
       provider,
       providerPaymentId,
       providerInvoiceId,
@@ -74,7 +74,7 @@ export class BillingPaymentRepository {
 
   /** Fetch billing payment data needed for refund calculation. */
   async getForRefund(provider: string, providerPaymentId: string): Promise<ForRefundRow | null> {
-    const rows = await this.query("SELECT * FROM public.get_billing_payment_for_refund($1, $2)", [
+    const rows = await this.query("SELECT * FROM bursar.get_billing_payment_for_refund($1, $2)", [
       provider,
       providerPaymentId,
     ]);
@@ -89,7 +89,7 @@ export class BillingPaymentRepository {
     const rows = await this.query(
       `SELECT provider, provider_payment_id, user_id, amount_minor,
               tax_minor, currency, purpose, metadata, created_at, updated_at
-       FROM public.billing_payments
+       FROM bursar.billing_payments
        WHERE provider = $1 AND provider_payment_id = $2`,
       [provider, providerPaymentId],
     );

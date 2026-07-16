@@ -49,7 +49,7 @@ export class BillingSubscriptionRepository {
       if (!state[key]) throw new Error(`subscription.upsert: ${key} is required`);
     }
     await this.query(
-      `INSERT INTO public.billing_subscriptions (${SUBSCRIPTION_COLS})
+      `INSERT INTO bursar.billing_subscriptions (${SUBSCRIPTION_COLS})
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
@@ -86,7 +86,7 @@ export class BillingSubscriptionRepository {
   async get(provider: string, providerSubscriptionId: string): Promise<SubscriptionRow | null> {
     const rows = await this.query(
       `SELECT ${SUBSCRIPTION_COLS}
-       FROM public.billing_subscriptions
+       FROM bursar.billing_subscriptions
        WHERE provider = $1 AND provider_subscription_id = $2`,
       [provider, providerSubscriptionId],
     );
@@ -102,7 +102,7 @@ export class BillingSubscriptionRepository {
     const activeStatuses = statuses ?? [SUBSCRIPTION_STATUS.ACTIVE, SUBSCRIPTION_STATUS.TRIALING];
     const rows = await this.query(
       `SELECT ${SUBSCRIPTION_COLS}
-       FROM public.billing_subscriptions
+       FROM bursar.billing_subscriptions
        WHERE user_id = $1 AND status = ANY($2::text[])
        ORDER BY current_period_start DESC NULLS LAST, created_at DESC
        LIMIT 1`,
@@ -120,7 +120,7 @@ export class BillingSubscriptionRepository {
   async getUserSubscriptions(userId: string): Promise<SubscriptionRow[]> {
     const rows = await this.query(
       `SELECT ${SUBSCRIPTION_COLS}
-       FROM public.billing_subscriptions
+       FROM bursar.billing_subscriptions
        WHERE user_id = $1
        ORDER BY current_period_start DESC NULLS LAST`,
       [userId],
@@ -136,7 +136,7 @@ export class BillingSubscriptionRepository {
     keepProvider: string,
   ): Promise<number> {
     const rows = await this.query(
-      `UPDATE public.billing_subscriptions
+      `UPDATE bursar.billing_subscriptions
        SET status = 'canceled', cancel_at_period_end = true, updated_at = now()
        WHERE user_id = $1 AND provider != $2 AND status IN ('active', 'trialing')
        RETURNING 1`,

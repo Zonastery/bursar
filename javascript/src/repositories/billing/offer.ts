@@ -31,7 +31,7 @@ export class BillingOfferRepository {
     productId: string | null,
   ): Promise<BillingOfferRow | null> {
     const rows = await this.query(
-      "SELECT * FROM public.resolve_billing_offer_by_price($1, $2, $3)",
+      "SELECT * FROM bursar.resolve_billing_offer_by_price($1, $2, $3)",
       [provider, priceId, productId],
     );
     const data = unwrapJsonb(rows);
@@ -42,7 +42,7 @@ export class BillingOfferRepository {
 
   /** Resolve a billing offer by provider lookup key. */
   async resolveByLookup(provider: string, lookupKey: string): Promise<BillingOfferRow | null> {
-    const rows = await this.query("SELECT * FROM public.resolve_billing_offer_by_lookup($1, $2)", [
+    const rows = await this.query("SELECT * FROM bursar.resolve_billing_offer_by_lookup($1, $2)", [
       provider,
       lookupKey,
     ]);

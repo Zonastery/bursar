@@ -34,7 +34,7 @@ class BillingTopupRepository:
         validate_non_empty(provider, "provider")
         row = unwrap_jsonb(
             self._execute(
-                "SELECT * FROM public.resolve_credit_topup_by_price(%s, %s, %s)",
+                "SELECT * FROM bursar.resolve_credit_topup_by_price(%s, %s, %s)",
                 [provider, price_id, product_id],
             )
         )
@@ -53,7 +53,7 @@ class BillingTopupRepository:
         validate_non_empty(provider, "provider")
         row = unwrap_jsonb(
             self._execute(
-                "SELECT * FROM public.resolve_credit_topup_by_lookup(%s, %s)",
+                "SELECT * FROM bursar.resolve_credit_topup_by_lookup(%s, %s)",
                 [provider, lookup_key],
             )
         )

@@ -8,6 +8,7 @@
 import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createHash } from "crypto";
 import pg from "pg";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,17 @@ CREATE TABLE IF NOT EXISTS public."user" (
   email TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Bursar's billing tables share the host application's standard timestamp
+-- trigger. The production Supabase baseline supplies it; bare Postgres tests
+-- provide the same minimal contract before applying the Bursar baseline.
+CREATE OR REPLACE FUNCTION public.handle_updated_at() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION auth.role() RETURNS text
 LANGUAGE SQL STABLE AS $$
@@ -69,9 +81,26 @@ export function migrationFiles(): string[] {
 }
 
 export async function applyMigrations(pool: pg.Pool): Promise<void> {
+  // Production setup owns the checksum ledger. The JS fixture deliberately
+  // applies the baseline only to an empty database; replaying raw files after
+  // the final schema-transfer migration would attempt to create triggers on
+  // compatibility views.
+  const ledger = await pool.query("SELECT to_regclass('bursar.schema_migrations') AS relation");
+  if (ledger.rows[0]?.relation) return;
   for (const file of migrationFiles()) {
     const sql = readFileSync(join(SQL_DIR, file), "utf8");
     await pool.query(sql);
+  }
+  await pool.query(`CREATE TABLE bursar.schema_migrations (
+    version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
+  )`);
+  for (const file of migrationFiles()) {
+    const sql = readFileSync(join(SQL_DIR, file), "utf8");
+    const checksum = createHash("sha256").update(sql).digest("hex");
+    await pool.query("INSERT INTO bursar.schema_migrations(version, checksum) VALUES ($1, $2)", [
+      file,
+      checksum,
+    ]);
   }
 }
 
@@ -83,11 +112,11 @@ export async function truncateBursarTables(pool: pg.Pool): Promise<void> {
     BEGIN
       FOR t IN
         SELECT tablename FROM pg_tables
-        WHERE schemaname = 'public'
+        WHERE schemaname = 'bursar'
           AND (tablename LIKE 'credit_%' OR tablename = 'user_credits'
                OR tablename LIKE 'billing_%')
       LOOP
-        EXECUTE format('TRUNCATE TABLE public.%I CASCADE', t);
+        EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
       END LOOP;
     EXCEPTION WHEN undefined_table THEN NULL;
     END $$;

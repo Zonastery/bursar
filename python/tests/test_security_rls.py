@@ -112,7 +112,7 @@ def rls_store(pg_database_url: str) -> PostgresStore:
 
 
 # ---------------------------------------------------------------------------
-# 1. RPC privilege lockdown — anon/authenticated denied, service_role allowed
+# 1. RPC privilege lockdown — Bursar is denied to every Data API role
 # ---------------------------------------------------------------------------
 
 # One representative call per RPC family (mutating writes, team ops, admin
@@ -122,31 +122,31 @@ def rls_store(pg_database_url: str) -> PostgresStore:
 # the REVOKE holds (or doesn't).
 _RPC_CALLS: dict[str, tuple[str, tuple]] = {
     "credits_add": (
-        "SELECT public.credits_add(%s, 10, 'purchase', '{}'::jsonb, NULL)",
+        "SELECT bursar.credits_add(%s, 10, 'purchase', '{}'::jsonb, NULL)",
         (str(uuid4()),),
     ),
     "deduct_with_allowance": (
-        "SELECT public.deduct_with_allowance(%s, 10)",
+        "SELECT bursar.deduct_with_allowance(%s, 10)",
         (str(uuid4()),),
     ),
     "refund_credits": (
-        "SELECT public.refund_credits(%s)",
+        "SELECT bursar.refund_credits(%s)",
         (str(uuid4()),),
     ),
     "create_team": (
-        "SELECT public.create_team('t', 100)",
+        "SELECT bursar.create_team('t', 100)",
         (),
     ),
     "deduct_team": (
-        "SELECT public.deduct_team(%s, %s, 10)",
+        "SELECT bursar.deduct_team(%s, %s, 10)",
         (str(uuid4()), str(uuid4())),
     ),
     "set_active_bursar_config": (
-        "SELECT public.set_active_bursar_config('{}'::jsonb)",
+        "SELECT bursar.set_active_bursar_config('{}'::jsonb)",
         (),
     ),
     "spend_by_model": (
-        "SELECT * FROM public.spend_by_model(now() - interval '1 day', now())",
+        "SELECT * FROM bursar.spend_by_model(now() - interval '1 day', now())",
         (),
     ),
 }
@@ -154,46 +154,25 @@ _RPC_CALLS: dict[str, tuple[str, tuple]] = {
 
 class TestRpcPrivilegeLockdown:
     @pytest.mark.parametrize("rpc_name", sorted(_RPC_CALLS))
-    @pytest.mark.parametrize("role", ["anon", "authenticated"])
-    def test_non_service_role_denied(self, rls_store: PostgresStore, rpc_name: str, role: str) -> None:
+    @pytest.mark.parametrize("role", ["anon", "authenticated", "service_role"])
+    def test_data_api_role_denied(self, rls_store: PostgresStore, rpc_name: str, role: str) -> None:
         sql, params = _RPC_CALLS[rpc_name]
         with pytest.raises(psycopg2.errors.InsufficientPrivilege):
             _run_as(rls_store.database_url, role, sql, params, jwt_role=role)
 
-    @pytest.mark.parametrize("rpc_name", sorted(_RPC_CALLS))
-    def test_service_role_allowed(self, rls_store: PostgresStore, rpc_name: str) -> None:
-        sql, params = _RPC_CALLS[rpc_name]
-        # Must not raise InsufficientPrivilege. The call may still fail for a
-        # business reason (e.g. refunding a nonexistent transaction) — that's
-        # a 200-with-error-envelope or a non-privilege exception, not a
-        # privilege denial, and this test only asserts the latter never fires.
-        try:
-            _run_as(rls_store.database_url, "service_role", sql, params, jwt_role="service_role")
-        except psycopg2.errors.InsufficientPrivilege:
-            pytest.fail(f"service_role was denied EXECUTE on {rpc_name} — lockdown is over-broad")
-        except psycopg2.errors.UndefinedFunction as exc:
-            # Caught explicitly (not swallowed by the broad except below): a
-            # typo'd/renamed RPC in _RPC_CALLS would otherwise silently pass
-            # this test while giving zero real signal about the lockdown.
-            pytest.fail(f"RPC {rpc_name!r} does not exist — check the SQL call in _RPC_CALLS: {exc}")
-        except psycopg2.Error:
-            pass  # any other DB error is a business-logic outcome, not a privilege failure
-
 
 # ---------------------------------------------------------------------------
-# 2. RLS tenant isolation on the raw tables
+# 2. Raw Bursar tables are inaccessible to Data API roles
 # ---------------------------------------------------------------------------
 
 
 class TestRlsTenantIsolation:
     def _grant(self, dsn: str, user_id: str, amount: int) -> None:
-        """Grant credits as service_role and COMMIT so the row persists."""
+        """Grant credits through the trusted direct database connection."""
         conn = psycopg2.connect(dsn)
         try:
             conn.autocommit = False
             with conn.cursor() as cur:
-                cur.execute("SET LOCAL ROLE service_role")
-                cur.execute("SET LOCAL request.jwt.claim.role = 'service_role'")
                 # Ensure user exists in public.user before granting credits
                 # (migration 021 FK constraint from user_credits to public.user).
                 cur.execute(
@@ -201,66 +180,26 @@ class TestRlsTenantIsolation:
                     (user_id,),
                 )
                 cur.execute(
-                    "SELECT public.credits_add(%s, %s, 'purchase', '{}'::jsonb, NULL)",
+                    "SELECT bursar.credits_add(%s, %s, 'purchase', '{}'::jsonb, NULL)",
                     (user_id, amount),
                 )
             conn.commit()
         finally:
             conn.close()
 
-    def test_authenticated_user_cannot_see_another_users_credits(self, rls_store: PostgresStore) -> None:
+    def test_authenticated_cannot_query_bursar_credit_state(self, rls_store: PostgresStore) -> None:
         dsn = rls_store.database_url
-        user_a, user_b = str(uuid4()), str(uuid4())
+        user_a = str(uuid4())
         self._grant(dsn, user_a, 10)
-        self._grant(dsn, user_b, 20)
-
-        rows_other = _run_as(
-            dsn,
-            "authenticated",
-            "SELECT user_id, balance FROM public.user_credits WHERE user_id = %s",
-            (user_b,),
-            jwt_role="authenticated",
-            jwt_sub=user_a,
-        )
-        assert rows_other == [], f"authenticated user A could read user B's balance: {rows_other}"
-
-        rows_own = _run_as(
-            dsn,
-            "authenticated",
-            "SELECT user_id, balance FROM public.user_credits WHERE user_id = %s",
-            (user_a,),
-            jwt_role="authenticated",
-            jwt_sub=user_a,
-        )
-        assert len(rows_own) == 1
-        assert str(rows_own[0][0]) == user_a
-
-    def test_authenticated_user_cannot_see_another_users_transactions(self, rls_store: PostgresStore) -> None:
-        dsn = rls_store.database_url
-        user_a, user_b = str(uuid4()), str(uuid4())
-        self._grant(dsn, user_a, 10)
-        self._grant(dsn, user_b, 20)
-
-        rows_other = _run_as(
-            dsn,
-            "authenticated",
-            "SELECT user_id FROM public.credit_transactions WHERE user_id = %s",
-            (user_b,),
-            jwt_role="authenticated",
-            jwt_sub=user_a,
-        )
-        assert rows_other == [], f"authenticated user A could read user B's transactions: {rows_other}"
-
-    def test_anon_with_no_jwt_sub_sees_no_rows(self, rls_store: PostgresStore) -> None:
-        """`anon` has table-level SELECT (platform default) but no `sub`
-        claim, so `auth.uid()` is NULL and the RLS predicate
-        (`auth.uid() = user_id`) can never match — anon sees nothing,
-        regardless of how many rows exist."""
-        dsn = rls_store.database_url
-        self._grant(dsn, str(uuid4()), 10)
-
-        rows = _run_as(dsn, "anon", "SELECT user_id FROM public.user_credits", jwt_role="anon")
-        assert rows == []
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _run_as(
+                dsn,
+                "authenticated",
+                "SELECT user_id FROM bursar.user_credits WHERE user_id = %s",
+                (user_a,),
+                jwt_role="authenticated",
+                jwt_sub=user_a,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +210,7 @@ class TestRlsTenantIsolation:
 
 
 class TestSchemaDriftGuard:
-    def test_every_public_function_is_revoked_from_anon_and_authenticated(self, rls_store: PostgresStore) -> None:
+    def test_every_bursar_function_is_revoked_from_anon_and_authenticated(self, rls_store: PostgresStore) -> None:
         conn = psycopg2.connect(rls_store.database_url)
         try:
             with conn.cursor() as cur:
@@ -282,7 +221,7 @@ class TestSchemaDriftGuard:
                            has_function_privilege('authenticated', p.oid, 'EXECUTE') AS auth_exec
                     FROM pg_proc p
                     JOIN pg_namespace n ON n.oid = p.pronamespace
-                    WHERE n.nspname = 'public'
+                    WHERE n.nspname = 'bursar'
                       -- Trigger functions (e.g. grant_signup_bonus,
                       -- handle_updated_at) are invoked internally by the
                       -- executor on DML, never called directly by a role, so
@@ -299,8 +238,8 @@ class TestSchemaDriftGuard:
         assert rows, "expected bursar's RPC functions to exist after migrations"
         leaks = [name for name, anon_exec, auth_exec in rows if anon_exec or auth_exec]
         assert not leaks, (
-            f"function(s) callable by anon/authenticated without an explicit REVOKE: {leaks}. "
+            f"Bursar function(s) callable by anon/authenticated without an explicit REVOKE: {leaks}. "
             "Every mutating or reading RPC must end with "
-            "`REVOKE EXECUTE ON FUNCTION public.<name>(...) FROM PUBLIC, anon, authenticated;` "
+            "`REVOKE EXECUTE ON FUNCTION bursar.<name>(...) FROM PUBLIC, anon, authenticated;` "
             "qualified with its exact signature (see 002_credit_rpcs.sql for the pattern)."
         )

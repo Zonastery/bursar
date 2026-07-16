@@ -43,7 +43,7 @@ class BillingPaymentRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_payment_id, "provider_payment_id")
         self._execute(
-            "SELECT public.upsert_billing_payment(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT bursar.upsert_billing_payment(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 provider,
                 provider_payment_id,
@@ -71,7 +71,7 @@ class BillingPaymentRepository:
         validate_non_empty(provider_payment_id, "provider_payment_id")
         row = unwrap_jsonb(
             self._execute(
-                "SELECT * FROM public.get_billing_payment_for_refund(%s, %s)",
+                "SELECT * FROM bursar.get_billing_payment_for_refund(%s, %s)",
                 [provider, provider_payment_id],
             )
         )
@@ -92,7 +92,7 @@ class BillingPaymentRepository:
         rows = self._execute(
             """SELECT provider, provider_payment_id, user_id, amount_minor,
                       tax_minor, currency, purpose, metadata, created_at, updated_at
-               FROM public.billing_payments
+               FROM bursar.billing_payments
                WHERE provider = %s AND provider_payment_id = %s""",
             [provider, provider_payment_id],
         )

@@ -210,7 +210,7 @@ export interface BillingEventResult {
 // ── Event claim ─────────────────────────────────────────────────────────
 
 export type BillingEventClaim =
-  { status: "claimed" } | { status: "duplicate" } | { status: "retry" };
+  { status: "claimed"; claimToken: string } | { status: "duplicate" } | { status: "retry" };
 
 // ── Subscription state ──────────────────────────────────────────────────
 

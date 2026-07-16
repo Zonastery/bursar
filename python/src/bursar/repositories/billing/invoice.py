@@ -45,7 +45,7 @@ class BillingInvoiceRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_invoice_id, "provider_invoice_id")
         self._execute(
-            "SELECT public.upsert_billing_invoice(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT bursar.upsert_billing_invoice(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             [
                 provider,
                 provider_invoice_id,
