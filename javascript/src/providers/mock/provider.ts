@@ -7,6 +7,9 @@ import type {
   CreateCustomerParams,
   PaymentMethodInfo,
   WebhookRequest,
+  ChangePlanParams,
+  PreviewChangePlanParams,
+  ChangePlanPreview,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
@@ -87,5 +90,17 @@ export class MockPaymentProvider implements PaymentProvider {
     );
 
     return { received: true };
+  }
+
+  async changePlan(_params: ChangePlanParams): Promise<void> {}
+
+  async previewChangePlan(_params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
+    return {
+      totalAmount: 0,
+      settlementAmount: 0,
+      currency: "USD",
+      lineItems: [],
+      effectiveAt: new Date().toISOString(),
+    };
   }
 }

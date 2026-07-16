@@ -9,6 +9,10 @@ import type {
   CreateCustomerParams,
   PaymentMethodInfo,
   WebhookRequest,
+  ChangePlanParams,
+  PreviewChangePlanParams,
+  ChangePlanPreview,
+  ChangePlanLineItem,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
@@ -156,5 +160,50 @@ export class DodoProvider implements PaymentProvider {
     const client = this.getClient();
     const payment = await client.payments.retrieve(providerPaymentId);
     return payment.payment_link ? { url: payment.payment_link } : null;
+  }
+
+  async changePlan(params: ChangePlanParams): Promise<void> {
+    const client = this.getClient();
+    await client.subscriptions.changePlan(params.providerSubscriptionId, {
+      product_id: params.productId,
+      proration_billing_mode: params.prorationBillingMode,
+      quantity: params.quantity ?? 1,
+      ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
+      ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
+    });
+  }
+
+  async previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
+    const client = this.getClient();
+    const response = await client.subscriptions.previewChangePlan(params.providerSubscriptionId, {
+      product_id: params.productId,
+      proration_billing_mode: params.prorationBillingMode,
+      quantity: params.quantity ?? 1,
+      ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
+    });
+
+    const lineItems: ChangePlanLineItem[] = [];
+    for (const item of response.immediate_charge.line_items) {
+      if (item.type === "subscription") {
+        lineItems.push({
+          productId: item.product_id,
+          name: item.name ?? item.description ?? "",
+          unitPrice: item.unit_price,
+          quantity: item.quantity,
+          prorationFactor: item.proration_factor,
+          currency: item.currency,
+          tax: item.tax ?? 0,
+          subtotal: 0,
+        });
+      }
+    }
+
+    return {
+      totalAmount: response.immediate_charge.summary.total_amount,
+      settlementAmount: response.immediate_charge.summary.settlement_amount,
+      currency: response.immediate_charge.summary.settlement_currency,
+      lineItems,
+      effectiveAt: response.immediate_charge.effective_at,
+    };
   }
 }

@@ -62,6 +62,43 @@ export interface ProviderLogger {
   error?: (msg: string, ctx?: Record<string, unknown>) => void;
 }
 
+export interface ChangePlanParams {
+  providerSubscriptionId: string;
+  productId: string;
+  prorationBillingMode:
+    "prorated_immediately" | "full_immediately" | "difference_immediately" | "do_not_bill";
+  effectiveAt?: "immediately" | "next_billing_date";
+  onPaymentFailure?: "prevent_change" | "apply_change";
+  quantity?: number;
+}
+
+export interface PreviewChangePlanParams {
+  providerSubscriptionId: string;
+  productId: string;
+  prorationBillingMode: ChangePlanParams["prorationBillingMode"];
+  effectiveAt?: "immediately" | "next_billing_date";
+  quantity?: number;
+}
+
+export interface ChangePlanLineItem {
+  productId: string;
+  name: string;
+  unitPrice: number;
+  quantity: number;
+  prorationFactor: number;
+  currency: string;
+  tax: number;
+  subtotal: number;
+}
+
+export interface ChangePlanPreview {
+  totalAmount: number;
+  settlementAmount: number;
+  currency: string;
+  lineItems: ChangePlanLineItem[];
+  effectiveAt: string;
+}
+
 export interface PaymentProvider {
   readonly provider: "stripe" | "dodo" | "mock";
 
@@ -84,4 +121,8 @@ export interface PaymentProvider {
   listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]>;
 
   getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null>;
+
+  changePlan(params: ChangePlanParams): Promise<void>;
+
+  previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
 }

@@ -8,6 +8,9 @@ import type {
   CreateCustomerParams,
   PaymentMethodInfo,
   WebhookRequest,
+  ChangePlanParams,
+  PreviewChangePlanParams,
+  ChangePlanPreview,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleStripeWebhook } from "./event-mapper.js";
@@ -155,5 +158,13 @@ export class StripeProvider implements PaymentProvider {
     const stripe = this.getStripe();
     const invoice = await stripe.invoices.retrieve(providerPaymentId);
     return invoice.hosted_invoice_url ? { url: invoice.hosted_invoice_url } : null;
+  }
+
+  async changePlan(_params: ChangePlanParams): Promise<void> {
+    throw new Error("StripeProvider.changePlan not implemented");
+  }
+
+  async previewChangePlan(_params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
+    throw new Error("StripeProvider.previewChangePlan not implemented");
   }
 }
