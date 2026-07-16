@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from bursar.billing.manager import BillingManager
+from bursar.bursar import BillingEventSink
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from bursar.providers.types import (
     CheckoutParams,
@@ -22,10 +22,10 @@ class MockPaymentProvider(PaymentProvider):
 
     def __init__(
         self,
-        bm: BillingManager,
+        sink: BillingEventSink,
         resolve_user: ProviderResolveUserFn | None = None,
     ) -> None:
-        self._bm = bm
+        self._sink = sink
         self._resolve_user = resolve_user
 
     async def create_checkout_session(self, params: CheckoutParams) -> dict:
@@ -79,7 +79,7 @@ class MockPaymentProvider(PaymentProvider):
             data,
             user_id,
             metadata,
-            self._bm,
+            self._sink,
         )
 
         return {"received": True}

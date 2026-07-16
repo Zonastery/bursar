@@ -7,11 +7,11 @@ commit (or roll back) together inside the store (contract §2, C1).
 
 Example::
 
-    from bursar import CreditManager, UsageMetrics
+    from bursar import CreditsService, UsageMetrics
     from bursar.interface.supabase import HttpxSupabaseStore
 
     store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
-    manager = CreditManager(store=store)
+    manager = CreditsService(store=store)
 
     # One-time setup (creates tables + RPCs)
     manager.setup()
@@ -113,12 +113,12 @@ class LeaseNotFoundError(CreditError):
 logger = logging.getLogger(__name__)
 
 #: Default ``low_balance`` threshold = this multiple of the engine's
-#: ``min_balance`` (contract §6 / M18). Override via the ``CreditManager``
+#: ``min_balance`` (contract §6 / M18). Override via the ``CreditsService``
 #: ``low_balance_threshold`` constructor argument.
 DEFAULT_LOW_BALANCE_MULTIPLIER = Decimal(2)
 
 #: Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
-#: Long batch/agentic jobs call :meth:`CreditManager.renew` before this elapses.
+#: Long batch/agentic jobs call :meth:`CreditsService.renew` before this elapses.
 DEFAULT_LEASE_TTL_SECONDS = 600
 
 #: Built-in financial-safety presets (interface plan §2). ``strict_prepaid`` keeps
@@ -148,7 +148,7 @@ class RunBilledResult:
 class LowBalanceConfig:
     """Configuration for the ``credits.low_balance`` signal (interface plan §6 / WS7).
 
-    Collapses the previous three overlapping ``CreditManager`` constructor
+    Collapses the previous three overlapping ``CreditsService`` constructor
     params (``low_balance_threshold``, ``low_balance_thresholds``,
     ``on_low_balance``) into one object.
 
@@ -171,7 +171,7 @@ class LowBalanceConfig:
     on_trigger: Callable[[CreditEvent], None] | None = None
 
 
-class CreditManager:
+class CreditsService:
     """Orchestrates credit operations: pricing -> atomic deduct.
 
     Args:

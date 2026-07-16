@@ -5,7 +5,7 @@ from typing import Any
 
 import stripe as stripe_mod
 
-from bursar.billing.manager import BillingManager
+from bursar.bursar import BillingEventSink
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 from bursar.providers.types import (
     CheckoutParams,
@@ -43,12 +43,12 @@ class StripeProvider(PaymentProvider):
 
     def __init__(
         self,
-        bm: BillingManager,
+        sink: BillingEventSink,
         webhook_secret: str = "",
         get_stripe: Callable[[], Any] | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
-        self._bm = bm
+        self._sink = sink
         self._webhook_secret = webhook_secret
         self._get_stripe = get_stripe or (lambda: stripe_mod)
         self._logger = logger
@@ -166,7 +166,7 @@ class StripeProvider(PaymentProvider):
             data,
             user_id,
             metadata,
-            self._bm,
+            self._sink,
             self._get_stripe(),
             self._logger,
         )

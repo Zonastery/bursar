@@ -5,7 +5,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
-from bursar.billing.manager import BillingManager
+from bursar.bursar import BillingEventSink
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from bursar.providers.types import (
     CheckoutParams,
@@ -30,13 +30,13 @@ class DodoProvider(PaymentProvider):
         self,
         get_client: Callable[[], Any],
         config: dict[str, str],
-        bm: BillingManager,
+        sink: BillingEventSink,
         resolve_user: ProviderResolveUserFn | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
         self._get_client = get_client
         self._config = config
-        self._bm = bm
+        self._sink = sink
         self._resolve_user = resolve_user
         self._logger = logger
 
@@ -116,7 +116,7 @@ class DodoProvider(PaymentProvider):
             data_dict,
             user_id,
             metadata,
-            self._bm,
+            self._sink,
             self._logger,
         )
         return {"received": True}

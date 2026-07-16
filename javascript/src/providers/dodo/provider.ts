@@ -10,7 +10,7 @@ import type {
   PaymentMethodInfo,
   WebhookRequest,
 } from "../types.js";
-import type { BillingManager } from "../../billing/billing-manager.js";
+import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
 
 export class DodoProvider implements PaymentProvider {
@@ -19,7 +19,7 @@ export class DodoProvider implements PaymentProvider {
   constructor(
     private getClient: () => DodoPayments,
     private config: { webhookKey: string; setupProductId?: string },
-    private bm: BillingManager,
+    private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
     private logger?: ProviderLogger,
   ) {}
@@ -73,7 +73,7 @@ export class DodoProvider implements PaymentProvider {
       userId = await this.resolveUser(data, metadata);
     }
 
-    await handleDodoBillingEvent(type, data, userId, metadata, this.bm, this.logger);
+    await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);
     return { received: true };
   }
 

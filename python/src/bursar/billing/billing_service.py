@@ -83,7 +83,7 @@ class SubscriptionStateMerge:
         return default
 
 
-class BillingManager:
+class BillingServiceImpl:
     def __init__(
         self,
         billing_store: BillingStore,
@@ -199,7 +199,7 @@ class BillingManager:
         """
         self._store.upsert_billing_customer(provider, provider_customer_id, user_id, email)
 
-    def handle_event(self, event: BillingEvent) -> BillingEventResult:
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         claim = self._store.claim_billing_event(
             event.provider,
             event.event_id,
@@ -242,7 +242,7 @@ class BillingManager:
             return
         if inspect.iscoroutinefunction(handler):
             logger.error(
-                "event handler for %s is async — BillingManager is synchronous, handler will not be called",
+                "event handler for %s is async — BillingServiceImpl is synchronous, handler will not be called",
                 event.event_type,
             )
             return

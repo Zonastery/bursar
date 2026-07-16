@@ -9,7 +9,7 @@ import type {
   PaymentMethodInfo,
   WebhookRequest,
 } from "../types.js";
-import type { BillingManager } from "../../billing/billing-manager.js";
+import type { BillingEventSink } from "../../bursar.js";
 import { handleStripeWebhook } from "./event-mapper.js";
 
 export class StripeProvider implements PaymentProvider {
@@ -17,7 +17,7 @@ export class StripeProvider implements PaymentProvider {
 
   constructor(
     private getStripe: () => Stripe,
-    private bm: BillingManager,
+    private sink: BillingEventSink,
     private webhookSecret: string,
     private logger?: ProviderLogger,
   ) {}
@@ -113,7 +113,7 @@ export class StripeProvider implements PaymentProvider {
       throw err;
     }
 
-    return handleStripeWebhook(event, this.bm, stripe, this.logger);
+    return handleStripeWebhook(event, this.sink, stripe, this.logger);
   }
 
   async cancelSubscription(subscriptionId: string): Promise<void> {

@@ -26,13 +26,13 @@ import pytest
 
 from bursar import ConfigError, UsageMetrics
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.credits_service import CreditsService, InsufficientCreditsError
 from bursar.events import CREDIT_EVENT_TYPES, CreditEvent, CreditEventEmitter
 from bursar.interface.base import StoreError
 from bursar.interface.models import (
     FeatureLimit,
 )
 from bursar.interface.postgres import PostgresStore
-from bursar.manager import CreditManager, InsufficientCreditsError
 
 pytestmark = [pytest.mark.integration]
 
@@ -81,7 +81,7 @@ _METRICS = UsageMetrics(model="gpt-4", input_tokens=100, output_tokens=50)
 _EXPECTED_COST = Decimal("2.5")
 
 
-def _add_and_deduct(manager: CreditManager, user_id: str = "u1") -> None:
+def _add_and_deduct(manager: CreditsService, user_id: str = "u1") -> None:
     """Shared helper: add credits → deduct → verify."""
     manager.add_credits(user_id, 100)
 
@@ -132,8 +132,8 @@ class TestPostgresStoreIntegration:
         return store
 
     @pytest.fixture
-    def manager(self, store: PostgresStore) -> CreditManager:
-        m = CreditManager(store=store)
+    def manager(self, store: PostgresStore) -> CreditsService:
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(_PRICING)
         return m
 
@@ -143,7 +143,7 @@ class TestPostgresStoreIntegration:
         assert result.success
         assert not result.errors
 
-    def test_full_flow_pg(self, manager: CreditManager) -> None:
+    def test_full_flow_pg(self, manager: CreditsService) -> None:
         _add_and_deduct(manager, _PG_USER)
 
     def test_signup_bonus_granted_when_auth_role_is_not_service_role_pg(self, store: PostgresStore) -> None:
@@ -162,7 +162,7 @@ class TestPostgresStoreIntegration:
         stub's fallback.
         """
         # Publish a pricing config with signup_grant so the trigger grants a bonus.
-        manager = CreditManager(store=store)
+        manager = CreditsService(store=store)
         pricing = dict(_PRICING)
         pricing = {
             **pricing,
@@ -346,13 +346,13 @@ class TestPostgresStoreIntegration:
         assert result.has_feature is False
 
     def test_balance_persists_across_managers(self, store: PostgresStore) -> None:
-        m1 = CreditManager(store=store)
+        m1 = CreditsService(store=store)
         m1.publish_pricing_from_dict(_PRICING)
         m1.add_credits(_PG_USER, 100)
         m1.deduct(_PG_USER, _METRICS, idempotency_key="tx_1")
 
         # Fresh manager, same store — balance should survive
-        m2 = CreditManager(store=store)
+        m2 = CreditsService(store=store)
         m2.load_pricing_from_store()
         balance = m2.get_balance(_PG_USER)
         assert balance.balance == 100 - _EXPECTED_COST
@@ -896,7 +896,7 @@ class TestLeaseLifecyclePg:
         assert plan.overdraft_floor == Decimal("-25")
 
     def test_manager_reserve_settle_flow_pg(self, store: PostgresStore) -> None:
-        m = CreditManager(store=store, policy="strict_prepaid")
+        m = CreditsService(store=store, policy="strict_prepaid")
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1238,7 +1238,7 @@ class TestAllowanceWindowPg:
         finally:
             conn.close()
 
-        m_roll = CreditManager(store=store)
+        m_roll = CreditsService(store=store)
         m_roll.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1290,7 +1290,7 @@ class TestAllowanceWindowPg:
         finally:
             conn.close()
 
-        m = CreditManager(store=store, policy="strict_prepaid")
+        m = CreditsService(store=store, policy="strict_prepaid")
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1328,7 +1328,7 @@ class TestAllowanceWindowPg:
         plan = store.get_user_plan(user)
         assert plan.plan_assigned_at is not None
 
-        m = CreditManager(store=store)
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1370,7 +1370,7 @@ class TestAllowanceWindowPg:
         plan = store.get_user_plan(user)
         assert plan.plan_assigned_at is not None
 
-        m = CreditManager(store=store)
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1403,7 +1403,7 @@ class TestAllowanceWindowPg:
         store.set_user_plan(user, "basic")
         store.add_credits(user, Decimal("1000"), "purchase")
 
-        m = CreditManager(store=store)
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1422,7 +1422,7 @@ class TestAllowanceWindowPg:
         assert via_manager.allowance_remaining == Decimal("7")
 
     def test_manager_check_allowance_planless_user_zero_shape_pg(self, store: PostgresStore) -> None:
-        m = CreditManager(store=store)
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1516,7 +1516,7 @@ class TestAllowanceWindowPg:
 
         user = _new_uuid(9115)
         store.add_credits(user, Decimal("100"), "purchase")
-        m = CreditManager(store=store)
+        m = CreditsService(store=store)
         m.publish_pricing_from_dict(config)
         result = m.deduct_fixed(user, "job")
         assert result.amount == Decimal("2.5")
@@ -1762,7 +1762,7 @@ class TestCreditTiersPg:
         """Client-side config validation (config.py) rejects invalid tiers
         before ever reaching Postgres — same guarantee as MemoryStore, since
         this validation is entirely in the Python layer."""
-        manager = CreditManager(store=store)
+        manager = CreditsService(store=store)
         with pytest.raises(ConfigError):
             manager.publish_pricing_from_dict(
                 {
@@ -1779,13 +1779,13 @@ class TestCreditTiersPg:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CreditManager end-to-end — credit tiers through the public manager API,
+# CreditsService end-to-end — credit tiers through the public manager API,
 # real Postgres
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestCreditManagerTiersPg:
-    """End-to-end credit-tier coverage through :class:`CreditManager` (not the
+class TestCreditsServiceTiersPg:
+    """End-to-end credit-tier coverage through :class:`CreditsService` (not the
     raw store) against a real Postgres instance.
 
     ``TestCreditTiersPg`` above drives ``PostgresStore`` directly to pin down
@@ -1795,7 +1795,7 @@ class TestCreditManagerTiersPg:
     ``reserve``/``settle`` lease lifecycle, ``refund_credits``,
     ``get_credit_tiers``, and ``sweep_expired_credits`` — and asserts on both
     the returned results and the ``CreditEventEmitter`` events they fire.
-    Nowhere else in the suite drives ``CreditManager`` against a real store
+    Nowhere else in the suite drives ``CreditsService`` against a real store
     (every other manager test uses ``MemoryStore``), so this is the only place
     the manager's policy resolution, event emission, and pricing engine are
     verified end to end against the actual Postgres RPCs tiers were added to.
@@ -1832,7 +1832,7 @@ class TestCreditManagerTiersPg:
         every step's result AND emitted event agree with get_credit_tiers."""
         emitter = CreditEventEmitter()
         events = self._subscribe_all(emitter)
-        mgr = CreditManager(store=store, emitter=emitter)
+        mgr = CreditsService(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(self._tiered_config())
         user = _new_uuid(9301)
 
@@ -1884,7 +1884,7 @@ class TestCreditManagerTiersPg:
         credits.reserved + credits.deducted."""
         emitter = CreditEventEmitter()
         events = self._subscribe_all(emitter)
-        mgr = CreditManager(store=store, emitter=emitter)
+        mgr = CreditsService(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(self._tiered_config())
         user = _new_uuid(9302)
 
@@ -1913,7 +1913,7 @@ class TestCreditManagerTiersPg:
         per-tier split."""
         emitter = CreditEventEmitter()
         events = self._subscribe_all(emitter)
-        mgr = CreditManager(store=store, emitter=emitter)
+        mgr = CreditsService(store=store, emitter=emitter)
         mgr.publish_pricing_from_dict(self._tiered_config())
         user = _new_uuid(9303)
 
@@ -1946,7 +1946,7 @@ class TestCreditManagerTiersPg:
         path), so it isn't covered by the store-level overdraft test above."""
         emitter = CreditEventEmitter()
         events = self._subscribe_all(emitter)
-        mgr = CreditManager(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal("-50"))
+        mgr = CreditsService(store=store, emitter=emitter, policy="overdraft", overdraft_floor=Decimal("-50"))
         mgr.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -1980,7 +1980,7 @@ class TestCreditManagerTiersPg:
 
 
 class TestLazyExpiryPg:
-    """``store.sweep_expired_credits(user_id=...)`` and ``CreditManager(lazy_expiry=True)``
+    """``store.sweep_expired_credits(user_id=...)`` and ``CreditsService(lazy_expiry=True)``
     against the real ``expire_credits`` RPC (011_lazy_expiry.sql's ``p_user_id``
     param). MemoryStore coverage for the same scenarios lives in
     ``test_lazy_expiry.py`` — this class targets the SQL layer specifically,
@@ -1989,7 +1989,7 @@ class TestLazyExpiryPg:
     Real Postgres has no injectable clock over a live RPC (unlike MemoryStore's
     ``clock=`` fixture), so every expiry here uses a near-future ``expires_at``
     plus a short real sleep, matching the idiom already established by
-    ``TestCreditManagerTiersPg.test_sweep_expired_credits_through_manager_scopes_per_tier``.
+    ``TestCreditsServiceTiersPg.test_sweep_expired_credits_through_manager_scopes_per_tier``.
     """
 
     @pytest.fixture
@@ -2058,14 +2058,14 @@ class TestLazyExpiryPg:
     def test_lazy_expiry_true_hides_expired_credits_across_all_gated_manager_methods(
         self, store: PostgresStore
     ) -> None:
-        """The flagship lazy-expiry scenario: a real ``CreditManager`` backed by
+        """The flagship lazy-expiry scenario: a real ``CreditsService`` backed by
         a real ``PostgresStore``, ``lazy_expiry=True``, and NO explicit
         ``sweep_expired_credits()`` call anywhere in this test. Every
         balance-authoritative method the manager gates on ``_maybe_lazy_expire``
         must reflect the true, post-expiry balance -- proving the "credits page
         must show the true non-expired balance" requirement against the real
         RPCs, not just MemoryStore."""
-        mgr = CreditManager(store=store, lazy_expiry=True)
+        mgr = CreditsService(store=store, lazy_expiry=True)
         mgr.publish_pricing_from_dict(
             {
                 "version": 1,
@@ -2102,7 +2102,7 @@ class TestLazyExpiryPg:
 
 
 class TestSubscriptionCyclePg:
-    """``CreditManager.grant_subscription_cycle`` end to end against a real
+    """``CreditsService.grant_subscription_cycle`` end to end against a real
     Postgres. MemoryStore coverage lives in ``test_subscription_cycle.py``.
 
     The critical regression covered here: a real bug was just found and fixed
@@ -2140,7 +2140,7 @@ class TestSubscriptionCyclePg:
         }
 
     def test_first_cycle_grant_increases_balance_by_granted_amount(self, store: PostgresStore) -> None:
-        mgr = CreditManager(store=store)
+        mgr = CreditsService(store=store)
         mgr.publish_pricing_from_dict(self._subscription_config())
         user = _new_uuid(9405)
 
@@ -2153,7 +2153,7 @@ class TestSubscriptionCyclePg:
         webhook event id with the default ``replace_prior=True`` must be a
         full no-op -- not a double-grant, and NOT a wipe-then-nothing that
         zeroes the balance the first (legitimate) call just granted."""
-        mgr = CreditManager(store=store)
+        mgr = CreditsService(store=store)
         mgr.publish_pricing_from_dict(self._subscription_config())
         user = _new_uuid(9406)
 
@@ -2167,7 +2167,7 @@ class TestSubscriptionCyclePg:
             assert mgr.get_balance(user).balance == Decimal("300")
 
     def test_new_cycle_with_replace_prior_expires_leftover_instead_of_stacking(self, store: PostgresStore) -> None:
-        mgr = CreditManager(store=store)
+        mgr = CreditsService(store=store)
         mgr.publish_pricing_from_dict(self._subscription_config())
         user = _new_uuid(9407)
 
@@ -2185,7 +2185,7 @@ class TestSubscriptionCyclePg:
         assert result.new_balance == Decimal("150")
 
     def test_replace_prior_false_stacks_new_grant_on_top_of_leftover(self, store: PostgresStore) -> None:
-        mgr = CreditManager(store=store)
+        mgr = CreditsService(store=store)
         mgr.publish_pricing_from_dict(self._subscription_config())
         user = _new_uuid(9408)
 

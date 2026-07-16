@@ -65,7 +65,7 @@ const LOW_BALANCE_MULTIPLIER = 2;
 
 /**
  * Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
- * Long batch/agentic jobs call {@link CreditManager.renew} before this elapses.
+ * Long batch/agentic jobs call {@link CreditsService.renew} before this elapses.
  */
 const DEFAULT_LEASE_TTL_SECONDS = 600;
 
@@ -106,7 +106,7 @@ export interface LowBalanceConfig {
 }
 
 /** Optional behavioural knobs for the manager. */
-export interface CreditManagerOptions {
+export interface CreditsServiceOptions {
   /**
    * Financial-safety preset for planless users (interface plan §2). Defaults to
    * ``"strict_prepaid"``. Per-plan / per-call policy layers on top of this.
@@ -140,7 +140,7 @@ export interface CreditManagerOptions {
   lazyExpiry?: boolean;
   /**
    * Milliseconds after which the cached PricingEngine is considered stale and
-   * the next call to {@link CreditManager.refreshIfStale} will reload it from
+   * the next call to {@link CreditsService.refreshIfStale} will reload it from
    * the store. When `0`, the engine is never reloaded automatically (the
    * consumer must call ``loadPricingFromStore`` manually). Default ``300_000``
    * (5 minutes). Concurrent calls to ``refreshIfStale`` are deduplicated —
@@ -149,7 +149,7 @@ export interface CreditManagerOptions {
   pricingTtl?: number;
 }
 
-/** Options for {@link CreditManager.reserve}. */
+/** Options for {@link CreditsService.reserve}. */
 export interface ReserveOptions {
   operationType?: string;
   billingMode?: BillingMode | null;
@@ -160,7 +160,7 @@ export interface ReserveOptions {
   feature?: string | null;
 }
 
-/** Options for {@link CreditManager.settle}. */
+/** Options for {@link CreditsService.settle}. */
 export interface SettleOptions {
   idempotencyKey?: string | null;
   metadata?: CreditMetadata | null;
@@ -172,14 +172,14 @@ export interface SettleOptions {
   feature?: string | null;
 }
 
-/** Options for {@link CreditManager.canAfford}. */
+/** Options for {@link CreditsService.canAfford}. */
 export interface CanAffordOptions {
   requiredFeature?: string | null;
   billingMode?: BillingMode | null;
   operationType?: string;
 }
 
-/** Options for {@link CreditManager.grantSubscriptionCycle}. */
+/** Options for {@link CreditsService.grantSubscriptionCycle}. */
 export interface GrantSubscriptionCycleOptions {
   /** Target credit bucket for the granted cycle. Defaults to ``"subscription"``. */
   bucket?: string;
@@ -204,7 +204,7 @@ export interface GrantSubscriptionCycleOptions {
   metadata?: CreditMetadata | null;
 }
 
-/** Options for {@link CreditManager.runBilled}. */
+/** Options for {@link CreditsService.runBilled}. */
 export interface RunBilledOptions<T> {
   estimate: MetricsOrAmount;
   doWork: () => Promise<{ result: T; actual: MetricsOrAmount }>;
@@ -231,7 +231,7 @@ export interface RunBilledOptions<T> {
  * (deducted, deduct_failed, added, refunded, refund_failed, expired,
  * cap_reached, cap_warning, low_balance).
  */
-export class CreditManager {
+export class CreditsService {
   private store: CreditStore;
   private engine: PricingEngine | null = null;
   private emitter: CreditEventEmitter | null = null;
@@ -265,7 +265,7 @@ export class CreditManager {
     store: CreditStore,
     engine?: PricingEngine | null,
     emitter?: CreditEventEmitter | null,
-    options?: CreditManagerOptions | null,
+    options?: CreditsServiceOptions | null,
   ) {
     const policy = options?.policy ?? "strict_prepaid";
     if (!POLICY_PRESETS.has(policy)) {
@@ -1364,7 +1364,7 @@ export class CreditManager {
         // Never block/break the op on a handler failure (§6/H4).
         await this.onLowBalance(event);
       } catch (err) {
-        console.error(`[CreditManager] onLowBalance handler failed for user ${userId}:`, err);
+        console.error(`[CreditsService] onLowBalance handler failed for user ${userId}:`, err);
       }
     }
   }
@@ -1594,7 +1594,7 @@ export class CreditManager {
 
     const result = await this.store.deductTeam(teamId, userId, cost, metadata, idempotencyKey);
     // H2 fix: surface store errors — emit credits.deduct_failed and throw,
-    // mirroring Python manager.py:1069-1082. Previously returned a silent
+    // mirroring the Python credit service implementation. Previously returned a silent
     // success-shaped object with an .error field, so failed charges looked OK.
     if (result.error) {
       this.emit("credits.deduct_failed", userId, {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bursar.providers._shared import call_billing_manager, parse_status
+from bursar.providers._shared import call_billing_event_sink, parse_status
 from bursar.providers.types import (
     CheckoutParams,
     CreateCustomerParams,
@@ -35,7 +35,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "call_billing_manager",
+    "call_billing_event_sink",
     "CheckoutParams",
     "CreateCustomerParams",
     "DodoProvider",

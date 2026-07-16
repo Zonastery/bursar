@@ -1,7 +1,7 @@
 export { BillingStore } from "./billing-store.js";
 export { PostgresBillingStore } from "./postgres-billing-store.js";
-export { BillingManager } from "./billing-manager.js";
-export type { BillingManagerOptions, BillingProvisioningPort } from "./billing-manager.js";
+export { BillingService } from "./billing-service.js";
+export type { BillingServiceOptions, BillingProvisioningPort } from "./billing-service.js";
 
 export { BillingEventType } from "./billing-types.js";
 

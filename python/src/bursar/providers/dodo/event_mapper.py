@@ -4,7 +4,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from bursar.billing.manager import BillingManager
 from bursar.billing.models import (
     BillingCustomerInfo,
     BillingDisputeInfo,
@@ -15,7 +14,8 @@ from bursar.billing.models import (
     BillingSubscriptionInfo,
     ProviderRef,
 )
-from bursar.providers._shared import call_billing_manager, parse_status
+from bursar.bursar import BillingEventSink
+from bursar.providers._shared import call_billing_event_sink, parse_status
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 _log = StdlibProviderLogger(logging.getLogger(__name__))
@@ -64,7 +64,7 @@ async def _handle_subscription_active(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     if not user_id:
@@ -85,7 +85,7 @@ async def _handle_subscription_active(
             refs=ProviderRef(lookup_key=metadata.get("plan_slug")) if metadata.get("plan_slug") else None,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_renewed(
@@ -93,7 +93,7 @@ async def _handle_subscription_renewed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     if not user_id:
@@ -113,7 +113,7 @@ async def _handle_subscription_renewed(
             period_end=period_end,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_cancelled(
@@ -121,7 +121,7 @@ async def _handle_subscription_cancelled(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -135,7 +135,7 @@ async def _handle_subscription_cancelled(
             provider_subscription_id=sub_id,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_expired(
@@ -143,7 +143,7 @@ async def _handle_subscription_expired(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -157,7 +157,7 @@ async def _handle_subscription_expired(
             provider_subscription_id=sub_id,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_failed(
@@ -165,7 +165,7 @@ async def _handle_subscription_failed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -180,7 +180,7 @@ async def _handle_subscription_failed(
             status=parse_status("past_due"),
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_on_hold(
@@ -188,7 +188,7 @@ async def _handle_subscription_on_hold(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -203,7 +203,7 @@ async def _handle_subscription_on_hold(
             status=parse_status("past_due"),
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_updated_event(
@@ -211,7 +211,7 @@ async def _handle_subscription_updated_event(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -229,7 +229,7 @@ async def _handle_subscription_updated_event(
             period_end=period_end,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_cancellation_scheduled(
@@ -237,7 +237,7 @@ async def _handle_subscription_cancellation_scheduled(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -252,7 +252,7 @@ async def _handle_subscription_cancellation_scheduled(
             cancel_at_period_end=True,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_subscription_plan_changed(
@@ -260,7 +260,7 @@ async def _handle_subscription_plan_changed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     sub_id = str(data.get("subscription_id", ""))
@@ -282,7 +282,7 @@ async def _handle_subscription_plan_changed(
             refs=refs,
         ),
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_payment_succeeded(
@@ -290,7 +290,7 @@ async def _handle_payment_succeeded(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
@@ -316,7 +316,7 @@ async def _handle_payment_succeeded(
         "event_type": BillingEventType.payment_succeeded,
         "payment": payment_info,
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_payment_failed(
@@ -324,7 +324,7 @@ async def _handle_payment_failed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
@@ -344,7 +344,7 @@ async def _handle_payment_failed(
         "event_type": BillingEventType.payment_failed,
         "payment": payment_info,
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_refund_succeeded(
@@ -352,7 +352,7 @@ async def _handle_refund_succeeded(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
@@ -372,7 +372,7 @@ async def _handle_refund_succeeded(
         "event_type": BillingEventType.refund_created,
         "refund": refund_info,
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_dispute_created(
@@ -380,7 +380,7 @@ async def _handle_dispute_created(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
@@ -399,7 +399,7 @@ async def _handle_dispute_created(
         "event_type": BillingEventType.dispute_created,
         "dispute": dispute_info,
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 async def _handle_dispute_closed(
@@ -407,7 +407,7 @@ async def _handle_dispute_closed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
@@ -426,7 +426,7 @@ async def _handle_dispute_closed(
         "event_type": BillingEventType.dispute_closed,
         "dispute": dispute_info,
     }
-    call_billing_manager(bm, BillingEvent(**_with_user(kw, user_id)))
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
 _EVENT_HANDLERS: dict[str, Any] = {
@@ -452,7 +452,7 @@ async def handle_dodo_billing_event(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     logger: ProviderLogger | None = None,
 ) -> None:
     if logger is None:
@@ -463,4 +463,4 @@ async def handle_dodo_billing_event(
         logger.debug("Unhandled Dodo webhook event type", {"type": event_type})
         return
 
-    await handler(event_type, data, user_id, metadata, bm, logger)
+    await handler(event_type, data, user_id, metadata, sink, logger)

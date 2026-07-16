@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS public.credit_plans (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- plan_key lets plans defined in pricing config be referenced by
+-- plan_key lets plans defined in Bursar config be referenced by
 -- human-readable keys (e.g. "pro", "enterprise") instead of opaque UUIDs.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_plans_plan_key
     ON public.credit_plans (plan_key)

@@ -26,7 +26,7 @@ class FakeCredits:
 
 def test_bursar_create_owns_catalog_and_delegates():
     credits = FakeCredits()
-    bursar = Bursar.create(credit_store=object(), credit_manager=credits)
+    bursar = Bursar.create(credit_store=object(), credits=credits)
 
     assert bursar.credits is credits
     assert bursar.billing is None
@@ -41,14 +41,25 @@ def test_bursar_always_owns_billing_provisioning(monkeypatch):
         def __init__(self, store, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr("bursar.bursar.BillingManager", FakeBilling)
+    monkeypatch.setattr("bursar.bursar.BillingServiceImpl", FakeBilling)
     credits = FakeCredits()
     Bursar.create(
         credit_store=object(),
         billing_store=object(),
-        credit_manager=credits,
-        billing_manager_options={"cancel_prior_providers": False},
+        credits=credits,
+        billing_options={"cancel_prior_providers": False},
     )
 
     assert captured["provisioning"] is credits
     assert captured["cancel_prior_providers"] is False
+
+
+def test_bursar_routes_provider_events_through_billing_service():
+    class FakeBilling:
+        def ingest_billing_event(self, event):
+            return {"handled": True, "action": event["event_type"]}
+
+    bursar = Bursar(credits=FakeCredits(), catalog=None, billing=FakeBilling())
+    event = {"event_type": "subscription.created"}
+
+    assert bursar.ingest_billing_event(event) == {"handled": True, "action": "subscription.created"}

@@ -8,14 +8,14 @@ import type {
   PaymentMethodInfo,
   WebhookRequest,
 } from "../types.js";
-import type { BillingManager } from "../../billing/billing-manager.js";
+import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
 
 export class MockPaymentProvider implements PaymentProvider {
   readonly provider = "mock" as const;
 
   constructor(
-    private bm: BillingManager,
+    private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
     private logger?: ProviderLogger,
   ) {}
@@ -82,7 +82,7 @@ export class MockPaymentProvider implements PaymentProvider {
       data,
       userId,
       metadata,
-      this.bm,
+      this.sink,
       this.logger,
     );
 

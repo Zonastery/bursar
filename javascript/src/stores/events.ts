@@ -1,8 +1,8 @@
 /**
  * Typed event emitter for credit lifecycle events.
  *
- * Events are emitted by ``CreditManager`` after each store operation.
- * The emitter is optional — inject into ``CreditManager`` constructor,
+ * Events are emitted by ``CreditsService`` after each store operation.
+ * The emitter is optional — inject into ``CreditsService`` constructor,
  * no-op if omitted.
  *
  * @example
@@ -11,7 +11,7 @@
  * emitter.on("credits.deducted", (event) => {
  *   console.log(`Deducted ${event.data?.amount} from ${event.userId}`);
  * });
- * const manager = new CreditManager(store, engine, emitter);
+ * const manager = new CreditsService(store, engine, emitter);
  * ```
  */
 
@@ -19,7 +19,7 @@
  * All credit lifecycle event types.
  *
  * Success events (``credits.deducted``/``credits.refunded``/…) are emitted by
- * ``CreditManager`` only after the underlying store operation committed without
+ * ``CreditsService`` only after the underlying store operation committed without
  * an ``error`` (contract §6). Failure events (``credits.deduct_failed`` /
  * ``credits.refund_failed``) carry the store's business-error code in
  * ``data.error`` for observability/fraud monitoring.

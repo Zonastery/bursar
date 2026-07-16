@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, Mock } from "vitest";
-import type { BillingManager, BillingEventResult } from "../src/billing/index.js";
+import type { BillingService, BillingEventResult } from "../src/billing/index.js";
 import type { WebhookRequest } from "../src/providers/types.js";
 
 // Mock @dodopayments/core/webhook at the top level so every import picks it up
@@ -8,10 +8,10 @@ vi.mock("@dodopayments/core/webhook", () => ({
 }));
 
 const mockBm = {
-  handleEvent: vi.fn<(...args: unknown[]) => BillingEventResult>().mockResolvedValue({
+  ingestBillingEvent: vi.fn<(...args: unknown[]) => BillingEventResult>().mockResolvedValue({
     handled: true,
   }),
-} as unknown as BillingManager;
+} as unknown as BillingService;
 
 const mockLogger = {
   debug: vi.fn(),

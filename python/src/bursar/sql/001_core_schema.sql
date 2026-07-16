@@ -134,7 +134,7 @@ BEGIN
 END;
 $$;
 
--- Signup bonus trigger: give free credits (amount from active pricing config's
+-- Signup bonus trigger: give free credits (amount from active Bursar config's
 -- `signup_grant` field under `ledger` (new schema), falling back to 50) on user signup.
 -- SECURITY DEFINER so the trigger function runs with table-owner privileges.
 CREATE OR REPLACE FUNCTION public.grant_signup_bonus()
@@ -151,10 +151,10 @@ BEGIN
   ) INTO v_bonus;
 
   -- p_bucket = 'gifted': the signup grant lands in the gifted-credits tier
-  -- (expiring bucket with ttl_days from pricing config). If no gifted bucket
+  -- (expiring bucket with ttl_days from Bursar config). If no gifted bucket
   -- is configured, credits_add_internal returns tier_not_found (silently
   -- discarded by PERFORM), so no bonus is granted — the zone of failure is
-  -- a missing pricing config, not a silent mis-routing to the purchased tier.
+  -- a missing Bursar config, not a silent mis-routing to the purchased tier.
   --
   -- Calls credits_add_internal (defined in 011_lazy_expiry.sql), NOT the
   -- guarded credits_add: a real Supabase GoTrue signup INSERT runs with no

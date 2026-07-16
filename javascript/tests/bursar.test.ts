@@ -20,13 +20,31 @@ describe("Bursar facade", () => {
   });
 
   it("wires billing provisioning to the facade-owned credit service", () => {
-    const creditManager = {} as ConstructorParameters<typeof Bursar>[0]["creditManager"];
+    const credits = {} as ConstructorParameters<typeof Bursar>[0]["credits"];
     const billingStore = {} as BillingStore;
-    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore, creditManager });
+    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore, credits });
 
     expect(bursar.billing).not.toBeNull();
     expect((bursar.billing as unknown as { provisioning: unknown }).provisioning).toBe(
       bursar.credits,
     );
+  });
+
+  it("routes provider events through the facade-owned billing service", async () => {
+    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore: {} as BillingStore });
+    const ingest = vi
+      .spyOn(bursar.billing!, "ingestBillingEvent")
+      .mockResolvedValue({ handled: true, action: "subscription_created" });
+    const event = {
+      provider: "mock",
+      eventId: "evt-1",
+      eventType: "subscription.created",
+    } as never;
+
+    await expect(bursar.ingestBillingEvent(event)).resolves.toEqual({
+      handled: true,
+      action: "subscription_created",
+    });
+    expect(ingest).toHaveBeenCalledWith(event);
   });
 });

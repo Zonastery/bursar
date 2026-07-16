@@ -32,10 +32,7 @@ export { validateExpression, evaluateExpression } from "./expr.js";
 
 // Application facade. Credit/billing orchestration is internal to Bursar.
 export { Bursar, CatalogService } from "./bursar.js";
-export type { BursarOptions } from "./bursar.js";
-
-// Internal types needed by compatibility adapters
-export type { CreditManager } from "./manager.js";
+export type { BursarOptions, BillingEventSink, BillingService, CreditsService } from "./bursar.js";
 
 // Types
 export type {

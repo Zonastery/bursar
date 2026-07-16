@@ -4,7 +4,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from bursar.billing.manager import BillingManager
 from bursar.billing.models import (
     BillingCustomerInfo,
     BillingEvent,
@@ -14,7 +13,8 @@ from bursar.billing.models import (
     BillingSubscriptionInfo,
     ProviderRef,
 )
-from bursar.providers._shared import call_billing_manager, parse_status
+from bursar.bursar import BillingEventSink
+from bursar.providers._shared import call_billing_event_sink, parse_status
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 STRIPE_CHECKOUT_EXPAND = ("line_items",)
@@ -55,7 +55,7 @@ async def _handle_checkout_completed(
     data: Any,
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
@@ -88,8 +88,8 @@ async def _handle_checkout_completed(
             period_start = _build_start(sub)
             plan_slug = (session.get("metadata") or {}).get("plan_slug")
 
-            call_billing_manager(
-                bm,
+            call_billing_event_sink(
+                sink,
                 BillingEvent(
                     provider="stripe",
                     event_id=event_id,
@@ -110,8 +110,8 @@ async def _handle_checkout_completed(
 
             sub_status = sub.get("status")
             if sub_status in ("active", "trialing"):
-                call_billing_manager(
-                    bm,
+                call_billing_event_sink(
+                    sink,
                     BillingEvent(
                         provider="stripe",
                         event_id=event_id,
@@ -150,8 +150,8 @@ async def _handle_checkout_completed(
             ),
         )
 
-        call_billing_manager(
-            bm,
+        call_billing_event_sink(
+            sink,
             BillingEvent(
                 provider="stripe",
                 event_id=event_id,
@@ -169,7 +169,7 @@ async def _handle_subscription_updated(
     data: Any,
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
@@ -195,8 +195,8 @@ async def _handle_subscription_updated(
     else:
         evt_type = BillingEventType.subscription_updated
 
-    call_billing_manager(
-        bm,
+    call_billing_event_sink(
+        sink,
         BillingEvent(
             provider="stripe",
             event_id=event_id,
@@ -222,14 +222,14 @@ async def _handle_subscription_deleted(
     data: Any,
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
     sub = data
-    call_billing_manager(
-        bm,
+    call_billing_event_sink(
+        sink,
         BillingEvent(
             provider="stripe",
             event_id=event_id,
@@ -250,7 +250,7 @@ async def _handle_invoice_paid(
     data: Any,
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
@@ -289,8 +289,8 @@ async def _handle_invoice_paid(
     period_end = _build_end(stripe_sub)
     period_start = _build_start(stripe_sub)
 
-    call_billing_manager(
-        bm,
+    call_billing_event_sink(
+        sink,
         BillingEvent(
             provider="stripe",
             event_id=event_id,
@@ -331,7 +331,7 @@ async def handle_stripe_billing_event(
     data: Any,
     user_id: str | None,
     metadata: dict[str, str],
-    bm: BillingManager,
+    sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger | None = None,
 ) -> None:
@@ -345,7 +345,7 @@ async def handle_stripe_billing_event(
         return
 
     try:
-        await handler(event_id, data, user_id, metadata, bm, stripe, logger, occurred_at)
+        await handler(event_id, data, user_id, metadata, sink, stripe, logger, occurred_at)
     except Exception as exc:
         logger.error(
             "Stripe webhook processing failed",

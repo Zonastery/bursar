@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from bursar.billing.manager import BillingManager
 from bursar.billing.models import BillingEvent, BillingEventResult, BillingSubscriptionStatus
+from bursar.bursar import BillingEventSink
 
 
-def call_billing_manager(bm: BillingManager, event: BillingEvent) -> BillingEventResult:
+def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> BillingEventResult:
     """Dispatch a billing event and raise on unexpected failures."""
-    result = bm.handle_event(event)
+    result = sink.ingest_billing_event(event)
     if not result.handled and result.error not in ("unhandled_event_type", "user_not_found"):
-        raise RuntimeError(f"BillingManager failed to handle event: {result.error}")
+        raise RuntimeError(f"Bursar failed to ingest billing event: {result.error}")
     return result
 
 

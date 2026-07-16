@@ -1,19 +1,62 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
-from bursar.billing.manager import BillingManager
+from bursar.billing.billing_service import BillingServiceImpl
+from bursar.billing.models import (
+    BillingCustomerRecord,
+    BillingEvent,
+    BillingEventResult,
+    BillingOfferResult,
+    BillingPreferences,
+    BillingSubscriptionState,
+    BillingTopupResult,
+)
 from bursar.billing.store import BillingStore
+from bursar.credits_service import CreditsService as CreditsServiceImpl
 from bursar.events import CreditEventEmitter
 from bursar.interface.base import CreditStore
-from bursar.manager import CreditManager
+
+
+class BillingEventSink(Protocol):
+    """Facade boundary consumed by payment providers."""
+
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult: ...
+
+
+class BillingService(BillingEventSink, Protocol):
+    """Public billing capability exposed by the Bursar facade."""
+
+    def get_user_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
+
+    def get_user_preferences(self, user_id: str) -> BillingPreferences | None: ...
+
+    def update_user_preferences(self, prefs: BillingPreferences) -> None: ...
+
+    def get_customer_by_user_id(self, user_id: str, provider: str | None = None) -> BillingCustomerRecord | None: ...
+
+    def resolve_offer(
+        self, provider: str, product_id: str | None = None, price_id: str | None = None
+    ) -> BillingOfferResult | None: ...
+
+    def resolve_topup(
+        self, provider: str, product_id: str | None = None, price_id: str | None = None
+    ) -> BillingTopupResult | None: ...
+
+    def upsert_customer(
+        self, provider: str, provider_customer_id: str, user_id: str, email: str | None = None
+    ) -> None: ...
+
+
+CreditsService = CreditsServiceImpl
 
 
 @dataclass(slots=True)
 class CatalogService:
     """Catalog operations; billing never owns configuration writes."""
 
-    credits: CreditManager
+    credits: CreditsService
 
     def active(self):
         return self.credits.get_active_pricing()
@@ -32,15 +75,15 @@ class CatalogService:
 class Bursar:
     """Single application-facing boundary for credit and billing operations.
 
-    The facade owns the lifecycle of both managers and prevents application
-    code from wiring an unrelated credit manager into billing by accident.
-    New integrations should depend on ``bursar.credits`` and
-    ``bursar.billing`` rather than constructing either manager independently.
+    The facade owns the lifecycle of both services and prevents application
+    code from wiring unrelated credit and billing implementations together.
+    Integrations should depend on ``bursar.credits`` and ``bursar.billing``
+    rather than constructing lifecycle services independently.
     """
 
-    credits: CreditManager
+    credits: CreditsService
     catalog: CatalogService
-    billing: BillingManager | None = None
+    billing: BillingService | None = None
 
     @classmethod
     def create(
@@ -48,21 +91,21 @@ class Bursar:
         *,
         credit_store: CreditStore,
         billing_store: BillingStore | None = None,
-        credit_manager: CreditManager | None = None,
-        credit_manager_options: dict | None = None,
-        billing_manager_options: dict | None = None,
+        credits: CreditsService | None = None,
+        credits_options: dict | None = None,
+        billing_options: dict | None = None,
         emitter: CreditEventEmitter | None = None,
     ) -> Bursar:
-        credits = credit_manager or CreditManager(
+        credits = credits or CreditsServiceImpl(
             store=credit_store,
             emitter=emitter,
-            **(credit_manager_options or {}),
+            **(credits_options or {}),
         )
         billing = (
-            BillingManager(
+            BillingServiceImpl(
                 billing_store,
                 **{
-                    **(billing_manager_options or {}),
+                    **(billing_options or {}),
                     # The facade owns this dependency; callers cannot replace
                     # it through the generic manager options dictionary.
                     "provisioning": credits,
@@ -80,3 +123,9 @@ class Bursar:
     def load_catalog(self) -> None:
         """Load the active catalog into the metering engine."""
         self.credits.load_pricing_from_store()
+
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+        """Submit a normalized provider event through the facade."""
+        if self.billing is None:
+            raise RuntimeError("Bursar billing capability is not configured")
+        return self.billing.ingest_billing_event(event)

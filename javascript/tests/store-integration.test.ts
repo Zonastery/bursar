@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, injec
 import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
-import { CreditManager } from "../src/manager.js";
+import { CreditsService } from "../src/credits-service.js";
 import { InsufficientCreditsError } from "../src/errors.js";
 import { CreditEventEmitter } from "../src/stores/events.js";
 import type { CreditEvent } from "../src/stores/events.js";
@@ -944,10 +944,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     await store.close();
   });
 
-  // ── lazyExpiry: true end-to-end via CreditManager + real PostgresStore ──
+  // ── lazyExpiry: true end-to-end via CreditsService + real PostgresStore ──
   it("lazyExpiry: true transparently sweeps a user's own expired credits before every read/spend call, no explicit sweep anywhere", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store, undefined, undefined, { lazyExpiry: true });
+    const manager = new CreditsService(store, undefined, undefined, { lazyExpiry: true });
 
     // 50 permanent + 100 that expires shortly. A short-lived FUTURE
     // expiresAt + a real wall-clock wait (rather than an already-past
@@ -989,7 +989,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
 // ───────────────────────────────────────────────────────────────────────────
 // Configurable allowance window (WS9) — real Postgres. Covers gaps identified
 // after the store-level `checkAllowance(userId, periodStart?)` threading and
-// the new `CreditManager.checkAllowance` passthrough: allowance_period/
+// the new `CreditsService.checkAllowance` passthrough: allowance_period/
 // plan_assigned_at round-trip, window isolation via explicit periodStart on
 // deductWithAllowance/createLease/settleLease, rolling_30d/anniversary plans
 // driven through the MANAGER (not just the raw store), and a direct live-DB
@@ -1117,7 +1117,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   // ── 5: rolling_30d plan through manager.deduct(), backdated anchor ───
   it("manager.deduct() on a rolling_30d plan resolves the window from a backdated plan_assigned_at", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     const config = {
       version: 1,
       metering: { models: { "*": "input_tokens * 1" } },
@@ -1170,7 +1170,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   // ── 6: anniversary plan through manager.reserve()/settle() ──────────
   it("manager.reserve()/settle() on an anniversary plan resolves the window from a backdated plan_assigned_at", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     const config = {
       version: 1,
       metering: { models: { "*": "input_tokens * 1" } },
@@ -1206,7 +1206,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     "manager.checkAllowance() for a %s plan matches resolveAllowanceWindow and reflects partial usage",
     async (allowancePeriod) => {
       const store = new PostgresStore(DATABASE_URL!, pool);
-      const manager = new CreditManager(store);
+      const manager = new CreditsService(store);
       const planKey = `ca-${allowancePeriod}`;
       const config = {
         version: 1,
@@ -1242,7 +1242,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   // ── 8: manager.checkAllowance() fast path (calendar_month / planless) ──
   it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a calendar_month plan", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     await pool.query(
       `INSERT INTO public.credit_plans (id, label, allowance_amount, plan_key, allowance_period, config_version)
        VALUES ($1, 'Cal', 15, $2, 'calendar_month', 0)`,
@@ -1259,7 +1259,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
 
   it("manager.checkAllowance() fast path is byte-identical to store.checkAllowance() for a planless user", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     await store.addCredits(PG_USER7, D(10), "purchase");
 
     const direct = await store.checkAllowance(PG_USER7);
@@ -1360,7 +1360,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   // ── 11: WS3 — fractional fixed job cost round-trips through Postgres JSONB ──
   it("WS3 — fractional fixed job cost round-trips through real Postgres JSONB and charges exactly", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     const config = {
       version: 1,
       metering: { models: { "*": "input_tokens * 1" }, flatJobs: { job: 2.5 } },
@@ -1381,7 +1381,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
   // ── 12: WS10 — manager.addCredits options-object form persists expiresAt ──
   it("WS10 — manager.addCredits options-object form persists expiresAt and sweepExpiredCredits reclaims exactly that grant", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
 
     await manager.addCredits(PG_USER12, D(30), {
       type: "purchase",
@@ -1599,7 +1599,7 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// CreditManager end-to-end — credit tiers through the public manager API,
+// CreditsService end-to-end — credit tiers through the public manager API,
 // real Postgres. The "Credit tiers — real Postgres" block above drives
 // PostgresStore directly to pin down SQL/RPC behavior; this block is the
 // manager-level counterpart: publishPricingFromDict, addCredits, the
@@ -1607,10 +1607,10 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
 // refundCredits, getBucketBalances, and sweepExpiredCredits exactly as an
 // integrator would call them, asserting on both the returned results and the
 // CreditEventEmitter events they fire. Nothing else in this suite drives
-// CreditManager against a real store (every other manager test uses
+// CreditsService against a real store (every other manager test uses
 // MemoryStore).
 // ───────────────────────────────────────────────────────────────────────────
-describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Postgres", () => {
+describe.runIf(DATABASE_URL)("CreditsService end-to-end — credit tiers, real Postgres", () => {
   const MGR_USER1 = "00000000-0000-0000-0000-000000000301";
   const MGR_USER2 = "00000000-0000-0000-0000-000000000302";
   const MGR_USER3 = "00000000-0000-0000-0000-000000000303";
@@ -1658,7 +1658,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.added", "credits.deducted", "credits.refunded"]);
-    const mgr = new CreditManager(store, undefined, emitter);
+    const mgr = new CreditsService(store, undefined, emitter);
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
     const gifted = await mgr.addCredits(MGR_USER1, D(20), { type: "purchase", bucket: "gifted" });
@@ -1711,7 +1711,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.reserved", "credits.deducted"]);
-    const mgr = new CreditManager(store, undefined, emitter);
+    const mgr = new CreditsService(store, undefined, emitter);
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
     const future = new Date(Date.now() + 86_400_000);
@@ -1738,7 +1738,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.expired"]);
-    const mgr = new CreditManager(store, undefined, emitter);
+    const mgr = new CreditsService(store, undefined, emitter);
     await mgr.publishPricingFromDict(TIER_CONFIG);
 
     // Must be in the future at grant time (invalid_expires_at) but elapsed by
@@ -1769,7 +1769,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
     const store = new PostgresStore(DATABASE_URL!, pool);
     const emitter = new CreditEventEmitter();
     const events = record(emitter, ["credits.overdraft"]);
-    const mgr = new CreditManager(store, undefined, emitter, {
+    const mgr = new CreditsService(store, undefined, emitter, {
       policy: "overdraft",
       overdraftFloor: -50,
     });
@@ -1800,7 +1800,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// CreditManager.grantSubscriptionCycle — real Postgres. A real bug was found
+// CreditsService.grantSubscriptionCycle — real Postgres. A real bug was found
 // and fixed in this exact implementation: with replacePrior:true (the
 // default), a redelivered webhook (same idempotencyKey) used to wipe the
 // tier's balance UNCONDITIONALLY before the idempotent grant call, so a
@@ -1813,7 +1813,7 @@ describe.runIf(DATABASE_URL)("CreditManager end-to-end — credit tiers, real Po
 // fix against the actual credits_add / tier-balance Postgres RPCs, since a
 // client/server logic mismatch could hide exactly there.
 // ───────────────────────────────────────────────────────────────────────────
-describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Postgres", () => {
+describe.runIf(DATABASE_URL)("CreditsService.grantSubscriptionCycle — real Postgres", () => {
   let store: PostgresStore;
 
   const SUB_USER1 = "00000000-0000-0000-0000-000000000401";
@@ -1856,7 +1856,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   });
 
   it("first cycle grant increases the balance; a SAME-idempotencyKey redelivery is a full no-op (the exact regression this fix addresses)", async () => {
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
 
     const first = await manager.grantSubscriptionCycle(SUB_USER1, D(100), {
@@ -1888,7 +1888,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   });
 
   it("a genuinely new cycle (different idempotencyKey) expires the leftover balance from a prior cycle when replacePrior: true", async () => {
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
 
     await manager.grantSubscriptionCycle(SUB_USER2, D(100), {
@@ -1908,7 +1908,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
   });
 
   it("replacePrior: false stacks the new cycle on top of any leftover balance", async () => {
-    const manager = new CreditManager(store);
+    const manager = new CreditsService(store);
     await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
 
     await manager.grantSubscriptionCycle(SUB_USER3, D(100), {
@@ -1927,7 +1927,7 @@ describe.runIf(DATABASE_URL)("CreditManager.grantSubscriptionCycle — real Post
     const emitter = new CreditEventEmitter();
     const events: CreditEvent[] = [];
     emitter.on("credits.cycle_renewed", (e) => events.push(e));
-    const manager = new CreditManager(store, undefined, emitter);
+    const manager = new CreditsService(store, undefined, emitter);
     await manager.publishPricingFromDict(SUBSCRIPTION_CONFIG);
 
     // set_user_plan resolves plan_key -> credit_plans.id server-side, so the

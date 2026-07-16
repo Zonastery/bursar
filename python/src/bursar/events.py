@@ -1,7 +1,7 @@
 """Typed event emitter for credit lifecycle events.
 
-Events are emitted by ``CreditManager`` after each store operation.
-The emitter is optional — inject into ``CreditManager`` constructor,
+Events are emitted by ``CreditsService`` after each store operation.
+The emitter is optional — inject into ``CreditsService`` constructor,
 no-op if omitted.
 
 Usage::
@@ -10,7 +10,7 @@ Usage::
 
     emitter = CreditEventEmitter()
     emitter.on("credits.deducted", lambda event: print(event))
-    manager = CreditManager(store=store, emitter=emitter)
+    manager = CreditsService(store=store, emitter=emitter)
 """
 
 from __future__ import annotations
@@ -52,10 +52,10 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.reservation_released",
         "credits.lease_expired",
         "credits.overdraft",
-        # Emitted by CreditManager.grant_subscription_cycle (webhook renewal/signup
+        # Emitted by CreditsService.grant_subscription_cycle (webhook renewal/signup
         # grant helper).
         "credits.cycle_renewed",
-        # Emitted by CreditManager.revoke_credits_by_tx_type (subscription lifecycle).
+        # Emitted by CreditsService.revoke_credits_by_tx_type (subscription lifecycle).
         "credits.revoked",
     }
 )

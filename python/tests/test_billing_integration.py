@@ -1,4 +1,4 @@
-"""Integration tests for PostgresBillingStore + BillingManager — mirrors
+"""Integration tests for PostgresBillingStore + BillingServiceImpl — mirrors
 JavaScript tests/billing-integration.test.ts.
 
 Tests sync/resolve round-trips, customer/subscription CRUD, event
@@ -14,7 +14,7 @@ from decimal import Decimal
 import psycopg2
 import pytest
 
-from bursar.billing.manager import BillingManager
+from bursar.billing.billing_service import BillingServiceImpl
 from bursar.billing.models import (
     AllowanceGrant,
     BillingConfig,
@@ -32,7 +32,7 @@ from bursar.billing.models import (
     ProviderRef,
 )
 from bursar.billing.postgres import PostgresBillingStore
-from bursar.manager import CreditManager
+from bursar.credits_service import CreditsService
 
 pytestmark = [pytest.mark.integration]
 
@@ -145,12 +145,12 @@ def _bootstrap_auth_users(pg_database_url: str) -> None:
 def _make_components(
     pg_database_url: str,
     pg_store: object,
-) -> tuple[PostgresBillingStore, CreditManager, BillingManager]:
+) -> tuple[PostgresBillingStore, CreditsService, BillingServiceImpl]:
     bs = PostgresBillingStore(pg_database_url)
-    cm = CreditManager(pg_store)  # type: ignore[arg-type]
+    cm = CreditsService(pg_store)  # type: ignore[arg-type]
     cm.publish_pricing_from_dict(PRICING_DICT)
-    bm = BillingManager(bs, provisioning=cm)
-    return bs, cm, bm
+    sink = BillingServiceImpl(bs, provisioning=cm)
+    return bs, cm, sink
 
 
 # ── Sync + Resolve ─────────────────────────────────────────────────────
@@ -159,7 +159,7 @@ def _make_components(
 class TestBillingSync:
     def test_config_sync_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         offer = bs.resolve_billing_offer(PROVIDER, product_id=None, price_id=PRICE_ID)
         assert offer is not None
@@ -168,7 +168,7 @@ class TestBillingSync:
 
     def test_config_resolve_by_product_id(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         offer = bs.resolve_billing_offer(PROVIDER, product_id="prod_monthly")
         assert offer is not None
@@ -176,7 +176,7 @@ class TestBillingSync:
 
     def test_topup_config_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         topup = bs.resolve_credit_topup(PROVIDER, product_id=None, price_id=PRICE_ID_TOPUP)
         assert topup is not None
@@ -185,13 +185,13 @@ class TestBillingSync:
 
     def test_unresolved_offer_returns_null(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         assert bs.resolve_billing_offer(PROVIDER, product_id=None, price_id="nonexistent") is None
 
     def test_resolve_billing_offer_no_match(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         assert bs.resolve_billing_offer("nonexistent_provider", product_id=None, price_id=PRICE_ID) is None
 
@@ -202,19 +202,19 @@ class TestBillingSync:
 class TestCustomerCrud:
     def test_customer_created_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID, "test@example.com")
         uid = bs.get_billing_customer(PROVIDER, CUSTOMER_ID)
         assert uid == USER_ID
 
     def test_customer_not_found(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.get_billing_customer(PROVIDER, "nonexistent_cus") is None
 
     def test_customer_remap_to_different_user_rejected(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
         result = bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
         assert result.get("error") == "user_id_mismatch"
@@ -222,7 +222,7 @@ class TestCustomerCrud:
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer("stripe", CUSTOMER_ID, USER_ID)
         bs.upsert_billing_customer("dodo", CUSTOMER_ID, USER_ID2)
         assert bs.get_billing_customer("stripe", CUSTOMER_ID) == USER_ID
@@ -235,7 +235,7 @@ class TestCustomerCrud:
 class TestSubscriptionCrud:
     def test_subscription_upsert_and_read(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         state = BillingSubscriptionState(
             user_id=USER_ID,
@@ -257,12 +257,12 @@ class TestSubscriptionCrud:
 
     def test_subscription_not_found(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.get_billing_subscription(PROVIDER, "nonexistent_sub") is None
 
     def test_subscription_update(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         bs.upsert_billing_subscription(
             BillingSubscriptionState(
@@ -291,7 +291,7 @@ class TestSubscriptionCrud:
 class TestEventIdempotency:
     def test_event_idempotency(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         event = BillingEvent(
             provider=PROVIDER,
@@ -300,14 +300,14 @@ class TestEventIdempotency:
             occurred_at=_now(),
             user_id=USER_ID,
         )
-        r1 = bm.handle_event(event)
+        r1 = sink.ingest_billing_event(event)
         assert r1.handled is True
-        r2 = bm.handle_event(event)
+        r2 = sink.ingest_billing_event(event)
         assert r2.action == "duplicate"
 
     def test_event_claim_complete_fail_cycle(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         c1 = bs.claim_billing_event(PROVIDER, "evt_claim_cycle", "test.event")
         assert c1.status == "claimed"
@@ -317,7 +317,7 @@ class TestEventIdempotency:
 
     def test_event_fail_then_reclaim(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         c1 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c1.status == "claimed"
@@ -328,7 +328,7 @@ class TestEventIdempotency:
     def test_event_handler_dispatched_for_matching_event(self, pg_database_url: str, pg_store: object) -> None:
         """Mirrors JavaScript test: eventHandlers dispatch on matching event type."""
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
         called = False
@@ -337,7 +337,7 @@ class TestEventIdempotency:
             nonlocal called
             called = True
 
-        bm = BillingManager(
+        sink = BillingServiceImpl(
             bs,
             provisioning=_cm,
             event_handlers={
@@ -345,7 +345,7 @@ class TestEventIdempotency:
             },
         )
         bs.sync_billing_from_config(BILLING_CONFIG)
-        result = bm.handle_event(
+        result = sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_handler_test",
@@ -364,27 +364,27 @@ class TestEventIdempotency:
 class TestTopup:
     def test_compute_topup_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _bm = _make_components(pg_database_url, pg_store)
-        result = BillingManager._compute_topup_credits(2000, 1000)
+        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        result = BillingServiceImpl._compute_topup_credits(2000, 1000)
         assert result == 20000
 
     def test_compute_topup_credits_odd_amount(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _bm = _make_components(pg_database_url, pg_store)
-        result = BillingManager._compute_topup_credits(1999, 1000)
+        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        result = BillingServiceImpl._compute_topup_credits(1999, 1000)
         assert result == 19990
 
 
-# ── BillingManager lifecycle ───────────────────────────────────────────
+# ── BillingServiceImpl lifecycle ───────────────────────────────────────────
 
 
-class TestBillingManagerLifecycle:
+class TestBillingServiceImplLifecycle:
     def test_subscription_lifecycle_full(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_1",
@@ -394,7 +394,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_create_1",
@@ -427,7 +427,7 @@ class TestBillingManagerLifecycle:
         assert plan.plan_id is not None
         assert plan.plan_assigned_at is not None
 
-        cancel_result = bm.handle_event(
+        cancel_result = sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cancel_1",
@@ -450,10 +450,10 @@ class TestBillingManagerLifecycle:
 
     def test_topup_credit_grant(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_2",
@@ -463,7 +463,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_payment_2",
@@ -486,12 +486,12 @@ class TestBillingManagerLifecycle:
 
     def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
         uid = "00000000-0000-0000-0000-000000000005"
         payment_id = "py_refund_clawback"
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_refund",
@@ -501,7 +501,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_pay_refund",
@@ -521,7 +521,7 @@ class TestBillingManagerLifecycle:
         balance_after_grant = cm.get_balance(uid)
         assert balance_after_grant.balance == Decimal("20000")
 
-        result = bm.handle_event(
+        result = sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_refund_1",
@@ -543,10 +543,10 @@ class TestBillingManagerLifecycle:
 
     def test_subscription_pause_resume(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_pause",
@@ -556,7 +556,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_1",
@@ -573,7 +573,7 @@ class TestBillingManagerLifecycle:
         )
         assert cm.get_user_plan(USER_ID2).plan_id is not None
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_2",
@@ -588,7 +588,7 @@ class TestBillingManagerLifecycle:
         )
         assert cm.get_user_plan(USER_ID2).plan_id is None
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_3",
@@ -607,9 +607,9 @@ class TestBillingManagerLifecycle:
 
     def test_unknown_event_type_ignored(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
-        result = bm.handle_event(
+        result = sink.ingest_billing_event(
             BillingEvent.model_construct(
                 provider=PROVIDER,
                 event_id="evt_unknown",
@@ -623,10 +623,10 @@ class TestBillingManagerLifecycle:
 
     def test_duplicate_event_skips_side_effects(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
@@ -638,7 +638,7 @@ class TestBillingManagerLifecycle:
         )
         assert bs.get_billing_customer(PROVIDER, "cus_dup_test") == USER_ID
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
@@ -652,7 +652,7 @@ class TestBillingManagerLifecycle:
 
     def test_provider_scoped_event_id(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
         c1 = bs.claim_billing_event("stripe", "evt_prov_scope", "test.event")
@@ -663,7 +663,7 @@ class TestBillingManagerLifecycle:
 
     def test_sync_offers_adds_new(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, _cm, _bm = _make_components(pg_database_url, pg_store)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
         bs.sync_billing_from_config(
@@ -685,10 +685,10 @@ class TestBillingManagerLifecycle:
 
     def test_cycle_grant_credits_granted(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg1",
@@ -698,7 +698,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg1",
@@ -725,10 +725,10 @@ class TestBillingManagerLifecycle:
 
     def test_cycle_grant_replace_prior(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        bs, cm, bm = _make_components(pg_database_url, pg_store)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
         bs.sync_billing_from_config(BILLING_CONFIG)
 
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg2",
@@ -738,7 +738,7 @@ class TestBillingManagerLifecycle:
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
             )
         )
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2a",
@@ -764,7 +764,7 @@ class TestBillingManagerLifecycle:
         assert balance1.balance == Decimal("5000")
 
         # Renew — should revoke prior cycle_grant and grant new 5000
-        bm.handle_event(
+        sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2b",

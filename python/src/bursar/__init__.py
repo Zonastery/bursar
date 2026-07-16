@@ -20,7 +20,6 @@ from bursar.billing import (
     BillingEventResult,
     BillingEventType,
     BillingInvoiceInfo,
-    BillingManager,
     BillingOffer,
     BillingOfferInterval,
     BillingPaymentInfo,
@@ -34,13 +33,22 @@ from bursar.billing import (
     CycleGrant,
     ProviderRef,
 )
-from bursar.billing.manager import BillingProvisioningPort
+from bursar.billing.billing_service import BillingProvisioningPort
 from bursar.breakdown import CostBreakdown
-from bursar.bursar import Bursar, CatalogService
+from bursar.bursar import BillingEventSink, BillingService, Bursar, CatalogService, CreditsService
 
 if TYPE_CHECKING:
     from bursar.billing import PostgresBillingStore
 from bursar.config import BursarConfig, ConfigError
+from bursar.credits_service import (
+    ConcurrencyLimitError,
+    CreditError,
+    FeatureNotEntitledError,
+    InsufficientCreditsError,
+    LeaseExpiredError,
+    LeaseNotFoundError,
+    PricingNotLoadedError,
+)
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter
 from bursar.expr import ExpressionError, evaluate_expression, validate_expression
@@ -90,15 +98,6 @@ from bursar.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from bursar.manager import (
-    ConcurrencyLimitError,
-    CreditError,
-    FeatureNotEntitledError,
-    InsufficientCreditsError,
-    LeaseExpiredError,
-    LeaseNotFoundError,
-    PricingNotLoadedError,
-)
 from bursar.metrics import ToolCall, UsageMetrics
 from bursar.providers.types import (
     CheckoutParams,
@@ -141,7 +140,6 @@ __all__ = [
     "BillingEventResult",
     "BillingEventType",
     "BillingInvoiceInfo",
-    "BillingManager",
     "BillingOffer",
     "BillingOfferInterval",
     "BillingPaymentInfo",
@@ -151,6 +149,8 @@ __all__ = [
     "BillingStore",
     "BillingProvisioningPort",
     "Bursar",
+    "BillingEventSink",
+    "BillingService",
     "CatalogService",
     "BillingSubscriptionInfo",
     "BillingSubscriptionState",
@@ -167,6 +167,7 @@ __all__ = [
     "ConcurrencyLimitError",
     "ConfigError",
     "CostBreakdown",
+    "CreditsService",
     "CreateCustomerParams",
     "CreateTeamResult",
     "CreditError",

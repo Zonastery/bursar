@@ -224,7 +224,7 @@ export abstract class CreditStore {
   abstract unsetUserPlan(userId: string): Promise<{ userId: string }>;
   abstract checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
   // periodStart overrides the window key for rolling_30d/anniversary plans
-  // (resolved by CreditManager via resolveAllowanceWindow); undefined keeps
+  // (resolved by CreditsService via resolveAllowanceWindow); undefined keeps
   // the calendar-month default (WS9).
   abstract checkAllowance(userId: string, periodStart?: Date | null): Promise<AllowanceResult>;
 
@@ -264,7 +264,7 @@ export abstract class CreditStore {
    * When `userId` is omitted (default), sweeps globally across every user —
    * unchanged behaviour/output shape from before this parameter existed. When
    * given, restricts the scan/expiry to that user's transactions only (used by
-   * `CreditManager`'s lazy-on-read expiry, `options.lazyExpiry`).
+   * `CreditsService`'s lazy-on-read expiry, `options.lazyExpiry`).
    */
   abstract sweepExpiredCredits(dryRun?: boolean, userId?: string): Promise<SweepResult>;
 

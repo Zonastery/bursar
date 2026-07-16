@@ -9,7 +9,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 
 | File | Purpose |
 |------|---------|
-| `src/bursar/manager.py` | `CreditManager` — the main public API. All business logic lives here. |
+| `src/bursar/credits_service.py` | Internal credit capability owned by the `Bursar` facade. |
 | `src/bursar/interface/base.py` | `CreditStore` ABC — the interface every store must implement. |
 | `src/bursar/interface/postgres.py` | `PostgresStore` — production store; all mutations call SQL RPCs via `psycopg2`. |
 | `src/bursar/interface/models.py` | All Pydantic result types, `PlanDefinition`, `OperationPolicy`. |
@@ -18,7 +18,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 | `src/bursar/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
 | `src/bursar/config.py` | `BursarConfig` — validates expression strings at load time. |
 | `src/bursar/expr.py` | Safe `ast`-based expression evaluator for pricing formulas. |
-| `src/bursar/billing/manager.py` | `BillingManager` — provider-agnostic billing orchestration. |
+| `src/bursar/billing/billing_service.py` | Provider-agnostic billing orchestration owned by `Bursar`. |
 | `src/bursar/billing/postgres.py` | `PostgresBillingStore` — billing state persistence via `psycopg2`. |
 | `src/bursar/billing/store.py` | `BillingStore` ABC — interface for billing persistence. |
 | `src/bursar/billing/models.py` | Billing Pydantic models: events, subscriptions, invoices, payments, offers, topups. |
@@ -28,7 +28,7 @@ Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (
 ## Architecture
 
 ```
-CreditManager
+Bursar facade
   ├── PricingEngine          (calculate cost from UsageMetrics)
   ├── CreditStore            (ABC — memory / postgres)
   │     ├── deduct_with_allowance()   atomic: allowance→cap→floor→debit (internal core)
@@ -36,7 +36,7 @@ CreditManager
   │     └── ... (30+ abstract methods)
   └── CreditEventEmitter     (optional pub/sub)
 
-BillingManager
+BillingService
   ├── ProviderMapper         (Stripe / Dodo webhook → BillingEvent)
   ├── BillingStore           (ABC — postgres)
   └── BillingEventEmitter    (typed pub/sub, 35+ event types)
@@ -67,7 +67,7 @@ BillingManager
 | `tests/test_engine.py` | PricingEngine expression evaluation |
 | `tests/test_expr.py` | Expression parser/evaluator edge cases |
 | `tests/test_security_rls.py` | RLS/privilege lockdown against real Postgres roles (`anon`/`authenticated`/`service_role`) — the REVOKE/RLS checks the rest of the suite bypasses by connecting as a superuser |
-| `tests/test_store_integration.py` | Real Postgres tests, incl. `CreditManager` end-to-end tier coverage. The 7 real-Postgres concurrency tests are `@pytest.mark.repeat(5)` — money-critical races, rerun to surface rare interleavings |
+| `tests/test_store_integration.py` | Real Postgres tests, incl. facade-owned credit capability end-to-end tier coverage. The 7 real-Postgres concurrency tests are `@pytest.mark.repeat(5)` — money-critical races, rerun to surface rare interleavings |
 
 Run: `pytest python/tests/`. Real-Postgres tests resolve a DSN from `DATABASE_URL` → `BURSAR_TEST_PG_URL` → a testcontainers-managed `postgres:16` (Docker permitting) → skip; see `tests/conftest.py`.
 

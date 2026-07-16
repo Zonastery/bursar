@@ -32,7 +32,7 @@ type ResolveUserFn = (
   email: string | null,
 ) => string | null;
 
-export interface BillingManagerOptions {
+export interface BillingServiceOptions {
   /** Narrow credit capability used by subscription provisioning. */
   provisioning?: BillingProvisioningPort | null;
   resolveUser?: ResolveUserFn | null;
@@ -63,9 +63,9 @@ export interface BillingProvisioningPort {
 
 /**
  * Provider-agnostic billing lifecycle state machine.
- * Mirrors Python bursar/billing/manager.py.
+ * Mirrors the Python billing service implementation.
  */
-export class BillingManager {
+export class BillingService {
   private store: BillingStore;
   private provisioning: BillingProvisioningPort | null;
   private resolveUser: ResolveUserFn | null;
@@ -83,7 +83,7 @@ export class BillingManager {
     return this.provisioning !== null;
   }
 
-  constructor(store: BillingStore, options?: BillingManagerOptions) {
+  constructor(store: BillingStore, options?: BillingServiceOptions) {
     this.store = store;
     this.provisioning = options?.provisioning ?? null;
     this.resolveUser = options?.resolveUser ?? null;
@@ -187,7 +187,7 @@ export class BillingManager {
     this.offerCache.clear();
   }
 
-  async handleEvent(event: BillingEvent): Promise<BillingEventResult> {
+  async ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult> {
     const claim = await this.store.claimBillingEvent(
       event.provider,
       event.eventId,
@@ -207,7 +207,7 @@ export class BillingManager {
       return result;
     } catch (err) {
       this.logger?.error?.(
-        `[BillingManager] failed to handle billing event ${event.provider}/${event.eventId}`,
+        `[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`,
         { error: err instanceof Error ? err.message : String(err) },
       );
       await this.store.failBillingEvent(event.provider, event.eventId);
@@ -241,7 +241,7 @@ export class BillingManager {
       await handler(event, userId);
     } catch (err) {
       this.logger?.error?.(
-        `[BillingManager] event handler failed for ${event.provider}/${event.eventId}`,
+        `[BillingService] event handler failed for ${event.provider}/${event.eventId}`,
         { error: err instanceof Error ? err.message : String(err) },
       );
     }
@@ -249,7 +249,7 @@ export class BillingManager {
 
   /**
    * Resolve userId from the event, mutating event.userId so that
-   * routeEvent's blanket fireEventCallback can read it. Each handleEvent
+   * routeEvent's blanket fireEventCallback can read it. Each ingestBillingEvent
    * call creates a fresh event object, so mutation is safe.
    */
   private async resolveUserId(event: BillingEvent): Promise<string | null> {
@@ -427,7 +427,7 @@ export class BillingManager {
       }
 
       this.logger?.error?.(
-        `[BillingManager] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}`,
+        `[BillingService] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}`,
       );
     }
 
@@ -713,7 +713,7 @@ export class BillingManager {
         event.payment.amountMinor > topupConfig.maxAmountMinor
       ) {
         this.logger?.warn?.(
-          `[BillingManager] topup amount ${event.payment.amountMinor} exceeds cap ${topupConfig.maxAmountMinor} for topup key ${topupConfig.topupKey} (user ${uid})`,
+          `[BillingService] topup amount ${event.payment.amountMinor} exceeds cap ${topupConfig.maxAmountMinor} for topup key ${topupConfig.topupKey} (user ${uid})`,
         );
         return { handled: true, action: "payment_succeeded_out_of_bounds" };
       }
@@ -775,7 +775,7 @@ export class BillingManager {
           const cpu = Number(rawCpu);
           if (!Number.isFinite(cpu) || cpu <= 0) {
             this.logger?.warn?.(
-              `[BillingManager] cannot claw back credits for refund ${event.refund.providerRefundId}: no valid creditsPerUnit in payment metadata`,
+              `[BillingService] cannot claw back credits for refund ${event.refund.providerRefundId}: no valid creditsPerUnit in payment metadata`,
             );
             return { handled: true, action: "refund_recorded_no_clawback" };
           }
@@ -830,13 +830,13 @@ export class BillingManager {
   ): Promise<void> {
     if (!this.provisioning) {
       this.logger?.debug?.(
-        `[BillingManager] provisionSubscription: no provisioning capability for user ${uid}`,
+        `[BillingService] provisionSubscription: no provisioning capability for user ${uid}`,
       );
       return;
     }
     const plan = planKeyOverride ?? offer?.plan;
     if (!plan) {
-      this.logger?.debug?.(`[BillingManager] provisionSubscription: no plan for user ${uid}`);
+      this.logger?.debug?.(`[BillingService] provisionSubscription: no plan for user ${uid}`);
       return;
     }
     const periodStart = event.subscription?.periodStart;
@@ -853,7 +853,7 @@ export class BillingManager {
       const result = await this.store.deactivateOtherProviderSubscriptions(uid, event.provider);
       if (result.deactivatedCount > 0) {
         this.logger?.debug?.(
-          `[BillingManager] deactivated ${result.deactivatedCount} prior provider subscription(s) for user ${uid}`,
+          `[BillingService] deactivated ${result.deactivatedCount} prior provider subscription(s) for user ${uid}`,
         );
       }
     }

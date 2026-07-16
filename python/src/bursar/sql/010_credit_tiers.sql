@@ -95,7 +95,7 @@ BEGIN
 END;
 $$;
 
--- sync_buckets_from_config: upsert bucket definitions from the pricing config
+-- sync_buckets_from_config: upsert bucket definitions from the Bursar config
 -- JSONB. Mirrors sync_plans_from_config's structure/pattern. Reads the buckets
 -- section from the revamped config layout under `ledger.buckets`.
 CREATE OR REPLACE FUNCTION public.sync_buckets_from_config(p_config JSONB)

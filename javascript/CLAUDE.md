@@ -9,7 +9,7 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 
 | File | Purpose |
 |------|---------|
-| `src/manager.ts` | `CreditManager` — full public API, all methods `async`. |
+| `src/credits-service.ts` | Internal credit capability used by the `Bursar` facade. |
 | `src/stores/credit-store.ts` | `CreditStore` abstract class — interface every store implements. |
 | `src/stores/postgres-store.ts` | `PostgresStore` — calls SQL RPCs via `pg`. |
 | `src/stores/events.ts` (re-exported from `stores/`) | `CreditEventEmitter`, `CreditEvent`, event types. |
@@ -24,7 +24,7 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 ## Architecture
 
 ```
-CreditManager
+Bursar facade
   ├── PricingEngine              (calculate cost from UsageMetrics)
   ├── CreditStore                (abstract — PostgresStore is the only implementation)
   │     ├── deductWithAllowance()   atomic: allowance→cap→floor→debit
@@ -49,7 +49,7 @@ CreditManager
 
 ## Constructor signature
 ```typescript
-new CreditManager(store, engine?, emitter?, options?)
+new Bursar({ creditStore, creditsOptions?, billingStore?, billingOptions? })
 // options: { policy?, overdraftFloor?, maxConcurrent?,
 //            lowBalance?, lowBalanceThresholds?,
 //            onLowBalance?, defaultTtlSeconds? }
@@ -69,7 +69,7 @@ new CreditManager(store, engine?, emitter?, options?)
 | `tests/expr.test.ts` | Expression parser/evaluator edge cases |
 | `tests/load-pricing-file.test.ts` | File loading for JSON/YAML |
 | `tests/postgres-store.test.ts` | PostgresStore unit tests against a mocked `pg.Pool` (no real DB) |
-| `tests/store-integration.test.ts` | Real Postgres tests incl. `CreditManager` end-to-end |
+| `tests/store-integration.test.ts` | Real Postgres tests incl. facade-owned credit capability end-to-end |
 | `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles |
 
 Run: `npm test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own

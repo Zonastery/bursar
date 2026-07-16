@@ -1,8 +1,8 @@
 import Stripe from "stripe";
-import type { BillingManager } from "../../billing/index.js";
+import type { BillingEventSink } from "../../bursar.js";
 import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/billing-types.js";
 import type { ProviderLogger } from "../types.js";
-import { callBillingManager } from "../_shared.js";
+import { callBillingEventSink } from "../_shared.js";
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
 
@@ -37,7 +37,7 @@ function customerId(
 
 export async function handleStripeWebhook(
   event: Stripe.Event,
-  bm: BillingManager,
+  sink: BillingEventSink,
   stripe: Stripe,
   logger?: ProviderLogger,
 ): Promise<{ received: boolean }> {
@@ -81,7 +81,7 @@ export async function handleStripeWebhook(
             const currentPeriodStart = buildStart(sub);
             const planSlug = session.metadata?.plan_slug as string | undefined;
 
-            await callBillingManager(bm, {
+            await callBillingEventSink(sink, {
               provider: "stripe",
               eventId: event.id,
               eventType: "checkout.completed",
@@ -119,7 +119,7 @@ export async function handleStripeWebhook(
             },
           };
 
-          await callBillingManager(bm, {
+          await callBillingEventSink(sink, {
             provider: "stripe",
             eventId: event.id,
             eventType: "payment.succeeded",
@@ -150,7 +150,7 @@ export async function handleStripeWebhook(
               ? "subscription.cancellation_scheduled"
               : "subscription.updated";
 
-        await callBillingManager(bm, {
+        await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
           eventType,
@@ -171,7 +171,7 @@ export async function handleStripeWebhook(
 
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription;
-        await callBillingManager(bm, {
+        await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
           eventType: "subscription.canceled",
@@ -226,7 +226,7 @@ export async function handleStripeWebhook(
         const periodEnd = stripeSub ? buildEnd(stripeSub) : buildEndFromInvoice(invoice);
         const periodStart = stripeSub ? buildStart(stripeSub) : buildStartFromInvoice(invoice);
 
-        await callBillingManager(bm, {
+        await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
           eventType: "invoice.paid",

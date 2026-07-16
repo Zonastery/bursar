@@ -1,5 +1,5 @@
--- bursar: versioned pricing configuration storage.
--- Enables live pricing updates without redeploys.
+-- bursar: versioned Bursar configuration storage.
+-- Enables live catalog updates without redeploys.
 
 CREATE TABLE IF NOT EXISTS public.bursar_config (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
@@ -28,18 +28,18 @@ DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE policyname = 'Server-only pricing config'
+        WHERE policyname = 'Server-only Bursar config'
         AND tablename = 'bursar_config'
         AND schemaname = 'public'
     ) THEN
-        CREATE POLICY "Server-only pricing config" ON public.bursar_config
+        CREATE POLICY "Server-only Bursar config" ON public.bursar_config
             USING (false);
     END IF;
 END;
 $$;
 
 
--- get_active_bursar_config: Fetch the currently active pricing configuration.
+-- get_active_bursar_config: Fetch the currently active Bursar configuration.
 CREATE OR REPLACE FUNCTION public.get_active_bursar_config()
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -76,7 +76,7 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN RETURN NULL; END;
 $$;
 
--- get_bursar_configs: List all pricing configs ordered by version.
+-- get_bursar_configs: List all Bursar configurations ordered by version.
 CREATE OR REPLACE FUNCTION public.get_bursar_configs()
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -100,7 +100,7 @@ BEGIN
 END;
 $$;
 
--- get_bursar_config: Fetch a specific pricing config by version.
+-- get_bursar_config: Fetch a specific Bursar configuration by version.
 CREATE OR REPLACE FUNCTION public.get_bursar_config(p_version INTEGER)
 RETURNS JSONB
 LANGUAGE plpgsql
