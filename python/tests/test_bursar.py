@@ -32,3 +32,23 @@ def test_bursar_create_owns_catalog_and_delegates():
     assert bursar.billing is None
     assert bursar.catalog.active() == {"version": 1}
     assert bursar.setup() == "setup"
+
+
+def test_bursar_always_owns_billing_provisioning(monkeypatch):
+    captured = {}
+
+    class FakeBilling:
+        def __init__(self, store, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("bursar.bursar.BillingManager", FakeBilling)
+    credits = FakeCredits()
+    Bursar.create(
+        credit_store=object(),
+        billing_store=object(),
+        credit_manager=credits,
+        billing_manager_options={"cancel_prior_providers": False},
+    )
+
+    assert captured["provisioning"] is credits
+    assert captured["cancel_prior_providers"] is False

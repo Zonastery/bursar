@@ -61,8 +61,12 @@ class Bursar:
         billing = (
             BillingManager(
                 billing_store,
-                provisioning=credits,
-                **(billing_manager_options or {}),
+                **{
+                    **(billing_manager_options or {}),
+                    # The facade owns this dependency; callers cannot replace
+                    # it through the generic manager options dictionary.
+                    "provisioning": credits,
+                },
             )
             if billing_store is not None
             else None
