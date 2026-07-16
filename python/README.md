@@ -363,7 +363,7 @@ bursar/
   metrics.py           # UsageMetrics, ToolCall
   breakdown.py         # CostBreakdown
   events.py            # CreditEventEmitter pub/sub
-  manager.py           # CreditManager orchestration
+  credits_service.py   # Credit capability owned by the Bursar facade
   interface/
     base.py            # CreditStore ABC (29 abstract methods)
     models.py          # Pydantic schemas
