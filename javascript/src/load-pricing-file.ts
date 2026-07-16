@@ -54,7 +54,9 @@ function assertNonEmptyObject(data: unknown, filepath: string): Record<string, u
     throw new ConfigError(`Pricing config is empty: ${filepath}`);
   }
   if (typeof data !== "object" || Array.isArray(data)) {
-    throw new ConfigError(`Pricing config must be a JSON/YAML object, got ${typeof data}: ${filepath}`);
+    throw new ConfigError(
+      `Pricing config must be a JSON/YAML object, got ${typeof data}: ${filepath}`,
+    );
   }
   if (Object.keys(data).length === 0) {
     throw new ConfigError(`Pricing config is empty: ${filepath}`);

@@ -168,9 +168,7 @@ describe("resolveAllowanceWindow", () => {
   });
 
   it("throws for an unrecognized period", () => {
-    expect(() =>
-      resolveAllowanceWindow(utc(2026, 1, 1), "bogus" as never, null),
-    ).toThrow();
+    expect(() => resolveAllowanceWindow(utc(2026, 1, 1), "bogus" as never, null)).toThrow();
   });
 });
 

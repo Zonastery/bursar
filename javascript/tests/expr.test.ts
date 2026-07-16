@@ -116,15 +116,15 @@ describe("evaluateExpression (Decimal results)", () => {
   });
 
   it("evaluates ceil function", () => {
-    expect(evaluateExpression("ceil(input_tokens * 0.001)", { input_tokens: 1500 }).toString()).toBe(
-      "2",
-    );
+    expect(
+      evaluateExpression("ceil(input_tokens * 0.001)", { input_tokens: 1500 }).toString(),
+    ).toBe("2");
   });
 
   it("evaluates floor function", () => {
-    expect(evaluateExpression("floor(output_tokens / 1000)", { output_tokens: 1500 }).toString()).toBe(
-      "1",
-    );
+    expect(
+      evaluateExpression("floor(output_tokens / 1000)", { output_tokens: 1500 }).toString(),
+    ).toBe("1");
   });
 
   it("evaluates min function", () => {
@@ -142,20 +142,20 @@ describe("evaluateExpression (Decimal results)", () => {
 
   it("evaluates round function (half-up)", () => {
     // CHANGED: round is now explicit ROUND_HALF_UP (was Math.round).
-    expect(evaluateExpression("round(input_tokens * 0.001)", { input_tokens: 1500 }).toString()).toBe(
-      "2",
-    );
+    expect(
+      evaluateExpression("round(input_tokens * 0.001)", { input_tokens: 1500 }).toString(),
+    ).toBe("2");
     // round(2.5) -> 3 (half-up), where Python banker's rounding would give 2;
     // both SDKs now agree on 3.
-    expect(evaluateExpression("round(input_tokens * 0.0025)", { input_tokens: 1000 }).toString()).toBe(
-      "3",
-    );
+    expect(
+      evaluateExpression("round(input_tokens * 0.0025)", { input_tokens: 1000 }).toString(),
+    ).toBe("3");
   });
 
   it("evaluates round(x, ndigits) half-up", () => {
-    expect(evaluateExpression("round(input_tokens * 0.001, 1)", { input_tokens: 1250 }).toString()).toBe(
-      "1.3",
-    );
+    expect(
+      evaluateExpression("round(input_tokens * 0.001, 1)", { input_tokens: 1250 }).toString(),
+    ).toBe("1.3");
   });
 
   it("evaluates ternary (greater than)", () => {
@@ -251,15 +251,15 @@ describe("evaluateExpression (Decimal results)", () => {
 
   it("evaluates tier function (6 args, two pairs + default)", () => {
     // tier(val, t1, r1, t2, r2, default): first value<t_i -> r_i, else -> default.
-    expect(evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: -1 }).toString()).toBe(
-      "0",
-    );
-    expect(evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: 5 }).toString()).toBe(
-      "5",
-    );
-    expect(evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: 15 }).toString()).toBe(
-      "7",
-    );
+    expect(
+      evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: -1 }).toString(),
+    ).toBe("0");
+    expect(
+      evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: 5 }).toString(),
+    ).toBe("5");
+    expect(
+      evaluateExpression("tier(tool_calls, 0, 0, 10, 5, 7)", { tool_calls: 15 }).toString(),
+    ).toBe("7");
   });
 
   it("rejects tier with odd arity (5 args) at eval time", () => {
@@ -282,18 +282,18 @@ describe("evaluateExpression (Decimal results)", () => {
     expect(evaluateExpression("clamp(input_tokens, 0, 100)", { input_tokens: 50 }).toString()).toBe(
       "50",
     );
-    expect(evaluateExpression("clamp(input_tokens, 0, 100)", { input_tokens: -10 }).toString()).toBe(
-      "0",
-    );
-    expect(evaluateExpression("clamp(input_tokens, 0, 100)", { input_tokens: 200 }).toString()).toBe(
-      "100",
-    );
+    expect(
+      evaluateExpression("clamp(input_tokens, 0, 100)", { input_tokens: -10 }).toString(),
+    ).toBe("0");
+    expect(
+      evaluateExpression("clamp(input_tokens, 0, 100)", { input_tokens: 200 }).toString(),
+    ).toBe("100");
   });
 
   it("evaluates not prefix", () => {
-    expect(evaluateExpression("5 if not (tool_calls > 10) else 10", { tool_calls: 5 }).toString()).toBe(
-      "5",
-    );
+    expect(
+      evaluateExpression("5 if not (tool_calls > 10) else 10", { tool_calls: 5 }).toString(),
+    ).toBe("5");
     expect(
       evaluateExpression("5 if not (tool_calls > 10) else 10", { tool_calls: 15 }).toString(),
     ).toBe("10");
@@ -330,9 +330,9 @@ describe("evaluateExpression (Decimal results)", () => {
   });
 
   it("evaluates percentile with single value", () => {
-    expect(evaluateExpression("percentile(50, input_tokens)", { input_tokens: 42 }).toString()).toBe(
-      "42",
-    );
+    expect(
+      evaluateExpression("percentile(50, input_tokens)", { input_tokens: 42 }).toString(),
+    ).toBe("42");
   });
 
   it("validates percentile function", () => {
@@ -493,19 +493,39 @@ describe("percentile() edge cases", () => {
 
   it("two values p=50 returns midpoint", () => {
     // sorted=[3,7], rank=0.5, lower=0, frac=0.5 → 3*0.5 + 7*0.5 = 5
-    expect(evalStr("percentile(50, input_tokens, output_tokens)", { input_tokens: 3, output_tokens: 7 })).toBe("5.0000");
+    expect(
+      evalStr("percentile(50, input_tokens, output_tokens)", { input_tokens: 3, output_tokens: 7 }),
+    ).toBe("5.0000");
   });
 
   it("all same values returns that value", () => {
-    expect(evalStr("percentile(50, input_tokens, output_tokens, tool_calls)", { input_tokens: 5, output_tokens: 5, tool_calls: 5 })).toBe("5.0000");
+    expect(
+      evalStr("percentile(50, input_tokens, output_tokens, tool_calls)", {
+        input_tokens: 5,
+        output_tokens: 5,
+        tool_calls: 5,
+      }),
+    ).toBe("5.0000");
   });
 
   it("p=0 returns the minimum", () => {
-    expect(evalStr("percentile(0, input_tokens, output_tokens, tool_calls)", { input_tokens: 10, output_tokens: 30, tool_calls: 20 })).toBe("10.0000");
+    expect(
+      evalStr("percentile(0, input_tokens, output_tokens, tool_calls)", {
+        input_tokens: 10,
+        output_tokens: 30,
+        tool_calls: 20,
+      }),
+    ).toBe("10.0000");
   });
 
   it("p=100 returns the maximum", () => {
-    expect(evalStr("percentile(100, input_tokens, output_tokens, tool_calls)", { input_tokens: 10, output_tokens: 30, tool_calls: 20 })).toBe("30.0000");
+    expect(
+      evalStr("percentile(100, input_tokens, output_tokens, tool_calls)", {
+        input_tokens: 10,
+        output_tokens: 30,
+        tool_calls: 20,
+      }),
+    ).toBe("30.0000");
   });
 });
 
@@ -524,25 +544,33 @@ describe("negative operands in complex expressions", () => {
   });
 
   it("max(-5, 0) via variables returns 0.0000", () => {
-    expect(evalStr("max(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: 0 })).toBe("0.0000");
+    expect(
+      evalStr("max(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: 0 }),
+    ).toBe("0.0000");
   });
 
   it("min(-5, -3) returns -5.0000", () => {
-    expect(evalStr("min(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: -3 })).toBe("-5.0000");
+    expect(
+      evalStr("min(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: -3 }),
+    ).toBe("-5.0000");
   });
 });
 
 // ── E5: Floor division by zero ──
 describe("floor division by zero", () => {
   it("10 // 0 throws ExpressionError", () => {
-    expect(() => evaluateExpression("input_tokens // 0", { input_tokens: 10 })).toThrow(ExpressionError);
+    expect(() => evaluateExpression("input_tokens // 0", { input_tokens: 10 })).toThrow(
+      ExpressionError,
+    );
   });
 });
 
 // ── E6: Large numeric literal stays exact ──
 describe("large numeric literal precision", () => {
   it("999999999999.9999 * 1 preserves all digits", () => {
-    expect(evalStr("input_tokens * 999999999999.9999", { input_tokens: 1 })).toBe("999999999999.9999");
+    expect(evalStr("input_tokens * 999999999999.9999", { input_tokens: 1 })).toBe(
+      "999999999999.9999",
+    );
   });
 });
 
@@ -550,11 +578,15 @@ describe("large numeric literal precision", () => {
 describe("round(x, n) with ndigits argument", () => {
   it("round(1.23456, 2) returns 1.23 (ROUND_HALF_UP)", () => {
     // round is supported with 2 args: toDecimalPlaces(2, ROUND_HALF_UP)
-    expect(evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.23456, output_tokens: 2 })).toBe("1.2300");
+    expect(
+      evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.23456, output_tokens: 2 }),
+    ).toBe("1.2300");
   });
 
   it("round(1.235, 2) rounds half-up to 1.24", () => {
-    expect(evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.235, output_tokens: 2 })).toBe("1.2400");
+    expect(
+      evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.235, output_tokens: 2 }),
+    ).toBe("1.2400");
   });
 });
 
@@ -628,9 +660,9 @@ describe("malformed number literals (H11)", () => {
     // The tokenizer's number scanner only consumes [0-9.] — 'e' is NOT included.
     // "1e" → tokenizes as number "1" then identifier "e".
     // "e" is an unknown variable → ExpressionError at evaluate time.
-    expect(() =>
-      evaluateExpression("input_tokens * 1e", { input_tokens: 5 }),
-    ).toThrow(ExpressionError);
+    expect(() => evaluateExpression("input_tokens * 1e", { input_tokens: 5 })).toThrow(
+      ExpressionError,
+    );
   });
 });
 

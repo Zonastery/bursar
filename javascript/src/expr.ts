@@ -279,14 +279,7 @@ export interface BoolOpNode {
 }
 
 export type Node =
-  | NumNode
-  | IdentNode
-  | BinOpNode
-  | UnaryNode
-  | CallNode
-  | TernaryNode
-  | CompareNode
-  | BoolOpNode;
+  NumNode | IdentNode | BinOpNode | UnaryNode | CallNode | TernaryNode | CompareNode | BoolOpNode;
 
 // ── Parser ─────────────────────────────────────────────────────────────────
 
@@ -491,9 +484,7 @@ function checkCallArity(name: string, argc: number): void {
       break;
     case "percentile":
       if (argc < 2)
-        throw new ExpressionError(
-          "percentile() requires at least 2 arguments (p, v1, [v2, ...])",
-        );
+        throw new ExpressionError("percentile() requires at least 2 arguments (p, v1, [v2, ...])");
       break;
     case "min":
       if (argc < 1) throw new ExpressionError("min() requires at least 1 argument");
@@ -731,7 +722,9 @@ function evaluateNode(node: Node, vars: Record<string, number | Decimal>): Decim
         }
         case "if":
           if (args.length !== 3)
-            throw new ExpressionError("if() requires exactly 3 arguments: if(condition, then, else)");
+            throw new ExpressionError(
+              "if() requires exactly 3 arguments: if(condition, then, else)",
+            );
           return truthy(args[0]) ? args[1] : args[2];
         case "tier": {
           if (args.length < 4 || args.length % 2 !== 0)
