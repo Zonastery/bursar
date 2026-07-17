@@ -148,6 +148,7 @@ class PlanDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str
+    tier: int | None = Field(default=None, ge=0)
     allowance: Allowance | None = None
     rate_overrides: dict[str, str] | None = None
     safety: PlanSafety | None = None

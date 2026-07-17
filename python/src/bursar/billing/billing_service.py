@@ -19,6 +19,7 @@ from bursar.billing.models import (
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
+    CheckoutIntent,
 )
 from bursar.billing.store import BillingStore
 
@@ -130,7 +131,73 @@ class BillingServiceImpl:
         self,
         user_id: str,
     ) -> BillingSubscriptionState | None:
-        return self._store.get_user_subscription(user_id)
+        return self._store.get_user_subscription(
+            user_id,
+            statuses=["active", "trialing", "canceled", "past_due", "incomplete"],
+        )
+
+    def get_active_subscription(
+        self,
+        user_id: str,
+    ) -> BillingSubscriptionState | None:
+        return self._store.get_user_subscription(
+            user_id,
+            statuses=["active", "trialing"],
+        )
+
+    def get_blocking_subscription(
+        self,
+        user_id: str,
+    ) -> BillingSubscriptionState | None:
+        return self._store.get_user_subscription(
+            user_id,
+            statuses=["active", "trialing", "past_due", "incomplete"],
+        )
+
+    def create_or_get_checkout_intent(
+        self,
+        actor_key: str,
+        provider: str,
+        type: str,
+        product_id: str,
+        request_fingerprint: str,
+        expires_at: str,
+    ) -> CheckoutIntent:
+        return self._store.create_or_get_checkout_intent(
+            actor_key,
+            provider,
+            type,
+            product_id,
+            request_fingerprint,
+            expires_at,
+        )
+
+    def update_checkout_intent(
+        self,
+        id: str,
+        status: str | None = None,
+        provider_session_id: str | None = None,
+        checkout_url: str | None = None,
+    ) -> None:
+        self._store.update_checkout_intent(id, status, provider_session_id, checkout_url)
+
+    def record_subscription_conflict(
+        self,
+        user_id: str | None = None,
+        provider: str = "",
+        duplicate_subscription_id: str = "",
+        existing_subscription_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._store.record_subscription_conflict(
+            user_id=user_id,
+            provider=provider,
+            duplicate_subscription_id=duplicate_subscription_id,
+            existing_subscription_id=existing_subscription_id,
+            event_id=event_id,
+            metadata=metadata,
+        )
 
     def get_user_preferences(self, user_id: str) -> BillingPreferences | None:
         """Get billing preferences for a user.
@@ -442,17 +509,96 @@ class BillingServiceImpl:
         return BillingEventResult(handled=True, action="checkout_recorded")
 
     def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
-        st = event.subscription.status.value if event.subscription and event.subscription.status else None
-        result = self._apply_subscription_event(
-            event,
-            status=st,
-            cancel_at_period_end=event.subscription.cancel_at_period_end if event.subscription else None,
-            action="subscription_created",
-            provision_on_positive=st in ("active", "trialing") if st else False,
+        uid = self._resolve_user_id(event)
+        if not uid:
+            return BillingEventResult(handled=False, error="user_not_found")
+        if not event.subscription or not event.subscription.provider_subscription_id:
+            return BillingEventResult(handled=False, error="no_subscription_data")
+
+        sub_id = event.subscription.provider_subscription_id
+        existing = self._store.get_billing_subscription(event.provider, sub_id)
+
+        blocking_statuses = {"active", "trialing", "past_due", "incomplete"}
+        all_user_subs = self._store.get_user_subscriptions(uid)
+        existing_for_provider = next(
+            (
+                s
+                for s in all_user_subs
+                if s.provider == event.provider
+                and s.provider_subscription_id != sub_id
+                and s.status in blocking_statuses
+            ),
+            None,
         )
-        if result.handled and event.subscription:
-            result.subscription_id = event.subscription.provider_subscription_id
-        return result
+        if existing_for_provider is not None:
+            self._store.record_subscription_conflict(
+                user_id=uid,
+                provider=event.provider,
+                duplicate_subscription_id=sub_id,
+                existing_subscription_id=existing_for_provider.provider_subscription_id,
+                event_id=event.event_id,
+                metadata=event.metadata,
+            )
+            logger.warning(
+                "subscription conflict for user %s: existing %s, duplicate %s",
+                uid,
+                existing_for_provider.provider_subscription_id,
+                sub_id,
+            )
+            return BillingEventResult(handled=True, action="subscription_conflict")
+
+        offer, offer_key, plan_key = self._offer_for_event(event)
+        st = event.subscription.status.value if event.subscription.status else None
+        subscription_state = self._subscription_state(
+            event,
+            uid,
+            existing,
+            status=st,
+            cancel_at_period_end=event.subscription.cancel_at_period_end,
+            offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+            plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
+        )
+        try:
+            self._store.upsert_billing_subscription(subscription_state)
+        except Exception as exc:
+            pgcode = getattr(exc, "pgcode", None)
+            if pgcode != "23505":
+                raise
+            concurrent = next(
+                (
+                    s
+                    for s in self._store.get_user_subscriptions(uid)
+                    if s.provider == event.provider
+                    and s.provider_subscription_id != sub_id
+                    and s.status in blocking_statuses
+                ),
+                None,
+            )
+            if concurrent is None:
+                raise
+            self._store.record_subscription_conflict(
+                user_id=uid,
+                provider=event.provider,
+                duplicate_subscription_id=sub_id,
+                existing_subscription_id=concurrent.provider_subscription_id,
+                event_id=event.event_id,
+                metadata=event.metadata,
+            )
+            return BillingEventResult(handled=True, action="subscription_conflict")
+
+        if self._provisioning and st and st in ("active", "trialing"):
+            self._provision_subscription(
+                uid,
+                offer,
+                event,
+                _plan_key=existing.plan if existing and existing.plan else None,
+            )
+
+        return BillingEventResult(
+            handled=True,
+            action="subscription_created",
+            subscription_id=sub_id,
+        )
 
     def _handle_subscription_updated(self, event: BillingEvent) -> BillingEventResult:
         result = self._apply_subscription_event(

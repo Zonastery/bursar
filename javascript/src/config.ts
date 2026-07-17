@@ -117,6 +117,7 @@ const LEDGER_KEYS: ReadonlySet<string> = new Set(["minBalance", "signupGrant", "
 /** Known plan-definition keys (new nested schema). */
 const PLAN_KEYS: ReadonlySet<string> = new Set([
   "label",
+  "tier",
   "allowance",
   "safety",
   "rateOverrides",
@@ -540,6 +541,9 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
     if (plan.label == null) {
       throw new ConfigError(`plan definition is missing required 'label' field: plans.${planKey}`);
     }
+    if (plan.tier != null && (!Number.isInteger(plan.tier) || Number(plan.tier) < 0)) {
+      throw new ConfigError(`plans.${planKey}.tier must be a non-negative integer`);
+    }
     if (plan.allowance != null) {
       if (typeof plan.allowance !== "object" || Array.isArray(plan.allowance)) {
         throw new ConfigError(`plans.${planKey}.allowance must be a dict`);
@@ -623,6 +627,7 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
 
     planDefs[key] = {
       label: p.label as string,
+      ...(p.tier != null ? { tier: Number(p.tier) } : {}),
       allowance: {
         amount: allowanceAmount,
         period: ((allowanceRaw["period"] as AllowancePeriod) ??

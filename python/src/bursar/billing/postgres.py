@@ -25,6 +25,8 @@ from bursar.billing.models import (
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
+    CheckoutIntent,
+    CheckoutIntentStatus,
 )
 from bursar.billing.store import BillingStore
 from bursar.repositories.billing.config import BillingConfigRepository
@@ -242,6 +244,69 @@ class PostgresBillingStore(BillingStore):
         config_json = json.dumps(raw, default=str)
         self._config_repo.sync_from_config(config_json)
 
+    def create_or_get_checkout_intent(
+        self,
+        actor_key: str,
+        provider: str,
+        type: str,
+        product_id: str,
+        request_fingerprint: str,
+        expires_at: str,
+    ) -> CheckoutIntent:
+        """Create or retrieve an open checkout intent for an actor key.
+
+        Atomically expires any old open intents for the same actor,
+        then inserts a new one (or returns the existing one via ON CONFLICT).
+        """
+        self._execute(
+            "UPDATE bursar.billing_checkout_intents"
+            " SET status = 'expired', updated_at = now()"
+            " WHERE actor_key = %s AND status = 'open' AND expires_at <= now()"
+            " RETURNING id",
+            [actor_key],
+        )
+        rows = self._execute(
+            "INSERT INTO bursar.billing_checkout_intents"
+            " (actor_key, provider, type, product_id, request_fingerprint, expires_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (actor_key) WHERE status = 'open'"
+            " DO UPDATE SET updated_at = now()"
+            " RETURNING id, actor_key, provider, type, product_id, request_fingerprint, status,"
+            "           provider_session_id, checkout_url, expires_at",
+            [actor_key, provider, type, product_id, request_fingerprint, expires_at],
+        )
+        r = rows[0]
+        return CheckoutIntent(
+            id=str(r["id"]),
+            actor_key=str(r["actor_key"]),
+            provider=str(r["provider"]),
+            type=r["type"],
+            product_id=str(r["product_id"]),
+            request_fingerprint=str(r["request_fingerprint"]),
+            status=CheckoutIntentStatus(str(r["status"])),
+            provider_session_id=str(r["provider_session_id"]) if r.get("provider_session_id") else None,
+            checkout_url=str(r["checkout_url"]) if r.get("checkout_url") else None,
+            expires_at=str(r["expires_at"]),
+        )
+
+    def update_checkout_intent(
+        self,
+        id: str,
+        status: str | None = None,
+        provider_session_id: str | None = None,
+        checkout_url: str | None = None,
+    ) -> None:
+        """Update a checkout intent's status and optional session/URL fields."""
+        self._execute(
+            "UPDATE bursar.billing_checkout_intents"
+            " SET status = COALESCE(%s, status),"
+            "     provider_session_id = COALESCE(%s, provider_session_id),"
+            "     checkout_url = COALESCE(%s, checkout_url),"
+            "     updated_at = now()"
+            " WHERE id = %s",
+            [status, provider_session_id, checkout_url, id],
+        )
+
     def resolve_billing_offer(
         self,
         provider: str,
@@ -380,16 +445,19 @@ class PostgresBillingStore(BillingStore):
     def get_user_subscription(
         self,
         user_id: str,
+        statuses: list[str] | None = None,
     ) -> BillingSubscriptionState | None:
-        """Get the most recent active/trialing subscription for a user.
+        """Get the most recent subscription for a user, filtered by status.
 
         Args:
             user_id: The user ID.
+            statuses: Optional list of statuses to filter by.
+                      Defaults to (active, trialing).
 
         Returns:
             BillingSubscriptionState if found, None otherwise.
         """
-        result = self._subscription_repo.get_user_subscription(user_id)
+        result = self._subscription_repo.get_user_subscription(user_id, status=tuple(statuses) if statuses else None)
         return self._row_to_subscription_state(result)
 
     def resolve_credit_topup(
@@ -639,6 +707,34 @@ class PostgresBillingStore(BillingStore):
         """
         ids = self._subscription_repo.deactivate_other_provider_subscriptions(user_id, keep_provider)
         return {"deactivated_count": len(ids), "deactivated_ids": ids}
+
+    def record_subscription_conflict(
+        self,
+        user_id: str | None = None,
+        provider: str = "",
+        duplicate_subscription_id: str = "",
+        existing_subscription_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Record a subscription conflict for manual review.
+
+        Uses ON CONFLICT DO NOTHING for idempotent insertion.
+        """
+        self._execute(
+            "INSERT INTO bursar.billing_subscription_conflicts"
+            " (user_id, provider, duplicate_subscription_id, existing_subscription_id, event_id, metadata)"
+            " VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (provider, duplicate_subscription_id) DO NOTHING",
+            [
+                user_id,
+                provider,
+                duplicate_subscription_id,
+                existing_subscription_id,
+                event_id,
+                json.dumps(metadata) if metadata else "{}",
+            ],
+        )
 
     def get_billing_preferences(self, user_id: str) -> BillingPreferences | None:
         """Get billing preferences for a user.

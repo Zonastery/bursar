@@ -19,6 +19,26 @@ const DISPUTE_CLOSED_TYPES = new Set([
   "dispute.expired",
 ]);
 
+function normalizeInterval(value: unknown): string | undefined {
+  const interval = String(value ?? "").toLowerCase();
+  return ["day", "week", "month", "year"].includes(interval) ? interval : undefined;
+}
+
+function subscriptionFields(data: Record<string, unknown>, metadata: Record<string, string>) {
+  const interval =
+    normalizeInterval(data.payment_frequency_interval) ??
+    normalizeInterval(data.subscription_period_interval) ??
+    normalizeInterval(metadata.billing_interval);
+  const rawIntervalCount =
+    data.payment_frequency_count ?? data.subscription_period_count ?? (interval ? 1 : undefined);
+  const intervalCount = Number(rawIntervalCount);
+  return {
+    ...(interval ? { interval } : {}),
+    ...(Number.isFinite(intervalCount) && intervalCount > 0 ? { intervalCount } : {}),
+    ...(data.previous_billing_date ? { periodStart: String(data.previous_billing_date) } : {}),
+  };
+}
+
 export async function handleDodoBillingEvent(
   type: string,
   data: Record<string, unknown>,
@@ -60,7 +80,12 @@ export async function handleDodoBillingEvent(
           providerSubscriptionId: subId,
           status: (String(data.status ?? "active") || "active") as BillingSubscriptionStatus,
           periodEnd,
-          refs: metadata.plan_slug ? { lookupKey: metadata.plan_slug } : undefined,
+          ...subscriptionFields(data, metadata),
+          refs: data.product_id
+            ? { productId: String(data.product_id) }
+            : metadata.plan_slug
+              ? { lookupKey: metadata.plan_slug }
+              : undefined,
         },
       });
       return;
@@ -81,6 +106,7 @@ export async function handleDodoBillingEvent(
           providerSubscriptionId: subId,
           status: "active",
           periodEnd,
+          ...subscriptionFields(data, metadata),
         },
       });
       return;
@@ -141,6 +167,7 @@ export async function handleDodoBillingEvent(
           providerSubscriptionId: subId,
           status: (String(data.status ?? "") || null) as BillingSubscriptionStatus | null,
           ...(periodEnd ? { periodEnd } : {}),
+          ...subscriptionFields(data, metadata),
         },
       });
       return;
@@ -183,6 +210,7 @@ export async function handleDodoBillingEvent(
         subscription: {
           providerSubscriptionId: subId,
           status: "active",
+          ...subscriptionFields(data, metadata),
           refs,
         },
       });

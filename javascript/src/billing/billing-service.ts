@@ -142,8 +142,41 @@ export class BillingService {
     ]);
   }
 
+  async createOrGetCheckoutIntent(input: Parameters<BillingStore["createOrGetCheckoutIntent"]>[0]) {
+    return this.store.createOrGetCheckoutIntent(input);
+  }
+
+  async updateCheckoutIntent(
+    id: string,
+    update: Parameters<BillingStore["updateCheckoutIntent"]>[1],
+  ): Promise<void> {
+    await this.store.updateCheckoutIntent(id, update);
+  }
+
+  async getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null> {
+    return this.store.getUserSubscription(userId, [
+      SUBSCRIPTION_STATUS.ACTIVE,
+      SUBSCRIPTION_STATUS.TRIALING,
+    ]);
+  }
+
+  async getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null> {
+    return this.store.getUserSubscription(userId, [
+      SUBSCRIPTION_STATUS.ACTIVE,
+      SUBSCRIPTION_STATUS.TRIALING,
+      SUBSCRIPTION_STATUS.PAST_DUE,
+      SUBSCRIPTION_STATUS.INCOMPLETE,
+    ]);
+  }
+
   async getUserPreferences(userId: string): Promise<BillingPreferences | null> {
     return this.store.getBillingPreferences(userId);
+  }
+
+  async recordSubscriptionConflict(
+    input: Parameters<BillingStore["recordSubscriptionConflict"]>[0],
+  ) {
+    await this.store.recordSubscriptionConflict(input);
   }
 
   async updateUserPreferences(prefs: BillingPreferences): Promise<void> {
@@ -367,6 +400,8 @@ export class BillingService {
       cancelAtPeriodEnd?: boolean | null;
       offerKey?: string | null;
       plan?: string | null;
+      interval?: string | null;
+      intervalCount?: number | null;
     },
   ): BillingSubscriptionState {
     if (!event.subscription) {
@@ -389,8 +424,14 @@ export class BillingService {
         sub.cancelAtPeriodEnd ??
         existing?.cancelAtPeriodEnd ??
         false,
-      interval: sub.interval ?? existing?.interval ?? null,
-      intervalCount: sub.intervalCount ?? existing?.intervalCount ?? null,
+      interval:
+        overrides?.interval ??
+        sub.interval ??
+        (event.metadata?.billing_interval as string | undefined) ??
+        existing?.interval ??
+        null,
+      intervalCount:
+        overrides?.intervalCount ?? sub.intervalCount ?? existing?.intervalCount ?? null,
       metadata: event.metadata ?? existing?.metadata ?? null,
     };
   }
@@ -444,16 +485,66 @@ export class BillingService {
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
+    const subscriptionId = event.subscription.providerSubscriptionId;
     const existing = await this.getExistingSubscription(event);
-    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
-    await this.store.upsertBillingSubscription(
-      this.buildSubscriptionState(event, uid, existing, {
-        status: event.subscription.status ?? "incomplete",
-        cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
-        offerKey: offerKey ?? existing?.offerKey ?? null,
-        plan: plan ?? existing?.plan ?? null,
-      }),
+    const blockingStatuses = new Set(["active", "trialing", "past_due", "incomplete"]);
+    const existingForProvider = (await this.store.getUserSubscriptions(uid)).find(
+      (candidate) =>
+        candidate.provider === event.provider &&
+        candidate.providerSubscriptionId !== subscriptionId &&
+        blockingStatuses.has(candidate.status ?? ""),
     );
+    if (existingForProvider) {
+      await this.store.recordSubscriptionConflict({
+        userId: uid,
+        provider: event.provider,
+        duplicateSubscriptionId: subscriptionId,
+        existingSubscriptionId: existingForProvider.providerSubscriptionId,
+        eventId: event.eventId,
+        metadata: event.metadata ?? undefined,
+      });
+      this.logger?.warn?.("[BillingService] subscription conflict quarantined", {
+        userId: uid,
+        provider: event.provider,
+        duplicateSubscriptionId: subscriptionId,
+        existingSubscriptionId: existingForProvider.providerSubscriptionId,
+      });
+      return { handled: true, action: "subscription_conflict" };
+    }
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const subscriptionState = this.buildSubscriptionState(event, uid, existing, {
+      status: event.subscription.status ?? "incomplete",
+      cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
+      offerKey: offerKey ?? existing?.offerKey ?? null,
+      plan: plan ?? existing?.plan ?? null,
+      interval: offer?.interval,
+      intervalCount: offer?.intervalCount,
+    });
+    try {
+      await this.store.upsertBillingSubscription(subscriptionState);
+    } catch (error) {
+      // The partial unique index is the final arbiter under concurrent
+      // webhooks. Convert its race loser into the same manual-review path as
+      // the preflight check instead of retrying a permanently invalid event.
+      const code = (error as { code?: string }).code;
+      if (code !== "23505") throw error;
+      const concurrent = (await this.store.getUserSubscriptions(uid)).find(
+        (candidate) =>
+          candidate.provider === event.provider &&
+          candidate.providerSubscriptionId !== subscriptionId &&
+          blockingStatuses.has(candidate.status ?? ""),
+      );
+      if (!concurrent) throw error;
+      await this.store.recordSubscriptionConflict({
+        userId: uid,
+        provider: event.provider,
+        duplicateSubscriptionId: subscriptionId,
+        existingSubscriptionId: concurrent.providerSubscriptionId,
+        eventId: event.eventId,
+        metadata: event.metadata ?? undefined,
+      });
+      return { handled: true, action: "subscription_conflict" };
+    }
     if (
       this.provisioning &&
       event.subscription.status &&
@@ -470,7 +561,7 @@ export class BillingService {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    const { offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: event.subscription.status ?? existing?.status ?? "incomplete",
@@ -478,6 +569,8 @@ export class BillingService {
           event.subscription.cancelAtPeriodEnd ?? existing?.cancelAtPeriodEnd ?? false,
         offerKey: offerKey ?? existing?.offerKey ?? null,
         plan: plan ?? existing?.plan ?? null,
+        interval: offer?.interval,
+        intervalCount: offer?.intervalCount,
       }),
     );
     if (this.provisioning) {
@@ -498,6 +591,8 @@ export class BillingService {
         status: "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
         plan: plan ?? existing?.plan ?? null,
+        interval: offer?.interval,
+        intervalCount: offer?.intervalCount,
       }),
     );
     if (this.provisioning) {
@@ -519,6 +614,8 @@ export class BillingService {
         status: "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
         plan: resolvedPlanKey,
+        interval: offer?.interval,
+        intervalCount: offer?.intervalCount,
       }),
     );
     if (this.provisioning && resolvedPlanKey) {
@@ -539,6 +636,8 @@ export class BillingService {
         status: event.subscription.status ?? "active",
         offerKey: offerKey ?? existing?.offerKey ?? null,
         plan: plan ?? existing?.plan ?? null,
+        interval: offer?.interval,
+        intervalCount: offer?.intervalCount,
       }),
     );
     if (this.provisioning && (plan ?? existing?.plan)) {
@@ -591,7 +690,7 @@ export class BillingService {
       }),
     );
     if (this.provisioning) {
-      await this.revokeSubscription(uid);
+      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
     return { handled: true, action: "subscription_canceled" };
   }
@@ -609,7 +708,7 @@ export class BillingService {
       }),
     );
     if (this.provisioning) {
-      await this.revokeSubscription(uid);
+      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
     return { handled: true, action: "subscription_expired" };
   }
@@ -627,7 +726,7 @@ export class BillingService {
       }),
     );
     if (this.provisioning) {
-      await this.revokeSubscription(uid);
+      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
     return { handled: true, action: "subscription_paused" };
   }
@@ -751,7 +850,7 @@ export class BillingService {
       await this.store.upsertBillingSubscription(
         this.buildSubscriptionState(event, uid, existing, { status: "past_due" }),
       );
-      await this.revokeSubscription(uid);
+      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
     return { handled: true, action: "payment_failed_recorded" };
   }
@@ -884,6 +983,17 @@ export class BillingService {
     await this.provisioning.unsetUserPlan(uid);
   }
 
+  /**
+   * Do not revoke access because a stale subscription record ended while a
+   * newer subscription for the same user is still active.
+   */
+  private async revokeIfCurrentSubscription(uid: string, subscriptionId: string): Promise<void> {
+    const current = await this.store.getUserSubscription(uid, ["active", "trialing"]);
+    if (!current || current.providerSubscriptionId === subscriptionId) {
+      await this.revokeSubscription(uid);
+    }
+  }
+
   private async reEvaluateAccess(uid: string, event: BillingEvent): Promise<void> {
     if (!this.provisioning || !event.subscription) return;
     const status = event.subscription.status;
@@ -904,7 +1014,7 @@ export class BillingService {
       status &&
       ["canceled", "expired", "unpaid", "paused", "incomplete_expired"].includes(status)
     ) {
-      await this.revokeSubscription(uid);
+      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
   }
 

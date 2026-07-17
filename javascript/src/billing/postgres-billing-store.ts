@@ -6,6 +6,7 @@ import type {
   BillingPreferences,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
+  CheckoutIntent,
   BillingTopupResult,
 } from "./billing-types.js";
 import { BillingStore } from "./billing-store.js";
@@ -149,6 +150,72 @@ export class PostgresBillingStore extends BillingStore {
     await this.billingConfig.syncFromConfig(JSON.stringify(camelToSnakeKeys(config)));
   }
 
+  async createOrGetCheckoutIntent(input: {
+    actorKey: string;
+    provider: string;
+    type: "subscription" | "credit_pack";
+    productId: string;
+    requestFingerprint: string;
+    expiresAt: string;
+  }): Promise<CheckoutIntent> {
+    await this.queryFn(
+      `UPDATE bursar.billing_checkout_intents
+          SET status = 'expired', updated_at = now()
+        WHERE actor_key = $1 AND status = 'open' AND expires_at <= now()
+        RETURNING id`,
+      [input.actorKey],
+    );
+    const result = await this.queryFn(
+      `INSERT INTO bursar.billing_checkout_intents
+        (actor_key, provider, type, product_id, request_fingerprint, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (actor_key) WHERE status = 'open'
+       DO UPDATE SET updated_at = now()
+       RETURNING id, actor_key, provider, type, product_id, request_fingerprint, status,
+                 provider_session_id, checkout_url, expires_at`,
+      [
+        input.actorKey,
+        input.provider,
+        input.type,
+        input.productId,
+        input.requestFingerprint,
+        input.expiresAt,
+      ],
+    );
+    const row = result[0] as Record<string, unknown>;
+    return {
+      id: String(row.id),
+      actorKey: String(row.actor_key),
+      provider: String(row.provider),
+      type: row.type as "subscription" | "credit_pack",
+      productId: String(row.product_id),
+      requestFingerprint: String(row.request_fingerprint),
+      status: row.status as CheckoutIntent["status"],
+      providerSessionId: row.provider_session_id ? String(row.provider_session_id) : null,
+      checkoutUrl: row.checkout_url ? String(row.checkout_url) : null,
+      expiresAt: toIso(row.expires_at) ?? input.expiresAt,
+    };
+  }
+
+  async updateCheckoutIntent(
+    id: string,
+    update: {
+      status?: "open" | "completed" | "failed" | "expired";
+      providerSessionId?: string | null;
+      checkoutUrl?: string | null;
+    },
+  ): Promise<void> {
+    await this.queryFn(
+      `UPDATE bursar.billing_checkout_intents
+          SET status = COALESCE($2, status),
+              provider_session_id = COALESCE($3, provider_session_id),
+              checkout_url = COALESCE($4, checkout_url),
+              updated_at = now()
+        WHERE id = $1`,
+      [id, update.status ?? null, update.providerSessionId ?? null, update.checkoutUrl ?? null],
+    );
+  }
+
   private rowToOffer(r: Record<string, unknown>): BillingOfferResult | null {
     if (!r?.offer_key) return null;
     return {
@@ -230,6 +297,30 @@ export class PostgresBillingStore extends BillingStore {
 
   async getBillingCustomer(provider: string, providerCustomerId: string): Promise<string | null> {
     return this.billingCustomer.get(provider, providerCustomerId);
+  }
+
+  async recordSubscriptionConflict(input: {
+    userId?: string | null;
+    provider: string;
+    duplicateSubscriptionId: string;
+    existingSubscriptionId?: string | null;
+    eventId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.queryFn(
+      `INSERT INTO bursar.billing_subscription_conflicts
+        (user_id, provider, duplicate_subscription_id, existing_subscription_id, event_id, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (provider, duplicate_subscription_id) DO NOTHING`,
+      [
+        input.userId ?? null,
+        input.provider,
+        input.duplicateSubscriptionId,
+        input.existingSubscriptionId ?? null,
+        input.eventId ?? null,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
   }
 
   async getBillingSubscription(

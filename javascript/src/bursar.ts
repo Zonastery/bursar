@@ -17,6 +17,7 @@ import type {
   BillingTopupResult,
   BillingCustomerRecord,
   BillingSubscriptionState,
+  CheckoutIntent,
 } from "./billing/billing-types.js";
 
 /** Boundary used by payment providers to submit normalized lifecycle events. */
@@ -26,9 +27,35 @@ export interface BillingEventSink {
 
 /** Public billing capability exposed by the Bursar facade. */
 export interface BillingService extends BillingEventSink {
+  createOrGetCheckoutIntent(input: {
+    actorKey: string;
+    provider: string;
+    type: "subscription" | "credit_pack";
+    productId: string;
+    requestFingerprint: string;
+    expiresAt: string;
+  }): Promise<CheckoutIntent>;
+  updateCheckoutIntent(
+    id: string,
+    update: {
+      status?: "open" | "completed" | "failed" | "expired";
+      providerSessionId?: string | null;
+      checkoutUrl?: string | null;
+    },
+  ): Promise<void>;
   getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
+  getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
+  getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
   updateUserPreferences(prefs: BillingPreferences): Promise<void>;
+  recordSubscriptionConflict(input: {
+    userId?: string | null;
+    provider: string;
+    duplicateSubscriptionId: string;
+    existingSubscriptionId?: string | null;
+    eventId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<void>;
   getCustomerByUserId(
     userId: string,
     provider?: string | null,

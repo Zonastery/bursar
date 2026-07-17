@@ -30,11 +30,15 @@ export class DodoProvider implements PaymentProvider {
 
   async createCheckoutSession(
     params: CheckoutParams,
-  ): Promise<{ url: string; customerId?: string }> {
+  ): Promise<{ url: string; customerId?: string; providerSessionId?: string }> {
     const client = this.getClient();
     const body: CheckoutSessionCreateParams = {
       product_cart: [{ product_id: params.productId, quantity: params.quantity ?? 1 }],
-      customer: params.customerId ? { customer_id: params.customerId } : undefined,
+      customer: params.customerId
+        ? { customer_id: params.customerId }
+        : params.email
+          ? { email: params.email }
+          : undefined,
       return_url: params.returnUrl,
       metadata: params.metadata,
     };
@@ -43,7 +47,7 @@ export class DodoProvider implements PaymentProvider {
       : undefined;
     const session = await client.checkoutSessions.create(body, requestOptions);
     if (!session.checkout_url) throw new Error("Checkout session returned no URL");
-    return { url: session.checkout_url };
+    return { url: session.checkout_url, providerSessionId: session.session_id };
   }
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {
@@ -130,17 +134,16 @@ export class DodoProvider implements PaymentProvider {
   async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
     const client = this.getClient();
     try {
-      const response = await client.customers.wallets.list(customerId);
-      return (response.items ?? []).map((w) => {
-        const wallet = w as unknown as Record<string, unknown>;
-        return {
-          id: String(wallet.payment_method_id ?? wallet.id ?? ""),
-          last4: String(wallet.last4 ?? ""),
-          brand: String(wallet.brand ?? "unknown"),
-          expiryMonth: Number(wallet.exp_month ?? wallet.expiry_month ?? 0),
-          expiryYear: Number(wallet.exp_year ?? wallet.expiry_year ?? 0),
-        };
-      });
+      const { items } = await client.customers.retrievePaymentMethods(customerId);
+      return items
+        .filter((pm) => pm.payment_method === "card" && pm.card && pm.recurring_enabled)
+        .map((pm) => ({
+          id: pm.payment_method_id,
+          last4: pm.card!.last4_digits ?? "",
+          brand: pm.card!.card_network ?? "unknown",
+          expiryMonth: pm.card!.expiry_month ? Number(pm.card!.expiry_month) : 0,
+          expiryYear: pm.card!.expiry_year ? Number(pm.card!.expiry_year) : 0,
+        }));
     } catch {
       return [];
     }
@@ -170,6 +173,7 @@ export class DodoProvider implements PaymentProvider {
       quantity: params.quantity ?? 1,
       ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
       ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
+      ...(params.metadata ? { metadata: params.metadata } : {}),
     });
   }
 

@@ -70,6 +70,7 @@ export interface ChangePlanParams {
   effectiveAt?: "immediately" | "next_billing_date";
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;
+  metadata?: Record<string, string>;
 }
 
 export interface PreviewChangePlanParams {
@@ -102,7 +103,9 @@ export interface ChangePlanPreview {
 export interface PaymentProvider {
   readonly provider: "stripe" | "dodo" | "mock";
 
-  createCheckoutSession(params: CheckoutParams): Promise<{ url: string; customerId?: string }>;
+  createCheckoutSession(
+    params: CheckoutParams,
+  ): Promise<{ url: string; customerId?: string; providerSessionId?: string }>;
 
   createCustomerPortalSession(params: PortalParams): Promise<{ url: string }>;
 

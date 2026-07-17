@@ -86,17 +86,26 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
   // the final schema-transfer migration would attempt to create triggers on
   // compatibility views.
   const ledger = await pool.query("SELECT to_regclass('bursar.schema_migrations') AS relation");
-  if (ledger.rows[0]?.relation) return;
-  for (const file of migrationFiles()) {
-    const sql = readFileSync(join(SQL_DIR, file), "utf8");
-    await pool.query(sql);
+  if (!ledger.rows[0]?.relation) {
+    await pool.query(`CREATE SCHEMA IF NOT EXISTS bursar`);
+    await pool.query(`CREATE TABLE bursar.schema_migrations (
+      version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
+    )`);
   }
-  await pool.query(`CREATE TABLE bursar.schema_migrations (
-    version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
-  )`);
   for (const file of migrationFiles()) {
     const sql = readFileSync(join(SQL_DIR, file), "utf8");
     const checksum = createHash("sha256").update(sql).digest("hex");
+    const applied = await pool.query(
+      "SELECT checksum FROM bursar.schema_migrations WHERE version = $1",
+      [file],
+    );
+    if (applied.rows[0]) {
+      if (applied.rows[0].checksum !== checksum) {
+        throw new Error(`migration checksum mismatch for ${file}`);
+      }
+      continue;
+    }
+    await pool.query(sql);
     await pool.query("INSERT INTO bursar.schema_migrations(version, checksum) VALUES ($1, $2)", [
       file,
       checksum,

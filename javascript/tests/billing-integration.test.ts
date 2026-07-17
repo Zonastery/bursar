@@ -4,7 +4,7 @@
  * Mirrors Python test_billing_integration.py.
  */
 
-import { describe, it, expect, beforeAll, afterAll, inject } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, inject } from "vitest";
 import pg from "pg";
 import { PostgresStore } from "../src/stores/postgres-store.js";
 import { CreditsService } from "../src/credits-service.js";
@@ -22,6 +22,7 @@ const USER_ID = "00000000-0000-0000-0000-000000000001";
 const USER_ID2 = "00000000-0000-0000-0000-000000000002";
 const USER_ID3 = "00000000-0000-0000-0000-000000000003";
 const USER_ID4 = "00000000-0000-0000-0000-000000000004";
+const USER_ID5 = "00000000-0000-0000-0000-000000000005";
 const PROVIDER = "stripe";
 const CUSTOMER_ID = "cus_test123";
 const CUSTOMER_ID2 = "cus_test456";
@@ -140,8 +141,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     await pool.query(BOOTSTRAP_SQL);
     await pool.query(
-      "INSERT INTO auth.users (id) VALUES ($1), ($2), ($3), ($4) ON CONFLICT DO NOTHING",
-      [USER_ID, USER_ID2, USER_ID3, USER_ID4],
+      "INSERT INTO auth.users (id) VALUES ($1), ($2), ($3), ($4), ($5) ON CONFLICT DO NOTHING",
+      [USER_ID, USER_ID2, USER_ID3, USER_ID4, USER_ID5],
     );
     await applyMigrations(pool);
     // Seed public.user for migration 021 FK from user_credits — range covers
@@ -154,6 +155,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     );
     await truncateBursarTables(pool);
   }, 60000);
+
+  beforeEach(async () => {
+    await truncateBursarTables(pool);
+  });
 
   afterAll(async () => {
     if (pool) await pool.end();
@@ -232,6 +237,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("subscription upsert and read", async () => {
     const { bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
     const state: BillingSubscriptionState = {
       userId: USER_ID,
       provider: PROVIDER,
@@ -382,6 +388,83 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect(cancelResult).toEqual({ handled: true, action: "subscription_canceled" });
     const plan2 = await cm.getUserPlan(USER_ID);
     expect(plan2.planId).toBeNull();
+  });
+
+  it("does not revoke a newer active subscription when an older one is cancelled", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_stale_old_create",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      subscription: {
+        providerSubscriptionId: "sub_stale_old",
+        status: "active",
+        periodStart: "2025-06-01T00:00:00Z",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    await bs.upsertBillingSubscription({
+      provider: "dodo",
+      providerSubscriptionId: "sub_stale_new",
+      userId: USER_ID3,
+      status: "active",
+    });
+    await cm.setUserPlan(USER_ID3, "pro");
+
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_stale_old_cancel",
+      eventType: "subscription.canceled",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      subscription: { providerSubscriptionId: "sub_stale_old", status: "canceled" },
+    });
+
+    const plan = await cm.getUserPlan(USER_ID3);
+    expect(plan.planId).not.toBeNull();
+    expect((await bs.getBillingSubscription("dodo", "sub_stale_new"))?.status).toBe("active");
+  });
+
+  it("quarantines a second current subscription for the same provider", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const first = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_conflict_first",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      subscription: {
+        providerSubscriptionId: "sub_conflict_first",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    const second = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_sub_conflict_second",
+      eventType: "subscription.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID3,
+      subscription: {
+        providerSubscriptionId: "sub_conflict_second",
+        status: "active",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+    expect(first).toEqual({ handled: true, action: "subscription_created" });
+    expect(second).toEqual({ handled: true, action: "subscription_conflict" });
+    expect(await bs.getBillingSubscription(PROVIDER, "sub_conflict_second")).toBeNull();
+    const conflicts = await pool.query(
+      `SELECT duplicate_subscription_id FROM bursar.billing_subscription_conflicts
+       WHERE duplicate_subscription_id = $1`,
+      ["sub_conflict_second"],
+    );
+    expect(conflicts.rows).toHaveLength(1);
   });
 
   it("topup credit grant", async () => {
@@ -930,7 +1013,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       eventId: "evt_exp_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      userId: USER_ID5,
       subscription: {
         providerSubscriptionId: "sub_exp_test",
         status: "active",
@@ -942,10 +1025,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       eventId: "evt_exp_2",
       eventType: "subscription.expired",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      userId: USER_ID5,
       subscription: { providerSubscriptionId: "sub_exp_test" },
     });
-    expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+    expect((await cm.getUserPlan(USER_ID5)).planId).toBeNull();
   });
 
   // ── Payment failed ──────────────────────────────────────────────────────
@@ -958,7 +1041,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       eventId: "evt_pf_1",
       eventType: "subscription.created",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      userId: USER_ID5,
       subscription: {
         providerSubscriptionId: "sub_pf_test",
         status: "active",
@@ -970,7 +1053,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       eventId: "evt_pf_2",
       eventType: "payment.failed",
       occurredAt: new Date().toISOString(),
-      userId: USER_ID,
+      userId: USER_ID5,
       customer: { providerCustomerId: "cus_pf" },
       payment: {
         providerPaymentId: "py_pf",
@@ -981,7 +1064,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       subscription: { providerSubscriptionId: "sub_pf_test" },
     });
     expect(result.handled).toBe(true);
-    expect((await cm.getUserPlan(USER_ID)).planId).toBeNull();
+    expect((await cm.getUserPlan(USER_ID5)).planId).toBeNull();
   });
 
   // ── Dispute lifecycle ───────────────────────────────────────────────────

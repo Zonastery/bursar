@@ -33,6 +33,36 @@ def _get_nested(data: dict, *keys: str) -> Any:
     return current
 
 
+def _normalize_interval(value: Any) -> str | None:
+    interval = str(value or "").lower()
+    return interval if interval in ("day", "week", "month", "year") else None
+
+
+def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
+    interval = (
+        _normalize_interval(data.get("payment_frequency_interval"))
+        or _normalize_interval(data.get("subscription_period_interval"))
+        or _normalize_interval(metadata.get("billing_interval"))
+    )
+    raw_interval_count = data.get("payment_frequency_count") or data.get("subscription_period_count")
+    if raw_interval_count is None and interval:
+        raw_interval_count = 1
+    result: dict[str, Any] = {}
+    if interval:
+        result["interval"] = interval
+    if raw_interval_count is not None:
+        try:
+            ic = int(raw_interval_count)
+            if ic > 0:
+                result["interval_count"] = ic
+        except (ValueError, TypeError):
+            pass
+    previous_billing = data.get("previous_billing_date")
+    if previous_billing:
+        result["period_start"] = str(previous_billing)
+    return result
+
+
 def _make_customer_info(data: dict[str, Any]) -> BillingCustomerInfo | None:
     cust_id = str(data.get("customer_id", ""))
     if cust_id:
@@ -83,6 +113,7 @@ async def _handle_subscription_active(
             status=parse_status("active"),
             period_end=period_end,
             refs=ProviderRef(lookup_key=metadata.get("plan_slug")) if metadata.get("plan_slug") else None,
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -111,6 +142,7 @@ async def _handle_subscription_renewed(
             provider_subscription_id=sub_id,
             status=parse_status("active"),
             period_end=period_end,
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -227,6 +259,7 @@ async def _handle_subscription_updated_event(
             provider_subscription_id=sub_id,
             status=parse_status(sub_status),
             period_end=period_end,
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -280,6 +313,7 @@ async def _handle_subscription_plan_changed(
             provider_subscription_id=sub_id,
             status=parse_status("active"),
             refs=refs,
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))

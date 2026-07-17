@@ -230,6 +230,28 @@ class BillingEventClaim(BaseModel):
     claim_token: str | None = None
 
 
+class CheckoutIntentStatus(StrEnum):
+    open = "open"
+    completed = "completed"
+    failed = "failed"
+    expired = "expired"
+
+
+class CheckoutIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    actor_key: str
+    provider: str
+    type: Literal["subscription", "credit_pack"]
+    product_id: str
+    request_fingerprint: str
+    status: CheckoutIntentStatus
+    provider_session_id: str | None = None
+    checkout_url: str | None = None
+    expires_at: str
+
+
 class BillingSubscriptionState(BaseModel):
     user_id: str
     provider: str

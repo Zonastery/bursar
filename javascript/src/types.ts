@@ -194,6 +194,8 @@ export interface FeatureLimit {
  */
 export interface PlanDefinition {
   label: string;
+  /** Explicit commercial rank used for upgrade/downgrade decisions. */
+  tier?: number;
   allowance: { amount: Decimal; period: AllowancePeriod };
   safety: {
     billingMode: BillingMode;

@@ -22,6 +22,8 @@ from bursar.billing.models import (
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
+    CheckoutIntent,
+    CheckoutIntentStatus,
     CycleGrant,
     ProviderRef,
 )
@@ -59,6 +61,8 @@ __all__ = [
     "BillingPreferences",
     "BillingProvisioningPort",
     "BillingProvider",
+    "CheckoutIntent",
+    "CheckoutIntentStatus",
     "ProviderRef",
     "BillingRefundInfo",
     "BillingStore",

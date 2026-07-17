@@ -9,12 +9,33 @@ from bursar.billing.models import (
     BillingPreferences,
     BillingSubscriptionState,
     BillingTopupResult,
+    CheckoutIntent,
 )
 
 
 class BillingStore(ABC):
     @abstractmethod
     def sync_billing_from_config(self, config: BillingConfig) -> None: ...
+
+    @abstractmethod
+    def create_or_get_checkout_intent(
+        self,
+        actor_key: str,
+        provider: str,
+        type: str,
+        product_id: str,
+        request_fingerprint: str,
+        expires_at: str,
+    ) -> CheckoutIntent: ...
+
+    @abstractmethod
+    def update_checkout_intent(
+        self,
+        id: str,
+        status: str | None = None,
+        provider_session_id: str | None = None,
+        checkout_url: str | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def resolve_billing_offer(
@@ -71,6 +92,7 @@ class BillingStore(ABC):
     def get_user_subscription(
         self,
         user_id: str,
+        statuses: list[str] | None = None,
     ) -> BillingSubscriptionState | None: ...
 
     @abstractmethod
@@ -163,6 +185,17 @@ class BillingStore(ABC):
 
     @abstractmethod
     def get_user_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]: ...
+
+    @abstractmethod
+    def record_subscription_conflict(
+        self,
+        user_id: str | None = None,
+        provider: str = "",
+        duplicate_subscription_id: str = "",
+        existing_subscription_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def deactivate_other_provider_subscriptions(

@@ -12,6 +12,7 @@ from bursar.billing.models import (
     BillingPreferences,
     BillingSubscriptionState,
     BillingTopupResult,
+    CheckoutIntent,
 )
 from bursar.billing.store import BillingStore
 from bursar.credits_service import CreditsService as CreditsServiceImpl
@@ -30,6 +31,10 @@ class BillingService(BillingEventSink, Protocol):
 
     def get_user_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
 
+    def get_active_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
+
+    def get_blocking_subscription(self, user_id: str) -> BillingSubscriptionState | None: ...
+
     def get_user_preferences(self, user_id: str) -> BillingPreferences | None: ...
 
     def update_user_preferences(self, prefs: BillingPreferences) -> None: ...
@@ -46,6 +51,34 @@ class BillingService(BillingEventSink, Protocol):
 
     def upsert_customer(
         self, provider: str, provider_customer_id: str, user_id: str, email: str | None = None
+    ) -> None: ...
+
+    def create_or_get_checkout_intent(
+        self,
+        actor_key: str,
+        provider: str,
+        type: str,
+        product_id: str,
+        request_fingerprint: str,
+        expires_at: str,
+    ) -> CheckoutIntent: ...
+
+    def update_checkout_intent(
+        self,
+        id: str,
+        status: str | None = None,
+        provider_session_id: str | None = None,
+        checkout_url: str | None = None,
+    ) -> None: ...
+
+    def record_subscription_conflict(
+        self,
+        user_id: str | None = None,
+        provider: str = "",
+        duplicate_subscription_id: str = "",
+        existing_subscription_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict | None = None,
     ) -> None: ...
 
 

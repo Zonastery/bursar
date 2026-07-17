@@ -230,6 +230,21 @@ export interface BillingSubscriptionState {
   metadata?: Record<string, unknown> | null;
 }
 
+export type CheckoutIntentStatus = "open" | "completed" | "failed" | "expired";
+
+export interface CheckoutIntent {
+  id: string;
+  actorKey: string;
+  provider: string;
+  type: "subscription" | "credit_pack";
+  productId: string;
+  requestFingerprint: string;
+  status: CheckoutIntentStatus;
+  providerSessionId?: string | null;
+  checkoutUrl?: string | null;
+  expiresAt: string;
+}
+
 // ── Typed store result types ─────────────────────────────────────────────
 
 export interface BillingGrantResult {

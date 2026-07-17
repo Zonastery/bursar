@@ -5,6 +5,7 @@ import type {
   BillingOfferResult,
   BillingPreferences,
   BillingSubscriptionState,
+  CheckoutIntent,
   BillingTopupResult,
 } from "./billing-types.js";
 
@@ -15,6 +16,24 @@ import type {
  * Mirrors Python bursar/billing/store.py.
  */
 export abstract class BillingStore {
+  abstract createOrGetCheckoutIntent(input: {
+    actorKey: string;
+    provider: string;
+    type: "subscription" | "credit_pack";
+    productId: string;
+    requestFingerprint: string;
+    expiresAt: string;
+  }): Promise<CheckoutIntent>;
+
+  abstract updateCheckoutIntent(
+    id: string,
+    update: {
+      status?: "open" | "completed" | "failed" | "expired";
+      providerSessionId?: string | null;
+      checkoutUrl?: string | null;
+    },
+  ): Promise<void>;
+
   abstract syncBillingFromConfig(config: BillingConfig): Promise<void>;
 
   abstract resolveBillingOffer(
@@ -134,6 +153,15 @@ export abstract class BillingStore {
   abstract getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
 
   abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
+
+  abstract recordSubscriptionConflict(input: {
+    userId?: string | null;
+    provider: string;
+    duplicateSubscriptionId: string;
+    existingSubscriptionId?: string | null;
+    eventId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<void>;
 
   abstract deactivateOtherProviderSubscriptions(
     userId: string,

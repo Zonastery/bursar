@@ -361,6 +361,35 @@ def _cmd_config_schema(_args: argparse.Namespace) -> None:
     print(json.dumps(BursarConfig.model_json_schema(), indent=2))
 
 
+def _cmd_audit_subscriptions(args: argparse.Namespace) -> None:
+    """Report current same-user/provider subscription duplicates (read-only)."""
+    _require_extra("postgres")
+    import psycopg2.extras
+
+    database_url = os.environ.get("DATABASE_URL") or args.database_url
+    if not database_url:
+        print("DATABASE_URL required", file=sys.stderr)
+        raise SystemExit(1)
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT user_id, provider, count(*)::int AS subscription_count,
+                       array_agg(provider_subscription_id ORDER BY created_at) AS subscription_ids
+                FROM bursar.billing_subscriptions
+                WHERE status IN ('active', 'trialing', 'past_due', 'incomplete')
+                GROUP BY user_id, provider
+                HAVING count(*) > 1
+                ORDER BY user_id, provider
+                """
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    print(json.dumps(rows, indent=2, default=str))
+
+
 # ── Parser construction ──────────────────────────────────────────────────────
 
 
@@ -408,6 +437,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_migrate.set_defaults(func=_cmd_migrate)
+
+    p_audit = sub.add_parser(
+        "audit-subscriptions",
+        help="Report duplicate current subscriptions before enabling the unique invariant",
+    )
+    p_audit.add_argument(
+        "database_url",
+        nargs="?",
+        default=None,
+        metavar="DATABASE_URL",
+        help="(discouraged) Postgres URL; prefer the DATABASE_URL env var.",
+    )
+    p_audit.set_defaults(func=_cmd_audit_subscriptions)
 
     # pricing
     p_config = sub.add_parser(
