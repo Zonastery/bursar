@@ -291,13 +291,18 @@ class PostgresStore(CreditStore):
                 cur.execute("""
                     SELECT to_regnamespace('auth'), to_regprocedure('auth.uid()'), to_regprocedure('auth.role()')
                 """)
-                auth_schema, auth_uid, auth_role = cur.fetchone()
+                auth_row = cur.fetchone()
+                if auth_row is None:
+                    raise StoreError("auth namespace query returned no rows")
+                auth_schema, auth_uid, auth_role = auth_row
                 if auth_schema is None or auth_uid is None or auth_role is None:
                     raise StoreError(
                         "Bursar requires configured auth.uid()/auth.role(); refusing to bootstrap auth objects"
                     )
 
-                for sql_file in _get_sql_files():
+                sql_files = _get_sql_files()
+
+                for sql_file in sql_files:
                     sql = sql_file.read_text(encoding="utf-8")
                     checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
                     cur.execute("SELECT checksum FROM bursar.schema_migrations WHERE version = %s", (sql_file.name,))
@@ -322,6 +327,85 @@ class PostgresStore(CreditStore):
         finally:
             conn.close()
         return result
+
+    def stamp(self) -> SetupResult:
+        """Stamp the current HEAD migrations into the ledger without executing them.
+
+        This is an explicit operator action to recover from a cleared ledger.
+        The caller attests that the schema is already at HEAD — the method records
+        each migration's checksum without re-applying the SQL.  After stamping,
+        subsequent ``setup()`` calls see a complete ledger and are idempotent.
+
+        Uses the same ``read_text().encode("utf-8")`` hashing as ``setup()`` so
+        checksums remain consistent regardless of platform newline handling.
+
+        Raises ``StoreError`` if:
+        * The bursar schema does not yet exist (run normal migrations instead).
+        * The migration ledger already has entries (run normal migrations
+          to apply any pending files, or if the ledger is partial recover by
+          clearing it first and re-stamping).
+        """
+        conn = self._conn()
+        try:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                cur.execute("CREATE SCHEMA IF NOT EXISTS bursar")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bursar.schema_migrations (
+                        version text PRIMARY KEY,
+                        checksum text NOT NULL,
+                        applied_at timestamptz NOT NULL DEFAULT now()
+                    )
+                """)
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
+
+                # Guard: refuse to stamp a database that never had bursar objects
+                # (the operator should run normal migrate instead).
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_tables
+                        WHERE schemaname = 'bursar' AND tablename = 'credit_buckets'
+                    )
+                """)
+                row = cur.fetchone()
+                if row is None or not row[0]:
+                    raise StoreError("bursar schema is empty — run 'bursar migrate' to create it, not --baseline-head")
+
+                # Guard: refuse when ledger already has entries — the operator
+                # might be trying to stub in a newly-added migration.  They
+                # should run normal migrate, or if they are sure, clear the
+                # ledger first then re-stamp.
+                cur.execute("SELECT count(*) FROM bursar.schema_migrations")
+                row = cur.fetchone()
+                if row is not None and row[0] > 0:
+                    raise StoreError(
+                        "migration ledger is not empty — run 'bursar migrate' to "
+                        "apply pending migrations, or clear the ledger first "
+                        "then retry --baseline-head"
+                    )
+
+                sql_files = _get_sql_files()
+                result = SetupResult()
+                for sql_file in sql_files:
+                    sql = sql_file.read_text(encoding="utf-8")
+                    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+                    cur.execute(
+                        "INSERT INTO bursar.schema_migrations(version, checksum) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (sql_file.name, checksum),
+                    )
+                    if cur.rowcount > 0:
+                        result.tables_created.append(sql_file.name)
+            conn.commit()
+            return result
+        except StoreError:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise StoreError(f"Bursar stamp failed: {exc}") from exc
+        finally:
+            conn.close()
 
     # ── Runtime operations ─────────────────────────────────────────────
 
@@ -1461,3 +1545,12 @@ def run_migrations(database_url: str) -> SetupResult:
     """
     store = PostgresStore(database_url)
     return store.setup(database_url)
+
+
+def stamp_migrations(database_url: str) -> SetupResult:
+    """Stamp the current HEAD migrations into the ledger without executing them.
+
+    Standalone entry point for the CLI ``migrate --baseline-head`` command.
+    """
+    store = PostgresStore(database_url)
+    return store.stamp()

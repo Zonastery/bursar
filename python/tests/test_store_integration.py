@@ -33,7 +33,7 @@ from bursar.interface.models import (
     CreditMetadata,
     FeatureLimit,
 )
-from bursar.interface.postgres import PostgresStore
+from bursar.interface.postgres import PostgresStore, stamp_migrations
 
 pytestmark = [pytest.mark.integration]
 
@@ -881,6 +881,39 @@ class TestPostgresStoreIntegration:
         assert r2.success, f"Second setup() failed: {r2.errors}"
 
         # Basic operations still work after double migration
+        store.add_credits(_PG_USER, Decimal("50"), "purchase")
+        assert store.get_balance(_PG_USER).balance >= Decimal("50")
+
+    def test_baseline_head_recovers_from_cleared_ledger(self, pg_database_url: str) -> None:
+        """Stamp recovers from a cleared migration ledger without re-applying SQL."""
+        store = PostgresStore(pg_database_url)
+
+        # 1. Run setup normally — objects created + ledger populated.
+        r1 = store.setup()
+        assert r1.success
+
+        # 2. Clear the ledger (simulates supabase db reset behaviour).
+        conn = store._conn()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM bursar.schema_migrations")
+        conn.commit()
+        conn.close()
+
+        # 3. setup() now raises — objects exist but ledger is empty.
+        with pytest.raises(StoreError, match="already exists|duplicate"):
+            store.setup()
+
+        # 4. Stamp the current HEAD without re-applying SQL.
+        r3 = stamp_migrations(pg_database_url)
+        assert r3.success
+        assert len(r3.tables_created) > 0
+
+        # 5. setup() now succeeds — ledger is complete.
+        r4 = store.setup()
+        assert r4.success
+        assert len(r4.tables_created) == 0
+
+        # 6. Basic operations still work.
         store.add_credits(_PG_USER, Decimal("50"), "purchase")
         assert store.get_balance(_PG_USER).balance >= Decimal("50")
 

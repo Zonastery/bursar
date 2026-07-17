@@ -229,6 +229,15 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
+    if args.baseline_head:
+        from bursar.interface.postgres import stamp_migrations
+
+        result = stamp_migrations(database_url)
+        for t in result.tables_created:
+            print(f"  + {t}  (stamped)")
+        print("Baseline complete.")
+        return
+
     from bursar.interface.postgres import run_migrations
 
     result = run_migrations(database_url)
@@ -386,6 +395,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="DATABASE_URL",
         help="(discouraged) Postgres URL; prefer the DATABASE_URL env var.",
+    )
+    p_migrate.add_argument(
+        "--baseline-head",
+        action="store_true",
+        default=False,
+        help=(
+            "Stamp the current HEAD migrations into the ledger without executing them. "
+            "Use when the bursar schema already exists but the migration ledger was "
+            "cleared (e.g. after supabase db reset). The caller attests the schema "
+            "is already at HEAD."
+        ),
     )
     p_migrate.set_defaults(func=_cmd_migrate)
 
