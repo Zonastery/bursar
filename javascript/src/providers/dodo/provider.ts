@@ -40,6 +40,7 @@ export class DodoProvider implements PaymentProvider {
           ? { email: params.email }
           : undefined,
       return_url: params.returnUrl,
+      cancel_url: params.cancelUrl,
       metadata: params.metadata,
     };
     const requestOptions = params.idempotencyKey
