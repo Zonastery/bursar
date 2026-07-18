@@ -85,6 +85,7 @@ export interface ChangePlanParams {
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;
   metadata?: Record<string, string>;
+  idempotencyKey?: string;
 }
 
 export interface PreviewChangePlanParams {
@@ -136,9 +137,9 @@ export interface PaymentProvider {
 
   handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }>;
 
-  cancelSubscription(subscriptionId: string): Promise<void>;
+  cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
-  reactivateSubscription(subscriptionId: string): Promise<void>;
+  reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
   listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]>;
 

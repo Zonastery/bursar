@@ -106,18 +106,26 @@ export class DodoProvider implements PaymentProvider {
     return { received: true };
   }
 
-  async cancelSubscription(subscriptionId: string): Promise<void> {
+  async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
     const client = this.getClient();
-    await client.subscriptions.update(subscriptionId, {
-      cancel_at_next_billing_date: true,
-    });
+    await client.subscriptions.update(
+      subscriptionId,
+      {
+        cancel_at_next_billing_date: true,
+      },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
   }
 
-  async reactivateSubscription(subscriptionId: string): Promise<void> {
+  async reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
     const client = this.getClient();
-    await client.subscriptions.update(subscriptionId, {
-      cancel_at_next_billing_date: false,
-    });
+    await client.subscriptions.update(
+      subscriptionId,
+      {
+        cancel_at_next_billing_date: false,
+      },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
   }
 
   async createUpdatePaymentMethodSession(
@@ -188,14 +196,18 @@ export class DodoProvider implements PaymentProvider {
 
   async changePlan(params: ChangePlanParams): Promise<void> {
     const client = this.getClient();
-    await client.subscriptions.changePlan(params.providerSubscriptionId, {
-      product_id: params.productId,
-      proration_billing_mode: params.prorationBillingMode,
-      quantity: params.quantity ?? 1,
-      ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
-      ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
-      ...(params.metadata ? { metadata: params.metadata } : {}),
-    });
+    await client.subscriptions.changePlan(
+      params.providerSubscriptionId,
+      {
+        product_id: params.productId,
+        proration_billing_mode: params.prorationBillingMode,
+        quantity: params.quantity ?? 1,
+        ...(params.effectiveAt ? { effective_at: params.effectiveAt } : {}),
+        ...(params.onPaymentFailure ? { on_payment_failure: params.onPaymentFailure } : {}),
+        ...(params.metadata ? { metadata: params.metadata } : {}),
+      },
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+    );
   }
 
   async previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview> {

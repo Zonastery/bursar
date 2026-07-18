@@ -131,14 +131,22 @@ export class StripeProvider implements PaymentProvider {
     return handleStripeWebhook(event, this.sink, stripe, this.logger);
   }
 
-  async cancelSubscription(subscriptionId: string): Promise<void> {
+  async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
     const stripe = this.getStripe();
-    await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true });
+    await stripe.subscriptions.update(
+      subscriptionId,
+      { cancel_at_period_end: true },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
   }
 
-  async reactivateSubscription(subscriptionId: string): Promise<void> {
+  async reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
     const stripe = this.getStripe();
-    await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: false });
+    await stripe.subscriptions.update(
+      subscriptionId,
+      { cancel_at_period_end: false },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
   }
 
   async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
