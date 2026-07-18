@@ -15,6 +15,7 @@ import type {
   BillingSubscriptionState,
 } from "../src/billing/index.js";
 import { BOOTSTRAP_SQL, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
+import { handleDodoBillingEvent } from "../src/providers/dodo/event-mapper.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
@@ -72,6 +73,10 @@ const BILLING_CONFIG: BillingConfig = {
         stripe: {
           productId: "prod_monthly",
           priceId: "price_monthly_1000",
+        },
+        dodo: {
+          productId: "prod_dodo_monthly",
+          priceId: "price_dodo_monthly_1000",
         },
       },
     },
@@ -650,6 +655,172 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect((await bs.claimBillingEvent("dodo", "evt_prov_scope", "test.event")).status).toBe(
       "claimed",
     );
+  });
+
+  // ── Dodo-shaped integration tests (regression: realistic payloads) ────
+
+  const dodoProductId = "prod_dodo_monthly";
+
+  it("dodo: full subscription lifecycle through ingest (regression: no data.id, JS dates)", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+
+    // Step 1: customer created — ingested directly like Dodo mapper would
+    await bm.ingestBillingEvent({
+      provider: "dodo",
+      eventId: "dodo:customer.created:cus_dodo_lifecycle",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID5,
+      customer: { providerCustomerId: "cus_dodo_lifecycle" },
+    });
+
+    // Step 2: subscription.active → subscription.created via Dodo mapper
+    // Payload has no data.id and JS toString dates — realistic Dodo payload
+    await handleDodoBillingEvent(
+      "subscription.active",
+      {
+        subscription_id: "sub_dodo_lifecycle",
+        status: "active",
+        product_id: dodoProductId,
+        payment_frequency_interval: "Month",
+        payment_frequency_count: 1,
+        previous_billing_date: new Date().toString(),
+        next_billing_date: new Date(Date.now() + 86400000 * 30).toString(),
+      },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: (e: any) => bm.ingestBillingEvent(e) } as any,
+    );
+
+    // Verify subscription was created
+    const stored = await bs.getBillingSubscription("dodo", "sub_dodo_lifecycle");
+    expect(stored).not.toBeNull();
+    expect(stored!.status).toBe("active");
+    expect(stored!.interval).toBe("month");
+    expect(stored!.intervalCount).toBe(1);
+    // Dates should be valid ISO 8601 (not raw JS toString)
+    expect(stored!.currentPeriodStart).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(stored!.currentPeriodEnd).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    // Verify plan was provisioned
+    const plan = await cm.getUserPlan(USER_ID5);
+    expect(plan.planId).not.toBeNull();
+    expect(plan.planAssignedAt).not.toBeNull();
+  });
+
+  it("dodo: duplicate event ID returns duplicate via event mapper (regression: no rawId collision)", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+
+    const ingest = (e: any) => bm.ingestBillingEvent(e);
+
+    // First call — should succeed
+    await handleDodoBillingEvent(
+      "subscription.active",
+      { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: ingest } as any,
+    );
+    expect((await bs.getBillingSubscription("dodo", "sub_dodo_dup"))?.status).toBe("active");
+
+    // Second call with same payload — should be handled as duplicate (not error)
+    await handleDodoBillingEvent(
+      "subscription.active",
+      { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: ingest } as any,
+    );
+
+    // Subscription should still be active (not overwritten by duplicate)
+    expect((await bs.getBillingSubscription("dodo", "sub_dodo_dup"))?.status).toBe("active");
+  });
+
+  it("dodo: multiple subscription events with distinct IDs all succeed (regression: original Bug 1)", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+
+    // Pre-create customer + user
+    await bm.ingestBillingEvent({
+      provider: "dodo",
+      eventId: "evt_dodo_multi_cus",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID5,
+      customer: { providerCustomerId: "cus_dodo_multi" },
+    });
+
+    const ingest = (e: any) => bm.ingestBillingEvent(e);
+
+    // Three different subscription events — each should produce a unique event ID
+    await handleDodoBillingEvent(
+      "subscription.active",
+      { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: ingest } as any,
+    );
+    await handleDodoBillingEvent(
+      "subscription.renewed",
+      { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: ingest } as any,
+    );
+    await handleDodoBillingEvent(
+      "subscription.updated",
+      { subscription_id: "sub_dodo_multi_1", status: "active" },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: ingest } as any,
+    );
+
+    // All three should have created billing_events entries without collisions
+    const sub = await bs.getBillingSubscription("dodo", "sub_dodo_multi_1");
+    expect(sub).not.toBeNull();
+  });
+
+  it("dodo: dates in JS toString() format stored as valid timestamptz (regression: Bug 2)", async () => {
+    const { bs, bm } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+
+    await bm.ingestBillingEvent({
+      provider: "dodo",
+      eventId: "evt_dodo_date_cus",
+      eventType: "customer.created",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID5,
+      customer: { providerCustomerId: "cus_dodo_date" },
+    });
+
+    // Use JS toString() dates — the exact format Dodo sends
+    const jsDate = new Date().toString();
+    const jsDateFuture = new Date(Date.now() + 86400000 * 30).toString();
+
+    await handleDodoBillingEvent(
+      "subscription.active",
+      {
+        subscription_id: "sub_dodo_date",
+        status: "active",
+        product_id: dodoProductId,
+        previous_billing_date: jsDate,
+        next_billing_date: jsDateFuture,
+      },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: (e: any) => bm.ingestBillingEvent(e) } as any,
+    );
+
+    const sub = await bs.getBillingSubscription("dodo", "sub_dodo_date");
+    expect(sub).not.toBeNull();
+    // Must be valid ISO 8601, not the raw JS toString format
+    expect(sub!.currentPeriodStart).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(sub!.currentPeriodEnd).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // Verify stored timestamps are parseable by Postgres (would error if not)
+    expect(() => new Date(sub!.currentPeriodStart!).toISOString()).not.toThrow();
+    expect(() => new Date(sub!.currentPeriodEnd!).toISOString()).not.toThrow();
   });
 
   it("sync offers adds new", async () => {

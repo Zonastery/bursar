@@ -24,6 +24,13 @@ function normalizeInterval(value: unknown): string | undefined {
   return ["day", "week", "month", "year"].includes(interval) ? interval : undefined;
 }
 
+/** Dodo sometimes sends dates in JS toString() format (e.g. "Sat Jul 18 2026 05:15:24 GMT+0000..."). Normalize to ISO 8601. */
+export function normalizeDate(raw: unknown): string | null {
+  if (!raw) return null;
+  const d = new Date(String(raw));
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 function subscriptionFields(data: Record<string, unknown>, metadata: Record<string, string>) {
   const interval =
     normalizeInterval(data.payment_frequency_interval) ??
@@ -32,10 +39,11 @@ function subscriptionFields(data: Record<string, unknown>, metadata: Record<stri
   const rawIntervalCount =
     data.payment_frequency_count ?? data.subscription_period_count ?? (interval ? 1 : undefined);
   const intervalCount = Number(rawIntervalCount);
+  const ps = normalizeDate(data.previous_billing_date);
   return {
     ...(interval ? { interval } : {}),
     ...(Number.isFinite(intervalCount) && intervalCount > 0 ? { intervalCount } : {}),
-    ...(data.previous_billing_date ? { periodStart: String(data.previous_billing_date) } : {}),
+    ...(ps ? { periodStart: ps } : {}),
   };
 }
 
@@ -47,7 +55,10 @@ export async function handleDodoBillingEvent(
   sink: BillingEventSink,
   logger?: ProviderLogger,
 ): Promise<void> {
-  const rawId = String(data.id ?? data.payment_id ?? "");
+  const sourceId = data.id ?? data.payment_id;
+  const rawId = sourceId
+    ? String(sourceId)
+    : `dodo:${type}:${data.subscription_id ?? data.customer_id ?? ""}`;
 
   const customerInfo = {
     providerCustomerId: String(data.customer_id ?? ""),
@@ -80,7 +91,6 @@ export async function handleDodoBillingEvent(
         return;
       }
       const subId = String(data.subscription_id ?? "");
-      const periodEnd = data.next_billing_date as string | null;
 
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),
@@ -88,7 +98,7 @@ export async function handleDodoBillingEvent(
         subscription: {
           providerSubscriptionId: subId,
           status: (String(data.status ?? "active") || "active") as BillingSubscriptionStatus,
-          periodEnd,
+          periodEnd: normalizeDate(data.next_billing_date),
           ...subscriptionFields(data, metadata),
           refs: data.product_id
             ? { productId: String(data.product_id) }
@@ -106,7 +116,6 @@ export async function handleDodoBillingEvent(
         return;
       }
       const subId = String(data.subscription_id ?? "");
-      const periodEnd = data.next_billing_date as string | null;
 
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),
@@ -114,8 +123,13 @@ export async function handleDodoBillingEvent(
         subscription: {
           providerSubscriptionId: subId,
           status: "active",
-          periodEnd,
+          periodEnd: normalizeDate(data.next_billing_date),
           ...subscriptionFields(data, metadata),
+          refs: data.product_id
+            ? { productId: String(data.product_id) }
+            : metadata.plan_slug
+              ? { lookupKey: metadata.plan_slug }
+              : undefined,
         },
       });
       return;
@@ -168,14 +182,14 @@ export async function handleDodoBillingEvent(
     case "subscription.updated": {
       const subId = String(data.subscription_id ?? "");
       if (!subId) return;
-      const periodEnd = data.next_billing_date as string | null;
+      const pe = normalizeDate(data.next_billing_date);
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),
         eventType: "subscription.updated",
         subscription: {
           providerSubscriptionId: subId,
           status: (String(data.status ?? "") || null) as BillingSubscriptionStatus | null,
-          ...(periodEnd ? { periodEnd } : {}),
+          ...(pe ? { periodEnd: pe } : {}),
           ...subscriptionFields(data, metadata),
         },
       });

@@ -8,6 +8,7 @@ a real Postgres 16.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -33,6 +34,7 @@ from bursar.billing.models import (
 )
 from bursar.billing.postgres import PostgresBillingStore
 from bursar.credits_service import CreditsService
+from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 
 pytestmark = [pytest.mark.integration]
 
@@ -40,6 +42,7 @@ USER_ID = "00000000-0000-0000-0000-000000000001"
 USER_ID2 = "00000000-0000-0000-0000-000000000002"
 USER_ID3 = "00000000-0000-0000-0000-000000000003"
 USER_ID4 = "00000000-0000-0000-0000-000000000004"
+USER_ID5 = "00000000-0000-0000-0000-000000000005"
 PROVIDER = "stripe"
 CUSTOMER_ID = "cus_test123"
 CUSTOMER_ID2 = "cus_test456"
@@ -49,6 +52,7 @@ PRODUCT_ID = "prod_monthly"
 PRICE_ID = "price_monthly_1000"
 PRICE_ID_TOPUP = "price_topup_credits"
 EVENT_ID = "evt_test_001"
+DODO_PRODUCT_ID = "prod_dodo_monthly"
 
 PRICING_DICT = {
     "version": 1,
@@ -84,6 +88,7 @@ BILLING_CONFIG = BillingConfig(
             valid_to="2026-12-31",
             providers={
                 "stripe": ProviderRef(product_id="prod_monthly", price_id="price_monthly_1000"),
+                "dodo": ProviderRef(product_id="prod_dodo_monthly", price_id="price_dodo_monthly_1000"),
             },
         ),
         "enterprise_yearly": BillingOffer(
@@ -133,7 +138,7 @@ def _bootstrap_auth_users(pg_database_url: str) -> None:
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            for uid in (USER_ID, USER_ID2, USER_ID3, USER_ID4):
+            for uid in (USER_ID, USER_ID2, USER_ID3, USER_ID4, USER_ID5):
                 cur.execute(
                     "INSERT INTO auth.users (id) VALUES (%s) ON CONFLICT DO NOTHING",
                     (uid,),
@@ -790,3 +795,185 @@ class TestBillingServiceImplLifecycle:
         )
         balance2 = cm.get_balance(USER_ID4)
         assert balance2.balance == Decimal("5000")
+
+
+class TestDodoBillingIntegration:
+    def test_full_subscription_lifecycle(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, cm, sink = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+
+        # customer created — ingest directly
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider="dodo",
+                event_id="dodo:customer.created:cus_dodo_lifecycle",
+                event_type="customer.created",
+                occurred_at=_now(),
+                user_id=USER_ID5,
+                customer=BillingCustomerInfo(provider_customer_id="cus_dodo_lifecycle"),
+            )
+        )
+
+        # subscription.active → subscription.created via Dodo mapper
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.active",
+                {
+                    "subscription_id": "sub_dodo_lifecycle",
+                    "status": "active",
+                    "product_id": DODO_PRODUCT_ID,
+                    "payment_frequency_interval": "Month",
+                    "payment_frequency_count": 1,
+                    "previous_billing_date": datetime.now(UTC).strftime(
+                        "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
+                    ),
+                    "next_billing_date": datetime.now(UTC).strftime(
+                        "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
+                    ),
+                },
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+
+        stored = bs.get_billing_subscription("dodo", "sub_dodo_lifecycle")
+        assert stored is not None
+        assert stored.status == "active"
+        assert stored.interval == "month"
+        assert stored.interval_count == 1
+        assert stored.current_period_start is not None
+        assert stored.current_period_start.startswith("202")
+        assert stored.current_period_end is not None
+        assert stored.current_period_end.startswith("202")
+
+        plan = cm.get_user_plan(USER_ID5)
+        assert plan.plan_id is not None
+        assert plan.plan_assigned_at is not None
+
+    def test_duplicate_event_returns_duplicate(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, _, sink = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider="dodo",
+                event_id="dodo:customer.created:cus_dodo_dup",
+                event_type="customer.created",
+                occurred_at=_now(),
+                user_id=USER_ID5,
+                customer=BillingCustomerInfo(provider_customer_id="cus_dodo_dup"),
+            )
+        )
+
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.active",
+                {"subscription_id": "sub_dodo_dup", "status": "active", "product_id": DODO_PRODUCT_ID},
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+        assert bs.get_billing_subscription("dodo", "sub_dodo_dup").status == "active"
+
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.active",
+                {"subscription_id": "sub_dodo_dup", "status": "active", "product_id": DODO_PRODUCT_ID},
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+        assert bs.get_billing_subscription("dodo", "sub_dodo_dup").status == "active"
+
+    def test_multiple_events_distinct_ids(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, _, sink = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider="dodo",
+                event_id="dodo:customer.created:cus_dodo_multi",
+                event_type="customer.created",
+                occurred_at=_now(),
+                user_id=USER_ID5,
+                customer=BillingCustomerInfo(provider_customer_id="cus_dodo_multi"),
+            )
+        )
+
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.active",
+                {"subscription_id": "sub_dodo_multi_1", "status": "active", "product_id": DODO_PRODUCT_ID},
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.renewed",
+                {"subscription_id": "sub_dodo_multi_1", "status": "active", "product_id": DODO_PRODUCT_ID},
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.updated",
+                {"subscription_id": "sub_dodo_multi_1", "status": "active"},
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+
+        assert bs.get_billing_subscription("dodo", "sub_dodo_multi_1") is not None
+
+    def test_js_date_parsed_to_valid_iso(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, _, sink = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+
+        sink.ingest_billing_event(
+            BillingEvent(
+                provider="dodo",
+                event_id="dodo:customer.created:cus_dodo_date",
+                event_type="customer.created",
+                occurred_at=_now(),
+                user_id=USER_ID5,
+                customer=BillingCustomerInfo(provider_customer_id="cus_dodo_date"),
+            )
+        )
+
+        js_date = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        js_date_future = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+
+        asyncio.run(
+            handle_dodo_billing_event(
+                "subscription.active",
+                {
+                    "subscription_id": "sub_dodo_date",
+                    "status": "active",
+                    "product_id": DODO_PRODUCT_ID,
+                    "previous_billing_date": js_date,
+                    "next_billing_date": js_date_future,
+                },
+                USER_ID5,
+                {},
+                sink,
+            )
+        )
+
+        sub = bs.get_billing_subscription("dodo", "sub_dodo_date")
+        assert sub is not None
+        assert sub.current_period_start is not None
+        assert sub.current_period_start.startswith("202")
+        assert sub.current_period_end is not None
+        assert sub.current_period_end.startswith("202")
