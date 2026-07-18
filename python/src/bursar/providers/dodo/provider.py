@@ -8,12 +8,16 @@ from typing import Any
 from bursar.bursar import BillingEventSink
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from bursar.providers.types import (
+    ChangePlanLineItem,
+    ChangePlanParams,
+    ChangePlanPreview,
     CheckoutParams,
     CreateCustomerParams,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
+    PreviewChangePlanParams,
     ProviderLogger,
     ProviderResolveUserFn,
     UpdatePaymentMethodParams,
@@ -47,16 +51,24 @@ class DodoProvider(PaymentProvider):
             "product_cart": [{"product_id": params.product_id, "quantity": quantity}],
             "return_url": params.return_url,
         }
+        if params.cancel_url:
+            session_kwargs["cancel_url"] = params.cancel_url
         if params.metadata:
             session_kwargs["metadata"] = params.metadata
         if params.customer_id:
             session_kwargs["customer"] = {"customer_id": params.customer_id}
+        elif params.email:
+            session_kwargs["customer"] = {"email": params.email}
 
         session = await client.checkout_sessions.create(**session_kwargs)
         url = getattr(session, "checkout_url", None) or session.get("checkout_url")
         if not url:
             raise ValueError("Checkout session returned no URL")
-        return {"url": url}
+        session_id = getattr(session, "session_id", None) or session.get("session_id")
+        result: dict[str, Any] = {"url": url}
+        if session_id:
+            result["providerSessionId"] = session_id
+        return result
 
     async def create_customer_portal_session(self, params: PortalParams) -> dict:
         client = self._get_client()
@@ -169,18 +181,23 @@ class DodoProvider(PaymentProvider):
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         client = self._get_client()
-        response = await client.customers.wallets.list(customer_id)
+        response = await client.customers.retrieve_payment_methods(customer_id)
         items = getattr(response, "items", None) or response.get("items", [])
         result: list[PaymentMethodInfo] = []
-        for w in items:
-            w_dict = w.model_dump() if hasattr(w, "model_dump") else w
+        for pm in items:
+            pm_dict = pm.model_dump() if hasattr(pm, "model_dump") else pm
+            if pm_dict.get("payment_method") != "card":
+                continue
+            card = pm_dict.get("card") or {}
+            if not card.get("recurring_enabled", False):
+                continue
             result.append(
                 PaymentMethodInfo(
-                    id=str(w_dict.get("payment_method_id", w_dict.get("id", ""))),
-                    last4=str(w_dict.get("last4", "")),
-                    brand=str(w_dict.get("brand", "unknown")),
-                    expiry_month=int(w_dict.get("exp_month", w_dict.get("expiry_month", 0))),
-                    expiry_year=int(w_dict.get("exp_year", w_dict.get("expiry_year", 0))),
+                    id=str(pm_dict.get("payment_method_id", "")),
+                    last4=str(card.get("last4_digits", "")),
+                    brand=str(card.get("card_network", "unknown")),
+                    expiry_month=int(card.get("expiry_month", 0)),
+                    expiry_year=int(card.get("expiry_year", 0)),
                 )
             )
         return result
@@ -204,3 +221,59 @@ class DodoProvider(PaymentProvider):
         if link:
             return {"url": link}
         return None
+
+    async def change_plan(self, params: ChangePlanParams) -> None:
+        client = self._get_client()
+        kwargs: dict[str, Any] = {
+            "product_id": params.product_id,
+            "proration_billing_mode": params.proration_billing_mode,
+            "quantity": params.quantity,
+        }
+        if params.effective_at:
+            kwargs["effective_at"] = params.effective_at
+        if params.on_payment_failure:
+            kwargs["on_payment_failure"] = params.on_payment_failure
+        if params.metadata:
+            kwargs["metadata"] = params.metadata
+        await client.subscriptions.change_plan(params.provider_subscription_id, **kwargs)
+
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+        client = self._get_client()
+        kwargs: dict[str, Any] = {
+            "product_id": params.product_id,
+            "proration_billing_mode": params.proration_billing_mode,
+            "quantity": params.quantity,
+        }
+        if params.effective_at:
+            kwargs["effective_at"] = params.effective_at
+        response = await client.subscriptions.preview_change_plan(params.provider_subscription_id, **kwargs)
+        immediate_charge = getattr(response, "immediate_charge", None) or response.get("immediate_charge", {})
+        line_items_raw = getattr(immediate_charge, "line_items", None) or immediate_charge.get("line_items", [])
+        summary = getattr(immediate_charge, "summary", None) or immediate_charge.get("summary", {})
+        line_items: list[ChangePlanLineItem] = []
+        for item in line_items_raw:
+            i = item.model_dump() if hasattr(item, "model_dump") else item
+            if i.get("type") == "subscription":
+                line_items.append(
+                    ChangePlanLineItem(
+                        product_id=str(i.get("product_id", "")),
+                        name=str(i.get("name", i.get("description", ""))),
+                        unit_price=int(i.get("unit_price", 0)),
+                        quantity=int(i.get("quantity", 0)),
+                        proration_factor=float(i.get("proration_factor", 0)),
+                        currency=str(i.get("currency", "")),
+                        tax=int(i.get("tax", 0)),
+                        subtotal=0,
+                    )
+                )
+        total = int(getattr(summary, "total_amount", None) or summary.get("total_amount", 0))
+        settlement = int(getattr(summary, "settlement_amount", None) or summary.get("settlement_amount", 0))
+        currency = str(getattr(summary, "settlement_currency", None) or summary.get("settlement_currency", "USD"))
+        effective = str(getattr(immediate_charge, "effective_at", None) or immediate_charge.get("effective_at", ""))
+        return ChangePlanPreview(
+            total_amount=total,
+            settlement_amount=settlement,
+            currency=currency,
+            line_items=line_items or None,
+            effective_at=effective,
+        )

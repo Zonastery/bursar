@@ -8,12 +8,15 @@ import stripe as stripe_mod
 from bursar.bursar import BillingEventSink
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 from bursar.providers.types import (
+    ChangePlanParams,
+    ChangePlanPreview,
     CheckoutParams,
     CreateCustomerParams,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
+    PreviewChangePlanParams,
     ProviderLogger,
     UpdatePaymentMethodParams,
     WebhookRequest,
@@ -222,3 +225,9 @@ class StripeProvider(PaymentProvider):
         if not url:
             return None
         return {"url": url}
+
+    async def change_plan(self, params: ChangePlanParams) -> None:
+        raise NotImplementedError("StripeProvider.change_plan not implemented")
+
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+        raise NotImplementedError("StripeProvider.preview_change_plan not implemented")

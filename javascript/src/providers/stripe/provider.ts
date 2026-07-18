@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import type { PaymentProvider, ProviderLogger } from "../types.js";
+import type { CheckoutPaymentStatus, PaymentProvider, ProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -61,6 +61,18 @@ export class StripeProvider implements PaymentProvider {
 
     if (!session.url) throw new Error("Stripe checkout session returned no URL");
     return { url: session.url, customerId };
+  }
+
+  async getCheckoutSessionStatus(providerSessionId: string): Promise<{
+    paymentStatus: CheckoutPaymentStatus;
+  } | null> {
+    const session = await this.getStripe().checkout.sessions.retrieve(providerSessionId);
+    if (session.status === "expired") return { paymentStatus: "cancelled" };
+    if (session.payment_status === "paid" || session.payment_status === "no_payment_required") {
+      return { paymentStatus: "succeeded" };
+    }
+    if (session.payment_status === "unpaid") return { paymentStatus: "requires_payment_method" };
+    return { paymentStatus: null };
   }
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {

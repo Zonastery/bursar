@@ -62,6 +62,20 @@ export interface ProviderLogger {
   error?: (msg: string, ctx?: Record<string, unknown>) => void;
 }
 
+export type CheckoutPaymentStatus =
+  | null
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "processing"
+  | "requires_customer_action"
+  | "requires_merchant_action"
+  | "requires_payment_method"
+  | "requires_confirmation"
+  | "requires_capture"
+  | "partially_captured"
+  | "partially_captured_and_capturable";
+
 export interface ChangePlanParams {
   providerSubscriptionId: string;
   productId: string;
@@ -102,6 +116,11 @@ export interface ChangePlanPreview {
 
 export interface PaymentProvider {
   readonly provider: "stripe" | "dodo" | "mock";
+
+  /** Retrieve the provider state for a checkout session, or null if it no longer exists. */
+  getCheckoutSessionStatus?(providerSessionId: string): Promise<{
+    paymentStatus: CheckoutPaymentStatus;
+  } | null>;
 
   createCheckoutSession(
     params: CheckoutParams,

@@ -5,12 +5,15 @@ import json
 from bursar.bursar import BillingEventSink
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from bursar.providers.types import (
+    ChangePlanParams,
+    ChangePlanPreview,
     CheckoutParams,
     CreateCustomerParams,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
+    PreviewChangePlanParams,
     ProviderResolveUserFn,
     UpdatePaymentMethodParams,
     WebhookRequest,
@@ -56,6 +59,18 @@ class MockPaymentProvider(PaymentProvider):
 
     async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
         return {"url": "https://example.com/invoice"}
+
+    async def change_plan(self, params: ChangePlanParams) -> None:
+        pass
+
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+        return ChangePlanPreview(
+            total_amount=0,
+            settlement_amount=0,
+            currency="USD",
+            line_items=None,
+            effective_at="",
+        )
 
     async def handle_webhook(self, req: WebhookRequest) -> dict:
         try:

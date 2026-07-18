@@ -61,10 +61,19 @@ export async function handleDodoBillingEvent(
       occurredAt: new Date().toISOString(),
       ...(userId ? { userId } : {}),
       ...(customerInfo.providerCustomerId ? { customer: customerInfo } : {}),
+      ...(Object.keys(metadata).length ? { metadata } : {}),
     };
   }
 
   switch (type) {
+    case "checkout.expired": {
+      await callBillingEventSink(sink, {
+        ...baseEvent(rawId),
+        eventType: "checkout.expired",
+      });
+      return;
+    }
+
     case "subscription.active": {
       if (!userId) {
         logger?.error?.("Dodo subscription event: no userId", { event: type });

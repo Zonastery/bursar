@@ -89,6 +89,47 @@ class PaymentMethodInfo:
     expiry_year: int = 0
 
 
+@dataclass
+class ChangePlanParams:
+    provider_subscription_id: str = ""
+    product_id: str = ""
+    proration_billing_mode: str = "prorated_immediately"
+    effective_at: str | None = None
+    on_payment_failure: str | None = None
+    quantity: int = 1
+    metadata: dict[str, str] | None = None
+
+
+@dataclass
+class PreviewChangePlanParams:
+    provider_subscription_id: str = ""
+    product_id: str = ""
+    proration_billing_mode: str = "prorated_immediately"
+    effective_at: str | None = None
+    quantity: int = 1
+
+
+@dataclass
+class ChangePlanLineItem:
+    product_id: str = ""
+    name: str = ""
+    unit_price: int = 0
+    quantity: int = 0
+    proration_factor: float = 0.0
+    currency: str = ""
+    tax: int = 0
+    subtotal: int = 0
+
+
+@dataclass
+class ChangePlanPreview:
+    total_amount: int = 0
+    settlement_amount: int = 0
+    currency: str = "USD"
+    line_items: list[ChangePlanLineItem] | None = None
+    effective_at: str = ""
+
+
 class PaymentProvider(ABC):
     provider: str
 
@@ -121,3 +162,9 @@ class PaymentProvider(ABC):
 
     @abstractmethod
     async def get_invoice_url(self, provider_payment_id: str) -> dict | None: ...
+
+    @abstractmethod
+    async def change_plan(self, params: ChangePlanParams) -> None: ...
+
+    @abstractmethod
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview: ...

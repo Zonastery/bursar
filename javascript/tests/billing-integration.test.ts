@@ -467,6 +467,60 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect(conflicts.rows).toHaveLength(1);
   });
 
+  it("closes checkout intents when payment failure or expiry is received", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    const failedIntent = await bs.createOrGetCheckoutIntent({
+      actorKey: `user:${USER_ID}`,
+      provider: PROVIDER,
+      type: "subscription",
+      productId: PRODUCT_ID,
+      requestFingerprint: "failed-intent",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_checkout_payment_failed",
+      eventType: "payment.failed",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      metadata: { checkout_intent_id: failedIntent.id },
+      payment: {
+        providerPaymentId: "pay_checkout_failed",
+        amountMinor: 1900,
+        currency: "USD",
+        purpose: "subscription",
+      },
+    });
+
+    const failedRow = await pool.query(
+      "SELECT status FROM bursar.billing_checkout_intents WHERE id = $1",
+      [failedIntent.id],
+    );
+    expect(failedRow.rows[0]?.status).toBe("failed");
+
+    const expiredIntent = await bs.createOrGetCheckoutIntent({
+      actorKey: `user:${USER_ID2}`,
+      provider: PROVIDER,
+      type: "subscription",
+      productId: PRODUCT_ID,
+      requestFingerprint: "expired-intent",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_checkout_expired",
+      eventType: "checkout.expired",
+      occurredAt: new Date().toISOString(),
+      metadata: { checkout_intent_id: expiredIntent.id },
+    });
+    const expiredRow = await pool.query(
+      "SELECT status FROM bursar.billing_checkout_intents WHERE id = $1",
+      [expiredIntent.id],
+    );
+    expect(expiredRow.rows[0]?.status).toBe("expired");
+  });
+
   it("topup credit grant", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);

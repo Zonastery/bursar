@@ -674,8 +674,8 @@ class BillingServiceImpl:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._provisioning:
-                self._revoke_subscription(uid)
+            if uid and self._provisioning and event.subscription:
+                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return result
 
     def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
@@ -695,8 +695,8 @@ class BillingServiceImpl:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._provisioning:
-                self._revoke_subscription(uid)
+            if uid and self._provisioning and event.subscription:
+                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return result
 
     def _handle_subscription_paused(self, event: BillingEvent) -> BillingEventResult:
@@ -709,8 +709,8 @@ class BillingServiceImpl:
         )
         if result.handled:
             uid = self._resolve_user_id(event)
-            if uid and self._provisioning:
-                self._revoke_subscription(uid)
+            if uid and self._provisioning and event.subscription:
+                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return result
 
     def _handle_subscription_resumed(self, event: BillingEvent) -> BillingEventResult:
@@ -819,7 +819,7 @@ class BillingServiceImpl:
         if uid and event.subscription and self._provisioning:
             existing = self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
             self._store.upsert_billing_subscription(self._subscription_state(event, uid, existing, status="past_due"))
-            self._revoke_subscription(uid)
+            self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
         return BillingEventResult(handled=True, action="payment_failed_recorded")
 
     def _handle_refund_created(self, event: BillingEvent) -> BillingEventResult:
@@ -946,6 +946,11 @@ class BillingServiceImpl:
         self._provisioning.unset_user_plan(uid)
         logger.info("revoked plan for user %s", uid)
 
+    def _revoke_if_current_subscription(self, uid: str, subscription_id: str) -> None:
+        current = self._store.get_user_subscription(uid, statuses=["active", "trialing"])
+        if not current or current.provider_subscription_id == subscription_id:
+            self._revoke_subscription(uid)
+
     def _re_evaluate_access(self, uid: str, event: BillingEvent) -> None:
         if not self._provisioning or not event.subscription:
             return
@@ -964,4 +969,4 @@ class BillingServiceImpl:
                 if existing and existing.plan:
                     self._provision_subscription(uid, None, event, _plan_key=existing.plan)
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
-            self._revoke_subscription(uid)
+            self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)

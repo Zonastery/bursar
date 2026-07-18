@@ -1,6 +1,11 @@
 import DodoPayments from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
-import type { PaymentProvider, ResolveUserCallback, ProviderLogger } from "../types.js";
+import type {
+  CheckoutPaymentStatus,
+  PaymentProvider,
+  ResolveUserCallback,
+  ProviderLogger,
+} from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -49,6 +54,21 @@ export class DodoProvider implements PaymentProvider {
     const session = await client.checkoutSessions.create(body, requestOptions);
     if (!session.checkout_url) throw new Error("Checkout session returned no URL");
     return { url: session.checkout_url, providerSessionId: session.session_id };
+  }
+
+  async getCheckoutSessionStatus(providerSessionId: string): Promise<{
+    paymentStatus: CheckoutPaymentStatus;
+  } | null> {
+    const client = this.getClient();
+    try {
+      const session = await client.checkoutSessions.retrieve(providerSessionId);
+      return { paymentStatus: session.payment_status ?? null };
+    } catch (error) {
+      const details = error as { status?: number; statusCode?: number; status_code?: number };
+      const status = details.status ?? details.statusCode ?? details.status_code;
+      if (status === 404) return null;
+      throw error;
+    }
   }
 
   async createCustomerPortalSession(params: PortalParams): Promise<{ url: string }> {

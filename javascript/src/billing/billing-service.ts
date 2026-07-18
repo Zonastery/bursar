@@ -260,6 +260,9 @@ export class BillingService {
     const handler = this.handlerMap[event.eventType];
     if (!handler) {
       if (this.IGNORED_EVENT_TYPES.has(event.eventType)) {
+        if (event.eventType === BillingEventType.CHECKOUT_EXPIRED) {
+          await this.updateCheckoutIntentFromEvent(event, "expired");
+        }
         return { handled: true, action: "ignored" };
       }
       return { handled: false, error: "unhandled_event_type" };
@@ -283,6 +286,15 @@ export class BillingService {
         { error: err instanceof Error ? err.message : String(err) },
       );
     }
+  }
+
+  private async updateCheckoutIntentFromEvent(
+    event: BillingEvent,
+    status: "completed" | "failed" | "expired",
+  ): Promise<void> {
+    const intentId = event.metadata?.checkout_intent_id;
+    if (typeof intentId !== "string" || !intentId) return;
+    await this.store.updateCheckoutIntent(intentId, { status });
   }
 
   /**
@@ -378,6 +390,7 @@ export class BillingService {
     if (event.subscription?.providerSubscriptionId) {
       return this.handleSubscriptionCreated(event);
     }
+    await this.updateCheckoutIntentFromEvent(event, "completed");
     return { handled: true, action: "checkout_completed" };
   }
 
@@ -509,6 +522,7 @@ export class BillingService {
         duplicateSubscriptionId: subscriptionId,
         existingSubscriptionId: existingForProvider.providerSubscriptionId,
       });
+      await this.updateCheckoutIntentFromEvent(event, "completed");
       return { handled: true, action: "subscription_conflict" };
     }
     const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
@@ -543,6 +557,7 @@ export class BillingService {
         eventId: event.eventId,
         metadata: event.metadata ?? undefined,
       });
+      await this.updateCheckoutIntentFromEvent(event, "completed");
       return { handled: true, action: "subscription_conflict" };
     }
     if (
@@ -551,6 +566,9 @@ export class BillingService {
       ["active", "trialing"].includes(event.subscription.status)
     ) {
       await this.provisionSubscription(uid, offer, event, existing?.plan ?? undefined);
+    }
+    if (["active", "trialing"].includes(event.subscription.status ?? "")) {
+      await this.updateCheckoutIntentFromEvent(event, "completed");
     }
     return { handled: true, action: "subscription_created" };
   }
@@ -830,6 +848,8 @@ export class BillingService {
       }
     }
 
+    await this.updateCheckoutIntentFromEvent(event, "completed");
+
     return { handled: true, action: "payment_succeeded" };
   }
 
@@ -852,6 +872,7 @@ export class BillingService {
       );
       await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
     }
+    await this.updateCheckoutIntentFromEvent(event, "failed");
     return { handled: true, action: "payment_failed_recorded" };
   }
 

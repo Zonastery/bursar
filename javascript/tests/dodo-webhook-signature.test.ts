@@ -113,4 +113,21 @@ describe("DodoProvider webhook signature verification", () => {
     const result = await provider.handleWebhook(req);
     expect(result).toEqual({ received: false, retryable: false });
   });
+
+  it("retrieves checkout payment status and treats a missing session as expired", async () => {
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ payment_status: "requires_customer_action" })
+      .mockRejectedValueOnce(Object.assign(new Error("not found"), { status: 404 }));
+    const provider = new DodoProvider(
+      () => ({ checkoutSessions: { retrieve } }) as never,
+      { webhookKey: WEBHOOK_KEY },
+      mockBm,
+    );
+
+    await expect(provider.getCheckoutSessionStatus("cks_1")).resolves.toEqual({
+      paymentStatus: "requires_customer_action",
+    });
+    await expect(provider.getCheckoutSessionStatus("cks_missing")).resolves.toBeNull();
+  });
 });

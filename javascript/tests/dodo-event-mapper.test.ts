@@ -28,6 +28,7 @@ describe("Dodo subscription event mapping", () => {
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.created",
+        metadata: { plan_slug: "sage", billing_interval: "year" },
         subscription: expect.objectContaining({
           providerSubscriptionId: "sub_1",
           interval: "year",
@@ -35,6 +36,27 @@ describe("Dodo subscription event mapping", () => {
           periodStart: "2026-07-17T00:00:00Z",
           refs: { productId: "prod_yearly" },
         }),
+      }),
+    );
+  });
+
+  it("preserves checkout intent metadata on terminal payment events", async () => {
+    const sink = {
+      ingestBillingEvent: vi.fn().mockResolvedValue({ handled: true }),
+    } as unknown as BillingEventSink;
+
+    await handleDodoBillingEvent(
+      "payment.failed",
+      { id: "evt_failed", payment_id: "pay_1" },
+      "user_1",
+      { checkout_intent_id: "intent_1" },
+      sink,
+    );
+
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "payment.failed",
+        metadata: { checkout_intent_id: "intent_1" },
       }),
     );
   });
