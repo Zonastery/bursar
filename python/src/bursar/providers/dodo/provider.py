@@ -182,7 +182,7 @@ class DodoProvider(PaymentProvider):
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         client = self._get_client()
         response = await client.customers.retrieve_payment_methods(customer_id)
-        items = getattr(response, "items", None) or response.get("items", [])
+        items = response.get("items", []) if isinstance(response, dict) else getattr(response, "items", None) or []
         result: list[PaymentMethodInfo] = []
         for pm in items:
             pm_dict = pm.model_dump() if hasattr(pm, "model_dump") else pm

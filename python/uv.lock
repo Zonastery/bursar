@@ -105,11 +105,13 @@ test = [
     { name = "psycopg2-binary" },
     { name = "pyright" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-repeat" },
     { name = "pytest-timeout" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "stripe" },
     { name = "testcontainers" },
 ]
 
@@ -131,6 +133,7 @@ dev = [
     { name = "pytest-timeout" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "stripe" },
     { name = "testcontainers" },
 ]
 test-deps = [
@@ -139,11 +142,13 @@ test-deps = [
     { name = "psycopg2-binary" },
     { name = "pyright" },
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "pytest-repeat" },
     { name = "pytest-timeout" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "stripe" },
     { name = "testcontainers" },
 ]
 
@@ -157,6 +162,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pyright", marker = "extra == 'test'", specifier = ">=1.1.390" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.23.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
     { name = "pytest-repeat", marker = "extra == 'test'", specifier = ">=0.9" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.3" },
@@ -165,6 +171,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'test'", specifier = ">=6.0.3" },
     { name = "ruff", marker = "extra == 'test'", specifier = ">=0.15.0" },
     { name = "stripe", marker = "extra == 'providers'", specifier = ">=10.0.0" },
+    { name = "stripe", marker = "extra == 'test'", specifier = ">=10.0.0" },
     { name = "testcontainers", extras = ["postgres"], marker = "extra == 'test'", specifier = ">=4.8" },
 ]
 provides-extras = ["providers", "postgres", "test"]
@@ -187,6 +194,7 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", specifier = ">=0.15.0" },
+    { name = "stripe", specifier = ">=10.0.0" },
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
 ]
 test-deps = [
@@ -195,11 +203,13 @@ test-deps = [
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "pyright", specifier = ">=1.1.390" },
     { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "pytest-repeat", specifier = ">=0.9" },
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", specifier = ">=0.15.0" },
+    { name = "stripe", specifier = ">=10.0.0" },
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
 ]
 

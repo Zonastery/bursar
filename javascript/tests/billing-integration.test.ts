@@ -314,6 +314,43 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect(c2.status).toBe("duplicate");
   });
 
+  it("concurrent event claims admit one worker", async () => {
+    const { bs } = await makePgComponents(pool);
+    await bs.syncBillingFromConfig(BILLING_CONFIG);
+    const workers = Array.from(
+      { length: 12 },
+      () => new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+    );
+    const ready = new Set<number>();
+    let release!: () => void;
+    const start = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const claims = await Promise.all(
+        workers.map(async (worker, i) => {
+          const local = new PostgresBillingStore(worker);
+          ready.add(i);
+          if (ready.size === workers.length) release();
+          await start;
+          return local.claimBillingEvent(PROVIDER, "evt_concurrent_claim", "test.event");
+        }),
+      );
+      expect(claims.filter((claim) => claim.status === "claimed")).toHaveLength(1);
+      expect(
+        claims.filter((claim) => claim.status === "duplicate" || claim.status === "retry"),
+      ).toHaveLength(11);
+      const winner = claims.find((claim) => claim.status === "claimed");
+      if (winner?.status !== "claimed") throw new Error("expected one claim winner");
+      await bs.completeBillingEvent(PROVIDER, "evt_concurrent_claim", winner.claimToken);
+      expect(
+        (await bs.claimBillingEvent(PROVIDER, "evt_concurrent_claim", "test.event")).status,
+      ).toBe("duplicate");
+    } finally {
+      await Promise.all(workers.map((worker) => worker.end()));
+    }
+  }, 30000);
+
   it("event fail then reclaim", async () => {
     const { bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);

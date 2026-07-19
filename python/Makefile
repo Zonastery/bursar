@@ -1,4 +1,4 @@
-.PHONY: build clean lint typecheck test publish publish-test release release-ci help
+.PHONY: build clean lint typecheck test test-concurrency publish publish-test release release-ci help
 .DEFAULT_GOAL := help
 
 # Single source of truth for the version: pyproject.toml (H9). Read it directly
@@ -26,6 +26,9 @@ typecheck:  ## Run pyright
 
 test: lint typecheck  ## Lint, typecheck, then run the test suite
 	uv run python -m pytest tests/ -q
+
+test-concurrency:  ## Run the real-Postgres concurrency subset (set DATABASE_URL)
+	BURSAR_RACE_ITERATIONS=$${BURSAR_RACE_ITERATIONS:-1} uv run python -m pytest tests/ -m concurrency -q
 
 publish-test: test build  ## Publish to TestPyPI
 	. ./.env && uv publish --publish-url https://test.pypi.org/legacy/

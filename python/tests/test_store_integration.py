@@ -3,7 +3,7 @@
 Postgres is provided via a **real Postgres 16** instance. The single
 ``pg_database_url`` fixture lives in ``conftest.py`` and resolves a connection
 string in this order: ``DATABASE_URL`` (what CI and the JS suite use) →
-``BURSAR_TEST_PG_URL`` (legacy override) → ``pg_tmp`` (disposable) → skip.
+``BURSAR_TEST_PG_URL`` (legacy override) → a testcontainers-managed Postgres → skip.
 
 If none is available the tests **skip** with a visible reason (a DB is optional
 in a bare sandbox); they are correct and CI-runnable against any source.
@@ -11,10 +11,12 @@ in a bare sandbox); they are correct and CI-runnable against any source.
 
 from __future__ import annotations
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Barrier
 from typing import Any
 
 try:
@@ -34,6 +36,19 @@ from bursar.interface.models import (
     FeatureLimit,
 )
 from bursar.interface.postgres import PostgresStore, stamp_migrations
+
+
+def _run_concurrently(count: int, operation: Any) -> list[Any]:
+    """Start all DB actors together so tests exercise transaction races."""
+    barrier = Barrier(count)
+
+    def gated(index: int) -> Any:
+        barrier.wait(timeout=30)
+        return operation(index)
+
+    with ThreadPoolExecutor(max_workers=count) as executor:
+        return list(executor.map(gated, range(count)))
+
 
 pytestmark = [pytest.mark.integration]
 
@@ -270,8 +285,7 @@ class TestPostgresStoreIntegration:
             assert result.error is None
             return result.lease_id
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            lease_ids = list(pool.map(lambda _: create(), range(8)))
+        lease_ids = _run_concurrently(8, lambda _: create())
         assert lease_ids[0] is not None
         assert set(lease_ids) == {lease_ids[0]}
 
@@ -402,7 +416,7 @@ class TestPostgresStoreIntegration:
         assert store.get_balance(_PG_USER).balance == Decimal("0")
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_deduct_no_double_spend_pg(self, store: PostgresStore) -> None:
         """N concurrent deduct_with_allowance against a real Postgres row.
         SELECT ... FOR UPDATE must serialize them: exactly 10 of 30 succeed,
@@ -421,8 +435,7 @@ class TestPostgresStoreIntegration:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=n) as ex:
-            results = list(ex.map(one, range(n)))
+        results = _run_concurrently(n, one)
 
         succeeded = [r for r in results if not r.error]  # type: ignore[attr-defined]
         balance = store.get_balance(_PG_USER).balance
@@ -430,7 +443,7 @@ class TestPostgresStoreIntegration:
         assert balance == Decimal("0")
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_same_idempotency_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
 
@@ -441,8 +454,7 @@ class TestPostgresStoreIntegration:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            results = list(ex.map(one, range(16)))
+        results = _run_concurrently(16, one)
 
         non_idem = [r for r in results if not r.idempotent and not r.error]  # type: ignore[attr-defined]
         assert len(non_idem) == 1
@@ -1089,7 +1101,7 @@ class TestLeaseAdversarialPg:
         return s
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_create_lease_no_over_admission_pg(self, store: PostgresStore) -> None:
         """N concurrent create_lease on one row. FOR UPDATE serializes them:
         with balance 100 / floor 0 / hold 30, exactly 3 leases admit and the
@@ -1104,8 +1116,7 @@ class TestLeaseAdversarialPg:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=n) as ex:
-            results = list(ex.map(one, range(n)))
+        results = _run_concurrently(n, one)
 
         admitted = [r for r in results if r.error is None]  # type: ignore[attr-defined]
         assert len(admitted) == 3
@@ -1115,7 +1126,7 @@ class TestLeaseAdversarialPg:
         assert avail.balance == Decimal("100")  # held, not yet charged
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_max_concurrent_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("10000"), "purchase")
 
@@ -1126,12 +1137,11 @@ class TestLeaseAdversarialPg:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            results = list(ex.map(one, range(40)))
+        results = _run_concurrently(40, one)
         assert sum(1 for r in results if r.error is None) == 5  # type: ignore[attr-defined]
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_settle_same_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
@@ -1143,12 +1153,11 @@ class TestLeaseAdversarialPg:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=12) as ex:
-            list(ex.map(one, range(12)))
+        _run_concurrently(12, one)
         assert store.get_balance(_PG_USER).balance == Decimal("50")  # charged exactly once
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_settle_same_lease_no_key_one_debit_pg(self, store: PostgresStore) -> None:
         store.add_credits(_PG_USER, Decimal("100"), "purchase")
         lease = store.create_lease(_PG_USER, Decimal("50"), "usage", floor=Decimal("0"))
@@ -1160,8 +1169,7 @@ class TestLeaseAdversarialPg:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=12) as ex:
-            list(ex.map(one, range(12)))
+        _run_concurrently(12, one)
         # Lease-settled replay (no key) also guarantees a single debit.
         assert store.get_balance(_PG_USER).balance == Decimal("50")
 
@@ -2774,7 +2782,7 @@ class TestFeatureLimitsPg:
         assert check_today.remaining == 0
 
     @pytest.mark.concurrency
-    @pytest.mark.repeat(5)  # money-critical race: rerun to surface rare interleavings
+    @pytest.mark.repeat(int(os.environ.get("BURSAR_RACE_ITERATIONS", "1")))
     def test_concurrent_deduct_exactly_n_succeed_under_limit_n_pg(self, store: PostgresStore) -> None:
         """N concurrent ``deduct_with_allowance`` calls against the same
         ``(user, feature, window)``, limit N -- ``deduct_with_allowance``
@@ -2802,8 +2810,7 @@ class TestFeatureLimitsPg:
             finally:
                 s.close()
 
-        with ThreadPoolExecutor(max_workers=m) as ex:
-            results = list(ex.map(one, range(m)))
+        results = _run_concurrently(m, one)
 
         succeeded = [r for r in results if not r.error]  # type: ignore[attr-defined]
         denied = [r for r in results if r.error == "feature_limit_reached"]  # type: ignore[attr-defined]

@@ -1,0 +1,51 @@
+name: Concurrency stress
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  races:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bursar
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/bursar
+      BURSAR_RACE_ITERATIONS: "20"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+      - run: pip install -e "python/[test,postgres]"
+      - working-directory: javascript
+        run: npm ci
+      - name: Python race subset
+        working-directory: python
+        run: pytest -m concurrency -q
+      - name: JavaScript race subset
+        working-directory: javascript
+        run: |
+          for iteration in $(seq 1 20); do
+            npx vitest run tests/store-integration.test.ts tests/billing-integration.test.ts -t concurrent
+          done

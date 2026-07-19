@@ -307,7 +307,6 @@ emitter.on("credits.low_balance", lambda e: send_alert(e.user_id, e.data["balanc
 
 | Store | Import | Deps | Use case |
 |-------|--------|------|----------|
-| `MemoryStore` | `bursar.interface.memory.MemoryStore` | None | Testing, dev |
 | `HttpxSupabaseStore` | `bursar.interface.supabase.HttpxSupabaseStore` | `httpx` | Supabase production |
 | `PostgresStore` | `bursar.interface.postgres.PostgresStore` | `psycopg2` | Direct PostgreSQL |
 
@@ -367,7 +366,6 @@ bursar/
   interface/
     base.py            # CreditStore ABC (29 abstract methods)
     models.py          # Pydantic schemas
-    memory.py          # MemoryStore
     supabase.py        # HttpxSupabaseStore + run_migrations()
     postgres.py        # PostgresStore
   sql/                 # 001_*.sql … 015_*.sql (15 migrations)

@@ -9,10 +9,13 @@ a real Postgres 16.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Barrier
 
 import psycopg2
+import psycopg2.pool
 import pytest
 
 from bursar.billing.billing_service import BillingServiceImpl
@@ -331,6 +334,31 @@ class TestEventIdempotency:
         bs.fail_billing_event(PROVIDER, "evt_fail_retry", c1.claim_token, "retryable test failure")
         c2 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c2.status == "claimed"
+
+    @pytest.mark.concurrency
+    def test_concurrent_event_claims_admit_one_worker(self, pg_database_url: str, pg_store: object) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        bs.sync_billing_from_config(BILLING_CONFIG)
+        barrier = Barrier(12)
+
+        def claim(_: int):
+            pool = psycopg2.pool.ThreadedConnectionPool(1, 1, pg_database_url)
+            local = PostgresBillingStore(pg_database_url, pool=pool)
+            try:
+                barrier.wait(timeout=30)
+                return local.claim_billing_event(PROVIDER, "evt_concurrent_claim", "test.event")
+            finally:
+                local.close()
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            claims = list(executor.map(claim, range(12)))
+        assert sum(c.status == "claimed" for c in claims) == 1
+        assert sum(c.status in ("duplicate", "retry") for c in claims) == 11
+        winner = next(c for c in claims if c.status == "claimed")
+        assert winner.claim_token is not None
+        bs.complete_billing_event(PROVIDER, "evt_concurrent_claim", winner.claim_token)
+        assert bs.claim_billing_event(PROVIDER, "evt_concurrent_claim", "test.event").status == "duplicate"
 
     def test_event_handler_dispatched_for_matching_event(self, pg_database_url: str, pg_store: object) -> None:
         """Mirrors JavaScript test: eventHandlers dispatch on matching event type."""

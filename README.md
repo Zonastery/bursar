@@ -24,10 +24,10 @@ manager.deduct("user_abc", UsageMetrics(model="gpt-4", input_tokens=500, output_
 ```
 
 ```typescript
-import { CreditManager, MemoryStore } from "@zonastery/bursar";
+import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new MemoryStore();
-const manager = new CreditManager(store);
+const store = new PostgresStore(process.env.DATABASE_URL!);
+const manager = new Bursar({ creditStore: store });
 manager.publishPricingFromDict({
   version: 1,
   models: { "_default": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)" },

@@ -1,0 +1,7 @@
+[
+  {"name": "calendar_december", "period": "calendar_month", "now": "2026-12-31", "anchor": null},
+  {"name": "rolling_boundary", "period": "rolling_30d", "now": "2026-02-28", "anchor": "2026-01-30"},
+  {"name": "anniversary_leap_clamp", "period": "anniversary", "now": "2028-02-29", "anchor": "2027-01-31"},
+  {"name": "feature_week_boundary", "feature": true, "period": "weekly", "now": "2026-07-19"},
+  {"name": "feature_year_boundary", "feature": true, "period": "yearly", "now": "2026-01-01"}
+]

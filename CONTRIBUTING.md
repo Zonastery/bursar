@@ -46,8 +46,9 @@ uv run pytest -q              # quiet
 
 Store/manager/SQL **integration tests run against a real Postgres**. They read
 the connection string from `DATABASE_URL` (falling back to the legacy
-`BURSAR_TEST_PG_URL`); without one, the Postgres-backed tests *skip* but the
-MemoryStore concurrency/double-spend tests still run. To run everything locally:
+`BURSAR_TEST_PG_URL`) or start a disposable Postgres 16 testcontainer when Docker
+is available. Without either, database tests skip with a visible reason. To run
+everything locally:
 
 ```bash
 docker run -d --name bursar-pg -e POSTGRES_PASSWORD=postgres \
@@ -63,7 +64,7 @@ runs this matrix on Python 3.11, 3.12, and 3.13.
 
 ```bash
 cd javascript
-npx vitest run                # MemoryStore + parity always run
+npx vitest run                # unit, parity, and available Postgres tests
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar npx vitest run
                               # also runs the PostgresStore integration tests
 npx tsc --noEmit              # typecheck

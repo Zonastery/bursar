@@ -20,6 +20,33 @@ const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
 const D = (n: number | string) => new Decimal(n);
 
+async function runWithIndependentStores<T>(
+  count: number,
+  operation: (store: PostgresStore, i: number) => Promise<T>,
+): Promise<T[]> {
+  const pools = Array.from(
+    { length: count },
+    () => new pg.Pool({ connectionString: DATABASE_URL!, max: 1 }),
+  );
+  const stores = pools.map((p) => new PostgresStore(DATABASE_URL!, p));
+  const ready = new Set<number>();
+  let release!: () => void;
+  const start = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    const work = stores.map(async (store, i) => {
+      ready.add(i);
+      if (ready.size === count) release();
+      await start;
+      return operation(store, i);
+    });
+    return await Promise.all(work);
+  } finally {
+    await Promise.all(pools.map((p) => p.end()));
+  }
+}
+
 const PG_USER = "00000000-0000-0000-0000-000000000001";
 const PG_USER2 = "00000000-0000-0000-0000-000000000099";
 const PLAN_UUID = "00000000-0000-0000-0000-0000000000a1";
@@ -120,6 +147,16 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     await expect(applyMigrations(pool)).resolves.toBeUndefined();
   });
 
+  it("rebuilds a cleared migration ledger without leaving the schema unusable", async () => {
+    await pool.query("DELETE FROM bursar.schema_migrations");
+    await expect(applyMigrations(pool)).resolves.toBeUndefined();
+    const result = await pool.query("SELECT count(*)::int AS count FROM bursar.schema_migrations");
+    expect(result.rows[0].count).toBeGreaterThan(0);
+    const store = new PostgresStore(DATABASE_URL!, pool);
+    await store.addCredits(PG_USER, D(2), "purchase");
+    expect((await store.getBalance(PG_USER)).balance.toString()).toBe("2");
+  });
+
   it("PostgresStore.setup() refuses to fake success (H17)", async () => {
     const store = new PostgresStore(DATABASE_URL!, pool);
     await expect(store.setup()).rejects.toThrow(/migrat/i);
@@ -183,13 +220,11 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     // Balance covers only 5 of 20 one-credit charges, floor 0.
     await store.addCredits(PG_USER, D(5), "purchase");
 
-    const results = await Promise.all(
-      Array.from({ length: 20 }, (_, i) =>
-        store.deductWithAllowance(PG_USER, D(1), {
-          idempotencyKey: `conc-${i}`,
-          minBalance: D(0),
-        }),
-      ),
+    const results = await runWithIndependentStores(20, (worker, i) =>
+      worker.deductWithAllowance(PG_USER, D(1), {
+        idempotencyKey: `conc-${i}`,
+        minBalance: D(0),
+      }),
     );
 
     const succeeded = results.filter((r) => !r.error);
@@ -209,10 +244,8 @@ describe.runIf(DATABASE_URL)("PostgresStore integration (real Postgres 16)", () 
     const store = new PostgresStore(DATABASE_URL!, pool);
     await store.addCredits(PG_USER, D(100), "purchase");
 
-    const results = await Promise.all(
-      Array.from({ length: 12 }, () =>
-        store.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "race-key" }),
-      ),
+    const results = await runWithIndependentStores(12, (worker) =>
+      worker.deductWithAllowance(PG_USER, D(10), { idempotencyKey: "race-key" }),
     );
     const realDebits = results.filter((r) => !r.idempotent && !r.error);
     expect(realDebits.length).toBe(1);

@@ -48,6 +48,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --maxWorkers=1",
+    "test:providers": "vitest --config vitest.providers.config.ts run --coverage",
+    "test:concurrency": "vitest run tests/store-integration.test.ts tests/billing-integration.test.ts -t concurrent",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "lint": "eslint src/ tests/",

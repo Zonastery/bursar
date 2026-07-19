@@ -12,9 +12,9 @@ start deducting credits. Pricing lives in your DB — update it live without red
 
 ```typescript
 import { CreditManager } from "@zonastery/bursar";
-import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
+import { PostgresStore } from "@zonastery/bursar";
 
-const store = new MemoryStore();
+const store = new PostgresStore(process.env.DATABASE_URL!);
 const manager = new CreditManager(store);
 
 await manager.publishPricingFromDict({
@@ -94,10 +94,10 @@ console.log(`Total: ${cost.total.toString()}`); // 0.0110
 
 ```typescript
 import { CreditManager } from "@zonastery/bursar";
-import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
+import { PostgresStore } from "@zonastery/bursar";
 import Decimal from "decimal.js";
 
-const store = new MemoryStore();
+const store = new PostgresStore(process.env.DATABASE_URL!);
 const manager = new CreditManager(store);
 
 // publishPricingFromDict is async — it syncs the config to the store.
@@ -140,9 +140,9 @@ await manager.addCredits("user_abc", 5000);
 
 ```typescript
 import { CreditManager } from "@zonastery/bursar";
-import { MemoryStore } from "@zonastery/bursar/node"; // Node-only (uses `crypto`)
+import { PostgresStore } from "@zonastery/bursar";
 
-const store = new MemoryStore();
+const store = new PostgresStore(process.env.DATABASE_URL!);
 const manager = new CreditManager(store);
 
 await manager.publishPricingFromDict({
@@ -292,7 +292,7 @@ const engine = PricingEngine.fromDict(data);
 
 | Store | Import | Deps | Use case |
 |-------|--------|------|----------|
-| `MemoryStore` | `@zonastery/bursar/node` | None (uses Node `crypto`) | Testing, development |
+| `PostgresStore` | `@zonastery/bursar` | `pg` (optional peer) | PostgreSQL production and integration tests |
 | `HttpxSupabaseStore` | `@zonastery/bursar` | Node 18+ (`fetch`) | Supabase production |
 | `PostgresStore` | `@zonastery/bursar` | `pg` (optional peer) | Direct PostgreSQL |
 
