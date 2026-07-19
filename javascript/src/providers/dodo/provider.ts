@@ -89,11 +89,37 @@ export class DodoProvider implements PaymentProvider {
         headers: req.headers,
         body: req.rawBody,
       });
-    } catch {
+    } catch (error) {
+      this.logger?.warn?.("Dodo webhook verification failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return { received: false, retryable: false };
     }
 
-    const data = (payload.data ?? {}) as Record<string, unknown>;
+    // The Dodo SDK verifier validates and returns the event, but some SDK
+    // versions omit provider extension fields such as metadata/product_id.
+    // The raw body is already signature-verified above, so merge those fields
+    // back from the signed payload before mapping the billing event.
+    let signedData: Record<string, unknown> = {};
+    try {
+      signedData = (JSON.parse(req.rawBody) as { data?: Record<string, unknown> }).data ?? {};
+    } catch {
+      // Verification succeeded, so the SDK payload remains authoritative.
+    }
+    const verifiedData = (payload.data ?? {}) as Record<string, unknown>;
+    const productCart = signedData.product_cart;
+    const cartProductId = Array.isArray(productCart)
+      ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
+      : undefined;
+    const data = {
+      ...verifiedData,
+      ...(verifiedData.metadata == null && signedData.metadata != null
+        ? { metadata: signedData.metadata }
+        : {}),
+      ...(verifiedData.product_id == null && (signedData.product_id ?? cartProductId) != null
+        ? { product_id: signedData.product_id ?? cartProductId }
+        : {}),
+    };
     const type: string = payload.type;
     const metadata = (data.metadata ?? {}) as Record<string, string>;
     let userId: string | null = metadata.userId ?? null;
