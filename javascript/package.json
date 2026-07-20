@@ -1,6 +1,6 @@
 {
   "name": "@zonastery/bursar",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "description": "Declarative credit calculation engine for AI SaaS platforms",
   "type": "module",
   "main": "./dist/index.js",
