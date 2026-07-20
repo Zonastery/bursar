@@ -51,7 +51,8 @@ Get the fixed cost for a named job. Returns `null` for an unknown/unconfigured j
 
 ### `pricingSchema(): BursarConfigData`
 
-Get the raw pricing config dict.
+Get the canonical snake_case pricing config dict. Dynamic identifier keys and
+opaque values are returned unchanged.
 
 ### `minBalance: number`
 

@@ -2,7 +2,6 @@ import Decimal from "decimal.js";
 import { StoreError } from "../errors.js";
 import { canonicalBursarConfigDict } from "../config.js";
 import { resolveCalendarWindow } from "../allowance.js";
-import { snakeToCamelKeys } from "../case-utils.js";
 import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
@@ -99,14 +98,14 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
         onExceed: "deny",
       };
     } else {
-      const fl = snakeToCamelKeys(v as Record<string, unknown>);
-      const valueRaw = fl["value"];
-      const rawMax = fl["maxCalls"];
+      const fl = v as Record<string, unknown>;
+      const valueRaw = fl.value;
+      const rawMax = fl.max_calls;
       out[k] = {
         ...(valueRaw !== undefined ? { value: valueRaw } : {}),
         maxCalls: rawMax === undefined || rawMax === null ? null : Number(rawMax),
         period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-        onExceed: (String(fl.onExceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+        onExceed: (String(fl.on_exceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
       };
     }
   }
@@ -117,11 +116,11 @@ function parsePerOperation(raw: unknown): Record<string, OperationPolicy> {
   if (!raw || typeof raw !== "object") return {};
   const out: Record<string, OperationPolicy> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const op = snakeToCamelKeys((v ?? {}) as Record<string, unknown>);
+    const op = (v ?? {}) as Record<string, unknown>;
     out[k] = {
-      billingMode: (String(op.billingMode ?? "strict") as BillingMode) ?? "strict",
-      maxConcurrent: op.maxConcurrent != null ? Number(op.maxConcurrent) : null,
-      overdraftFloor: op.overdraftFloor != null ? dec(op.overdraftFloor) : null,
+      billingMode: (String(op.billing_mode ?? "strict") as BillingMode) ?? "strict",
+      maxConcurrent: op.max_concurrent != null ? Number(op.max_concurrent) : null,
+      overdraftFloor: op.overdraft_floor != null ? dec(op.overdraft_floor) : null,
     };
   }
   return out;
@@ -611,21 +610,13 @@ export class PostgresStore extends CreditStore {
       return { id: String(row.id ?? ""), config: {}, version: defaultVersion };
     }
 
-    const rawFlatJobs: unknown =
-      config && typeof config.metering === "object" && config.metering !== null
-        ? (config.metering as Record<string, unknown>).flat_jobs
-        : undefined;
-
     const result: BursarConfigResult = {
       id: String(row.id ?? ""),
-      config: snakeToCamelKeys(config),
+      // Config is a shared snake_case wire document. Dynamic keys (plan IDs,
+      // model IDs, bucket names, etc.) must remain byte-for-byte unchanged.
+      config,
       version: Number(row.version ?? defaultVersion),
     };
-
-    if (rawFlatJobs) {
-      const metering = result.config.metering as Record<string, unknown> | undefined;
-      if (metering) metering.flatJobs = rawFlatJobs;
-    }
 
     return result;
   }

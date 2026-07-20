@@ -1,5 +1,4 @@
 import Decimal from "decimal.js";
-import { camelToSnakeKeys } from "./case-utils.js";
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
@@ -85,7 +84,7 @@ export interface BillingSection {
 }
 
 /** Internal validated pricing configuration. */
-export interface BursarConfig {
+export interface ParsedBursarConfig {
   version: number;
   metering: MeteringConfig;
   ledger: LedgerConfig;
@@ -93,7 +92,10 @@ export interface BursarConfig {
   billing?: BillingSection;
 }
 
-/** Known top-level config keys, checked after snake→camel normalisation. */
+/** Canonical snake_case configuration document accepted by the SDK. */
+export type BursarConfigData = Record<string, unknown>;
+
+/** Known top-level keys, checked after decoding the snake_case wire shape. */
 const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   "version",
   "metering",
@@ -102,7 +104,11 @@ const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   "billing",
 ]);
 
-/** Known metering-section keys. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Known metering-section keys after decoding. */
 const METERING_KEYS: ReadonlySet<string> = new Set([
   "models",
   "tools",
@@ -111,7 +117,7 @@ const METERING_KEYS: ReadonlySet<string> = new Set([
   "flatJobs",
 ]);
 
-/** Known ledger-section keys. */
+/** Known ledger-section keys after decoding. */
 const LEDGER_KEYS: ReadonlySet<string> = new Set(["minBalance", "signupGrant", "buckets"]);
 
 /** Known plan-definition keys (new nested schema). */
@@ -214,7 +220,7 @@ function assertKnownKeys(
 /** Variable set for validating `tools` expressions: base set + `calls` (WS2). */
 const TOOLS_VARIABLES: ReadonlySet<string> = new Set([...KNOWN_VARIABLES, "calls"]);
 
-function validateExpressions(raw: BursarConfig): void {
+function validateExpressions(raw: ParsedBursarConfig): void {
   for (const [key, expr] of Object.entries(raw.metering.models)) {
     try {
       validateExpression(expr, KNOWN_VARIABLES);
@@ -250,13 +256,14 @@ function validateExpressions(raw: BursarConfig): void {
 }
 
 /**
- * H6 fix: normalise snake_case keys to camelCase before consumption.
- *
- * The documented config format is snake_case (allowance_amount, billing_mode,
- * rate_overrides, overdraft_floor). JS previously only read
- * camelCase, silently dropping these fields and falling back to defaults.
+ * Decode documented snake_case config fields into the camelCase internal model.
+ * CamelCase input is rejected so mixed representations cannot collide or
+ * silently select a different value.
  */
-function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
+function decodeSnakeFields(
+  data: Record<string, unknown>,
+  context: string,
+): Record<string, unknown> {
   const keyMap: Record<string, string> = {
     min_balance: "minBalance",
     signup_grant: "signupGrant",
@@ -294,52 +301,48 @@ function normaliseKeys(data: Record<string, unknown>): Record<string, unknown> {
   };
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(data)) {
+    if (Object.entries(keyMap).some(([snake, camel]) => snake !== camel && camel === k)) {
+      throw new ConfigError(`${context}.${k} must use snake_case`);
+    }
     const mapped = keyMap[k] ?? k;
     out[mapped] = v;
   }
   return out;
 }
 
-/** Recursively normalise a plan definition object (new nested schema). */
-function normalisePlan(p: Record<string, unknown>): Record<string, unknown> {
-  const out = normaliseKeys(p);
+/** Decode a plan definition while preserving its dynamic map keys. */
+function decodePlan(p: Record<string, unknown>): Record<string, unknown> {
+  const out = decodeSnakeFields(p, "plan");
   // Normalise nested allowance section
   if (out.allowance != null && typeof out.allowance === "object" && !Array.isArray(out.allowance)) {
-    out.allowance = normaliseKeys(out.allowance as Record<string, unknown>);
+    out.allowance = decodeSnakeFields(out.allowance as Record<string, unknown>, "plan.allowance");
   }
   // Normalise nested safety section
   if (out.safety != null && typeof out.safety === "object" && !Array.isArray(out.safety)) {
-    out.safety = normaliseKeys(out.safety as Record<string, unknown>);
-    // Normalise perOperation inside safety
-    const safety = out.safety as Record<string, unknown>;
-    if (safety.perOperation != null && typeof safety.perOperation === "object") {
-      const perOp = safety.perOperation as Record<string, unknown>;
-      for (const [opKey, opVal] of Object.entries(perOp)) {
-        perOp[opKey] = normaliseKeys(opVal as Record<string, unknown>);
-      }
-    }
+    out.safety = decodeSnakeFields(out.safety as Record<string, unknown>, "plan.safety");
   }
   return out;
 }
 
-/** Recursively normalise a bucket definition object (credit buckets). */
-function normaliseBucket(t: Record<string, unknown>): Record<string, unknown> {
-  return normaliseKeys(t);
+/** Decode a bucket definition while preserving the bucket identifier. */
+function decodeBucket(t: Record<string, unknown>): Record<string, unknown> {
+  return decodeSnakeFields(t, "ledger.buckets");
 }
 
 /**
- * Normalise + validate a plan's `entitlements` map (per-feature
- * invocation-count limits). Each entry's own keys are snake/camel-normalised
- * since, unlike top-level plan fields, these nested objects are not otherwise
- * touched by `normaliseKeys`.
+ * Decode + validate a plan's `entitlements` map. Feature identifiers and
+ * arbitrary entitlement values are opaque and remain unchanged.
  */
-function normaliseEntitlements(
+function decodeEntitlements(
   planKey: string,
   raw: Record<string, unknown>,
 ): Record<string, PlanEntitlement> {
   const out: Record<string, PlanEntitlement> = {};
   for (const [featureKey, rawLimit] of Object.entries(raw)) {
-    const limit = normaliseKeys((rawLimit ?? {}) as Record<string, unknown>);
+    const limit = decodeSnakeFields(
+      (rawLimit ?? {}) as Record<string, unknown>,
+      `plans.${planKey}.entitlements.${featureKey}`,
+    );
     assertKnownKeys(limit, FEATURE_LIMIT_KEYS, `plans.${planKey}.entitlements.${featureKey}`);
     const rawMax = limit.maxCalls;
     let maxCalls: number | null = null;
@@ -376,16 +379,19 @@ function normaliseEntitlements(
 }
 
 /**
- * Normalise + validate a plan's `safety.perOperation` map (per-operation
- * financial-safety policy overrides, mirrors Python's `OperationPolicy`).
+ * Decode + validate a plan's `safety.per_operation` map (per-operation
+ * financial-safety policy overrides, mirroring Python's `OperationPolicy`).
  */
-function normalisePerOperation(
+function decodePerOperation(
   planKey: string,
   raw: Record<string, unknown>,
 ): Record<string, OperationPolicy> {
   const out: Record<string, OperationPolicy> = {};
   for (const [opType, rawPolicy] of Object.entries(raw)) {
-    const policy = normaliseKeys((rawPolicy ?? {}) as Record<string, unknown>);
+    const policy = decodeSnakeFields(
+      (rawPolicy ?? {}) as Record<string, unknown>,
+      `plans.${planKey}.safety.per_operation.${opType}`,
+    );
     assertKnownKeys(
       policy,
       OPERATION_POLICY_KEYS,
@@ -413,7 +419,7 @@ function normalisePerOperation(
 // ── Section parsers (extracted from loadConfigFromDict, M6) ─────────
 
 function parseMetering(raw: Record<string, unknown>): MeteringConfig {
-  const normalised = normaliseKeys(raw);
+  const normalised = decodeSnakeFields(raw, "metering");
   assertKnownKeys(normalised, METERING_KEYS, "metering");
 
   if (normalised.models == null) throw new ConfigError("missing required section: metering.models");
@@ -455,7 +461,7 @@ function parseSignupGrant(raw: unknown): SignupGrant | null {
   if (typeof raw !== "object" || Array.isArray(raw)) {
     throw new ConfigError("ledger.signupGrant must be an object { amount, bucket }");
   }
-  const grant = normaliseKeys(raw as Record<string, unknown>);
+  const grant = decodeSnakeFields(raw as Record<string, unknown>, "ledger.signup_grant");
   assertKnownKeys(grant, SIGNUP_GRANT_KEYS, "ledger.signupGrant");
   const amount = Number(grant.amount);
   if (!Number.isFinite(amount) || amount < 0) {
@@ -468,7 +474,7 @@ function parseSignupGrant(raw: unknown): SignupGrant | null {
 }
 
 function parseLedger(raw: Record<string, unknown>): LedgerConfig {
-  const normalised = normaliseKeys(raw);
+  const normalised = decodeSnakeFields(raw, "ledger");
   assertKnownKeys(normalised, LEDGER_KEYS, "ledger");
 
   const minBalance = new Decimal((normalised.minBalance as number | string | undefined) ?? 0);
@@ -494,7 +500,7 @@ function parseBuckets(raw: Record<string, unknown>): Record<string, BucketDefini
 
   const rawBuckets = raw.buckets as Record<string, Record<string, unknown>>;
   const buckets = Object.fromEntries(
-    Object.entries(rawBuckets).map(([k, v]) => [k, normaliseBucket(v)]),
+    Object.entries(rawBuckets).map(([k, v]) => [k, decodeBucket(v)]),
   );
 
   let overdraftCount = 0;
@@ -534,7 +540,7 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
   const rawPlans = raw.plans as Record<string, Record<string, unknown>> | undefined;
   if (!rawPlans) return undefined;
 
-  const plans = Object.fromEntries(Object.entries(rawPlans).map(([k, v]) => [k, normalisePlan(v)]));
+  const plans = Object.fromEntries(Object.entries(rawPlans).map(([k, v]) => [k, decodePlan(v)]));
 
   for (const [planKey, plan] of Object.entries(plans)) {
     assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
@@ -598,10 +604,7 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
       if (typeof plan.entitlements !== "object" || Array.isArray(plan.entitlements)) {
         throw new ConfigError(`plans.${planKey}.entitlements must be a dict`);
       }
-      plan.entitlements = normaliseEntitlements(
-        planKey,
-        plan.entitlements as Record<string, unknown>,
-      );
+      plan.entitlements = decodeEntitlements(planKey, plan.entitlements as Record<string, unknown>);
     }
   }
 
@@ -637,7 +640,7 @@ function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition
         billingMode,
         perOperation:
           perOperationRaw != null
-            ? normalisePerOperation(key, perOperationRaw as Record<string, unknown>)
+            ? decodePerOperation(key, perOperationRaw as Record<string, unknown>)
             : undefined,
         maxConcurrent: (safetyRaw.maxConcurrent as number | null) ?? null,
         overdraftFloor:
@@ -668,7 +671,10 @@ function parseProviderRefs(
     { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }
   > = {};
   for (const [providerKey, providerVal] of Object.entries(raw as Record<string, unknown>)) {
-    const ref = normaliseKeys((providerVal ?? {}) as Record<string, unknown>);
+    const ref = decodeSnakeFields(
+      (providerVal ?? {}) as Record<string, unknown>,
+      `${context}.${providerKey}`,
+    );
     assertKnownKeys(ref, PROVIDER_REF_KEYS, `${context}.${providerKey}`);
     out[providerKey] = {
       ...(ref.productId != null ? { productId: String(ref.productId) } : {}),
@@ -681,7 +687,10 @@ function parseProviderRefs(
 }
 
 function parseGrant(raw: unknown, context: string): SubscriptionGrant {
-  const grant = normaliseKeys((raw ?? { mode: "allowance" }) as Record<string, unknown>);
+  const grant = decodeSnakeFields(
+    (raw ?? { mode: "allowance" }) as Record<string, unknown>,
+    context,
+  );
   const mode = (grant.mode as string | undefined) ?? "allowance";
   if (mode === "allowance") {
     assertKnownKeys(grant, new Set(["mode"]), context);
@@ -707,7 +716,7 @@ function parseGrant(raw: unknown, context: string): SubscriptionGrant {
 }
 
 function parseBillingOffer(raw: unknown, context: string): BillingOffer {
-  const offer = normaliseKeys((raw ?? {}) as Record<string, unknown>);
+  const offer = decodeSnakeFields((raw ?? {}) as Record<string, unknown>, context);
   assertKnownKeys(offer, BILLING_OFFER_KEYS, context);
   if (offer.plan == null || offer.plan === "") {
     throw new ConfigError(`${context} is missing required 'plan' field`);
@@ -737,7 +746,7 @@ function parseBillingOffer(raw: unknown, context: string): BillingOffer {
 }
 
 function parseBillingTopup(raw: unknown, context: string): BillingCreditTopup {
-  const topup = normaliseKeys((raw ?? {}) as Record<string, unknown>);
+  const topup = decodeSnakeFields((raw ?? {}) as Record<string, unknown>, context);
   assertKnownKeys(topup, BILLING_TOPUP_KEYS, context);
   const creditsPerUnit = Number(topup.creditsPerUnit ?? 1000);
   if (!Number.isFinite(creditsPerUnit) || creditsPerUnit < 0) {
@@ -779,7 +788,8 @@ function parseBillingTopup(raw: unknown, context: string): BillingCreditTopup {
 
 function parseBilling(raw: unknown): BillingSection | undefined {
   if (raw == null) return undefined;
-  const section = normaliseKeys(raw as Record<string, unknown>);
+  if (!isRecord(raw)) throw new ConfigError("billing must be a dict");
+  const section = decodeSnakeFields(raw, "billing");
   assertKnownKeys(section, BILLING_KEYS, "billing");
   const subscriptions: Record<string, BillingOffer> = {};
   if (section.subscriptions != null) {
@@ -806,7 +816,7 @@ function parseBilling(raw: unknown): BillingSection | undefined {
   };
 }
 
-function validatePlanReferences(config: BursarConfig): void {
+function validatePlanReferences(config: ParsedBursarConfig): void {
   const billing = config.billing;
   if (!billing?.subscriptions || Object.keys(billing.subscriptions).length === 0) return;
   const plans = config.plans ?? {};
@@ -819,7 +829,7 @@ function validatePlanReferences(config: BursarConfig): void {
   }
 }
 
-function validateRateOverrideKeys(config: BursarConfig): void {
+function validateRateOverrideKeys(config: ParsedBursarConfig): void {
   if (!config.plans) return;
   const modelKeys = new Set(Object.keys(config.metering.models));
   for (const [planId, planDef] of Object.entries(config.plans)) {
@@ -835,7 +845,7 @@ function validateRateOverrideKeys(config: BursarConfig): void {
   }
 }
 
-function validateBucketReferences(config: BursarConfig): void {
+function validateBucketReferences(config: ParsedBursarConfig): void {
   const buckets = config.ledger.buckets;
   const bucketKeys = buckets ? new Set(Object.keys(buckets)) : null;
 
@@ -883,38 +893,63 @@ function decToJson(value: Decimal): number | string {
   return value.isInteger() ? value.toNumber() : value.toString();
 }
 
-/** Convert a validated config to a plain camelCase dict (JSON-safe). */
-function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
+function providerRefsToSnake(
+  refs: Record<
+    string,
+    {
+      productId?: string | null;
+      priceId?: string | null;
+      variantId?: string | null;
+      lookupKey?: string | null;
+    }
+  >,
+): Record<string, Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(refs).map(([provider, ref]) => [
+      provider,
+      {
+        ...(ref.productId != null ? { product_id: ref.productId } : {}),
+        ...(ref.priceId != null ? { price_id: ref.priceId } : {}),
+        ...(ref.variantId != null ? { variant_id: ref.variantId } : {}),
+        ...(ref.lookupKey != null ? { lookup_key: ref.lookupKey } : {}),
+      },
+    ]),
+  );
+}
+
+/** Convert a validated config to the canonical snake_case JSON shape. */
+export function bursarConfigToSnakeDict(config: ParsedBursarConfig): Record<string, unknown> {
   const plans = config.plans
     ? Object.fromEntries(
         Object.entries(config.plans).map(([key, plan]) => [
           key,
           {
             label: plan.label,
+            ...(plan.tier != null ? { tier: plan.tier } : {}),
             allowance: {
               amount: decToJson(plan.allowance.amount),
               period: plan.allowance.period,
             },
             safety: {
-              billingMode: plan.safety.billingMode,
+              billing_mode: plan.safety.billingMode,
               ...(plan.safety.maxConcurrent != null
-                ? { maxConcurrent: plan.safety.maxConcurrent }
+                ? { max_concurrent: plan.safety.maxConcurrent }
                 : {}),
               ...(plan.safety.overdraftFloor != null
-                ? { overdraftFloor: decToJson(plan.safety.overdraftFloor) }
+                ? { overdraft_floor: decToJson(plan.safety.overdraftFloor) }
                 : {}),
               ...(plan.safety.perOperation
                 ? {
-                    perOperation: Object.fromEntries(
+                    per_operation: Object.fromEntries(
                       Object.entries(plan.safety.perOperation).map(([op, policy]) => [
                         op,
                         {
-                          billingMode: policy.billingMode,
+                          billing_mode: policy.billingMode,
                           ...(policy.maxConcurrent != null
-                            ? { maxConcurrent: policy.maxConcurrent }
+                            ? { max_concurrent: policy.maxConcurrent }
                             : {}),
                           ...(policy.overdraftFloor != null
-                            ? { overdraftFloor: decToJson(policy.overdraftFloor) }
+                            ? { overdraft_floor: decToJson(policy.overdraftFloor) }
                             : {}),
                         },
                       ]),
@@ -922,7 +957,7 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
                   }
                 : {}),
             },
-            ...(plan.rateOverrides ? { rateOverrides: plan.rateOverrides } : {}),
+            ...(plan.rateOverrides ? { rate_overrides: plan.rateOverrides } : {}),
             ...(plan.entitlements
               ? {
                   entitlements: Object.fromEntries(
@@ -930,9 +965,9 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
                       fk,
                       {
                         ...(ent.value !== undefined ? { value: ent.value } : {}),
-                        ...(ent.maxCalls != null ? { maxCalls: ent.maxCalls } : {}),
+                        ...(ent.maxCalls != null ? { max_calls: ent.maxCalls } : {}),
                         period: ent.period,
-                        onExceed: ent.onExceed,
+                        on_exceed: ent.onExceed,
                       },
                     ]),
                   ),
@@ -952,21 +987,21 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
             {
               plan: offer.plan,
               interval: offer.interval ?? "month",
-              intervalCount: offer.intervalCount ?? 1,
+              interval_count: offer.intervalCount ?? 1,
               grant:
                 offer.grant?.mode === "cycle_grant"
                   ? {
                       mode: "cycle_grant",
                       credits: offer.grant.credits,
                       bucket: offer.grant.bucket,
-                      replacePrior: offer.grant.replacePrior ?? true,
+                      replace_prior: offer.grant.replacePrior ?? true,
                     }
                   : (offer.grant ?? { mode: "allowance" }),
               ...(offer.providers && Object.keys(offer.providers).length > 0
-                ? { providers: offer.providers }
+                ? { providers: providerRefsToSnake(offer.providers) }
                 : {}),
-              ...(offer.validFrom != null ? { validFrom: offer.validFrom } : {}),
-              ...(offer.validTo != null ? { validTo: offer.validTo } : {}),
+              ...(offer.validFrom != null ? { valid_from: offer.validFrom } : {}),
+              ...(offer.validTo != null ? { valid_to: offer.validTo } : {}),
             },
           ]),
         ),
@@ -974,13 +1009,13 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
           Object.entries(config.billing.topups).map(([key, topup]) => [
             key,
             {
-              depositTo: topup.depositTo,
-              creditsPerUnit: topup.creditsPerUnit ?? 1000,
-              minAmountMinor: topup.minAmountMinor ?? 500,
-              maxAmountMinor: topup.maxAmountMinor ?? 500_000,
-              taxBehavior: topup.taxBehavior ?? "exclude_tax",
+              deposit_to: topup.depositTo,
+              credits_per_unit: topup.creditsPerUnit ?? 1000,
+              min_amount_minor: topup.minAmountMinor ?? 500,
+              max_amount_minor: topup.maxAmountMinor ?? 500_000,
+              tax_behavior: topup.taxBehavior ?? "exclude_tax",
               ...(topup.providers && Object.keys(topup.providers).length > 0
-                ? { providers: topup.providers }
+                ? { providers: providerRefsToSnake(topup.providers) }
                 : {}),
             },
           ]),
@@ -994,14 +1029,14 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
       models: config.metering.models,
       tools: config.metering.tools,
       search: config.metering.search,
-      cacheDiscount: config.metering.cacheDiscount,
-      flatJobs: Object.fromEntries(
+      cache_discount: config.metering.cacheDiscount,
+      flat_jobs: Object.fromEntries(
         Object.entries(config.metering.flatJobs).map(([job, cost]) => [job, decToJson(cost)]),
       ),
     },
     ledger: {
-      minBalance: decToJson(config.ledger.minBalance),
-      ...(config.ledger.signupGrant ? { signupGrant: config.ledger.signupGrant } : {}),
+      min_balance: decToJson(config.ledger.minBalance),
+      ...(config.ledger.signupGrant ? { signup_grant: config.ledger.signupGrant } : {}),
       ...(config.ledger.buckets
         ? {
             buckets: Object.fromEntries(
@@ -1011,8 +1046,8 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
                   label: bucket.label,
                   priority: bucket.priority,
                   expires: bucket.expires,
-                  ...(bucket.ttlDays != null ? { ttlDays: bucket.ttlDays } : {}),
-                  ...(bucket.allowOverdraft ? { allowOverdraft: true } : {}),
+                  ...(bucket.ttlDays != null ? { ttl_days: bucket.ttlDays } : {}),
+                  ...(bucket.allowOverdraft ? { allow_overdraft: true } : {}),
                   ...(bucket.default ? { default: true } : {}),
                 },
               ]),
@@ -1026,15 +1061,22 @@ function bursarConfigToDict(config: BursarConfig): Record<string, unknown> {
 }
 
 /** Validate and return a canonical snake_case config dict for persistence. */
-export function canonicalBursarConfigDict(data: Record<string, unknown>): Record<string, unknown> {
+export function canonicalBursarConfigDict(data: BursarConfigData): BursarConfigData {
   const config = loadConfigFromDict(data);
-  return camelToSnakeKeys(bursarConfigToDict(config)) as Record<string, unknown>;
+  return bursarConfigToSnakeDict(config);
 }
 
 /** Load and validate a pricing config from a raw dictionary. */
-export function loadConfigFromDict(data: Record<string, unknown>): BursarConfig {
-  const d = normaliseKeys(data);
+export function loadConfigFromDict(data: BursarConfigData): ParsedBursarConfig {
+  if (!isRecord(data)) throw new ConfigError("config must be a dict");
+  const d = decodeSnakeFields(data, "config");
   assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
+
+  for (const section of ["metering", "ledger", "plans"] as const) {
+    if (d[section] != null && !isRecord(d[section])) {
+      throw new ConfigError(`${section} must be a dict`);
+    }
+  }
 
   const version = (d.version as number | undefined) ?? 1;
   if (version !== 1) {
@@ -1049,7 +1091,7 @@ export function loadConfigFromDict(data: Record<string, unknown>): BursarConfig 
   const plans = parsePlans(d as Record<string, unknown>);
   const billing = parseBilling(d.billing);
 
-  const config: BursarConfig = { version, metering, ledger };
+  const config: ParsedBursarConfig = { version, metering, ledger };
   if (plans) config.plans = plans;
   if (billing) config.billing = billing;
 

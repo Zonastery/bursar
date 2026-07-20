@@ -896,7 +896,7 @@ export class BillingService {
 
         if (payment?.purpose === "credit_topup") {
           const payMeta = (payment.metadata ?? {}) as Record<string, unknown>;
-          const rawCpu = payMeta.creditsPerUnit as string | number | null | undefined;
+          const rawCpu = payMeta.credits_per_unit as string | number | null | undefined;
           const cpu = Number(rawCpu);
           if (!Number.isFinite(cpu) || cpu <= 0) {
             this.logger?.warn?.(

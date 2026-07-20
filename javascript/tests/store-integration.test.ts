@@ -1062,7 +1062,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       const config = {
         version: 1,
         metering: { models: { "*": "input_tokens * 1" } },
-        ledger: { minBalance: 0 },
+        ledger: { min_balance: 0 },
         plans: {
           [planKey]: {
             label: `Plan ${allowancePeriod}`,
@@ -1154,7 +1154,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const config = {
       version: 1,
       metering: { models: { "*": "input_tokens * 1" } },
-      ledger: { minBalance: 0 },
+      ledger: { min_balance: 0 },
       plans: {
         rolling: {
           label: "Rolling",
@@ -1207,7 +1207,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const config = {
       version: 1,
       metering: { models: { "*": "input_tokens * 1" } },
-      ledger: { minBalance: 0 },
+      ledger: { min_balance: 0 },
       plans: {
         anniv: {
           label: "Anniversary",
@@ -1244,7 +1244,7 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
       const config = {
         version: 1,
         metering: { models: { "*": "input_tokens * 1" } },
-        ledger: { minBalance: 0 },
+        ledger: { min_balance: 0 },
         plans: {
           [planKey]: {
             label: planKey,
@@ -1396,14 +1396,14 @@ describe.runIf(DATABASE_URL)("Configurable allowance window (WS9) — real Postg
     const manager = new CreditsService(store);
     const config = {
       version: 1,
-      metering: { models: { "*": "input_tokens * 1" }, flatJobs: { job: 2.5 } },
-      ledger: { minBalance: 0 },
+      metering: { models: { "*": "input_tokens * 1" }, flat_jobs: { job: 2.5 } },
+      ledger: { min_balance: 0 },
     };
     await store.setActivePricing(config);
     await manager.publishPricingFromDict(config);
 
     const stored = await store.getActivePricing();
-    expect((stored?.config.metering as Record<string, unknown>)?.flatJobs?.job).toBe("2.5");
+    expect((stored?.config.metering as Record<string, unknown>)?.flat_jobs?.job).toBe("2.5");
 
     await manager.addCredits(PG_USER11, 10);
     const result = await manager.deductFlatJob(PG_USER11, "job");
@@ -1499,9 +1499,9 @@ describe.runIf(DATABASE_URL)("Credit tiers — real Postgres", () => {
     version: 1,
     metering: { models: { "*": "input_tokens * 1" } },
     ledger: {
-      minBalance: 0,
+      min_balance: 0,
       buckets: {
-        gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
+        gifted: { label: "Gifted", priority: 10, expires: true, ttl_days: 30 },
         purchased: { label: "Purchased", priority: 20, expires: false, default: true },
       },
     },
@@ -1671,9 +1671,9 @@ describe.runIf(DATABASE_URL)("CreditsService end-to-end — credit tiers, real P
     version: 1,
     metering: { models: { "*": "input_tokens * 1" } },
     ledger: {
-      minBalance: 0,
+      min_balance: 0,
       buckets: {
-        gifted: { label: "Gifted", priority: 10, expires: true, ttlDays: 30 },
+        gifted: { label: "Gifted", priority: 10, expires: true, ttl_days: 30 },
         purchased: { label: "Purchased", priority: 30, expires: false, default: true },
       },
     },
@@ -1810,10 +1810,10 @@ describe.runIf(DATABASE_URL)("CreditsService end-to-end — credit tiers, real P
       version: 1,
       metering: { models: { "*": "input_tokens * 1" } },
       ledger: {
-        minBalance: 0,
+        min_balance: 0,
         buckets: {
           gifted: { label: "Gifted", priority: 10, expires: false, default: true },
-          purchased: { label: "Purchased", priority: 20, expires: false, allowOverdraft: true },
+          purchased: { label: "Purchased", priority: 20, expires: false, allow_overdraft: true },
         },
       },
     });
@@ -1871,13 +1871,13 @@ describe.runIf(DATABASE_URL)("CreditsService.grantSubscriptionCycle — real Pos
     version: 1,
     metering: { models: { "*": "input_tokens * 1" } },
     ledger: {
-      minBalance: 0,
+      min_balance: 0,
       buckets: {
         subscription: {
           label: "Subscription",
           priority: 10,
           expires: true,
-          ttlDays: 30,
+          ttl_days: 30,
           default: true,
         },
       },

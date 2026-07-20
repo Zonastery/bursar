@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import Decimal from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/stores/postgres-store.js";
 import { PostgresStore } from "../src/stores/postgres-store.js";
+import { PostgresBillingStore } from "../src/billing/postgres-billing-store.js";
 import { StoreError } from "../src/errors.js";
 
 const D = (n: number | string) => new Decimal(n);
@@ -442,6 +443,74 @@ describe("PostgresStore", () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
     const result = await store.getActivePricing();
     expect(result).toBeNull();
+  });
+
+  it("returns the canonical config without converting identifier keys", async () => {
+    const config = {
+      version: 1,
+      metering: {
+        models: { myModel: "input_tokens * 1" },
+        flat_jobs: { camelJob: 2.5 },
+      },
+      ledger: { buckets: { giftBucket: { label: "Gift" } } },
+      plans: { myPlan: { label: "Plan" } },
+    };
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([{ id: "cfg-1", version: 1, config }]),
+    );
+    const result = await store.getActivePricing();
+    expect(result?.config).toEqual(config);
+  });
+
+  it("serializes billing fields explicitly while preserving catalog keys", async () => {
+    const calls: Array<{ params?: unknown[] }> = [];
+    const pool = {
+      query: vi.fn(async (_sql: string, params?: unknown[]) => {
+        calls.push({ params });
+        return { rows: [] };
+      }),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+    const store = new PostgresBillingStore(pool);
+    await store.syncBillingFromConfig({
+      subscriptions: {
+        StarterPlan: {
+          plan: "starterPlan",
+          intervalCount: 1,
+          providers: { stripe: { priceId: "price_1" } },
+        },
+      },
+      topups: {
+        CreditPack: { depositTo: "giftBucket", creditsPerUnit: 1000 },
+      },
+    });
+    const serialized = JSON.parse(String(calls[0]?.params?.[0]));
+    expect(serialized.subscriptions.StarterPlan.interval_count).toBe(1);
+    expect(serialized.subscriptions.StarterPlan.providers.stripe.price_id).toBe("price_1");
+    expect(serialized.topups.CreditPack.deposit_to).toBe("giftBucket");
+    expect(serialized.topups.CreditPack.credits_per_unit).toBe(1000);
+  });
+
+  it("keeps persisted payment metadata in its canonical snake_case shape", async () => {
+    const pool = {
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            purpose: "credit_topup",
+            amount_minor: 1000,
+            currency: "USD",
+            metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
+          },
+        ],
+      }),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+    const store = new PostgresBillingStore(pool);
+    await expect(store.getBillingPayment("stripe", "pay_1")).resolves.toEqual({
+      purpose: "credit_topup",
+      metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
+    });
   });
 
   it("setActivePricing returns empty id for empty results", async () => {

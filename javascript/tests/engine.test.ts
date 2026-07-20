@@ -3,9 +3,57 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import Decimal from "decimal.js";
-import { PricingEngine } from "../src/engine.js";
+import { PricingEngine as PricingEngineStrict } from "../src/engine.js";
 import { ConfigError } from "../src/errors.js";
 import type { UsageMetrics } from "../src/metrics.js";
+
+const LEGACY_FIELD_NAMES: Record<string, string> = {
+  minBalance: "min_balance",
+  signupGrant: "signup_grant",
+  rateOverrides: "rate_overrides",
+  billingMode: "billing_mode",
+  overdraftFloor: "overdraft_floor",
+  perOperation: "per_operation",
+  maxConcurrent: "max_concurrent",
+  ttlDays: "ttl_days",
+  allowOverdraft: "allow_overdraft",
+  maxCalls: "max_calls",
+  onExceed: "on_exceed",
+  cacheDiscount: "cache_discount",
+  flatJobs: "flat_jobs",
+  intervalCount: "interval_count",
+  depositTo: "deposit_to",
+  creditsPerUnit: "credits_per_unit",
+  minAmountMinor: "min_amount_minor",
+  maxAmountMinor: "max_amount_minor",
+  taxBehavior: "tax_behavior",
+  productId: "product_id",
+  priceId: "price_id",
+  variantId: "variant_id",
+  lookupKey: "lookup_key",
+  replacePrior: "replace_prior",
+  validFrom: "valid_from",
+  validTo: "valid_to",
+};
+
+function legacyConfigFixture(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(legacyConfigFixture);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        LEGACY_FIELD_NAMES[key] ?? key,
+        legacyConfigFixture(item),
+      ]),
+    );
+  }
+  return value;
+}
+
+const PricingEngine = {
+  fromDict(data: Record<string, unknown>) {
+    return PricingEngineStrict.fromDict(legacyConfigFixture(data) as Record<string, unknown>);
+  },
+};
 
 const TEST_CONFIG = {
   version: 1,
@@ -256,8 +304,8 @@ describe("PricingEngine", () => {
       expect(schema.metering.models["gpt-4"]).toBeTruthy();
       expect(schema.metering.tools).toBeTruthy();
       expect(schema.metering.search).toBeTruthy();
-      expect(schema.metering.cacheDiscount).toBeTruthy();
-      expect(schema.metering.flatJobs).toBeTruthy();
+      expect(schema.metering.cache_discount).toBeTruthy();
+      expect(schema.metering.flat_jobs).toBeTruthy();
     });
   });
 });

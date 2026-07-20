@@ -467,6 +467,27 @@
         "metering": { "models": { "*": "input_tokens * 1" } },
         "billing": { "topups": { "x": { "tier": "purchased" } } }
       }
+    },
+    {
+      "name": "camel_case_config_field_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": {
+          "models": { "*": "input_tokens * 1" },
+          "cacheDiscount": "input_tokens * 0"
+        }
+      }
+    },
+    {
+      "name": "mixed_case_duplicate_rejected",
+      "expect": "reject",
+      "config": {
+        "metering": {
+          "models": { "*": "input_tokens * 1" },
+          "cache_discount": "input_tokens * 0",
+          "cacheDiscount": "input_tokens * 0"
+        }
+      }
     }
   ]
 }

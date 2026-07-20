@@ -941,6 +941,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     });
     const balanceAfterGrant = await cm.getBalance(uid);
     expect(balanceAfterGrant.balance.toString()).toBe("20000");
+    await pool.query(
+      "UPDATE bursar.billing_payments SET metadata = $1::jsonb WHERE provider = $2 AND provider_payment_id = $3",
+      [JSON.stringify({ credits_per_unit: 1000 }), PROVIDER, paymentId],
+    );
 
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,

@@ -133,6 +133,21 @@ describe("payment provider adapter contracts", () => {
     });
   });
 
+  it.each(["status", "statusCode", "status_code"])(
+    "contains Dodo SDK status aliases at the provider boundary (%s)",
+    async (key) => {
+      const client = {
+        checkoutSessions: {
+          retrieve: async () => {
+            throw { [key]: 404 };
+          },
+        },
+      } as any;
+      const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
+      await expect(provider.getCheckoutSessionStatus("missing")).resolves.toBeNull();
+    },
+  );
+
   it("keeps the mock provider deterministic and complete", async () => {
     const provider = new MockPaymentProvider(sink);
     await expect(provider.createCheckoutSession({ returnUrl: "https://return" })).resolves.toEqual({

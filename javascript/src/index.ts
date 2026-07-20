@@ -5,7 +5,7 @@ export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
 export type { ToolCall, UsageMetrics } from "./metrics.js";
 export type {
-  BursarConfig,
+  BursarConfigData,
   MeteringConfig,
   LedgerConfig,
   SignupGrant,

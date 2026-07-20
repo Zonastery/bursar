@@ -415,6 +415,29 @@ describe("event type routing", () => {
     );
   });
 
+  it("uses refund_id as the event id when Dodo omits data.id", async () => {
+    const sink = makeSink();
+    await handleDodoBillingEvent(
+      "refund.succeeded",
+      {
+        refund_id: "refund_dodo_without_id",
+        payment_id: "pay_dodo_success_001",
+        refund_amount: 100,
+        currency: "USD",
+      },
+      null,
+      {},
+      sink,
+    );
+
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: "refund_dodo_without_id",
+        eventType: "refund.created",
+      }),
+    );
+  });
+
   it("dispute.* → dispute.created for open dispute types", async () => {
     const sink = makeSink();
     await handleDodoBillingEvent("dispute.created", DODO_DISPUTE_CREATED, null, {}, sink);

@@ -58,7 +58,9 @@ Build a `PricingEngine` from a dict and persist it to the store in one call.
 
 ```typescript
 await manager.publishPricingFromDict({
-  models: { "_default": "input_tokens * (0.001 / 1000)" },
+  metering: {
+    models: { "*": "input_tokens * (0.001 / 1000)" },
+  },
 });
 ```
 

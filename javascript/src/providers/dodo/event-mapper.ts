@@ -55,7 +55,7 @@ export async function handleDodoBillingEvent(
   sink: BillingEventSink,
   logger?: ProviderLogger,
 ): Promise<void> {
-  const sourceId = data.id ?? data.payment_id;
+  const sourceId = data.id ?? data.refund_id ?? data.payment_id;
   const rawId = sourceId
     ? String(sourceId)
     : `dodo:${type}:${data.subscription_id ?? data.customer_id ?? ""}`;

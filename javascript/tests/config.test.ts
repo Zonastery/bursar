@@ -1,6 +1,58 @@
 import { describe, it, expect } from "vitest";
-import { loadConfigFromDict } from "../src/config.js";
+import {
+  canonicalBursarConfigDict,
+  loadConfigFromDict as loadConfigFromDictStrict,
+} from "../src/config.js";
 import { ConfigError } from "../src/errors.js";
+
+// These legacy unit fixtures predate the shared snake_case config contract.
+// Keep their assertions focused by adapting only known schema fields here;
+// strict-input behavior is covered directly below and by config-parity.test.
+const LEGACY_FIELD_NAMES: Record<string, string> = {
+  minBalance: "min_balance",
+  signupGrant: "signup_grant",
+  rateOverrides: "rate_overrides",
+  billingMode: "billing_mode",
+  overdraftFloor: "overdraft_floor",
+  perOperation: "per_operation",
+  maxConcurrent: "max_concurrent",
+  ttlDays: "ttl_days",
+  allowOverdraft: "allow_overdraft",
+  maxCalls: "max_calls",
+  onExceed: "on_exceed",
+  cacheDiscount: "cache_discount",
+  flatJobs: "flat_jobs",
+  intervalCount: "interval_count",
+  depositTo: "deposit_to",
+  creditsPerUnit: "credits_per_unit",
+  minAmountMinor: "min_amount_minor",
+  maxAmountMinor: "max_amount_minor",
+  taxBehavior: "tax_behavior",
+  productId: "product_id",
+  priceId: "price_id",
+  variantId: "variant_id",
+  lookupKey: "lookup_key",
+  replacePrior: "replace_prior",
+  validFrom: "valid_from",
+  validTo: "valid_to",
+};
+
+function legacyConfigFixture(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(legacyConfigFixture);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        LEGACY_FIELD_NAMES[key] ?? key,
+        legacyConfigFixture(item),
+      ]),
+    );
+  }
+  return value;
+}
+
+function loadConfigFromDict(data: Record<string, unknown>) {
+  return loadConfigFromDictStrict(legacyConfigFixture(data) as Record<string, unknown>);
+}
 
 const VALID_CONFIG = {
   version: 1,
@@ -15,6 +67,33 @@ const VALID_CONFIG = {
 };
 
 describe("loadConfigFromDict", () => {
+  it("rejects camelCase config fields at the public boundary", () => {
+    expect(() =>
+      loadConfigFromDictStrict({
+        metering: { models: { "*": "input_tokens * 1" }, cacheDiscount: "input_tokens * 0" },
+      }),
+    ).toThrow(/snake_case/);
+  });
+
+  it("canonicalization preserves identifier-map keys", () => {
+    const canonical = canonicalBursarConfigDict({
+      metering: {
+        models: { myModel: "input_tokens * 1" },
+        flat_jobs: { camelJob: 2.5 },
+      },
+      ledger: {
+        buckets: { giftBucket: { label: "Gift" } },
+      },
+      plans: {
+        myPlan: { label: "Plan", rate_overrides: { myModel: "input_tokens * 2" } },
+      },
+    });
+    expect((canonical.metering as Record<string, unknown>).models).toHaveProperty("myModel");
+    expect((canonical.metering as Record<string, unknown>).flat_jobs).toHaveProperty("camelJob");
+    expect(canonical.plans).toHaveProperty("myPlan");
+    expect(canonical.ledger).toHaveProperty("buckets.giftBucket");
+  });
+
   it("loads a valid config", () => {
     const config = loadConfigFromDict(VALID_CONFIG);
     expect(config.metering.models["gpt-4"]).toBeTruthy();

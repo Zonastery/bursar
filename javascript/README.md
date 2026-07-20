@@ -234,17 +234,22 @@ Basic example:
 ```json
 {
   "version": 1,
-  "models": {
-    "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
-    "_default": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)"
+  "metering": {
+    "models": {
+      "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
+      "*": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)"
+    },
+    "tools": { "*": "calls * 5 / 1000" },
+    "search": "search_queries * 0.5 + search_results * 0.05",
+    "cache_discount": "cache_read_tokens * (0.001 / 1000)",
+    "flat_jobs": { "batch_train": 100 }
   },
-  "tools": { "_default": "tool_calls * 5 / 1000" },
-  "search": { "costs": "search_queries * 0.5 + search_results * 0.05" },
-  "cache": { "discount": "-cache_read_tokens * (0.001 / 1000)" },
-  "fixed": { "batch_train": 100 },
-  "minBalance": 5
+  "ledger": { "min_balance": 5 }
 }
 ```
+
+Pricing configuration uses the shared snake_case JSON shape. JavaScript method
+arguments and returned domain objects use camelCase.
 
 ### Expression syntax
 

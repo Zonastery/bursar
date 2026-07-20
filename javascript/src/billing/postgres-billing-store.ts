@@ -8,9 +8,9 @@ import type {
   BillingSubscriptionStatus,
   CheckoutIntent,
   BillingTopupResult,
+  ProviderRef,
 } from "./billing-types.js";
 import { BillingStore } from "./billing-store.js";
-import { camelToSnakeKeys, snakeToCamelKeys } from "../case-utils.js";
 import type { QueryFn } from "../repositories/types.js";
 import { BillingOfferRepository } from "../repositories/billing/offer.js";
 import { BillingTopupRepository } from "../repositories/billing/topup.js";
@@ -32,6 +32,66 @@ function toIso(value: unknown): string | null {
     return (value as Date).toISOString();
   }
   return String(value);
+}
+
+function billingConfigToSnake(config: BillingConfig): Record<string, unknown> {
+  const providerRefs = (refs: Record<string, ProviderRef> | undefined) =>
+    refs
+      ? Object.fromEntries(
+          Object.entries(refs).map(([provider, ref]) => [
+            provider,
+            {
+              ...(ref.productId != null ? { product_id: ref.productId } : {}),
+              ...(ref.priceId != null ? { price_id: ref.priceId } : {}),
+              ...(ref.variantId != null ? { variant_id: ref.variantId } : {}),
+              ...(ref.lookupKey != null ? { lookup_key: ref.lookupKey } : {}),
+            },
+          ]),
+        )
+      : undefined;
+
+  return {
+    currency: config.currency,
+    subscriptions: Object.fromEntries(
+      Object.entries(config.subscriptions ?? {}).map(([key, offer]) => [
+        key,
+        {
+          plan: offer.plan,
+          interval: offer.interval,
+          ...(offer.intervalCount != null ? { interval_count: offer.intervalCount } : {}),
+          ...(offer.grant
+            ? {
+                grant:
+                  offer.grant.mode === "cycle_grant"
+                    ? {
+                        mode: offer.grant.mode,
+                        credits: offer.grant.credits,
+                        bucket: offer.grant.bucket,
+                        replace_prior: offer.grant.replacePrior,
+                      }
+                    : { mode: offer.grant.mode },
+              }
+            : {}),
+          ...(providerRefs(offer.providers) ? { providers: providerRefs(offer.providers) } : {}),
+          ...(offer.validFrom != null ? { valid_from: offer.validFrom } : {}),
+          ...(offer.validTo != null ? { valid_to: offer.validTo } : {}),
+        },
+      ]),
+    ),
+    topups: Object.fromEntries(
+      Object.entries(config.topups ?? {}).map(([key, topup]) => [
+        key,
+        {
+          deposit_to: topup.depositTo,
+          ...(topup.creditsPerUnit != null ? { credits_per_unit: topup.creditsPerUnit } : {}),
+          ...(topup.minAmountMinor != null ? { min_amount_minor: topup.minAmountMinor } : {}),
+          ...(topup.maxAmountMinor != null ? { max_amount_minor: topup.maxAmountMinor } : {}),
+          ...(topup.taxBehavior != null ? { tax_behavior: topup.taxBehavior } : {}),
+          ...(providerRefs(topup.providers) ? { providers: providerRefs(topup.providers) } : {}),
+        },
+      ]),
+    ),
+  };
 }
 
 export class PostgresBillingStore extends BillingStore {
@@ -147,7 +207,7 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    await this.billingConfig.syncFromConfig(JSON.stringify(camelToSnakeKeys(config)));
+    await this.billingConfig.syncFromConfig(JSON.stringify(billingConfigToSnake(config)));
   }
 
   async createOrGetCheckoutIntent(input: {
@@ -261,10 +321,10 @@ export class PostgresBillingStore extends BillingStore {
       JSON.stringify({ eventType }),
     );
     if (!result) return { status: "retry" as const };
-    const r = snakeToCamelKeys(result) as Record<string, unknown>;
+    const r = result as Record<string, unknown>;
     const s = r.status as string;
-    if (s === "claimed" && typeof r.claimToken === "string")
-      return { status: "claimed" as const, claimToken: r.claimToken };
+    if (s === "claimed" && typeof r.claim_token === "string")
+      return { status: "claimed" as const, claimToken: r.claim_token };
     if (s === "duplicate") return { status: "duplicate" as const };
     return { status: "retry" as const };
   }
@@ -481,7 +541,11 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<Record<string, unknown> | null> {
     const result = await this.billingPayment.getForRefund(provider, providerPaymentId);
     if (!result) return null;
-    return snakeToCamelKeys(result) as Record<string, unknown>;
+    const row = result as Record<string, unknown>;
+    return {
+      purpose: row.purpose,
+      metadata: row.metadata,
+    };
   }
 
   private rowToSubscriptionState(r: Record<string, unknown>): BillingSubscriptionState {

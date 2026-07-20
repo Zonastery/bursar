@@ -1,7 +1,7 @@
 import Decimal from "decimal.js";
 import { evaluateExpression } from "./expr.js";
-import type { BursarConfig } from "./config.js";
-import { loadConfigFromDict } from "./config.js";
+import type { ParsedBursarConfig } from "./config.js";
+import { bursarConfigToSnakeDict, loadConfigFromDict } from "./config.js";
 import type { CostBreakdown } from "./breakdown.js";
 import { makeCostBreakdown } from "./breakdown.js";
 import type { UsageMetrics } from "./metrics.js";
@@ -14,9 +14,9 @@ import { ConfigError } from "./errors.js";
  * breakdowns. All money values are exact `Decimal`s — never binary `number`.
  */
 export class PricingEngine {
-  private config: BursarConfig;
+  private config: ParsedBursarConfig;
 
-  constructor(config: BursarConfig) {
+  constructor(config: ParsedBursarConfig) {
     this.config = config;
   }
 
@@ -58,29 +58,7 @@ export class PricingEngine {
 
   /** Return the pricing config as a dict. */
   pricingSchema(): Record<string, unknown> {
-    return {
-      version: this.config.version,
-      metering: {
-        models: { ...this.config.metering.models },
-        tools:
-          Object.keys(this.config.metering.tools).length > 0
-            ? { ...this.config.metering.tools }
-            : null,
-        search: this.config.metering.search ?? null,
-        cacheDiscount: this.config.metering.cacheDiscount ?? null,
-        flatJobs:
-          Object.keys(this.config.metering.flatJobs).length > 0
-            ? { ...this.config.metering.flatJobs }
-            : null,
-      },
-      ledger: {
-        minBalance: this.config.ledger.minBalance,
-        signupGrant: this.config.ledger.signupGrant ?? null,
-        buckets: this.config.ledger.buckets ? { ...this.config.ledger.buckets } : null,
-      },
-      plans: this.config.plans ? { ...this.config.plans } : null,
-      billing: this.config.billing ? { ...this.config.billing } : null,
-    };
+    return bursarConfigToSnakeDict(this.config);
   }
 
   /** Minimum balance users must keep. */
