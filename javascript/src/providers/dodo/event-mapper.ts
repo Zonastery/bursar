@@ -5,7 +5,7 @@ import type {
   BillingRefundInfo,
   BillingDisputeInfo,
 } from "../../billing/billing-types.js";
-import type { ProviderLogger } from "../types.js";
+import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import { callBillingEventSink } from "../_shared.js";
 
 // Dodo dispute statuses that indicate the dispute is closed (resolved).
@@ -53,8 +53,9 @@ export async function handleDodoBillingEvent(
   userId: string | null,
   metadata: Record<string, string>,
   sink: BillingEventSink,
-  logger?: ProviderLogger,
+  logger?: ProviderLogger | null,
 ): Promise<void> {
+  const log = normalizeProviderLogger(logger);
   const sourceId = data.id ?? data.refund_id ?? data.payment_id;
   const rawId = sourceId
     ? String(sourceId)
@@ -87,11 +88,23 @@ export async function handleDodoBillingEvent(
 
     case "subscription.active": {
       if (!userId) {
-        logger?.error?.("Dodo subscription event: no userId", { event: type });
+        log.error("Dodo subscription event: no userId", { event: type });
         return;
       }
       const subId = String(data.subscription_id ?? "");
 
+      const refs = data.product_id
+        ? { productId: String(data.product_id) }
+        : metadata.plan_slug
+          ? { lookupKey: metadata.plan_slug }
+          : undefined;
+      log.debug("Dodo subscription.active mapped", {
+        subscriptionId: subId,
+        productId: data.product_id ? String(data.product_id) : undefined,
+        planSlug: metadata.plan_slug,
+        hasUserId: Boolean(userId),
+        refs,
+      });
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),
         eventType: "subscription.created",
@@ -100,11 +113,7 @@ export async function handleDodoBillingEvent(
           status: (String(data.status ?? "active") || "active") as BillingSubscriptionStatus,
           periodEnd: normalizeDate(data.next_billing_date),
           ...subscriptionFields(data, metadata),
-          refs: data.product_id
-            ? { productId: String(data.product_id) }
-            : metadata.plan_slug
-              ? { lookupKey: metadata.plan_slug }
-              : undefined,
+          refs,
         },
       });
       return;
@@ -112,7 +121,7 @@ export async function handleDodoBillingEvent(
 
     case "subscription.renewed": {
       if (!userId) {
-        logger?.error?.("Dodo subscription event: no userId", { event: type });
+        log.error("Dodo subscription event: no userId", { event: type });
         return;
       }
       const subId = String(data.subscription_id ?? "");
@@ -317,7 +326,7 @@ export async function handleDodoBillingEvent(
         });
         return;
       }
-      logger?.debug?.("Unhandled Dodo webhook event type", { type });
+      log.debug("Unhandled Dodo webhook event type", { type });
     }
   }
 }

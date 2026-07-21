@@ -1,5 +1,6 @@
 import Stripe from "stripe";
-import type { CheckoutPaymentStatus, PaymentProvider, ProviderLogger } from "../types.js";
+import type { CheckoutPaymentStatus, PaymentProvider } from "../types.js";
+import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -22,12 +23,21 @@ export class StripeProvider implements PaymentProvider {
     private getStripe: () => Stripe,
     private sink: BillingEventSink,
     private webhookSecret: string,
-    private logger?: ProviderLogger,
-  ) {}
+    logger?: ProviderLogger | null,
+  ) {
+    this.logger = normalizeProviderLogger(logger);
+  }
+
+  private logger: ReturnType<typeof normalizeProviderLogger>;
 
   async createCheckoutSession(
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string }> {
+    this.logger.info("[StripeProvider] createCheckoutSession", {
+      productId: params.productId,
+      type: params.type,
+      hasUserId: Boolean(params.userId),
+    });
     if (!params.userId) throw new Error("Authentication required for checkout");
     const stripe = this.getStripe();
 

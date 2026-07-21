@@ -13,7 +13,11 @@ import type {
   BillingTopupResult,
 } from "./billing-types.js";
 import { BillingEventType } from "./billing-types.js";
-import type { ProviderLogger } from "../providers/types.js";
+import {
+  type NormalizedProviderLogger,
+  type ProviderLogger,
+  normalizeProviderLogger,
+} from "../providers/types.js";
 import { SUBSCRIPTION_STATUS } from "../repositories/billing/subscription.js";
 
 interface OfferCacheValue {
@@ -71,7 +75,7 @@ export class BillingService {
   private resolveUser: ResolveUserFn | null;
   private eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
   private cancelPriorProviders: boolean;
-  private logger: ProviderLogger | null;
+  private logger: NormalizedProviderLogger;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
   private readonly IGNORED_EVENT_TYPES: Set<BillingEventType> = new Set([
@@ -89,7 +93,7 @@ export class BillingService {
     this.resolveUser = options?.resolveUser ?? null;
     this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
-    this.logger = options?.logger ?? null;
+    this.logger = normalizeProviderLogger(options?.logger);
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
       ttl: 60_000,
@@ -221,25 +225,37 @@ export class BillingService {
   }
 
   async ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.debug("[BillingService] ingestBillingEvent", {
+      eventId: event.eventId,
+      provider: event.provider,
+      eventType: event.eventType,
+    });
     const claim = await this.store.claimBillingEvent(
       event.provider,
       event.eventId,
       event.eventType,
     );
+    this.logger.debug("[BillingService] claim status", {
+      status: claim.status,
+      eventId: event.eventId,
+    });
 
     if (claim.status === "duplicate") {
+      this.logger.debug("[BillingService] duplicate event", { eventId: event.eventId });
       return { handled: true, action: "duplicate" };
     }
     if (claim.status === "retry") {
+      this.logger.warn("[BillingService] claim retry", { eventId: event.eventId });
       return { handled: false, error: "claim_failed_retry" };
     }
 
     try {
       const result = await this.routeEvent(event);
+      this.logger.debug("[BillingService] routeEvent result", { result, eventId: event.eventId });
       await this.store.completeBillingEvent(event.provider, event.eventId, claim.claimToken);
       return result;
     } catch (err) {
-      this.logger?.error?.(
+      this.logger.error(
         `[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`,
         { error: err instanceof Error ? err.message : String(err) },
       );
@@ -281,7 +297,7 @@ export class BillingService {
     try {
       await handler(event, userId);
     } catch (err) {
-      this.logger?.error?.(
+      this.logger.error(
         `[BillingService] event handler failed for ${event.provider}/${event.eventId}`,
         { error: err instanceof Error ? err.message : String(err) },
       );
@@ -351,6 +367,10 @@ export class BillingService {
   }
 
   private async handleCustomerCreated(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleCustomerCreated", {
+      provider: event.provider,
+      customerId: event.customer?.providerCustomerId,
+    });
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveUserId(event);
       if (uid) {
@@ -366,6 +386,10 @@ export class BillingService {
   }
 
   private async handleCustomerDeleted(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleCustomerDeleted", {
+      provider: event.provider,
+      customerId: event.customer?.providerCustomerId,
+    });
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveUserId(event);
       if (uid && this.provisioning) {
@@ -376,6 +400,11 @@ export class BillingService {
   }
 
   private async handleCheckoutCompleted(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleCheckoutCompleted", {
+      provider: event.provider,
+      eventId: event.eventId,
+      hasUserId: Boolean(event.userId),
+    });
     if (event.customer?.providerCustomerId) {
       const uid = await this.resolveUserId(event);
       if (uid) {
@@ -485,7 +514,7 @@ export class BillingService {
         };
       }
 
-      this.logger?.error?.(
+      this.logger.error(
         `[BillingService] resolveOfferAndKeys: no offer found for ${event.provider}/${refs.lookupKey}`,
       );
     }
@@ -495,6 +524,11 @@ export class BillingService {
 
   private async handleSubscriptionCreated(event: BillingEvent): Promise<BillingEventResult> {
     const uid = await this.resolveUserId(event);
+    this.logger.info("[BillingService] handleSubscriptionCreated", {
+      eventId: event.eventId,
+      provider: event.provider,
+      hasUserId: Boolean(uid),
+    });
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
@@ -516,7 +550,7 @@ export class BillingService {
         eventId: event.eventId,
         metadata: event.metadata ?? undefined,
       });
-      this.logger?.warn?.("[BillingService] subscription conflict quarantined", {
+      this.logger.warn("[BillingService] subscription conflict quarantined", {
         userId: uid,
         provider: event.provider,
         duplicateSubscriptionId: subscriptionId,
@@ -526,6 +560,11 @@ export class BillingService {
       return { handled: true, action: "subscription_conflict" };
     }
     const { offer, offerKey, plan } = await this.resolveOfferAndKeys(event);
+    this.logger.debug("[BillingService] resolveOfferAndKeys", {
+      offerKey,
+      plan,
+      eventId: event.eventId,
+    });
     const subscriptionState = this.buildSubscriptionState(event, uid, existing, {
       status: event.subscription.status ?? "incomplete",
       cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? false,
@@ -535,6 +574,10 @@ export class BillingService {
       intervalCount: offer?.intervalCount,
     });
     try {
+      this.logger.debug("[BillingService] upserting subscription", {
+        plan: subscriptionState.plan,
+        eventId: event.eventId,
+      });
       await this.store.upsertBillingSubscription(subscriptionState);
     } catch (error) {
       // The partial unique index is the final arbiter under concurrent
@@ -574,6 +617,11 @@ export class BillingService {
   }
 
   private async handleSubscriptionUpdated(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleSubscriptionUpdated", {
+      provider: event.provider,
+      eventId: event.eventId,
+      subId: event.subscription?.providerSubscriptionId,
+    });
     const uid = await this.resolveUserId(event);
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
@@ -598,6 +646,10 @@ export class BillingService {
   }
 
   private async handleSubscriptionActivated(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleSubscriptionActivated", {
+      provider: event.provider,
+      eventId: event.eventId,
+    });
     const uid = await this.resolveUserId(event);
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
@@ -696,6 +748,10 @@ export class BillingService {
   }
 
   private async handleSubscriptionCanceled(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleSubscriptionCanceled", {
+      provider: event.provider,
+      eventId: event.eventId,
+    });
     const uid = await this.resolveUserId(event);
     if (!uid) return { handled: false, error: "user_not_found" };
     if (!event.subscription?.providerSubscriptionId)
@@ -777,6 +833,11 @@ export class BillingService {
   }
 
   private async handleInvoicePaid(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handleInvoicePaid", {
+      provider: event.provider,
+      eventId: event.eventId,
+      invoiceId: event.invoice?.providerInvoiceId,
+    });
     if (event.invoice) {
       const uid = await this.resolveUserId(event);
       if (uid) {
@@ -799,6 +860,11 @@ export class BillingService {
   }
 
   private async handlePaymentSucceeded(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handlePaymentSucceeded", {
+      provider: event.provider,
+      eventId: event.eventId,
+      amountMinor: event.payment?.amountMinor,
+    });
     if (!event.payment) return { handled: true, action: "payment_succeeded" };
 
     const uid = await this.resolveUserId(event);
@@ -834,7 +900,7 @@ export class BillingService {
         topupConfig.maxAmountMinor != null &&
         event.payment.amountMinor > topupConfig.maxAmountMinor
       ) {
-        this.logger?.warn?.(
+        this.logger.warn(
           `[BillingService] topup amount ${event.payment.amountMinor} exceeds cap ${topupConfig.maxAmountMinor} for topup key ${topupConfig.topupKey} (user ${uid})`,
         );
         return { handled: true, action: "payment_succeeded_out_of_bounds" };
@@ -854,6 +920,10 @@ export class BillingService {
   }
 
   private async handlePaymentFailed(event: BillingEvent): Promise<BillingEventResult> {
+    this.logger.info("[BillingService] handlePaymentFailed", {
+      provider: event.provider,
+      eventId: event.eventId,
+    });
     const uid = await this.resolveUserId(event);
     if (uid && event.payment) {
       await this.store.upsertBillingPayment({
@@ -899,7 +969,7 @@ export class BillingService {
           const rawCpu = payMeta.credits_per_unit as string | number | null | undefined;
           const cpu = Number(rawCpu);
           if (!Number.isFinite(cpu) || cpu <= 0) {
-            this.logger?.warn?.(
+            this.logger.warn(
               `[BillingService] cannot claw back credits for refund ${event.refund.providerRefundId}: no valid creditsPerUnit in payment metadata`,
             );
             return { handled: true, action: "refund_recorded_no_clawback" };
@@ -954,16 +1024,17 @@ export class BillingService {
     planKeyOverride?: string,
   ): Promise<void> {
     if (!this.provisioning) {
-      this.logger?.debug?.(
+      this.logger.debug(
         `[BillingService] provisionSubscription: no provisioning capability for user ${uid}`,
       );
       return;
     }
     const plan = planKeyOverride ?? offer?.plan;
     if (!plan) {
-      this.logger?.debug?.(`[BillingService] provisionSubscription: no plan for user ${uid}`);
+      this.logger.debug("[BillingService] provisionSubscription skipped (no plan)", { uid });
       return;
     }
+    this.logger.debug("[BillingService] provisionSubscription setting plan", { uid, plan });
     const periodStart = event.subscription?.periodStart;
     const planAssignedAt = periodStart
       ? (() => {
@@ -977,7 +1048,7 @@ export class BillingService {
     if (this.cancelPriorProviders && event.provider) {
       const result = await this.store.deactivateOtherProviderSubscriptions(uid, event.provider);
       if (result.deactivatedCount > 0) {
-        this.logger?.debug?.(
+        this.logger.debug(
           `[BillingService] deactivated ${result.deactivatedCount} prior provider subscription(s) for user ${uid}`,
         );
       }

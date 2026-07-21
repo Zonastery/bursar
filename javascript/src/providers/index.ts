@@ -11,6 +11,8 @@ export type {
   ProviderLogger,
 } from "./types.js";
 
+export { noopLogger } from "./types.js";
+
 export { handleDodoBillingEvent } from "./dodo/event-mapper.js";
 export { handleStripeWebhook } from "./stripe/event-mapper.js";
 export { DodoProvider } from "./dodo/provider.js";

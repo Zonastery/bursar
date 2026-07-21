@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import type { BillingEventSink } from "../../bursar.js";
 import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/billing-types.js";
-import type { ProviderLogger } from "../types.js";
+import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import { callBillingEventSink } from "../_shared.js";
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
@@ -39,15 +39,16 @@ export async function handleStripeWebhook(
   event: Stripe.Event,
   sink: BillingEventSink,
   stripe: Stripe,
-  logger?: ProviderLogger,
+  logger?: ProviderLogger | null,
 ): Promise<{ received: boolean }> {
+  const log = normalizeProviderLogger(logger);
   try {
     switch (event.type) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
         const userId = session.client_reference_id;
         if (!userId) {
-          logger?.warn?.("Webhook: no client_reference_id", { sessionId: session.id });
+          log.warn("Webhook: no client_reference_id", { sessionId: session.id });
           break;
         }
 
@@ -57,7 +58,7 @@ export async function handleStripeWebhook(
             expand: [...STRIPE_CHECKOUT_EXPAND],
           });
         } catch (err) {
-          logger?.error?.("Failed to retrieve expanded session", { sessionId: session.id, err });
+          log.error("Failed to retrieve expanded session", { sessionId: session.id, err });
           break;
         }
 
@@ -98,7 +99,7 @@ export async function handleStripeWebhook(
               },
             });
           } catch (err) {
-            logger?.error?.("Failed to process subscription", {
+            log.error("Failed to process subscription", {
               userId,
               subscriptionId: subId,
               err,
@@ -136,7 +137,7 @@ export async function handleStripeWebhook(
         const sub = event.data.object as Stripe.Subscription;
         const userId = sub.metadata?.userId;
         if (!userId) {
-          logger?.debug?.("customer.subscription.updated: no userId in metadata", {
+          log.debug("customer.subscription.updated: no userId in metadata", {
             subscriptionId: sub.id,
           });
           break;
@@ -188,7 +189,7 @@ export async function handleStripeWebhook(
         const invoice = event.data.object as Stripe.Invoice;
         const subscriptionId = (invoice as { subscription?: string }).subscription;
         if (!subscriptionId) {
-          logger?.debug?.("invoice.paid: no subscription reference", { invoiceId: invoice.id });
+          log.debug("invoice.paid: no subscription reference", { invoiceId: invoice.id });
           break;
         }
 
@@ -208,7 +209,7 @@ export async function handleStripeWebhook(
             stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
             userId = stripeSub.metadata?.userId;
           } catch (err) {
-            logger?.error?.("invoice.paid: failed to retrieve subscription", {
+            log.error("invoice.paid: failed to retrieve subscription", {
               subscriptionId,
               err,
             });
@@ -216,7 +217,7 @@ export async function handleStripeWebhook(
           }
         }
         if (!userId) {
-          logger?.warn?.("invoice.paid: no userId", { subscriptionId });
+          log.warn("invoice.paid: no userId", { subscriptionId });
           break;
         }
 
@@ -253,13 +254,13 @@ export async function handleStripeWebhook(
       }
 
       default:
-        logger?.debug?.("Unhandled Stripe webhook event", {
+        log.debug("Unhandled Stripe webhook event", {
           eventType: event.type,
           eventId: event.id,
         });
     }
   } catch (err) {
-    logger?.error?.("Stripe webhook processing failed", {
+    log.error("Stripe webhook processing failed", {
       eventId: event.id,
       eventType: event.type,
       err,

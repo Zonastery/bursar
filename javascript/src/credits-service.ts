@@ -100,6 +100,12 @@ function isAmount(value: MetricsOrAmount): value is Decimal | number {
  * entirely, the manager falls back to ``[minBalance * LOW_BALANCE_MULTIPLIER]``,
  * resolved lazily against the loaded engine.
  */
+import {
+  type NormalizedProviderLogger,
+  type ProviderLogger,
+  normalizeProviderLogger,
+} from "./providers/types.js";
+
 export interface LowBalanceConfig {
   thresholds?: (Decimal | number)[] | null;
   onTrigger?: ((event: CreditEvent) => void | Promise<void>) | null;
@@ -107,6 +113,7 @@ export interface LowBalanceConfig {
 
 /** Optional behavioural knobs for the manager. */
 export interface CreditsServiceOptions {
+  logger?: ProviderLogger | null;
   /**
    * Financial-safety preset for planless users (interface plan §2). Defaults to
    * ``"strict_prepaid"``. Per-plan / per-call policy layers on top of this.
@@ -261,6 +268,7 @@ export class CreditsService {
   private pricingCache: LRUCache<string, PricingEngine>;
   private versionEngines = new Map<number, PricingEngine>();
 
+  private logger: NormalizedProviderLogger;
   constructor(
     store: CreditStore,
     engine?: PricingEngine | null,
@@ -276,6 +284,7 @@ export class CreditsService {
     this.store = store;
     if (engine) this.engine = engine;
     if (emitter) this.emitter = emitter;
+    this.logger = normalizeProviderLogger(options?.logger);
     this.policy = policy;
     this.overdraftFloor =
       options?.overdraftFloor != null ? toDecimal(options.overdraftFloor) : null;
@@ -341,8 +350,12 @@ export class CreditsService {
 
   /** Load the active pricing config from the store. */
   async loadPricingFromStore(): Promise<void> {
+    this.logger.info("[CreditsService] loading pricing from store");
     const active = await this.store.getActivePricing();
-    if (!active) throw new PricingNotLoadedError("no active pricing config in store");
+    if (!active) {
+      this.logger.warn("[CreditsService] no active pricing config in store");
+      throw new PricingNotLoadedError("no active pricing config in store");
+    }
 
     const engineDict = active.config as Record<string, unknown>;
     this.engine = PricingEngineClass.fromDict(engineDict);
@@ -418,6 +431,7 @@ export class CreditsService {
    * unhandled promise rejection.
    */
   async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
+    this.logger.info("[CreditsService] publishPricing", { label });
     const canonical = canonicalBursarConfigDict(config);
     this.engine = PricingEngineClass.fromDict(canonical);
     this.versionEngines.clear();
@@ -467,6 +481,7 @@ export class CreditsService {
    * The event is emitted only after the store write succeeds (contract §6).
    */
   async setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void> {
+    this.logger.info("[CreditsService] setUserPlan", { planKey, planAssignedAt });
     const result = await this.store.setUserPlan(userId, planKey, planAssignedAt);
     this.emit("credits.plan_changed", userId, {
       userId,
@@ -482,6 +497,7 @@ export class CreditsService {
    * re-assign and re-anchor the allowance window.
    */
   async unsetUserPlan(userId: string): Promise<void> {
+    this.logger.info("[CreditsService] unsetUserPlan");
     await this.store.unsetUserPlan(userId);
     this.emit("credits.plan_changed", userId, {
       userId,
@@ -594,6 +610,7 @@ export class CreditsService {
     },
   ): Promise<AddCreditsResult> {
     const type = options?.type ?? "adjustment";
+    this.logger.info("[CreditsService] addCredits", { amount, type, bucket: options?.bucket });
     const result = await this.store.addCredits(
       userId,
       toDecimal(amount),
@@ -640,6 +657,7 @@ export class CreditsService {
     },
   ): Promise<AddCreditsResult> {
     const txType = options?.txType ?? "adjustment";
+    this.logger.info("[CreditsService] deductCredits", { amount, txType, bucket: options?.bucket });
     const result = await this.store.addCredits(
       userId,
       toDecimal(amount).neg(),
@@ -682,6 +700,11 @@ export class CreditsService {
     amount: Decimal | number,
     options?: GrantSubscriptionCycleOptions,
   ): Promise<AddCreditsResult> {
+    this.logger.info("[CreditsService] grantSubscriptionCycle", {
+      amount,
+      bucket: options?.bucket,
+      planKey: options?.planKey,
+    });
     if (options?.expiresAt != null && options?.ttlDays != null) {
       throw new ConfigError(
         "grantSubscriptionCycle: specify at most one of 'expiresAt' or 'ttlDays', not both",
@@ -972,6 +995,10 @@ export class CreditsService {
     options?: ReserveOptions,
   ): Promise<LeaseResult> {
     await this.maybeLazyExpire(userId);
+    this.logger.debug("[CreditsService] reserve", {
+      feature: options?.requiredFeature,
+      operationType: options?.operationType,
+    });
     const operationType = options?.operationType ?? "usage";
     const requiredFeature = options?.requiredFeature ?? null;
 
@@ -1019,6 +1046,11 @@ export class CreditsService {
       this.raiseLeaseError(result.error, userId, amount);
     }
 
+    this.logger.info("[CreditsService] reservation acquired", {
+      leaseId: result.leaseId,
+      amount: result.amount,
+      billingMode: result.billingMode,
+    });
     this.emit("credits.reserved", userId, {
       leaseId: result.leaseId,
       amount: result.amount,
@@ -1046,6 +1078,7 @@ export class CreditsService {
     options?: SettleOptions,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
+    this.logger.debug("[CreditsService] settle", { leaseId });
     const idempotencyKey = options?.idempotencyKey ?? null;
     const { amount, model } = await this.costOf(metricsOrAmount, userId);
 
@@ -1105,6 +1138,12 @@ export class CreditsService {
       this.raiseLeaseError(result.error, userId, amount);
     }
 
+    this.logger.info("[CreditsService] settled", {
+      leaseId,
+      amount: result.amount,
+      balanceAfter: result.balanceAfter,
+      idempotent: result.idempotent,
+    });
     this.emit("credits.deducted", userId, {
       transactionId: result.transactionId,
       amount: result.amount,
@@ -1154,8 +1193,10 @@ export class CreditsService {
 
   /** Release a lease without charging (work failed/aborted) — idempotent (H1). */
   async release(userId: string, leaseId: string): Promise<ReleaseResult> {
+    this.logger.debug("[CreditsService] release", { leaseId });
     const result = await this.store.releaseLease(userId, leaseId);
     if (result.released) {
+      this.logger.info("[CreditsService] lease released", { leaseId, reason: result.reason });
       this.emit("credits.reservation_released", userId, {
         leaseId,
         reason: result.reason,
@@ -1167,6 +1208,7 @@ export class CreditsService {
   /** Extend a lease's TTL for long batch/agentic jobs (B4). */
   async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseResult> {
     const ttlSeconds = ttl != null ? ttl : this.defaultTtl;
+    this.logger.debug("[CreditsService] renew", { leaseId, ttlSeconds });
     const result = await this.store.renewLease(userId, leaseId, ttlSeconds);
     if (result.error) {
       if (result.error === "lease_expired") {
@@ -1391,6 +1433,7 @@ export class CreditsService {
     feature?: string | null,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
+    this.logger.debug("[CreditsService] deduct", { model: metrics.model, feature });
     const engine = await this.engineForUser(userId);
     let rateOverrides: Record<string, string> | null = null;
     const plan = await this.store.getUserPlan(userId);
@@ -1462,6 +1505,12 @@ export class CreditsService {
     const result = await this.store.deductWithAllowance(userId, cost, options);
 
     if (result.error) {
+      this.logger.warn("[CreditsService] deduct failed", {
+        error: result.error,
+        amount: cost,
+        model: metrics.model,
+        feature,
+      });
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
         amount: cost,
@@ -1538,9 +1587,14 @@ export class CreditsService {
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
     const refundAmount = amount != null ? toDecimal(amount) : undefined;
+    this.logger.info("[CreditsService] refundCredits", { transactionId, refundAmount, reason });
     const result = await this.store.refundCredits(transactionId, refundAmount, reason, metadata);
 
     if (result.error) {
+      this.logger.warn("[CreditsService] refundCredits failed", {
+        transactionId,
+        error: result.error,
+      });
       this.emit("credits.refund_failed", result.userId, {
         transactionId,
         error: result.error,

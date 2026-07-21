@@ -1,4 +1,5 @@
-import type { PaymentProvider, ResolveUserCallback, ProviderLogger } from "../types.js";
+import type { PaymentProvider, ResolveUserCallback } from "../types.js";
+import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -20,8 +21,12 @@ export class MockPaymentProvider implements PaymentProvider {
   constructor(
     private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
-    private logger?: ProviderLogger,
-  ) {}
+    logger?: ProviderLogger | null,
+  ) {
+    this.logger = normalizeProviderLogger(logger);
+  }
+
+  private logger: ReturnType<typeof normalizeProviderLogger>;
 
   async createCheckoutSession(
     params: CheckoutParams,

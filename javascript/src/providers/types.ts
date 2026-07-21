@@ -58,8 +58,27 @@ export type ResolveUserCallback = (
 
 export interface ProviderLogger {
   debug?: (msg: string, ctx?: Record<string, unknown>) => void;
+  info?: (msg: string, ctx?: Record<string, unknown>) => void;
   warn?: (msg: string, ctx?: Record<string, unknown>) => void;
   error?: (msg: string, ctx?: Record<string, unknown>) => void;
+}
+
+export type NormalizedProviderLogger = Required<ProviderLogger>;
+
+export const noopLogger: NormalizedProviderLogger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
+
+export function normalizeProviderLogger(logger?: ProviderLogger | null): NormalizedProviderLogger {
+  return {
+    debug: logger?.debug ?? noopLogger.debug,
+    info: logger?.info ?? noopLogger.info,
+    warn: logger?.warn ?? noopLogger.warn,
+    error: logger?.error ?? noopLogger.error,
+  };
 }
 
 export type CheckoutPaymentStatus =

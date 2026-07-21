@@ -1,11 +1,7 @@
 import DodoPayments from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
-import type {
-  CheckoutPaymentStatus,
-  PaymentProvider,
-  ResolveUserCallback,
-  ProviderLogger,
-} from "../types.js";
+import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
+import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -39,12 +35,21 @@ export class DodoProvider implements PaymentProvider {
     private config: { webhookKey: string; setupProductId?: string },
     private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
-    private logger?: ProviderLogger,
-  ) {}
+    logger?: ProviderLogger | null,
+  ) {
+    this.logger = normalizeProviderLogger(logger);
+  }
+
+  private logger: ReturnType<typeof normalizeProviderLogger>;
 
   async createCheckoutSession(
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string; providerSessionId?: string }> {
+    this.logger.info("[DodoProvider] createCheckoutSession", {
+      productId: params.productId,
+      type: params.type,
+      hasUserId: Boolean(params.userId),
+    });
     const client = this.getClient();
     const body: CheckoutSessionCreateParams = {
       product_cart: [{ product_id: params.productId, quantity: params.quantity ?? 1 }],
@@ -98,7 +103,7 @@ export class DodoProvider implements PaymentProvider {
         body: req.rawBody,
       });
     } catch (error) {
-      this.logger?.warn?.("Dodo webhook verification failed", {
+      this.logger.warn("[DodoProvider] webhook verification failed", {
         error: error instanceof Error ? error.message : String(error),
       });
       return { received: false, retryable: false };
