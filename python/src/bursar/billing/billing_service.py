@@ -180,9 +180,7 @@ class BillingServiceImpl:
         ):
             return subscription
         try:
-            expired = (
-                datetime.fromisoformat(subscription.grace_ends_at).timestamp() <= datetime.now(UTC).timestamp()
-            )
+            expired = datetime.fromisoformat(subscription.grace_ends_at).timestamp() <= datetime.now(UTC).timestamp()
         except (TypeError, ValueError):
             expired = False
         if not expired:
@@ -910,9 +908,7 @@ class BillingServiceImpl:
             existing = self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
             past_due = self._subscription_state(event, uid, existing, status="past_due")
             self._store.upsert_billing_subscription(
-                past_due.model_copy(
-                    update={"grace_ends_at": (datetime.now(UTC) + timedelta(days=7)).isoformat()}
-                )
+                past_due.model_copy(update={"grace_ends_at": (datetime.now(UTC) + timedelta(days=7)).isoformat()})
             )
         return BillingEventResult(handled=True, action="payment_failed_recorded")
 

@@ -128,6 +128,9 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "BillingAutoRechargeAttempt",
+    "BillingAutoRechargeConfig",
+    "BillingAutoRechargeProfile",
     "AutoRechargeService",
     "AddCreditsResult",
     "AddTeamMemberResult",

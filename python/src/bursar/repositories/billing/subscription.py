@@ -70,7 +70,9 @@ class BillingSubscriptionRepository:
             raise ValueError(err.get("message") or err.get("error"))
         if state.get("grace_ends_at") is not None:
             self._execute(
-                "UPDATE bursar.billing_subscriptions SET grace_ends_at = %s, updated_at = now() WHERE provider = %s AND provider_subscription_id = %s",
+                "UPDATE bursar.billing_subscriptions "
+                "SET grace_ends_at = %s, updated_at = now() "
+                "WHERE provider = %s AND provider_subscription_id = %s",
                 [state["grace_ends_at"], state["provider"], state["provider_subscription_id"]],
             )
 

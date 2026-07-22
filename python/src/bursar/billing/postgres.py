@@ -492,7 +492,8 @@ class PostgresBillingStore(BillingStore):
         rows = self._execute(
             """INSERT INTO bursar.billing_subscription_changes
             (id, user_id, provider, provider_subscription_id, from_plan, from_interval, to_plan, to_interval,
-             effective_at, state, proration_billing_mode, quote, quote_hash, provider_operation_id, effective_date, expires_at)
+             effective_at, state, proration_billing_mode, quote, quote_hash, provider_operation_id,
+             effective_date, expires_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) RETURNING *""",
             [
                 change.id,
@@ -519,7 +520,10 @@ class PostgresBillingStore(BillingStore):
         self, provider: str, provider_subscription_id: str
     ) -> BillingSubscriptionChange | None:
         rows = self._execute(
-            "SELECT * FROM bursar.billing_subscription_changes WHERE provider=%s AND provider_subscription_id=%s AND state IN ('awaiting_payment','scheduled') ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM bursar.billing_subscription_changes "
+            "WHERE provider=%s AND provider_subscription_id=%s "
+            "AND state IN ('awaiting_payment','scheduled') "
+            "ORDER BY created_at DESC LIMIT 1",
             [provider, provider_subscription_id],
         )
         return self._row_to_subscription_change(rows[0]) if rows else None
@@ -930,7 +934,9 @@ class PostgresBillingStore(BillingStore):
         action_url: str | None = None,
     ) -> None:
         self._execute(
-            "UPDATE bursar.billing_auto_recharge_attempts SET state=%s, provider_payment_id=COALESCE(%s,provider_payment_id), failure_code=%s, action_url=%s, updated_at=now() WHERE id=%s",
+            "UPDATE bursar.billing_auto_recharge_attempts "
+            "SET state=%s, provider_payment_id=COALESCE(%s,provider_payment_id), "
+            "failure_code=%s, action_url=%s, updated_at=now() WHERE id=%s",
             [state, provider_payment_id, failure_code, action_url, attempt_id],
         )
 

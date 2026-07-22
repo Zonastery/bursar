@@ -8,6 +8,7 @@ import stripe as stripe_mod
 from bursar.bursar import BillingEventSink
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 from bursar.providers.types import (
+    ChangePlanLineItem,
     ChangePlanParams,
     ChangePlanPreview,
     CheckoutParams,

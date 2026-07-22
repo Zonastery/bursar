@@ -56,6 +56,8 @@ __all__ = [
     "AutoRechargeService",
     "AllowanceGrant",
     "BillingConfig",
+    "BillingAutoRechargeAttempt",
+    "BillingAutoRechargeProfile",
     "BillingAutoRechargeConfig",
     "BillingAutoRechargePolicy",
     "AutoRechargeTrigger",
