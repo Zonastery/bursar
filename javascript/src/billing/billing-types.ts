@@ -138,6 +138,7 @@ export interface BillingSubscriptionInfo {
 // ── Invoice info ────────────────────────────────────────────────────────
 
 export interface BillingInvoiceInfo {
+  provider?: string;
   providerInvoiceId: string;
   status?: string | null;
   amountPaidMinor?: number | null;
@@ -227,7 +228,29 @@ export interface BillingSubscriptionState {
   cancelAtPeriodEnd?: boolean;
   interval?: string | null;
   intervalCount?: number | null;
+  graceEndsAt?: string | null;
   metadata?: Record<string, unknown> | null;
+}
+
+export type BillingSubscriptionChangeState =
+  "draft" | "awaiting_payment" | "scheduled" | "completed" | "failed" | "canceled" | "superseded";
+export interface BillingSubscriptionChange {
+  id: string;
+  userId: string;
+  provider: string;
+  providerSubscriptionId: string;
+  fromPlan?: string | null;
+  fromInterval?: string | null;
+  toPlan: string;
+  toInterval: string;
+  effectiveAt: "immediately" | "next_billing_date" | "trial_end";
+  state: BillingSubscriptionChangeState;
+  prorationBillingMode: string;
+  quote: Record<string, unknown>;
+  quoteHash: string;
+  providerOperationId?: string | null;
+  effectiveDate?: string | null;
+  expiresAt?: string | null;
 }
 
 export type CheckoutIntentStatus = "open" | "completed" | "failed" | "expired";
@@ -290,10 +313,97 @@ export interface BillingCreditTopup {
   providers?: Record<string, ProviderRef>;
 }
 
+export interface BillingAutoRechargeConfig {
+  enabled: boolean;
+  /** Canonical policy shape. Legacy flattened fields remain during migration. */
+  defaultPolicy?: BillingAutoRechargePolicy;
+  thresholdCredits: number;
+  topupKey: string;
+  quantity: number;
+  maxRecharges: number;
+  windowDays: number;
+}
+
+export interface BillingAutoRechargePolicy {
+  trigger: { type: "balance_below"; thresholdCredits: number };
+  topup: { key: string; quantity: number };
+  limit?: {
+    period: "calendar_day" | "calendar_month" | "rolling_days";
+    maxCharges?: number;
+    maxAmountMinor?: number;
+    currency?: string;
+    rollingDays?: number;
+  };
+}
+
+export const AUTO_RECHARGE_STATES = {
+  DISABLED: "disabled",
+  ACTIVE: "active",
+  PROCESSING: "processing",
+  SUSPENDED: "suspended",
+  LIMIT_REACHED: "limit_reached",
+} as const;
+
+export type AutoRechargeState = (typeof AUTO_RECHARGE_STATES)[keyof typeof AUTO_RECHARGE_STATES];
+
+export interface BillingAutoRechargeStatus {
+  enabled: boolean;
+  state: AutoRechargeState;
+  thresholdCredits: number;
+  topupKey: string;
+  quantity: number;
+  maxRecharges: number;
+  windowDays: number;
+  rechargesInWindow: number;
+  paymentMethodId?: string | null;
+  paymentMethodLast4?: string | null;
+  paymentMethodBrand?: string | null;
+  suspendedReason?: string | null;
+  pendingAttemptId?: string | null;
+  quoteAmountMinor?: number | null;
+  quoteCurrency?: string | null;
+}
+
+export type AutoRechargeAttemptState =
+  "claimed" | "processing" | "succeeded" | "retryable" | "failed" | "action_required";
+
+export interface BillingAutoRechargeProfile {
+  userId: string;
+  enabled: boolean;
+  state: AutoRechargeState;
+  provider?: string | null;
+  providerCustomerId?: string | null;
+  paymentMethodId?: string | null;
+  suspendedReason?: string | null;
+  consentedAt?: string | null;
+  policySnapshot?: Record<string, unknown> | null;
+  policyHash?: string | null;
+  quoteSnapshot?: Record<string, unknown> | null;
+  consentReference?: string | null;
+  armed?: boolean;
+}
+
+export interface BillingAutoRechargeAttempt {
+  id: string;
+  userId: string;
+  provider: string;
+  idempotencyKey: string;
+  providerPaymentId?: string | null;
+  topupKey: string;
+  quantity: number;
+  state: AutoRechargeAttemptState;
+  credits?: number | null;
+  failureCode?: string | null;
+  actionUrl?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BillingConfig {
   currency?: string;
   subscriptions?: Record<string, BillingOffer>;
   topups?: Record<string, BillingCreditTopup>;
+  autoRecharge?: BillingAutoRechargeConfig | null;
 }
 
 // ── Billing preferences ──────────────────────────────────────────────────

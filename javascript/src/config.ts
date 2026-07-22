@@ -4,6 +4,7 @@ import { validateExpression } from "./expr.js";
 import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 import type { BillingMode, OperationPolicy, PlanDefinition, BucketDefinition } from "./types.js";
 import type {
+  BillingAutoRechargeConfig,
   BillingCreditTopup,
   BillingOffer,
   BillingOfferInterval,
@@ -81,6 +82,7 @@ export interface BillingSection {
   currency: string;
   subscriptions: Record<string, BillingOffer>;
   topups: Record<string, BillingCreditTopup>;
+  autoRecharge?: BillingAutoRechargeConfig | null;
 }
 
 /** Internal validated pricing configuration. */
@@ -146,7 +148,32 @@ const OPERATION_POLICY_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /** Known billing-section keys. */
-const BILLING_KEYS: ReadonlySet<string> = new Set(["currency", "subscriptions", "topups"]);
+const BILLING_KEYS: ReadonlySet<string> = new Set([
+  "currency",
+  "subscriptions",
+  "topups",
+  "autoRecharge",
+]);
+
+const BILLING_AUTO_RECHARGE_KEYS: ReadonlySet<string> = new Set([
+  "enabled",
+  "defaultPolicy",
+  "thresholdCredits",
+  "topupKey",
+  "quantity",
+  "maxRecharges",
+  "windowDays",
+  "trigger",
+  "topup",
+  "limit",
+  "type",
+  "key",
+  "period",
+  "maxCharges",
+  "maxAmountMinor",
+  "currency",
+  "rollingDays",
+]);
 
 /** Known billing-offer keys. */
 const BILLING_OFFER_KEYS: ReadonlySet<string> = new Set([
@@ -291,6 +318,15 @@ function decodeSnakeFields(
     replace_prior: "replacePrior",
     valid_from: "validFrom",
     valid_to: "validTo",
+    auto_recharge: "autoRecharge",
+    threshold_credits: "thresholdCredits",
+    topup_key: "topupKey",
+    max_recharges: "maxRecharges",
+    window_days: "windowDays",
+    default_policy: "defaultPolicy",
+    max_charges: "maxCharges",
+    max_amount_minor: "maxAmountMinor",
+    rolling_days: "rollingDays",
     allowance: "allowance",
     safety: "safety",
     entitlements: "entitlements",
@@ -809,10 +845,86 @@ function parseBilling(raw: unknown): BillingSection | undefined {
       topups[key] = parseBillingTopup(val, `billing.topups.${key}`);
     }
   }
+  let autoRecharge: BillingAutoRechargeConfig | null | undefined;
+  if (section.autoRecharge != null) {
+    if (!isRecord(section.autoRecharge)) {
+      throw new ConfigError("billing.autoRecharge must be a dict");
+    }
+    const value = decodeSnakeFields(section.autoRecharge, "billing.autoRecharge");
+    assertKnownKeys(value, BILLING_AUTO_RECHARGE_KEYS, "billing.autoRecharge");
+    const policy = isRecord(value.defaultPolicy)
+      ? decodeSnakeFields(value.defaultPolicy, "billing.autoRecharge.defaultPolicy")
+      : null;
+    const trigger =
+      policy && isRecord(policy.trigger)
+        ? decodeSnakeFields(policy.trigger, "billing.autoRecharge.defaultPolicy.trigger")
+        : null;
+    const topup =
+      policy && isRecord(policy.topup)
+        ? decodeSnakeFields(policy.topup, "billing.autoRecharge.defaultPolicy.topup")
+        : null;
+    const limit =
+      policy && isRecord(policy.limit)
+        ? decodeSnakeFields(policy.limit, "billing.autoRecharge.defaultPolicy.limit")
+        : null;
+    const thresholdCredits = Number(trigger?.thresholdCredits ?? value.thresholdCredits ?? 5000);
+    const quantity = Number(topup?.quantity ?? value.quantity ?? 1);
+    const maxRecharges = Number(limit?.maxCharges ?? value.maxRecharges ?? 3);
+    const windowDays = Number(limit?.rollingDays ?? value.windowDays ?? 30);
+    if (!Number.isFinite(thresholdCredits) || thresholdCredits < 0) {
+      throw new ConfigError("billing.autoRecharge.thresholdCredits must be >= 0");
+    }
+    if (!Number.isFinite(quantity) || quantity < 1 || !Number.isInteger(quantity)) {
+      throw new ConfigError("billing.autoRecharge.quantity must be a positive integer");
+    }
+    if (!Number.isFinite(maxRecharges) || maxRecharges < 1 || !Number.isInteger(maxRecharges)) {
+      throw new ConfigError("billing.autoRecharge.maxRecharges must be a positive integer");
+    }
+    if (!Number.isFinite(windowDays) || windowDays < 1 || !Number.isInteger(windowDays)) {
+      throw new ConfigError("billing.autoRecharge.windowDays must be a positive integer");
+    }
+    const topupKey = String(topup?.key ?? value.topupKey ?? "default");
+    if (!topups[topupKey]) {
+      throw new ConfigError(
+        `billing.autoRecharge.topupKey references unknown top-up '${topupKey}'`,
+      );
+    }
+    autoRecharge = {
+      enabled: Boolean(value.enabled ?? true),
+      thresholdCredits,
+      topupKey,
+      quantity,
+      maxRecharges,
+      windowDays,
+      ...(policy
+        ? {
+            defaultPolicy: {
+              trigger: { type: "balance_below" as const, thresholdCredits },
+              topup: { key: topupKey, quantity },
+              ...(limit
+                ? {
+                    limit: {
+                      period: String(limit.period ?? "calendar_month") as
+                        "calendar_day" | "calendar_month" | "rolling_days",
+                      ...(limit.maxCharges != null ? { maxCharges } : {}),
+                      ...(limit.maxAmountMinor != null
+                        ? { maxAmountMinor: Number(limit.maxAmountMinor) }
+                        : {}),
+                      ...(limit.currency != null ? { currency: String(limit.currency) } : {}),
+                      ...(limit.rollingDays != null ? { rollingDays: windowDays } : {}),
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    };
+  }
   return {
     currency: String(section.currency ?? "USD"),
     subscriptions,
     topups,
+    autoRecharge,
   };
 }
 
@@ -1020,6 +1132,50 @@ export function bursarConfigToSnakeDict(config: ParsedBursarConfig): Record<stri
             },
           ]),
         ),
+        ...(config.billing.autoRecharge
+          ? {
+              auto_recharge: {
+                enabled: config.billing.autoRecharge.enabled,
+                default_policy: {
+                  trigger: {
+                    type: "balance_below",
+                    threshold_credits:
+                      config.billing.autoRecharge.defaultPolicy?.trigger.thresholdCredits ??
+                      config.billing.autoRecharge.thresholdCredits,
+                  },
+                  topup: {
+                    key:
+                      config.billing.autoRecharge.defaultPolicy?.topup.key ??
+                      config.billing.autoRecharge.topupKey,
+                    quantity:
+                      config.billing.autoRecharge.defaultPolicy?.topup.quantity ??
+                      config.billing.autoRecharge.quantity,
+                  },
+                  limit: {
+                    period:
+                      config.billing.autoRecharge.defaultPolicy?.limit?.period ?? "rolling_days",
+                    max_charges:
+                      config.billing.autoRecharge.defaultPolicy?.limit?.maxCharges ??
+                      config.billing.autoRecharge.maxRecharges,
+                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.maxAmountMinor != null
+                      ? {
+                          max_amount_minor:
+                            config.billing.autoRecharge.defaultPolicy.limit.maxAmountMinor,
+                        }
+                      : {}),
+                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.currency != null
+                      ? { currency: config.billing.autoRecharge.defaultPolicy.limit.currency }
+                      : {}),
+                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.rollingDays != null
+                      ? {
+                          rolling_days: config.billing.autoRecharge.defaultPolicy.limit.rollingDays,
+                        }
+                      : { rolling_days: config.billing.autoRecharge.windowDays }),
+                  },
+                },
+              },
+            }
+          : {}),
       }
     : undefined;
 

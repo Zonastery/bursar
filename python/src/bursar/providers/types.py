@@ -49,6 +49,7 @@ class CheckoutParams:
     return_url: str = ""
     cancel_url: str = ""
     metadata: dict[str, str] | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass
@@ -87,6 +88,35 @@ class PaymentMethodInfo:
     brand: str = ""
     expiry_month: int = 0
     expiry_year: int = 0
+    is_default: bool = False
+
+
+@dataclass
+class SavedPaymentChargeParams:
+    customer_id: str = ""
+    payment_method_id: str = ""
+    product_id: str = ""
+    quantity: int = 1
+    metadata: dict[str, str] | None = None
+    idempotency_key: str = ""
+    return_url: str | None = None
+
+
+@dataclass
+class SavedPaymentChargeResult:
+    provider_payment_id: str | None = None
+    status: str = "processing"
+    action_url: str | None = None
+    amount_minor: int | None = None
+    currency: str | None = None
+
+
+@dataclass
+class SavedPaymentChargeQuote:
+    amount_minor: int
+    currency: str
+    tax_minor: int | None = None
+    expires_at: str | None = None
 
 
 @dataclass
@@ -98,6 +128,7 @@ class ChangePlanParams:
     on_payment_failure: str | None = None
     quantity: int = 1
     metadata: dict[str, str] | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass
@@ -128,6 +159,11 @@ class ChangePlanPreview:
     currency: str = "USD"
     line_items: list[ChangePlanLineItem] | None = None
     effective_at: str = ""
+    recurring_amount: int | None = None
+    recurring_currency: str | None = None
+    next_billing_date: str | None = None
+    tax_amount: int | None = None
+    customer_credits: int | None = None
 
 
 class PaymentProvider(ABC):
@@ -151,14 +187,36 @@ class PaymentProvider(ABC):
     @abstractmethod
     async def handle_webhook(self, req: WebhookRequest) -> dict: ...
 
-    @abstractmethod
-    async def cancel_subscription(self, subscription_id: str) -> None: ...
+    async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
+        return None
 
     @abstractmethod
-    async def reactivate_subscription(self, subscription_id: str) -> None: ...
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+
+    @abstractmethod
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+
+    async def cancel_scheduled_plan_change(
+        self,
+        subscription_id: str,
+        provider_operation_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        """Remove a pending plan switch while retaining the subscription."""
+        raise NotImplementedError
 
     @abstractmethod
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]: ...
+
+    async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
+        methods = await self.list_payment_methods(customer_id)
+        return methods[0] if len(methods) == 1 else None
+
+    async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
+        raise NotImplementedError("provider does not support saved-payment previews")
+
+    @abstractmethod
+    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult: ...
 
     @abstractmethod
     async def get_invoice_url(self, provider_payment_id: str) -> dict | None: ...

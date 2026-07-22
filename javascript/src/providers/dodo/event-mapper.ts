@@ -265,6 +265,17 @@ export async function handleDodoBillingEvent(
         ...baseEvent(rawId),
         eventType: "payment.succeeded",
         ...(userId ? { userId } : {}),
+        ...(subscriptionId
+          ? {
+              subscription: {
+                providerSubscriptionId: subscriptionId,
+                status: (String(data.subscription_status ?? "active") ||
+                  "active") as BillingSubscriptionStatus,
+                periodStart: normalizeDate(data.previous_billing_date),
+                periodEnd: normalizeDate(data.next_billing_date),
+              },
+            }
+          : {}),
         payment,
       });
       return;

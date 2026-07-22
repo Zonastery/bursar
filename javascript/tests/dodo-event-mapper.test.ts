@@ -376,6 +376,11 @@ describe("event type routing", () => {
           amountMinor: 2999,
           currency: "USD",
         }),
+        subscription: expect.objectContaining({
+          providerSubscriptionId: DODO_PAYMENT_SUCCEEDED.subscription_id,
+          periodStart: null,
+          periodEnd: null,
+        }),
       }),
     );
   });

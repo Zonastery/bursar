@@ -12,13 +12,17 @@ import type { CreditEventEmitter } from "./stores/events.js";
 import type {
   BillingEvent,
   BillingEventResult,
+  BillingAutoRechargeAttempt,
+  BillingAutoRechargeProfile,
   BillingPreferences,
   BillingOfferResult,
   BillingTopupResult,
   BillingCustomerRecord,
   BillingSubscriptionState,
   CheckoutIntent,
+  BillingInvoiceInfo,
 } from "./billing/billing-types.js";
+import type { AutoRechargeService } from "./billing/auto-recharge-service.js";
 
 /** Boundary used by payment providers to submit normalized lifecycle events. */
 export interface BillingEventSink {
@@ -27,6 +31,7 @@ export interface BillingEventSink {
 
 /** Public billing capability exposed by the Bursar facade. */
 export interface BillingService extends BillingEventSink {
+  readonly autoRecharge: AutoRechargeService;
   createOrGetCheckoutIntent(input: {
     actorKey: string;
     provider: string;
@@ -43,11 +48,41 @@ export interface BillingService extends BillingEventSink {
       checkoutUrl?: string | null;
     },
   ): Promise<void>;
+  getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null>;
   getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
+  getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
+  listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
+  pseudonymizeFinancialSubject(userId: string): Promise<void>;
+  listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
+  upsertBillingSubscription(state: BillingSubscriptionState): Promise<void>;
   updateUserPreferences(prefs: BillingPreferences): Promise<void>;
+  getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
+  upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
+  claimAutoRechargeAttempt(input: {
+    userId: string;
+    provider: string;
+    topupKey: string;
+    quantity: number;
+    maxRecharges: number;
+    windowDays: number;
+  }): Promise<BillingAutoRechargeAttempt | null>;
+  updateAutoRechargeAttempt(input: {
+    id: string;
+    state: string;
+    providerPaymentId?: string | null;
+    failureCode?: string | null;
+    actionUrl?: string | null;
+  }): Promise<void>;
+  updateAutoRechargeAttemptByProviderPayment(input: {
+    provider: string;
+    providerPaymentId: string;
+    state: string;
+    failureCode?: string | null;
+  }): Promise<void>;
+  countAutoRechargeAttempts(userId: string, windowDays: number): Promise<number>;
   recordSubscriptionConflict(input: {
     userId?: string | null;
     provider: string;

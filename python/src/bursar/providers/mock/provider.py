@@ -15,6 +15,9 @@ from bursar.providers.types import (
     PortalParams,
     PreviewChangePlanParams,
     ProviderResolveUserFn,
+    SavedPaymentChargeParams,
+    SavedPaymentChargeQuote,
+    SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
@@ -43,14 +46,33 @@ class MockPaymentProvider(PaymentProvider):
     async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
         return {"url": params.return_url}
 
-    async def cancel_subscription(self, subscription_id: str) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         pass
 
-    async def reactivate_subscription(self, subscription_id: str) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+        pass
+
+    async def cancel_scheduled_plan_change(
+        self,
+        subscription_id: str,
+        provider_operation_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
         pass
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         return []
+
+    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
+        return SavedPaymentChargeResult(
+            provider_payment_id=f"mock_pay_{params.idempotency_key}",
+            status="succeeded",
+            amount_minor=0,
+            currency="USD",
+        )
+
+    async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
+        return SavedPaymentChargeQuote(amount_minor=0, currency="USD")
 
     async def create_customer(self, params: CreateCustomerParams) -> dict:
         import time

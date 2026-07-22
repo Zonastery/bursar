@@ -114,6 +114,38 @@ describe("DodoProvider webhook signature verification", () => {
     expect(result).toEqual({ received: false, retryable: false });
   });
 
+  it("does not resolve an anonymous user for payment.failed", async () => {
+    const { verifyWebhookPayload } = await import("@dodopayments/core/webhook");
+    (verifyWebhookPayload as Mock).mockResolvedValue({
+      type: "payment.failed",
+      data: {
+        id: "evt_payment_failed",
+        payment_id: "pay_failed",
+        customer: { customer_id: "cus_failed", email: "guest@example.com" },
+      },
+    });
+    const resolveUser = vi.fn().mockRejectedValue(new Error("user lookup should be skipped"));
+    const provider = new DodoProvider(
+      () => ({}) as never,
+      { webhookKey: WEBHOOK_KEY },
+      mockBm,
+      resolveUser,
+      mockLogger,
+    );
+
+    const result = await provider.handleWebhook({
+      rawBody: JSON.stringify({
+        type: "payment.failed",
+        data: { payment_id: "pay_failed" },
+      }),
+      headers: {},
+    });
+
+    expect(result).toEqual({ received: true });
+    expect(resolveUser).not.toHaveBeenCalled();
+    expect(mockBm.ingestBillingEvent).toHaveBeenCalled();
+  });
+
   it("retrieves checkout payment status and treats a missing session as expired", async () => {
     const retrieve = vi
       .fn()

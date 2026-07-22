@@ -185,6 +185,34 @@ export async function handleStripeWebhook(
         break;
       }
 
+      case "payment_intent.succeeded":
+      case "payment_intent.payment_failed": {
+        const intent = event.data.object as Stripe.PaymentIntent;
+        const metadata = intent.metadata ?? {};
+        if (!metadata.auto_recharge_attempt_id) break;
+        const succeeded = event.type === "payment_intent.succeeded";
+        const payment: BillingPaymentInfo = {
+          providerPaymentId: intent.id,
+          amountMinor: intent.amount,
+          taxMinor: null,
+          currency: intent.currency.toUpperCase(),
+          purpose: "credit_topup",
+          refs: {
+            productId: metadata.product_id,
+            priceId: metadata.price_id,
+          },
+        };
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType: succeeded ? "payment.succeeded" : "payment.failed",
+          occurredAt: new Date().toISOString(),
+          userId: metadata.userId,
+          payment,
+        });
+        break;
+      }
+
       case "invoice.paid": {
         const invoice = event.data.object as Stripe.Invoice;
         const subscriptionId = (invoice as { subscription?: string }).subscription;

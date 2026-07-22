@@ -16,12 +16,15 @@ import psycopg2.extras
 import psycopg2.pool
 
 from bursar.billing.models import (
+    BillingAutoRechargeAttempt,
+    BillingAutoRechargeProfile,
     BillingConfig,
     BillingCustomerRecord,
     BillingEventClaim,
     BillingGrantResult,
     BillingOfferResult,
     BillingPreferences,
+    BillingSubscriptionChange,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
@@ -188,9 +191,33 @@ class PostgresBillingStore(BillingStore):
             cancel_at_period_end=bool(r.cancel_at_period_end),
             interval=str(r.interval) if r.interval else None,
             interval_count=int(r.interval_count) if r.interval_count is not None else None,
+            grace_ends_at=str(r.grace_ends_at) if getattr(r, "grace_ends_at", None) else None,
             metadata=r.metadata if isinstance(r.metadata, dict) else None,
             catalog_version=int(cv) if (cv := getattr(r, "catalog_version", None)) is not None else None,
             plan_version_id=str(pv) if (pv := getattr(r, "plan_version_id", None)) else None,
+        )
+
+    @staticmethod
+    def _row_to_subscription_change(row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
+        if not row:
+            return None
+        return BillingSubscriptionChange(
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            provider=str(row["provider"]),
+            provider_subscription_id=str(row["provider_subscription_id"]),
+            from_plan=row.get("from_plan"),
+            from_interval=row.get("from_interval"),
+            to_plan=str(row["to_plan"]),
+            to_interval=str(row["to_interval"]),
+            effective_at=str(row["effective_at"]),
+            state=str(row["state"]),
+            proration_billing_mode=str(row["proration_billing_mode"]),
+            quote=row.get("quote") or {},
+            quote_hash=str(row["quote_hash"]),
+            provider_operation_id=row.get("provider_operation_id"),
+            effective_date=str(row["effective_date"]) if row.get("effective_date") else None,
+            expires_at=str(row["expires_at"]) if row.get("expires_at") else None,
         )
 
     @staticmethod
@@ -403,6 +430,7 @@ class PostgresBillingStore(BillingStore):
                 "cancel_at_period_end": state.cancel_at_period_end,
                 "interval": state.interval,
                 "interval_count": state.interval_count,
+                "grace_ends_at": _to_utc_iso(state.grace_ends_at),
                 "metadata": state.metadata,
                 "catalog_version": state.catalog_version,
                 "plan_version_id": state.plan_version_id,
@@ -459,6 +487,53 @@ class PostgresBillingStore(BillingStore):
         """
         result = self._subscription_repo.get_user_subscription(user_id, status=tuple(statuses) if statuses else None)
         return self._row_to_subscription_state(result)
+
+    def create_billing_subscription_change(self, change: BillingSubscriptionChange) -> BillingSubscriptionChange:
+        rows = self._execute(
+            """INSERT INTO bursar.billing_subscription_changes
+            (id, user_id, provider, provider_subscription_id, from_plan, from_interval, to_plan, to_interval,
+             effective_at, state, proration_billing_mode, quote, quote_hash, provider_operation_id, effective_date, expires_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) RETURNING *""",
+            [
+                change.id,
+                change.user_id,
+                change.provider,
+                change.provider_subscription_id,
+                change.from_plan,
+                change.from_interval,
+                change.to_plan,
+                change.to_interval,
+                change.effective_at,
+                change.state,
+                change.proration_billing_mode,
+                json.dumps(change.quote),
+                change.quote_hash,
+                change.provider_operation_id,
+                change.effective_date,
+                change.expires_at,
+            ],
+        )
+        return self._row_to_subscription_change(rows[0])
+
+    def get_open_billing_subscription_change(
+        self, provider: str, provider_subscription_id: str
+    ) -> BillingSubscriptionChange | None:
+        rows = self._execute(
+            "SELECT * FROM bursar.billing_subscription_changes WHERE provider=%s AND provider_subscription_id=%s AND state IN ('awaiting_payment','scheduled') ORDER BY created_at DESC LIMIT 1",
+            [provider, provider_subscription_id],
+        )
+        return self._row_to_subscription_change(rows[0]) if rows else None
+
+    def update_billing_subscription_change(self, id: str, **updates: Any) -> None:
+        allowed = {"state", "provider_operation_id", "effective_date"}
+        fields = [(key, value) for key, value in updates.items() if key in allowed]
+        if not fields:
+            return
+        assignments = ", ".join(f"{key} = %s" for key, _ in fields)
+        self._execute(
+            f"UPDATE bursar.billing_subscription_changes SET {assignments}, updated_at=now() WHERE id=%s",
+            [*(value for _, value in fields), id],
+        )
 
     def resolve_credit_topup(
         self,
@@ -765,6 +840,99 @@ class PostgresBillingStore(BillingStore):
             prefs: The billing preferences to persist.
         """
         self._preferences_repo.upsert(prefs.model_dump())
+
+    def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None:
+        rows = self._execute("SELECT * FROM bursar.billing_auto_recharge_profiles WHERE user_id=%s", [user_id])
+        if not rows:
+            return None
+        row = rows[0]
+        return BillingAutoRechargeProfile(
+            user_id=str(row["user_id"]),
+            enabled=bool(row["enabled"]),
+            state=str(row["state"]),
+            provider=row.get("provider"),
+            provider_customer_id=row.get("provider_customer_id"),
+            payment_method_id=row.get("payment_method_id"),
+            suspended_reason=row.get("suspended_reason"),
+            consented_at=str(row["consented_at"]) if row.get("consented_at") else None,
+            consent_reference=row.get("consent_reference"),
+            consent_metadata=row.get("consent_metadata"),
+            policy_override=row.get("policy_override"),
+            policy_snapshot=row.get("policy_snapshot"),
+            policy_hash=row.get("policy_hash"),
+            quote_snapshot=row.get("quote_snapshot"),
+            armed=bool(row.get("armed", True)),
+        )
+
+    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
+        self._execute(
+            """INSERT INTO bursar.billing_auto_recharge_profiles
+              (user_id,enabled,state,provider,provider_customer_id,payment_method_id,suspended_reason,consented_at)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+              ON CONFLICT (user_id) DO UPDATE SET enabled=EXCLUDED.enabled,state=EXCLUDED.state,
+              provider=EXCLUDED.provider,provider_customer_id=EXCLUDED.provider_customer_id,
+              payment_method_id=EXCLUDED.payment_method_id,suspended_reason=EXCLUDED.suspended_reason,
+              consented_at=EXCLUDED.consented_at,consent_reference=EXCLUDED.consent_reference,
+                 consent_metadata=EXCLUDED.consent_metadata,policy_override=EXCLUDED.policy_override,
+                 policy_snapshot=EXCLUDED.policy_snapshot,policy_hash=EXCLUDED.policy_hash,
+                 quote_snapshot=EXCLUDED.quote_snapshot,armed=EXCLUDED.armed,updated_at=now()""",
+            [
+                profile.user_id,
+                profile.enabled,
+                profile.state,
+                profile.provider,
+                profile.provider_customer_id,
+                profile.payment_method_id,
+                profile.suspended_reason,
+                profile.consented_at,
+                profile.consent_reference,
+                json.dumps(profile.consent_metadata) if profile.consent_metadata is not None else None,
+                json.dumps(profile.policy_override) if profile.policy_override is not None else None,
+                json.dumps(profile.policy_snapshot) if profile.policy_snapshot is not None else None,
+                profile.policy_hash,
+                json.dumps(profile.quote_snapshot) if profile.quote_snapshot is not None else None,
+                profile.armed,
+            ],
+        )
+
+    def claim_auto_recharge_attempt(
+        self, user_id: str, provider: str, topup_key: str, quantity: int, max_recharges: int, window_days: int
+    ) -> BillingAutoRechargeAttempt | None:
+        rows = self._execute(
+            "SELECT * FROM bursar.claim_auto_recharge_attempt(%s,%s,%s,%s,%s,%s)",
+            [user_id, provider, topup_key, quantity, max_recharges, window_days],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return BillingAutoRechargeAttempt(
+            id=str(row["id"]),
+            user_id=str(row["user_id"]),
+            provider=str(row["provider"]),
+            idempotency_key=str(row["idempotency_key"]),
+            provider_payment_id=row.get("provider_payment_id"),
+            topup_key=str(row["topup_key"]),
+            quantity=int(row["quantity"]),
+            state=str(row["state"]),
+            credits=row.get("credits"),
+            failure_code=row.get("failure_code"),
+            action_url=row.get("action_url"),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def update_auto_recharge_attempt(
+        self,
+        attempt_id: str,
+        state: str,
+        provider_payment_id: str | None = None,
+        failure_code: str | None = None,
+        action_url: str | None = None,
+    ) -> None:
+        self._execute(
+            "UPDATE bursar.billing_auto_recharge_attempts SET state=%s, provider_payment_id=COALESCE(%s,provider_payment_id), failure_code=%s, action_url=%s, updated_at=now() WHERE id=%s",
+            [state, provider_payment_id, failure_code, action_url, attempt_id],
+        )
 
     def get_billing_customer_by_user_id(
         self,

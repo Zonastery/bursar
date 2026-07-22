@@ -12,6 +12,9 @@ describe("payment provider adapter contracts", () => {
       checkoutSessions: {
         create: async (...args: unknown[]) => {
           calls.push(args);
+          if ((args[0] as Record<string, unknown>)?.confirm === true) {
+            return { session_id: "sess_auto", payment_id: "pay_auto" };
+          }
           return { checkout_url: "https://checkout.test", session_id: "sess_1" };
         },
         retrieve: async () => ({ payment_status: "paid" }),
@@ -31,12 +34,28 @@ describe("payment provider adapter contracts", () => {
                 expiry_year: "2030",
               },
             },
+            {
+              payment_method: "card",
+              payment_method_id: "pm_1_duplicate",
+              recurring_enabled: true,
+              card: {
+                last4_digits: "4242",
+                card_network: "visa",
+                expiry_month: "1",
+                expiry_year: "2030",
+              },
+            },
             { payment_method: "paypal", payment_method_id: "pm_2" },
           ],
         }),
         create: async () => ({ customer_id: "cus_1" }),
       },
-      payments: { retrieve: async () => ({ payment_link: "https://invoice.test" }) },
+      payments: {
+        retrieve: async (id: string) =>
+          id === "pay_auto"
+            ? { payment_id: id, status: "succeeded", total_amount: 500, currency: "USD" }
+            : { payment_link: "https://invoice.test" },
+      },
       subscriptions: {
         update: async (...args: unknown[]) => calls.push(args),
         changePlan: async (...args: unknown[]) => calls.push(args),
@@ -78,7 +97,25 @@ describe("payment provider adapter contracts", () => {
     await expect(
       provider.createCustomerPortalSession({ customerId: "cus_1", returnUrl: "https://return" }),
     ).resolves.toEqual({ url: "https://portal.test" });
-    await expect(provider.listPaymentMethods("cus_1")).resolves.toHaveLength(1);
+    await expect(provider.listPaymentMethods("cus_1")).resolves.toEqual([
+      {
+        id: "pm_1",
+        last4: "4242",
+        brand: "visa",
+        expiryMonth: 1,
+        expiryYear: 2030,
+      },
+    ]);
+    await expect(
+      provider.chargeSavedPaymentMethod({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+        productId: "prod_topup",
+        quantity: 1,
+        metadata: { purpose: "credit_topup" },
+        idempotencyKey: "auto_1",
+      }),
+    ).resolves.toMatchObject({ providerPaymentId: "pay_auto", status: "succeeded" });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
     await expect(
       provider.previewChangePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
@@ -104,7 +141,24 @@ describe("payment provider adapter contracts", () => {
         },
       },
       billingPortal: { sessions: { create: async () => ({ url: "https://portal.test" }) } },
-      paymentMethods: { list: async () => ({ data: [] }) },
+      paymentMethods: {
+        list: async () => ({
+          data: [
+            {
+              id: "pm_1",
+              card: { last4: "4242", brand: "visa", exp_month: 1, exp_year: 2030 },
+            },
+            {
+              id: "pm_1_duplicate",
+              card: { last4: "4242", brand: "visa", exp_month: 1, exp_year: 2030 },
+            },
+          ],
+        }),
+      },
+      prices: { retrieve: async () => ({ unit_amount: 500, currency: "usd" }) },
+      paymentIntents: {
+        create: async () => ({ id: "pi_auto", status: "succeeded", amount: 500, currency: "usd" }),
+      },
       invoices: { retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }) },
       subscriptions: { update: async (...args: unknown[]) => calls.push({ args }) },
       webhooks: { constructEvent: () => ({}) },
@@ -127,6 +181,17 @@ describe("payment provider adapter contracts", () => {
       paymentStatus: "cancelled",
     });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
+    await expect(provider.listPaymentMethods("cus_1")).resolves.toHaveLength(1);
+    await expect(
+      provider.chargeSavedPaymentMethod({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+        productId: "price_topup",
+        quantity: 1,
+        metadata: { purpose: "credit_topup" },
+        idempotencyKey: "auto_1",
+      }),
+    ).resolves.toMatchObject({ providerPaymentId: "pi_auto", status: "succeeded" });
     await expect(provider.handleWebhook({ rawBody: "{}", headers: {} })).resolves.toEqual({
       received: false,
       retryable: false,

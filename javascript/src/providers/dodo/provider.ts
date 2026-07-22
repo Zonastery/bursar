@@ -1,7 +1,11 @@
 import DodoPayments from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
 import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
-import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
+import {
+  deduplicatePaymentMethods,
+  type ProviderLogger,
+  normalizeProviderLogger,
+} from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -14,6 +18,9 @@ import type {
   PreviewChangePlanParams,
   ChangePlanPreview,
   ChangePlanLineItem,
+  SavedPaymentChargeParams,
+  SavedPaymentChargeResult,
+  SavedPaymentChargeQuote,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
@@ -137,8 +144,9 @@ export class DodoProvider implements PaymentProvider {
     const metadata = (data.metadata ?? {}) as Record<string, string>;
     let userId: string | null = metadata.userId ?? null;
 
-    if (!userId && this.resolveUser) {
-      userId = await this.resolveUser(data, metadata);
+    const resolvesUserWithoutMetadata = type !== "payment.failed" && type !== "checkout.expired";
+    if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
+      userId = await this.resolveUser(data, metadata, type);
     }
 
     await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);
@@ -163,6 +171,18 @@ export class DodoProvider implements PaymentProvider {
       {
         cancel_at_next_billing_date: false,
       },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
+  }
+
+  async cancelScheduledPlanChange(
+    subscriptionId: string,
+    _providerOperationId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<void> {
+    const client = this.getClient();
+    await client.subscriptions.cancelChangePlan(
+      subscriptionId,
       idempotencyKey ? { idempotencyKey } : undefined,
     );
   }
@@ -203,7 +223,7 @@ export class DodoProvider implements PaymentProvider {
     const client = this.getClient();
     try {
       const { items } = await client.customers.retrievePaymentMethods(customerId);
-      return items
+      const methods = items
         .filter((pm) => pm.payment_method === "card" && pm.card && pm.recurring_enabled)
         .map((pm) => ({
           id: pm.payment_method_id,
@@ -212,9 +232,67 @@ export class DodoProvider implements PaymentProvider {
           expiryMonth: pm.card!.expiry_month ? Number(pm.card!.expiry_month) : 0,
           expiryYear: pm.card!.expiry_year ? Number(pm.card!.expiry_year) : 0,
         }));
+      return deduplicatePaymentMethods(methods);
     } catch {
       return [];
     }
+  }
+
+  async getDefaultPaymentMethod(customerId: string): Promise<PaymentMethodInfo | null> {
+    const methods = await this.listPaymentMethods(customerId);
+    return methods.length === 1 ? methods[0] : null;
+  }
+
+  async previewSavedPaymentCharge(
+    params: SavedPaymentChargeParams,
+  ): Promise<SavedPaymentChargeQuote> {
+    const preview = await this.getClient().checkoutSessions.preview({
+      product_cart: [{ product_id: params.productId, quantity: params.quantity }],
+      customer: { customer_id: params.customerId },
+    });
+    return {
+      amountMinor: preview.current_breakup.total_amount,
+      taxMinor: preview.current_breakup.tax ?? null,
+      currency: preview.currency,
+    };
+  }
+
+  async chargeSavedPaymentMethod(
+    params: SavedPaymentChargeParams,
+  ): Promise<SavedPaymentChargeResult> {
+    const client = this.getClient();
+    const session = await client.checkoutSessions.create(
+      {
+        product_cart: [{ product_id: params.productId, quantity: params.quantity }],
+        customer: { customer_id: params.customerId },
+        payment_method_id: params.paymentMethodId,
+        confirm: true,
+        return_url: params.returnUrl,
+        metadata: params.metadata,
+      },
+      { idempotencyKey: params.idempotencyKey },
+    );
+    if (!session.payment_id) {
+      return { status: "failed" };
+    }
+    const payment = await client.payments.retrieve(session.payment_id);
+    const rawStatus = payment.status ?? "processing";
+    const status: SavedPaymentChargeResult["status"] =
+      rawStatus === "succeeded"
+        ? "succeeded"
+        : rawStatus === "processing"
+          ? "processing"
+          : rawStatus === "requires_customer_action"
+            ? "requires_customer_action"
+            : rawStatus === "requires_payment_method"
+              ? "requires_payment_method"
+              : "failed";
+    return {
+      providerPaymentId: payment.payment_id,
+      status,
+      amountMinor: payment.total_amount,
+      currency: payment.currency,
+    };
   }
 
   async createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }> {
@@ -233,7 +311,7 @@ export class DodoProvider implements PaymentProvider {
     return payment.payment_link ? { url: payment.payment_link } : null;
   }
 
-  async changePlan(params: ChangePlanParams): Promise<void> {
+  async changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string }> {
     const client = this.getClient();
     await client.subscriptions.changePlan(
       params.providerSubscriptionId,
@@ -247,6 +325,7 @@ export class DodoProvider implements PaymentProvider {
       },
       params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
     );
+    return { providerOperationId: undefined };
   }
 
   async previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview> {
@@ -280,6 +359,17 @@ export class DodoProvider implements PaymentProvider {
       currency: response.immediate_charge.summary.settlement_currency,
       lineItems,
       effectiveAt: response.immediate_charge.effective_at,
+      recurringAmount: response.new_plan?.recurring_pre_tax_amount ?? undefined,
+      recurringCurrency: response.new_plan?.currency ?? undefined,
+      nextBillingDate: response.new_plan?.next_billing_date ?? undefined,
+      // The dialog shows settlement_amount (after provider credits), so tax
+      // must use the matching settlement_tax field. `tax` is the pre-
+      // settlement tax and can be much larger than the amount actually due.
+      taxAmount:
+        response.immediate_charge.summary.settlement_tax ??
+        response.immediate_charge.summary.tax ??
+        undefined,
+      customerCredits: response.immediate_charge.summary.customer_credits,
     };
   }
 }

@@ -1,9 +1,12 @@
 import type {
   BillingConfig,
+  BillingAutoRechargeAttempt,
+  BillingAutoRechargeProfile,
   BillingCustomerRecord,
   BillingEventClaim,
   BillingOfferResult,
   BillingPreferences,
+  BillingSubscriptionChange,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   CheckoutIntent,
@@ -23,6 +26,7 @@ import { BillingInvoiceRepository } from "../repositories/billing/invoice.js";
 import { BillingDisputeRepository } from "../repositories/billing/dispute.js";
 import { BillingConfigRepository } from "../repositories/billing/config.js";
 import { BillingPreferencesRepository } from "../repositories/billing/preferences.js";
+import { BillingAutoRechargeRepository } from "../repositories/billing/auto-recharge.js";
 
 function toIso(value: unknown): string | null {
   if (!value) return null;
@@ -91,6 +95,18 @@ function billingConfigToSnake(config: BillingConfig): Record<string, unknown> {
         },
       ]),
     ),
+    ...(config.autoRecharge
+      ? {
+          auto_recharge: {
+            enabled: config.autoRecharge.enabled,
+            threshold_credits: config.autoRecharge.thresholdCredits,
+            topup_key: config.autoRecharge.topupKey,
+            quantity: config.autoRecharge.quantity,
+            max_recharges: config.autoRecharge.maxRecharges,
+            window_days: config.autoRecharge.windowDays,
+          },
+        }
+      : {}),
   };
 }
 
@@ -109,6 +125,7 @@ export class PostgresBillingStore extends BillingStore {
   private _dispute: BillingDisputeRepository | null = null;
   private _config: BillingConfigRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
+  private _autoRecharge: BillingAutoRechargeRepository | null = null;
   private ownsPool: boolean = false;
 
   constructor(poolOrUrl: import("pg").Pool | string) {
@@ -206,6 +223,11 @@ export class PostgresBillingStore extends BillingStore {
     return this._preferences;
   }
 
+  private get billingAutoRecharge(): BillingAutoRechargeRepository {
+    if (!this._autoRecharge) this._autoRecharge = new BillingAutoRechargeRepository(this.queryFn);
+    return this._autoRecharge;
+  }
+
   async syncBillingFromConfig(config: BillingConfig): Promise<void> {
     await this.billingConfig.syncFromConfig(JSON.stringify(billingConfigToSnake(config)));
   }
@@ -274,6 +296,31 @@ export class PostgresBillingStore extends BillingStore {
         WHERE id = $1`,
       [id, update.status ?? null, update.providerSessionId ?? null, update.checkoutUrl ?? null],
     );
+  }
+
+  async getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null> {
+    const result = await this.queryFn(
+      `SELECT id, actor_key, provider, type, product_id, request_fingerprint, status,
+              provider_session_id, checkout_url, expires_at
+         FROM bursar.billing_checkout_intents
+        WHERE id = $1 AND actor_key = $2
+        LIMIT 1`,
+      [id, actorKey],
+    );
+    const row = result[0] as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      actorKey: String(row.actor_key),
+      provider: String(row.provider),
+      type: row.type as "subscription" | "credit_pack",
+      productId: String(row.product_id),
+      requestFingerprint: String(row.request_fingerprint),
+      status: row.status as CheckoutIntent["status"],
+      providerSessionId: row.provider_session_id ? String(row.provider_session_id) : null,
+      checkoutUrl: row.checkout_url ? String(row.checkout_url) : null,
+      expiresAt: toIso(row.expires_at) ?? new Date(0).toISOString(),
+    };
   }
 
   private rowToOffer(r: Record<string, unknown>): BillingOfferResult | null {
@@ -392,6 +439,69 @@ export class PostgresBillingStore extends BillingStore {
     return this.rowToSubscriptionState(r);
   }
 
+  async createBillingSubscriptionChange(
+    input: Omit<BillingSubscriptionChange, "id">,
+  ): Promise<BillingSubscriptionChange> {
+    const rows = await this.queryFn(
+      `INSERT INTO bursar.billing_subscription_changes
+       (user_id, provider, provider_subscription_id, from_plan, from_interval, to_plan, to_interval, effective_at, state, proration_billing_mode, quote, quote_hash, provider_operation_id, effective_date, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      [
+        input.userId,
+        input.provider,
+        input.providerSubscriptionId,
+        input.fromPlan ?? null,
+        input.fromInterval ?? null,
+        input.toPlan,
+        input.toInterval,
+        input.effectiveAt,
+        input.state,
+        input.prorationBillingMode,
+        JSON.stringify(input.quote),
+        input.quoteHash,
+        input.providerOperationId ?? null,
+        input.effectiveDate ?? null,
+        input.expiresAt ?? null,
+      ],
+    );
+    return this.rowToSubscriptionChange(rows[0] as Record<string, unknown>);
+  }
+
+  async getOpenBillingSubscriptionChange(
+    provider: string,
+    providerSubscriptionId: string,
+  ): Promise<BillingSubscriptionChange | null> {
+    const rows = await this.queryFn(
+      `SELECT * FROM bursar.billing_subscription_changes WHERE provider = $1 AND provider_subscription_id = $2
+       AND state IN ('awaiting_payment','scheduled') ORDER BY created_at DESC LIMIT 1`,
+      [provider, providerSubscriptionId],
+    );
+    return rows[0] ? this.rowToSubscriptionChange(rows[0] as Record<string, unknown>) : null;
+  }
+
+  async listExpiredGraceSubscriptions(now: string): Promise<BillingSubscriptionState[]> {
+    const rows = await this.queryFn(
+      `SELECT * FROM bursar.billing_subscriptions WHERE status = 'past_due'
+       AND grace_ends_at IS NOT NULL AND grace_ends_at <= $1`,
+      [now],
+    );
+    return rows.map((row) => this.rowToSubscriptionState(row as Record<string, unknown>));
+  }
+
+  async updateBillingSubscriptionChange(
+    id: string,
+    update: Partial<
+      Pick<BillingSubscriptionChange, "state" | "providerOperationId" | "effectiveDate">
+    >,
+  ): Promise<void> {
+    await this.queryFn(
+      `UPDATE bursar.billing_subscription_changes SET state = COALESCE($2, state),
+       provider_operation_id = COALESCE($3, provider_operation_id), effective_date = COALESCE($4, effective_date),
+       completed_at = CASE WHEN $2 = 'completed' THEN now() ELSE completed_at END, updated_at = now() WHERE id = $1`,
+      [id, update.state ?? null, update.providerOperationId ?? null, update.effectiveDate ?? null],
+    );
+  }
+
   async getUserSubscription(
     userId: string,
     statuses?: string[],
@@ -404,6 +514,10 @@ export class PostgresBillingStore extends BillingStore {
   async getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
     const rows = await this.billingSubscription.getUserSubscriptions(userId);
     return rows.map((r) => this.rowToSubscriptionState(r));
+  }
+
+  async pseudonymizeFinancialSubject(userId: string): Promise<void> {
+    await this.queryFn("SELECT bursar.pseudonymize_financial_subject($1::uuid)", [userId]);
   }
 
   async deactivateOtherProviderSubscriptions(
@@ -515,6 +629,10 @@ export class PostgresBillingStore extends BillingStore {
     );
   }
 
+  async listBillingInvoices(userId: string) {
+    return this.billingInvoice.listForUser(userId);
+  }
+
   async upsertBillingDispute(options: {
     provider: string;
     providerDisputeId: string;
@@ -562,10 +680,32 @@ export class PostgresBillingStore extends BillingStore {
       cancelAtPeriodEnd: Boolean(r.cancel_at_period_end),
       interval: r.interval ? String(r.interval) : null,
       intervalCount: r.interval_count ? Number(r.interval_count) : null,
+      graceEndsAt: toIso(r.grace_ends_at),
       metadata:
         r.metadata && typeof r.metadata === "object"
           ? (r.metadata as Record<string, unknown>)
           : null,
+    };
+  }
+
+  private rowToSubscriptionChange(r: Record<string, unknown>): BillingSubscriptionChange {
+    return {
+      id: String(r.id),
+      userId: String(r.user_id),
+      provider: String(r.provider),
+      providerSubscriptionId: String(r.provider_subscription_id),
+      fromPlan: r.from_plan ? String(r.from_plan) : null,
+      fromInterval: r.from_interval ? String(r.from_interval) : null,
+      toPlan: String(r.to_plan),
+      toInterval: String(r.to_interval),
+      effectiveAt: String(r.effective_at) as BillingSubscriptionChange["effectiveAt"],
+      state: String(r.state) as BillingSubscriptionChange["state"],
+      prorationBillingMode: String(r.proration_billing_mode),
+      quote: (r.quote ?? {}) as Record<string, unknown>,
+      quoteHash: String(r.quote_hash),
+      providerOperationId: r.provider_operation_id ? String(r.provider_operation_id) : null,
+      effectiveDate: toIso(r.effective_date),
+      expiresAt: toIso(r.expires_at),
     };
   }
 
@@ -602,6 +742,48 @@ export class PostgresBillingStore extends BillingStore {
       invoiceReminders: prefs.invoiceReminders,
       usageLimitAlerts: prefs.usageLimitAlerts,
     });
+  }
+
+  async getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null> {
+    return this.billingAutoRecharge.getProfile(userId);
+  }
+
+  async upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void> {
+    return this.billingAutoRecharge.upsertProfile(profile);
+  }
+
+  async claimAutoRechargeAttempt(input: {
+    userId: string;
+    provider: string;
+    topupKey: string;
+    quantity: number;
+    maxRecharges: number;
+    windowDays: number;
+  }): Promise<BillingAutoRechargeAttempt | null> {
+    return this.billingAutoRecharge.claimAttempt(input);
+  }
+
+  async updateAutoRechargeAttempt(input: {
+    id: string;
+    state: string;
+    providerPaymentId?: string | null;
+    failureCode?: string | null;
+    actionUrl?: string | null;
+  }): Promise<void> {
+    return this.billingAutoRecharge.updateAttempt(input);
+  }
+
+  async updateAutoRechargeAttemptByProviderPayment(input: {
+    provider: string;
+    providerPaymentId: string;
+    state: string;
+    failureCode?: string | null;
+  }): Promise<void> {
+    return this.billingAutoRecharge.updateAttemptByProviderPayment(input);
+  }
+
+  async countAutoRechargeAttempts(userId: string, windowDays: number): Promise<number> {
+    return this.billingAutoRecharge.countAttempts(userId, windowDays);
   }
 
   async getBillingCustomerByUserId(

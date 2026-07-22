@@ -2,11 +2,14 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from bursar.billing.models import (
+    BillingAutoRechargeAttempt,
+    BillingAutoRechargeProfile,
     BillingConfig,
     BillingCustomerRecord,
     BillingEventClaim,
     BillingOfferResult,
     BillingPreferences,
+    BillingSubscriptionChange,
     BillingSubscriptionState,
     BillingTopupResult,
     CheckoutIntent,
@@ -94,6 +97,22 @@ class BillingStore(ABC):
         user_id: str,
         statuses: list[str] | None = None,
     ) -> BillingSubscriptionState | None: ...
+
+    @abstractmethod
+    def create_billing_subscription_change(
+        self,
+        change: BillingSubscriptionChange,
+    ) -> BillingSubscriptionChange: ...
+
+    @abstractmethod
+    def get_open_billing_subscription_change(
+        self,
+        provider: str,
+        provider_subscription_id: str,
+    ) -> BillingSubscriptionChange | None: ...
+
+    @abstractmethod
+    def update_billing_subscription_change(self, id: str, **updates: Any) -> None: ...
 
     @abstractmethod
     def resolve_credit_topup(
@@ -209,6 +228,33 @@ class BillingStore(ABC):
 
     @abstractmethod
     def upsert_billing_preferences(self, prefs: BillingPreferences) -> None: ...
+
+    @abstractmethod
+    def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None: ...
+
+    @abstractmethod
+    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None: ...
+
+    @abstractmethod
+    def claim_auto_recharge_attempt(
+        self,
+        user_id: str,
+        provider: str,
+        topup_key: str,
+        quantity: int,
+        max_recharges: int,
+        window_days: int,
+    ) -> BillingAutoRechargeAttempt | None: ...
+
+    @abstractmethod
+    def update_auto_recharge_attempt(
+        self,
+        attempt_id: str,
+        state: str,
+        provider_payment_id: str | None = None,
+        failure_code: str | None = None,
+        action_url: str | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def get_billing_customer_by_user_id(

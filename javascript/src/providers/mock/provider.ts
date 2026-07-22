@@ -11,6 +11,9 @@ import type {
   ChangePlanParams,
   PreviewChangePlanParams,
   ChangePlanPreview,
+  SavedPaymentChargeParams,
+  SavedPaymentChargeResult,
+  SavedPaymentChargeQuote,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
@@ -56,6 +59,27 @@ export class MockPaymentProvider implements PaymentProvider {
 
   async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
     return [];
+  }
+
+  async getDefaultPaymentMethod(customerId: string): Promise<PaymentMethodInfo | null> {
+    return (await this.listPaymentMethods(customerId))[0] ?? null;
+  }
+
+  async previewSavedPaymentCharge(
+    _params: SavedPaymentChargeParams,
+  ): Promise<SavedPaymentChargeQuote> {
+    return { amountMinor: 0, currency: "USD" };
+  }
+
+  async chargeSavedPaymentMethod(
+    params: SavedPaymentChargeParams,
+  ): Promise<SavedPaymentChargeResult> {
+    return {
+      providerPaymentId: `mock_pay_${params.idempotencyKey}`,
+      status: "succeeded",
+      amountMinor: 0,
+      currency: "USD",
+    };
   }
 
   async createCustomer(_params: CreateCustomerParams): Promise<{ customerId: string }> {

@@ -49,11 +49,57 @@ export interface PaymentMethodInfo {
   brand: string;
   expiryMonth: number;
   expiryYear: number;
+  isDefault?: boolean;
+}
+
+export type SavedPaymentChargeStatus =
+  "succeeded" | "processing" | "failed" | "requires_customer_action" | "requires_payment_method";
+
+export interface SavedPaymentChargeParams {
+  customerId: string;
+  paymentMethodId: string;
+  productId: string;
+  quantity: number;
+  metadata: Record<string, string>;
+  idempotencyKey: string;
+  returnUrl?: string;
+}
+
+export interface SavedPaymentChargeResult {
+  providerPaymentId?: string;
+  status: SavedPaymentChargeStatus;
+  actionUrl?: string;
+  amountMinor?: number;
+  currency?: string;
+}
+
+export interface SavedPaymentChargeQuote {
+  amountMinor: number;
+  currency: string;
+  taxMinor?: number | null;
+  expiresAt?: string | null;
+}
+
+/** Provider APIs can return duplicate records for the same visible card. */
+export function deduplicatePaymentMethods(methods: PaymentMethodInfo[]): PaymentMethodInfo[] {
+  const seen = new Set<string>();
+  return methods.filter((method) => {
+    const key = [
+      method.brand.trim().toLowerCase(),
+      method.last4,
+      method.expiryMonth,
+      method.expiryYear,
+    ].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export type ResolveUserCallback = (
   data: Record<string, unknown>,
   metadata: Record<string, string>,
+  eventType?: string,
 ) => Promise<string | null>;
 
 export interface ProviderLogger {
@@ -106,6 +152,10 @@ export interface ChangePlanParams {
   metadata?: Record<string, string>;
   idempotencyKey?: string;
 }
+export interface PlanSelection {
+  planId: string;
+  interval: "month" | "year";
+}
 
 export interface PreviewChangePlanParams {
   providerSubscriptionId: string;
@@ -132,6 +182,11 @@ export interface ChangePlanPreview {
   currency: string;
   lineItems: ChangePlanLineItem[];
   effectiveAt: string;
+  recurringAmount?: number;
+  recurringCurrency?: string;
+  nextBillingDate?: string;
+  taxAmount?: number;
+  customerCredits?: number;
 }
 
 export interface PaymentProvider {
@@ -160,11 +215,24 @@ export interface PaymentProvider {
 
   reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
+  /** Removes a pending plan switch while retaining the current subscription. */
+  cancelScheduledPlanChange?(
+    subscriptionId: string,
+    providerOperationId?: string | null,
+    idempotencyKey?: string,
+  ): Promise<void>;
+
   listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]>;
+
+  getDefaultPaymentMethod?(customerId: string): Promise<PaymentMethodInfo | null>;
+
+  previewSavedPaymentCharge?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeQuote>;
+
+  chargeSavedPaymentMethod(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
 
   getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null>;
 
-  changePlan(params: ChangePlanParams): Promise<void>;
+  changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string } | void>;
 
   previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
 }

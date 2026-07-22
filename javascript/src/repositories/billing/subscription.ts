@@ -4,7 +4,7 @@ import { pgBoolean, safeParse } from "../_shared.js";
 
 const SUBSCRIPTION_COLS = `user_id, provider, provider_subscription_id, provider_customer_id,
     offer_key, plan, status, current_period_start,
-    current_period_end, cancel_at_period_end, interval, interval_count, metadata`;
+    current_period_end, cancel_at_period_end, interval, interval_count, grace_ends_at, metadata`;
 
 export const SUBSCRIPTION_STATUS = {
   ACTIVE: "active",
@@ -50,7 +50,7 @@ export class BillingSubscriptionRepository {
     }
     await this.query(
       `INSERT INTO bursar.billing_subscriptions (${SUBSCRIPTION_COLS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
          provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
@@ -62,6 +62,7 @@ export class BillingSubscriptionRepository {
          cancel_at_period_end = EXCLUDED.cancel_at_period_end,
          interval = COALESCE(EXCLUDED.interval, billing_subscriptions.interval),
          interval_count = COALESCE(EXCLUDED.interval_count, billing_subscriptions.interval_count),
+         grace_ends_at = EXCLUDED.grace_ends_at,
          metadata = CASE WHEN EXCLUDED.metadata IS NOT NULL THEN EXCLUDED.metadata ELSE billing_subscriptions.metadata END,
          updated_at = now()`,
       [
@@ -77,6 +78,7 @@ export class BillingSubscriptionRepository {
         state.cancelAtPeriodEnd ?? false,
         state.interval ?? null,
         state.intervalCount ?? null,
+        state.graceEndsAt ?? null,
         state.metadata ? JSON.stringify(state.metadata) : null,
       ],
     );

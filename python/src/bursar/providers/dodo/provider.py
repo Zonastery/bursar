@@ -20,11 +20,20 @@ from bursar.providers.types import (
     PreviewChangePlanParams,
     ProviderLogger,
     ProviderResolveUserFn,
+    SavedPaymentChargeParams,
+    SavedPaymentChargeQuote,
+    SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _dodo_val(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 class DodoProvider(PaymentProvider):
@@ -60,6 +69,8 @@ class DodoProvider(PaymentProvider):
         elif params.email:
             session_kwargs["customer"] = {"email": params.email}
 
+        if params.idempotency_key:
+            session_kwargs["idempotency_key"] = params.idempotency_key
         session = await client.checkout_sessions.create(**session_kwargs)
         url = getattr(session, "checkout_url", None) or session.get("checkout_url")
         if not url:
@@ -133,19 +144,47 @@ class DodoProvider(PaymentProvider):
         )
         return {"received": True}
 
-    async def cancel_subscription(self, subscription_id: str) -> None:
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         client = self._get_client()
+        kwargs = {"cancel_at_next_billing_date": True}
+        if idempotency_key:
+            kwargs["idempotency_key"] = idempotency_key
         await client.subscriptions.update(
             subscription_id,
-            cancel_at_next_billing_date=True,
+            **kwargs,
         )
 
-    async def reactivate_subscription(self, subscription_id: str) -> None:
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         client = self._get_client()
+        kwargs = {"cancel_at_next_billing_date": False}
+        if idempotency_key:
+            kwargs["idempotency_key"] = idempotency_key
         await client.subscriptions.update(
             subscription_id,
-            cancel_at_next_billing_date=False,
+            **kwargs,
         )
+
+    async def cancel_scheduled_plan_change(
+        self,
+        subscription_id: str,
+        provider_operation_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        client = self._get_client()
+        kwargs: dict[str, Any] = {}
+        if idempotency_key:
+            kwargs["idempotency_key"] = idempotency_key
+        await client.subscriptions.cancel_change_plan(subscription_id, **kwargs)
+
+    async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
+        client = self._get_client()
+        session = await client.checkout_sessions.retrieve(provider_session_id)
+        status = getattr(session, "payment_status", None) or session.get("payment_status")
+        if status in ("succeeded", "paid"):
+            return {"paymentStatus": "succeeded"}
+        if status in ("failed", "unpaid"):
+            return {"paymentStatus": "failed"}
+        return {"paymentStatus": None}
 
     async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
         product_id = params.product_id or self._config.get("setup_product_id")
@@ -202,6 +241,51 @@ class DodoProvider(PaymentProvider):
             )
         return result
 
+    async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
+        methods = await self.list_payment_methods(customer_id)
+        return methods[0] if len(methods) == 1 else None
+
+    async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
+        preview = await self._get_client().checkout_sessions.preview(
+            product_cart=[{"product_id": params.product_id, "quantity": params.quantity}],
+            customer={"customer_id": params.customer_id},
+        )
+        breakup = _dodo_val(preview, "current_breakup", {}) or {}
+        return SavedPaymentChargeQuote(
+            amount_minor=int(_dodo_val(breakup, "total_amount", 0)),
+            tax_minor=_dodo_val(breakup, "tax"),
+            currency=str(_dodo_val(preview, "currency", "USD")),
+        )
+
+    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
+        client = self._get_client()
+        session = await client.checkout_sessions.create(
+            product_cart=[{"product_id": params.product_id, "quantity": params.quantity}],
+            customer={"customer_id": params.customer_id},
+            payment_method_id=params.payment_method_id,
+            confirm=True,
+            return_url=params.return_url,
+            metadata=params.metadata or {},
+            idempotency_key=params.idempotency_key,
+        )
+        payment_id = _dodo_val(session, "payment_id")
+        if not payment_id:
+            return SavedPaymentChargeResult(status="failed")
+        payment = await client.payments.retrieve(payment_id)
+        raw_status = _dodo_val(payment, "status", "processing")
+        status = {
+            "succeeded": "succeeded",
+            "processing": "processing",
+            "requires_customer_action": "requires_customer_action",
+            "requires_payment_method": "requires_payment_method",
+        }.get(raw_status, "failed")
+        return SavedPaymentChargeResult(
+            provider_payment_id=str(payment_id),
+            status=status,
+            amount_minor=_dodo_val(payment, "total_amount"),
+            currency=_dodo_val(payment, "currency"),
+        )
+
     async def create_customer(self, params: CreateCustomerParams) -> dict:
         client = self._get_client()
         kwargs: dict[str, Any] = {
@@ -235,6 +319,8 @@ class DodoProvider(PaymentProvider):
             kwargs["on_payment_failure"] = params.on_payment_failure
         if params.metadata:
             kwargs["metadata"] = params.metadata
+        if params.idempotency_key:
+            kwargs["idempotency_key"] = params.idempotency_key
         await client.subscriptions.change_plan(params.provider_subscription_id, **kwargs)
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:

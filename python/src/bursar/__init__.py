@@ -3,6 +3,8 @@
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
+from bursar.billing.auto_recharge import AutoRechargeService
+
 try:
     __version__ = version("bursar")
 except PackageNotFoundError:  # pragma: no cover - source checkout without install
@@ -10,6 +12,9 @@ except PackageNotFoundError:  # pragma: no cover - source checkout without insta
 
 from bursar.billing import (
     AllowanceGrant,
+    BillingAutoRechargeAttempt,
+    BillingAutoRechargeConfig,
+    BillingAutoRechargeProfile,
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
@@ -123,6 +128,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "AutoRechargeService",
     "AddCreditsResult",
     "AddTeamMemberResult",
     "AggregateStatsRow",

@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from bursar.billing.models import BillingCreditTopup, BillingOffer
+from bursar.billing.models import BillingAutoRechargeConfig, BillingCreditTopup, BillingOffer
 from bursar.expr import ExpressionError, validate_expression
 from bursar.interface.models import BucketDefinition, PlanDefinition
 from bursar.metrics import METRIC_VARIABLES
@@ -54,6 +54,17 @@ class BillingSection(BaseModel):
     currency: str = "USD"
     subscriptions: dict[str, BillingOffer] = Field(default_factory=dict)
     topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
+    auto_recharge: BillingAutoRechargeConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_auto_recharge(self) -> "BillingSection":
+        if self.auto_recharge is None:
+            return self
+        policy = self.auto_recharge.default_policy
+        topup_key = policy.topup.key if policy is not None else self.auto_recharge.topup_key
+        if topup_key not in self.topups:
+            raise ValueError(f"billing.auto_recharge.topup_key references unknown top-up '{topup_key}'")
+        return self
 
 
 class BursarConfig(BaseModel):

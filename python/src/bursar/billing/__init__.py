@@ -1,8 +1,16 @@
 from typing import TYPE_CHECKING
 
+from bursar.billing.auto_recharge import AutoRechargeService
 from bursar.billing.billing_service import BillingProvisioningPort
 from bursar.billing.models import (
     AllowanceGrant,
+    AutoRechargeLimit,
+    AutoRechargeTopup,
+    AutoRechargeTrigger,
+    BillingAutoRechargeAttempt,
+    BillingAutoRechargeConfig,
+    BillingAutoRechargePolicy,
+    BillingAutoRechargeProfile,
     BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
@@ -19,6 +27,7 @@ from bursar.billing.models import (
     BillingPreferences,
     BillingProvider,
     BillingRefundInfo,
+    BillingSubscriptionChange,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
@@ -44,8 +53,14 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "AutoRechargeService",
     "AllowanceGrant",
     "BillingConfig",
+    "BillingAutoRechargeConfig",
+    "BillingAutoRechargePolicy",
+    "AutoRechargeTrigger",
+    "AutoRechargeTopup",
+    "AutoRechargeLimit",
     "BillingCreditTopup",
     "BillingCustomerInfo",
     "BillingCustomerRecord",
@@ -67,6 +82,7 @@ __all__ = [
     "BillingRefundInfo",
     "BillingStore",
     "BillingSubscriptionInfo",
+    "BillingSubscriptionChange",
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
     "CycleGrant",

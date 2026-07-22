@@ -5,12 +5,16 @@ import type {
   BillingEvent,
   BillingEventHandler,
   BillingEventResult,
+  BillingAutoRechargeAttempt,
+  BillingAutoRechargeProfile,
   BillingCustomerRecord,
   BillingOfferResult,
   BillingPreferences,
+  BillingSubscriptionChange,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   BillingTopupResult,
+  CheckoutIntent,
 } from "./billing-types.js";
 import { BillingEventType } from "./billing-types.js";
 import {
@@ -19,6 +23,7 @@ import {
   normalizeProviderLogger,
 } from "../providers/types.js";
 import { SUBSCRIPTION_STATUS } from "../repositories/billing/subscription.js";
+import { AutoRechargeService } from "./auto-recharge-service.js";
 
 interface OfferCacheValue {
   offer: BillingOfferResult | null;
@@ -42,6 +47,8 @@ export interface BillingServiceOptions {
   resolveUser?: ResolveUserFn | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   cancelPriorProviders?: boolean;
+  /** Plan assigned when a paid subscription reaches a terminal state. */
+  fallbackPlanKey?: string | null;
   logger?: ProviderLogger | null;
 }
 
@@ -50,6 +57,7 @@ export interface BillingServiceOptions {
  * prevents billing code from depending on the full credit manager surface.
  */
 export interface BillingProvisioningPort {
+  getUserPlan?(userId: string): Promise<{ planAssignedAt?: Date | string | null } | null>;
   setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void>;
   unsetUserPlan(userId: string): Promise<void>;
   addCredits(
@@ -70,11 +78,13 @@ export interface BillingProvisioningPort {
  * Mirrors the Python billing service implementation.
  */
 export class BillingService {
+  readonly autoRecharge: AutoRechargeService;
   private store: BillingStore;
   private provisioning: BillingProvisioningPort | null;
   private resolveUser: ResolveUserFn | null;
   private eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
   private cancelPriorProviders: boolean;
+  private fallbackPlanKey: string | null;
   private logger: NormalizedProviderLogger;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
@@ -93,6 +103,7 @@ export class BillingService {
     this.resolveUser = options?.resolveUser ?? null;
     this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
+    this.fallbackPlanKey = options?.fallbackPlanKey ?? null;
     this.logger = normalizeProviderLogger(options?.logger);
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
@@ -107,6 +118,7 @@ export class BillingService {
         return { offer };
       },
     });
+    this.autoRecharge = new AutoRechargeService(this);
     this.handlerMap = {
       [BillingEventType.CUSTOMER_CREATED]: this.handleCustomerCreated.bind(this),
       [BillingEventType.CUSTOMER_UPDATED]: this.handleCustomerCreated.bind(this),
@@ -136,7 +148,7 @@ export class BillingService {
   }
 
   async getUserSubscription(userId: string): Promise<BillingSubscriptionState | null> {
-    return this.store.getUserSubscription(userId, [
+    const subscription = await this.store.getUserSubscription(userId, [
       SUBSCRIPTION_STATUS.ACTIVE,
       SUBSCRIPTION_STATUS.TRIALING,
       SUBSCRIPTION_STATUS.CANCELED,
@@ -144,6 +156,7 @@ export class BillingService {
       SUBSCRIPTION_STATUS.INCOMPLETE,
       // EXPIRED excluded — expired subscriptions are not "current" for billing purposes.
     ]);
+    return this.expireGraceIfNeeded(subscription);
   }
 
   async createOrGetCheckoutIntent(input: Parameters<BillingStore["createOrGetCheckoutIntent"]>[0]) {
@@ -157,6 +170,10 @@ export class BillingService {
     await this.store.updateCheckoutIntent(id, update);
   }
 
+  async getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null> {
+    return this.store.getCheckoutIntent(id, actorKey);
+  }
+
   async getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null> {
     return this.store.getUserSubscription(userId, [
       SUBSCRIPTION_STATUS.ACTIVE,
@@ -165,16 +182,45 @@ export class BillingService {
   }
 
   async getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null> {
-    return this.store.getUserSubscription(userId, [
+    const subscription = await this.store.getUserSubscription(userId, [
       SUBSCRIPTION_STATUS.ACTIVE,
       SUBSCRIPTION_STATUS.TRIALING,
       SUBSCRIPTION_STATUS.PAST_DUE,
       SUBSCRIPTION_STATUS.INCOMPLETE,
     ]);
+    return this.expireGraceIfNeeded(subscription);
   }
 
   async getUserPreferences(userId: string): Promise<BillingPreferences | null> {
     return this.store.getBillingPreferences(userId);
+  }
+
+  async listBillingInvoices(userId: string) {
+    return this.store.listBillingInvoices(userId);
+  }
+
+  async upsertBillingSubscription(state: BillingSubscriptionState): Promise<void> {
+    await this.store.upsertBillingSubscription(state);
+  }
+
+  async createBillingSubscriptionChange(
+    input: Omit<BillingSubscriptionChange, "id">,
+  ): Promise<BillingSubscriptionChange> {
+    return this.store.createBillingSubscriptionChange(input);
+  }
+
+  async getOpenBillingSubscriptionChange(
+    provider: string,
+    providerSubscriptionId: string,
+  ): Promise<BillingSubscriptionChange | null> {
+    return this.store.getOpenBillingSubscriptionChange(provider, providerSubscriptionId);
+  }
+
+  async updateBillingSubscriptionChange(
+    id: string,
+    update: Parameters<BillingStore["updateBillingSubscriptionChange"]>[1],
+  ): Promise<void> {
+    await this.store.updateBillingSubscriptionChange(id, update);
   }
 
   async recordSubscriptionConflict(
@@ -185,6 +231,108 @@ export class BillingService {
 
   async updateUserPreferences(prefs: BillingPreferences): Promise<void> {
     await this.store.upsertBillingPreferences(prefs);
+  }
+
+  async getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null> {
+    return this.store.getAutoRechargeProfile(userId);
+  }
+
+  async getActiveBursarConfig(): Promise<Record<string, unknown> | null> {
+    return this.store.getActiveBursarConfig();
+  }
+
+  /** Moves subscriptions whose seven-day recovery window elapsed to the fallback plan. */
+  async listCancellableProviderSubscriptionIds(userId: string): Promise<string[]> {
+    const cancellableStatuses = new Set<BillingSubscriptionStatus>([
+      SUBSCRIPTION_STATUS.ACTIVE,
+      SUBSCRIPTION_STATUS.TRIALING,
+      SUBSCRIPTION_STATUS.INCOMPLETE,
+    ]);
+    const subscriptions = await this.store.getUserSubscriptions(userId);
+    return subscriptions.flatMap((subscription) =>
+      subscription.status &&
+      cancellableStatuses.has(subscription.status) &&
+      subscription.providerSubscriptionId
+        ? [subscription.providerSubscriptionId]
+        : [],
+    );
+  }
+
+  async pseudonymizeFinancialSubject(userId: string): Promise<void> {
+    await this.store.pseudonymizeFinancialSubject(userId);
+  }
+
+  async expirePastDueGracePeriods(now = new Date()): Promise<number> {
+    const expired = await this.store.listExpiredGraceSubscriptions(now.toISOString());
+    for (const subscription of expired) {
+      await this.store.upsertBillingSubscription({ ...subscription, status: "expired" });
+      await this.revokeIfCurrentSubscription(
+        subscription.userId,
+        subscription.providerSubscriptionId,
+      );
+    }
+    return expired.length;
+  }
+
+  /**
+   * Grace expiry is enforced whenever Bursar reads a subscription, so no web
+   * route or scheduler owns billing state. Provider terminal webhooks remain
+   * the primary path; this closes the gap if a provider leaves it past_due.
+   */
+  private async expireGraceIfNeeded(
+    subscription: BillingSubscriptionState | null,
+  ): Promise<BillingSubscriptionState | null> {
+    if (
+      !subscription ||
+      subscription.status !== "past_due" ||
+      !subscription.graceEndsAt ||
+      new Date(subscription.graceEndsAt).getTime() > Date.now()
+    )
+      return subscription;
+    await this.store.upsertBillingSubscription({ ...subscription, status: "expired" });
+    await this.revokeIfCurrentSubscription(
+      subscription.userId,
+      subscription.providerSubscriptionId,
+    );
+    return { ...subscription, status: "expired" };
+  }
+
+  async upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void> {
+    return this.store.upsertAutoRechargeProfile(profile);
+  }
+
+  async claimAutoRechargeAttempt(input: {
+    userId: string;
+    provider: string;
+    topupKey: string;
+    quantity: number;
+    maxRecharges: number;
+    windowDays: number;
+  }): Promise<BillingAutoRechargeAttempt | null> {
+    return this.store.claimAutoRechargeAttempt(input);
+  }
+
+  async updateAutoRechargeAttempt(input: {
+    id: string;
+    state: string;
+    providerPaymentId?: string | null;
+    failureCode?: string | null;
+    actionUrl?: string | null;
+  }): Promise<void> {
+    return this.store.updateAutoRechargeAttempt(input);
+  }
+
+  async updateAutoRechargeAttemptByProviderPayment(input: {
+    provider: string;
+    providerPaymentId: string;
+    state: string;
+    failureCode?: string | null;
+  }): Promise<void> {
+    return this.store.updateAutoRechargeAttemptByProviderPayment(input);
+  }
+
+  async countAutoRechargeAttempts(userId: string, windowDays: number): Promise<number> {
+    return this.store.countAutoRechargeAttempts(userId, windowDays);
   }
 
   async getCustomerByUserId(
@@ -444,6 +592,7 @@ export class BillingService {
       plan?: string | null;
       interval?: string | null;
       intervalCount?: number | null;
+      metadata?: Record<string, unknown> | null;
     },
   ): BillingSubscriptionState {
     if (!event.subscription) {
@@ -474,7 +623,11 @@ export class BillingService {
         null,
       intervalCount:
         overrides?.intervalCount ?? sub.intervalCount ?? existing?.intervalCount ?? null,
-      metadata: event.metadata ?? existing?.metadata ?? null,
+      metadata:
+        overrides?.metadata ??
+        (event.metadata || existing?.metadata
+          ? { ...(existing?.metadata ?? {}), ...(event.metadata ?? {}) }
+          : null),
     };
   }
 
@@ -708,11 +861,32 @@ export class BillingService {
         plan: plan ?? existing?.plan ?? null,
         interval: offer?.interval,
         intervalCount: offer?.intervalCount,
+        metadata: {
+          ...(existing?.metadata ?? {}),
+          ...(event.metadata ?? {}),
+          pendingPlanChange: null,
+        },
       }),
     );
     if (this.provisioning && (plan ?? existing?.plan)) {
       // Plan-change: prefer new plan over existing (renewal at L422 correctly keeps existing).
-      await this.provisionSubscription(uid, offer, event, plan ?? existing?.plan ?? undefined);
+      await this.provisionSubscription(
+        uid,
+        offer,
+        event,
+        plan ?? existing?.plan ?? undefined,
+        true,
+      );
+    }
+    const pending = await this.store.getOpenBillingSubscriptionChange(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (pending) {
+      await this.store.updateBillingSubscriptionChange(pending.id, {
+        state: "completed",
+        effectiveDate: event.occurredAt,
+      });
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
@@ -893,6 +1067,24 @@ export class BillingService {
         purpose: event.payment.purpose,
         metadata: paymentMetadata,
       });
+
+      // Dodo represents subscription receipts as payment.succeeded events,
+      // while Stripe emits invoice.paid. Materialize the Dodo payment as a
+      // paid invoice so invoice history is provider-agnostic.
+      if (event.payment.purpose === "subscription" && event.subscription) {
+        await this.store.upsertBillingInvoice({
+          provider: event.provider,
+          providerInvoiceId: event.payment.providerPaymentId,
+          providerSubscriptionId: event.subscription.providerSubscriptionId,
+          userId: uid,
+          status: "paid",
+          amountPaidMinor: event.payment.amountMinor,
+          amountDueMinor: event.payment.amountMinor,
+          currency: event.payment.currency,
+          periodStart: event.subscription.periodStart,
+          periodEnd: event.subscription.periodEnd,
+        });
+      }
     }
 
     if (topupConfig && this.provisioning && event.payment.purpose === "credit_topup" && uid) {
@@ -912,6 +1104,11 @@ export class BillingService {
           bucket: topupConfig.depositTo ?? "purchased",
         });
       }
+      await this.store.updateAutoRechargeAttemptByProviderPayment({
+        provider: event.provider,
+        providerPaymentId: event.payment.providerPaymentId,
+        state: "succeeded",
+      });
     }
 
     await this.updateCheckoutIntentFromEvent(event, "completed");
@@ -937,10 +1134,17 @@ export class BillingService {
     }
     if (uid && event.subscription && this.provisioning) {
       const existing = await this.getExistingSubscription(event);
-      await this.store.upsertBillingSubscription(
-        this.buildSubscriptionState(event, uid, existing, { status: "past_due" }),
-      );
-      await this.revokeIfCurrentSubscription(uid, event.subscription.providerSubscriptionId);
+      const pastDue = this.buildSubscriptionState(event, uid, existing, { status: "past_due" });
+      pastDue.graceEndsAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      await this.store.upsertBillingSubscription(pastDue);
+    }
+    if (event.payment) {
+      await this.store.updateAutoRechargeAttemptByProviderPayment({
+        provider: event.provider,
+        providerPaymentId: event.payment.providerPaymentId,
+        state: "failed",
+        failureCode: "provider_payment_failed",
+      });
     }
     await this.updateCheckoutIntentFromEvent(event, "failed");
     return { handled: true, action: "payment_failed_recorded" };
@@ -1022,6 +1226,7 @@ export class BillingService {
     offer: BillingOfferResult | null,
     event: BillingEvent,
     planKeyOverride?: string,
+    preserveAllowanceAnchor = false,
   ): Promise<void> {
     if (!this.provisioning) {
       this.logger.debug(
@@ -1035,7 +1240,10 @@ export class BillingService {
       return;
     }
     this.logger.debug("[BillingService] provisionSubscription setting plan", { uid, plan });
-    const periodStart = event.subscription?.periodStart;
+    const periodStart =
+      preserveAllowanceAnchor && this.provisioning.getUserPlan
+        ? (await this.provisioning.getUserPlan(uid))?.planAssignedAt
+        : event.subscription?.periodStart;
     const planAssignedAt = periodStart
       ? (() => {
           const d = new Date(periodStart);
@@ -1072,6 +1280,10 @@ export class BillingService {
 
   private async revokeSubscription(uid: string): Promise<void> {
     if (!this.provisioning) return;
+    if (this.fallbackPlanKey) {
+      await this.provisioning.setUserPlan(uid, this.fallbackPlanKey);
+      return;
+    }
     await this.provisioning.unsetUserPlan(uid);
   }
 
@@ -1089,7 +1301,10 @@ export class BillingService {
   private async reEvaluateAccess(uid: string, event: BillingEvent): Promise<void> {
     if (!this.provisioning || !event.subscription) return;
     const status = event.subscription.status;
-    if (status && ["active", "trialing"].includes(status)) {
+    // Provider retries (Stripe past_due, Dodo on_hold mapped to past_due)
+    // are a grace period. Keep the last paid entitlements until the provider
+    // reaches a terminal state instead of revoking access on the first miss.
+    if (status && ["active", "trialing", "past_due"].includes(status)) {
       const offer = await this.resolveOfferFromEvent(event);
       if (offer) {
         await this.provisionSubscription(uid, offer, event);

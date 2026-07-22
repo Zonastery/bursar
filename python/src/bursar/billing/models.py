@@ -192,12 +192,60 @@ class BillingCreditTopup(BaseModel):
     providers: dict[str, ProviderRef] = Field(default_factory=dict)
 
 
+class AutoRechargeTrigger(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["balance_below"] = "balance_below"
+    threshold_credits: Decimal = Field(ge=0)
+
+
+class AutoRechargeTopup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    key: str
+    quantity: int = Field(ge=1)
+
+
+class AutoRechargeLimit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    period: Literal["calendar_day", "calendar_month", "rolling_days"]
+    max_charges: int | None = Field(default=None, ge=1)
+    max_amount_minor: int | None = Field(default=None, ge=1)
+    currency: str | None = None
+    rolling_days: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "AutoRechargeLimit":
+        if self.period == "rolling_days" and self.rolling_days is None:
+            raise ValueError("rolling_days is required when auto-recharge limit period is rolling_days")
+        if self.max_amount_minor is not None and not self.currency:
+            raise ValueError("currency is required when max_amount_minor is configured")
+        return self
+
+
+class BillingAutoRechargePolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    trigger: AutoRechargeTrigger
+    topup: AutoRechargeTopup
+    limit: AutoRechargeLimit | None = None
+
+
+class BillingAutoRechargeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    default_policy: BillingAutoRechargePolicy | None = None
+    threshold_credits: int = Field(default=5000, ge=0)
+    topup_key: str = "default"
+    quantity: int = Field(default=1, ge=1)
+    max_recharges: int = Field(default=3, ge=1)
+    window_days: int = Field(default=30, ge=1)
+
+
 class BillingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     currency: str = "USD"
     subscriptions: dict[str, BillingOffer] = Field(default_factory=dict)
     topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
+    auto_recharge: BillingAutoRechargeConfig | None = None
 
     @classmethod
     def from_bursar_config(cls, cfg: Any) -> "BillingConfig":
@@ -222,6 +270,7 @@ class BillingConfig(BaseModel):
             currency=billing_data.currency or "USD",
             subscriptions=subscriptions,
             topups=topups,
+            auto_recharge=getattr(billing_data, "auto_recharge", None),
         )
 
 
@@ -265,9 +314,31 @@ class BillingSubscriptionState(BaseModel):
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None
+    grace_ends_at: str | None = None
     metadata: dict[str, Any] | None = None
     catalog_version: int | None = None
     plan_version_id: str | None = None
+
+
+class BillingSubscriptionChange(BaseModel):
+    """Durable provider-neutral state for a customer initiated plan switch."""
+
+    id: str
+    user_id: str
+    provider: str
+    provider_subscription_id: str
+    from_plan: str | None = None
+    from_interval: str | None = None
+    to_plan: str
+    to_interval: str
+    effective_at: Literal["immediately", "next_billing_date", "trial_end"]
+    state: Literal["draft", "awaiting_payment", "scheduled", "completed", "failed", "canceled", "superseded"]
+    proration_billing_mode: str
+    quote: dict[str, Any] = Field(default_factory=dict)
+    quote_hash: str
+    provider_operation_id: str | None = None
+    effective_date: str | None = None
+    expires_at: str | None = None
 
 
 class BillingGrantResult(BaseModel):
@@ -309,6 +380,48 @@ class BillingPreferences(BaseModel):
     usage_alerts: bool = True
     invoice_reminders: bool = False
     usage_limit_alerts: bool = True
+
+
+class BillingAutoRechargeProfile(BaseModel):
+    user_id: str
+    enabled: bool = False
+    state: Literal["disabled", "active", "processing", "suspended", "limit_reached"] = "disabled"
+    provider: str | None = None
+    provider_customer_id: str | None = None
+    payment_method_id: str | None = None
+    suspended_reason: str | None = None
+    consented_at: str | None = None
+    consent_reference: str | None = None
+    consent_metadata: dict[str, Any] | None = None
+    policy_override: dict[str, Any] | None = None
+    policy_snapshot: dict[str, Any] | None = None
+    policy_hash: str | None = None
+    quote_snapshot: dict[str, Any] | None = None
+    armed: bool = True
+
+
+class BillingAutoRechargeAttempt(BaseModel):
+    id: str
+    user_id: str
+    provider: str
+    idempotency_key: str
+    provider_payment_id: str | None = None
+    topup_key: str
+    quantity: int
+    state: Literal["claimed", "processing", "succeeded", "retryable", "failed", "action_required"]
+    credits: Decimal | None = None
+    trigger_balance: Decimal | None = None
+    policy_snapshot: dict[str, Any] | None = None
+    policy_hash: str | None = None
+    quoted_amount_minor: int | None = None
+    final_amount_minor: int | None = None
+    currency: str | None = None
+    failure_code: str | None = None
+    failure_category: str | None = None
+    failure_message: str | None = None
+    action_url: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class BillingCustomerRecord(BaseModel):

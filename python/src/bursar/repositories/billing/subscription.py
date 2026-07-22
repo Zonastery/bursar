@@ -16,7 +16,7 @@ SUBSCRIPTION_STATUS_INCOMPLETE = "incomplete"
 SUBSCRIPTION_COLS = (
     "user_id, provider, provider_subscription_id, provider_customer_id, "
     "offer_key, plan, status, current_period_start, "
-    "current_period_end, cancel_at_period_end, interval, interval_count, metadata, "
+    "current_period_end, cancel_at_period_end, interval, interval_count, grace_ends_at, metadata, "
     "catalog_version, plan_version_id"
 )
 
@@ -56,6 +56,7 @@ class BillingSubscriptionRepository:
             "cancel_at_period_end": state.get("cancel_at_period_end", False),
             "interval": state.get("interval"),
             "interval_count": state.get("interval_count"),
+            "grace_ends_at": state.get("grace_ends_at"),
             "metadata": state.get("metadata"),
             "catalog_version": state.get("catalog_version"),
             "plan_version_id": state.get("plan_version_id"),
@@ -67,6 +68,11 @@ class BillingSubscriptionRepository:
         if rows and isinstance(rows[0], dict) and rows[0].get("result", {}).get("error"):
             err = rows[0]["result"]
             raise ValueError(err.get("message") or err.get("error"))
+        if state.get("grace_ends_at") is not None:
+            self._execute(
+                "UPDATE bursar.billing_subscriptions SET grace_ends_at = %s, updated_at = now() WHERE provider = %s AND provider_subscription_id = %s",
+                [state["grace_ends_at"], state["provider"], state["provider_subscription_id"]],
+            )
 
     def get(self, provider: str, provider_subscription_id: str) -> SubscriptionRow | None:
         validate_non_empty(provider, "provider")
