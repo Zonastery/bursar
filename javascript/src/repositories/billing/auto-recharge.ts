@@ -48,7 +48,7 @@ export class BillingAutoRechargeRepository {
       "SELECT * FROM bursar.billing_auto_recharge_profiles WHERE user_id = $1",
       [userId],
     );
-    return rows[0] ? profileFromRow(rows[0]) : null;
+    return rows[0] ? profileFromRow(rows[0] as Record<string, unknown>) : null;
   }
 
   async upsertProfile(profile: BillingAutoRechargeProfile): Promise<void> {
@@ -100,7 +100,7 @@ export class BillingAutoRechargeRepository {
         input.windowDays,
       ],
     );
-    return rows[0] ? attemptFromRow(rows[0]) : null;
+    return rows[0] ? attemptFromRow(rows[0] as Record<string, unknown>) : null;
   }
 
   async updateAttempt(input: {

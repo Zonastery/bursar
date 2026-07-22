@@ -325,7 +325,6 @@ function decodeSnakeFields(
     window_days: "windowDays",
     default_policy: "defaultPolicy",
     max_charges: "maxCharges",
-    max_amount_minor: "maxAmountMinor",
     rolling_days: "rollingDays",
     allowance: "allowance",
     safety: "safety",
@@ -906,7 +905,7 @@ function parseBilling(raw: unknown): BillingSection | undefined {
                     limit: {
                       period: String(limit.period ?? "calendar_month") as
                         "calendar_day" | "calendar_month" | "rolling_days",
-                      ...(limit.maxCharges != null ? { maxCharges } : {}),
+                      ...(limit.maxCharges != null ? { maxCharges: maxRecharges } : {}),
                       ...(limit.maxAmountMinor != null
                         ? { maxAmountMinor: Number(limit.maxAmountMinor) }
                         : {}),

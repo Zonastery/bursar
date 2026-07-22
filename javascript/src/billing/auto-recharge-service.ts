@@ -167,7 +167,7 @@ export class AutoRechargeService {
         topupKey: policy.topupKey,
         quantity: policy.quantity,
       }),
-      quoteSnapshot: quote ?? null,
+      quoteSnapshot: quote ? ({ ...quote } as Record<string, unknown>) : null,
       consentReference: input.consentReference ?? null,
       armed: true,
     };
@@ -222,7 +222,7 @@ export class AutoRechargeService {
         await this.billing.upsertAutoRechargeProfile({ ...profile, armed: true });
       return { outcome: "above_threshold" };
     }
-    const quote = await this.quote({ userId: input.userId, provider: input.provider });
+    await this.quote({ userId: input.userId, provider: input.provider });
     const attempt = await this.billing.claimAutoRechargeAttempt({
       userId: input.userId,
       provider: input.provider.provider,
