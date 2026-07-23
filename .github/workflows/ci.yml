@@ -137,10 +137,17 @@ jobs:
           cache-dependency-path: javascript/package-lock.json
       # Also loads tests/parity/expression_cases.json (parity gate, §7).
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
-      - working-directory: javascript
-        run: |
-          npm ci
-          npx vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
+        - working-directory: javascript
+          run: |
+            npm ci
+            postgres_container=$(docker ps --filter 'ancestor=postgres:16' --format '{{.ID}}' | head -1)
+            docker exec "$postgres_container" psql -U postgres -d bursar -c "ALTER SYSTEM SET max_connections = 500"
+            docker restart "$postgres_container"
+            for attempt in $(seq 1 30); do
+              if docker exec "$postgres_container" pg_isready -U postgres -d bursar >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+            npx vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
           npx vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
