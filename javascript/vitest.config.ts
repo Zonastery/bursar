@@ -40,6 +40,8 @@ export default defineConfig({
         "src/metrics.ts",
         "src/providers",
         "src/billing/billing-types.ts",
+        // Abstract capability surface; concrete stores are covered instead.
+        "src/stores/credit-store.ts",
       ],
       reporter: ["text", "json", "html"],
       // Measured baseline (no DB) was ~92% for src/ and ~68% for src/stores/

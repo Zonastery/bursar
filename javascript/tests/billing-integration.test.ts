@@ -1299,7 +1299,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   // ── Payment failed ──────────────────────────────────────────────────────
 
-  it("payment failed records and revokes", async () => {
+  it("payment failed records and preserves grace-period access", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bs.syncBillingFromConfig(BILLING_CONFIG);
     await bm.ingestBillingEvent({
@@ -1330,7 +1330,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       subscription: { providerSubscriptionId: "sub_pf_test" },
     });
     expect(result.handled).toBe(true);
-    expect((await cm.getUserPlan(USER_ID5)).planId).toBeNull();
+    expect((await cm.getUserPlan(USER_ID5)).planId).not.toBeNull();
+    expect((await bs.getBillingSubscription(PROVIDER, "sub_pf_test"))?.status).toBe("past_due");
   });
 
   // ── Dispute lifecycle ───────────────────────────────────────────────────
