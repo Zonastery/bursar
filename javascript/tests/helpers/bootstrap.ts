@@ -81,10 +81,9 @@ export function migrationFiles(): string[] {
 }
 
 export async function applyMigrations(pool: pg.Pool): Promise<void> {
-  // Production setup owns the checksum ledger. The JS fixture deliberately
-  // applies the baseline only to an empty database; replaying raw files after
-  // the final schema-transfer migration would attempt to create triggers on
-  // compatibility views.
+  // Production setup owns the checksum ledger. The bundled SQL is a baseline
+  // dump, so a missing ledger on an existing schema must be repaired by
+  // stamping it rather than replaying CREATE TABLE/constraint statements.
   const ledger = await pool.query("SELECT to_regclass('bursar.schema_migrations') AS relation");
   if (!ledger.rows[0]?.relation) {
     await pool.query(`CREATE SCHEMA IF NOT EXISTS bursar`);
@@ -92,6 +91,23 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
       version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
     )`);
   }
+
+  const state = await pool.query(
+    "SELECT to_regclass('bursar.credit_transactions') AS relation, " +
+      "count(*)::int AS ledger_count FROM bursar.schema_migrations",
+  );
+  if (state.rows[0]?.relation && state.rows[0].ledger_count === 0) {
+    for (const file of migrationFiles()) {
+      const sql = readFileSync(join(SQL_DIR, file), "utf8");
+      const checksum = createHash("sha256").update(sql).digest("hex");
+      await pool.query("INSERT INTO bursar.schema_migrations(version, checksum) VALUES ($1, $2)", [
+        file,
+        checksum,
+      ]);
+    }
+    return;
+  }
+
   for (const file of migrationFiles()) {
     const sql = readFileSync(join(SQL_DIR, file), "utf8");
     const checksum = createHash("sha256").update(sql).digest("hex");
