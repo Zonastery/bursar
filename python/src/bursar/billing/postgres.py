@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal, cast
 
 import psycopg2
 import psycopg2.extras
@@ -210,8 +210,11 @@ class PostgresBillingStore(BillingStore):
             from_interval=row.get("from_interval"),
             to_plan=str(row["to_plan"]),
             to_interval=str(row["to_interval"]),
-            effective_at=str(row["effective_at"]),
-            state=str(row["state"]),
+            effective_at=cast(Literal["immediately", "next_billing_date", "trial_end"], str(row["effective_at"])),
+            state=cast(
+                Literal["draft", "awaiting_payment", "scheduled", "completed", "failed", "canceled", "superseded"],
+                str(row["state"]),
+            ),
             proration_billing_mode=str(row["proration_billing_mode"]),
             quote=row.get("quote") or {},
             quote_hash=str(row["quote_hash"]),
@@ -514,7 +517,10 @@ class PostgresBillingStore(BillingStore):
                 change.expires_at,
             ],
         )
-        return self._row_to_subscription_change(rows[0])
+        parsed_change = self._row_to_subscription_change(rows[0])
+        if parsed_change is None:
+            raise RuntimeError("billing subscription change INSERT returned no row")
+        return parsed_change
 
     def get_open_billing_subscription_change(
         self, provider: str, provider_subscription_id: str
@@ -853,7 +859,7 @@ class PostgresBillingStore(BillingStore):
         return BillingAutoRechargeProfile(
             user_id=str(row["user_id"]),
             enabled=bool(row["enabled"]),
-            state=str(row["state"]),
+            state=cast(Literal["disabled", "active", "processing", "suspended", "limit_reached"], str(row["state"])),
             provider=row.get("provider"),
             provider_customer_id=row.get("provider_customer_id"),
             payment_method_id=row.get("payment_method_id"),
@@ -917,7 +923,10 @@ class PostgresBillingStore(BillingStore):
             provider_payment_id=row.get("provider_payment_id"),
             topup_key=str(row["topup_key"]),
             quantity=int(row["quantity"]),
-            state=str(row["state"]),
+            state=cast(
+                Literal["claimed", "processing", "succeeded", "retryable", "failed", "action_required"],
+                str(row["state"]),
+            ),
             credits=row.get("credits"),
             failure_code=row.get("failure_code"),
             action_url=row.get("action_url"),

@@ -32,7 +32,7 @@ COMMENT ON SCHEMA bursar IS 'Backend-only Bursar accounting, catalog, and billin
 
 -- Bursar owns its timestamp trigger helper.  This keeps the backend schema
 -- independent of Supabase's public helper while retaining identical behavior.
-CREATE FUNCTION bursar.handle_updated_at() RETURNS trigger
+CREATE OR REPLACE FUNCTION bursar.handle_updated_at() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path TO ''
     AS $$

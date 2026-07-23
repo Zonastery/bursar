@@ -324,7 +324,8 @@ class StripeProvider(PaymentProvider):
         item_id = _stripe_val(item, "id")
         options = {"idempotency_key": params.idempotency_key} if params.idempotency_key else None
         if params.effective_at == "next_billing_date":
-            schedule = await stripe.SubscriptionSchedule.create_async(
+            schedule_api: Any = stripe.SubscriptionSchedule
+            schedule = await schedule_api.create_async(
                 from_subscription=params.provider_subscription_id,
                 options=options,
             )
@@ -332,7 +333,7 @@ class StripeProvider(PaymentProvider):
             if len(phases) < 2:
                 raise ValueError("Stripe subscription schedule has no next phase")
             phases[1]["items"] = [{"price": params.product_id, "quantity": params.quantity}]
-            await stripe.SubscriptionSchedule.modify_async(
+            await schedule_api.modify_async(
                 _stripe_val(schedule, "id"),
                 phases=phases,
                 options=options,

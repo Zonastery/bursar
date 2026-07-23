@@ -203,6 +203,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          mkdir -p /tmp/bursar-npm
           npm pack --pack-destination /tmp/bursar-npm
       - name: Install npm artifact in a clean consumer
         run: |

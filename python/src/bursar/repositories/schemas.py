@@ -309,6 +309,7 @@ class SubscriptionRow(BaseModel):
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None
+    grace_ends_at: str | datetime | None = None
     metadata: dict[str, Any] | None = None
     catalog_version: int | None = None
     plan_version_id: str | None = None

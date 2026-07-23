@@ -146,7 +146,7 @@ class DodoProvider(PaymentProvider):
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         client = self._get_client()
-        kwargs = {"cancel_at_next_billing_date": True}
+        kwargs: dict[str, Any] = {"cancel_at_next_billing_date": True}
         if idempotency_key:
             kwargs["idempotency_key"] = idempotency_key
         await client.subscriptions.update(
@@ -156,7 +156,7 @@ class DodoProvider(PaymentProvider):
 
     async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         client = self._get_client()
-        kwargs = {"cancel_at_next_billing_date": False}
+        kwargs: dict[str, Any] = {"cancel_at_next_billing_date": False}
         if idempotency_key:
             kwargs["idempotency_key"] = idempotency_key
         await client.subscriptions.update(
