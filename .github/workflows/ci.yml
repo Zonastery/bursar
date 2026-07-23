@@ -54,7 +54,6 @@ jobs:
     services:
       postgres:
         image: postgres:16
-        command: postgres -c max_connections=500
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -141,7 +140,7 @@ jobs:
       - working-directory: javascript
         run: |
           npm ci
-          npx vitest run --coverage --maxWorkers=1 --minWorkers=1
+          npx vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
           npx vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
