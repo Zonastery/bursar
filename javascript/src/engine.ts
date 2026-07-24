@@ -1,211 +1,120 @@
 import Decimal from "decimal.js";
+
+import { ConfigError } from "./errors.js";
 import { evaluateExpression } from "./expr.js";
-import type { ParsedBursarConfig } from "./config.js";
-import { bursarConfigToSnakeDict, loadConfigFromDict } from "./config.js";
+import type { ParsedBursarConfig, PriceRule } from "./config.js";
+import { canonicalBursarConfigDict, loadConfigFromDict } from "./config.js";
 import type { CostBreakdown } from "./breakdown.js";
 import { makeCostBreakdown } from "./breakdown.js";
 import type { UsageMetrics } from "./metrics.js";
-import { ConfigError } from "./errors.js";
 
-/**
- * Credit calculation engine.
- *
- * Evaluates pricing expressions against usage metrics to produce cost
- * breakdowns. All money values are exact `Decimal`s — never binary `number`.
- */
+const quantize = (value: Decimal): Decimal => value.toDecimalPlaces(4, Decimal.ROUND_HALF_UP);
+
 export class PricingEngine {
-  private config: ParsedBursarConfig;
+  constructor(private readonly config: ParsedBursarConfig) {}
 
-  constructor(config: ParsedBursarConfig) {
-    this.config = config;
-  }
-
-  /** Load engine from a config dictionary. */
   static fromDict(data: Record<string, unknown>): PricingEngine {
     return new PricingEngine(loadConfigFromDict(data));
   }
 
-  /** Calculate credit cost for a single usage event. */
-  calculate(metrics: UsageMetrics, rateOverrides?: Record<string, string> | null): CostBreakdown {
-    const variables = this.buildVariables(metrics);
-    const modelCredits = this.calcModel(metrics.model ?? null, variables, rateOverrides);
-    const toolCredits = this.calcTools(metrics, variables);
-    const searchCredits = this.calcSearch(variables);
-    const cacheSavings = this.calcCache(variables);
-    const fixedCredits = this.calcFlatJobs(metrics);
+  get pricingSchema(): Record<string, unknown> {
+    return canonicalBursarConfigDict(this.config as unknown as Record<string, unknown>);
+  }
 
-    // makeCostBreakdown quantizes every component to 4dp HALF_UP and computes
-    // the single-source-of-truth total (clamped at 0). No truncation.
+  get minBalance(): Decimal {
+    return new Decimal(0);
+  }
+
+  calculate(
+    metrics: UsageMetrics,
+    options: { rateCard?: string } | Record<string, string> | null = {},
+  ): CostBreakdown {
+    const usage = this.config.usage;
+    if (!usage) throw new ConfigError("usage pricing is not configured");
+    const operationName = metrics.operation;
+    const operation = usage.operations[operationName];
+    if (!operation) throw new ConfigError(`unknown usage operation '${operationName}'`);
+    const measures: Record<string, Decimal.Value> = { ...(metrics.measures ?? {}) };
+    const dimensions: Record<string, string> = { ...(metrics.dimensions ?? {}) };
+
+    const unknownMeasures = Object.keys(measures).filter(
+      (key) => !operation.measures.includes(key),
+    );
+    const unknownDimensions = Object.keys(dimensions).filter(
+      (key) => !operation.dimensions.includes(key),
+    );
+    if (unknownMeasures.length)
+      throw new ConfigError(
+        `operation '${metrics.operation}' received undeclared measures ${unknownMeasures.join(", ")}`,
+      );
+    if (unknownDimensions.length)
+      throw new ConfigError(
+        `operation '${metrics.operation}' received undeclared dimensions ${unknownDimensions.join(", ")}`,
+      );
+    const requestedRateCard =
+      options != null && "rateCard" in options ? options.rateCard : undefined;
+    const card = this.resolveRateCard(requestedRateCard);
+    const rules = this.rulesFor(card, operationName);
+    const rule = rules.find((candidate) => this.matches(candidate, dimensions));
+    if (!rule)
+      throw new ConfigError(
+        `no price rule matched operation '${operationName}' in rate card '${card}'`,
+      );
+    const variables: Record<string, Decimal> = {};
+    for (const name of operation.measures) {
+      const value = new Decimal(measures[name] ?? 0);
+      if (!value.isFinite() || value.isNegative())
+        throw new ConfigError(`usage measure '${name}' must be finite and non-negative`);
+      variables[name] = value;
+    }
+    const value = evaluateExpression(rule.formula, variables);
+    if (!value.isFinite() || value.isNegative())
+      throw new ConfigError(
+        `price formula for '${operationName}' produced a negative or non-finite credit cost`,
+      );
+    const total = quantize(value);
     return makeCostBreakdown({
-      modelCredits,
-      toolCredits,
-      searchCredits,
-      cacheSavings,
-      fixedCredits,
-      breakdown: {
-        model: metrics.model ?? "unknown",
-        inputTokens: metrics.inputTokens ?? 0,
-        outputTokens: metrics.outputTokens ?? 0,
-        toolCount: (metrics.toolCalls ?? []).length,
-      },
+      operationCredits: total,
+      breakdown: { operation: operationName, rateCard: card, measures, dimensions },
     });
   }
 
-  /** Calculate credit costs for multiple usage events. */
-  calculateBatch(metricsList: UsageMetrics[]): CostBreakdown[] {
-    return metricsList.map((m) => this.calculate(m));
+  calculateBatch(metrics: UsageMetrics[], options: { rateCard?: string } = {}): CostBreakdown[] {
+    return metrics.map((metric) => this.calculate(metric, options));
   }
 
-  /** Return the pricing config as a dict. */
-  pricingSchema(): Record<string, unknown> {
-    return bursarConfigToSnakeDict(this.config);
+  getRateCardForPlan(planId: string | null | undefined): string | undefined {
+    if (!planId) return undefined;
+    return this.config.plans[planId]?.rateCard;
   }
 
-  /** Minimum balance users must keep. */
-  get minBalance(): Decimal {
-    return this.config.ledger.minBalance;
-  }
-
-  /** The canonical set of metric variable names usable in expressions. */
-  get knownVariables(): Set<string> {
-    return new Set(Object.keys(this.buildVariables({})));
-  }
-
-  /** Check if a model name exists in the pricing config. */
-  hasModel(modelName: string): boolean {
-    return Object.prototype.hasOwnProperty.call(this.config.metering.models, modelName);
-  }
-
-  /** Resolve a model version string to a pricing config key. */
-  resolveModel(modelVersion: string): string | null {
-    const models = this.config.metering.models;
-    if (Object.prototype.hasOwnProperty.call(models, modelVersion)) return modelVersion;
-    for (const key of Object.keys(models)) {
-      if (key !== "*" && modelVersion.startsWith(key)) return key;
+  private resolveRateCard(requested?: string): string {
+    const cards = this.config.usage!.rateCards;
+    if (requested) {
+      if (!cards[requested]) throw new ConfigError(`unknown rate card '${requested}'`);
+      return requested;
     }
-    if (Object.prototype.hasOwnProperty.call(models, "*")) return "*";
-    return null;
+    const keys = Object.keys(cards);
+    if (keys.length === 1) return keys[0];
+    throw new ConfigError("rateCard is required when more than one rate card is configured");
   }
 
-  /**
-   * Get the flat job credit cost for a named batch job, as a `Decimal`.
-   * Returns `null` for an unknown job (L3 parity with Python). The amount is
-   * NOT truncated to an integer.
-   */
-  getFlatJobCost(jobName: string): Decimal | null {
-    if (Object.prototype.hasOwnProperty.call(this.config.metering.flatJobs, jobName)) {
-      return this.config.metering.flatJobs[jobName];
-    }
-    return null;
+  private rulesFor(cardKey: string, operation: string): PriceRule[] {
+    const card = this.config.usage!.rateCards[cardKey];
+    if (card.prices[operation]) return card.prices[operation];
+    if (!card.extends)
+      throw new ConfigError(`rate card '${cardKey}' has no price for operation '${operation}'`);
+    return this.rulesFor(card.extends, operation);
   }
 
-  // ── Internal ──
-
-  private buildVariables(metrics: UsageMetrics): Record<string, number> {
-    return {
-      input_tokens: metrics.inputTokens ?? 0,
-      output_tokens: metrics.outputTokens ?? 0,
-      cache_read_tokens: metrics.cacheReadTokens ?? 0,
-      cache_write_tokens: metrics.cacheWriteTokens ?? 0,
-      tool_calls: (metrics.toolCalls ?? []).length,
-      search_queries: metrics.searchQueries ?? 0,
-      search_results: metrics.searchResults ?? 0,
-      web_search_calls: metrics.webSearchCalls ?? 0,
-      code_exec_calls: metrics.codeExecCalls ?? 0,
-    };
-  }
-
-  private calcModel(
-    modelName: string | null,
-    variables: Record<string, number>,
-    rateOverrides?: Record<string, string> | null,
-  ): Decimal {
-    const name = modelName === null || modelName === "none" ? "*" : modelName;
-
-    if (rateOverrides) {
-      const resolved = this.resolveModel(name);
-      if (resolved && Object.prototype.hasOwnProperty.call(rateOverrides, resolved)) {
-        return evaluateExpression(rateOverrides[resolved], variables);
-      }
-      if (Object.prototype.hasOwnProperty.call(rateOverrides, "*")) {
-        return evaluateExpression(rateOverrides["*"], variables);
-      }
+  private matches(rule: PriceRule, dimensions: Record<string, string>): boolean {
+    if (rule.default) return true;
+    for (const [key, matcher] of Object.entries(rule.match ?? {})) {
+      const value = dimensions[key];
+      if (value == null) return false;
+      if (matcher.exact != null && value !== matcher.exact) return false;
+      if (matcher.prefix != null && !value.startsWith(matcher.prefix)) return false;
     }
-
-    const models = this.config.metering.models;
-    let expr: string | undefined;
-
-    if (Object.prototype.hasOwnProperty.call(models, name)) {
-      expr = models[name];
-    } else if (Object.prototype.hasOwnProperty.call(models, "*")) {
-      expr = models["*"];
-    } else if (Object.prototype.hasOwnProperty.call(models, "_default")) {
-      expr = models["_default"];
-    }
-
-    if (!expr) {
-      throw new ConfigError(`model '${modelName}' not found and no "*" configured`);
-    }
-
-    return evaluateExpression(expr, variables);
-  }
-
-  private calcTools(metrics: UsageMetrics, variables: Record<string, number>): Decimal {
-    const tools = this.config.metering.tools;
-    const defaultExpr = tools["*"] ?? "tool_calls * 0";
-    let total = new Decimal(0);
-    const seenSpecific = new Set<string>();
-
-    const calls = metrics.toolCalls ?? [];
-    const uniqueNames = [...new Set(calls.map((t) => t.name))];
-
-    // WS2: `tool_calls` always means the GLOBAL total across all tools — it is
-    // never overridden. Each branch instead gets its own `calls`,
-    // scoped to just that branch's call count, alongside the unchanged globals.
-    for (const toolName of uniqueNames) {
-      if (Object.prototype.hasOwnProperty.call(tools, toolName)) {
-        const thisToolCalls = calls.filter((t) => t.name === toolName).length;
-        const local = { ...variables, calls: thisToolCalls };
-        total = total.plus(evaluateExpression(tools[toolName], local));
-        seenSpecific.add(toolName);
-      }
-    }
-
-    // Count unknown *calls* (not unique names) for the default expression, to
-    // match the Python engine's `sum(1 for t in tool_calls if t.name not in
-    // seen_specific)`. Previously this counted unique names, diverging from
-    // Python and (masked by 2dp rounding) under-charging on repeated unknowns.
-    const unknownCount = calls.filter((t) => !seenSpecific.has(t.name)).length;
-    if (unknownCount > 0) {
-      const local = { ...variables, calls: unknownCount };
-      total = total.plus(evaluateExpression(defaultExpr, local));
-    }
-
-    return total;
-  }
-
-  private calcSearch(variables: Record<string, number>): Decimal {
-    if (this.config.metering.search) {
-      return evaluateExpression(this.config.metering.search, variables);
-    }
-    return new Decimal(0);
-  }
-
-  private calcCache(variables: Record<string, number>): Decimal {
-    if (this.config.metering.cacheDiscount) {
-      // cacheDiscount is the savings expression; negate so it reduces cost.
-      return evaluateExpression(this.config.metering.cacheDiscount, variables).negated();
-    }
-    return new Decimal(0);
-  }
-
-  private calcFlatJobs(metrics: UsageMetrics): Decimal {
-    if (
-      metrics.flatJob &&
-      Object.prototype.hasOwnProperty.call(this.config.metering.flatJobs, metrics.flatJob)
-    ) {
-      return this.config.metering.flatJobs[metrics.flatJob];
-    }
-    return new Decimal(0);
+    return true;
   }
 }

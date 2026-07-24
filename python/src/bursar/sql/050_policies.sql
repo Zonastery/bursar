@@ -145,24 +145,13 @@ CREATE POLICY "Server-only user_credit_buckets" ON bursar.user_credit_buckets US
 
 
 --
--- Name: user_credits Users can view own credits; Type: POLICY; Schema: bursar; Owner: -
---
-
-CREATE POLICY "Users can view own credits" ON bursar.user_credits FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: credit_reservations Users can view own reservations; Type: POLICY; Schema: bursar; Owner: -
---
-
-CREATE POLICY "Users can view own reservations" ON bursar.credit_reservations FOR SELECT USING ((auth.uid() = user_id));
-
-
---
--- Name: credit_transactions Users can view own transactions; Type: POLICY; Schema: bursar; Owner: -
---
-
-CREATE POLICY "Users can view own transactions" ON bursar.credit_transactions FOR SELECT USING ((auth.uid() = user_id));
+CREATE POLICY "Server-only credit_accounts" ON bursar.credit_accounts USING (false);
+CREATE POLICY "Server-only credit_ledger_entries" ON bursar.credit_ledger_entries USING (false);
+CREATE POLICY "Server-only credit_lot_allocations" ON bursar.credit_lot_allocations USING (false);
+CREATE POLICY "Server-only credit_lot_reversals" ON bursar.credit_lot_reversals USING (false);
+CREATE POLICY "Server-only credit_lots" ON bursar.credit_lots USING (false);
+CREATE POLICY "Server-only catalog_object_versions" ON bursar.catalog_object_versions USING (false);
+CREATE POLICY "Server-only credit_reservations" ON bursar.credit_reservations USING (false);
 
 
 --

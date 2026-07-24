@@ -11,13 +11,13 @@ export type BillingMode = "strict" | "overdraft";
 
 /** Flexible metadata attached to credit transactions. */
 export interface CreditMetadata {
-  inputTokens?: number | null;
-  outputTokens?: number | null;
-  model?: string | null;
+  operation?: string | null;
+  measures?: Record<string, unknown> | null;
+  dimensions?: Record<string, string> | null;
+  breakdownTotal?: string | null;
   referenceType?: string | null;
   referenceId?: string | null;
   idempotencyKey?: string | null;
-  flatJob?: string | null;
   [key: string]: unknown;
 }
 

@@ -86,7 +86,7 @@ jobs:
       - name: Verify pricing JSON schema is up to date
         run: |
           python python/scripts/generate_pricing_json_schema.py
-          git diff --exit-code docs/pricing-config.schema.json
+          git diff --exit-code -- docs/pricing-config.schema.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.python-version == '3.13'
         with:

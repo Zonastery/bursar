@@ -154,7 +154,7 @@ class Bursar:
         return self.credits.setup()
 
     def load_catalog(self) -> None:
-        """Load the active catalog into the metering engine."""
+        """Load the active catalog into the pricing engine."""
         self.credits.load_pricing_from_store()
 
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:

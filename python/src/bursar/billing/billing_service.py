@@ -402,8 +402,8 @@ class BillingServiceImpl:
             )
 
     @staticmethod
-    def _compute_topup_credits(amount_minor: int, credits_per_unit: int) -> int:
-        return (amount_minor * credits_per_unit) // 100
+    def _compute_topup_credits(amount_minor: int, credits_per_unit: Decimal | int) -> Decimal:
+        return (Decimal(amount_minor) * Decimal(credits_per_unit)) // Decimal(100)
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
         if event.user_id:
@@ -851,7 +851,7 @@ class BillingServiceImpl:
             payment_metadata: dict | None = None
             if topup_config:
                 payment_metadata = {
-                    "credits_per_unit": int(topup_config.credits_per_unit or 1000),
+                    "credits_per_unit": str(topup_config.credits_per_unit or 1000),
                 }
             self._store.upsert_billing_payment(
                 provider=event.provider,
@@ -875,7 +875,7 @@ class BillingServiceImpl:
                     topup_config.max_amount_minor,
                 )
                 return BillingEventResult(handled=True, action="payment_succeeded")
-            cps = int(topup_config.credits_per_unit or 1000)
+            cps = topup_config.credits_per_unit or Decimal("1000")
             credits = self._compute_topup_credits(amt, cps)
             if credits > 0:
                 self._provisioning.add_credits(
@@ -885,7 +885,7 @@ class BillingServiceImpl:
                     bucket=topup_config.deposit_to,
                 )
                 logger.info(
-                    "granted %d topup credits to user %s (payment %s)",
+                    "granted %s topup credits to user %s (payment %s)",
                     credits,
                     uid,
                     event.payment.provider_payment_id,
@@ -936,7 +936,7 @@ class BillingServiceImpl:
                             refund.provider_refund_id,
                         )
                         return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
-                    credits_per_unit = int(credits_per_unit)
+                    credits_per_unit = Decimal(str(credits_per_unit))
                     credits = self._compute_topup_credits(refund.amount_minor, credits_per_unit)
                     if credits > 0:
                         self._provisioning.deduct_credits(
@@ -946,7 +946,7 @@ class BillingServiceImpl:
                             bucket="purchased",
                         )
                         logger.info(
-                            "clawed back %d credits from user %s for refund %s",
+                            "clawed back %s credits from user %s for refund %s",
                             credits,
                             uid,
                             refund.provider_refund_id,

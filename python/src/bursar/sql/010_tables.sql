@@ -4,7 +4,7 @@
 CREATE TABLE bursar.billing_credit_topups (
     topup_key text NOT NULL,
     deposit_to text DEFAULT 'purchased'::text NOT NULL,
-    credits_per_unit integer DEFAULT 1000 NOT NULL,
+    credits_per_unit numeric(18,4) DEFAULT 1000 NOT NULL,
     min_amount_minor integer DEFAULT 500 NOT NULL,
     max_amount_minor integer DEFAULT 500000 NOT NULL,
     tax_behavior text DEFAULT 'exclude_tax'::text NOT NULL,
@@ -12,7 +12,8 @@ CREATE TABLE bursar.billing_credit_topups (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     status text DEFAULT 'active'::text NOT NULL,
     CONSTRAINT billing_credit_topups_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text]))),
-    CONSTRAINT billing_credit_topups_tax_behavior_check CHECK ((tax_behavior = ANY (ARRAY['exclude_tax'::text, 'include_tax'::text])))
+    CONSTRAINT billing_credit_topups_tax_behavior_check CHECK ((tax_behavior = ANY (ARRAY['exclude_tax'::text, 'include_tax'::text]))),
+    CONSTRAINT billing_credit_topups_amounts_check CHECK (credits_per_unit > 0 AND min_amount_minor >= 0 AND max_amount_minor >= min_amount_minor)
 );
 
 
@@ -105,9 +106,10 @@ CREATE TABLE bursar.billing_offers (
     offer_key text NOT NULL,
     plan text NOT NULL,
     "interval" text DEFAULT 'month'::text NOT NULL,
+    billing_interval text GENERATED ALWAYS AS ("interval") STORED,
     interval_count integer DEFAULT 1 NOT NULL,
     grant_mode text DEFAULT 'allowance'::text NOT NULL,
-    grant_credits integer,
+    grant_credits numeric(18,4),
     grant_bucket text,
     grant_replace_prior boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -138,6 +140,7 @@ CREATE TABLE bursar.billing_payments (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     subject_id uuid,
     CONSTRAINT billing_payments_amount_nonnegative CHECK ((amount_minor >= 0)),
+    CONSTRAINT billing_payments_tax_nonnegative CHECK (tax_minor IS NULL OR tax_minor >= 0),
     CONSTRAINT billing_payments_currency_iso CHECK ((currency ~ '^[A-Z]{3}$'::text)),
     CONSTRAINT billing_payments_purpose_check CHECK ((purpose = ANY (ARRAY['subscription'::text, 'credit_topup'::text, 'unknown'::text])))
 );
@@ -228,6 +231,7 @@ CREATE TABLE bursar.billing_subscriptions (
     current_period_end timestamp with time zone,
     cancel_at_period_end boolean DEFAULT false NOT NULL,
     "interval" text,
+    billing_interval text GENERATED ALWAYS AS ("interval") STORED,
     interval_count integer,
     metadata jsonb DEFAULT '{}'::jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -282,11 +286,13 @@ CREATE TABLE bursar.credit_accounts (
     account_type text NOT NULL,
     user_id uuid,
     team_id uuid,
+    subject_id uuid,
     balance numeric(18,4) DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT credit_accounts_account_type_check CHECK ((account_type = ANY (ARRAY['personal'::text, 'team'::text]))),
-    CONSTRAINT credit_accounts_check CHECK ((((account_type = 'personal'::text) AND (user_id IS NOT NULL) AND (team_id IS NULL)) OR ((account_type = 'team'::text) AND (team_id IS NOT NULL) AND (user_id IS NULL))))
+    CONSTRAINT credit_accounts_check CHECK (((account_type = 'personal'::text AND team_id IS NULL AND num_nonnulls(user_id, subject_id) = 1) OR (account_type = 'team'::text AND team_id IS NOT NULL AND user_id IS NULL AND subject_id IS NULL))),
+    CONSTRAINT credit_accounts_balance_finite CHECK (bursar.is_finite_numeric(balance))
 );
 
 
@@ -324,7 +330,7 @@ CREATE TABLE bursar.credit_ledger_entries (
     metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     reference_transaction_id uuid,
-    CONSTRAINT credit_ledger_entries_amount_check CHECK ((amount <> (0)::numeric))
+    CONSTRAINT credit_ledger_entries_amount_check CHECK ((amount <> (0)::numeric AND bursar.is_finite_numeric(amount)))
 );
 
 
@@ -345,7 +351,7 @@ CREATE TABLE bursar.credit_lot_allocations (
     lot_id uuid,
     amount numeric(18,4) NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT credit_lot_allocations_amount_check CHECK ((amount > (0)::numeric))
+    CONSTRAINT credit_lot_allocations_amount_check CHECK ((amount > (0)::numeric AND bursar.is_finite_numeric(amount)))
 );
 
 
@@ -359,7 +365,7 @@ CREATE TABLE bursar.credit_lot_reversals (
     original_allocation_id uuid NOT NULL,
     amount numeric(18,4) NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT credit_lot_reversals_amount_check CHECK ((amount > (0)::numeric))
+    CONSTRAINT credit_lot_reversals_amount_check CHECK ((amount > (0)::numeric AND bursar.is_finite_numeric(amount)))
 );
 
 
@@ -376,8 +382,8 @@ CREATE TABLE bursar.credit_lots (
     expires_at timestamp with time zone,
     bucket text DEFAULT 'default'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT credit_lots_check CHECK (((consumed >= (0)::numeric) AND (consumed <= granted))),
-    CONSTRAINT credit_lots_granted_check CHECK ((granted > (0)::numeric))
+    CONSTRAINT credit_lots_check CHECK ((bursar.is_finite_numeric(consumed) AND consumed >= (0)::numeric) AND (consumed <= granted)),
+    CONSTRAINT credit_lots_granted_check CHECK ((granted > (0)::numeric AND bursar.is_finite_numeric(granted)))
 );
 
 
@@ -419,7 +425,12 @@ CREATE TABLE bursar.credit_plans (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     config_version integer NOT NULL,
     status text DEFAULT 'active'::text NOT NULL,
-    CONSTRAINT credit_plans_status_check CHECK ((status = ANY (ARRAY['active'::text, 'retired'::text])))
+    CONSTRAINT credit_plans_status_check CHECK ((status = ANY (ARRAY['active'::text, 'retired'::text]))),
+    CONSTRAINT credit_plans_allowance_check CHECK (allowance_amount >= 0 AND bursar.is_finite_numeric(allowance_amount)),
+    CONSTRAINT credit_plans_billing_mode_check CHECK (billing_mode IN ('strict', 'overdraft')),
+    CONSTRAINT credit_plans_max_concurrent_check CHECK (max_concurrent IS NULL OR max_concurrent > 0),
+    CONSTRAINT credit_plans_overdraft_floor_check CHECK (overdraft_floor IS NULL OR (overdraft_floor <= 0 AND bursar.is_finite_numeric(overdraft_floor))),
+    CONSTRAINT credit_plans_allowance_period_check CHECK (allowance_period IN ('calendar_month', 'rolling_30d', 'anniversary'))
 );
 
 
@@ -439,7 +450,12 @@ CREATE TABLE bursar.credit_reservations (
     billing_mode text DEFAULT 'strict'::text NOT NULL,
     overdraft_floor numeric(18,4),
     settle_tx_id uuid,
-    CONSTRAINT credit_reservations_amount_check CHECK ((amount > (0)::numeric))
+    account_id uuid NOT NULL,
+    idempotency_key text GENERATED ALWAYS AS ((metadata ->> 'idempotency_key'::text)) STORED,
+    CONSTRAINT credit_reservations_amount_check CHECK ((amount > (0)::numeric AND bursar.is_finite_numeric(amount))),
+    CONSTRAINT credit_reservations_billing_mode_check CHECK (billing_mode IN ('strict', 'overdraft')),
+    CONSTRAINT credit_reservations_overdraft_floor_check CHECK (overdraft_floor IS NULL OR (overdraft_floor <= 0 AND bursar.is_finite_numeric(overdraft_floor))),
+    CONSTRAINT credit_reservations_status_check CHECK (status IN ('active', 'settled', 'released', 'expired'))
 );
 
 
@@ -456,7 +472,8 @@ CREATE TABLE bursar.credit_spend_caps (
     action text DEFAULT 'deny'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT credit_spend_caps_action_check CHECK ((action = ANY (ARRAY['deny'::text, 'warn'::text, 'notify'::text]))),
-    CONSTRAINT credit_spend_caps_cap_type_check CHECK ((cap_type = ANY (ARRAY['daily'::text, 'monthly'::text])))
+    CONSTRAINT credit_spend_caps_cap_type_check CHECK ((cap_type = ANY (ARRAY['daily'::text, 'monthly'::text]))),
+    CONSTRAINT credit_spend_caps_limit_check CHECK (cap_limit > 0 AND bursar.is_finite_numeric(cap_limit))
 );
 
 
@@ -471,7 +488,9 @@ CREATE TABLE bursar.credit_team_members (
     role text DEFAULT 'member'::text NOT NULL,
     spend_cap numeric(18,4),
     total_spent numeric(18,4) DEFAULT 0 NOT NULL,
-    joined_at timestamp with time zone DEFAULT now() NOT NULL
+    joined_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT credit_team_members_spend_check CHECK (spend_cap IS NULL OR (spend_cap >= 0 AND bursar.is_finite_numeric(spend_cap))),
+    CONSTRAINT credit_team_members_total_spent_check CHECK (total_spent >= 0 AND bursar.is_finite_numeric(total_spent))
 );
 
 
@@ -485,7 +504,9 @@ CREATE TABLE bursar.credit_teams (
     balance numeric(18,4) DEFAULT 0 NOT NULL,
     member_count integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT credit_teams_balance_finite CHECK (bursar.is_finite_numeric(balance)),
+    CONSTRAINT credit_teams_member_count_check CHECK (member_count >= 0)
 );
 
 
@@ -503,8 +524,9 @@ CREATE TABLE bursar.credit_transactions (
     metadata jsonb DEFAULT '{}'::jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     idempotency_key text GENERATED ALWAYS AS ((metadata ->> 'idempotency_key'::text)) STORED,
-    account_id uuid,
-    acting_user_id uuid
+    account_id uuid NOT NULL,
+    acting_user_id uuid NOT NULL,
+    CONSTRAINT credit_transactions_amount_finite CHECK (bursar.is_finite_numeric(amount))
 );
 
 
@@ -526,7 +548,8 @@ CREATE TABLE bursar.credit_usage_window (
     billing_period date NOT NULL,
     usage numeric(18,4) DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT credit_usage_window_usage_check CHECK (usage >= 0 AND bursar.is_finite_numeric(usage))
 );
 
 
@@ -551,7 +574,8 @@ CREATE TABLE bursar.user_credit_buckets (
     bucket_key text NOT NULL,
     balance numeric(18,4) DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_credit_buckets_balance_finite CHECK (bursar.is_finite_numeric(balance))
 );
 
 
@@ -568,6 +592,8 @@ CREATE TABLE bursar.user_credits (
     plan_id uuid,
     plan_assigned_at timestamp with time zone,
     catalog_version integer
+    ,CONSTRAINT user_credits_balance_finite CHECK (bursar.is_finite_numeric(balance))
+    ,CONSTRAINT user_credits_lifetime_purchased_check CHECK (lifetime_purchased >= 0 AND bursar.is_finite_numeric(lifetime_purchased))
 );
 
 

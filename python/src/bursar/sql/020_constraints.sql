@@ -102,13 +102,6 @@ ALTER TABLE ONLY bursar.catalog_object_versions
 
 
 --
--- Name: credit_accounts credit_accounts_account_type_user_id_team_id_key; Type: CONSTRAINT; Schema: bursar; Owner: -
---
-
-ALTER TABLE ONLY bursar.credit_accounts
-    ADD CONSTRAINT credit_accounts_account_type_user_id_team_id_key UNIQUE (account_type, user_id, team_id);
-
-
 --
 -- Name: credit_accounts credit_accounts_pkey; Type: CONSTRAINT; Schema: bursar; Owner: -
 --
@@ -139,6 +132,9 @@ ALTER TABLE ONLY bursar.credit_ledger_entries
 
 ALTER TABLE ONLY bursar.credit_ledger_entries
     ADD CONSTRAINT credit_ledger_entries_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY bursar.credit_ledger_entries
+    ADD CONSTRAINT credit_ledger_entries_source_transaction_uq UNIQUE (source_transaction_id);
 
 
 --

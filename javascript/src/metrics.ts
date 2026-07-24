@@ -1,19 +1,7 @@
-/** A single tool invocation recorded during an agent step. */
-export interface ToolCall {
-  name: string;
-}
-
-/** Raw usage counters collected across one or more agent steps. */
+/** One provider-neutral billable operation. */
 export interface UsageMetrics {
-  model?: string | null;
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  toolCalls?: ToolCall[];
-  searchQueries?: number;
-  searchResults?: number;
-  webSearchCalls?: number;
-  codeExecCalls?: number;
-  flatJob?: string | null;
+  operation: string;
+  measures?: Record<string, number | string>;
+  dimensions?: Record<string, string>;
+  metadata?: Record<string, unknown>;
 }

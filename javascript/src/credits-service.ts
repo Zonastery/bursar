@@ -54,7 +54,6 @@ import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
 import { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
-
 /**
  * Default `low_balance` threshold multiplier (contract §6 / M18). The event
  * fires when a deduction crosses ``minBalance * LOW_BALANCE_MULTIPLIER`` from
@@ -929,7 +928,7 @@ export class CreditsService {
       }
     }
     const breakdown = engine.calculate(metricsOrAmount, rateOverrides);
-    return { amount: breakdown.total, model: metricsOrAmount.model ?? null };
+    return { amount: breakdown.total, model: metricsOrAmount.dimensions?.model ?? null };
   }
 
   /** Map a store business code to the coherent typed exception (M2). */
@@ -1097,11 +1096,10 @@ export class CreditsService {
           if (v != null) txMeta[k] = v;
         }
       }
-      txMeta["inputTokens"] = metricsOrAmount.inputTokens ?? 0;
-      txMeta["outputTokens"] = metricsOrAmount.outputTokens ?? 0;
-      txMeta["model"] = metricsOrAmount.model ?? "unknown";
+      txMeta["operation"] = metricsOrAmount.operation;
+      txMeta["measures"] = { ...(metricsOrAmount.measures ?? {}) };
+      txMeta["dimensions"] = { ...(metricsOrAmount.dimensions ?? {}) };
       txMeta["breakdownTotal"] = amount.toString();
-      if (metricsOrAmount.flatJob) txMeta["flatJob"] = metricsOrAmount.flatJob;
       if (idempotencyKey) txMeta["idempotencyKey"] = idempotencyKey;
     }
 
@@ -1433,7 +1431,7 @@ export class CreditsService {
     feature?: string | null,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
-    this.logger.debug("[CreditsService] deduct", { model: metrics.model, feature });
+    this.logger.debug("[CreditsService] deduct", { model: metrics.dimensions?.model, feature });
     const engine = await this.engineForUser(userId);
     let rateOverrides: Record<string, string> | null = null;
     const plan = await this.store.getUserPlan(userId);
@@ -1474,14 +1472,10 @@ export class CreditsService {
         if (v != null) meta[k] = v;
       }
     }
-    meta["inputTokens"] = metrics.inputTokens ?? 0;
-    meta["outputTokens"] = metrics.outputTokens ?? 0;
-    meta["model"] = metrics.model ?? "unknown";
+    meta["operation"] = metrics.operation;
+    meta["measures"] = { ...(metrics.measures ?? {}) };
+    meta["dimensions"] = { ...(metrics.dimensions ?? {}) };
     meta["breakdownTotal"] = breakdown.total.toString();
-    if (metrics.flatJob) {
-      meta["flatJob"] = metrics.flatJob;
-      meta["reference_type"] = metrics.flatJob;
-    }
     if (idempotencyKey) meta["idempotencyKey"] = idempotencyKey;
 
     const periodStart = await this.resolveAllowancePeriodStart(userId);
@@ -1493,7 +1487,7 @@ export class CreditsService {
     const options: DeductWithAllowanceOptions = {
       idempotencyKey: idempotencyKey ?? null,
       minBalance: this.minBalanceDecimal(),
-      model: metrics.model ?? null,
+      model: metrics.dimensions?.model ?? null,
       metadata: meta as CreditMetadata,
       periodStart,
       feature: feature ?? null,
@@ -1508,13 +1502,13 @@ export class CreditsService {
       this.logger.warn("[CreditsService] deduct failed", {
         error: result.error,
         amount: cost,
-        model: metrics.model,
+        model: metrics.dimensions?.model,
         feature,
       });
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
         amount: cost,
-        model: metrics.model ?? null,
+        model: metrics.dimensions?.model ?? null,
       });
       if (result.error === "cap_reached") {
         this.raiseDeductError(result.error, userId, cost);
@@ -1523,7 +1517,7 @@ export class CreditsService {
         this.emit("credits.feature_limit_reached", userId, {
           feature,
           amount: cost,
-          model: metrics.model ?? null,
+          model: metrics.dimensions?.model ?? null,
         });
         this.raiseDeductError(result.error, userId, cost, feature);
       }
@@ -1536,7 +1530,7 @@ export class CreditsService {
       amount: result.amount,
       allowanceConsumed: result.allowanceConsumed,
       balanceAfter: result.balanceAfter,
-      model: metrics.model ?? null,
+      model: metrics.dimensions?.model ?? null,
       idempotent: result.idempotent,
     });
 
@@ -1544,7 +1538,7 @@ export class CreditsService {
       this.emit("credits.cap_warning", userId, {
         action: result.capWarning,
         amount: result.amount,
-        model: metrics.model ?? null,
+        model: metrics.dimensions?.model ?? null,
       });
     }
 
@@ -1556,7 +1550,7 @@ export class CreditsService {
         feature,
         balanceAfter: result.balanceAfter,
         amount: result.amount,
-        model: metrics.model ?? null,
+        model: metrics.dimensions?.model ?? null,
         action: result.featureLimitWarning,
       });
     }
@@ -1670,34 +1664,6 @@ export class CreditsService {
     });
     return result;
   }
-
-  /**
-   * Shortcut for flat-cost batch jobs.
-   *
-   * L1: an unknown/typo'd ``jobName`` is rejected (throws) instead of silently
-   * charging 0 credits — ``engine.getFlatJobCost(jobName) === null`` means the job
-   * is not configured.
-   */
-  async deductFlatJob(
-    userId: string,
-    jobName: string,
-    idempotencyKey?: string | null,
-    metadata?: CreditMetadata | null,
-    feature?: string | null,
-  ): Promise<DeductionResult> {
-    await this.maybeLazyExpire(userId);
-    if (!this.engine)
-      throw new PricingNotLoadedError(
-        "pricing not loaded: call loadPricingFromStore or publishPricing first",
-      );
-    if (this.engine.getFlatJobCost(jobName) === null) {
-      throw new ConfigError(
-        `unknown flat job '${jobName}': not configured in pricing metering.flatJobs section`,
-      );
-    }
-    return await this.deduct(userId, { flatJob: jobName }, idempotencyKey, metadata, feature);
-  }
-
   /**
    * Sweep expired credits — global when ``userId`` is omitted, scoped to a
    * single user when given (used by ``maybeLazyExpire``). Shared by the public

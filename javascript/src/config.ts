@@ -1,1258 +1,705 @@
 import Decimal from "decimal.js";
+
 import { ConfigError } from "./errors.js";
 import { validateExpression } from "./expr.js";
-import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
-import type { BillingMode, OperationPolicy, PlanDefinition, BucketDefinition } from "./types.js";
-import type {
-  BillingAutoRechargeConfig,
-  BillingCreditTopup,
-  BillingOffer,
-  BillingOfferInterval,
-  SubscriptionGrant,
-} from "./billing/billing-types.js";
 
-/** Valid `allowancePeriod` values (WS9b). */
-const ALLOWANCE_PERIODS: ReadonlySet<string> = new Set([
-  "calendar_month",
-  "rolling_30d",
-  "anniversary",
-]);
+export type BursarConfigData = Record<string, unknown>;
+export type PeriodUnit = "day" | "week" | "month" | "year";
+export type PeriodAnchor = "calendar" | "plan_assignment" | "rolling";
+export type LimitAction = "deny" | "warn" | "notify";
+export type BillingMode = "strict" | "overdraft";
 
-/** Valid `FeatureLimit.period` cadences (mirrors Python `resolve_calendar_window`). */
-const FEATURE_LIMIT_PERIODS: ReadonlySet<string> = new Set([
-  "daily",
-  "weekly",
-  "monthly",
-  "yearly",
-]);
-
-/** Valid `FeatureLimit.onExceed` values (mirrors `SpendCap.action`). */
-const FEATURE_LIMIT_ACTIONS: ReadonlySet<string> = new Set(["deny", "warn", "notify"]);
-
-/**
- * Canonical metric-variable set — MUST mirror `PricingEngine.buildVariables`
- * exactly. Expressions may only reference these names (or allowed functions).
- * Passed into `validateExpression` so typos like `inputtokens` fail at
- * config-load, not at first runtime use (M5).
- */
-export const KNOWN_VARIABLES: ReadonlySet<string> = new Set([
-  "input_tokens",
-  "output_tokens",
-  "cache_read_tokens",
-  "cache_write_tokens",
-  "tool_calls",
-  "search_queries",
-  "search_results",
-  "web_search_calls",
-  "code_exec_calls",
-]);
-
-/** Metering configuration section. */
-export interface MeteringConfig {
-  models: Record<string, string>;
-  tools: Record<string, string>;
-  search?: string | null;
-  cacheDiscount?: string | null;
-  flatJobs: Record<string, Decimal>;
+export interface Period {
+  unit: PeriodUnit;
+  count: number;
+  anchor: PeriodAnchor;
+  timezone: string;
 }
-
-/** Credits granted to new users on signup, routed to a configured bucket. */
+export interface OperationDefinition {
+  measures: string[];
+  dimensions: string[];
+}
+export interface DimensionMatcher {
+  exact?: string;
+  prefix?: string;
+}
+export interface PriceRule {
+  match?: Record<string, DimensionMatcher>;
+  default: boolean;
+  formula: string;
+}
+export interface RateCard {
+  extends?: string;
+  prices: Record<string, PriceRule[]>;
+}
+export interface UsageConfig {
+  operations: Record<string, OperationDefinition>;
+  rateCards: Record<string, RateCard>;
+}
+export interface BucketDefinition {
+  expiresAfter?: Period;
+}
 export interface SignupGrant {
-  amount: number;
+  amount: Decimal;
   bucket: string;
 }
-
-/** Ledger configuration section. */
-export interface LedgerConfig {
-  minBalance: Decimal;
-  signupGrant?: SignupGrant | null;
-  buckets?: Record<string, BucketDefinition> | null;
+export interface CreditsConfig {
+  buckets: Record<string, BucketDefinition>;
+  spendOrder: string[];
+  defaultBucket?: string;
+  overdraftBucket?: string;
+  signupGrant?: SignupGrant;
 }
-
-/** Parsed entitlement entry (missing `maxCalls` means unlimited). */
-export interface PlanEntitlement {
-  value?: unknown;
-  maxCalls: number | null;
-  period: FeatureLimitPeriod;
-  onExceed: "deny" | "warn" | "notify";
+export interface IncludedCredits {
+  amount: Decimal;
+  reset: Period;
 }
-
-/** Billing configuration section. */
-export interface BillingSection {
-  currency: string;
-  subscriptions: Record<string, BillingOffer>;
-  topups: Record<string, BillingCreditTopup>;
-  autoRecharge?: BillingAutoRechargeConfig | null;
+export interface FeatureLimit {
+  maxCalls: number;
+  period: Period;
+  action: LimitAction;
 }
-
-/** Internal validated pricing configuration. */
+export interface OperationSpendingPolicy {
+  maxConcurrent?: number;
+  mode?: BillingMode;
+  overdraftLimit?: Decimal;
+}
+export interface SpendingPolicy {
+  mode: BillingMode;
+  overdraftLimit?: Decimal;
+  maxConcurrent?: number;
+  operations: Record<string, OperationSpendingPolicy>;
+}
+export interface PlanDefinition {
+  displayName: string;
+  rateCard?: string;
+  includedCredits?: IncludedCredits;
+  features: Record<string, unknown>;
+  limits: Record<string, FeatureLimit>;
+  spending: SpendingPolicy;
+}
+export interface ProviderReference {
+  lookup: { type: string; value: string };
+}
+export interface RenewalCredits {
+  amount: Decimal;
+  bucket: string;
+  behavior: "replace" | "accumulate";
+  onSubscriptionEnd: "expire" | "keep";
+}
+export interface SubscriptionOffer {
+  plan: string;
+  billingPeriod: Period;
+  providers: Record<string, ProviderReference>;
+  renewalCredits?: RenewalCredits;
+  stackCredits: boolean;
+}
+export interface TopupOffer {
+  credits: Decimal;
+  bucket: string;
+  providers: Record<string, ProviderReference>;
+}
+export interface AutoRechargePolicy {
+  trigger: { balanceBelow: Decimal };
+  purchase: { topup: string; quantity: number };
+  limit: { maxPurchases: number; period: Period };
+}
+export interface PaymentsConfig {
+  subscriptions: Record<string, SubscriptionOffer>;
+  topups: Record<string, TopupOffer>;
+  autoRecharge?: AutoRechargePolicy;
+}
 export interface ParsedBursarConfig {
-  version: number;
-  metering: MeteringConfig;
-  ledger: LedgerConfig;
-  plans?: Record<string, PlanDefinition> | null;
-  billing?: BillingSection;
+  version: 1;
+  usage?: UsageConfig;
+  credits: CreditsConfig;
+  plans: Record<string, PlanDefinition>;
+  payments?: PaymentsConfig;
 }
 
-/** Canonical snake_case configuration document accepted by the SDK. */
-export type BursarConfigData = Record<string, unknown>;
-
-/** Known top-level keys, checked after decoding the snake_case wire shape. */
-const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
-  "version",
-  "metering",
-  "ledger",
-  "plans",
-  "billing",
-]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/** Known metering-section keys after decoding. */
-const METERING_KEYS: ReadonlySet<string> = new Set([
-  "models",
-  "tools",
-  "search",
-  "cacheDiscount",
-  "flatJobs",
-]);
-
-/** Known ledger-section keys after decoding. */
-const LEDGER_KEYS: ReadonlySet<string> = new Set(["minBalance", "signupGrant", "buckets"]);
-
-/** Known plan-definition keys (new nested schema). */
-const PLAN_KEYS: ReadonlySet<string> = new Set([
-  "label",
-  "tier",
-  "allowance",
-  "safety",
-  "rateOverrides",
-  "entitlements",
-]);
-
-/** Known `FeatureLimit` keys. */
-const FEATURE_LIMIT_KEYS: ReadonlySet<string> = new Set([
-  "maxCalls",
-  "period",
-  "onExceed",
-  "value",
-]);
-
-/** Known `OperationPolicy` keys (entries of a plan's `safety.perOperation` map). */
-const OPERATION_POLICY_KEYS: ReadonlySet<string> = new Set([
-  "billingMode",
-  "maxConcurrent",
-  "overdraftFloor",
-]);
-
-/** Known billing-section keys. */
-const BILLING_KEYS: ReadonlySet<string> = new Set([
-  "currency",
-  "subscriptions",
-  "topups",
-  "autoRecharge",
-]);
-
-const BILLING_AUTO_RECHARGE_KEYS: ReadonlySet<string> = new Set([
-  "enabled",
-  "defaultPolicy",
-  "thresholdCredits",
-  "topupKey",
-  "quantity",
-  "maxRecharges",
-  "windowDays",
-  "trigger",
-  "topup",
-  "limit",
-  "type",
-  "key",
-  "period",
-  "maxCharges",
-  "maxAmountMinor",
-  "currency",
-  "rollingDays",
-]);
-
-/** Known billing-offer keys. */
-const BILLING_OFFER_KEYS: ReadonlySet<string> = new Set([
-  "plan",
-  "interval",
-  "intervalCount",
-  "grant",
-  "providers",
-  "validFrom",
-  "validTo",
-]);
-
-/** Known billing-topup keys. */
-const BILLING_TOPUP_KEYS: ReadonlySet<string> = new Set([
-  "depositTo",
-  "creditsPerUnit",
-  "minAmountMinor",
-  "maxAmountMinor",
-  "taxBehavior",
-  "providers",
-]);
-
-/** Known provider-ref keys. */
-const PROVIDER_REF_KEYS: ReadonlySet<string> = new Set([
-  "productId",
-  "priceId",
-  "variantId",
-  "lookupKey",
-]);
-
-const BILLING_OFFER_INTERVALS: ReadonlySet<string> = new Set(["day", "week", "month", "year"]);
-const TAX_BEHAVIORS: ReadonlySet<string> = new Set(["exclude_tax", "include_tax"]);
-
-/** Known signup-grant keys. */
-const SIGNUP_GRANT_KEYS: ReadonlySet<string> = new Set(["amount", "bucket"]);
-
-/** Known bucket-definition keys. */
-const BUCKET_KEYS: ReadonlySet<string> = new Set([
-  "label",
-  "priority",
-  "expires",
-  "ttlDays",
-  "allowOverdraft",
-  "default",
-]);
-
-/** Known allowance-section keys. */
-const ALLOWANCE_KEYS: ReadonlySet<string> = new Set(["amount", "period"]);
-
-/** Known safety-section keys. */
-const SAFETY_KEYS: ReadonlySet<string> = new Set([
-  "billingMode",
-  "perOperation",
-  "maxConcurrent",
-  "overdraftFloor",
-]);
-
-/** Reject any key not in `known` — catches typos that would otherwise silently fall back to a default. */
-function assertKnownKeys(
-  obj: Record<string, unknown>,
-  known: ReadonlySet<string>,
-  context: string,
-): void {
-  for (const key of Object.keys(obj)) {
-    if (!known.has(key)) {
-      throw new ConfigError(`unknown config key in ${context}: ${key}`);
-    }
+const ID = /^[a-z][a-z0-9_]*$/;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const assertRecord = (value: unknown, path: string): Record<string, unknown> => {
+  if (!isRecord(value)) throw new ConfigError(`${path} must be an object`);
+  return value;
+};
+const assertKnown = (value: Record<string, unknown>, keys: string[], path: string): void => {
+  for (const key of Object.keys(value))
+    if (!keys.includes(key)) throw new ConfigError(`unknown config key in ${path}: ${key}`);
+};
+const id = (value: string, path: string): string => {
+  if (!ID.test(value)) throw new ConfigError(`${path} must be a non-empty snake_case identifier`);
+  return value;
+};
+const string = (value: unknown, path: string): string => {
+  if (typeof value !== "string" || !value)
+    throw new ConfigError(`${path} must be a non-empty string`);
+  return value;
+};
+const decimal = (value: unknown, path: string, allowZero = true): Decimal => {
+  try {
+    const result = new Decimal(value as Decimal.Value);
+    if (!result.isFinite() || result.isNegative() || (!allowZero && result.isZero()))
+      throw new Error();
+    return result;
+  } catch {
+    throw new ConfigError(
+      `${path} must be a finite ${allowZero ? "non-negative" : "positive"} decimal`,
+    );
   }
-}
+};
+const positiveInt = (value: unknown, path: string, allowZero = false): number => {
+  if (!Number.isInteger(value) || (value as number) < (allowZero ? 0 : 1))
+    throw new ConfigError(`${path} must be an integer ${allowZero ? ">= 0" : ">= 1"}`);
+  return value as number;
+};
 
-/** Variable set for validating `tools` expressions: base set + `calls` (WS2). */
-const TOOLS_VARIABLES: ReadonlySet<string> = new Set([...KNOWN_VARIABLES, "calls"]);
-
-function validateExpressions(raw: ParsedBursarConfig): void {
-  for (const [key, expr] of Object.entries(raw.metering.models)) {
-    try {
-      validateExpression(expr, KNOWN_VARIABLES);
-    } catch (e) {
-      throw new ConfigError(
-        `invalid expression in metering.models.${key}: ${(e as Error).message}`,
-      );
-    }
-  }
-  for (const [key, expr] of Object.entries(raw.metering.tools)) {
-    try {
-      validateExpression(expr, TOOLS_VARIABLES);
-    } catch (e) {
-      throw new ConfigError(`invalid expression in metering.tools.${key}: ${(e as Error).message}`);
-    }
-  }
-  if (raw.metering.search) {
-    try {
-      validateExpression(raw.metering.search, KNOWN_VARIABLES);
-    } catch (e) {
-      throw new ConfigError(`invalid expression in metering.search: ${(e as Error).message}`);
-    }
-  }
-  if (raw.metering.cacheDiscount) {
-    try {
-      validateExpression(raw.metering.cacheDiscount, KNOWN_VARIABLES);
-    } catch (e) {
-      throw new ConfigError(
-        `invalid expression in metering.cacheDiscount: ${(e as Error).message}`,
-      );
-    }
-  }
-}
-
-/**
- * Decode documented snake_case config fields into the camelCase internal model.
- * CamelCase input is rejected so mixed representations cannot collide or
- * silently select a different value.
- */
-function decodeSnakeFields(
-  data: Record<string, unknown>,
-  context: string,
-): Record<string, unknown> {
-  const keyMap: Record<string, string> = {
-    min_balance: "minBalance",
-    signup_grant: "signupGrant",
-    rate_overrides: "rateOverrides",
-    billing_mode: "billingMode",
-    overdraft_floor: "overdraftFloor",
-    per_operation: "perOperation",
-    max_concurrent: "maxConcurrent",
-    ttl_days: "ttlDays",
-    allow_overdraft: "allowOverdraft",
-    max_calls: "maxCalls",
-    on_exceed: "onExceed",
-    cache_discount: "cacheDiscount",
-    flat_jobs: "flatJobs",
-    interval_count: "intervalCount",
-    deposit_to: "depositTo",
-    credits_per_unit: "creditsPerUnit",
-    min_amount_minor: "minAmountMinor",
-    max_amount_minor: "maxAmountMinor",
-    tax_behavior: "taxBehavior",
-    product_id: "productId",
-    price_id: "priceId",
-    variant_id: "variantId",
-    lookup_key: "lookupKey",
-    replace_prior: "replacePrior",
-    valid_from: "validFrom",
-    valid_to: "validTo",
-    auto_recharge: "autoRecharge",
-    threshold_credits: "thresholdCredits",
-    topup_key: "topupKey",
-    max_recharges: "maxRecharges",
-    window_days: "windowDays",
-    default_policy: "defaultPolicy",
-    max_charges: "maxCharges",
-    rolling_days: "rollingDays",
-    allowance: "allowance",
-    safety: "safety",
-    entitlements: "entitlements",
-    label: "label",
-    metering: "metering",
-    ledger: "ledger",
-    billing: "billing",
+function parsePeriod(value: unknown, path: string): Period {
+  const raw = assertRecord(value, path);
+  assertKnown(raw, ["unit", "count", "anchor", "timezone"], path);
+  const unit = string(raw.unit, `${path}.unit`) as PeriodUnit;
+  if (!["day", "week", "month", "year"].includes(unit))
+    throw new ConfigError(`${path}.unit is invalid`);
+  const anchor = (raw.anchor ?? "calendar") as PeriodAnchor;
+  if (!["calendar", "plan_assignment", "rolling"].includes(anchor))
+    throw new ConfigError(`${path}.anchor is invalid`);
+  return {
+    unit,
+    count: raw.count == null ? 1 : positiveInt(raw.count, `${path}.count`),
+    anchor,
+    timezone: raw.timezone == null ? "UTC" : string(raw.timezone, `${path}.timezone`),
   };
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (Object.entries(keyMap).some(([snake, camel]) => snake !== camel && camel === k)) {
-      throw new ConfigError(`${context}.${k} must use snake_case`);
-    }
-    const mapped = keyMap[k] ?? k;
-    out[mapped] = v;
+}
+
+function parseOperations(value: unknown): Record<string, OperationDefinition> {
+  const raw = assertRecord(value, "usage.operations");
+  const out: Record<string, OperationDefinition> = {};
+  if (Object.keys(raw).length === 0) throw new ConfigError("usage.operations must not be empty");
+  for (const [key, input] of Object.entries(raw)) {
+    id(key, "usage.operations key");
+    const obj = assertRecord(input, `usage.operations.${key}`);
+    assertKnown(obj, ["measures", "dimensions"], `usage.operations.${key}`);
+    const parseNames = (name: "measures" | "dimensions") => {
+      const values = obj[name] ?? [];
+      if (!Array.isArray(values) || values.some((v) => typeof v !== "string"))
+        throw new ConfigError(`usage.operations.${key}.${name} must be a string array`);
+      values.forEach((v) => id(v, `usage.operations.${key}.${name}`));
+      if (new Set(values).size !== values.length)
+        throw new ConfigError(`usage.operations.${key}.${name} contains duplicates`);
+      return values as string[];
+    };
+    const measures = parseNames("measures"),
+      dimensions = parseNames("dimensions");
+    if (measures.some((x) => dimensions.includes(x)))
+      throw new ConfigError(`usage.operations.${key} reuses a measure as a dimension`);
+    out[key] = { measures, dimensions };
   }
   return out;
 }
 
-/** Decode a plan definition while preserving its dynamic map keys. */
-function decodePlan(p: Record<string, unknown>): Record<string, unknown> {
-  const out = decodeSnakeFields(p, "plan");
-  // Normalise nested allowance section
-  if (out.allowance != null && typeof out.allowance === "object" && !Array.isArray(out.allowance)) {
-    out.allowance = decodeSnakeFields(out.allowance as Record<string, unknown>, "plan.allowance");
+function parseRule(value: unknown, path: string, operation: OperationDefinition): PriceRule {
+  const raw = assertRecord(value, path);
+  assertKnown(raw, ["match", "default", "formula"], path);
+  const isDefault = raw.default === true;
+  const hasMatch = raw.match != null;
+  if (isDefault === hasMatch)
+    throw new ConfigError(`${path} must define exactly one of default or match`);
+  const formula = string(raw.formula, `${path}.formula`);
+  try {
+    validateExpression(formula, new Set(operation.measures));
+  } catch (error) {
+    throw new ConfigError(`invalid formula in ${path}: ${(error as Error).message}`);
   }
-  // Normalise nested safety section
-  if (out.safety != null && typeof out.safety === "object" && !Array.isArray(out.safety)) {
-    out.safety = decodeSnakeFields(out.safety as Record<string, unknown>, "plan.safety");
+  if (!hasMatch) return { default: true, formula };
+  const matchRaw = assertRecord(raw.match, `${path}.match`);
+  const match: Record<string, DimensionMatcher> = {};
+  for (const [key, input] of Object.entries(matchRaw)) {
+    if (!operation.dimensions.includes(key))
+      throw new ConfigError(`${path}.match references undeclared dimension '${key}'`);
+    const matcher = assertRecord(input, `${path}.match.${key}`);
+    assertKnown(matcher, ["exact", "prefix"], `${path}.match.${key}`);
+    const exact =
+      matcher.exact == null ? undefined : string(matcher.exact, `${path}.match.${key}.exact`);
+    const prefix =
+      matcher.prefix == null ? undefined : string(matcher.prefix, `${path}.match.${key}.prefix`);
+    if ((exact == null) === (prefix == null))
+      throw new ConfigError(`${path}.match.${key} requires exactly one of exact or prefix`);
+    match[key] = { ...(exact != null ? { exact } : {}), ...(prefix != null ? { prefix } : {}) };
   }
-  return out;
+  if (Object.keys(match).length === 0) throw new ConfigError(`${path}.match must not be empty`);
+  return { match, default: false, formula };
 }
 
-/** Decode a bucket definition while preserving the bucket identifier. */
-function decodeBucket(t: Record<string, unknown>): Record<string, unknown> {
-  return decodeSnakeFields(t, "ledger.buckets");
-}
-
-/**
- * Decode + validate a plan's `entitlements` map. Feature identifiers and
- * arbitrary entitlement values are opaque and remain unchanged.
- */
-function decodeEntitlements(
-  planKey: string,
-  raw: Record<string, unknown>,
-): Record<string, PlanEntitlement> {
-  const out: Record<string, PlanEntitlement> = {};
-  for (const [featureKey, rawLimit] of Object.entries(raw)) {
-    const limit = decodeSnakeFields(
-      (rawLimit ?? {}) as Record<string, unknown>,
-      `plans.${planKey}.entitlements.${featureKey}`,
-    );
-    assertKnownKeys(limit, FEATURE_LIMIT_KEYS, `plans.${planKey}.entitlements.${featureKey}`);
-    const rawMax = limit.maxCalls;
-    let maxCalls: number | null = null;
-    if (rawMax !== undefined && rawMax !== null) {
-      maxCalls = Number(rawMax);
-      if (!Number.isFinite(maxCalls) || maxCalls < 0) {
+function parseUsage(value: unknown): UsageConfig {
+  const raw = assertRecord(value, "usage");
+  assertKnown(raw, ["operations", "rate_cards"], "usage");
+  const operations = parseOperations(raw.operations);
+  const cardsRaw = assertRecord(raw.rate_cards, "usage.rate_cards");
+  if (Object.keys(cardsRaw).length === 0)
+    throw new ConfigError("usage.rate_cards must not be empty");
+  const rateCards: Record<string, RateCard> = {};
+  for (const [key, input] of Object.entries(cardsRaw)) {
+    id(key, "usage.rate_cards key");
+    const card = assertRecord(input, `usage.rate_cards.${key}`);
+    assertKnown(card, ["extends", "prices"], `usage.rate_cards.${key}`);
+    const pricesRaw = assertRecord(card.prices ?? {}, `usage.rate_cards.${key}.prices`);
+    const prices: Record<string, PriceRule[]> = {};
+    for (const [operation, rulesInput] of Object.entries(pricesRaw)) {
+      if (!operations[operation])
         throw new ConfigError(
-          `invalid entitlements in plans.${planKey}.${featureKey}: maxCalls must be >= 0, got ${String(limit.maxCalls)}`,
+          `usage.rate_cards.${key}.prices references unknown operation '${operation}'`,
         );
-      }
-    }
-    const period = (limit.period as string | undefined) ?? "monthly";
-    const onExceed = (limit.onExceed as string | undefined) ?? "deny";
-    if (!FEATURE_LIMIT_PERIODS.has(period)) {
-      throw new ConfigError(
-        `invalid entitlements in plans.${planKey}.${featureKey}: unknown period '${period}' ` +
-          `(expected one of ${[...FEATURE_LIMIT_PERIODS].sort().join(", ")})`,
+      if (!Array.isArray(rulesInput) || rulesInput.length === 0)
+        throw new ConfigError(
+          `usage.rate_cards.${key}.prices.${operation} must be a non-empty array`,
+        );
+      const rules = rulesInput.map((rule, index) =>
+        parseRule(
+          rule,
+          `usage.rate_cards.${key}.prices.${operation}[${index}]`,
+          operations[operation],
+        ),
       );
+      if (!rules.at(-1)?.default || rules.filter((rule) => rule.default).length !== 1)
+        throw new ConfigError(
+          `usage.rate_cards.${key}.prices.${operation} must end with exactly one default rule`,
+        );
+      prices[operation] = rules;
     }
-    if (!FEATURE_LIMIT_ACTIONS.has(onExceed)) {
-      throw new ConfigError(
-        `invalid entitlements in plans.${planKey}.${featureKey}: unknown onExceed '${onExceed}' ` +
-          `(expected one of ${[...FEATURE_LIMIT_ACTIONS].sort().join(", ")})`,
-      );
-    }
-    out[featureKey] = {
-      maxCalls,
-      period: period as FeatureLimitPeriod,
-      onExceed: onExceed as PlanEntitlement["onExceed"],
-      value: limit.value,
+    rateCards[key] = {
+      ...(card.extends == null
+        ? {}
+        : { extends: string(card.extends, `usage.rate_cards.${key}.extends`) }),
+      prices,
     };
   }
-  return out;
-}
-
-/**
- * Decode + validate a plan's `safety.per_operation` map (per-operation
- * financial-safety policy overrides, mirroring Python's `OperationPolicy`).
- */
-function decodePerOperation(
-  planKey: string,
-  raw: Record<string, unknown>,
-): Record<string, OperationPolicy> {
-  const out: Record<string, OperationPolicy> = {};
-  for (const [opType, rawPolicy] of Object.entries(raw)) {
-    const policy = decodeSnakeFields(
-      (rawPolicy ?? {}) as Record<string, unknown>,
-      `plans.${planKey}.safety.per_operation.${opType}`,
-    );
-    assertKnownKeys(
-      policy,
-      OPERATION_POLICY_KEYS,
-      `plans.${planKey}.safety.perOperation.${opType}`,
-    );
-    const billingMode = (policy.billingMode as string | undefined) ?? "strict";
-    if (billingMode !== "strict" && billingMode !== "overdraft") {
+  for (const [key, card] of Object.entries(rateCards))
+    if (card.extends && !rateCards[card.extends])
       throw new ConfigError(
-        `invalid billingMode in plans.${planKey}.safety.perOperation.${opType}: '${billingMode}' ` +
-          `(expected 'strict' or 'overdraft')`,
+        `usage.rate_cards.${key}.extends references unknown rate card '${card.extends}'`,
       );
-    }
-    out[opType] = {
-      billingMode: billingMode as BillingMode,
-      maxConcurrent: (policy.maxConcurrent as number | null) ?? null,
-      overdraftFloor:
-        policy.overdraftFloor != null
-          ? new Decimal(policy.overdraftFloor as number | string)
-          : null,
-    };
-  }
-  return out;
+  const visiting = new Set<string>(),
+    visited = new Set<string>();
+  const visit = (key: string): void => {
+    if (visiting.has(key))
+      throw new ConfigError(`usage.rate_cards inheritance cycle includes '${key}'`);
+    if (visited.has(key)) return;
+    visiting.add(key);
+    const parent = rateCards[key].extends;
+    if (parent) visit(parent);
+    visiting.delete(key);
+    visited.add(key);
+  };
+  Object.keys(rateCards).forEach(visit);
+  const pricesOperation = (card: string, operation: string): boolean =>
+    Object.prototype.hasOwnProperty.call(rateCards[card].prices, operation) ||
+    (rateCards[card].extends != null && pricesOperation(rateCards[card].extends!, operation));
+  for (const card of Object.keys(rateCards))
+    for (const operation of Object.keys(operations))
+      if (!pricesOperation(card, operation))
+        throw new ConfigError(`usage.rate_cards.${card} has no price for operation '${operation}'`);
+  return { operations, rateCards };
 }
 
-// ── Section parsers (extracted from loadConfigFromDict, M6) ─────────
-
-function parseMetering(raw: Record<string, unknown>): MeteringConfig {
-  const normalised = decodeSnakeFields(raw, "metering");
-  assertKnownKeys(normalised, METERING_KEYS, "metering");
-
-  if (normalised.models == null) throw new ConfigError("missing required section: metering.models");
+function parseCredits(value: unknown): CreditsConfig {
+  if (value == null) return { buckets: {}, spendOrder: [] };
+  const raw = assertRecord(value, "credits");
+  assertKnown(
+    raw,
+    ["buckets", "spend_order", "default_bucket", "overdraft_bucket", "signup_grant"],
+    "credits",
+  );
+  const bucketsRaw = assertRecord(raw.buckets ?? {}, "credits.buckets");
+  const buckets: Record<string, BucketDefinition> = {};
+  for (const [key, input] of Object.entries(bucketsRaw)) {
+    id(key, "credits.buckets key");
+    const bucket = assertRecord(input, `credits.buckets.${key}`);
+    assertKnown(bucket, ["expires_after"], `credits.buckets.${key}`);
+    buckets[key] =
+      bucket.expires_after == null
+        ? {}
+        : {
+            expiresAfter: parsePeriod(bucket.expires_after, `credits.buckets.${key}.expires_after`),
+          };
+  }
+  const order = raw.spend_order ?? [];
+  if (!Array.isArray(order) || order.some((v) => typeof v !== "string"))
+    throw new ConfigError("credits.spend_order must be a string array");
+  if (Object.keys(buckets).length === 0) {
+    if (
+      order.length ||
+      raw.default_bucket != null ||
+      raw.overdraft_bucket != null ||
+      raw.signup_grant != null
+    )
+      throw new ConfigError("credits bucket settings require credits.buckets");
+    return { buckets, spendOrder: [] };
+  }
   if (
-    typeof normalised.models !== "object" ||
-    Object.keys(normalised.models as object).length === 0
-  ) {
-    throw new ConfigError("metering.models must be a non-empty dict");
+    new Set(order).size !== order.length ||
+    order.length !== Object.keys(buckets).length ||
+    order.some((key) => !buckets[key])
+  )
+    throw new ConfigError("credits.spend_order must list every bucket exactly once");
+  const defaultBucket = string(raw.default_bucket, "credits.default_bucket");
+  if (!buckets[defaultBucket])
+    throw new ConfigError("credits.default_bucket references an unknown bucket");
+  const overdraftBucket =
+    raw.overdraft_bucket == null
+      ? undefined
+      : string(raw.overdraft_bucket, "credits.overdraft_bucket");
+  if (overdraftBucket && !buckets[overdraftBucket])
+    throw new ConfigError("credits.overdraft_bucket references an unknown bucket");
+  let signupGrant: SignupGrant | undefined;
+  if (raw.signup_grant != null) {
+    const grant = assertRecord(raw.signup_grant, "credits.signup_grant");
+    assertKnown(grant, ["amount", "bucket"], "credits.signup_grant");
+    const bucket = string(grant.bucket, "credits.signup_grant.bucket");
+    if (!buckets[bucket])
+      throw new ConfigError("credits.signup_grant.bucket references an unknown bucket");
+    signupGrant = { amount: decimal(grant.amount, "credits.signup_grant.amount", false), bucket };
   }
-
-  const metering: MeteringConfig = {
-    models: normalised.models as Record<string, string>,
-    tools: (normalised.tools as Record<string, string> | undefined) ?? { "*": "calls * 0" },
-    search: (normalised.search as string | null | undefined) ?? null,
-    cacheDiscount: (normalised.cacheDiscount as string | null | undefined) ?? null,
-    flatJobs: Object.fromEntries(
-      Object.entries(
-        (normalised.flatJobs as Record<string, number | string> | undefined) ?? {},
-      ).map(([job, cost]) => [job, new Decimal(cost)]),
-    ),
-  };
-
-  for (const [job, cost] of Object.entries(metering.flatJobs)) {
-    if (cost.isNegative()) {
-      throw new ConfigError(`metering.flatJobs.${job} must be >= 0, got ${cost.toString()}`);
-    }
-  }
-
-  return metering;
-}
-
-function parseSignupGrant(raw: unknown): SignupGrant | null {
-  if (raw === undefined || raw === null) return null;
-  if (typeof raw === "number") {
-    throw new ConfigError(
-      "ledger.signupGrant must be an object { amount, bucket }, not a scalar number",
-    );
-  }
-  if (typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ConfigError("ledger.signupGrant must be an object { amount, bucket }");
-  }
-  const grant = decodeSnakeFields(raw as Record<string, unknown>, "ledger.signup_grant");
-  assertKnownKeys(grant, SIGNUP_GRANT_KEYS, "ledger.signupGrant");
-  const amount = Number(grant.amount);
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw new ConfigError(`ledger.signupGrant.amount must be >= 0, got ${String(grant.amount)}`);
-  }
-  if (grant.bucket == null || grant.bucket === "") {
-    throw new ConfigError("ledger.signupGrant.bucket is required");
-  }
-  return { amount, bucket: String(grant.bucket) };
-}
-
-function parseLedger(raw: Record<string, unknown>): LedgerConfig {
-  const normalised = decodeSnakeFields(raw, "ledger");
-  assertKnownKeys(normalised, LEDGER_KEYS, "ledger");
-
-  const minBalance = new Decimal((normalised.minBalance as number | string | undefined) ?? 0);
-  if (minBalance.isNegative()) throw new ConfigError("ledger.minBalance must be >= 0");
-
   return {
-    minBalance,
-    signupGrant: parseSignupGrant(normalised.signupGrant),
-    buckets: undefined,
+    buckets,
+    spendOrder: order as string[],
+    defaultBucket,
+    ...(overdraftBucket ? { overdraftBucket } : {}),
+    ...(signupGrant ? { signupGrant } : {}),
   };
 }
 
-function parseBuckets(raw: Record<string, unknown>): Record<string, BucketDefinition> | undefined {
-  if (raw.buckets === undefined || raw.buckets === null) return undefined;
-  if (typeof raw.buckets !== "object" || Array.isArray(raw.buckets)) {
-    throw new ConfigError("ledger.buckets must be a dict of bucket definitions");
-  }
-  if (Object.keys(raw.buckets as object).length === 0) {
-    throw new ConfigError(
-      "ledger.buckets must not be an empty object; omit the `buckets` key entirely for no buckets",
+function parsePlans(
+  value: unknown,
+  usage?: UsageConfig,
+  credits?: CreditsConfig,
+): Record<string, PlanDefinition> {
+  if (value == null) return {};
+  const raw = assertRecord(value, "plans");
+  const out: Record<string, PlanDefinition> = {};
+  for (const [key, input] of Object.entries(raw)) {
+    id(key, "plans key");
+    const plan = assertRecord(input, `plans.${key}`);
+    assertKnown(
+      plan,
+      ["display_name", "rate_card", "included_credits", "features", "limits", "spending"],
+      `plans.${key}`,
     );
-  }
-
-  const rawBuckets = raw.buckets as Record<string, Record<string, unknown>>;
-  const buckets = Object.fromEntries(
-    Object.entries(rawBuckets).map(([k, v]) => [k, decodeBucket(v)]),
-  );
-
-  let overdraftCount = 0;
-  let defaultCount = 0;
-  for (const [bucketKey, t] of Object.entries(buckets)) {
-    assertKnownKeys(t, BUCKET_KEYS, `ledger.buckets.${bucketKey}`);
-    if (t.allowOverdraft === true) overdraftCount++;
-    if (t["default"] === true) defaultCount++;
-    if (t.ttlDays != null && (t.ttlDays as number) <= 0) {
+    const displayName = string(plan.display_name, `plans.${key}.display_name`);
+    const rateCard =
+      plan.rate_card == null ? undefined : string(plan.rate_card, `plans.${key}.rate_card`);
+    if (rateCard && !usage?.rateCards[rateCard])
+      throw new ConfigError(`plans.${key}.rate_card references an unknown rate card`);
+    let includedCredits: IncludedCredits | undefined;
+    if (plan.included_credits != null) {
+      const included = assertRecord(plan.included_credits, `plans.${key}.included_credits`);
+      assertKnown(included, ["amount", "reset"], `plans.${key}.included_credits`);
+      includedCredits = {
+        amount: decimal(included.amount, `plans.${key}.included_credits.amount`),
+        reset: parsePeriod(included.reset, `plans.${key}.included_credits.reset`),
+      };
+    }
+    const features =
+      plan.features == null ? {} : assertRecord(plan.features, `plans.${key}.features`);
+    Object.keys(features).forEach((feature) => id(feature, `plans.${key}.features key`));
+    const limitsRaw = plan.limits == null ? {} : assertRecord(plan.limits, `plans.${key}.limits`);
+    const limits: Record<string, FeatureLimit> = {};
+    for (const [feature, rawLimit] of Object.entries(limitsRaw)) {
+      id(feature, `plans.${key}.limits key`);
+      const limit = assertRecord(rawLimit, `plans.${key}.limits.${feature}`);
+      assertKnown(limit, ["max_calls", "period", "action"], `plans.${key}.limits.${feature}`);
+      const action = (limit.action ?? "deny") as LimitAction;
+      if (!["deny", "warn", "notify"].includes(action))
+        throw new ConfigError(`plans.${key}.limits.${feature}.action is invalid`);
+      limits[feature] = {
+        maxCalls: positiveInt(limit.max_calls, `plans.${key}.limits.${feature}.max_calls`, true),
+        period: parsePeriod(limit.period, `plans.${key}.limits.${feature}.period`),
+        action,
+      };
+    }
+    const spendingRaw =
+      plan.spending == null ? {} : assertRecord(plan.spending, `plans.${key}.spending`);
+    assertKnown(
+      spendingRaw,
+      ["mode", "overdraft_limit", "max_concurrent", "operations"],
+      `plans.${key}.spending`,
+    );
+    const mode = (spendingRaw.mode ?? "strict") as BillingMode;
+    if (!["strict", "overdraft"].includes(mode))
+      throw new ConfigError(`plans.${key}.spending.mode is invalid`);
+    const overdraftLimit =
+      spendingRaw.overdraft_limit == null
+        ? undefined
+        : decimal(spendingRaw.overdraft_limit, `plans.${key}.spending.overdraft_limit`);
+    if (overdraftLimit && mode !== "overdraft")
+      throw new ConfigError(`plans.${key}.spending.overdraft_limit requires overdraft mode`);
+    if (mode === "overdraft" && !credits?.overdraftBucket)
       throw new ConfigError(
-        `ledger.buckets.${bucketKey}.ttlDays must be > 0, got ${String(t.ttlDays)}`,
+        `plans.${key}.spending overdraft mode requires credits.overdraft_bucket`,
       );
-    }
-  }
-  if (overdraftCount > 1) {
-    throw new ConfigError("at most one bucket may set allowOverdraft: true");
-  }
-  if (defaultCount > 1) {
-    throw new ConfigError('at most one bucket may set "default": true');
-  }
-
-  const bucketDefs: Record<string, BucketDefinition> = {};
-  for (const [key, t] of Object.entries(buckets)) {
-    bucketDefs[key] = {
-      label: (t.label as string | undefined) ?? key,
-      priority: Number(t.priority ?? 0),
-      expires: Boolean(t.expires ?? false),
-      ttlDays: t.ttlDays != null ? Number(t.ttlDays) : null,
-      allowOverdraft: Boolean(t.allowOverdraft ?? false),
-      default: Boolean(t["default"] ?? false),
-    };
-  }
-  return bucketDefs;
-}
-
-function parsePlans(raw: Record<string, unknown>): Record<string, PlanDefinition> | undefined {
-  const rawPlans = raw.plans as Record<string, Record<string, unknown>> | undefined;
-  if (!rawPlans) return undefined;
-
-  const plans = Object.fromEntries(Object.entries(rawPlans).map(([k, v]) => [k, decodePlan(v)]));
-
-  for (const [planKey, plan] of Object.entries(plans)) {
-    assertKnownKeys(plan, PLAN_KEYS, `plans.${planKey}`);
-    if (plan.label == null) {
-      throw new ConfigError(`plan definition is missing required 'label' field: plans.${planKey}`);
-    }
-    if (plan.tier != null && (!Number.isInteger(plan.tier) || Number(plan.tier) < 0)) {
-      throw new ConfigError(`plans.${planKey}.tier must be a non-negative integer`);
-    }
-    if (plan.allowance != null) {
-      if (typeof plan.allowance !== "object" || Array.isArray(plan.allowance)) {
-        throw new ConfigError(`plans.${planKey}.allowance must be a dict`);
-      }
-      assertKnownKeys(
-        plan.allowance as Record<string, unknown>,
-        ALLOWANCE_KEYS,
-        `plans.${planKey}.allowance`,
+    const operationsRaw =
+      spendingRaw.operations == null
+        ? {}
+        : assertRecord(spendingRaw.operations, `plans.${key}.spending.operations`);
+    const operations: Record<string, OperationSpendingPolicy> = {};
+    for (const [operation, rawPolicy] of Object.entries(operationsRaw)) {
+      id(operation, `plans.${key}.spending.operations key`);
+      const policy = assertRecord(rawPolicy, `plans.${key}.spending.operations.${operation}`);
+      assertKnown(
+        policy,
+        ["max_concurrent", "mode", "overdraft_limit"],
+        `plans.${key}.spending.operations.${operation}`,
       );
-      const allowance = plan.allowance as Record<string, unknown>;
-      if (allowance.period != null && !ALLOWANCE_PERIODS.has(allowance.period as string)) {
+      const policyMode = policy.mode == null ? undefined : (policy.mode as BillingMode);
+      if (policyMode && !["strict", "overdraft"].includes(policyMode))
+        throw new ConfigError(`plans.${key}.spending.operations.${operation}.mode is invalid`);
+      const policyLimit =
+        policy.overdraft_limit == null
+          ? undefined
+          : decimal(
+              policy.overdraft_limit,
+              `plans.${key}.spending.operations.${operation}.overdraft_limit`,
+            );
+      if (policyLimit && policyMode !== "overdraft")
         throw new ConfigError(
-          `invalid allowance period in plans.${planKey}: ${String(allowance.period)} ` +
-            `(expected one of ${[...ALLOWANCE_PERIODS].sort().join(", ")})`,
+          `plans.${key}.spending.operations.${operation}.overdraft_limit requires overdraft mode`,
         );
-      }
+      operations[operation] = {
+        ...(policy.max_concurrent == null
+          ? {}
+          : {
+              maxConcurrent: positiveInt(
+                policy.max_concurrent,
+                `plans.${key}.spending.operations.${operation}.max_concurrent`,
+              ),
+            }),
+        ...(policyMode ? { mode: policyMode } : {}),
+        ...(policyLimit ? { overdraftLimit: policyLimit } : {}),
+      };
     }
-    if (plan.safety != null) {
-      if (typeof plan.safety !== "object" || Array.isArray(plan.safety)) {
-        throw new ConfigError(`plans.${planKey}.safety must be a dict`);
-      }
-      assertKnownKeys(
-        plan.safety as Record<string, unknown>,
-        SAFETY_KEYS,
-        `plans.${planKey}.safety`,
-      );
-      const safety = plan.safety as Record<string, unknown>;
-      if (
-        safety.billingMode != null &&
-        safety.billingMode !== "strict" &&
-        safety.billingMode !== "overdraft"
-      ) {
-        throw new ConfigError(
-          `invalid billingMode in plans.${planKey}.safety: '${String(safety.billingMode)}' ` +
-            `(expected 'strict' or 'overdraft')`,
-        );
-      }
-    }
-    const overrides = plan.rateOverrides as Record<string, string> | undefined;
-    if (overrides) {
-      for (const [modelKey, expr] of Object.entries(overrides)) {
-        try {
-          validateExpression(expr, KNOWN_VARIABLES);
-        } catch (e) {
-          throw new ConfigError(
-            `invalid expression in plans.${planKey}.rateOverrides.${modelKey}: ${(e as Error).message}`,
-          );
-        }
-      }
-    }
-    if (plan.entitlements != null) {
-      if (typeof plan.entitlements !== "object" || Array.isArray(plan.entitlements)) {
-        throw new ConfigError(`plans.${planKey}.entitlements must be a dict`);
-      }
-      plan.entitlements = decodeEntitlements(planKey, plan.entitlements as Record<string, unknown>);
-    }
-  }
-
-  const planLabels = Object.values(plans).map((p) => p.label as string);
-  if (new Set(planLabels).size !== planLabels.length) {
-    throw new ConfigError("duplicate plan labels in pricing config");
-  }
-
-  const planDefs: Record<string, PlanDefinition> = {};
-  for (const [key, p] of Object.entries(plans)) {
-    const allowanceRaw = (p.allowance as Record<string, unknown>) ?? {};
-    const allowanceAmount = new Decimal(
-      (allowanceRaw["amount"] as number | string | undefined) ?? 0,
-    );
-    if (allowanceAmount.isNegative()) {
-      throw new ConfigError(
-        `plans.${key}.allowance.amount must be >= 0, got ${allowanceAmount.toString()}`,
-      );
-    }
-    const safetyRaw = (p.safety as Record<string, unknown>) ?? {};
-    const billingMode = (safetyRaw.billingMode ?? "strict") as "strict" | "overdraft";
-    const perOperationRaw = safetyRaw.perOperation as Record<string, unknown> | undefined;
-
-    planDefs[key] = {
-      label: p.label as string,
-      ...(p.tier != null ? { tier: Number(p.tier) } : {}),
-      allowance: {
-        amount: allowanceAmount,
-        period: ((allowanceRaw["period"] as AllowancePeriod) ??
-          "calendar_month") as AllowancePeriod,
+    out[key] = {
+      displayName,
+      ...(rateCard ? { rateCard } : {}),
+      ...(includedCredits ? { includedCredits } : {}),
+      features,
+      limits,
+      spending: {
+        mode,
+        ...(overdraftLimit ? { overdraftLimit } : {}),
+        ...(spendingRaw.max_concurrent == null
+          ? {}
+          : {
+              maxConcurrent: positiveInt(
+                spendingRaw.max_concurrent,
+                `plans.${key}.spending.max_concurrent`,
+              ),
+            }),
+        operations,
       },
-      safety: {
-        billingMode,
-        perOperation:
-          perOperationRaw != null
-            ? decodePerOperation(key, perOperationRaw as Record<string, unknown>)
-            : undefined,
-        maxConcurrent: (safetyRaw.maxConcurrent as number | null) ?? null,
-        overdraftFloor:
-          safetyRaw.overdraftFloor != null
-            ? new Decimal(safetyRaw.overdraftFloor as number | string)
-            : null,
-      },
-      rateOverrides: (p.rateOverrides as Record<string, string>) ?? null,
-      entitlements: (p.entitlements as Record<string, PlanEntitlement>) ?? null,
-    };
-  }
-  return planDefs;
-}
-
-function parseProviderRefs(
-  raw: unknown,
-  context: string,
-): Record<
-  string,
-  { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }
-> {
-  if (raw == null) return {};
-  if (typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ConfigError(`${context} must be a dict of provider refs`);
-  }
-  const out: Record<
-    string,
-    { productId?: string; priceId?: string; variantId?: string; lookupKey?: string }
-  > = {};
-  for (const [providerKey, providerVal] of Object.entries(raw as Record<string, unknown>)) {
-    const ref = decodeSnakeFields(
-      (providerVal ?? {}) as Record<string, unknown>,
-      `${context}.${providerKey}`,
-    );
-    assertKnownKeys(ref, PROVIDER_REF_KEYS, `${context}.${providerKey}`);
-    out[providerKey] = {
-      ...(ref.productId != null ? { productId: String(ref.productId) } : {}),
-      ...(ref.priceId != null ? { priceId: String(ref.priceId) } : {}),
-      ...(ref.variantId != null ? { variantId: String(ref.variantId) } : {}),
-      ...(ref.lookupKey != null ? { lookupKey: String(ref.lookupKey) } : {}),
     };
   }
   return out;
 }
 
-function parseGrant(raw: unknown, context: string): SubscriptionGrant {
-  const grant = decodeSnakeFields(
-    (raw ?? { mode: "allowance" }) as Record<string, unknown>,
-    context,
-  );
-  const mode = (grant.mode as string | undefined) ?? "allowance";
-  if (mode === "allowance") {
-    assertKnownKeys(grant, new Set(["mode"]), context);
-    return { mode: "allowance" };
-  }
-  if (mode === "cycle_grant") {
-    assertKnownKeys(grant, new Set(["mode", "credits", "bucket", "replacePrior"]), context);
-    const credits = Number(grant.credits);
-    if (!Number.isFinite(credits) || credits < 0) {
-      throw new ConfigError(`${context}.credits must be >= 0, got ${String(grant.credits)}`);
-    }
-    if (grant.bucket == null || grant.bucket === "") {
-      throw new ConfigError(`${context}.bucket is required for cycle_grant`);
-    }
-    return {
-      mode: "cycle_grant",
-      credits,
-      bucket: String(grant.bucket),
-      replacePrior: Boolean(grant.replacePrior ?? true),
-    };
-  }
-  throw new ConfigError(`unknown grant mode in ${context}: '${mode}'`);
-}
-
-function parseBillingOffer(raw: unknown, context: string): BillingOffer {
-  const offer = decodeSnakeFields((raw ?? {}) as Record<string, unknown>, context);
-  assertKnownKeys(offer, BILLING_OFFER_KEYS, context);
-  if (offer.plan == null || offer.plan === "") {
-    throw new ConfigError(`${context} is missing required 'plan' field`);
-  }
-  const interval = (offer.interval as string | undefined) ?? "month";
-  if (!BILLING_OFFER_INTERVALS.has(interval)) {
-    throw new ConfigError(
-      `invalid interval in ${context}: '${interval}' ` +
-        `(expected one of ${[...BILLING_OFFER_INTERVALS].sort().join(", ")})`,
-    );
-  }
-  const intervalCount = Number(offer.intervalCount ?? 1);
-  if (!Number.isFinite(intervalCount) || intervalCount < 1) {
-    throw new ConfigError(
-      `${context}.intervalCount must be >= 1, got ${String(offer.intervalCount)}`,
-    );
-  }
-  return {
-    plan: String(offer.plan),
-    interval: interval as BillingOfferInterval,
-    intervalCount,
-    grant: parseGrant(offer.grant, `${context}.grant`),
-    providers: parseProviderRefs(offer.providers, `${context}.providers`),
-    validFrom: offer.validFrom != null ? String(offer.validFrom) : null,
-    validTo: offer.validTo != null ? String(offer.validTo) : null,
-  };
-}
-
-function parseBillingTopup(raw: unknown, context: string): BillingCreditTopup {
-  const topup = decodeSnakeFields((raw ?? {}) as Record<string, unknown>, context);
-  assertKnownKeys(topup, BILLING_TOPUP_KEYS, context);
-  const creditsPerUnit = Number(topup.creditsPerUnit ?? 1000);
-  if (!Number.isFinite(creditsPerUnit) || creditsPerUnit < 0) {
-    throw new ConfigError(
-      `${context}.creditsPerUnit must be >= 0, got ${String(topup.creditsPerUnit)}`,
-    );
-  }
-  const minAmountMinor = Number(topup.minAmountMinor ?? 500);
-  const maxAmountMinor = Number(topup.maxAmountMinor ?? 500_000);
-  if (!Number.isFinite(minAmountMinor) || minAmountMinor < 0) {
-    throw new ConfigError(
-      `${context}.minAmountMinor must be >= 0, got ${String(topup.minAmountMinor)}`,
-    );
-  }
-  if (!Number.isFinite(maxAmountMinor) || maxAmountMinor < 0) {
-    throw new ConfigError(
-      `${context}.maxAmountMinor must be >= 0, got ${String(topup.maxAmountMinor)}`,
-    );
-  }
-  const taxBehavior = (topup.taxBehavior as string | undefined) ?? "exclude_tax";
-  if (!TAX_BEHAVIORS.has(taxBehavior)) {
-    throw new ConfigError(
-      `invalid taxBehavior in ${context}: '${taxBehavior}' ` +
-        `(expected one of ${[...TAX_BEHAVIORS].sort().join(", ")})`,
-    );
-  }
-  if (topup.depositTo == null || topup.depositTo === "") {
-    throw new ConfigError(`${context} is missing required 'depositTo' field`);
-  }
-  return {
-    depositTo: String(topup.depositTo),
-    creditsPerUnit,
-    minAmountMinor,
-    maxAmountMinor,
-    taxBehavior: taxBehavior as BillingCreditTopup["taxBehavior"],
-    providers: parseProviderRefs(topup.providers, `${context}.providers`),
-  };
-}
-
-function parseBilling(raw: unknown): BillingSection | undefined {
-  if (raw == null) return undefined;
-  if (!isRecord(raw)) throw new ConfigError("billing must be a dict");
-  const section = decodeSnakeFields(raw, "billing");
-  assertKnownKeys(section, BILLING_KEYS, "billing");
-  const subscriptions: Record<string, BillingOffer> = {};
-  if (section.subscriptions != null) {
-    if (typeof section.subscriptions !== "object" || Array.isArray(section.subscriptions)) {
-      throw new ConfigError("billing.subscriptions must be a dict");
-    }
-    for (const [key, val] of Object.entries(section.subscriptions as Record<string, unknown>)) {
-      subscriptions[key] = parseBillingOffer(val, `billing.subscriptions.${key}`);
-    }
-  }
-  const topups: Record<string, BillingCreditTopup> = {};
-  if (section.topups != null) {
-    if (typeof section.topups !== "object" || Array.isArray(section.topups)) {
-      throw new ConfigError("billing.topups must be a dict");
-    }
-    for (const [key, val] of Object.entries(section.topups as Record<string, unknown>)) {
-      topups[key] = parseBillingTopup(val, `billing.topups.${key}`);
-    }
-  }
-  let autoRecharge: BillingAutoRechargeConfig | null | undefined;
-  if (section.autoRecharge != null) {
-    if (!isRecord(section.autoRecharge)) {
-      throw new ConfigError("billing.autoRecharge must be a dict");
-    }
-    const value = decodeSnakeFields(section.autoRecharge, "billing.autoRecharge");
-    assertKnownKeys(value, BILLING_AUTO_RECHARGE_KEYS, "billing.autoRecharge");
-    const policy = isRecord(value.defaultPolicy)
-      ? decodeSnakeFields(value.defaultPolicy, "billing.autoRecharge.defaultPolicy")
-      : null;
-    const trigger =
-      policy && isRecord(policy.trigger)
-        ? decodeSnakeFields(policy.trigger, "billing.autoRecharge.defaultPolicy.trigger")
-        : null;
-    const topup =
-      policy && isRecord(policy.topup)
-        ? decodeSnakeFields(policy.topup, "billing.autoRecharge.defaultPolicy.topup")
-        : null;
-    const limit =
-      policy && isRecord(policy.limit)
-        ? decodeSnakeFields(policy.limit, "billing.autoRecharge.defaultPolicy.limit")
-        : null;
-    const thresholdCredits = Number(trigger?.thresholdCredits ?? value.thresholdCredits ?? 5000);
-    const quantity = Number(topup?.quantity ?? value.quantity ?? 1);
-    const maxRecharges = Number(limit?.maxCharges ?? value.maxRecharges ?? 3);
-    const windowDays = Number(limit?.rollingDays ?? value.windowDays ?? 30);
-    if (!Number.isFinite(thresholdCredits) || thresholdCredits < 0) {
-      throw new ConfigError("billing.autoRecharge.thresholdCredits must be >= 0");
-    }
-    if (!Number.isFinite(quantity) || quantity < 1 || !Number.isInteger(quantity)) {
-      throw new ConfigError("billing.autoRecharge.quantity must be a positive integer");
-    }
-    if (!Number.isFinite(maxRecharges) || maxRecharges < 1 || !Number.isInteger(maxRecharges)) {
-      throw new ConfigError("billing.autoRecharge.maxRecharges must be a positive integer");
-    }
-    if (!Number.isFinite(windowDays) || windowDays < 1 || !Number.isInteger(windowDays)) {
-      throw new ConfigError("billing.autoRecharge.windowDays must be a positive integer");
-    }
-    const topupKey = String(topup?.key ?? value.topupKey ?? "default");
-    if (!topups[topupKey]) {
-      throw new ConfigError(
-        `billing.autoRecharge.topupKey references unknown top-up '${topupKey}'`,
-      );
-    }
-    autoRecharge = {
-      enabled: Boolean(value.enabled ?? true),
-      thresholdCredits,
-      topupKey,
-      quantity,
-      maxRecharges,
-      windowDays,
-      ...(policy
-        ? {
-            defaultPolicy: {
-              trigger: { type: "balance_below" as const, thresholdCredits },
-              topup: { key: topupKey, quantity },
-              ...(limit
-                ? {
-                    limit: {
-                      period: String(limit.period ?? "calendar_month") as
-                        "calendar_day" | "calendar_month" | "rolling_days",
-                      ...(limit.maxCharges != null ? { maxCharges: maxRecharges } : {}),
-                      ...(limit.maxAmountMinor != null
-                        ? { maxAmountMinor: Number(limit.maxAmountMinor) }
-                        : {}),
-                      ...(limit.currency != null ? { currency: String(limit.currency) } : {}),
-                      ...(limit.rollingDays != null ? { rollingDays: windowDays } : {}),
-                    },
-                  }
-                : {}),
-            },
-          }
-        : {}),
-    };
-  }
-  return {
-    currency: String(section.currency ?? "USD"),
-    subscriptions,
-    topups,
-    autoRecharge,
-  };
-}
-
-function validatePlanReferences(config: ParsedBursarConfig): void {
-  const billing = config.billing;
-  if (!billing?.subscriptions || Object.keys(billing.subscriptions).length === 0) return;
-  const plans = config.plans ?? {};
-  for (const [offerKey, offer] of Object.entries(billing.subscriptions)) {
-    if (!Object.prototype.hasOwnProperty.call(plans, offer.plan)) {
-      throw new ConfigError(
-        `billing.subscriptions.${offerKey}.plan references unknown plan '${offer.plan}'`,
-      );
-    }
-  }
-}
-
-function validateRateOverrideKeys(config: ParsedBursarConfig): void {
-  if (!config.plans) return;
-  const modelKeys = new Set(Object.keys(config.metering.models));
-  for (const [planId, planDef] of Object.entries(config.plans)) {
-    if (!planDef.rateOverrides) continue;
-    for (const overrideKey of Object.keys(planDef.rateOverrides)) {
-      if (overrideKey !== "*" && !modelKeys.has(overrideKey)) {
-        throw new ConfigError(
-          `plans.${planId}.rateOverrides.${overrideKey} references unknown model ` +
-            `(must be one of ${[...modelKeys].sort().join(", ")} or '*')`,
-        );
-      }
-    }
-  }
-}
-
-function validateBucketReferences(config: ParsedBursarConfig): void {
-  const buckets = config.ledger.buckets;
-  const bucketKeys = buckets ? new Set(Object.keys(buckets)) : null;
-
-  const signupGrant = config.ledger.signupGrant;
-  if (signupGrant != null) {
-    if (!bucketKeys) {
-      throw new ConfigError("ledger.buckets must be defined when ledger.signupGrant is set");
-    }
-    if (!bucketKeys.has(signupGrant.bucket)) {
-      throw new ConfigError(
-        `ledger.signupGrant.bucket references unknown bucket '${signupGrant.bucket}' ` +
-          `(must be one of ${[...bucketKeys].sort().join(", ")})`,
-      );
-    }
-  }
-
-  if (!bucketKeys) return;
-
-  const billing = config.billing;
-  if (!billing) return;
-
-  for (const [offerKey, offer] of Object.entries(billing.subscriptions)) {
-    const grant = offer.grant;
-    if (grant?.mode === "cycle_grant" && grant.bucket != null) {
-      if (!bucketKeys.has(grant.bucket)) {
-        throw new ConfigError(
-          `billing.subscriptions.${offerKey}.grant.bucket references unknown bucket '${grant.bucket}' ` +
-            `(must be one of ${[...bucketKeys].sort().join(", ")})`,
-        );
-      }
-    }
-  }
-
-  for (const [topupKey, topup] of Object.entries(billing.topups)) {
-    if (topup.depositTo != null && !bucketKeys.has(topup.depositTo)) {
-      throw new ConfigError(
-        `billing.topups.${topupKey}.depositTo references unknown bucket '${topup.depositTo}' ` +
-          `(must be one of ${[...bucketKeys].sort().join(", ")})`,
-      );
-    }
-  }
-}
-
-function decToJson(value: Decimal): number | string {
-  return value.isInteger() ? value.toNumber() : value.toString();
-}
-
-function providerRefsToSnake(
-  refs: Record<
-    string,
-    {
-      productId?: string | null;
-      priceId?: string | null;
-      variantId?: string | null;
-      lookupKey?: string | null;
-    }
-  >,
-): Record<string, Record<string, string>> {
-  return Object.fromEntries(
-    Object.entries(refs).map(([provider, ref]) => [
-      provider,
-      {
-        ...(ref.productId != null ? { product_id: ref.productId } : {}),
-        ...(ref.priceId != null ? { price_id: ref.priceId } : {}),
-        ...(ref.variantId != null ? { variant_id: ref.variantId } : {}),
-        ...(ref.lookupKey != null ? { lookup_key: ref.lookupKey } : {}),
+function parseProviders(value: unknown, path: string): Record<string, ProviderReference> {
+  const raw = assertRecord(value, path);
+  if (Object.keys(raw).length === 0) throw new ConfigError(`${path} must not be empty`);
+  const out: Record<string, ProviderReference> = {};
+  for (const [provider, input] of Object.entries(raw)) {
+    id(provider, `${path} key`);
+    const ref = assertRecord(input, `${path}.${provider}`);
+    assertKnown(ref, ["lookup"], `${path}.${provider}`);
+    const lookup = assertRecord(ref.lookup, `${path}.${provider}.lookup`);
+    assertKnown(lookup, ["type", "value"], `${path}.${provider}.lookup`);
+    out[provider] = {
+      lookup: {
+        type: string(lookup.type, `${path}.${provider}.lookup.type`),
+        value: string(lookup.value, `${path}.${provider}.lookup.value`),
       },
-    ]),
-  );
+    };
+  }
+  return out;
 }
 
-/** Convert a validated config to the canonical snake_case JSON shape. */
-export function bursarConfigToSnakeDict(config: ParsedBursarConfig): Record<string, unknown> {
-  const plans = config.plans
-    ? Object.fromEntries(
-        Object.entries(config.plans).map(([key, plan]) => [
-          key,
-          {
-            label: plan.label,
-            ...(plan.tier != null ? { tier: plan.tier } : {}),
-            allowance: {
-              amount: decToJson(plan.allowance.amount),
-              period: plan.allowance.period,
-            },
-            safety: {
-              billing_mode: plan.safety.billingMode,
-              ...(plan.safety.maxConcurrent != null
-                ? { max_concurrent: plan.safety.maxConcurrent }
-                : {}),
-              ...(plan.safety.overdraftFloor != null
-                ? { overdraft_floor: decToJson(plan.safety.overdraftFloor) }
-                : {}),
-              ...(plan.safety.perOperation
-                ? {
-                    per_operation: Object.fromEntries(
-                      Object.entries(plan.safety.perOperation).map(([op, policy]) => [
-                        op,
-                        {
-                          billing_mode: policy.billingMode,
-                          ...(policy.maxConcurrent != null
-                            ? { max_concurrent: policy.maxConcurrent }
-                            : {}),
-                          ...(policy.overdraftFloor != null
-                            ? { overdraft_floor: decToJson(policy.overdraftFloor) }
-                            : {}),
-                        },
-                      ]),
-                    ),
-                  }
-                : {}),
-            },
-            ...(plan.rateOverrides ? { rate_overrides: plan.rateOverrides } : {}),
-            ...(plan.entitlements
-              ? {
-                  entitlements: Object.fromEntries(
-                    Object.entries(plan.entitlements).map(([fk, ent]) => [
-                      fk,
-                      {
-                        ...(ent.value !== undefined ? { value: ent.value } : {}),
-                        ...(ent.maxCalls != null ? { max_calls: ent.maxCalls } : {}),
-                        period: ent.period,
-                        on_exceed: ent.onExceed,
-                      },
-                    ]),
-                  ),
-                }
-              : {}),
-          },
-        ]),
+function parsePayments(
+  value: unknown,
+  plans: Record<string, PlanDefinition>,
+  credits: CreditsConfig,
+): PaymentsConfig | undefined {
+  if (value == null) return undefined;
+  const raw = assertRecord(value, "payments");
+  assertKnown(raw, ["subscriptions", "topups", "auto_recharge"], "payments");
+  const subscriptions: Record<string, SubscriptionOffer> = {},
+    topups: Record<string, TopupOffer> = {};
+  const seen = new Set<string>();
+  const checkRefs = (refs: Record<string, ProviderReference>) =>
+    Object.entries(refs).forEach(([provider, ref]) => {
+      const key = `${provider}/${ref.lookup.type}/${ref.lookup.value}`;
+      if (seen.has(key)) throw new ConfigError(`duplicate provider lookup ${key}`);
+      seen.add(key);
+    });
+  const subscriptionsRaw = assertRecord(raw.subscriptions ?? {}, "payments.subscriptions");
+  for (const [key, input] of Object.entries(subscriptionsRaw)) {
+    id(key, "payments.subscriptions key");
+    const offer = assertRecord(input, `payments.subscriptions.${key}`);
+    assertKnown(
+      offer,
+      ["plan", "billing_period", "providers", "renewal_credits", "stack_credits"],
+      `payments.subscriptions.${key}`,
+    );
+    const plan = string(offer.plan, `payments.subscriptions.${key}.plan`);
+    if (!plans[plan])
+      throw new ConfigError(`payments.subscriptions.${key}.plan references an unknown plan`);
+    const providers = parseProviders(offer.providers, `payments.subscriptions.${key}.providers`);
+    checkRefs(providers);
+    let renewalCredits: RenewalCredits | undefined;
+    if (offer.renewal_credits != null) {
+      const grant = assertRecord(
+        offer.renewal_credits,
+        `payments.subscriptions.${key}.renewal_credits`,
+      );
+      assertKnown(
+        grant,
+        ["amount", "bucket", "behavior", "on_subscription_end"],
+        `payments.subscriptions.${key}.renewal_credits`,
+      );
+      const bucket = string(grant.bucket, `payments.subscriptions.${key}.renewal_credits.bucket`);
+      if (!credits.buckets[bucket])
+        throw new ConfigError(
+          `payments.subscriptions.${key}.renewal_credits.bucket references an unknown bucket`,
+        );
+      const behavior = string(
+        grant.behavior,
+        `payments.subscriptions.${key}.renewal_credits.behavior`,
+      ) as RenewalCredits["behavior"];
+      const onSubscriptionEnd = string(
+        grant.on_subscription_end,
+        `payments.subscriptions.${key}.renewal_credits.on_subscription_end`,
+      ) as RenewalCredits["onSubscriptionEnd"];
+      if (
+        !["replace", "accumulate"].includes(behavior) ||
+        !["expire", "keep"].includes(onSubscriptionEnd)
       )
-    : undefined;
-
-  const billing = config.billing
-    ? {
-        currency: config.billing.currency,
-        subscriptions: Object.fromEntries(
-          Object.entries(config.billing.subscriptions).map(([key, offer]) => [
-            key,
-            {
-              plan: offer.plan,
-              interval: offer.interval ?? "month",
-              interval_count: offer.intervalCount ?? 1,
-              grant:
-                offer.grant?.mode === "cycle_grant"
-                  ? {
-                      mode: "cycle_grant",
-                      credits: offer.grant.credits,
-                      bucket: offer.grant.bucket,
-                      replace_prior: offer.grant.replacePrior ?? true,
-                    }
-                  : (offer.grant ?? { mode: "allowance" }),
-              ...(offer.providers && Object.keys(offer.providers).length > 0
-                ? { providers: providerRefsToSnake(offer.providers) }
-                : {}),
-              ...(offer.validFrom != null ? { valid_from: offer.validFrom } : {}),
-              ...(offer.validTo != null ? { valid_to: offer.validTo } : {}),
-            },
-          ]),
+        throw new ConfigError(
+          `payments.subscriptions.${key}.renewal_credits has an invalid policy`,
+        );
+      renewalCredits = {
+        amount: decimal(
+          grant.amount,
+          `payments.subscriptions.${key}.renewal_credits.amount`,
+          false,
         ),
-        topups: Object.fromEntries(
-          Object.entries(config.billing.topups).map(([key, topup]) => [
-            key,
-            {
-              deposit_to: topup.depositTo,
-              credits_per_unit: topup.creditsPerUnit ?? 1000,
-              min_amount_minor: topup.minAmountMinor ?? 500,
-              max_amount_minor: topup.maxAmountMinor ?? 500_000,
-              tax_behavior: topup.taxBehavior ?? "exclude_tax",
-              ...(topup.providers && Object.keys(topup.providers).length > 0
-                ? { providers: providerRefsToSnake(topup.providers) }
-                : {}),
-            },
-          ]),
-        ),
-        ...(config.billing.autoRecharge
-          ? {
-              auto_recharge: {
-                enabled: config.billing.autoRecharge.enabled,
-                default_policy: {
-                  trigger: {
-                    type: "balance_below",
-                    threshold_credits:
-                      config.billing.autoRecharge.defaultPolicy?.trigger.thresholdCredits ??
-                      config.billing.autoRecharge.thresholdCredits,
-                  },
-                  topup: {
-                    key:
-                      config.billing.autoRecharge.defaultPolicy?.topup.key ??
-                      config.billing.autoRecharge.topupKey,
-                    quantity:
-                      config.billing.autoRecharge.defaultPolicy?.topup.quantity ??
-                      config.billing.autoRecharge.quantity,
-                  },
-                  limit: {
-                    period:
-                      config.billing.autoRecharge.defaultPolicy?.limit?.period ?? "rolling_days",
-                    max_charges:
-                      config.billing.autoRecharge.defaultPolicy?.limit?.maxCharges ??
-                      config.billing.autoRecharge.maxRecharges,
-                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.maxAmountMinor != null
-                      ? {
-                          max_amount_minor:
-                            config.billing.autoRecharge.defaultPolicy.limit.maxAmountMinor,
-                        }
-                      : {}),
-                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.currency != null
-                      ? { currency: config.billing.autoRecharge.defaultPolicy.limit.currency }
-                      : {}),
-                    ...(config.billing.autoRecharge.defaultPolicy?.limit?.rollingDays != null
-                      ? {
-                          rolling_days: config.billing.autoRecharge.defaultPolicy.limit.rollingDays,
-                        }
-                      : { rolling_days: config.billing.autoRecharge.windowDays }),
-                  },
-                },
-              },
-            }
-          : {}),
-      }
-    : undefined;
-
-  return {
-    version: config.version,
-    metering: {
-      models: config.metering.models,
-      tools: config.metering.tools,
-      search: config.metering.search,
-      cache_discount: config.metering.cacheDiscount,
-      flat_jobs: Object.fromEntries(
-        Object.entries(config.metering.flatJobs).map(([job, cost]) => [job, decToJson(cost)]),
+        bucket,
+        behavior,
+        onSubscriptionEnd,
+      };
+    }
+    const stackCredits = offer.stack_credits === true;
+    if (renewalCredits && plans[plan].includedCredits && !stackCredits)
+      throw new ConfigError(
+        `payments.subscriptions.${key} combines included_credits and renewal_credits; set stack_credits: true`,
+      );
+    subscriptions[key] = {
+      plan,
+      billingPeriod: parsePeriod(
+        offer.billing_period,
+        `payments.subscriptions.${key}.billing_period`,
       ),
-    },
-    ledger: {
-      min_balance: decToJson(config.ledger.minBalance),
-      ...(config.ledger.signupGrant ? { signup_grant: config.ledger.signupGrant } : {}),
-      ...(config.ledger.buckets
-        ? {
-            buckets: Object.fromEntries(
-              Object.entries(config.ledger.buckets).map(([bk, bucket]) => [
-                bk,
-                {
-                  label: bucket.label,
-                  priority: bucket.priority,
-                  expires: bucket.expires,
-                  ...(bucket.ttlDays != null ? { ttl_days: bucket.ttlDays } : {}),
-                  ...(bucket.allowOverdraft ? { allow_overdraft: true } : {}),
-                  ...(bucket.default ? { default: true } : {}),
-                },
-              ]),
-            ),
-          }
-        : {}),
-    },
-    ...(plans ? { plans } : {}),
-    ...(billing ? { billing } : {}),
+      providers,
+      ...(renewalCredits ? { renewalCredits } : {}),
+      stackCredits,
+    };
+  }
+  const topupsRaw = assertRecord(raw.topups ?? {}, "payments.topups");
+  for (const [key, input] of Object.entries(topupsRaw)) {
+    id(key, "payments.topups key");
+    const offer = assertRecord(input, `payments.topups.${key}`);
+    assertKnown(offer, ["credits", "bucket", "providers"], `payments.topups.${key}`);
+    const bucket = string(offer.bucket, `payments.topups.${key}.bucket`);
+    if (!credits.buckets[bucket])
+      throw new ConfigError(`payments.topups.${key}.bucket references an unknown bucket`);
+    const providers = parseProviders(offer.providers, `payments.topups.${key}.providers`);
+    checkRefs(providers);
+    topups[key] = {
+      credits: decimal(offer.credits, `payments.topups.${key}.credits`, false),
+      bucket,
+      providers,
+    };
+  }
+  let autoRecharge: AutoRechargePolicy | undefined;
+  if (raw.auto_recharge != null) {
+    const policy = assertRecord(raw.auto_recharge, "payments.auto_recharge");
+    assertKnown(policy, ["trigger", "purchase", "limit"], "payments.auto_recharge");
+    const trigger = assertRecord(policy.trigger, "payments.auto_recharge.trigger");
+    assertKnown(trigger, ["balance_below"], "payments.auto_recharge.trigger");
+    const purchase = assertRecord(policy.purchase, "payments.auto_recharge.purchase");
+    assertKnown(purchase, ["topup", "quantity"], "payments.auto_recharge.purchase");
+    const topup = string(purchase.topup, "payments.auto_recharge.purchase.topup");
+    if (!topups[topup])
+      throw new ConfigError("payments.auto_recharge.purchase.topup references an unknown top-up");
+    const limit = assertRecord(policy.limit, "payments.auto_recharge.limit");
+    assertKnown(limit, ["max_purchases", "period"], "payments.auto_recharge.limit");
+    autoRecharge = {
+      trigger: {
+        balanceBelow: decimal(
+          trigger.balance_below,
+          "payments.auto_recharge.trigger.balance_below",
+        ),
+      },
+      purchase: {
+        topup,
+        quantity:
+          purchase.quantity == null
+            ? 1
+            : positiveInt(purchase.quantity, "payments.auto_recharge.purchase.quantity"),
+      },
+      limit: {
+        maxPurchases: positiveInt(
+          limit.max_purchases,
+          "payments.auto_recharge.limit.max_purchases",
+        ),
+        period: parsePeriod(limit.period, "payments.auto_recharge.limit.period"),
+      },
+    };
+  }
+  return { subscriptions, topups, ...(autoRecharge ? { autoRecharge } : {}) };
+}
+
+export function loadConfigFromDict(data: BursarConfigData): ParsedBursarConfig {
+  const raw = assertRecord(data, "config");
+  assertKnown(raw, ["version", "usage", "credits", "plans", "payments"], "config");
+  if ((raw.version ?? 1) !== 1) throw new ConfigError("version must be 1");
+  const usage = raw.usage == null ? undefined : parseUsage(raw.usage);
+  const credits = parseCredits(raw.credits);
+  const plans = parsePlans(raw.plans, usage, credits);
+  const payments = parsePayments(raw.payments, plans, credits);
+  return {
+    version: 1,
+    ...(usage ? { usage } : {}),
+    credits,
+    plans,
+    ...(payments ? { payments } : {}),
   };
 }
 
-/** Validate and return a canonical snake_case config dict for persistence. */
+function toSnakeCase(value: unknown): unknown {
+  if (value instanceof Decimal) return value.toString();
+  if (Array.isArray(value)) return value.map(toSnakeCase);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, child]) => child !== undefined)
+      .map(([key, child]) => [
+        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
+        toSnakeCase(child),
+      ]),
+  );
+}
+
 export function canonicalBursarConfigDict(data: BursarConfigData): BursarConfigData {
-  const config = loadConfigFromDict(data);
-  return bursarConfigToSnakeDict(config);
+  return toSnakeCase(loadConfigFromDict(data)) as BursarConfigData;
 }
 
-/** Load and validate a pricing config from a raw dictionary. */
-export function loadConfigFromDict(data: BursarConfigData): ParsedBursarConfig {
-  if (!isRecord(data)) throw new ConfigError("config must be a dict");
-  const d = decodeSnakeFields(data, "config");
-  assertKnownKeys(d, TOP_LEVEL_KEYS, "config");
+/** Internal persistence projection until the SQL catalogue is migrated. */
 
-  for (const section of ["metering", "ledger", "plans"] as const) {
-    if (d[section] != null && !isRecord(d[section])) {
-      throw new ConfigError(`${section} must be a dict`);
-    }
-  }
-
-  const version = (d.version as number | undefined) ?? 1;
-  if (version !== 1) {
-    throw new ConfigError(`version must be 1, got ${JSON.stringify(d.version)}`);
-  }
-
-  const metering = parseMetering((d.metering ?? {}) as Record<string, unknown>);
-  const ledger = parseLedger((d.ledger ?? {}) as Record<string, unknown>);
-  const buckets = parseBuckets((d.ledger ?? {}) as Record<string, unknown>);
-  if (buckets) ledger.buckets = buckets;
-
-  const plans = parsePlans(d as Record<string, unknown>);
-  const billing = parseBilling(d.billing);
-
-  const config: ParsedBursarConfig = { version, metering, ledger };
-  if (plans) config.plans = plans;
-  if (billing) config.billing = billing;
-
-  validateExpressions(config);
-  validatePlanReferences(config);
-  validateRateOverrideKeys(config);
-  validateBucketReferences(config);
-  return config;
-}
+export const bursarConfigToSnakeDict = canonicalBursarConfigDict;

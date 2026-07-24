@@ -59,7 +59,7 @@ DECLARE
     v_period_start DATE;
     v_new_usage NUMERIC;
 BEGIN
-    IF p_amount <= 0 THEN
+    IF NOT bursar.is_finite_numeric(p_amount) OR p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
@@ -154,10 +154,8 @@ BEGIN
     account.id, NEW.id, NEW.reference_id, NEW.amount,
     NEW.type::text, key, coalesce(NEW.metadata, '{}'::jsonb)
   )
-  ON CONFLICT (account_id, entry_type, idempotency_key) DO NOTHING;
-  IF FOUND THEN
-    UPDATE bursar.credit_accounts SET balance = balance + NEW.amount, updated_at = now() WHERE id = account.id;
-  END IF;
+  ;
+  UPDATE bursar.credit_accounts SET balance = balance + NEW.amount, updated_at = now() WHERE id = account.id;
   RETURN NEW;
 END $$;
 
@@ -179,7 +177,8 @@ BEGIN
   UPDATE bursar.billing_refunds SET subject_id = v_subject, user_id = NULL WHERE user_id = p_user_id;
   UPDATE bursar.billing_disputes SET subject_id = v_subject, user_id = NULL WHERE user_id = p_user_id;
   DELETE FROM bursar.billing_preferences WHERE user_id = p_user_id;
-  RETURN v_subject;
+    UPDATE bursar.credit_accounts SET subject_id = v_subject, user_id = NULL WHERE user_id = p_user_id AND account_type = 'personal';
+    RETURN v_subject;
 END $$;
 
 
@@ -216,6 +215,7 @@ CREATE FUNCTION bursar.reclaim_billing_event(p_provider text, p_event_id text) R
     AS $$
 DECLARE
     v_existing RECORD;
+    v_token uuid := gen_random_uuid();
 BEGIN
     SELECT * INTO v_existing FROM bursar.billing_events
     WHERE provider = p_provider AND provider_event_id = p_event_id
@@ -240,10 +240,11 @@ BEGIN
     END IF;
 
     UPDATE bursar.billing_events
-    SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1
+    SET status = 'processing', updated_at = now(), retry_count = v_existing.retry_count + 1,
+        claim_token = v_token, claim_expires_at = now() + interval '5 minutes'
     WHERE id = v_existing.id;
 
-    RETURN jsonb_build_object('status', 'reclaimed', 'event_id', v_existing.id);
+    RETURN jsonb_build_object('status', 'reclaimed', 'event_id', v_existing.id, 'claim_token', v_token);
 END;
 $$;
 
@@ -429,6 +430,9 @@ BEGIN
     v_remaining := v_original_debit - v_prior_refunded;
 
     -- Requested amount: explicit value, else the full remaining refundable.
+    IF p_amount IS NOT NULL AND NOT bursar.is_finite_numeric(p_amount) THEN
+        RETURN jsonb_build_object('error', 'over_refund', 'user_id', v_tx.user_id, 'new_balance', COALESCE(v_new_balance, 0));
+    END IF;
     v_refund_amount := COALESCE(p_amount, v_remaining);
 
     -- (1) Over-refund rejection: prior refunds + this refund must not exceed the
@@ -608,7 +612,7 @@ BEGIN
 
     SELECT * INTO v_ref
     FROM bursar.billing_provider_refs
-    WHERE provider = p_provider AND lookup_key = p_lookup_key
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND lookup_key = p_lookup_key
       AND resource_type = 'offer' AND active = true
     LIMIT 1;
 
@@ -660,13 +664,13 @@ BEGIN
     IF p_price_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM bursar.billing_provider_refs
-        WHERE provider = p_provider AND price_id = p_price_id
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND price_id = p_price_id
           AND resource_type = 'offer' AND active = true
         LIMIT 1;
     ELSIF p_product_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM bursar.billing_provider_refs
-        WHERE provider = p_provider AND product_id = p_product_id
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND product_id = p_product_id
           AND resource_type = 'offer' AND active = true
         LIMIT 1;
     END IF;
@@ -718,7 +722,7 @@ BEGIN
 
     SELECT * INTO v_ref
     FROM bursar.billing_provider_refs
-    WHERE provider = p_provider AND lookup_key = p_lookup_key
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND lookup_key = p_lookup_key
       AND resource_type = 'topup' AND active = true
     LIMIT 1;
 
@@ -766,13 +770,13 @@ BEGIN
     IF p_price_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM bursar.billing_provider_refs
-        WHERE provider = p_provider AND price_id = p_price_id
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND price_id = p_price_id
           AND resource_type = 'topup' AND active = true
         LIMIT 1;
     ELSIF p_product_id IS NOT NULL THEN
         SELECT * INTO v_ref
         FROM bursar.billing_provider_refs
-        WHERE provider = p_provider AND product_id = p_product_id
+ WHERE provider = p_provider AND environment = bursar.current_provider_environment() AND product_id = p_product_id
           AND resource_type = 'topup' AND active = true
         LIMIT 1;
     END IF;
@@ -942,6 +946,7 @@ DECLARE
     v_new_id UUID;
     v_next_version INTEGER;
 BEGIN
+    PERFORM bursar.validate_bursar_config(p_config);
     PERFORM pg_advisory_xact_lock(hashtext('bursar_pricing_version'));
 
     SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version
@@ -953,15 +958,92 @@ BEGIN
     VALUES (p_config, true, v_next_version, p_label)
     RETURNING id INTO v_new_id;
 
-    PERFORM bursar.sync_plans_from_config(p_config, v_next_version);
-    PERFORM bursar.sync_buckets_from_config(p_config, v_next_version);
-    PERFORM bursar.sync_billing_from_config(p_config->'billing');
+    PERFORM bursar.sync_plans_from_config(bursar.internal_catalog_config_from_public(p_config), v_next_version);
+    PERFORM bursar.sync_buckets_from_config(bursar.internal_catalog_config_from_public(p_config), v_next_version);
+    PERFORM bursar.sync_billing_from_config(bursar.internal_catalog_config_from_public(p_config)->'billing');
 
     RETURN jsonb_build_object(
         'id', v_new_id,
         'version', v_next_version,
         'active', true
     );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION bursar.refund_credits(
+  p_transaction_id uuid,
+  p_amount numeric DEFAULT NULL,
+  p_reason text DEFAULT NULL,
+  p_metadata jsonb DEFAULT '{}'
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+  v_tx record;
+  v_account bursar.credit_accounts;
+  v_refund numeric(18,4);
+  v_prior numeric(18,4);
+  v_remaining numeric(18,4);
+  v_new_balance numeric(18,4);
+  v_refund_id uuid;
+  v_bucket_key text;
+  v_bucket_amount numeric(18,4);
+  v_to_restore numeric(18,4);
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('refund:' || p_transaction_id::text, 0));
+  SELECT ct.*, a.account_type, a.team_id, a.balance AS account_balance
+  INTO v_tx
+  FROM bursar.credit_transactions ct
+  JOIN bursar.credit_accounts a ON a.id = ct.account_id
+  WHERE ct.id = p_transaction_id
+  FOR UPDATE;
+  IF NOT FOUND OR v_tx.type NOT IN ('usage','team_usage') OR v_tx.amount >= 0 THEN
+    RETURN jsonb_build_object('error','over_refund');
+  END IF;
+  IF p_amount IS NOT NULL AND NOT bursar.is_finite_numeric(p_amount) THEN
+    RETURN jsonb_build_object('error','over_refund');
+  END IF;
+  v_refund := COALESCE(p_amount, abs(v_tx.amount));
+  SELECT COALESCE(sum(amount),0) INTO v_prior
+  FROM bursar.credit_transactions
+  WHERE reference_id = p_transaction_id AND type = 'refund';
+  v_remaining := abs(v_tx.amount) - v_prior;
+  IF v_refund <= 0 OR v_refund > v_remaining THEN
+    RETURN jsonb_build_object('error','over_refund');
+  END IF;
+
+  IF v_tx.account_type = 'personal' THEN
+    UPDATE bursar.user_credits SET balance = balance + v_refund, updated_at = now()
+    WHERE user_id = v_tx.user_id RETURNING balance INTO v_new_balance;
+    v_to_restore := v_refund;
+    FOR v_bucket_key, v_bucket_amount IN
+      SELECT key, value::numeric FROM jsonb_each_text(
+        COALESCE(v_tx.metadata->'bucket_breakdown', jsonb_build_object('default', abs(v_tx.amount)))
+      )
+    LOOP
+      v_bucket_amount := least(v_bucket_amount, v_to_restore);
+      EXIT WHEN v_to_restore <= 0;
+      INSERT INTO bursar.user_credit_buckets (user_id, bucket_key, balance)
+      VALUES (v_tx.user_id, v_bucket_key, least(v_bucket_amount, v_refund))
+      ON CONFLICT (user_id, bucket_key) DO UPDATE
+      SET balance = bursar.user_credit_buckets.balance + excluded.balance, updated_at = now();
+      v_to_restore := v_to_restore - v_bucket_amount;
+    END LOOP;
+  ELSE
+    UPDATE bursar.credit_teams SET balance = balance + v_refund, updated_at = now()
+    WHERE id = v_tx.team_id RETURNING balance INTO v_new_balance;
+  END IF;
+
+  INSERT INTO bursar.credit_transactions
+    (user_id, amount, type, reference_type, reference_id, metadata, account_id, acting_user_id)
+  VALUES (v_tx.user_id, v_refund, 'refund', p_reason, p_transaction_id,
+          COALESCE(p_metadata,'{}') || jsonb_build_object('reason',p_reason), v_tx.account_id, v_tx.acting_user_id)
+  RETURNING id INTO v_refund_id;
+
+  RETURN jsonb_build_object('refund_transaction_id', v_refund_id, 'user_id', v_tx.user_id,
+                            'account_id', v_tx.account_id, 'account_type', v_tx.account_type,
+                            'amount', v_refund, 'new_balance', v_new_balance);
 END;
 $$;
 

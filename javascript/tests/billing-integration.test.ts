@@ -36,26 +36,30 @@ const EVENT_ID = "evt_test_001";
 
 const PRICING_DICT = {
   version: 1,
-  metering: {
-    models: { "*": "input_tokens * 1" },
+  usage: {
+    operations: { inference: { measures: ["tokens"] } },
+    rate_cards: { standard: { prices: { inference: [{ default: true, formula: "tokens" }] } } },
   },
-  ledger: {
-    min_balance: 0,
-    buckets: {
-      purchased: {
-        label: "Purchased",
-        priority: 1,
-        default: true,
-        allow_overdraft: false,
-      },
-    },
+  credits: {
+    buckets: { purchased: {} },
+    spend_order: ["purchased"],
+    default_bucket: "purchased",
   },
   plans: {
-    free: { label: "Free", allowance: { amount: 1000 } },
-    pro: { label: "Pro", allowance: { amount: 100000 } },
+    free: {
+      display_name: "Free",
+      rate_card: "standard",
+      included_credits: { amount: 1000, reset: { unit: "month", count: 1 } },
+    },
+    pro: {
+      display_name: "Pro",
+      rate_card: "standard",
+      included_credits: { amount: 100000, reset: { unit: "month", count: 1 } },
+    },
     enterprise: {
-      label: "Enterprise",
-      allowance: { amount: 1000000 },
+      display_name: "Enterprise",
+      rate_card: "standard",
+      included_credits: { amount: 1000000, reset: { unit: "month", count: 1 } },
     },
   },
 };

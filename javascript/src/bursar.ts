@@ -184,7 +184,7 @@ export class Bursar implements BillingEventSink {
     return this.credits.setup();
   }
 
-  /** Load the active catalog into the metering engine. */
+  /** Load the active catalog into the pricing engine. */
   async loadCatalog(): Promise<void> {
     await this.credits.loadPricingFromStore();
   }

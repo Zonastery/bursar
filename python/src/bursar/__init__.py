@@ -103,7 +103,7 @@ from bursar.interface.models import (
     TopUserRow,
     TransactionRow,
 )
-from bursar.metrics import ToolCall, UsageMetrics
+from bursar.metrics import UsageMetrics
 from bursar.providers.types import (
     CheckoutParams,
     CreateCustomerParams,
@@ -224,7 +224,6 @@ __all__ = [
     "TeamBalanceResult",
     "TeamDeductionResult",
     "TeamMember",
-    "ToolCall",
     "TopUserRow",
     "TransactionRow",
     "UpdatePaymentMethodParams",

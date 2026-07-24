@@ -141,4 +141,11 @@ ALTER TABLE bursar.user_credit_buckets ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE bursar.user_credits ENABLE ROW LEVEL SECURITY;
 
+ALTER TABLE bursar.credit_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bursar.credit_ledger_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bursar.credit_lot_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bursar.credit_lot_reversals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bursar.credit_lots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bursar.catalog_object_versions ENABLE ROW LEVEL SECURITY;
+
 --

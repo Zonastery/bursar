@@ -3,13 +3,14 @@ export type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
 export { resolveAllowanceWindow, resolveCalendarWindow } from "./allowance.js";
 export type { CostBreakdown } from "./breakdown.js";
 export { makeCostBreakdown } from "./breakdown.js";
-export type { ToolCall, UsageMetrics } from "./metrics.js";
+export type { UsageMetrics } from "./metrics.js";
 export type {
   BursarConfigData,
-  MeteringConfig,
-  LedgerConfig,
-  SignupGrant,
-  BillingSection,
+  UsageConfig,
+  CreditsConfig,
+  PlanDefinition as PricingPlanDefinition,
+  PaymentsConfig,
+  Period,
 } from "./config.js";
 export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
 export {

@@ -1,84 +1,61 @@
-"""Tests for SQL hardening and catalog lifecycle behaviors."""
-
-from decimal import Decimal
+"""Configuration hardening cases shared by storage-facing tests."""
 
 import pytest
 
-from bursar.config import ConfigError, load_config_from_dict
+from bursar.config import ConfigError, canonical_bursar_config_dict, load_config_from_dict
+from bursar.engine import PricingEngine
+from bursar.metrics import UsageMetrics
 
 
-class TestConfigHardening:
-    def test_signup_grant_scalar_rejected(self) -> None:
-        with pytest.raises(ConfigError, match="object"):
-            load_config_from_dict(
-                {
-                    "version": 1,
-                    "metering": {"models": {"*": "input_tokens * 1"}},
-                    "ledger": {"signup_grant": 50},
-                }
-            )
-
-    def test_signup_grant_requires_bucket_in_ledger(self) -> None:
-        with pytest.raises(ConfigError, match="unknown bucket"):
-            load_config_from_dict(
-                {
-                    "version": 1,
-                    "metering": {"models": {"*": "input_tokens * 1"}},
-                    "ledger": {
-                        "signup_grant": {"amount": 10, "bucket": "promo"},
-                        "buckets": {"gifted": {"label": "Gifted", "priority": 10}},
-                    },
-                }
-            )
-
-    def test_rate_override_unknown_model_rejected(self) -> None:
-        with pytest.raises(ConfigError, match="unknown model"):
-            load_config_from_dict(
-                {
-                    "version": 1,
-                    "metering": {"models": {"*": "input_tokens * 1"}},
-                    "ledger": {"min_balance": "0"},
-                    "plans": {
-                        "pro": {
-                            "label": "Pro",
-                            "rate_overrides": {"gpt-4": "input_tokens * 0.01"},
-                        }
-                    },
-                }
-            )
-
-    def test_dangling_billing_plan_rejected(self) -> None:
-        with pytest.raises(ConfigError, match="unknown plan"):
-            load_config_from_dict(
-                {
-                    "version": 1,
-                    "metering": {"models": {"*": "input_tokens * 1"}},
-                    "ledger": {"min_balance": "0"},
-                    "plans": {"pro": {"label": "Pro"}},
-                    "billing": {
-                        "subscriptions": {"pro-monthly": {"plan": "enterprise", "grant": {"mode": "allowance"}}}
-                    },
-                }
-            )
-
-    def test_config_error_is_value_error(self) -> None:
-        assert issubclass(ConfigError, ValueError)
+def config() -> dict:
+    return {
+        "version": 1,
+        "usage": {
+            "operations": {"completion": {"measures": ["tokens"], "dimensions": ["model"]}},
+            "rate_cards": {
+                "standard": {"prices": {"completion": [{"default": True, "formula": "tokens"}]}},
+                "pro": {
+                    "extends": "standard",
+                    "prices": {"completion": [{"default": True, "formula": "tokens * 0.5"}]},
+                },
+            },
+        },
+        "credits": {"buckets": {"purchased": {}}, "spend_order": ["purchased"], "default_bucket": "purchased"},
+        "plans": {"pro": {"display_name": "Pro", "rate_card": "pro"}},
+    }
 
 
-class TestEngineRateOverrides:
-    def test_plan_rate_override_applied(self) -> None:
-        from bursar.engine import PricingEngine
-        from bursar.metrics import UsageMetrics
+def test_signup_grant_requires_a_declared_bucket() -> None:
+    data = config()
+    data["credits"]["signup_grant"] = {"amount": 1, "bucket": "gifted"}
+    with pytest.raises(ConfigError, match="configured bucket"):
+        load_config_from_dict(data)
 
-        engine = PricingEngine.from_dict(
-            {
-                "version": 1,
-                "metering": {"models": {"*": "input_tokens * 1"}},
-                "ledger": {"min_balance": "0"},
-            }
-        )
-        result = engine.calculate(
-            UsageMetrics(model="*", input_tokens=10),
-            rate_overrides={"*": "input_tokens * 5"},
-        )
-        assert result.total == Decimal("50.0000")
+
+def test_plan_rate_card_requires_a_declared_card() -> None:
+    data = config()
+    data["plans"]["pro"]["rate_card"] = "missing"
+    with pytest.raises(ConfigError, match="unknown rate card"):
+        load_config_from_dict(data)
+
+
+def test_catalog_config_is_the_canonical_public_document() -> None:
+    stored = canonical_bursar_config_dict(config())
+    assert stored["plans"]["pro"]["rate_card"] == "pro"
+    assert "_bursar_public_config" not in stored
+    assert "metering" not in stored
+    assert "ledger" not in stored
+
+
+def test_usage_metrics_require_an_explicit_operation() -> None:
+    with pytest.raises(Exception, match="operation"):
+        UsageMetrics()
+
+
+def test_plan_rate_card_is_applied() -> None:
+    engine = PricingEngine.from_dict(config())
+    result = engine.calculate(
+        UsageMetrics(operation="completion", measures={"tokens": 8}, dimensions={"model": "x"}),
+        rate_card=engine.get_rate_card_for_plan("pro"),
+    )
+    assert str(result.total) == "4.0000"

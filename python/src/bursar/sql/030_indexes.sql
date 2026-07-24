@@ -92,7 +92,7 @@ CREATE INDEX credit_transactions_account_cursor_idx ON bursar.credit_transaction
 -- Name: credit_transactions_operation_key_uq; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE UNIQUE INDEX credit_transactions_operation_key_uq ON bursar.credit_transactions USING btree (user_id, type, idempotency_key) WHERE (idempotency_key IS NOT NULL);
+CREATE UNIQUE INDEX credit_transactions_operation_key_uq ON bursar.credit_transactions USING btree (account_id, type, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
 
 --
@@ -253,7 +253,6 @@ CREATE INDEX idx_credit_plan_migrations_user ON bursar.credit_plan_migrations US
 -- Name: idx_credit_plans_plan_key; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE INDEX idx_credit_plans_plan_key ON bursar.credit_plans USING btree (plan_key);
 
 
 --
@@ -302,14 +301,12 @@ CREATE INDEX idx_credit_transactions_expires_at ON bursar.credit_transactions US
 -- Name: idx_credit_transactions_idempotency_team_usage; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_credit_transactions_idempotency_team_usage ON bursar.credit_transactions USING btree (user_id, type, ((metadata ->> 'team_id'::text)), ((metadata ->> 'idempotency_key'::text))) WHERE ((type = 'team_usage'::bursar.credit_tx_type) AND ((metadata ->> 'idempotency_key'::text) IS NOT NULL));
 
 
 --
 -- Name: idx_credit_transactions_idempotency_user; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_credit_transactions_idempotency_user ON bursar.credit_transactions USING btree (user_id, type, ((metadata ->> 'idempotency_key'::text))) WHERE (((metadata ->> 'idempotency_key'::text) IS NOT NULL) AND (type <> 'team_usage'::bursar.credit_tx_type));
 
 
 --
@@ -337,14 +334,12 @@ CREATE INDEX idx_credit_transactions_user_expires ON bursar.credit_transactions 
 -- Name: idx_credit_transactions_user_id; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE INDEX idx_credit_transactions_user_id ON bursar.credit_transactions USING btree (user_id, created_at DESC);
 
 
 --
 -- Name: idx_credit_transactions_user_id_created_at; Type: INDEX; Schema: bursar; Owner: -
 --
 
-CREATE INDEX idx_credit_transactions_user_id_created_at ON bursar.credit_transactions USING btree (user_id, created_at);
 
 
 --
@@ -371,8 +366,27 @@ CREATE INDEX idx_signup_grant_failures_user ON bursar.signup_grant_failures USIN
 --
 -- Name: idx_user_credit_buckets_user; Type: INDEX; Schema: bursar; Owner: -
 --
+-- The composite primary key already covers user_id lookups.
 
-CREATE INDEX idx_user_credit_buckets_user ON bursar.user_credit_buckets USING btree (user_id);
+CREATE INDEX billing_subscriptions_offer_key_idx ON bursar.billing_subscriptions (offer_key) WHERE offer_key IS NOT NULL;
+CREATE INDEX billing_subscriptions_plan_version_id_idx ON bursar.billing_subscriptions (plan_version_id) WHERE plan_version_id IS NOT NULL;
+CREATE INDEX credit_plan_migrations_from_plan_id_idx ON bursar.credit_plan_migrations (from_plan_id) WHERE from_plan_id IS NOT NULL;
+CREATE INDEX credit_plan_migrations_to_plan_id_idx ON bursar.credit_plan_migrations (to_plan_id);
+CREATE INDEX credit_reservations_settle_tx_id_idx ON bursar.credit_reservations (settle_tx_id) WHERE settle_tx_id IS NOT NULL;
+CREATE INDEX credit_reservations_account_id_idx ON bursar.credit_reservations (account_id);
+CREATE INDEX credit_team_members_user_id_idx ON bursar.credit_team_members (user_id);
+CREATE INDEX user_credits_plan_id_idx ON bursar.user_credits (plan_id) WHERE plan_id IS NOT NULL;
 
+CREATE INDEX credit_transactions_feature_window_idx
+  ON bursar.credit_transactions (user_id, ((metadata ->> 'feature')), created_at)
+  WHERE type = 'usage'::bursar.credit_tx_type;
+CREATE INDEX credit_transactions_model_window_idx
+  ON bursar.credit_transactions (user_id, ((metadata ->> 'model')), created_at)
+  INCLUDE (amount)
+  WHERE type IN ('usage'::bursar.credit_tx_type, 'team_usage'::bursar.credit_tx_type) AND amount < 0;
+CREATE INDEX credit_transactions_team_window_idx
+  ON bursar.credit_transactions (account_id, acting_user_id, created_at)
+  INCLUDE (amount)
+  WHERE type = 'team_usage'::bursar.credit_tx_type AND amount < 0;
 
 --

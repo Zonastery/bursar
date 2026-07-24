@@ -15,6 +15,7 @@ export interface CostBreakdown {
   searchCredits: Decimal;
   cacheSavings: Decimal;
   fixedCredits: Decimal;
+  operationCredits: Decimal;
   total: Decimal;
   breakdown: Record<string, unknown>;
 }
@@ -25,6 +26,7 @@ export function makeCostBreakdown(partial?: {
   searchCredits?: Decimal;
   cacheSavings?: Decimal;
   fixedCredits?: Decimal;
+  operationCredits?: Decimal;
   breakdown?: Record<string, unknown>;
 }): CostBreakdown {
   const modelCredits = quantizeMoney(partial?.modelCredits ?? new Decimal(0));
@@ -32,6 +34,7 @@ export function makeCostBreakdown(partial?: {
   const searchCredits = quantizeMoney(partial?.searchCredits ?? new Decimal(0));
   const cacheSavings = quantizeMoney(partial?.cacheSavings ?? new Decimal(0));
   const fixedCredits = quantizeMoney(partial?.fixedCredits ?? new Decimal(0));
+  const operationCredits = quantizeMoney(partial?.operationCredits ?? new Decimal(0));
 
   // Single source of truth for the total: sum of components, clamped at 0,
   // quantized to 4dp HALF_UP.
@@ -39,6 +42,7 @@ export function makeCostBreakdown(partial?: {
     .plus(toolCredits)
     .plus(searchCredits)
     .plus(fixedCredits)
+    .plus(operationCredits)
     .plus(cacheSavings);
   const total = quantizeMoney(Decimal.max(new Decimal(0), rawTotal));
 
@@ -48,6 +52,7 @@ export function makeCostBreakdown(partial?: {
     searchCredits,
     cacheSavings,
     fixedCredits,
+    operationCredits,
     total,
     breakdown: partial?.breakdown ?? {},
   };

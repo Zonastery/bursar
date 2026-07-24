@@ -1,9 +1,69 @@
 {
   "$defs": {
-    "Allowance": {
+    "AutoRechargeLimit": {
       "additionalProperties": false,
       "properties": {
-        "amount": {
+        "max_purchases": {
+          "minimum": 1,
+          "title": "Max Purchases",
+          "type": "integer"
+        },
+        "period": {
+          "$ref": "#/$defs/Period"
+        }
+      },
+      "required": [
+        "max_purchases",
+        "period"
+      ],
+      "title": "AutoRechargeLimit",
+      "type": "object"
+    },
+    "AutoRechargePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "trigger": {
+          "$ref": "#/$defs/AutoRechargeTrigger"
+        },
+        "purchase": {
+          "$ref": "#/$defs/AutoRechargePurchase"
+        },
+        "limit": {
+          "$ref": "#/$defs/AutoRechargeLimit"
+        }
+      },
+      "required": [
+        "trigger",
+        "purchase",
+        "limit"
+      ],
+      "title": "AutoRechargePolicy",
+      "type": "object"
+    },
+    "AutoRechargePurchase": {
+      "additionalProperties": false,
+      "properties": {
+        "topup": {
+          "title": "Topup",
+          "type": "string"
+        },
+        "quantity": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Quantity",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "topup"
+      ],
+      "title": "AutoRechargePurchase",
+      "type": "object"
+    },
+    "AutoRechargeTrigger": {
+      "additionalProperties": false,
+      "properties": {
+        "balance_below": {
           "anyOf": [
             {
               "minimum": 0.0,
@@ -14,332 +74,73 @@
               "type": "string"
             }
           ],
-          "default": "0",
-          "title": "Amount"
-        },
-        "period": {
-          "default": "calendar_month",
-          "enum": [
-            "calendar_month",
-            "rolling_30d",
-            "anniversary"
-          ],
-          "title": "Period",
-          "type": "string"
-        }
-      },
-      "title": "Allowance",
-      "type": "object"
-    },
-    "AllowanceGrant": {
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "const": "allowance",
-          "default": "allowance",
-          "title": "Mode",
-          "type": "string"
-        }
-      },
-      "title": "AllowanceGrant",
-      "type": "object"
-    },
-    "BillingCreditTopup": {
-      "additionalProperties": false,
-      "properties": {
-        "deposit_to": {
-          "title": "Deposit To",
-          "type": "string"
-        },
-        "credits_per_unit": {
-          "default": 1000,
-          "title": "Credits Per Unit",
-          "type": "integer"
-        },
-        "min_amount_minor": {
-          "default": 500,
-          "title": "Min Amount Minor",
-          "type": "integer"
-        },
-        "max_amount_minor": {
-          "default": 500000,
-          "title": "Max Amount Minor",
-          "type": "integer"
-        },
-        "tax_behavior": {
-          "default": "exclude_tax",
-          "enum": [
-            "exclude_tax",
-            "include_tax"
-          ],
-          "title": "Tax Behavior",
-          "type": "string"
-        },
-        "providers": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ProviderRef"
-          },
-          "title": "Providers",
-          "type": "object"
+          "title": "Balance Below"
         }
       },
       "required": [
-        "deposit_to"
+        "balance_below"
       ],
-      "title": "BillingCreditTopup",
-      "type": "object"
-    },
-    "BillingOffer": {
-      "additionalProperties": false,
-      "properties": {
-        "plan": {
-          "title": "Plan",
-          "type": "string"
-        },
-        "interval": {
-          "$ref": "#/$defs/BillingOfferInterval",
-          "default": "month"
-        },
-        "interval_count": {
-          "default": 1,
-          "minimum": 1,
-          "title": "Interval Count",
-          "type": "integer"
-        },
-        "grant": {
-          "discriminator": {
-            "mapping": {
-              "allowance": "#/$defs/AllowanceGrant",
-              "cycle_grant": "#/$defs/CycleGrant"
-            },
-            "propertyName": "mode"
-          },
-          "oneOf": [
-            {
-              "$ref": "#/$defs/AllowanceGrant"
-            },
-            {
-              "$ref": "#/$defs/CycleGrant"
-            }
-          ],
-          "title": "Grant"
-        },
-        "providers": {
-          "additionalProperties": {
-            "$ref": "#/$defs/ProviderRef"
-          },
-          "title": "Providers",
-          "type": "object"
-        },
-        "valid_from": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Valid From"
-        },
-        "valid_to": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Valid To"
-        }
-      },
-      "required": [
-        "plan"
-      ],
-      "title": "BillingOffer",
-      "type": "object"
-    },
-    "BillingOfferInterval": {
-      "enum": [
-        "day",
-        "week",
-        "month",
-        "year"
-      ],
-      "title": "BillingOfferInterval",
-      "type": "string"
-    },
-    "BillingSection": {
-      "additionalProperties": false,
-      "properties": {
-        "currency": {
-          "default": "USD",
-          "title": "Currency",
-          "type": "string"
-        },
-        "subscriptions": {
-          "additionalProperties": {
-            "$ref": "#/$defs/BillingOffer"
-          },
-          "title": "Subscriptions",
-          "type": "object"
-        },
-        "topups": {
-          "additionalProperties": {
-            "$ref": "#/$defs/BillingCreditTopup"
-          },
-          "title": "Topups",
-          "type": "object"
-        }
-      },
-      "title": "BillingSection",
+      "title": "AutoRechargeTrigger",
       "type": "object"
     },
     "BucketDefinition": {
       "additionalProperties": false,
       "properties": {
-        "label": {
-          "default": "",
-          "title": "Label",
-          "type": "string"
-        },
-        "priority": {
-          "default": 0,
-          "title": "Priority",
-          "type": "integer"
-        },
-        "expires": {
-          "default": false,
-          "title": "Expires",
-          "type": "boolean"
-        },
-        "ttl_days": {
+        "expires_after": {
           "anyOf": [
             {
-              "type": "integer"
+              "$ref": "#/$defs/Period"
             },
             {
               "type": "null"
             }
           ],
-          "default": null,
-          "title": "Ttl Days"
-        },
-        "default": {
-          "type": "boolean",
-          "default": false,
-          "title": "Default"
-        },
-        "allow_overdraft": {
-          "default": false,
-          "title": "Allow Overdraft",
-          "type": "boolean"
+          "default": null
         }
       },
       "title": "BucketDefinition",
       "type": "object"
     },
-    "CycleGrant": {
+    "CreditsConfig": {
       "additionalProperties": false,
       "properties": {
-        "mode": {
-          "const": "cycle_grant",
-          "default": "cycle_grant",
-          "title": "Mode",
-          "type": "string"
+        "buckets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BucketDefinition"
+          },
+          "title": "Buckets",
+          "type": "object"
         },
-        "credits": {
-          "minimum": 0,
-          "title": "Credits",
-          "type": "integer"
+        "spend_order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Spend Order",
+          "type": "array"
         },
-        "bucket": {
-          "title": "Bucket",
-          "type": "string"
-        },
-        "replace_prior": {
-          "default": true,
-          "title": "Replace Prior",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "credits",
-        "bucket"
-      ],
-      "title": "CycleGrant",
-      "type": "object"
-    },
-    "Entitlement": {
-      "additionalProperties": false,
-      "properties": {
-        "value": {
-          "anyOf": [
-            {},
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Value"
-        },
-        "max_calls": {
+        "default_bucket": {
           "anyOf": [
             {
-              "minimum": 0,
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Max Calls"
-        },
-        "period": {
-          "default": "monthly",
-          "enum": [
-            "daily",
-            "weekly",
-            "monthly",
-            "yearly"
-          ],
-          "title": "Period",
-          "type": "string"
-        },
-        "on_exceed": {
-          "default": "deny",
-          "enum": [
-            "deny",
-            "warn",
-            "notify"
-          ],
-          "title": "On Exceed",
-          "type": "string"
-        }
-      },
-      "title": "Entitlement",
-      "type": "object"
-    },
-    "LedgerConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "min_balance": {
-          "anyOf": [
-            {
-              "minimum": 0.0,
-              "type": "number"
-            },
-            {
-              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
               "type": "string"
+            },
+            {
+              "type": "null"
             }
           ],
-          "default": "0",
-          "title": "Min Balance"
+          "default": null,
+          "title": "Default Bucket"
+        },
+        "overdraft_bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overdraft Bucket"
         },
         "signup_grant": {
           "anyOf": [
@@ -351,44 +152,15 @@
             }
           ],
           "default": null
-        },
-        "buckets": {
-          "anyOf": [
-            {
-              "additionalProperties": {
-                "$ref": "#/$defs/BucketDefinition"
-              },
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Buckets"
         }
       },
-      "title": "LedgerConfig",
+      "title": "CreditsConfig",
       "type": "object"
     },
-    "MeteringConfig": {
+    "DimensionMatcher": {
       "additionalProperties": false,
       "properties": {
-        "models": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Models",
-          "type": "object"
-        },
-        "tools": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Tools",
-          "type": "object"
-        },
-        "search": {
+        "exact": {
           "anyOf": [
             {
               "type": "string"
@@ -398,9 +170,9 @@
             }
           ],
           "default": null,
-          "title": "Search"
+          "title": "Exact"
         },
-        "cache_discount": {
+        "prefix": {
           "anyOf": [
             {
               "type": "string"
@@ -410,45 +182,96 @@
             }
           ],
           "default": null,
-          "title": "Cache Discount"
+          "title": "Prefix"
+        }
+      },
+      "title": "DimensionMatcher",
+      "type": "object"
+    },
+    "FeatureLimit": {
+      "additionalProperties": false,
+      "properties": {
+        "max_calls": {
+          "minimum": 0,
+          "title": "Max Calls",
+          "type": "integer"
         },
-        "flat_jobs": {
-          "additionalProperties": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              }
-            ]
-          },
-          "title": "Flat Jobs",
-          "type": "object"
+        "period": {
+          "$ref": "#/$defs/Period"
+        },
+        "action": {
+          "default": "deny",
+          "enum": [
+            "deny",
+            "warn",
+            "notify"
+          ],
+          "title": "Action",
+          "type": "string"
         }
       },
       "required": [
-        "models"
+        "max_calls",
+        "period"
       ],
-      "title": "MeteringConfig",
+      "title": "FeatureLimit",
       "type": "object"
     },
-    "OperationPolicy": {
+    "IncludedCredits": {
       "additionalProperties": false,
       "properties": {
-        "billing_mode": {
-          "default": "strict",
-          "enum": [
-            "strict",
-            "overdraft"
+        "amount": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
           ],
-          "title": "Billing Mode",
-          "type": "string"
+          "title": "Amount"
         },
+        "reset": {
+          "$ref": "#/$defs/Period"
+        }
+      },
+      "required": [
+        "amount",
+        "reset"
+      ],
+      "title": "IncludedCredits",
+      "type": "object"
+    },
+    "OperationDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "measures": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Measures",
+          "type": "array"
+        },
+        "dimensions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dimensions",
+          "type": "array"
+        }
+      },
+      "title": "OperationDefinition",
+      "type": "object"
+    },
+    "OperationSpendingPolicy": {
+      "additionalProperties": false,
+      "properties": {
         "max_concurrent": {
           "anyOf": [
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             },
             {
@@ -458,9 +281,26 @@
           "default": null,
           "title": "Max Concurrent"
         },
-        "overdraft_floor": {
+        "mode": {
           "anyOf": [
             {
+              "enum": [
+                "strict",
+                "overdraft"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mode"
+        },
+        "overdraft_limit": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
               "type": "number"
             },
             {
@@ -472,23 +312,108 @@
             }
           ],
           "default": null,
-          "title": "Overdraft Floor"
+          "title": "Overdraft Limit"
         }
       },
-      "title": "OperationPolicy",
+      "title": "OperationSpendingPolicy",
+      "type": "object"
+    },
+    "PaymentsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "subscriptions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SubscriptionOffer"
+          },
+          "title": "Subscriptions",
+          "type": "object"
+        },
+        "topups": {
+          "additionalProperties": {
+            "$ref": "#/$defs/TopupOffer"
+          },
+          "title": "Topups",
+          "type": "object"
+        },
+        "auto_recharge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutoRechargePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "PaymentsConfig",
+      "type": "object"
+    },
+    "Period": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "anchor": {
+          "default": "calendar",
+          "enum": [
+            "calendar",
+            "plan_assignment",
+            "rolling"
+          ],
+          "title": "Anchor",
+          "type": "string"
+        },
+        "timezone": {
+          "default": "UTC",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit"
+      ],
+      "title": "Period",
       "type": "object"
     },
     "PlanDefinition": {
       "additionalProperties": false,
       "properties": {
-        "label": {
-          "title": "Label",
+        "display_name": {
+          "title": "Display Name",
           "type": "string"
         },
-        "allowance": {
+        "rate_card": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Allowance"
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Card"
+        },
+        "included_credits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IncludedCredits"
             },
             {
               "type": "null"
@@ -496,175 +421,184 @@
           ],
           "default": null
         },
-        "rate_overrides": {
-          "anyOf": [
-            {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Rate Overrides"
+        "features": {
+          "additionalProperties": true,
+          "title": "Features",
+          "type": "object"
         },
-        "safety": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PlanSafety"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "limits": {
+          "additionalProperties": {
+            "$ref": "#/$defs/FeatureLimit"
+          },
+          "title": "Limits",
+          "type": "object"
         },
-        "entitlements": {
-          "anyOf": [
-            {
-              "additionalProperties": {
-                "$ref": "#/$defs/Entitlement"
-              },
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Entitlements"
+        "spending": {
+          "$ref": "#/$defs/SpendingPolicy"
         }
       },
       "required": [
-        "label"
+        "display_name"
       ],
       "title": "PlanDefinition",
       "type": "object"
     },
-    "PlanSafety": {
+    "PriceRule": {
       "additionalProperties": false,
       "properties": {
-        "billing_mode": {
-          "default": "strict",
-          "enum": [
-            "strict",
-            "overdraft"
-          ],
-          "title": "Billing Mode",
-          "type": "string"
-        },
-        "max_concurrent": {
+        "match": {
           "anyOf": [
             {
-              "type": "integer"
+              "additionalProperties": {
+                "$ref": "#/$defs/DimensionMatcher"
+              },
+              "type": "object"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "title": "Max Concurrent"
+          "title": "Match"
         },
-        "overdraft_floor": {
+        "default": {
+          "type": "boolean",
+          "default": false,
+          "title": "Default"
+        },
+        "formula": {
+          "title": "Formula",
+          "type": "string"
+        }
+      },
+      "required": [
+        "formula"
+      ],
+      "title": "PriceRule",
+      "type": "object"
+    },
+    "ProviderLookup": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "value"
+      ],
+      "title": "ProviderLookup",
+      "type": "object"
+    },
+    "ProviderReference": {
+      "additionalProperties": false,
+      "properties": {
+        "lookup": {
+          "$ref": "#/$defs/ProviderLookup"
+        }
+      },
+      "required": [
+        "lookup"
+      ],
+      "title": "ProviderReference",
+      "type": "object"
+    },
+    "RateCard": {
+      "additionalProperties": false,
+      "properties": {
+        "extends": {
           "anyOf": [
             {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extends"
+        },
+        "prices": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/PriceRule"
+            },
+            "type": "array"
+          },
+          "title": "Prices",
+          "type": "object"
+        }
+      },
+      "title": "RateCard",
+      "type": "object"
+    },
+    "RenewalCredits": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
               "type": "number"
             },
             {
               "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
               "type": "string"
-            },
-            {
-              "type": "null"
             }
           ],
-          "default": null,
-          "title": "Overdraft Floor"
+          "title": "Amount"
         },
-        "per_operation": {
-          "anyOf": [
-            {
-              "additionalProperties": {
-                "$ref": "#/$defs/OperationPolicy"
-              },
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "behavior": {
+          "enum": [
+            "replace",
+            "accumulate"
           ],
-          "default": null,
-          "title": "Per Operation"
+          "title": "Behavior",
+          "type": "string"
+        },
+        "on_subscription_end": {
+          "enum": [
+            "expire",
+            "keep"
+          ],
+          "title": "On Subscription End",
+          "type": "string"
         }
       },
-      "title": "PlanSafety",
-      "type": "object"
-    },
-    "ProviderRef": {
-      "additionalProperties": false,
-      "properties": {
-        "product_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Product Id"
-        },
-        "price_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Price Id"
-        },
-        "variant_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Variant Id"
-        },
-        "lookup_key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Lookup Key"
-        }
-      },
-      "title": "ProviderRef",
+      "required": [
+        "amount",
+        "bucket",
+        "behavior",
+        "on_subscription_end"
+      ],
+      "title": "RenewalCredits",
       "type": "object"
     },
     "SignupGrant": {
       "additionalProperties": false,
       "properties": {
         "amount": {
-          "minimum": 0,
-          "title": "Amount",
-          "type": "integer"
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Amount"
         },
         "bucket": {
           "title": "Bucket",
@@ -677,6 +611,162 @@
       ],
       "title": "SignupGrant",
       "type": "object"
+    },
+    "SpendingPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "strict",
+          "enum": [
+            "strict",
+            "overdraft"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "overdraft_limit": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overdraft Limit"
+        },
+        "max_concurrent": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Concurrent"
+        },
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OperationSpendingPolicy"
+          },
+          "title": "Operations",
+          "type": "object"
+        }
+      },
+      "title": "SpendingPolicy",
+      "type": "object"
+    },
+    "SubscriptionOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "plan": {
+          "title": "Plan",
+          "type": "string"
+        },
+        "billing_period": {
+          "$ref": "#/$defs/Period"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderReference"
+          },
+          "title": "Providers",
+          "type": "object"
+        },
+        "renewal_credits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RenewalCredits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stack_credits": {
+          "default": false,
+          "title": "Stack Credits",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "plan",
+        "billing_period",
+        "providers"
+      ],
+      "title": "SubscriptionOffer",
+      "type": "object"
+    },
+    "TopupOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "credits": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Credits"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "providers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderReference"
+          },
+          "title": "Providers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "credits",
+        "bucket",
+        "providers"
+      ],
+      "title": "TopupOffer",
+      "type": "object"
+    },
+    "UsageConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OperationDefinition"
+          },
+          "title": "Operations",
+          "type": "object"
+        },
+        "rate_cards": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RateCard"
+          },
+          "title": "Rate Cards",
+          "type": "object"
+        }
+      },
+      "required": [
+        "operations",
+        "rate_cards"
+      ],
+      "title": "UsageConfig",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -687,31 +777,31 @@
       "title": "Version",
       "type": "integer"
     },
-    "metering": {
-      "$ref": "#/$defs/MeteringConfig"
-    },
-    "ledger": {
-      "$ref": "#/$defs/LedgerConfig"
-    },
-    "plans": {
+    "usage": {
       "anyOf": [
         {
-          "additionalProperties": {
-            "$ref": "#/$defs/PlanDefinition"
-          },
-          "type": "object"
+          "$ref": "#/$defs/UsageConfig"
         },
         {
           "type": "null"
         }
       ],
-      "default": null,
-      "title": "Plans"
+      "default": null
     },
-    "billing": {
+    "credits": {
+      "$ref": "#/$defs/CreditsConfig"
+    },
+    "plans": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PlanDefinition"
+      },
+      "title": "Plans",
+      "type": "object"
+    },
+    "payments": {
       "anyOf": [
         {
-          "$ref": "#/$defs/BillingSection"
+          "$ref": "#/$defs/PaymentsConfig"
         },
         {
           "type": "null"
@@ -720,9 +810,8 @@
       "default": null
     }
   },
-  "required": [
-    "metering"
-  ],
   "title": "BursarConfig",
-  "type": "object"
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zonastery.github.io/bursar/pricing-config.schema.json"
 }

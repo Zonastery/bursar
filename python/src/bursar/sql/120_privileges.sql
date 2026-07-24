@@ -1,6 +1,31 @@
 -- Name: FUNCTION _upsert_billing_provider_ref(p_resource_type text, p_provider text, p_price_id text, p_product_id text, p_variant_id text, p_lookup_key text, p_resource_key text); Type: ACL; Schema: bursar; Owner: -
 --
 
+-- Backend RPC surface: schema access is explicit, and only public service
+-- operations are executable by service_role. Trigger and helper functions are
+-- never callable directly.
+GRANT USAGE ON SCHEMA bursar TO service_role;
+REVOKE ALL ON SCHEMA bursar FROM PUBLIC, anon, authenticated;
+
+REVOKE ALL ON FUNCTION bursar._upsert_billing_provider_ref(text,text,text,text,text,text,text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar._walk_and_debit_buckets(uuid,numeric) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.credits_add_internal(uuid,numeric,bursar.credit_tx_type,jsonb,text,text) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.assign_credit_account() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.assign_reservation_account() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.grant_signup_bonus() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.project_credit_transaction() FROM PUBLIC, anon, authenticated, service_role;
+
+GRANT EXECUTE ON FUNCTION bursar.activate_bursar_config(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.claim_billing_event(text,text,text,jsonb,integer,integer) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.complete_billing_event(text,text,uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.fail_billing_event(text,text,uuid,text) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.get_user_plan(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.list_transactions_cursor(uuid,text[],timestamptz,timestamptz,integer,timestamptz,uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.pseudonymize_financial_subject(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.reconcile_credit_account(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.set_active_bursar_config(jsonb,text) TO service_role;
+GRANT EXECUTE ON FUNCTION bursar.unset_user_plan(uuid) TO service_role;
+
 REVOKE ALL ON FUNCTION bursar._upsert_billing_provider_ref(p_resource_type text, p_provider text, p_price_id text, p_product_id text, p_variant_id text, p_lookup_key text, p_resource_key text) FROM PUBLIC;
 GRANT ALL ON FUNCTION bursar._upsert_billing_provider_ref(p_resource_type text, p_provider text, p_price_id text, p_product_id text, p_variant_id text, p_lookup_key text, p_resource_key text) TO service_role;
 
@@ -552,16 +577,16 @@ GRANT ALL ON FUNCTION bursar.upsert_billing_dispute(p_provider text, p_provider_
 -- Name: FUNCTION upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor integer, p_amount_due_minor integer, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb); Type: ACL; Schema: bursar; Owner: -
 --
 
-REVOKE ALL ON FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor integer, p_amount_due_minor integer, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb) FROM PUBLIC;
-GRANT ALL ON FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor integer, p_amount_due_minor integer, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb) TO service_role;
+REVOKE ALL ON FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor bigint, p_amount_due_minor bigint, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor bigint, p_amount_due_minor bigint, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb) TO service_role;
 
 
 --
 -- Name: FUNCTION upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor integer, p_tax_minor integer, p_currency text, p_purpose text, p_metadata jsonb); Type: ACL; Schema: bursar; Owner: -
 --
 
-REVOKE ALL ON FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor integer, p_tax_minor integer, p_currency text, p_purpose text, p_metadata jsonb) FROM PUBLIC;
-GRANT ALL ON FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor integer, p_tax_minor integer, p_currency text, p_purpose text, p_metadata jsonb) TO service_role;
+REVOKE ALL ON FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor bigint, p_tax_minor bigint, p_currency text, p_purpose text, p_metadata jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor bigint, p_tax_minor bigint, p_currency text, p_purpose text, p_metadata jsonb) TO service_role;
 
 
 --
@@ -576,8 +601,8 @@ GRANT ALL ON FUNCTION bursar.upsert_billing_preferences(p_user_id uuid, p_auto_r
 -- Name: FUNCTION upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor integer, p_currency text, p_reason text, p_metadata jsonb); Type: ACL; Schema: bursar; Owner: -
 --
 
-REVOKE ALL ON FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor integer, p_currency text, p_reason text, p_metadata jsonb) FROM PUBLIC;
-GRANT ALL ON FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor integer, p_currency text, p_reason text, p_metadata jsonb) TO service_role;
+REVOKE ALL ON FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor bigint, p_currency text, p_reason text, p_metadata jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor bigint, p_currency text, p_reason text, p_metadata jsonb) TO service_role;
 
 
 --
@@ -593,6 +618,17 @@ GRANT ALL ON FUNCTION bursar.upsert_billing_subscription(p_state jsonb) TO servi
 --
 
 REVOKE ALL ON FUNCTION bursar.validate_bursar_config(p_config jsonb) FROM PUBLIC;
+
+REVOKE ALL ON FUNCTION bursar._upsert_billing_provider_ref(text,text,text,text,text,text,text) FROM service_role;
+REVOKE ALL ON FUNCTION bursar._walk_and_debit_buckets(uuid,numeric) FROM service_role;
+REVOKE ALL ON FUNCTION bursar.credits_add_internal(uuid,numeric,bursar.credit_tx_type,jsonb,text,text) FROM service_role;
+REVOKE ALL ON FUNCTION bursar.assign_credit_account() FROM service_role;
+REVOKE ALL ON FUNCTION bursar.assign_reservation_account() FROM service_role;
+REVOKE ALL ON FUNCTION bursar.grant_signup_bonus() FROM service_role;
+REVOKE ALL ON FUNCTION bursar.project_credit_transaction() FROM service_role;
+
+REVOKE ALL ON FUNCTION bursar.resolve_allowance_period(uuid, uuid, date) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION bursar.current_provider_environment() FROM PUBLIC, anon, authenticated, service_role;
 
 
 --

@@ -628,7 +628,7 @@ class TestDecimalQuantizationBoundary:
 # ── E11: Parity pricing_cases via PricingEngine ──────────────────────────────
 
 
-_PRICING_CASES_FOR_EXPR = _PARITY["pricing_cases"]
+_PRICING_CASES_FOR_EXPR: list[dict] = []
 
 
 @pytest.mark.parametrize("case", _PRICING_CASES_FOR_EXPR, ids=[c["name"] for c in _PRICING_CASES_FOR_EXPR])

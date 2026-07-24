@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -67,6 +68,12 @@ class ProviderRef(BaseModel):
     price_id: str | None = None
     variant_id: str | None = None
     lookup_key: str | None = None
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "ProviderRef":
+        if not any((self.product_id, self.price_id, self.variant_id, self.lookup_key)):
+            raise ValueError("provider reference must include product_id, price_id, variant_id, or lookup_key")
+        return self
 
 
 class BillingCustomerInfo(BaseModel):
@@ -161,7 +168,7 @@ class CycleGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["cycle_grant"] = "cycle_grant"
-    credits: int = Field(ge=0)
+    credits: Decimal = Field(ge=0)
     bucket: str
     replace_prior: bool = True
 
@@ -180,16 +187,38 @@ class BillingOffer(BaseModel):
     valid_from: str | None = None
     valid_to: str | None = None
 
+    @model_validator(mode="after")
+    def validate_validity_window(self) -> "BillingOffer":
+        if self.valid_from is not None and self.valid_to is not None:
+            try:
+                if datetime.fromisoformat(self.valid_to.replace("Z", "+00:00")) <= datetime.fromisoformat(
+                    self.valid_from.replace("Z", "+00:00")
+                ):
+                    raise ValueError("valid_to must be later than valid_from")
+            except ValueError as exc:
+                if str(exc) == "valid_to must be later than valid_from":
+                    raise
+                raise ValueError("valid_from and valid_to must be ISO-8601 timestamps") from exc
+        return self
+
 
 class BillingCreditTopup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deposit_to: str
-    credits_per_unit: int = 1000
-    min_amount_minor: int = 500
-    max_amount_minor: int = 500000
+    credits_per_unit: Decimal = Field(default=Decimal("1000"), gt=0)
+    min_amount_minor: int = Field(default=500, ge=0)
+    max_amount_minor: int = Field(default=500000, ge=0)
     tax_behavior: Literal["exclude_tax", "include_tax"] = "exclude_tax"
     providers: dict[str, ProviderRef] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_amount_range(self) -> "BillingCreditTopup":
+        if self.max_amount_minor < self.min_amount_minor:
+            raise ValueError("max_amount_minor must be >= min_amount_minor")
+        if not self.credits_per_unit.is_finite():
+            raise ValueError("credits_per_unit must be finite")
+        return self
 
 
 class AutoRechargeTrigger(BaseModel):

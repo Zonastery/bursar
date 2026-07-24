@@ -1,6 +1,44 @@
 -- Name: _upsert_billing_provider_ref(text, text, text, text, text, text, text); Type: FUNCTION; Schema: bursar; Owner: -
 --
 
+CREATE FUNCTION bursar.resolve_allowance_period(
+  p_user_id uuid,
+  p_plan_id uuid,
+  p_requested_start date DEFAULT NULL
+)
+RETURNS TABLE(period_start date, period_end date)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO ''
+AS $$
+DECLARE
+  v_period text;
+  v_anchor date;
+  v_today date := (now() AT TIME ZONE 'UTC')::date;
+  v_today_year integer := extract(year FROM (now() AT TIME ZONE 'UTC'))::int;
+BEGIN
+  SELECT cp.allowance_period, COALESCE(uc.plan_assigned_at::date, v_today)
+  INTO v_period, v_anchor
+  FROM bursar.credit_plans cp
+  LEFT JOIN bursar.user_credits uc ON uc.plan_id = cp.id AND uc.user_id = p_user_id
+  WHERE cp.id = p_plan_id;
+  IF p_requested_start IS NOT NULL THEN
+    period_start := p_requested_start;
+  ELSIF v_period = 'rolling_30d' THEN
+    period_start := v_today - 29;
+  ELSIF v_period = 'anniversary' THEN
+    period_start := make_date(v_today_year, extract(month FROM v_anchor)::int, LEAST(extract(day FROM v_anchor)::int, extract(day FROM (date_trunc('month', v_today::timestamp) + interval '1 month - 1 day'))::int));
+    IF period_start > v_today THEN
+      period_start := make_date(extract(year FROM v_today)::int - 1, extract(month FROM v_anchor)::int, LEAST(extract(day FROM v_anchor)::int, extract(day FROM (date_trunc('month', (v_today - interval '1 year')::timestamp) + interval '1 month - 1 day'))::int));
+    END IF;
+  ELSE
+    period_start := date_trunc('month', v_today::timestamp)::date;
+  END IF;
+  period_end := CASE WHEN v_period = 'rolling_30d' THEN period_start + 29
+                     WHEN v_period = 'anniversary' THEN (period_start + interval '1 month - 1 day')::date
+                     ELSE (period_start + interval '1 month - 1 day')::date END;
+  RETURN NEXT;
+END;
+$$;
+
 CREATE FUNCTION bursar._upsert_billing_provider_ref(p_resource_type text, p_provider text, p_price_id text DEFAULT NULL::text, p_product_id text DEFAULT NULL::text, p_variant_id text DEFAULT NULL::text, p_lookup_key text DEFAULT NULL::text, p_resource_key text DEFAULT NULL::text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -13,7 +51,8 @@ DECLARE
     v_lookup_key TEXT := p_lookup_key;
 BEGIN
     SELECT id INTO v_ref_id FROM bursar.billing_provider_refs
-    WHERE provider = p_provider AND resource_type = p_resource_type
+    WHERE provider = p_provider AND environment = bursar.current_provider_environment()
+    AND resource_type = p_resource_type
     AND (
         (v_price_id IS NOT NULL AND price_id = v_price_id)
         OR (v_product_id IS NOT NULL AND product_id = v_product_id)
@@ -34,13 +73,92 @@ BEGIN
         WHERE id = v_ref_id;
     ELSE
         INSERT INTO bursar.billing_provider_refs (
-            provider, price_id, product_id, variant_id,
+            provider, environment, price_id, product_id, variant_id,
             lookup_key, resource_type, resource_key, active
         ) VALUES (
-            p_provider, v_price_id, v_product_id, v_variant_id,
+            p_provider, bursar.current_provider_environment(), v_price_id, v_product_id, v_variant_id,
             v_lookup_key, p_resource_type, COALESCE(p_resource_key, ''), true
         );
     END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION bursar.expire_credits(p_dry_run boolean DEFAULT false, p_user_id uuid DEFAULT NULL)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+  v_group record;
+  v_expired numeric(18,4);
+  v_expired_count integer := 0;
+  v_expired_amount numeric(18,4) := 0;
+  v_by_bucket jsonb := '{}'::jsonb;
+  v_account bursar.credit_accounts;
+  v_tx_id uuid;
+BEGIN
+  FOR v_group IN
+    SELECT l.account_id, l.bucket, sum(l.granted - l.consumed)::numeric(18,4) AS amount
+    FROM bursar.credit_lots l
+    WHERE l.consumed < l.granted
+      AND l.expires_at IS NOT NULL
+      AND l.expires_at <= now()
+      AND (p_user_id IS NULL OR EXISTS (
+        SELECT 1 FROM bursar.credit_accounts a
+        WHERE a.id = l.account_id AND a.user_id = p_user_id
+      ))
+    GROUP BY l.account_id, l.bucket
+    ORDER BY l.account_id, l.bucket
+  LOOP
+    SELECT * INTO v_account
+    FROM bursar.credit_accounts
+    WHERE id = v_group.account_id
+    FOR UPDATE;
+
+    IF v_account.id IS NULL OR v_account.account_type <> 'personal' OR v_account.user_id IS NULL THEN
+      CONTINUE;
+    END IF;
+
+    PERFORM 1 FROM bursar.credit_lots l
+    WHERE l.account_id = v_group.account_id
+      AND l.bucket = v_group.bucket
+      AND l.consumed < l.granted
+      AND l.expires_at IS NOT NULL
+      AND l.expires_at <= now()
+    FOR UPDATE;
+    SELECT sum(l.granted - l.consumed)::numeric(18,4) INTO v_expired
+    FROM bursar.credit_lots l
+    WHERE l.account_id = v_group.account_id
+      AND l.bucket = v_group.bucket
+      AND l.consumed < l.granted
+      AND l.expires_at IS NOT NULL
+      AND l.expires_at <= now()
+    ;
+
+    v_expired := COALESCE(v_expired, 0);
+    IF v_expired <= 0 THEN CONTINUE; END IF;
+    v_expired_count := v_expired_count + 1;
+    v_expired_amount := v_expired_amount + v_expired;
+    v_by_bucket := v_by_bucket || jsonb_build_object(v_group.bucket, COALESCE((v_by_bucket->>v_group.bucket)::numeric, 0) + v_expired);
+
+    IF NOT p_dry_run THEN
+      UPDATE bursar.user_credit_buckets
+      SET balance = balance - v_expired, updated_at = now()
+      WHERE user_id = v_account.user_id AND bucket_key = v_group.bucket;
+      UPDATE bursar.user_credits
+      SET balance = balance - v_expired, updated_at = now()
+      WHERE user_id = v_account.user_id;
+      INSERT INTO bursar.credit_transactions (user_id, amount, type, account_id, acting_user_id, metadata)
+      VALUES (v_account.user_id, -v_expired, 'adjustment', v_account.id, v_account.user_id,
+              jsonb_build_object('reason','credit_expired','expired_amount',v_expired,'bucket',v_group.bucket))
+      RETURNING id INTO v_tx_id;
+      UPDATE bursar.credit_lots
+      SET consumed = granted, updated_at = now()
+      WHERE account_id = v_group.account_id AND bucket = v_group.bucket
+        AND consumed < granted AND expires_at IS NOT NULL AND expires_at <= now();
+    END IF;
+  END LOOP;
+  RETURN jsonb_build_object('expired_count', v_expired_count, 'expired_amount', v_expired_amount, 'expired_by_bucket', v_by_bucket, 'dry_run', p_dry_run);
 END;
 $$;
 
@@ -139,9 +257,9 @@ BEGIN
     PERFORM bursar.validate_bursar_config(v_config);
     UPDATE bursar.bursar_config SET active = false WHERE active;
     UPDATE bursar.bursar_config SET active = true WHERE version = p_version;
-    PERFORM bursar.sync_plans_from_config(v_config, p_version);
-    PERFORM bursar.sync_buckets_from_config(v_config, p_version);
-    PERFORM bursar.sync_billing_from_config(v_config->'billing');
+    PERFORM bursar.sync_plans_from_config(bursar.internal_catalog_config_from_public(v_config), p_version);
+    PERFORM bursar.sync_buckets_from_config(bursar.internal_catalog_config_from_public(v_config), p_version);
+    PERFORM bursar.sync_billing_from_config(bursar.internal_catalog_config_from_public(v_config)->'billing');
     RETURN jsonb_build_object('id', v_target_id, 'version', p_version, 'active', true);
 END;
 $$;
@@ -465,7 +583,8 @@ BEGIN
         );
     END IF;
 
-    v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
+    SELECT period_start INTO v_period_start
+    FROM bursar.resolve_allowance_period(p_user_id, v_plan_id, p_period_start);
 
     -- Inclusive end-of-period date, derived from v_period_start (not `now()`,
     -- so a call for a past period reports that period's own end, not the
@@ -676,9 +795,15 @@ BEGIN
         END IF;
     END IF;
 
-    IF p_amount IS NULL OR NOT (p_amount = p_amount)
+    IF NOT bursar.is_finite_numeric(p_amount)
        OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric OR p_amount <= 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
+    END IF;
+    IF p_billing_mode NOT IN ('strict', 'overdraft') THEN
+        RETURN jsonb_build_object('error', 'invalid_billing_mode', 'billing_mode', p_billing_mode);
+    END IF;
+    IF p_ttl_seconds IS NULL OR p_ttl_seconds <= 0 OR p_max_concurrent IS NOT NULL AND p_max_concurrent <= 0 THEN
+        RETURN jsonb_build_object('error', 'invalid_lease_policy');
     END IF;
 
     -- Lock the balance row (and capture plan_id), creating it if missing.
@@ -697,7 +822,8 @@ BEGIN
     IF v_plan_id IS NOT NULL THEN
         SELECT allowance_amount INTO v_allowance_amount
         FROM bursar.credit_plans WHERE id = v_plan_id;
-        v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
+        SELECT period_start INTO v_period_start
+        FROM bursar.resolve_allowance_period(p_user_id, v_plan_id, p_period_start);
         SELECT COALESCE(SUM(usage), 0) INTO v_used
         FROM bursar.credit_usage_window
         WHERE user_id = p_user_id AND plan_id = v_plan_id AND billing_period = v_period_start;
@@ -874,7 +1000,7 @@ BEGIN
     -- PUBLIC/anon/authenticated below.
 
     -- Reject non-finite amounts (NaN / +-Infinity) outright.
-    IF p_amount IS NULL OR NOT (p_amount = p_amount) OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric THEN
+    IF NOT bursar.is_finite_numeric(p_amount) THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
@@ -889,6 +1015,8 @@ BEGIN
     -- tier_required/expires_at validation on a redelivered call — the
     -- original grant already happened; nothing further is validated.
     IF p_idempotency_key IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'credit-add:' || p_user_id::text || ':' || p_type::text || ':' || p_idempotency_key, 0));
         SELECT id, amount, COALESCE(metadata->>'bucket', 'default')
         INTO v_transaction_id, v_existing_amount, v_existing_bucket
         FROM bursar.credit_transactions
@@ -1089,7 +1217,7 @@ DECLARE
   v_window TIMESTAMPTZ;
   v_replay_amount NUMERIC;
 BEGIN
-  IF p_amount IS NULL OR p_amount <= 0 THEN
+  IF NOT bursar.is_finite_numeric(p_amount) OR p_amount <= 0 THEN
     RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
   END IF;
 
@@ -1240,7 +1368,7 @@ DECLARE
     v_bucket_breakdown       JSONB := '{}'::jsonb;
 BEGIN
     IF p_amount IS NULL
-       OR NOT (p_amount = p_amount)
+       OR NOT bursar.is_finite_numeric(p_amount)
        OR p_amount = 'Infinity'::numeric
        OR p_amount = '-Infinity'::numeric
        OR p_amount < 0 THEN
@@ -1290,7 +1418,8 @@ BEGIN
     IF NOT p_skip_allowance AND v_plan_id IS NOT NULL THEN
         SELECT allowance_amount INTO v_allowance_amount
         FROM bursar.credit_plans WHERE id = v_plan_id;
-        v_period_start := COALESCE(p_period_start, (date_trunc('month', now() AT TIME ZONE 'UTC'))::DATE);
+        SELECT period_start INTO v_period_start
+        FROM bursar.resolve_allowance_period(p_user_id, v_plan_id, p_period_start);
         SELECT COALESCE(SUM(usage), 0) INTO v_used
         FROM bursar.credit_usage_window
         WHERE user_id = p_user_id AND plan_id = v_plan_id AND billing_period = v_period_start;
@@ -1439,7 +1568,7 @@ $$;
 -- Name: expire_credits(boolean, uuid); Type: FUNCTION; Schema: bursar; Owner: -
 --
 
-CREATE FUNCTION bursar.expire_credits(p_dry_run boolean DEFAULT false, p_user_id uuid DEFAULT NULL::uuid) RETURNS jsonb
+CREATE FUNCTION bursar.expire_credits_legacy(p_dry_run boolean DEFAULT false, p_user_id uuid DEFAULT NULL::uuid) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$

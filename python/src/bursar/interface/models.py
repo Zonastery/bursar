@@ -10,13 +10,15 @@ BillingMode = Literal["strict", "overdraft"]
 
 
 class CreditMetadata(BaseModel, extra="allow"):
-    input_tokens: int | None = None
-    output_tokens: int | None = None
-    model: str | None = None
+    """Provider-neutral transaction context emitted for a usage charge."""
+
+    operation: str | None = None
+    measures: dict[str, Any] | None = None
+    dimensions: dict[str, str] | None = None
+    breakdown_total: str | None = None
     reference_type: str | None = None
     reference_id: str | None = None
     idempotency_key: str | None = None
-    flat_job: str | None = None
 
 
 class BalanceResult(BaseModel):
@@ -115,8 +117,14 @@ class OperationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     billing_mode: BillingMode = "strict"
-    max_concurrent: int | None = None
+    max_concurrent: int | None = Field(default=None, gt=0)
     overdraft_floor: Decimal | None = None
+
+    @model_validator(mode="after")
+    def validate_overdraft_floor(self) -> OperationPolicy:
+        if self.overdraft_floor is not None and (not self.overdraft_floor.is_finite() or self.overdraft_floor > 0):
+            raise ValueError("overdraft_floor must be finite and <= 0")
+        return self
 
 
 class Entitlement(BaseModel):
@@ -134,14 +142,26 @@ class Allowance(BaseModel):
     amount: Decimal = Field(default=Decimal(0), ge=0)
     period: Literal["calendar_month", "rolling_30d", "anniversary"] = "calendar_month"
 
+    @model_validator(mode="after")
+    def validate_amount(self) -> Allowance:
+        if not self.amount.is_finite():
+            raise ValueError("allowance amount must be finite")
+        return self
+
 
 class PlanSafety(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     billing_mode: BillingMode = "strict"
-    max_concurrent: int | None = None
+    max_concurrent: int | None = Field(default=None, gt=0)
     overdraft_floor: Decimal | None = None
     per_operation: dict[str, OperationPolicy] | None = None
+
+    @model_validator(mode="after")
+    def validate_overdraft_floor(self) -> PlanSafety:
+        if self.overdraft_floor is not None and (not self.overdraft_floor.is_finite() or self.overdraft_floor > 0):
+            raise ValueError("overdraft_floor must be finite and <= 0")
+        return self
 
 
 class PlanDefinition(BaseModel):
@@ -167,6 +187,10 @@ class BucketDefinition(BaseModel):
 
     @model_validator(mode="after")
     def _derive_expires(self) -> BucketDefinition:
+        if self.ttl_days is not None and self.ttl_days <= 0:
+            raise ValueError("ttl_days must be greater than zero")
+        if self.ttl_days is not None and self.expires is False:
+            raise ValueError("expires cannot be false when ttl_days is set")
         if self.ttl_days is not None:
             self.expires = True
         return self

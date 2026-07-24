@@ -22,7 +22,11 @@ Example::
     # Deduct credits for a usage event
     result = manager.deduct(
         user_id="user_abc",
-        metrics=UsageMetrics(model="claude-opus-4", input_tokens=500, output_tokens=200),
+        metrics=UsageMetrics(
+            operation="completion",
+            measures={"input_tokens": 500, "output_tokens": 200},
+            dimensions={"model": "claude-opus-4"},
+        ),
         idempotency_key="chat_42_turn_7",
     )
     print(f"Deducted {result.amount} credits, balance: {result.balance_after}")
@@ -40,7 +44,6 @@ from decimal import Decimal
 from typing import Any
 
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
-from bursar.config import ConfigError
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
@@ -187,7 +190,7 @@ class CreditsService:
             time (see :class:`LowBalanceConfig`).
         lazy_expiry: When ``True``, a per-user expiry sweep runs inline before
             every balance-authoritative read/write (``get_balance``,
-            ``get_bucket_balances``, ``deduct``, ``deduct_fixed``, ``deduct_team``,
+            ``get_bucket_balances``, ``deduct``, ``deduct``, ``deduct_team``,
             ``reserve``, ``settle``) so expired grants are invisible without
             waiting for the periodic cron ``sweep_expired_credits()``. Defaults
             to ``False`` (unchanged behavior — a background/cron sweep is the
@@ -840,17 +843,16 @@ class CreditsService:
         user_id: str | None = None,
     ) -> tuple[Decimal, str | None]:
         """Compute the credit cost and model from metrics, or pass a raw amount."""
-        if isinstance(metrics_or_amount, UsageMetrics):
-            engine = self._engine_for_user(user_id)
-            rate_overrides: dict[str, str] | None = None
-            if user_id is not None:
-                plan = self._store.get_user_plan(user_id)
-                raw_overrides = getattr(plan, "rate_overrides", None)
-                if raw_overrides:
-                    rate_overrides = {str(k): str(v) for k, v in raw_overrides.items()}
-            breakdown = engine.calculate(metrics_or_amount, rate_overrides=rate_overrides)
-            return breakdown.total, metrics_or_amount.model
-        return Decimal(metrics_or_amount), None
+        if not isinstance(metrics_or_amount, UsageMetrics):
+            return Decimal(metrics_or_amount), None
+
+        engine = self._engine_for_user(user_id)
+        rate_card: str | None = None
+        if user_id is not None:
+            plan = self._store.get_user_plan(user_id)
+            rate_card = engine.get_rate_card_for_plan(getattr(plan, "plan_id", None))
+        breakdown = engine.calculate(metrics_or_amount, rate_card=rate_card)
+        return breakdown.total, metrics_or_amount.dimensions.get("model")
 
     def _raise_lease_error(self, error: str, user_id: str, amount: Decimal) -> None:
         """Map a store business code to the coherent typed exception (M2)."""
@@ -988,7 +990,7 @@ class CreditsService:
 
         ``skip_allowance=True`` prevents the free inference allowance from being
         consumed at settle time. Use for fixed-cost operations reserved via the
-        lease pattern (mirrors the ``deduct_fixed`` / ``deduct`` ``skip_allowance``
+        lease pattern (mirrors the ``deduct`` / ``deduct`` ``skip_allowance``
         flag — Fix 7 / #4).
 
         ``feature`` re-supplies the same feature name passed to :meth:`reserve`
@@ -1338,12 +1340,10 @@ class CreditsService:
         if metadata:
             base.update(metadata.model_dump(exclude_none=True))
         # System fields last (M7): these must not be overwritten by the caller.
-        base["input_tokens"] = metrics.input_tokens
-        base["output_tokens"] = metrics.output_tokens
-        base["model"] = metrics.model
-        base["breakdown_total"] = breakdown_total
-        if metrics.flat_job:
-            base["flat_job"] = metrics.flat_job
+        base["operation"] = metrics.operation
+        base["measures"] = {key: str(value) for key, value in metrics.measures.items()}
+        base["dimensions"] = dict(metrics.dimensions)
+        base["breakdown_total"] = str(breakdown_total)
         if idempotency_key:
             base["idempotency_key"] = idempotency_key
         return CreditMetadata(**base)
@@ -1361,7 +1361,7 @@ class CreditsService:
             user_id,
             {
                 "amount": cost,
-                "model": metrics.model,
+                "model": metrics.dimensions.get("model"),
                 "error": error,
                 "feature": feature,
             },
@@ -1401,7 +1401,7 @@ class CreditsService:
             metadata: Extra metadata to attach to the transaction.
             skip_allowance: When ``True``, bypass free-allowance consumption so
                 the full cost is charged to the balance. Pass ``True`` for
-                fixed-cost batch jobs (via ``deduct_fixed``) to keep inference
+                fixed-cost batch jobs (via ``deduct``) to keep inference
                 allowance uncontaminated (Fix 7).
             feature: Optional feature name naming a per-feature invocation-count
                 limit. When the user's plan has a ``FeatureLimit`` configured for
@@ -1427,7 +1427,8 @@ class CreditsService:
             )
 
         # 1) Calculate cost — exact Decimal, NO truncation (H1).
-        breakdown = self._engine.calculate(metrics)
+        plan = self._store.get_user_plan(user_id)
+        breakdown = self._engine.calculate(metrics, rate_card=self._engine.get_rate_card_for_plan(plan.plan_id))
         cost = breakdown.total
 
         # 2) Short-circuit a zero (or non-positive) cost: nothing to charge.
@@ -1460,7 +1461,7 @@ class CreditsService:
             cost,
             idempotency_key=idempotency_key,
             min_balance=self._engine.min_balance,
-            model=metrics.model,
+            model=metrics.dimensions.get("model"),
             metadata=tx_meta,
             skip_allowance=skip_allowance,
             period_start=self._resolve_allowance_period_start(user_id),
@@ -1483,7 +1484,7 @@ class CreditsService:
                 "amount": result.amount,
                 "allowance_consumed": result.allowance_consumed,
                 "balance_after": result.balance_after,
-                "model": metrics.model,
+                "model": metrics.dimensions.get("model"),
             },
         )
 
@@ -1495,7 +1496,7 @@ class CreditsService:
                 {
                     "balance_after": result.balance_after,
                     "amount": result.amount,
-                    "model": metrics.model,
+                    "model": metrics.dimensions.get("model"),
                     "action": result.cap_warning,
                 },
             )
@@ -1511,7 +1512,7 @@ class CreditsService:
                     "feature": feature,
                     "balance_after": result.balance_after,
                     "amount": result.amount,
-                    "model": metrics.model,
+                    "model": metrics.dimensions.get("model"),
                     "action": result.feature_limit_warning,
                 },
             )
@@ -1693,7 +1694,7 @@ class CreditsService:
 
         Called as the first line of methods that gate real money movement or
         an authoritative balance read (``get_balance``, ``get_bucket_balances``,
-        ``deduct``, ``deduct_fixed``, ``deduct_team``, ``reserve``, ``settle``)
+        ``deduct``, ``deduct``, ``deduct_team``, ``reserve``, ``settle``)
         so expired grants are invisible without waiting for the periodic cron
         ``sweep_expired_credits()``. Deliberately NOT wired into advisory/
         analytics methods (``get_available``, ``can_afford``, ``spend_by_user``,
@@ -1748,60 +1749,3 @@ class CreditsService:
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window."""
         return self._store.aggregate_stats(start, end)
-
-    def deduct_fixed(
-        self,
-        user_id: str,
-        job_name: str,
-        idempotency_key: str | None = None,
-        metadata: CreditMetadata | None = None,
-        *,
-        use_allowance: bool = False,
-        required_feature: str | None = None,
-        feature: str | None = None,
-    ) -> DeductionResult:
-        """Shortcut for fixed-cost batch jobs (roadmap gen, topic gen, etc.).
-
-        Rejects an unknown / unconfigured ``job_name`` rather than silently
-        charging 0 credits (L1): the engine returns ``None`` for an unknown job,
-        which would otherwise become a "successful" free deduction.
-
-        ``use_allowance`` defaults to ``False``: fixed-cost operations (PDF
-        generation, training runs, …) and monthly free inference allowances are
-        separate budgets and must not cross-contaminate. Pass
-        ``use_allowance=True`` to bill fixed-cost jobs against the allowance
-        pool first instead.
-
-        ``required_feature`` checks the user's plan for boolean entitlement
-        (the plan's ``features`` dict), raising :exc:`FeatureNotEntitledError`
-        if absent. ``feature`` names a per-feature invocation-count limit
-        (the plan's ``features_limits`` dict) — passed through to :meth:`deduct`
-        for enforcement.
-
-        Raises:
-            PricingNotLoadedError: If pricing hasn't been loaded.
-            ValueError: If ``job_name`` is not a configured fixed-cost job.
-            FeatureNotEntitledError: If ``required_feature`` is not in the
-                user's plan.
-        """
-        self._maybe_lazy_expire(user_id)
-        if not self._engine:
-            raise PricingNotLoadedError(
-                "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
-            )
-        if self._engine.get_flat_job_cost(job_name) is None:
-            raise ConfigError(f"Unknown fixed-cost job: {job_name!r}")
-
-        if required_feature is not None:
-            check = self.check_feature(user_id, required_feature)
-            if not check.has_feature:
-                raise FeatureNotEntitledError(f"Feature {required_feature!r} is not entitled for user={user_id}")
-
-        return self.deduct(
-            user_id=user_id,
-            metrics=UsageMetrics(flat_job=job_name),
-            idempotency_key=idempotency_key,
-            metadata=metadata,
-            skip_allowance=not use_allowance,
-            feature=feature,
-        )

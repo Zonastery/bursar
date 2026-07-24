@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from bursar.providers._shared import call_billing_event_sink, parse_status
 from bursar.providers.types import (
     CheckoutParams,
@@ -17,6 +19,11 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
+
+if TYPE_CHECKING:
+    from bursar.providers.dodo.provider import DodoProvider
+    from bursar.providers.mock.provider import MockPaymentProvider
+    from bursar.providers.stripe.provider import StripeProvider
 
 
 def __getattr__(name: str):

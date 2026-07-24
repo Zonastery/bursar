@@ -1,48 +1,51 @@
-"""Pure data structures for agent usage telemetry.
+"""Provider-neutral usage input for the Bursar v1 pricing engine."""
 
-Consumed by ``PricingEngine.calculate()`` to produce a ``CostBreakdown``.
+from __future__ import annotations
 
-The expression namespace includes per-step ``METRIC_VARIABLES`` and a per-tool
-``calls`` variable that counts invocations of the current tool.
-"""
+from decimal import Decimal
+from typing import Any
 
-from pydantic import BaseModel, Field
-
-
-class ToolCall(BaseModel):
-    """A single tool invocation recorded during an agent step."""
-
-    name: str
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class UsageMetrics(BaseModel):
-    """Raw usage counters collected across one or more agent steps.
+    """One billable operation.
 
-    All integer fields default to 0 so callers can partially populate
-    the struct and rely on sensible zero-values.
-
-    The ``calls`` variable is available only in tool-scoped expressions
-    and reflects the number of times the current tool was invoked.
+    ``operation`` selects the configured operation.  ``measures`` are
+    non-negative numeric quantities used by price formulas; ``dimensions``
+    select an ordered price rule.  This keeps provider model names, images,
+    audio seconds and future AI workload attributes out of Bursar's schema.
     """
 
-    model: str | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    tool_calls: list[ToolCall] = Field(default_factory=list)
-    search_queries: int = 0
-    search_results: int = 0
-    web_search_calls: int = 0
-    code_exec_calls: int = 0
-    flat_job: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    operation: str
+    measures: dict[str, Decimal] = Field(default_factory=dict)
+    dimensions: dict[str, str] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("operation")
+    @classmethod
+    def validate_operation(cls, value: str) -> str:
+        if not value:
+            raise ValueError("operation must be non-empty")
+        return value
+
+    @field_validator("measures")
+    @classmethod
+    def validate_measures(cls, values: dict[str, Decimal]) -> dict[str, Decimal]:
+        for key, value in values.items():
+            if not key or not value.is_finite() or value < 0:
+                raise ValueError("usage measures must have non-empty names and finite non-negative values")
+        return values
+
+    @field_validator("dimensions")
+    @classmethod
+    def validate_dimensions(cls, values: dict[str, str]) -> dict[str, str]:
+        for key, value in values.items():
+            if not key or not value:
+                raise ValueError("usage dimensions must have non-empty names and values")
+        return values
 
 
-# Canonical metric-variable set exposed to pricing expressions. This is the
-# single authority used both to build the evaluation namespace (engine
-# ``_build_variables``) and to validate expression variable names at
-# config-load time (M5). Derived from ``UsageMetrics.model_fields`` so it
-# stays in sync automatically.
-METRIC_VARIABLES: frozenset[str] = frozenset(
-    name for name, field in UsageMetrics.model_fields.items() if name not in ("model", "flat_job")
-)
+METRIC_VARIABLES: frozenset[str] = frozenset()

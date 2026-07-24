@@ -29,6 +29,29 @@ CREATE TRIGGER credit_ledger_refund_lot_provenance AFTER INSERT ON bursar.credit
 -- Name: credit_transactions credit_transaction_account_assignment; Type: TRIGGER; Schema: bursar; Owner: -
 --
 
+CREATE OR REPLACE FUNCTION bursar.assign_reservation_account()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+  IF NEW.account_id IS NULL THEN
+    INSERT INTO bursar.credit_accounts (account_type, user_id)
+    VALUES ('personal', NEW.user_id)
+    ON CONFLICT DO NOTHING;
+    SELECT id INTO NEW.account_id
+    FROM bursar.credit_accounts
+    WHERE account_type = 'personal' AND user_id = NEW.user_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER credit_reservation_account_assignment
+BEFORE INSERT ON bursar.credit_reservations
+FOR EACH ROW EXECUTE FUNCTION bursar.assign_reservation_account();
+
 CREATE TRIGGER credit_transaction_account_assignment BEFORE INSERT ON bursar.credit_transactions FOR EACH ROW EXECUTE FUNCTION bursar.assign_credit_account();
 
 

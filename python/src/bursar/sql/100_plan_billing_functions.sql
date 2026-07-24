@@ -113,8 +113,7 @@ DECLARE
     v_existing_bucket_bd JSONB;
     v_bucket_breakdown JSONB := '{}'::jsonb;
 BEGIN
-    IF p_amount IS NULL OR NOT (p_amount = p_amount)
-       OR p_amount = 'Infinity'::numeric OR p_amount = '-Infinity'::numeric OR p_amount < 0 THEN
+    IF NOT bursar.is_finite_numeric(p_amount) OR p_amount < 0 THEN
         RETURN jsonb_build_object('error', 'invalid_amount', 'amount', p_amount);
     END IF;
 
@@ -198,22 +197,12 @@ BEGIN
     END IF;
     v_net := p_amount - v_consume;
 
-    -- Floor enforcement: clamp v_net so the post-settle balance stays ≥ floor.
-    -- strict / strict_prepaid → floor is p_min_balance (engine's min_balance).
-    -- overdraft → floor is the overdraft_floor stored on the lease (can be negative).
-    IF v_billing_mode IN ('strict', 'strict_prepaid') THEN
-        v_settle_floor := COALESCE(p_min_balance, 0);
-    ELSE
-        v_settle_floor := COALESCE(v_overdraft_floor, 0);
-    END IF;
-    v_max_debit := GREATEST(0, v_balance - v_settle_floor);
-    IF v_net > v_max_debit THEN
-        v_net := v_max_debit;
-        -- Re-clamp allowance consume so it doesn't exceed amount - net.
-        IF v_net < p_amount THEN
-            v_consume := LEAST(v_consume, p_amount - v_net);
-        END IF;
-    END IF;
+    -- Settlement records the complete actual cost. Admission floors protect
+    -- new work, but they must not silently erase overage after work completes.
+    v_settle_floor := CASE WHEN v_billing_mode = 'overdraft'
+                           THEN COALESCE(v_overdraft_floor, 0)
+                           ELSE COALESCE(p_min_balance, 0)
+                      END;
 
     -- Spend cap is ADVISORY at settle (never blocks): record the strongest breach.
     FOR v_cap IN
@@ -269,7 +258,7 @@ BEGIN
 
         v_metadata := COALESCE(p_metadata, '{}'::jsonb)
             || jsonb_strip_nulls(jsonb_build_object('idempotency_key', p_idempotency_key, 'model', p_model, 'feature', p_feature))
-            || jsonb_build_object('allowance_consumed', v_consume, 'balance_after', v_balance - v_net, 'bucket_breakdown', v_bucket_breakdown);
+            || jsonb_build_object('allowance_consumed', v_consume, 'requested_amount', p_amount, 'charged_amount', v_net, 'balance_after', v_balance - v_net, 'floor_breached', v_balance - v_net < v_settle_floor, 'bucket_breakdown', v_bucket_breakdown);
 
         UPDATE bursar.user_credits SET balance = balance - v_net, updated_at = now()
         WHERE user_id = p_user_id RETURNING balance INTO v_new_balance;
@@ -302,7 +291,10 @@ BEGIN
         'transaction_id', v_tx_id, 'amount', v_net, 'allowance_consumed', v_consume,
         'balance_after', v_new_balance, 'idempotent', false, 'cap_warning', v_cap_warning,
         'feature_limit_warning', v_feature_limit_warning,
-        'bucket_breakdown', v_bucket_breakdown
+        'bucket_breakdown', v_bucket_breakdown,
+        'requested_amount', p_amount,
+        'charged_amount', v_net,
+        'floor_breached', v_new_balance < v_settle_floor
     );
 END;
 $$;
@@ -429,7 +421,8 @@ DECLARE
     v_config_keys TEXT[];
 BEGIN
     IF p_config ? 'subscriptions' AND jsonb_typeof(p_config->'subscriptions') = 'object' THEN
-        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(p_config->'subscriptions') k;
+        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(COALESCE(p_config->'subscriptions', '{}'::jsonb)) k;
+        v_config_keys := COALESCE(v_config_keys, ARRAY[]::text[]);
 
         IF v_config_keys IS NOT NULL THEN
             UPDATE bursar.billing_offers SET status = 'archived', updated_at = now()
@@ -437,7 +430,8 @@ BEGIN
         END IF;
 
         UPDATE bursar.billing_provider_refs SET active = false, updated_at = now()
-        WHERE resource_type = 'offer';
+        WHERE resource_type = 'offer'
+          AND environment = bursar.current_provider_environment();
 
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'subscriptions')
         LOOP
@@ -452,7 +446,7 @@ BEGIN
                 COALESCE(v_item->>'interval', 'month'),
                 COALESCE((v_item->>'interval_count')::INTEGER, 1),
                 COALESCE(v_item#>>'{grant,mode}', 'allowance'),
-                (v_item#>>'{grant,credits}')::INTEGER,
+                (v_item#>>'{grant,credits}')::NUMERIC,
                 v_item#>>'{grant,bucket}',
                 COALESCE((v_item#>>'{grant,replace_prior}')::BOOLEAN, true),
                 (v_item->>'valid_from')::TIMESTAMPTZ,
@@ -486,7 +480,8 @@ BEGIN
     END IF;
 
     IF p_config ? 'topups' AND jsonb_typeof(p_config->'topups') = 'object' THEN
-        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(p_config->'topups') k;
+        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(COALESCE(p_config->'topups', '{}'::jsonb)) k;
+        v_config_keys := COALESCE(v_config_keys, ARRAY[]::text[]);
 
         IF v_config_keys IS NOT NULL THEN
             UPDATE bursar.billing_credit_topups SET status = 'archived', updated_at = now()
@@ -494,7 +489,8 @@ BEGIN
         END IF;
 
         UPDATE bursar.billing_provider_refs SET active = false, updated_at = now()
-        WHERE resource_type = 'topup';
+        WHERE resource_type = 'topup'
+          AND environment = bursar.current_provider_environment();
 
         FOR v_key, v_item IN SELECT * FROM jsonb_each(p_config->'topups')
         LOOP
@@ -505,7 +501,7 @@ BEGIN
             VALUES (
                 v_key,
                 v_item->>'deposit_to',
-                COALESCE((v_item->>'credits_per_unit')::INTEGER, 1000),
+                COALESCE((v_item->>'credits_per_unit')::NUMERIC, 1000),
                 COALESCE((v_item->>'min_amount_minor')::INTEGER, 500),
                 COALESCE((v_item->>'max_amount_minor')::INTEGER, 500000),
                 COALESCE(v_item->>'tax_behavior', 'exclude_tax')
@@ -558,14 +554,17 @@ BEGIN
 
     IF p_config #>> '{ledger,buckets}' IS NOT NULL
        AND jsonb_typeof(p_config #> '{ledger,buckets}') = 'object' THEN
+        UPDATE bursar.credit_buckets
+        SET is_default = false, allow_overdraft = false, updated_at = now()
+        WHERE status = 'active';
         SELECT array_agg(k) INTO v_config_keys
-        FROM jsonb_object_keys(p_config #> '{ledger,buckets}') k;
+        FROM jsonb_object_keys(COALESCE(p_config #> '{ledger,buckets}', '{}'::jsonb)) k;
+        v_config_keys := COALESCE(v_config_keys, ARRAY[]::text[]);
 
         IF v_config_keys IS NOT NULL THEN
             UPDATE bursar.credit_buckets
             SET status = 'retired', updated_at = now()
             WHERE bucket_key != ALL(v_config_keys)
-              AND config_version = v_version
               AND status = 'active';
         END IF;
 
@@ -620,7 +619,8 @@ DECLARE
     v_config_keys TEXT[];
 BEGIN
     IF p_config ? 'plans' AND jsonb_typeof(p_config->'plans') = 'object' THEN
-        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(p_config->'plans') k;
+        SELECT array_agg(k) INTO v_config_keys FROM jsonb_object_keys(COALESCE(p_config->'plans', '{}'::jsonb)) k;
+        v_config_keys := COALESCE(v_config_keys, ARRAY[]::text[]);
 
         IF v_config_keys IS NOT NULL THEN
             UPDATE bursar.credit_plans
@@ -730,7 +730,7 @@ DECLARE
 BEGIN
     SELECT user_id INTO v_existing_user
     FROM bursar.billing_customers
-    WHERE provider = p_provider AND provider_customer_id = p_provider_customer_id;
+ WHERE provider = p_provider AND provider_customer_id = p_provider_customer_id FOR UPDATE;
 
     IF v_existing_user IS NOT NULL AND v_existing_user <> p_user_id THEN
         RETURN jsonb_build_object(
@@ -741,9 +741,11 @@ BEGIN
 
     INSERT INTO bursar.billing_customers (provider, provider_customer_id, user_id, email)
     VALUES (p_provider, p_provider_customer_id, p_user_id, p_email)
-    ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
-        email = COALESCE(EXCLUDED.email, billing_customers.email),
-        updated_at = now();
+ ON CONFLICT (provider, provider_customer_id) DO UPDATE SET
+ user_id = COALESCE(billing_customers.user_id, EXCLUDED.user_id),
+ email = COALESCE(EXCLUDED.email, billing_customers.email),
+ updated_at = now()
+ WHERE billing_customers.user_id IS NULL OR billing_customers.user_id = EXCLUDED.user_id;
 
     RETURN jsonb_build_object('status', 'ok');
 END;
@@ -771,6 +773,7 @@ BEGIN
         COALESCE(p_metadata, '{}'::jsonb)
     )
     ON CONFLICT (provider, provider_dispute_id) DO UPDATE SET
+        user_id = COALESCE(billing_disputes.user_id, EXCLUDED.user_id),
         provider_payment_id = EXCLUDED.provider_payment_id,
         status = EXCLUDED.status,
         reason = EXCLUDED.reason,
@@ -787,7 +790,7 @@ $$;
 -- Name: upsert_billing_invoice(text, text, text, uuid, text, integer, integer, text, timestamp with time zone, timestamp with time zone, jsonb); Type: FUNCTION; Schema: bursar; Owner: -
 --
 
-CREATE FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor integer, p_amount_due_minor integer, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+CREATE FUNCTION bursar.upsert_billing_invoice(p_provider text, p_provider_invoice_id text, p_provider_subscription_id text, p_user_id uuid, p_status text, p_amount_paid_minor bigint, p_amount_due_minor bigint, p_currency text, p_period_start timestamp with time zone, p_period_end timestamp with time zone, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -806,6 +809,7 @@ BEGIN
         COALESCE(p_metadata, '{}'::jsonb)
     )
     ON CONFLICT (provider, provider_invoice_id) DO UPDATE SET
+        user_id = COALESCE(billing_invoices.user_id, EXCLUDED.user_id),
         provider_subscription_id = EXCLUDED.provider_subscription_id,
         status = EXCLUDED.status,
         amount_paid_minor = EXCLUDED.amount_paid_minor,
@@ -826,7 +830,7 @@ $$;
 -- Name: upsert_billing_payment(text, text, text, uuid, integer, integer, text, text, jsonb); Type: FUNCTION; Schema: bursar; Owner: -
 --
 
-CREATE FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor integer, p_tax_minor integer, p_currency text, p_purpose text, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+CREATE FUNCTION bursar.upsert_billing_payment(p_provider text, p_provider_payment_id text, p_provider_invoice_id text, p_user_id uuid, p_amount_minor bigint, p_tax_minor bigint, p_currency text, p_purpose text, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -843,6 +847,7 @@ BEGIN
         COALESCE(p_metadata, '{}'::jsonb)
     )
     ON CONFLICT (provider, provider_payment_id) DO UPDATE SET
+        user_id = COALESCE(billing_payments.user_id, EXCLUDED.user_id),
         provider_invoice_id = EXCLUDED.provider_invoice_id,
         amount_minor = EXCLUDED.amount_minor,
         tax_minor = EXCLUDED.tax_minor,
@@ -892,7 +897,7 @@ $$;
 -- Name: upsert_billing_refund(text, text, text, uuid, integer, text, text, jsonb); Type: FUNCTION; Schema: bursar; Owner: -
 --
 
-CREATE FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor integer, p_currency text, p_reason text, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+CREATE FUNCTION bursar.upsert_billing_refund(p_provider text, p_provider_refund_id text, p_provider_payment_id text, p_user_id uuid, p_amount_minor bigint, p_currency text, p_reason text, p_metadata jsonb DEFAULT NULL::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -909,6 +914,7 @@ BEGIN
         COALESCE(p_metadata, '{}'::jsonb)
     )
     ON CONFLICT (provider, provider_refund_id) DO UPDATE SET
+        user_id = COALESCE(billing_refunds.user_id, EXCLUDED.user_id),
         provider_payment_id = EXCLUDED.provider_payment_id,
         amount_minor = EXCLUDED.amount_minor,
         currency = EXCLUDED.currency,
@@ -938,7 +944,7 @@ BEGIN
     SELECT user_id INTO v_existing_user
     FROM bursar.billing_subscriptions
     WHERE provider = p_state->>'provider'
-      AND provider_subscription_id = p_state->>'provider_subscription_id';
+ AND provider_subscription_id = p_state->>'provider_subscription_id' FOR UPDATE;
 
     IF v_existing_user IS NOT NULL
        AND v_existing_user <> (p_state->>'user_id')::UUID THEN
@@ -983,7 +989,8 @@ BEGIN
         v_catalog_version,
         v_plan_version_id
     )
-    ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
+ ON CONFLICT (provider, provider_subscription_id) DO UPDATE SET
+ user_id = COALESCE(billing_subscriptions.user_id, EXCLUDED.user_id),
         provider_customer_id = COALESCE(EXCLUDED.provider_customer_id, billing_subscriptions.provider_customer_id),
         offer_key = COALESCE(EXCLUDED.offer_key, billing_subscriptions.offer_key),
         plan = COALESCE(EXCLUDED.plan, billing_subscriptions.plan),
@@ -996,7 +1003,8 @@ BEGIN
         metadata = CASE WHEN (p_state->>'metadata') IS NOT NULL THEN (p_state->>'metadata')::JSONB ELSE billing_subscriptions.metadata END,
         catalog_version = COALESCE(EXCLUDED.catalog_version, billing_subscriptions.catalog_version),
         plan_version_id = COALESCE(EXCLUDED.plan_version_id, billing_subscriptions.plan_version_id),
-        updated_at = now();
+ updated_at = now()
+ WHERE billing_subscriptions.user_id IS NULL OR billing_subscriptions.user_id = EXCLUDED.user_id;
 
     RETURN jsonb_build_object('status', 'ok');
 END;

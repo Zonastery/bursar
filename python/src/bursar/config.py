@@ -1,296 +1,405 @@
+"""The public Bursar pricing configuration contract.
+
+Version ``1`` intentionally has a single, compact vocabulary.  It models
+arbitrary billable operations, credit wallets, plans and provider-owned
+payment catalog references.  The module is deliberately independent from the
+SQL catalogue representation; the latter is an implementation detail.
+"""
+
+from __future__ import annotations
+
+import re
 from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from bursar.billing.models import BillingAutoRechargeConfig, BillingCreditTopup, BillingOffer
 from bursar.expr import ExpressionError, validate_expression
-from bursar.interface.models import BucketDefinition, PlanDefinition
-from bursar.metrics import METRIC_VARIABLES
 
-DEFAULT_TOOL_EXPR = "calls * 0"
+IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+PeriodUnit = Literal["day", "week", "month", "year"]
+PeriodAnchor = Literal["calendar", "plan_assignment", "rolling"]
+LimitAction = Literal["deny", "warn", "notify"]
+BillingMode = Literal["strict", "overdraft"]
 
 
 class ConfigError(ValueError):
-    """Raised on config parsing or validation failures."""
+    """Raised when a Bursar configuration is invalid."""
 
 
-class MeteringConfig(BaseModel):
+def _validate_identifier(value: str, path: str) -> None:
+    if not IDENTIFIER_RE.fullmatch(value):
+        raise ValueError(f"{path} must be a non-empty snake_case identifier")
+
+
+class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    models: dict[str, str]
-    tools: dict[str, str] = Field(default_factory=lambda: {"*": DEFAULT_TOOL_EXPR})
-    search: str | None = None
-    cache_discount: str | None = None
-    flat_jobs: dict[str, Decimal] = Field(default_factory=dict)
 
-    @field_validator("flat_jobs")
+class Period(StrictModel):
+    unit: PeriodUnit
+    count: int = Field(default=1, ge=1)
+    anchor: PeriodAnchor = "calendar"
+    timezone: str = "UTC"
+
+    @field_validator("timezone")
     @classmethod
-    def validate_flat_jobs_non_negative(cls, v: dict[str, Decimal]) -> dict[str, Decimal]:
-        for job_name, amount in v.items():
-            if amount < 0:
-                raise ValueError(f"metering.flat_jobs.{job_name} must be >= 0, got {amount}")
-        return v
+    def validate_timezone(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("timezone must be non-empty")
+        return value
 
 
-class SignupGrant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class OperationDefinition(StrictModel):
+    measures: list[str] = Field(default_factory=list)
+    dimensions: list[str] = Field(default_factory=list)
 
-    amount: int = Field(ge=0)
+    @field_validator("measures", "dimensions")
+    @classmethod
+    def validate_names(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("operation measures and dimensions must not contain duplicates")
+        for value in values:
+            _validate_identifier(value, "operation measure/dimension")
+        return values
+
+
+class DimensionMatcher(StrictModel):
+    exact: str | None = None
+    prefix: str | None = None
+
+    @model_validator(mode="after")
+    def validate_matcher(self) -> DimensionMatcher:
+        if (self.exact is None) == (self.prefix is None):
+            raise ValueError("a dimension matcher requires exactly one of exact or prefix")
+        if self.exact is not None and not self.exact:
+            raise ValueError("dimension matcher exact must be non-empty")
+        if self.prefix is not None and not self.prefix:
+            raise ValueError("dimension matcher prefix must be non-empty")
+        return self
+
+
+class PriceRule(StrictModel):
+    match: dict[str, DimensionMatcher] | None = None
+    default: bool = False
+    formula: str
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> PriceRule:
+        if self.default == bool(self.match):
+            raise ValueError("a price rule must be either a match rule or the default rule")
+        return self
+
+
+class RateCard(StrictModel):
+    extends: str | None = None
+    prices: dict[str, list[PriceRule]] = Field(default_factory=dict)
+
+
+class UsageConfig(StrictModel):
+    operations: dict[str, OperationDefinition]
+    rate_cards: dict[str, RateCard]
+
+    @model_validator(mode="after")
+    def validate_usage(self) -> UsageConfig:  # noqa: C901
+        if not self.operations:
+            raise ValueError("usage.operations must not be empty")
+        if not self.rate_cards:
+            raise ValueError("usage.rate_cards must not be empty")
+        for operation, definition in self.operations.items():
+            _validate_identifier(operation, "usage.operations key")
+            overlap = set(definition.measures) & set(definition.dimensions)
+            if overlap:
+                raise ValueError(
+                    f"usage.operations.{operation} reuses names as measures and dimensions: {sorted(overlap)}"
+                )
+        for card_key, card in self.rate_cards.items():
+            _validate_identifier(card_key, "usage.rate_cards key")
+            if card.extends is not None and card.extends not in self.rate_cards:
+                raise ValueError(f"usage.rate_cards.{card_key}.extends references unknown rate card '{card.extends}'")
+            for operation, rules in card.prices.items():
+                if operation not in self.operations:
+                    raise ValueError(f"usage.rate_cards.{card_key}.prices references unknown operation '{operation}'")
+                if not rules:
+                    raise ValueError(f"usage.rate_cards.{card_key}.prices.{operation} must not be empty")
+                if not rules[-1].default or sum(rule.default for rule in rules) != 1:
+                    raise ValueError(
+                        f"usage.rate_cards.{card_key}.prices.{operation} must end with exactly one default rule"
+                    )
+                dimensions = set(self.operations[operation].dimensions)
+                measures = set(self.operations[operation].measures)
+                for index, rule in enumerate(rules):
+                    if rule.match and not set(rule.match).issubset(dimensions):
+                        unknown = sorted(set(rule.match) - dimensions)
+                        message = f"usage.rate_cards.{card_key}.prices.{operation}[{index}] "
+                        message += f"matches undeclared dimensions {unknown}"
+                        raise ValueError(message)
+                    try:
+                        validate_expression(rule.formula, known_variables=measures)
+                    except ExpressionError as exc:
+                        raise ValueError(
+                            f"invalid formula in usage.rate_cards.{card_key}.prices.{operation}[{index}]: {exc}"
+                        ) from exc
+
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(key: str) -> None:
+            if key in visiting:
+                raise ValueError(f"usage.rate_cards inheritance cycle includes '{key}'")
+            if key in visited:
+                return
+            visiting.add(key)
+            parent = self.rate_cards[key].extends
+            if parent is not None:
+                visit(parent)
+            visiting.remove(key)
+            visited.add(key)
+
+        for key in self.rate_cards:
+            visit(key)
+
+        def prices_operation(card_key: str, operation: str) -> bool:
+            card = self.rate_cards[card_key]
+            return operation in card.prices or (card.extends is not None and prices_operation(card.extends, operation))
+
+        for card_key in self.rate_cards:
+            for operation in self.operations:
+                if not prices_operation(card_key, operation):
+                    raise ValueError(f"usage.rate_cards.{card_key} has no price for operation '{operation}'")
+        return self
+
+
+class BucketDefinition(StrictModel):
+    expires_after: Period | None = None
+
+
+class SignupGrant(StrictModel):
+    amount: Decimal = Field(gt=0)
     bucket: str
 
 
-class LedgerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    min_balance: Decimal = Field(default=Decimal(0), ge=0)
+class CreditsConfig(StrictModel):
+    buckets: dict[str, BucketDefinition] = Field(default_factory=dict)
+    spend_order: list[str] = Field(default_factory=list)
+    default_bucket: str | None = None
+    overdraft_bucket: str | None = None
     signup_grant: SignupGrant | None = None
-    buckets: dict[str, BucketDefinition] | None = None
-
-
-class BillingSection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    currency: str = "USD"
-    subscriptions: dict[str, BillingOffer] = Field(default_factory=dict)
-    topups: dict[str, BillingCreditTopup] = Field(default_factory=dict)
-    auto_recharge: BillingAutoRechargeConfig | None = None
 
     @model_validator(mode="after")
-    def validate_auto_recharge(self) -> "BillingSection":
-        if self.auto_recharge is None:
+    def validate_credits(self) -> CreditsConfig:
+        if not self.buckets:
+            if self.spend_order or self.default_bucket is not None or self.overdraft_bucket is not None:
+                raise ValueError("credits bucket settings require credits.buckets")
+            if self.signup_grant is not None:
+                raise ValueError("credits.signup_grant requires credits.buckets")
             return self
-        policy = self.auto_recharge.default_policy
-        topup_key = policy.topup.key if policy is not None else self.auto_recharge.topup_key
-        if topup_key not in self.topups:
-            raise ValueError(f"billing.auto_recharge.topup_key references unknown top-up '{topup_key}'")
+        for key in self.buckets:
+            _validate_identifier(key, "credits.buckets key")
+        if set(self.spend_order) != set(self.buckets) or len(self.spend_order) != len(self.buckets):
+            raise ValueError("credits.spend_order must list every bucket exactly once")
+        if self.default_bucket not in self.buckets:
+            raise ValueError("credits.default_bucket must reference a configured bucket")
+        if self.overdraft_bucket is not None and self.overdraft_bucket not in self.buckets:
+            raise ValueError("credits.overdraft_bucket must reference a configured bucket")
+        if self.signup_grant is not None and self.signup_grant.bucket not in self.buckets:
+            raise ValueError("credits.signup_grant.bucket must reference a configured bucket")
         return self
 
 
-class BursarConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class IncludedCredits(StrictModel):
+    amount: Decimal = Field(ge=0)
+    reset: Period
 
-    version: Literal[1] = 1
-    metering: MeteringConfig
-    ledger: LedgerConfig = Field(default_factory=lambda: LedgerConfig())
-    plans: dict[str, PlanDefinition] | None = None
-    billing: BillingSection | None = None
 
-    @model_validator(mode="before")
+class FeatureLimit(StrictModel):
+    max_calls: int = Field(ge=0)
+    period: Period
+    action: LimitAction = "deny"
+
+
+class OperationSpendingPolicy(StrictModel):
+    max_concurrent: int | None = Field(default=None, gt=0)
+    mode: BillingMode | None = None
+    overdraft_limit: Decimal | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_overdraft(self) -> OperationSpendingPolicy:
+        if self.overdraft_limit is not None and self.mode not in (None, "overdraft"):
+            raise ValueError("overdraft_limit requires overdraft mode")
+        return self
+
+
+class SpendingPolicy(StrictModel):
+    mode: BillingMode = "strict"
+    overdraft_limit: Decimal | None = Field(default=None, ge=0)
+    max_concurrent: int | None = Field(default=None, gt=0)
+    operations: dict[str, OperationSpendingPolicy] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_overdraft(self) -> SpendingPolicy:
+        if self.overdraft_limit is not None and self.mode != "overdraft":
+            raise ValueError("plans.*.spending.overdraft_limit requires overdraft mode")
+        for key in self.operations:
+            _validate_identifier(key, "plans.*.spending.operations key")
+        return self
+
+
+class PlanDefinition(StrictModel):
+    display_name: str
+    rate_card: str | None = None
+    included_credits: IncludedCredits | None = None
+    features: dict[str, Any] = Field(default_factory=dict)
+    limits: dict[str, FeatureLimit] = Field(default_factory=dict)
+    spending: SpendingPolicy = Field(default_factory=SpendingPolicy)
+
+    @field_validator("display_name")
     @classmethod
-    def validate_structure(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        metering = data.get("metering")
-        if metering is None:
-            raise ConfigError("missing required section: metering")
-        if not isinstance(metering, dict):
-            raise ConfigError("metering must be a dict")
-        models = metering.get("models")
-        if not isinstance(models, dict) or len(models) == 0:
-            raise ConfigError("metering.models must be a non-empty dict")
-
-        plans = data.get("plans")
-        if plans is not None and isinstance(plans, dict):
-            plan_labels: list[str] = []
-            for plan_key, p in plans.items():
-                if isinstance(p, dict):
-                    label = p.get("label")
-                    if label is None:
-                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
-                else:
-                    label = getattr(p, "label", None)
-                    if label is None:
-                        raise ConfigError(f"plan '{plan_key}' is missing required 'label' field")
-                plan_labels.append(label)
-            if len(plan_labels) != len(set(plan_labels)):
-                raise ConfigError("duplicate plan labels in pricing config")
-
-        ledger = data.get("ledger") if isinstance(data.get("ledger"), dict) else None
-        cls._validate_buckets(ledger)
-        cls._reject_scalar_signup_grant(ledger)
-        return data
-
-    @staticmethod
-    def _reject_scalar_signup_grant(ledger: dict | None) -> None:
-        if not ledger:
-            return
-        raw = ledger.get("signup_grant")
-        if raw is None:
-            return
-        if not isinstance(raw, dict):
-            raise ConfigError(
-                "ledger.signup_grant must be an object { amount, bucket } — omit the key to disable signup grants"
-            )
-
-    @staticmethod
-    def _validate_buckets(ledger: dict | None) -> None:
-        buckets = (ledger or {}).get("buckets") if ledger else None
-        if buckets is None:
-            return
-        if not isinstance(buckets, dict):
-            raise ConfigError("ledger.buckets must be a dict")
-        if len(buckets) == 0:
-            raise ConfigError("ledger.buckets must not be an empty dict — omit the key entirely for no buckets")
-
-        default_count = 0
-        overdraft_count = 0
-        for b in buckets.values():
-            if isinstance(b, dict):
-                is_default = b.get("default", False)
-                allow_overdraft = b.get("allow_overdraft", False)
-                ttl = b.get("ttl_days")
-            else:
-                is_default = getattr(b, "default", False)
-                allow_overdraft = getattr(b, "allow_overdraft", False)
-                ttl = getattr(b, "ttl_days", None)
-            default_count += bool(is_default)
-            overdraft_count += bool(allow_overdraft)
-            if ttl is not None and ttl <= 0:
-                raise ConfigError("ledger.buckets ttl_days must be > 0 when set")
-        if default_count > 1:
-            raise ConfigError("at most one bucket may set default=True")
-        if overdraft_count > 1:
-            raise ConfigError("at most one bucket may set allow_overdraft=True")
+    def validate_display_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("plans.*.display_name must be non-empty")
+        return value
 
     @model_validator(mode="after")
-    def validate_grant_bucket_references(self) -> "BursarConfig":
-        buckets = self.ledger.buckets
-        bucket_keys = set(buckets.keys()) if buckets else set()
-
-        grant = self.ledger.signup_grant
-        if grant is not None:
-            if not bucket_keys:
-                raise ConfigError(
-                    "ledger.signup_grant requires ledger.buckets — "
-                    "define the target bucket before enabling signup grants"
-                )
-            assert buckets is not None  # narrowed by not bucket_keys above
-            if grant.bucket not in bucket_keys:
-                raise ConfigError(
-                    f"ledger.signup_grant.bucket references unknown bucket '{grant.bucket}' "
-                    f"(must be one of {sorted(bucket_keys)})"
-                )
-            target = buckets[grant.bucket]
-            if target.expires and target.ttl_days is None:
-                raise ConfigError(
-                    f"ledger.buckets.{grant.bucket} expires but has no ttl_days — "
-                    "signup grants into expiring buckets require ttl_days"
-                )
-
-        billing = self.billing
-        if billing is None or not bucket_keys:
-            return self
-
-        for offer_key, offer in billing.subscriptions.items():
-            cycle = offer.grant
-            if cycle.mode == "cycle_grant" and cycle.bucket not in bucket_keys:
-                raise ConfigError(
-                    f"billing.subscriptions.{offer_key}.grant.bucket references unknown bucket "
-                    f"'{cycle.bucket}' (must be one of {sorted(bucket_keys)})"
-                )
-
-        for topup_key, topup in billing.topups.items():
-            if topup.deposit_to not in bucket_keys:
-                raise ConfigError(
-                    f"billing.topups.{topup_key}.deposit_to references unknown bucket "
-                    f"'{topup.deposit_to}' (must be one of {sorted(bucket_keys)})"
-                )
-
+    def validate_plan(self) -> PlanDefinition:
+        for key in self.features:
+            _validate_identifier(key, "plans.*.features key")
+        for key in self.limits:
+            _validate_identifier(key, "plans.*.limits key")
         return self
 
-    @model_validator(mode="after")
-    def validate_plan_references(self) -> "BursarConfig":
-        billing = self.billing
-        if billing is not None and billing.subscriptions:
-            plans = self.plans or {}
-            for offer_key, offer in billing.subscriptions.items():
-                plan_ref = offer.plan
-                if plan_ref not in plans:
-                    raise ConfigError(f"billing.subscriptions.{offer_key}.plan references unknown plan '{plan_ref}'")
-        return self
+
+class ProviderLookup(StrictModel):
+    type: str
+    value: str
+
+    @field_validator("type", "value")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("provider lookup type and value must be non-empty")
+        return value
+
+
+class ProviderReference(StrictModel):
+    lookup: ProviderLookup
+
+
+class RenewalCredits(StrictModel):
+    amount: Decimal = Field(gt=0)
+    bucket: str
+    behavior: Literal["replace", "accumulate"]
+    on_subscription_end: Literal["expire", "keep"]
+
+
+class SubscriptionOffer(StrictModel):
+    plan: str
+    billing_period: Period
+    providers: dict[str, ProviderReference]
+    renewal_credits: RenewalCredits | None = None
+    stack_credits: bool = False
+
+
+class TopupOffer(StrictModel):
+    credits: Decimal = Field(gt=0)
+    bucket: str
+    providers: dict[str, ProviderReference]
+
+
+class AutoRechargeTrigger(StrictModel):
+    balance_below: Decimal = Field(ge=0)
+
+
+class AutoRechargePurchase(StrictModel):
+    topup: str
+    quantity: int = Field(default=1, ge=1)
+
+
+class AutoRechargeLimit(StrictModel):
+    max_purchases: int = Field(ge=1)
+    period: Period
+
+
+class AutoRechargePolicy(StrictModel):
+    trigger: AutoRechargeTrigger
+    purchase: AutoRechargePurchase
+    limit: AutoRechargeLimit
+
+
+class PaymentsConfig(StrictModel):
+    subscriptions: dict[str, SubscriptionOffer] = Field(default_factory=dict)
+    topups: dict[str, TopupOffer] = Field(default_factory=dict)
+    auto_recharge: AutoRechargePolicy | None = None
+
+
+class BursarConfig(StrictModel):
+    version: Literal[1] = 1
+    usage: UsageConfig | None = None
+    credits: CreditsConfig = Field(default_factory=CreditsConfig)
+    plans: dict[str, PlanDefinition] = Field(default_factory=dict)
+    payments: PaymentsConfig | None = None
 
     @model_validator(mode="after")
-    def validate_rate_override_keys(self) -> "BursarConfig":
-        if not self.plans:
+    def validate_references(self) -> BursarConfig:  # noqa: C901
+        if self.usage is not None:
+            for key, plan in self.plans.items():
+                _validate_identifier(key, "plans key")
+                card = plan.rate_card
+                if card is not None and card not in self.usage.rate_cards:
+                    raise ValueError(f"plans.{key}.rate_card references unknown rate card '{card}'")
+                if plan.spending.mode == "overdraft" and self.credits.overdraft_bucket is None:
+                    raise ValueError(f"plans.{key}.spending overdraft mode requires credits.overdraft_bucket")
+        elif any(plan.rate_card is not None for plan in self.plans.values()):
+            raise ValueError("plans.*.rate_card requires usage")
+
+        payments = self.payments
+        if payments is None:
             return self
-        model_keys = set(self.metering.models.keys())
-        for plan_id, plan_def in self.plans.items():
-            if not plan_def.rate_overrides:
-                continue
-            for override_key in plan_def.rate_overrides:
-                if override_key != "*" and override_key not in model_keys:
-                    raise ConfigError(
-                        f"plans.{plan_id}.rate_overrides.{override_key} references unknown model "
-                        f"(must be one of {sorted(model_keys)} or '*')"
+        seen_refs: set[tuple[str, str, str]] = set()
+        for key, offer in payments.subscriptions.items():
+            _validate_identifier(key, "payments.subscriptions key")
+            if offer.plan not in self.plans:
+                raise ValueError(f"payments.subscriptions.{key}.plan references unknown plan '{offer.plan}'")
+            self._validate_provider_refs(f"payments.subscriptions.{key}", offer.providers, seen_refs)
+            if offer.renewal_credits is not None:
+                if offer.renewal_credits.bucket not in self.credits.buckets:
+                    raise ValueError(f"payments.subscriptions.{key}.renewal_credits.bucket references unknown bucket")
+                if self.plans[offer.plan].included_credits is not None and not offer.stack_credits:
+                    raise ValueError(
+                        f"payments.subscriptions.{key} combines included_credits and renewal_credits; "
+                        "set stack_credits: true"
                     )
+        for key, offer in payments.topups.items():
+            _validate_identifier(key, "payments.topups key")
+            if offer.bucket not in self.credits.buckets:
+                raise ValueError(f"payments.topups.{key}.bucket references unknown bucket")
+            self._validate_provider_refs(f"payments.topups.{key}", offer.providers, seen_refs)
+        if payments.auto_recharge is not None:
+            topup = payments.auto_recharge.purchase.topup
+            if topup not in payments.topups:
+                raise ValueError(f"payments.auto_recharge.purchase.topup references unknown top-up '{topup}'")
         return self
-
-    @model_validator(mode="after")
-    def validate_expressions(self) -> "BursarConfig":
-        known = set(METRIC_VARIABLES)
-        self._validate_metering_exprs(known)
-        self._validate_tool_exprs(known)
-        self._validate_metering_sections(known)
-        if self.plans:
-            self._validate_plan_exprs(known)
-        return self
-
-    def _validate_metering_exprs(self, known: set[str]) -> None:
-        for model_name, expr in self.metering.models.items():
-            self._check_expr(expr, f"metering.models.{model_name}", known)
-
-    def _validate_tool_exprs(self, known: set[str]) -> None:
-        tools_known = known | {"calls"}
-        for tool_name, expr in self.metering.tools.items():
-            self._check_expr(expr, f"metering.tools.{tool_name}", tools_known)
-
-    def _validate_metering_sections(self, known: set[str]) -> None:
-        for section_name, section_expr in (
-            ("metering.search", self.metering.search),
-            ("metering.cache_discount", self.metering.cache_discount),
-        ):
-            if section_expr is not None:
-                self._check_expr(section_expr, section_name, known)
-
-    def _validate_plan_exprs(self, known: set[str]) -> None:
-        for plan_id, plan_def in (self.plans or {}).items():
-            if plan_def.rate_overrides:
-                for model_key, expr in plan_def.rate_overrides.items():
-                    self._check_expr(expr, f"plans.{plan_id}.rate_overrides.{model_key}", known)
 
     @staticmethod
-    def _check_expr(expr: str, path: str, known: set[str]) -> None:
-        try:
-            validate_expression(expr, known_variables=known)
-        except ExpressionError as e:
-            raise ConfigError(f"invalid expression in {path}: {e}") from e
+    def _validate_provider_refs(path: str, refs: dict[str, ProviderReference], seen: set[tuple[str, str, str]]) -> None:
+        if not refs:
+            raise ValueError(f"{path}.providers must not be empty")
+        for provider, ref in refs.items():
+            _validate_identifier(provider, f"{path}.providers key")
+            key = (provider, ref.lookup.type, ref.lookup.value)
+            if key in seen:
+                raise ValueError(f"duplicate provider lookup {provider}/{ref.lookup.type}/{ref.lookup.value}")
+            seen.add(key)
 
 
-# Domain name for the complete document. BursarConfig remains an internal
-# compatibility name for existing storage and engine code.
-BursarConfig = BursarConfig
-
-
-def load_config_from_dict(data: dict) -> BursarConfig:
+def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
     try:
         return BursarConfig.model_validate(data)
     except ValidationError as exc:
-        for err in exc.errors():
-            if err.get("type") != "value_error":
-                continue
-            msg = err.get("msg", "")
-            if not isinstance(msg, str):
-                continue
-            if msg.startswith("Value error, "):
-                raise ConfigError(msg.removeprefix("Value error, ")) from exc
-            # Custom ConfigError raised inside validators is serialized into ctx
-            ctx = err.get("ctx") or {}
-            if isinstance(ctx.get("error"), ConfigError):
-                raise ctx["error"] from exc
-        raise
+        errors = "; ".join(error.get("msg", "invalid configuration") for error in exc.errors())
+        raise ConfigError(errors) from exc
 
 
-def canonical_bursar_config_dict(data: dict) -> dict:
-    """Validate and return a canonical snake_case config dict for persistence."""
-    return load_config_from_dict(data).model_dump(mode="json")
+def canonical_bursar_config_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate and return the canonical public v1 config document."""
+    return load_config_from_dict(data).model_dump(mode="json", exclude_none=True)

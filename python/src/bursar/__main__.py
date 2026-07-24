@@ -195,8 +195,22 @@ def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
         except ImportError:
             print("PyYAML required for .yaml files: pip install bursar[postgres]", file=sys.stderr)
             raise SystemExit(1) from None
+
+        class _StrictYamlLoader(yaml.SafeLoader):
+            pass
+
+        def _construct_mapping(loader: Any, node: Any, deep: bool = False) -> dict[Any, Any]:
+            mapping: dict[Any, Any] = {}
+            for key_node, value_node in node.value:
+                key = loader.construct_object(key_node, deep=deep)
+                if key in mapping:
+                    raise yaml.YAMLError(f"duplicate key: {key!r}")
+                mapping[key] = loader.construct_object(value_node, deep=deep)
+            return mapping
+
+        _StrictYamlLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
         try:
-            return yaml.safe_load(raw)
+            return yaml.load(raw, Loader=_StrictYamlLoader)
         except yaml.YAMLError as exc:
             print(f"Invalid YAML in {source}: {exc}", file=sys.stderr)
             raise SystemExit(1) from None

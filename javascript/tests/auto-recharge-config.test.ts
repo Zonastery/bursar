@@ -1,43 +1,44 @@
 import { describe, expect, it } from "vitest";
+
 import { loadConfigFromDict } from "../src/config.js";
 
 describe("auto-recharge Bursar configuration", () => {
   const base = {
     version: 1,
-    metering: { models: { "*": "input_tokens + output_tokens" } },
-    billing: {
+    credits: {
+      buckets: { purchased: {} },
+      spend_order: ["purchased"],
+      default_bucket: "purchased",
+    },
+    payments: {
       topups: {
-        default: { deposit_to: "purchased", providers: { dodo: { product_id: "pdt_topup" } } },
+        small_pack: {
+          credits: 1000,
+          bucket: "purchased",
+          providers: { dodo: { lookup: { type: "product_id", value: "pdt_topup" } } },
+        },
       },
       auto_recharge: {
-        enabled: true,
-        threshold_credits: 5000,
-        topup_key: "default",
-        quantity: 1,
-        max_recharges: 3,
-        window_days: 30,
+        trigger: { balance_below: 5000 },
+        purchase: { topup: "small_pack", quantity: 1 },
+        limit: { max_purchases: 3, period: { unit: "day", count: 30, anchor: "rolling" } },
       },
     },
   };
 
-  it("parses the configured top-up policy", () => {
-    expect(loadConfigFromDict(base).billing?.autoRecharge).toEqual({
-      enabled: true,
-      thresholdCredits: 5000,
-      topupKey: "default",
-      quantity: 1,
-      maxRecharges: 3,
-      windowDays: 30,
-    });
+  it("parses one configured top-up policy", () => {
+    expect(loadConfigFromDict(base).payments?.autoRecharge?.trigger.balanceBelow.toString()).toBe(
+      "5000",
+    );
   });
 
-  it("rejects an auto-recharge policy that references an unknown top-up", () => {
+  it("rejects auto-recharge references to unknown top-ups", () => {
     expect(() =>
       loadConfigFromDict({
         ...base,
-        billing: {
-          ...base.billing,
-          auto_recharge: { ...base.billing.auto_recharge, topup_key: "missing" },
+        payments: {
+          ...base.payments,
+          auto_recharge: { ...base.payments.auto_recharge, purchase: { topup: "missing" } },
         },
       }),
     ).toThrow(/unknown top-up/);

@@ -108,6 +108,12 @@ ALTER TABLE ONLY bursar.credit_plan_migrations
 ALTER TABLE ONLY bursar.credit_reservations
     ADD CONSTRAINT credit_reservations_user_id_fkey FOREIGN KEY (user_id) REFERENCES bursar.user_credits(user_id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY bursar.credit_reservations
+    ADD CONSTRAINT credit_reservations_account_id_fkey FOREIGN KEY (account_id) REFERENCES bursar.credit_accounts(id);
+
+ALTER TABLE ONLY bursar.credit_reservations
+    ADD CONSTRAINT credit_reservations_settle_tx_id_fkey FOREIGN KEY (settle_tx_id) REFERENCES bursar.credit_transactions(id);
+
 
 --
 -- Name: credit_spend_caps credit_spend_caps_user_id_fkey; Type: FK CONSTRAINT; Schema: bursar; Owner: -
