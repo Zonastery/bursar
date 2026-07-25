@@ -337,7 +337,7 @@ for callers that need a reservation step.
 
 ## SQL Migrations
 
-10 bundled migrations (`DATABASE_URL=… bursar migrate`):
+8 grouped bundled migrations (`DATABASE_URL=… bursar migrate`):
 
 | File | Contents |
 |------|----------|

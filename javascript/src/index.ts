@@ -6,6 +6,7 @@ export { makeCostBreakdown } from "./breakdown.js";
 export type { UsageMetrics } from "./metrics.js";
 export type {
   BursarConfigData,
+  ParsedBursarConfig,
   UsageConfig,
   CreditsConfig,
   PlanDefinition as PricingPlanDefinition,

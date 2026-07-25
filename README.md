@@ -84,7 +84,7 @@ npm install @zonastery/bursar  # TypeScript
 bursar migrate "postgresql://user:pass@host:5432/db"
 ```
 
-Applies 15 SQL migrations — tables and RPCs for credits (including the atomic
+Applies 8 grouped SQL migrations — tables and RPCs for credits (including the atomic
 `deduct_with_allowance` deduction), pricing versions, plans, refunds, expiry,
 analytics, teams, spend caps, feature entitlements, transaction/usage listing,
 and `NUMERIC` (fractional) money columns.

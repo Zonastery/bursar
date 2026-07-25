@@ -681,6 +681,7 @@ export class PostgresStore extends CreditStore {
       return {
         userId,
         planId: null,
+        planKey: null,
         planLabel: null,
         allowanceAmount: ZERO,
         allowancePeriod: "calendar_month" as AllowancePeriod,
@@ -691,6 +692,7 @@ export class PostgresStore extends CreditStore {
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
+      planKey: (row.plan_key as string) ?? null,
       planLabel: (row.plan_label as string) ?? null,
       allowanceAmount: dec(row.allowance_amount),
       entitlements: parseFeatureLimits(row.entitlements),

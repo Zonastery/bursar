@@ -7,7 +7,7 @@ export class BillingPreferencesRepository {
   /** Get billing preferences for a user. Returns null if not found. */
   async get(userId: string): Promise<Record<string, unknown> | null> {
     const rows = await this.query(
-      `SELECT user_id, auto_recharge, overage_protection,
+      `SELECT user_id, auto_recharge,
               email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
        FROM bursar.billing_preferences WHERE user_id = $1`,
       [userId],
@@ -20,7 +20,6 @@ export class BillingPreferencesRepository {
   async upsert(prefs: {
     userId: string;
     autoRecharge?: boolean;
-    overageProtection?: boolean;
     emailNotifications?: boolean;
     usageAlerts?: boolean;
     invoiceReminders?: boolean;
@@ -28,15 +27,13 @@ export class BillingPreferencesRepository {
   }): Promise<void> {
     await this.query(
       `INSERT INTO bursar.billing_preferences (
-           user_id, auto_recharge, overage_protection,
+           user_id, auto_recharge,
            email_notifications, usage_alerts, invoice_reminders, usage_limit_alerts
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (user_id) DO UPDATE SET
            auto_recharge = COALESCE(EXCLUDED.auto_recharge,
                billing_preferences.auto_recharge),
-           overage_protection = COALESCE(EXCLUDED.overage_protection,
-               billing_preferences.overage_protection),
            email_notifications = COALESCE(EXCLUDED.email_notifications,
                billing_preferences.email_notifications),
            usage_alerts = COALESCE(EXCLUDED.usage_alerts,
@@ -49,7 +46,6 @@ export class BillingPreferencesRepository {
       [
         prefs.userId,
         prefs.autoRecharge ?? false,
-        prefs.overageProtection ?? true,
         prefs.emailNotifications ?? true,
         prefs.usageAlerts ?? true,
         prefs.invoiceReminders ?? false,

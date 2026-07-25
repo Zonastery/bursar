@@ -6,6 +6,7 @@ export const UserPlanRowSchema = z
   .object({
     user_id: z.string().optional(),
     plan_id: z.string().nullable().optional(),
+    plan_key: z.string().nullable().optional(),
     plan_label: z.string().nullable().optional(),
     allowance_amount: z
       .union([z.string(), z.number()] as const)

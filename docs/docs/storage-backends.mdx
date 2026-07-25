@@ -138,19 +138,13 @@ The bundled SQL files create the required schema in deterministic dependency ord
 
 | File | Creates |
 |------|---------|
-| `001_schema_and_types.sql` | Bursar schema and shared enum types |
-| `010_tables.sql` | Bursar-owned tables |
-| `020_constraints.sql` | Primary keys and table checks |
-| `030_indexes.sql` | Query and uniqueness indexes |
-| `040_foreign_keys.sql` | Relational foreign keys |
-| `050_policies.sql` | RLS policies |
-| `060_rls.sql` | RLS enablement |
-| `070_credit_functions.sql` | Core credit, team, allowance, cap, and expiry functions |
-| `080_billing_functions.sql` | Billing event, customer, subscription, and configuration functions |
-| `090_lease_catalog_functions.sql` | Signup, ledger, refund, lease, provider, and catalog functions |
-| `100_plan_billing_functions.sql` | Plan lifecycle, billing synchronization, and catalog validation functions |
-| `110_triggers.sql` | Projection, lot allocation, timestamp, and catalog triggers |
-| `120_privileges.sql` | Function execution ACLs |
-| `130_compatibility_hardening.sql` | Signup compatibility, account provenance, cursor compatibility, and final hardening |
+| `001_schema.sql` | Bursar schema and shared enum types |
+| `010_tables_and_relations.sql` | Tables, constraints, indexes, and foreign keys |
+| `020_security.sql` | Policies and row-level security |
+| `030_credit_functions.sql` | Core credit, team, allowance, cap, and expiry functions |
+| `040_billing_and_lease_functions.sql` | Billing, lease, catalog, and plan lifecycle functions |
+| `050_triggers_and_lifecycle.sql` | Triggers, auto-recharge, and subscription lifecycle |
+| `060_privileges.sql` | Function and table execution ACLs |
+| `070_hardening_and_catalog.sql` | Compatibility hardening and catalog validation |
 
-All DDL is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE`, plus dynamic `DROP FUNCTION`-by-name guards for RPCs whose signature changed across releases). Migrations return a `SetupResult` with `tables_created` (list of applied files), `rpcs_created`, and `errors`. Check `result.success` (true when `errors` is empty) before going further.
+The migration ledger makes setup idempotent: each bundled file is applied once and recorded. Migrations return a `SetupResult` with `tables_created` (list of applied files), `rpcs_created`, and `errors`. Check `result.success` (true when `errors` is empty) before going further.

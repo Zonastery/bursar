@@ -724,7 +724,6 @@ export class PostgresBillingStore extends BillingStore {
     return {
       userId: String(row.user_id),
       autoRecharge: Boolean(row.auto_recharge),
-      overageProtection: Boolean(row.overage_protection),
       emailNotifications: Boolean(row.email_notifications),
       usageAlerts: Boolean(row.usage_alerts),
       invoiceReminders: Boolean(row.invoice_reminders),
@@ -736,7 +735,6 @@ export class PostgresBillingStore extends BillingStore {
     await this.billingPreferences.upsert({
       userId: prefs.userId,
       autoRecharge: prefs.autoRecharge,
-      overageProtection: prefs.overageProtection,
       emailNotifications: prefs.emailNotifications,
       usageAlerts: prefs.usageAlerts,
       invoiceReminders: prefs.invoiceReminders,
@@ -757,8 +755,13 @@ export class PostgresBillingStore extends BillingStore {
     provider: string;
     topupKey: string;
     quantity: number;
+    windowStart: string;
     maxRecharges: number;
-    windowDays: number;
+    triggerBalance: number;
+    policySnapshot: Record<string, unknown>;
+    policyHash: string;
+    quotedAmountMinor: number | null;
+    currency: string | null;
   }): Promise<BillingAutoRechargeAttempt | null> {
     return this.billingAutoRecharge.claimAttempt(input);
   }

@@ -233,6 +233,7 @@ export interface AllowanceResult {
 export interface GetUserPlanResult {
   userId: string;
   planId: string | null;
+  planKey: string | null;
   planLabel: string | null;
   allowanceAmount: Decimal;
   allowancePeriod: AllowancePeriod | null;

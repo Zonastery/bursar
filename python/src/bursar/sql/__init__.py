@@ -1,4 +1,4 @@
-"""Bundled SQL migrations for bursar."""
+"""Bundled, grouped SQL migrations for bursar."""
 
 from pathlib import Path
 

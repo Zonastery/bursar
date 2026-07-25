@@ -1574,6 +1574,23 @@ export class CreditsService {
    * ``credits.refund_failed`` (no success event is ever emitted for a failed
    * refund).
    */
+  /** Deduct the configured fixed cost for one named job. */
+  async deductFlatJob(
+    userId: string,
+    jobName: string,
+    idempotencyKey?: string | null,
+    metadata?: CreditMetadata | null,
+    feature?: string | null,
+  ): Promise<DeductionResult> {
+    return this.deduct(
+      userId,
+      { operation: jobName, measures: { jobs: 1 } },
+      idempotencyKey,
+      metadata,
+      feature,
+    );
+  }
+
   async refundCredits(
     transactionId: string,
     amount?: Decimal | number,

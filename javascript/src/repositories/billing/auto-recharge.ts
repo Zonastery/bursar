@@ -86,18 +86,28 @@ export class BillingAutoRechargeRepository {
     provider: string;
     topupKey: string;
     quantity: number;
+    windowStart: string;
     maxRecharges: number;
-    windowDays: number;
+    triggerBalance: number;
+    policySnapshot: Record<string, unknown>;
+    policyHash: string;
+    quotedAmountMinor: number | null;
+    currency: string | null;
   }): Promise<BillingAutoRechargeAttempt | null> {
     const rows = await this.query(
-      "SELECT * FROM bursar.claim_auto_recharge_attempt($1, $2, $3, $4, $5, $6)",
+      "SELECT * FROM bursar.claim_auto_recharge_attempt($1, $2, $3, $4, $5::timestamptz, $6, $7, $8::jsonb, $9, $10, $11)",
       [
         input.userId,
         input.provider,
         input.topupKey,
         input.quantity,
+        input.windowStart,
         input.maxRecharges,
-        input.windowDays,
+        input.triggerBalance,
+        JSON.stringify(input.policySnapshot),
+        input.policyHash,
+        input.quotedAmountMinor,
+        input.currency,
       ],
     );
     return rows[0] ? attemptFromRow(rows[0] as Record<string, unknown>) : null;

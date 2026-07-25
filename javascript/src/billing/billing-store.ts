@@ -206,8 +206,13 @@ export abstract class BillingStore {
     provider: string;
     topupKey: string;
     quantity: number;
+    windowStart: string;
     maxRecharges: number;
-    windowDays: number;
+    triggerBalance: number;
+    policySnapshot: Record<string, unknown>;
+    policyHash: string;
+    quotedAmountMinor: number | null;
+    currency: string | null;
   }): Promise<BillingAutoRechargeAttempt | null>;
   abstract updateAutoRechargeAttempt(input: {
     id: string;

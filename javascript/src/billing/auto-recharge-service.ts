@@ -1,4 +1,5 @@
 import type { BillingService } from "./billing-service.js";
+import { loadConfigFromDict } from "../config.js";
 import type {
   BillingAutoRechargeConfig,
   BillingAutoRechargeProfile,
@@ -31,44 +32,23 @@ export class AutoRechargeService {
   private async policy(
     provider: PaymentProvider,
   ): Promise<(BillingAutoRechargeConfig & { productId: string }) | null> {
-    const raw = (await this.billing.getActiveBursarConfig()) ?? {};
-    const billing = (raw.billing ?? {}) as Record<string, unknown>;
-    const auto = (billing.auto_recharge ?? billing.autoRecharge ?? {}) as Record<string, unknown>;
-    if (auto.enabled === false || Object.keys(auto).length === 0) return null;
-    const defaultPolicy = (auto.default_policy ?? auto.defaultPolicy ?? {}) as Record<
-      string,
-      unknown
-    >;
-    const trigger = (defaultPolicy.trigger ?? {}) as Record<string, unknown>;
-    const topupPolicy = (defaultPolicy.topup ?? {}) as Record<string, unknown>;
-    const limit = (defaultPolicy.limit ?? {}) as Record<string, unknown>;
-    const topupKey = String(topupPolicy.key ?? auto.topup_key ?? auto.topupKey ?? "default");
-    const topups = (billing.topups ?? {}) as Record<string, unknown>;
-    const topup = (topups[topupKey] ?? {}) as Record<string, unknown>;
-    const refs = (topup.providers ?? {}) as Record<string, unknown>;
-    const ref = (refs[provider.provider] ?? {}) as Record<string, unknown>;
-    const productId = String(ref.price_id ?? ref.priceId ?? ref.product_id ?? ref.productId ?? "");
+    const raw = await this.billing.getActiveBursarConfig();
+    if (!raw) return null;
+    const config = loadConfigFromDict(raw);
+    const payments = config.payments;
+    const auto = payments?.autoRecharge;
+    if (!payments || !auto) return null;
+    const topupKey = auto.purchase.topup;
+    const topup = payments.topups[topupKey];
+    const productId = topup?.providers[provider.provider]?.lookup.value;
     if (!productId) return null;
     return {
-      enabled: auto.enabled !== false,
-      thresholdCredits: Number(
-        trigger.threshold_credits ??
-          trigger.thresholdCredits ??
-          auto.threshold_credits ??
-          auto.thresholdCredits ??
-          0,
-      ),
+      enabled: true,
+      thresholdCredits: Number(auto.trigger.balanceBelow),
       topupKey,
-      quantity: Number(topupPolicy.quantity ?? auto.quantity ?? 1),
-      maxRecharges: Number(
-        limit.max_charges ?? limit.maxCharges ?? auto.max_recharges ?? auto.maxRecharges ?? 3,
-      ),
-      windowDays:
-        String(limit.period ?? "") === "calendar_month"
-          ? 0
-          : Number(
-              limit.rolling_days ?? limit.rollingDays ?? auto.window_days ?? auto.windowDays ?? 30,
-            ),
+      quantity: auto.purchase.quantity,
+      maxRecharges: auto.limit.maxPurchases,
+      windowDays: auto.limit.period.unit === "month" ? 0 : auto.limit.period.count,
       productId,
     };
   }
@@ -80,19 +60,26 @@ export class AutoRechargeService {
     const policy = await this.policy(input.provider);
     if (!policy || !input.provider.previewSavedPaymentCharge) return null;
     const customer = await this.billing.getCustomerByUserId(input.userId, input.provider.provider);
+    if (!customer) return null;
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
     const paymentMethodId =
       profile?.paymentMethodId ??
-      (await input.provider.getDefaultPaymentMethod?.(customer?.providerCustomerId ?? ""))?.id;
-    if (!customer || !paymentMethodId) return null;
-    return input.provider.previewSavedPaymentCharge({
-      customerId: customer.providerCustomerId,
-      paymentMethodId,
-      productId: policy.productId,
-      quantity: policy.quantity,
-      metadata: {},
-      idempotencyKey: "auto-recharge-preview",
-    });
+      (await input.provider.getDefaultPaymentMethod?.(customer.providerCustomerId))?.id;
+    if (!paymentMethodId) return null;
+    try {
+      return await input.provider.previewSavedPaymentCharge({
+        customerId: customer.providerCustomerId,
+        paymentMethodId,
+        productId: policy.productId,
+        quantity: policy.quantity,
+        metadata: {},
+        idempotencyKey: "auto-recharge-preview",
+      });
+    } catch {
+      // A quote is informational; enabling consent must not depend on the
+      // provider's preview endpoint being available.
+      return null;
+    }
   }
 
   async getStatus(input: {
@@ -102,9 +89,15 @@ export class AutoRechargeService {
     const policy = await this.policy(input.provider);
     if (!policy) return null;
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
-    const methods = profile?.providerCustomerId
-      ? await input.provider.listPaymentMethods(profile.providerCustomerId)
-      : [];
+    let methods: Awaited<ReturnType<PaymentProvider["listPaymentMethods"]>> = [];
+    if (profile?.providerCustomerId) {
+      try {
+        methods = await input.provider.listPaymentMethods(profile.providerCustomerId);
+      } catch {
+        // The persisted profile remains authoritative after consent. Provider
+        // method metadata is optional display data and must not hide status.
+      }
+    }
     const method = methods.find((item) => item.id === profile?.paymentMethodId);
     const state = profile?.enabled ? profile.state : "disabled";
     const quote = await this.quote(input);
@@ -222,14 +215,29 @@ export class AutoRechargeService {
         await this.billing.upsertAutoRechargeProfile({ ...profile, armed: true });
       return { outcome: "above_threshold" };
     }
-    await this.quote({ userId: input.userId, provider: input.provider });
+    const quote = await this.quote({ userId: input.userId, provider: input.provider });
+    const now = new Date();
+    const windowStart =
+      policy.windowDays === 0
+        ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString()
+        : new Date(now.getTime() - policy.windowDays * 24 * 60 * 60 * 1000).toISOString();
+    const policySnapshot = {
+      thresholdCredits: policy.thresholdCredits,
+      topupKey: policy.topupKey,
+      quantity: policy.quantity,
+    };
     const attempt = await this.billing.claimAutoRechargeAttempt({
       userId: input.userId,
       provider: input.provider.provider,
       topupKey: policy.topupKey,
       quantity: policy.quantity,
+      windowStart,
       maxRecharges: policy.maxRecharges,
-      windowDays: policy.windowDays,
+      triggerBalance: input.balance,
+      policySnapshot,
+      policyHash: JSON.stringify(policySnapshot),
+      quotedAmountMinor: quote?.amountMinor ?? null,
+      currency: quote?.currency ?? null,
     });
     if (!attempt) return { outcome: "limit_reached" };
     const charge = await input.provider.chargeSavedPaymentMethod({

@@ -101,6 +101,7 @@ class UserPlanRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     user_id: str = ""
     plan_id: str | None = None
+    plan_key: str | None = None
     plan_label: str | None = None
     allowance_amount: str | Decimal | None = None
     allowance_period: str = "calendar_month"

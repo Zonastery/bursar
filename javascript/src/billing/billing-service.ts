@@ -47,8 +47,8 @@ export interface BillingServiceOptions {
   resolveUser?: ResolveUserFn | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
   cancelPriorProviders?: boolean;
-  /** Plan assigned when a paid subscription reaches a terminal state. */
-  fallbackPlanKey?: string | null;
+  /** Plan assigned when a paid subscription reaches terminal state. */
+  terminalPlanKey?: string | null;
   logger?: ProviderLogger | null;
 }
 
@@ -84,7 +84,7 @@ export class BillingService {
   private resolveUser: ResolveUserFn | null;
   private eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
   private cancelPriorProviders: boolean;
-  private fallbackPlanKey: string | null;
+  private terminalPlanKey: string | null;
   private logger: NormalizedProviderLogger;
   private handlerMap: Record<string, (event: BillingEvent) => Promise<BillingEventResult>>;
   private offerCache: LRUCache<string, OfferCacheValue, OfferContext>;
@@ -103,7 +103,7 @@ export class BillingService {
     this.resolveUser = options?.resolveUser ?? null;
     this.eventHandlers = options?.eventHandlers ?? {};
     this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
-    this.fallbackPlanKey = options?.fallbackPlanKey ?? null;
+    this.terminalPlanKey = options?.terminalPlanKey ?? null;
     this.logger = normalizeProviderLogger(options?.logger);
     this.offerCache = new LRUCache<string, OfferCacheValue, OfferContext>({
       max: 100,
@@ -241,7 +241,7 @@ export class BillingService {
     return this.store.getActiveBursarConfig();
   }
 
-  /** Moves subscriptions whose seven-day recovery window elapsed to the fallback plan. */
+  /** Moves subscriptions whose seven-day recovery window elapsed to the terminal plan. */
   async listCancellableProviderSubscriptionIds(userId: string): Promise<string[]> {
     const cancellableStatuses = new Set<BillingSubscriptionStatus>([
       SUBSCRIPTION_STATUS.ACTIVE,
@@ -306,8 +306,13 @@ export class BillingService {
     provider: string;
     topupKey: string;
     quantity: number;
+    windowStart: string;
     maxRecharges: number;
-    windowDays: number;
+    triggerBalance: number;
+    policySnapshot: Record<string, unknown>;
+    policyHash: string;
+    quotedAmountMinor: number | null;
+    currency: string | null;
   }): Promise<BillingAutoRechargeAttempt | null> {
     return this.store.claimAutoRechargeAttempt(input);
   }
@@ -1280,8 +1285,8 @@ export class BillingService {
 
   private async revokeSubscription(uid: string): Promise<void> {
     if (!this.provisioning) return;
-    if (this.fallbackPlanKey) {
-      await this.provisioning.setUserPlan(uid, this.fallbackPlanKey);
+    if (this.terminalPlanKey) {
+      await this.provisioning.setUserPlan(uid, this.terminalPlanKey);
       return;
     }
     await this.provisioning.unsetUserPlan(uid);
@@ -1292,7 +1297,7 @@ export class BillingService {
    * newer subscription for the same user is still active.
    */
   private async revokeIfCurrentSubscription(uid: string, subscriptionId: string): Promise<void> {
-    const current = await this.store.getUserSubscription(uid, ["active", "trialing"]);
+    const current = await this.store.getUserSubscription(uid, ["active", "trialing", "past_due"]);
     if (!current || current.providerSubscriptionId === subscriptionId) {
       await this.revokeSubscription(uid);
     }

@@ -18,6 +18,7 @@ import type {
   BillingOfferResult,
   BillingTopupResult,
   BillingCustomerRecord,
+  BillingSubscriptionChange,
   BillingSubscriptionState,
   CheckoutIntent,
   BillingInvoiceInfo,
@@ -57,6 +58,20 @@ export interface BillingService extends BillingEventSink {
   listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
   pseudonymizeFinancialSubject(userId: string): Promise<void>;
   listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
+  createBillingSubscriptionChange(
+    input: Omit<BillingSubscriptionChange, "id">,
+  ): Promise<BillingSubscriptionChange>;
+  getOpenBillingSubscriptionChange(
+    provider: string,
+    providerSubscriptionId: string,
+  ): Promise<BillingSubscriptionChange | null>;
+  updateBillingSubscriptionChange(
+    id: string,
+    update: Parameters<BillingServiceImpl["updateBillingSubscriptionChange"]>[1],
+  ): Promise<void>;
+  recordSubscriptionConflict(
+    input: Parameters<BillingServiceImpl["recordSubscriptionConflict"]>[0],
+  ): Promise<void>;
   upsertBillingSubscription(state: BillingSubscriptionState): Promise<void>;
   updateUserPreferences(prefs: BillingPreferences): Promise<void>;
   getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
@@ -66,8 +81,13 @@ export interface BillingService extends BillingEventSink {
     provider: string;
     topupKey: string;
     quantity: number;
+    windowStart: string;
     maxRecharges: number;
-    windowDays: number;
+    triggerBalance: number;
+    policySnapshot: Record<string, unknown>;
+    policyHash: string;
+    quotedAmountMinor: number | null;
+    currency: string | null;
   }): Promise<BillingAutoRechargeAttempt | null>;
   updateAutoRechargeAttempt(input: {
     id: string;

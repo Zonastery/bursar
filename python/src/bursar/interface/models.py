@@ -135,6 +135,14 @@ class Entitlement(BaseModel):
     period: Literal["daily", "weekly", "monthly", "yearly"] = "monthly"
     on_exceed: Literal["deny", "warn", "notify"] = "deny"
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_boolean_entitlement(cls, value: Any) -> Any:
+        """Accept the canonical boolean form for unlimited feature access."""
+        if isinstance(value, bool):
+            return {"value": value}
+        return value
+
 
 class Allowance(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -206,6 +214,7 @@ class AllowanceResult(BaseModel):
 class GetUserPlanResult(BaseModel):
     user_id: str
     plan_id: str | None = None
+    plan_key: str | None = None
     plan_label: str | None = None
     allowance_amount: Decimal = Decimal(0)
     allowance_period: Literal["calendar_month", "rolling_30d", "anniversary"] = "calendar_month"
