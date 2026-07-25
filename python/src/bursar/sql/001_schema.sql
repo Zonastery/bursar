@@ -1,3 +1,8 @@
+
+-- ============================================================================
+-- Source: 001_schema_and_types.sql
+-- ============================================================================
+
 --
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
@@ -77,3 +82,4 @@ CREATE TYPE bursar.credit_tx_type AS ENUM (
 
 
 --
+

@@ -1,3 +1,8 @@
+
+-- ============================================================================
+-- Source: 130_compatibility_hardening.sql
+-- ============================================================================
+
 -- PostgreSQL database dump complete
 
 -- This Bursar-owned trigger is intentionally attached to Better Auth's host
@@ -540,3 +545,167 @@ GRANT ALL ON FUNCTION bursar.list_transactions_cursor_with_total(uuid, text[], t
 REVOKE ALL ON FUNCTION bursar.list_usage_events_cursor(uuid, timestamptz, timestamptz, integer, timestamptz, uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION bursar.list_usage_events_cursor(uuid, timestamptz, timestamptz, integer, timestamptz, uuid) TO service_role;
 --
+
+
+-- ============================================================================
+-- Source: 140_subscription_hardening.sql
+-- ============================================================================
+
+-- Durable checkout coordination and a database-level subscription guard.
+-- A user may have one current subscription per provider; provider changes are
+-- reconciled explicitly by deactivate_other_provider_subscriptions().
+
+CREATE TABLE IF NOT EXISTS bursar.billing_checkout_intents (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    actor_key text NOT NULL,
+    provider text NOT NULL,
+    type text NOT NULL,
+    product_id text NOT NULL,
+    request_fingerprint text NOT NULL,
+    status text NOT NULL DEFAULT 'open',
+    provider_session_id text,
+    checkout_url text,
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT billing_checkout_intents_type CHECK (type IN ('subscription', 'credit_pack')),
+    CONSTRAINT billing_checkout_intents_status CHECK (status IN ('open', 'completed', 'failed', 'expired'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_checkout_intents_open_actor
+    ON bursar.billing_checkout_intents(actor_key)
+    WHERE status = 'open';
+
+CREATE INDEX IF NOT EXISTS idx_billing_checkout_intents_expiry
+    ON bursar.billing_checkout_intents(expires_at);
+
+CREATE TABLE IF NOT EXISTS bursar.billing_subscription_conflicts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    user_id uuid,
+    provider text NOT NULL,
+    duplicate_subscription_id text NOT NULL,
+    existing_subscription_id text,
+    event_id text,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    status text NOT NULL DEFAULT 'open',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    resolved_at timestamptz,
+    resolution text,
+    CONSTRAINT billing_subscription_conflicts_status CHECK (status IN ('open', 'resolved'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_subscription_conflicts_duplicate
+    ON bursar.billing_subscription_conflicts(provider, duplicate_subscription_id);
+
+-- This is intentionally provider-scoped: Bursar supports an explicit provider
+-- migration path, but two current subscriptions from the same provider are
+-- never a valid entitlement state. Run `bursar audit-subscriptions` and repair
+-- any historical duplicates before applying this migration.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_subscriptions_one_current_per_provider
+    ON bursar.billing_subscriptions(user_id, provider)
+    WHERE status IN ('active', 'trialing', 'past_due', 'incomplete');
+
+
+-- ============================================================================
+-- Source: 150_public_config_catalog.sql
+-- ============================================================================
+
+-- Public v1 catalog contract.  The persisted document is the YAML/SDK shape;
+-- this helper adapts it only while populating the pre-existing operational
+-- tables, which are intentionally migrated separately from catalog storage.
+
+CREATE OR REPLACE FUNCTION bursar.internal_catalog_config_from_public(p_config jsonb)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+SET search_path TO ''
+AS $$
+WITH buckets AS (
+  SELECT COALESCE(jsonb_object_agg(key,
+    jsonb_build_object(
+      'label', key,
+      'priority', ordinality - 1,
+      'default', key = p_config#>>'{credits,default_bucket}',
+      'expires', value ? 'expires_after',
+      'ttl_days', CASE value#>>'{expires_after,unit}'
+        WHEN 'day' THEN COALESCE((value#>>'{expires_after,count}')::int, 0)
+        WHEN 'week' THEN COALESCE((value#>>'{expires_after,count}')::int, 0) * 7
+        WHEN 'month' THEN COALESCE((value#>>'{expires_after,count}')::int, 0) * 30
+        WHEN 'year' THEN COALESCE((value#>>'{expires_after,count}')::int, 0) * 365
+      END)), '{}'::jsonb) AS value
+  FROM unnest(COALESCE(ARRAY(SELECT jsonb_array_elements_text(p_config#>'{credits,spend_order}')), ARRAY[]::text[]))
+       WITH ORDINALITY AS t(key, ordinality)
+  CROSS JOIN LATERAL (SELECT p_config#>ARRAY['credits', 'buckets', key] AS value) AS bucket
+), plans AS (
+  SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object(
+    'label', value->>'display_name',
+    'allowance', CASE WHEN value ? 'included_credits' THEN jsonb_build_object(
+      'amount', value#>>'{included_credits,amount}',
+      'period', CASE value#>>'{included_credits,reset,anchor}' WHEN 'rolling' THEN 'rolling_30d' WHEN 'plan_assignment' THEN 'anniversary' ELSE 'calendar_month' END) END,
+    'rate_overrides', '{}'::jsonb,
+    'entitlements',
+      COALESCE(value->'features', '{}'::jsonb) ||
+      COALESCE((
+        SELECT jsonb_object_agg(
+          limit_key,
+          jsonb_build_object(
+            'max_calls', limit_value->'max_calls',
+            'period', CASE limit_value#>>'{period,unit}'
+              WHEN 'day' THEN 'daily'
+              WHEN 'week' THEN 'weekly'
+              WHEN 'year' THEN 'yearly'
+              ELSE 'monthly'
+            END,
+            'on_exceed', limit_value->'action'
+          )
+        )
+        FROM jsonb_each(COALESCE(value->'limits', '{}'::jsonb)) AS limits(limit_key, limit_value)
+      ), '{}'::jsonb),
+    'safety', jsonb_build_object(
+      'billing_mode', COALESCE(value#>>'{spending,mode}', 'strict'),
+      'max_concurrent', value#>>'{spending,max_concurrent}',
+      'overdraft_floor', CASE WHEN value#>>'{spending,overdraft_limit}' IS NULL THEN NULL ELSE -((value#>>'{spending,overdraft_limit}')::numeric) END,
+      'per_operation', COALESCE(value#>'{spending,operations}', '{}'::jsonb)))), '{}'::jsonb) AS value
+  FROM jsonb_each(COALESCE(p_config->'plans', '{}'::jsonb))
+), subscriptions AS (
+  SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object(
+    'plan', value->>'plan',
+    'interval', value#>>'{billing_period,unit}',
+    'interval_count', COALESCE((value#>>'{billing_period,count}')::int, 1),
+    'grant', CASE WHEN value ? 'renewal_credits' THEN jsonb_build_object('mode','cycle_grant','credits',value#>>'{renewal_credits,amount}','bucket',value#>>'{renewal_credits,bucket}','replace_prior',(value#>>'{renewal_credits,behavior}') = 'replace') ELSE jsonb_build_object('mode','allowance') END,
+    'providers', COALESCE((SELECT jsonb_object_agg(provider, jsonb_build_object(ref#>>'{lookup,type}', ref#>>'{lookup,value}')) FROM jsonb_each(value->'providers') AS p(provider, ref)), '{}'::jsonb))), '{}'::jsonb) AS value
+  FROM jsonb_each(COALESCE(p_config#>'{payments,subscriptions}', '{}'::jsonb))
+), topups AS (
+  SELECT COALESCE(jsonb_object_agg(key, jsonb_build_object(
+    'deposit_to', value->>'bucket', 'credits_per_unit', value->>'credits',
+    'providers', COALESCE((SELECT jsonb_object_agg(provider, jsonb_build_object(ref#>>'{lookup,type}', ref#>>'{lookup,value}')) FROM jsonb_each(value->'providers') AS p(provider, ref)), '{}'::jsonb))), '{}'::jsonb) AS value
+  FROM jsonb_each(COALESCE(p_config#>'{payments,topups}', '{}'::jsonb))
+)
+SELECT jsonb_build_object(
+  'version', 1,
+  'metering', jsonb_build_object('models', jsonb_build_object('*','0')),
+  'ledger', jsonb_build_object('min_balance','0','buckets',(SELECT value FROM buckets),'signup_grant',p_config#>'{credits,signup_grant}'),
+  'plans', (SELECT value FROM plans),
+  'billing', jsonb_build_object('currency','USD','subscriptions',(SELECT value FROM subscriptions),'topups',(SELECT value FROM topups)));
+$$;
+
+CREATE OR REPLACE FUNCTION bursar.validate_bursar_config(p_config jsonb)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+BEGIN
+  IF p_config IS NULL OR jsonb_typeof(p_config) <> 'object' OR p_config->>'version' <> '1' THEN
+    RAISE EXCEPTION 'bursar config must be a version 1 object' USING ERRCODE='22023';
+  END IF;
+  IF p_config ? 'metering' OR p_config ? 'ledger' OR p_config ? 'billing' OR p_config ? '_bursar_public_config' THEN
+    RAISE EXCEPTION 'legacy or private catalog sections are not allowed' USING ERRCODE='22023';
+  END IF;
+  IF p_config ? 'usage' AND (jsonb_typeof(p_config#>'{usage,operations}') <> 'object' OR jsonb_typeof(p_config#>'{usage,rate_cards}') <> 'object') THEN
+    RAISE EXCEPTION 'usage.operations and usage.rate_cards must be objects' USING ERRCODE='22023';
+  END IF;
+  IF p_config ? 'credits' AND jsonb_typeof(p_config#>'{credits,buckets}') <> 'object' THEN
+    RAISE EXCEPTION 'credits.buckets must be an object' USING ERRCODE='22023';
+  END IF;
+  IF p_config ? 'plans' AND jsonb_typeof(p_config->'plans') <> 'object' THEN
+    RAISE EXCEPTION 'plans must be an object' USING ERRCODE='22023';
+  END IF;
+END;
+$$;

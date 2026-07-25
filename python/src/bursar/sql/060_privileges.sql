@@ -1,3 +1,8 @@
+
+-- ============================================================================
+-- Source: 120_privileges.sql
+-- ============================================================================
+
 -- Name: FUNCTION _upsert_billing_provider_ref(p_resource_type text, p_provider text, p_price_id text, p_product_id text, p_variant_id text, p_lookup_key text, p_resource_key text); Type: ACL; Schema: bursar; Owner: -
 --
 
@@ -632,3 +637,4 @@ REVOKE ALL ON FUNCTION bursar.current_provider_environment() FROM PUBLIC, anon, 
 
 
 --
+
