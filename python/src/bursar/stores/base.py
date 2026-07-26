@@ -12,7 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from bursar.interface.models import (
+from bursar.stores.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -31,10 +31,12 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    LedgerCursor,
+    LedgerEntry,
+    LedgerPage,
     MigratePlanUsersResult,
     RefundResult,
     ReleaseResult,
-    SetupResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
@@ -43,7 +45,6 @@ from bursar.interface.models import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
-    TransactionRow,
 )
 
 
@@ -99,21 +100,6 @@ class CreditStore(ABC):
         """Initialize the store."""
         super().__init__()
 
-    # ── Schema management ──────────────────────────────────────────────
-
-    @abstractmethod
-    def setup(self, database_url: str | None = None) -> SetupResult:
-        """Run bundled SQL migrations (tables, indexes, RPCs).
-
-        Idempotent — safe to call on every deploy.
-
-        Args:
-            database_url: Postgres connection string. Required for stores
-                that manage schema setup directly (``HttpxSupabaseStore``,
-                ``PostgresStore``). Ignored by in-memory stores.
-        """
-        ...
-
     # ── Runtime operations ─────────────────────────────────────────────
 
     @abstractmethod
@@ -143,7 +129,7 @@ class CreditStore(ABC):
                 ``is_default=True`` (raises if none is marked default).
             idempotency_key: Optional user-scoped replay key. A retried grant
                 with the same key (e.g. a webhook redelivered by the sender)
-                returns the original transaction's result rather than
+                returns the original entry's result rather than
                 granting a second time — no double-mutation, no second
                 ledger row. Follows the same replay idiom already used by
                 :meth:`deduct_with_allowance`/:meth:`settle_lease`/
@@ -208,7 +194,7 @@ class CreditStore(ABC):
                 allowance consumption for ``rolling_30d``/``anniversary`` plans.
                 ``None`` (the default) falls back to the current UTC calendar
                 month, matching the pre-WS9 behavior exactly.
-            feature: Optional feature name tagged onto the inserted transaction's
+            feature: Optional feature name tagged onto the inserted entry's
                 ``metadata.feature`` and, when ``feature_limit`` is given, checked
                 against it. ``None`` skips feature-limit enforcement/tagging
                 entirely (the manager only passes this when the caller named a
@@ -566,7 +552,7 @@ class CreditStore(ABC):
     @abstractmethod
     def refund_credits(
         self,
-        transaction_id: str,
+        entry_id: str,
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
@@ -574,13 +560,13 @@ class CreditStore(ABC):
         """Refund a previous credit deduction.
 
         Args:
-            transaction_id: The transaction to refund.
+            entry_id: The transaction to refund.
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
-            metadata: Extra metadata to attach to the refund transaction.
+            metadata: Extra metadata to attach to the refund entry.
 
         Returns:
-            ``RefundResult`` with the refund transaction details, or
+            ``RefundResult`` with the refund ledger entry details, or
             ``error`` set if the transaction doesn't exist or is already refunded.
         """
         ...
@@ -616,10 +602,10 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def revoke_credits_by_tx_type(
+    def revoke_credits_by_entry_type(
         self,
         user_id: str,
-        tx_type: str,
+        entry_type: str,
     ) -> dict:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
@@ -696,44 +682,34 @@ class CreditStore(ABC):
         """
         raise CapabilityNotSupportedError("aggregate_stats is not supported by this store")
 
-    # ── Transaction listing (optional capability — WS8) ──────────────────────
+    # ── Canonical ledger history ───────────────────────────────────────
 
-    def list_user_transactions(
+    def list_ledger_entries(
         self,
         user_id: str,
-        types: list[str] | None = None,
+        entry_types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> list[TransactionRow]:
-        """List credit transactions for a user with pagination.
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        """List account ledger history with a stable timestamp-plus-entry cursor."""
+        raise CapabilityNotSupportedError("list_ledger_entries not supported by this store")
 
-        Args:
-            user_id: The user to query.
-            types: Optional filter by transaction types (e.g. ["usage"]).
-            from_date: Optional start of date range (inclusive).
-            to_date: Optional end of date range (inclusive).
-            limit: Maximum rows to return (default 50).
-            offset: Number of rows to skip (default 0).
-
-        Returns:
-            List of ``TransactionRow`` objects. Each row includes ``total_count``
-            representing the total matching rows before pagination.
-        """
-        raise CapabilityNotSupportedError("list_user_transactions is not supported by this store")
-
-    def list_user_transactions_cursor(
+    def list_usage_entries(
         self,
         user_id: str,
-        types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        cursor: tuple[datetime | str, str] | None = None,
-    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
-        """List transaction history with a stable timestamp-plus-ID cursor."""
-        raise CapabilityNotSupportedError("list_user_transactions_cursor is not supported by this store")
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        """List usage ledger entries with the same cursor contract."""
+        return self.list_ledger_entries(user_id, ["usage"], from_date, to_date, limit, cursor)
+
+    def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
+        """Return one ledger entry when it belongs to the user account."""
+        raise CapabilityNotSupportedError("get_ledger_entry not supported by this store")
 
     # ── Team/shared balance pools (optional capability — WS8) ──────────────
 
@@ -815,6 +791,6 @@ class CreditStore(ABC):
                 the shared pool again (contract §2/H12).
 
         Returns:
-            ``TeamDeductionResult`` with transaction details.
+            ``TeamDeductionResult`` with ledger entry details.
         """
         raise CapabilityNotSupportedError("deduct_team is not supported by this store")

@@ -3,11 +3,7 @@
 Built on :mod:`argparse` so flags, ``--help``, exit codes and type coercion are
 handled by the stdlib rather than hand-rolled ``argv`` slicing.
 
-Connection secrets are taken from the environment, never the command line:
-
-* ``migrate`` reads ``DATABASE_URL`` (primary). A positional URL is accepted for
-  convenience but is discouraged — it leaks via ``ps``/shell history/CI logs.
-* ``pricing`` reads ``DATABASE_URL``.
+Connection secrets are taken from ``DATABASE_URL``, never the command line.
 """
 
 from __future__ import annotations
@@ -20,17 +16,15 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
 from bursar.expr import ExpressionError
 
-_T = TypeVar("_T")
-
 if TYPE_CHECKING:
-    from bursar.interface.base import CreditStore
-    from bursar.interface.models import BursarConfigResult
+    from bursar.stores.base import CreditStore
+    from bursar.stores.models import BursarConfigResult
 
 try:
     from dotenv import load_dotenv
@@ -88,7 +82,7 @@ def _require_extra(extra: str) -> None:
 
 def _is_transient(exc: Exception) -> bool:
     """True only for the PostgREST schema-cache / connection errors worth retrying."""
-    from bursar.interface.base import StoreError
+    from bursar.stores.base import StoreError
 
     if not isinstance(exc, StoreError):
         return False
@@ -96,7 +90,7 @@ def _is_transient(exc: Exception) -> bool:
     return any(marker in msg for marker in _TRANSIENT_MARKERS)
 
 
-def _retry_transient(op: Callable[[], _T], *, what: str) -> _T:
+def _retry_transient[T](op: Callable[[], T], *, what: str) -> T:
     """Run *op*, retrying ONLY transient PostgREST/connection errors (H7).
 
     A non-transient error (auth, validation, a write that already committed)
@@ -140,7 +134,7 @@ def _store_from_env(store_type: str | None = None) -> CreditStore:
     if not database_url:
         print("DATABASE_URL required", file=sys.stderr)
         raise SystemExit(1)
-    from bursar.interface.postgres import PostgresStore
+    from bursar.stores.postgres import PostgresStore
 
     return PostgresStore(database_url=database_url)
 
@@ -224,47 +218,16 @@ def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
 # ── Command handlers ─────────────────────────────────────────────────────────
 
 
-def _cmd_migrate(args: argparse.Namespace) -> None:
+def _cmd_migrate(_args: argparse.Namespace) -> None:
     _require_extra("postgres")
-
-    # DATABASE_URL (env) is primary; a positional arg is a discouraged fallback.
-    database_url = os.environ.get("DATABASE_URL") or args.database_url
-    if args.database_url:
-        print(
-            "warning: passing the database URL on the command line leaks the password "
-            "via 'ps'/shell history/CI logs — prefer the DATABASE_URL env var.",
-            file=sys.stderr,
-        )
+    database_url = os.environ.get("DATABASE_URL")
     if not database_url:
-        print(
-            "No database URL. Set DATABASE_URL (recommended) or pass it positionally:\n"
-            "  DATABASE_URL=postgresql://… bursar migrate",
-            file=sys.stderr,
-        )
+        print("DATABASE_URL is required", file=sys.stderr)
         raise SystemExit(1)
+    from bursar.stores.postgres import run_migrations
 
-    if args.baseline_head:
-        from bursar.interface.postgres import stamp_migrations
-
-        result = stamp_migrations(database_url)
-        for t in result.tables_created:
-            print(f"  + {t}  (stamped)")
-        print("Baseline complete.")
-        return
-
-    from bursar.interface.postgres import run_migrations
-
-    result = run_migrations(database_url)
-    for t in result.tables_created:
-        print(f"  + {t}")
-    for e in result.errors:
-        print(f"  - {e}", file=sys.stderr)
-
-    if result.success:
-        print("Migration complete.")
-    else:
-        print("Migration completed with errors.", file=sys.stderr)
-        raise SystemExit(1)
+    run_migrations(database_url)
+    print("Migrations applied successfully.")
 
 
 def _cmd_config_validate(args: argparse.Namespace) -> None:
@@ -375,38 +338,6 @@ def _cmd_config_schema(_args: argparse.Namespace) -> None:
     print(json.dumps(BursarConfig.model_json_schema(), indent=2))
 
 
-def _cmd_audit_subscriptions(args: argparse.Namespace) -> None:
-    """Report current same-user/provider subscription duplicates (read-only)."""
-    _require_extra("postgres")
-    import psycopg2.extras
-
-    database_url = os.environ.get("DATABASE_URL") or args.database_url
-    if not database_url:
-        print("DATABASE_URL required", file=sys.stderr)
-        raise SystemExit(1)
-    conn = psycopg2.connect(database_url)
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT user_id, provider, count(*)::int AS subscription_count,
-                       array_agg(provider_subscription_id ORDER BY created_at) AS subscription_ids
-                FROM bursar.billing_subscriptions
-                WHERE status IN ('active', 'trialing', 'past_due', 'incomplete')
-                GROUP BY user_id, provider
-                HAVING count(*) > 1
-                ORDER BY user_id, provider
-                """
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    print(json.dumps(rows, indent=2, default=str))
-
-
-# ── Parser construction ──────────────────────────────────────────────────────
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -425,45 +356,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate = sub.add_parser(
         "migrate",
         help="Run database migrations (bursar[postgres])",
-        description=(
-            "Run bundled SQL migrations. The connection string is read from the "
-            "DATABASE_URL environment variable (recommended). A positional URL is "
-            "accepted but discouraged because it leaks the password via the process "
-            "list, shell history and CI logs."
-        ),
-    )
-    p_migrate.add_argument(
-        "database_url",
-        nargs="?",
-        default=None,
-        metavar="DATABASE_URL",
-        help="(discouraged) Postgres URL; prefer the DATABASE_URL env var.",
-    )
-    p_migrate.add_argument(
-        "--baseline-head",
-        action="store_true",
-        default=False,
-        help=(
-            "Stamp the current HEAD migrations into the ledger without executing them. "
-            "Use when the bursar schema already exists but the migration ledger was "
-            "cleared (e.g. after supabase db reset). The caller attests the schema "
-            "is already at HEAD."
-        ),
+        description="Run bundled SQL migrations using DATABASE_URL.",
     )
     p_migrate.set_defaults(func=_cmd_migrate)
-
-    p_audit = sub.add_parser(
-        "audit-subscriptions",
-        help="Report duplicate current subscriptions before enabling the unique invariant",
-    )
-    p_audit.add_argument(
-        "database_url",
-        nargs="?",
-        default=None,
-        metavar="DATABASE_URL",
-        help="(discouraged) Postgres URL; prefer the DATABASE_URL env var.",
-    )
-    p_audit.set_defaults(func=_cmd_audit_subscriptions)
 
     # pricing
     p_config = sub.add_parser(

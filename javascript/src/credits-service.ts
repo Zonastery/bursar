@@ -37,19 +37,14 @@ import type {
   BursarConfigResult,
   RefundResult,
   ReleaseResult,
-  SetupResult,
   SpendByModelRow,
   SpendByUserRow,
   SweepResult,
   TeamDeductionResult,
   TopUserRow,
-  UserTransactionRow,
+  LedgerEntry,
 } from "./types.js";
-import type {
-  ListTransactionsOptions,
-  ListUsageEventsOptions,
-  PaginatedTransactions,
-} from "./types.js";
+import type { ListLedgerEntriesOptions, ListUsageEntriesOptions, LedgerPage } from "./types.js";
 import type { CreditStore } from "./stores/credit-store.js";
 import type { CreditEvent, CreditEventEmitter, CreditEventType } from "./stores/events.js";
 import type { UsageMetrics } from "./metrics.js";
@@ -333,11 +328,6 @@ export class CreditsService {
     return this.minBalanceDecimal().times(LOW_BALANCE_MULTIPLIER);
   }
 
-  /** Run bundled SQL migrations through the store. */
-  async setup(): Promise<SetupResult> {
-    return await this.store.setup();
-  }
-
   /** Load pricing from a raw dict and sync it. */
   async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
     const canonical = canonicalBursarConfigDict(data);
@@ -585,13 +575,16 @@ export class CreditsService {
   }
 
   /** Revoke all un-revoked credits of a given type for a user. */
-  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
-    return this.store.revokeCreditsByTxType(userId, txType);
+  async revokeCreditsByEntryType(
+    userId: string,
+    entryType: string,
+  ): Promise<Record<string, unknown>> {
+    return this.store.revokeCreditsByEntryType(userId, entryType);
   }
 
-  /** Fetch a single credit transaction by ID. Returns null when not found. */
-  async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
-    return await this.store.getTransaction(userId, transactionId);
+  /** Fetch a single ledger entry by ID. Returns null when not found. */
+  async getLedgerEntry(userId: string, entryId: string): Promise<LedgerEntry | null> {
+    return await this.store.getLedgerEntry(userId, entryId);
   }
 
   /** Add credits to a user's account. */
@@ -620,7 +613,7 @@ export class CreditsService {
       options?.idempotencyKey,
     );
     this.emit("credits.added", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: result.amount,
       newBalance: result.newBalance,
       type,
@@ -650,27 +643,31 @@ export class CreditsService {
     userId: string,
     amount: Decimal | number,
     options?: {
-      txType?: string;
+      entryType?: string;
       bucket?: string | null;
       metadata?: CreditMetadata | null;
     },
   ): Promise<AddCreditsResult> {
-    const txType = options?.txType ?? "adjustment";
-    this.logger.info("[CreditsService] deductCredits", { amount, txType, bucket: options?.bucket });
+    const entryType = options?.entryType ?? "adjustment";
+    this.logger.info("[CreditsService] deductCredits", {
+      amount,
+      entryType,
+      bucket: options?.bucket,
+    });
     const result = await this.store.addCredits(
       userId,
       toDecimal(amount).neg(),
-      txType,
+      entryType,
       options?.metadata ?? null,
       null,
       options?.bucket ?? undefined,
       undefined,
     );
     this.emit("credits.deducted", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: result.amount,
       newBalance: result.newBalance,
-      txType,
+      entryType,
     });
     return result;
   }
@@ -764,7 +761,7 @@ export class CreditsService {
     }
 
     this.emit("credits.cycle_renewed", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: amountDec,
       newBalance: result.newBalance,
       bucket,
@@ -1081,7 +1078,7 @@ export class CreditsService {
     const idempotencyKey = options?.idempotencyKey ?? null;
     const { amount, model } = await this.costOf(metricsOrAmount, userId);
 
-    // Build transaction metadata: caller fields first, system fields last (M7).
+    // Build ledger metadata: caller fields first, system fields last (M7).
     const txMeta: Record<string, unknown> = {};
     if (isAmount(metricsOrAmount)) {
       if (options?.metadata) {
@@ -1143,7 +1140,7 @@ export class CreditsService {
       idempotent: result.idempotent,
     });
     this.emit("credits.deducted", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: result.amount,
       allowanceConsumed: result.allowanceConsumed,
       balanceAfter: result.balanceAfter,
@@ -1447,7 +1444,7 @@ export class CreditsService {
     if (cost.lte(0)) {
       const balance = await this.store.getBalance(userId);
       const result: DeductionResult = {
-        transactionId: "",
+        entryId: "",
         userId,
         amount: new Decimal(0),
         allowanceConsumed: new Decimal(0),
@@ -1464,7 +1461,7 @@ export class CreditsService {
       return result;
     }
 
-    // Build transaction metadata: caller fields FIRST, system fields LAST so the
+    // Build ledger metadata: caller fields FIRST, system fields LAST so the
     // system fields win (contract §5 / M7).
     const meta: Record<string, unknown> = {};
     if (metadata) {
@@ -1526,7 +1523,7 @@ export class CreditsService {
 
     // Success — emit deducted, then any cap warning, then edge-triggered low-balance.
     this.emit("credits.deducted", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: result.amount,
       allowanceConsumed: result.allowanceConsumed,
       balanceAfter: result.balanceAfter,
@@ -1592,22 +1589,22 @@ export class CreditsService {
   }
 
   async refundCredits(
-    transactionId: string,
+    entryId: string,
     amount?: Decimal | number,
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
     const refundAmount = amount != null ? toDecimal(amount) : undefined;
-    this.logger.info("[CreditsService] refundCredits", { transactionId, refundAmount, reason });
-    const result = await this.store.refundCredits(transactionId, refundAmount, reason, metadata);
+    this.logger.info("[CreditsService] refundCredits", { entryId, refundAmount, reason });
+    const result = await this.store.refundCredits(entryId, refundAmount, reason, metadata);
 
     if (result.error) {
       this.logger.warn("[CreditsService] refundCredits failed", {
-        transactionId,
+        entryId,
         error: result.error,
       });
       this.emit("credits.refund_failed", result.userId, {
-        transactionId,
+        entryId,
         error: result.error,
         reason: reason ?? null,
       });
@@ -1615,8 +1612,8 @@ export class CreditsService {
     }
 
     this.emit("credits.refunded", result.userId, {
-      transactionId,
-      refundTransactionId: result.refundTransactionId,
+      entryId,
+      refundEntryId: result.refundEntryId,
       amount: result.amount,
       newBalance: result.newBalance,
       reason: reason ?? null,
@@ -1649,7 +1646,7 @@ export class CreditsService {
     if (cost.lte(0)) {
       const teamBal = await this.store.getTeamBalance(teamId);
       return {
-        transactionId: "",
+        entryId: "",
         teamId,
         userId,
         amount: new Decimal(0),
@@ -1673,7 +1670,7 @@ export class CreditsService {
       );
     }
     this.emit("credits.deducted", userId, {
-      transactionId: result.transactionId,
+      entryId: result.entryId,
       amount: result.amount,
       teamBalanceAfter: result.teamBalanceAfter,
       teamId,
@@ -1725,19 +1722,13 @@ export class CreditsService {
     return await this.store.spendByModel(start, end);
   }
 
-  /** List all user credit transactions with pagination. */
-  async listUserTransactions(
-    userId: string,
-    options?: ListTransactionsOptions,
-  ): Promise<PaginatedTransactions> {
-    return await this.store.listUserTransactions(userId, options);
+  /** List all user ledger entries with pagination. */
+  async listLedgerEntries(userId: string, options?: ListLedgerEntriesOptions): Promise<LedgerPage> {
+    return await this.store.listLedgerEntries(userId, options);
   }
 
-  async listUsageEvents(
-    userId: string,
-    options?: ListUsageEventsOptions,
-  ): Promise<PaginatedTransactions> {
-    return await this.store.listUsageEvents(userId, options);
+  async listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage> {
+    return await this.store.listUsageEntries(userId, options);
   }
 
   /** Top users by spend in a time window with limit. */

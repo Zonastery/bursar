@@ -4,7 +4,7 @@ import { DeductionRowSchema } from "./deduction.js";
 import type { DeductionRow } from "./deduction.js";
 import { pgBoolean, safeParse } from "./_shared.js";
 
-export const LeaseRowSchema = z
+const LeaseRowSchema = z
   .object({
     lease_id: z.string().optional(),
     user_id: z.string().optional(),
@@ -22,11 +22,11 @@ export const LeaseRowSchema = z
       .optional(),
     billing_mode: z.string().optional(),
     expires_at: z.string().optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 
-export const ReleaseRowSchema = z
+const ReleaseRowSchema = z
   .object({
     released: pgBoolean.nullable().optional(),
     reason: z.string().nullable().optional(),

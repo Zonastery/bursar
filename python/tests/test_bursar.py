@@ -5,9 +5,6 @@ from bursar.bursar import Bursar
 
 @dataclass
 class FakeCredits:
-    def setup(self):
-        return "setup"
-
     def load_pricing_from_store(self):
         return None
 
@@ -31,7 +28,6 @@ def test_bursar_create_owns_catalog_and_delegates():
     assert bursar.credits is credits
     assert bursar.billing is None
     assert bursar.catalog.active() == {"version": 1}
-    assert bursar.setup() == "setup"
 
 
 def test_bursar_always_owns_billing_provisioning(monkeypatch):

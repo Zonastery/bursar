@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
+from bursar.billing.auto_recharge import AutoRechargeService
 from bursar.billing.models import (
     BillingCustomerRecord,
     BillingEvent,
@@ -40,10 +41,11 @@ class BillingProvisioningPort(Protocol):
         self,
         user_id: str,
         amount: Decimal | int,
-        tx_type: str = "adjustment",
+        entry_type: str = "adjustment",
         metadata: Any = None,
         expires_at: datetime | None = None,
         bucket: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Any: ...
 
     def deduct_credits(
@@ -51,12 +53,12 @@ class BillingProvisioningPort(Protocol):
         user_id: str,
         amount: Decimal | int,
         *,
-        tx_type: str = "adjustment",
+        entry_type: str = "adjustment",
         bucket: str | None = None,
         metadata: Any = None,
     ) -> Any: ...
 
-    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> Any: ...
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> Any: ...
 
 
 IGNORED_EVENT_TYPES: frozenset[BillingEventType] = frozenset(
@@ -101,6 +103,7 @@ class BillingServiceImpl:
         self._event_handlers = event_handlers or {}
         self._cancel_prior_providers = cancel_prior_providers
         self._fallback_plan_key = fallback_plan_key
+        self.auto_recharge = AutoRechargeService(self)
         self._handlers = {
             BillingEventType.customer_created: self._handle_customer_upserted,
             BillingEventType.customer_updated: self._handle_customer_upserted,
@@ -305,6 +308,10 @@ class BillingServiceImpl:
 
     def get_auto_recharge_profile(self, user_id: str):
         return self._store.get_auto_recharge_profile(user_id)
+
+    def get_active_bursar_config(self) -> dict[str, Any] | None:
+        """Return the active canonical public Bursar configuration."""
+        return self._store.get_active_bursar_config()
 
     def upsert_auto_recharge_profile(self, profile) -> None:
         self._store.upsert_auto_recharge_profile(profile)
@@ -881,7 +888,7 @@ class BillingServiceImpl:
                 self._provisioning.add_credits(
                     uid,
                     Decimal(credits),
-                    tx_type="purchase",
+                    entry_type="purchase",
                     bucket=topup_config.deposit_to,
                 )
                 logger.info(
@@ -942,7 +949,7 @@ class BillingServiceImpl:
                         self._provisioning.deduct_credits(
                             uid,
                             Decimal(str(credits)),
-                            tx_type="refund",
+                            entry_type="refund",
                             bucket="purchased",
                         )
                         logger.info(
@@ -1019,11 +1026,11 @@ class BillingServiceImpl:
                 cycle_tier = g.bucket or "purchased"
                 replace_prior = g.replace_prior
                 if replace_prior:
-                    self._provisioning.revoke_credits_by_tx_type(uid, "cycle_grant")
+                    self._provisioning.revoke_credits_by_entry_type(uid, "cycle_grant")
                 self._provisioning.add_credits(
                     uid,
                     Decimal(str(cycle_credits)),
-                    tx_type="cycle_grant",
+                    entry_type="cycle_grant",
                     bucket=cycle_tier,
                 )
                 logger.info("granted %d cycle credits to user %s (tier=%s)", cycle_credits, uid, cycle_tier)

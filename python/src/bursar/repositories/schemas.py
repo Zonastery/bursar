@@ -18,7 +18,7 @@ class BalanceRow(BaseModel):
 
 class AddCreditsRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
+    entry_id: str = ""
     user_id: str = ""
     amount: str | Decimal | None = None
     new_balance: str | Decimal | None = None
@@ -37,7 +37,7 @@ class AvailableRow(BaseModel):
 
 class DeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    transaction_id: str = ""
+    entry_id: str = ""
     amount: str | Decimal | None = None
     balance_after: str | Decimal | None = None
     allowance_consumed: str | Decimal | None = None
@@ -51,7 +51,7 @@ class DeductionRow(BaseModel):
 
 class RefundRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    refund_transaction_id: str = ""
+    refund_entry_id: str = ""
     user_id: str = ""
     amount: str | Decimal | None = None
     new_balance: str | Decimal | None = None
@@ -76,7 +76,7 @@ class LeaseRow(BaseModel):
     available: str | Decimal | None = None
     reserved: str | Decimal | None = None
     billing_mode: str = "strict"
-    expires_at: str = ""
+    expires_at: datetime | str = ""
     error: str | None = None
 
 
@@ -93,7 +93,7 @@ class ActivePricingRow(BaseModel):
     version: int = 0
     label: str | None = None
     active: bool = False
-    created_at: str = ""
+    created_at: str | datetime = ""
     error: str | None = None
 
 
@@ -111,7 +111,7 @@ class UserPlanRow(BaseModel):
     per_operation: dict[str, Any] | None = None
     max_concurrent: int | None = None
     overdraft_floor: str | Decimal | None = None
-    plan_assigned_at: str | None = None
+    plan_assigned_at: str | datetime | None = None
     config_version: int | None = None
     catalog_version: int | None = None
 
@@ -120,7 +120,7 @@ class SetUserPlanRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     user_id: str = ""
     plan_id: str = ""
-    plan_assigned_at: str | None = None
+    plan_assigned_at: str | datetime | None = None
 
 
 class MigratePlanRow(BaseModel):
@@ -167,14 +167,14 @@ class SpendByUserRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     user_id: str = ""
     total_spend: str | Decimal | None = None
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class SpendByModelRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model: str = ""
     total_spend: str | Decimal | None = None
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class TopUserRow(BaseModel):
@@ -187,7 +187,7 @@ class DailySpendRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     date: str = ""
     total_spend: str | Decimal | None = None
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class AggregateStatsRow(BaseModel):
@@ -199,19 +199,20 @@ class AggregateStatsRow(BaseModel):
     top_user: str = ""
 
 
-class TransactionRow(BaseModel):
+class LedgerEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    user_id: str = ""
+
+    entry_id: str = ""
+    account_id: str = ""
+    actor_user_id: str | None = None
     amount: str | Decimal | None = None
-    type: str = ""
-    reference_type: str | None = None
-    reference_id: str | None = None
+    entry_type: str = ""
+    reference_entry_id: str | None = None
+    idempotency_key: str | None = None
     metadata: dict[str, Any] | None = None
     created_at: str | datetime = ""
-    total_count: int = 0
     next_cursor_created_at: str | datetime | None = None
-    next_cursor_id: str | None = None
+    next_cursor_entry_id: str | None = None
 
 
 class CreateTeamRow(BaseModel):
@@ -248,7 +249,7 @@ class TeamMemberRow(BaseModel):
 
 class TeamDeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    transaction_id: str = ""
+    entry_id: str = ""
     team_id: str = ""
     user_id: str = ""
     amount: str | Decimal | None = None

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { CallProc } from "./types.js";
 import { pgBoolean, safeParse } from "./_shared.js";
 
-export const UserPlanRowSchema = z
+const UserPlanRowSchema = z
   .object({
     user_id: z.string().optional(),
     plan_id: z.string().nullable().optional(),
@@ -21,20 +21,26 @@ export const UserPlanRowSchema = z
       .union([z.string(), z.number()] as const)
       .nullable()
       .optional(),
-    plan_assigned_at: z.string().nullable().optional(),
+    plan_assigned_at: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .nullable()
+      .optional(),
     config_version: z.number().nullable().optional(),
   })
   .passthrough();
 
-export const SetUserPlanRowSchema = z
+const SetUserPlanRowSchema = z
   .object({
     user_id: z.string().optional(),
     plan_id: z.string().optional(),
-    plan_assigned_at: z.string().nullable().optional(),
+    plan_assigned_at: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .nullable()
+      .optional(),
   })
   .passthrough();
 
-export const MigratePlanRowSchema = z
+const MigratePlanRowSchema = z
   .object({
     plan_key: z.string().optional(),
     target_plan_id: z.string().optional(),
@@ -43,7 +49,7 @@ export const MigratePlanRowSchema = z
   })
   .passthrough();
 
-export const AllowanceRowSchema = z
+const AllowanceRowSchema = z
   .object({
     plan_id: z.string().nullable().optional(),
     allowance_remaining: z
@@ -55,7 +61,7 @@ export const AllowanceRowSchema = z
   })
   .passthrough();
 
-export const FeatureLimitRowSchema = z
+const FeatureLimitRowSchema = z
   .object({
     user_id: z.string().optional(),
     feature: z.string().optional(),
@@ -69,7 +75,7 @@ export const FeatureLimitRowSchema = z
   })
   .passthrough();
 
-export const CapCheckRowSchema = z
+const CapCheckRowSchema = z
   .object({
     capped: pgBoolean.nullable().optional(),
     current_spend: z
@@ -85,7 +91,7 @@ export const CapCheckRowSchema = z
   })
   .passthrough();
 
-export const UnsetPlanRowSchema = z
+const UnsetPlanRowSchema = z
   .object({
     user_id: z.string().optional(),
   })
@@ -140,7 +146,11 @@ export class PlanRepository {
   async checkAllowance(userId: string, periodStart: string | null): Promise<AllowanceRow | null> {
     const rows = await this.callproc("check_plan_allowance", [userId, periodStart]);
     if (!rows || rows.length === 0) return null;
-    return safeParse(AllowanceRowSchema, rows[0], "PlanRepository.checkAllowance");
+    const row = rows[0] as Record<string, unknown>;
+    for (const field of ["period_start", "period_end"] as const) {
+      if (row[field] instanceof Date) row[field] = row[field].toISOString().slice(0, 10);
+    }
+    return safeParse(AllowanceRowSchema, row, "PlanRepository.checkAllowance");
   }
 
   /** Increment a user's usage window. */

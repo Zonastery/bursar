@@ -5,7 +5,7 @@ description = "Declarative credit calculation engine for AI SaaS platforms"
 readme = "README.md"
 # Bounded to the advertised 3.11–3.13 range (M13). decimal-based money math is
 # stdlib, so no new runtime dependency is needed.
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
@@ -17,7 +17,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -69,7 +68,7 @@ test = [
 bursar = ["sql/*.sql"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
@@ -90,7 +89,7 @@ indent-style = "space"
 [tool.pyright]
 # Pin the analysis target so pyright does not false-flag `X | Y` union syntax
 # (Phase-1 agents hit this without it). Matches the floor of requires-python.
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 typeCheckingMode = "standard"
 useLibraryCodeForTypes = false
 venvPath = "."

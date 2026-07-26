@@ -18,7 +18,6 @@ import psycopg2.pool
 from bursar.billing.models import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
-    BillingConfig,
     BillingCustomerRecord,
     BillingEventClaim,
     BillingGrantResult,
@@ -32,7 +31,6 @@ from bursar.billing.models import (
     CheckoutIntentStatus,
 )
 from bursar.billing.store import BillingStore
-from bursar.repositories.billing.config import BillingConfigRepository
 from bursar.repositories.billing.customer import BillingCustomerRepository
 from bursar.repositories.billing.dispute import BillingDisputeRepository
 from bursar.repositories.billing.event import BillingEventRepository
@@ -161,12 +159,6 @@ class PostgresBillingStore(BillingStore):
         return self._dispute_repo_cache
 
     @property
-    def _config_repo(self) -> BillingConfigRepository:
-        if not hasattr(self, "_config_repo_cache"):
-            self._config_repo_cache = BillingConfigRepository(self._execute)
-        return self._config_repo_cache
-
-    @property
     def _preferences_repo(self) -> BillingPreferencesRepository:
         if not hasattr(self, "_preferences_repo_cache"):
             self._preferences_repo_cache = BillingPreferencesRepository(self._execute)
@@ -264,15 +256,13 @@ class PostgresBillingStore(BillingStore):
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    def sync_billing_from_config(self, config: BillingConfig) -> None:
-        """Sync the full billing configuration from a BillingConfig object.
-
-        Args:
-            config: The billing configuration to sync.
-        """
-        raw = config.model_dump()
-        config_json = json.dumps(raw, default=str)
-        self._config_repo.sync_from_config(config_json)
+    def get_active_bursar_config(self) -> dict[str, Any] | None:
+        rows = self._execute("SELECT config FROM bursar.bursar_config WHERE active = TRUE LIMIT 1")
+        if not rows:
+            return None
+        row = rows[0]
+        value = row.get("config") if isinstance(row, dict) else row[0]
+        return value if isinstance(value, dict) else None
 
     def create_or_get_checkout_intent(
         self,

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { QueryFn } from "../types.js";
 import { unwrapJsonb, safeParse } from "../_shared.js";
 
-export const BillingTopupRowSchema = z
+const BillingTopupRowSchema = z
   .object({
     topup_key: z.string().optional(),
     credits_per_unit: z

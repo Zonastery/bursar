@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { CallProc } from "./types.js";
 import { pgBoolean, safeParse } from "./_shared.js";
 
-export const BalanceRowSchema = z
+const BalanceRowSchema = z
   .object({
     user_id: z.string(),
     balance: z.union([z.string(), z.number()] as const).nullable(),
@@ -11,9 +11,9 @@ export const BalanceRowSchema = z
   .partial()
   .passthrough();
 
-export const AddCreditsRowSchema = z
+const AddCreditsRowSchema = z
   .object({
-    id: z.string().optional(),
+    entry_id: z.string().optional(),
     user_id: z.string().optional(),
     amount: z
       .union([z.string(), z.number()] as const)
@@ -29,11 +29,11 @@ export const AddCreditsRowSchema = z
       .optional(),
     bucket: z.string().optional(),
     idempotent: pgBoolean.nullable().optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 
-export const AvailableRowSchema = z
+const AvailableRowSchema = z
   .object({
     balance: z
       .union([z.string(), z.number()] as const)
@@ -79,6 +79,7 @@ export class BalanceRepository {
     amount: string,
     type: string,
     metadata: string,
+    expiresAt: string | null,
     bucket: string | null,
     idempotencyKey: string | null,
   ): Promise<AddCreditsRow> {
@@ -87,6 +88,7 @@ export class BalanceRepository {
       amount,
       type,
       metadata,
+      expiresAt,
       bucket,
       idempotencyKey,
     ]);

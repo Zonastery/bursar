@@ -46,8 +46,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The advertised support window (README badge: 3.11 | 3.12 | 3.13).
-        python-version: ["3.11", "3.12", "3.13"]
+        # Supported Python runtimes.
+        python-version: ["3.12", "3.13"]
     # Real Postgres so the store/manager/SQL integration tests RUN (not skip).
     # A bare container is enough: the conftest.py fixtures bootstrap the `auth`
     # stubs/roles and apply python/src/bursar/sql/*.sql themselves.
@@ -98,8 +98,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Supported window per javascript/README.md ("Works in Node.js 18+").
-        node-version: ["18", "20", "22"]
+        # Supported Node.js LTS/current runtimes.
+        node-version: ["22", "24"]
     # GitHub Actions `services:` manages the container lifecycle, health gate
     # (pg_isready), and tear-down — no manual `docker run`/`docker stop` needed.
     # Default `max_connections=100` is ample: store-integration.test.ts uses a

@@ -11,39 +11,47 @@ import json
 from hashlib import sha256
 from typing import Any
 
-from bursar.billing.models import (
-    BillingAutoRechargeConfig,
-    BillingAutoRechargePolicy,
-    BillingAutoRechargeProfile,
-    BillingConfig,
-)
+from bursar.billing.models import BillingAutoRechargeProfile
+from bursar.config import AutoRechargePolicy, load_config_from_dict
 from bursar.providers.types import PaymentProvider, SavedPaymentChargeParams
 
 
 class AutoRechargeService:
-    def __init__(self, billing: Any, config: BillingConfig) -> None:
+    def __init__(self, billing: Any) -> None:
         self._billing = billing
-        self._config = config
 
-    def _policy(self) -> BillingAutoRechargePolicy | None:
-        config: BillingAutoRechargeConfig | None = self._config.auto_recharge
-        if config is None or not config.enabled:
+    def _policy(self) -> AutoRechargePolicy | None:
+        raw = self._billing.get_active_bursar_config()
+        if raw is None:
             return None
-        return config.default_policy
+        return load_config_from_dict(raw).payments.auto_recharge
 
-    def _policy_snapshot(self, policy: BillingAutoRechargePolicy) -> tuple[dict[str, Any], str]:
+    @staticmethod
+    def _policy_snapshot(policy: AutoRechargePolicy) -> tuple[dict[str, Any], str]:
         snapshot = policy.model_dump(mode="json", exclude_none=True)
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
         return snapshot, sha256(encoded.encode()).hexdigest()
 
-    def _topup_product(self, policy: BillingAutoRechargePolicy, provider: PaymentProvider) -> str:
-        topup = self._config.topups.get(policy.topup.key)
+    def _topup_product(self, policy: AutoRechargePolicy, provider: PaymentProvider) -> str:
+        raw = self._billing.get_active_bursar_config()
+        if raw is None:
+            raise ValueError("auto-recharge configuration is not active")
+        payments = load_config_from_dict(raw).payments
+        topup = payments.topups.get(policy.purchase.topup)
         if topup is None:
             raise ValueError("auto-recharge top-up is not configured")
         provider_ref = topup.providers.get(provider.provider)
-        if provider_ref is None or not provider_ref.product_id:
-            raise ValueError("auto-recharge top-up is unavailable for this provider")
-        return provider_ref.product_id
+        if provider_ref is None or not provider_ref.lookup.value:
+            raise ValueError("auto-recharge top-up is unavailable for provider")
+        return provider_ref.lookup.value
+
+    @staticmethod
+    def _window_days(policy: AutoRechargePolicy) -> int:
+        period = policy.limit.period
+        if period.unit == "month" and period.anchor == "calendar":
+            return 0
+        multiplier = {"day": 1, "week": 7, "month": 30, "year": 365}[period.unit]
+        return period.count * multiplier
 
     async def quote(self, user_id: str, provider: PaymentProvider) -> dict[str, Any] | None:
         policy = self._policy()
@@ -57,7 +65,7 @@ class AutoRechargeService:
                 customer_id=profile.provider_customer_id,
                 payment_method_id=profile.payment_method_id,
                 product_id=self._topup_product(policy, provider),
-                quantity=policy.topup.quantity,
+                quantity=policy.purchase.quantity,
                 idempotency_key=f"auto-recharge-quote:{user_id}",
             )
         )
@@ -86,7 +94,7 @@ class AutoRechargeService:
                 customer_id=customer.provider_customer_id,
                 payment_method_id=method.id,
                 product_id=self._topup_product(policy, provider),
-                quantity=policy.topup.quantity,
+                quantity=policy.purchase.quantity,
                 idempotency_key=f"auto-recharge-quote:{user_id}",
             )
         )
@@ -120,20 +128,20 @@ class AutoRechargeService:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if policy is None or profile is None or not profile.enabled:
             return "disabled"
-        if balance >= policy.trigger.threshold_credits:
+        if balance >= policy.trigger.balance_below:
             if not profile.armed:
                 profile.armed = True
                 self._billing.upsert_auto_recharge_profile(profile)
             return "above_threshold"
         if not profile.armed or not profile.provider_customer_id or not profile.payment_method_id:
             return "not_armed"
-        window_days = 0 if policy.limit.period == "calendar_month" else policy.limit.rolling_days or 30
+        window_days = self._window_days(policy)
         attempt = self._billing.claim_auto_recharge_attempt(
             user_id,
             provider.provider,
-            policy.topup.key,
-            policy.topup.quantity,
-            policy.limit.max_charges,
+            policy.purchase.topup,
+            policy.purchase.quantity,
+            policy.limit.max_purchases,
             window_days,
         )
         if attempt is None:
@@ -146,7 +154,7 @@ class AutoRechargeService:
                     customer_id=profile.provider_customer_id,
                     payment_method_id=profile.payment_method_id,
                     product_id=self._topup_product(policy, provider),
-                    quantity=policy.topup.quantity,
+                    quantity=policy.purchase.quantity,
                     idempotency_key=attempt.idempotency_key,
                     metadata={"user_id": user_id, "auto_recharge_attempt_id": attempt.id},
                 )

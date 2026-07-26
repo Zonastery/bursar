@@ -40,12 +40,6 @@ describe("PostgresStore", () => {
     expect(store).toBeInstanceOf(PostgresStore);
   });
 
-  it("setup throws StoreError instead of silently succeeding (H17)", async () => {
-    const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    await expect(store.setup()).rejects.toThrow(StoreError);
-    await expect(store.setup()).rejects.toThrow(/migrat/i);
-  });
-
   it("getBalance returns zero Decimal for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
     const result = await store.getBalance("user-1");
@@ -67,14 +61,14 @@ describe("PostgresStore", () => {
   it("addCredits returns default Decimals for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
     const result = await store.addCredits("user-1", D(100));
-    expect(result.transactionId).toBe("");
+    expect(result.entryId).toBe("");
     expect(result.newBalance.toString()).toBe("0");
   });
 
   it("addCredits parses row result and sends amount as a decimal string", async () => {
     const { ctor, calls } = makeRecordingPool([
       {
-        id: "tx-1",
+        entry_id: "tx-1",
         user_id: "user-1",
         amount: "100",
         new_balance: "200",
@@ -83,7 +77,7 @@ describe("PostgresStore", () => {
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const result = await store.addCredits("user-1", D("100.5"), "purchase");
-    expect(result.transactionId).toBe("tx-1");
+    expect(result.entryId).toBe("tx-1");
     expect(result.newBalance.toString()).toBe("200");
     // amount param serialized as a decimal string (no binary float).
     expect(calls[0].text).toContain("credits_add");
@@ -95,7 +89,7 @@ describe("PostgresStore", () => {
     it("addCredits sends the tier as the 5th credits_add param", async () => {
       const { ctor, calls } = makeRecordingPool([
         {
-          id: "tx-tier-1",
+          entry_id: "tx-tier-1",
           user_id: "user-1",
           amount: "20",
           new_balance: "20",
@@ -111,6 +105,7 @@ describe("PostgresStore", () => {
         "20",
         "adjustment",
         JSON.stringify({}),
+        null,
         "gifted",
         null,
       ]);
@@ -119,7 +114,13 @@ describe("PostgresStore", () => {
 
     it("addCredits omits tier as null when not specified, and defaults result.bucket to 'default'", async () => {
       const { ctor, calls } = makeRecordingPool([
-        { id: "tx-1", user_id: "user-1", amount: "10", new_balance: "10", lifetime_purchased: "0" },
+        {
+          entry_id: "tx-1",
+          user_id: "user-1",
+          amount: "10",
+          new_balance: "10",
+          lifetime_purchased: "0",
+        },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
       const result = await store.addCredits("user-1", D(10));
@@ -134,7 +135,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            transaction_id: "tx-1",
+            entry_id: "tx-1",
             amount: "15.0000",
             allowance_consumed: "0.0000",
             balance_after: "5.0000",
@@ -177,7 +178,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            transaction_id: "tx-1",
+            entry_id: "tx-1",
             amount: "15.0000",
             allowance_consumed: "0.0000",
             balance_after: "5.0000",
@@ -195,7 +196,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            refund_transaction_id: "refund-1",
+            refund_entry_id: "refund-1",
             user_id: "user-1",
             amount: "15.0000",
             new_balance: "115.0000",
@@ -224,7 +225,7 @@ describe("PostgresStore", () => {
     });
 
     it("getBucketBalances unwraps the single-JSONB envelope {user_id, buckets, total_balance} (not a rowset)", async () => {
-      // get_user_credit_buckets RETURNS JSONB — a single scalar envelope object,
+      // get_credit_bucket_balances RETURNS JSONB — a single scalar envelope object,
       // NOT one row per bucket. callproc's scalar-JSONB unwrapping surfaces it
       // as a single-element array whose one element IS the envelope; the
       // per-bucket rows live under its `buckets` array field.
@@ -232,7 +233,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            get_user_credit_buckets: {
+            get_credit_bucket_balances: {
               user_id: "user-1",
               buckets: [
                 {
@@ -279,7 +280,7 @@ describe("PostgresStore", () => {
     });
 
     it("getBucketBalances would misread a flat rowset as an empty envelope (documents the contract, not a rowset)", async () => {
-      // If get_user_credit_buckets were (incorrectly) mocked as a flat array of
+      // If get_credit_bucket_balances were (incorrectly) mocked as a flat array of
       // per-bucket rows — the WRONG shape per the SQL contract: it RETURNS one
       // JSONB envelope, not SETOF — callproc's `rows.length === 1` scalar-unwrap
       // heuristic does not fire for a multi-row result, so `tiers`
@@ -313,7 +314,7 @@ describe("PostgresStore", () => {
     it("calls deduct_with_allowance with all params (decimal strings)", async () => {
       const { ctor, calls } = makeRecordingPool([
         {
-          transaction_id: "tx-1",
+          entry_id: "tx-1",
           amount: "2.5000",
           allowance_consumed: "0.0000",
           balance_after: "97.5000",
@@ -357,7 +358,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            transaction_id: "tx-2",
+            entry_id: "tx-2",
             amount: "15.0000",
             allowance_consumed: "10.0000",
             balance_after: "85.0000",
@@ -379,7 +380,7 @@ describe("PostgresStore", () => {
       );
       const result = await store.deductWithAllowance("user-1", D(20));
       expect(result.error).toBe("cap_reached");
-      expect(result.transactionId).toBe("");
+      expect(result.entryId).toBe("");
     });
 
     it("maps insufficient_credits error envelope", async () => {
@@ -396,7 +397,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
-            transaction_id: "tx-orig",
+            entry_id: "tx-orig",
             amount: "10.0000",
             allowance_consumed: "0.0000",
             balance_after: "90.0000",
@@ -407,7 +408,7 @@ describe("PostgresStore", () => {
       );
       const result = await store.deductWithAllowance("user-1", D(10), { idempotencyKey: "k" });
       expect(result.idempotent).toBe(true);
-      expect(result.transactionId).toBe("tx-orig");
+      expect(result.entryId).toBe("tx-orig");
     });
   });
 
@@ -416,9 +417,9 @@ describe("PostgresStore", () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
         makeMockPool([
-          { user_id: "u1", total_spend: "10", transaction_count: 1 },
-          { user_id: "u2", total_spend: "20", transaction_count: 2 },
-          { user_id: "u3", total_spend: "30", transaction_count: 3 },
+          { user_id: "u1", total_spend: "10", entry_count: 1 },
+          { user_id: "u2", total_spend: "20", entry_count: 2 },
+          { user_id: "u3", total_spend: "30", entry_count: 3 },
         ]),
       );
       const rows = await store.spendByUser(new Date(), new Date());
@@ -461,35 +462,6 @@ describe("PostgresStore", () => {
     );
     const result = await store.getActivePricing();
     expect(result?.config).toEqual(config);
-  });
-
-  it("serializes billing fields explicitly while preserving catalog keys", async () => {
-    const calls: Array<{ params?: unknown[] }> = [];
-    const pool = {
-      query: vi.fn(async (_sql: string, params?: unknown[]) => {
-        calls.push({ params });
-        return { rows: [] };
-      }),
-      end: vi.fn().mockResolvedValue(undefined),
-    } as unknown as import("pg").Pool;
-    const store = new PostgresBillingStore(pool);
-    await store.syncBillingFromConfig({
-      subscriptions: {
-        StarterPlan: {
-          plan: "starterPlan",
-          intervalCount: 1,
-          providers: { stripe: { priceId: "price_1" } },
-        },
-      },
-      topups: {
-        CreditPack: { depositTo: "giftBucket", creditsPerUnit: 1000 },
-      },
-    });
-    const serialized = JSON.parse(String(calls[0]?.params?.[0]));
-    expect(serialized.subscriptions.StarterPlan.interval_count).toBe(1);
-    expect(serialized.subscriptions.StarterPlan.providers.stripe.price_id).toBe("price_1");
-    expect(serialized.topups.CreditPack.deposit_to).toBe("giftBucket");
-    expect(serialized.topups.CreditPack.credits_per_unit).toBe(1000);
   });
 
   it("keeps persisted payment metadata in its canonical snake_case shape", async () => {
@@ -568,7 +540,7 @@ describe("PostgresStore", () => {
       "postgresql://localhost/db",
       makeMockPool([
         {
-          id: "tx-1",
+          entry_id: "tx-1",
           user_id: "user-1",
           amount: null,
           new_balance: "100",
@@ -586,7 +558,7 @@ describe("PostgresStore", () => {
   it("addCredits sends non-round amount as exact decimal string (PG3)", async () => {
     const { ctor, calls } = makeRecordingPool([
       {
-        id: "tx-2",
+        entry_id: "tx-2",
         user_id: "user-1",
         amount: "0.0001",
         new_balance: "0.0001",
@@ -604,7 +576,7 @@ describe("PostgresStore", () => {
   it("addCredits serializes expiresAt as ISO string (PG4)", async () => {
     const { ctor, calls } = makeRecordingPool([
       {
-        id: "tx-3",
+        entry_id: "tx-3",
         user_id: "user-1",
         amount: "50",
         new_balance: "150",
@@ -629,7 +601,7 @@ describe("PostgresStore", () => {
     // deductWithAllowance maps ALL error envelopes to result.error — unknown codes included.
     const result = await store.deductWithAllowance("user-1", D(20));
     expect(result.error).toBe("some_unknown_code_xyz");
-    expect(result.transactionId).toBe("");
+    expect(result.entryId).toBe("");
   });
 
   // PG6 — Network/transport error bubbles as the underlying error (postgres store does not wrap)
@@ -659,7 +631,7 @@ describe("PostgresStore", () => {
       "postgresql://localhost/db",
       makeMockPool([
         {
-          id: "tx-pg7",
+          entry_id: "tx-pg7",
           user_id: "user-1",
           amount: "100.1234567890",
           new_balance: "100.1235",

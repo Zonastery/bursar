@@ -68,9 +68,9 @@ export interface BillingProvisioningPort {
   deductCredits(
     userId: string,
     amount: Decimal | number,
-    options?: { txType?: string; bucket?: string | null },
+    options?: { entryType?: string; bucket?: string | null },
   ): Promise<unknown>;
-  revokeCreditsByTxType(userId: string, txType: string): Promise<unknown>;
+  revokeCreditsByEntryType(userId: string, entryType: string): Promise<unknown>;
 }
 
 /**
@@ -1186,7 +1186,7 @@ export class BillingService {
           const credits = Math.trunc((event.refund.amountMinor * cpu) / 100);
           if (credits > 0) {
             await this.provisioning.deductCredits(uid, credits, {
-              txType: "refund",
+              entryType: "refund",
               bucket: "purchased",
             });
           }
@@ -1273,7 +1273,7 @@ export class BillingService {
       if (cycleCredits && cycleCredits > 0) {
         const cycleBucket = g.bucket ?? "purchased";
         if (g.replacePrior) {
-          await this.provisioning.revokeCreditsByTxType(uid, "cycle_grant");
+          await this.provisioning.revokeCreditsByEntryType(uid, "cycle_grant");
         }
         await this.provisioning.addCredits(uid, new Decimal(cycleCredits), {
           type: "cycle_grant",

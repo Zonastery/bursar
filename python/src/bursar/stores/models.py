@@ -28,7 +28,7 @@ class BalanceResult(BaseModel):
 
 
 class AddCreditsResult(BaseModel):
-    transaction_id: str
+    entry_id: str
     user_id: str
     amount: Decimal
     new_balance: Decimal
@@ -69,7 +69,7 @@ class AvailableResult(BaseModel):
 
 
 class DeductionResult(BaseModel):
-    transaction_id: str
+    entry_id: str
     user_id: str
     amount: Decimal
     balance_after: Decimal
@@ -103,16 +103,6 @@ class BursarConfigHistoryItem(BaseModel):
     created_at: str = ""
 
 
-class SetupResult(BaseModel):
-    tables_created: list[str] = Field(default_factory=list)
-    rpcs_created: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-
-    @property
-    def success(self) -> bool:
-        return len(self.errors) == 0
-
-
 class OperationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -141,6 +131,23 @@ class Entitlement(BaseModel):
         """Accept the canonical boolean form for unlimited feature access."""
         if isinstance(value, bool):
             return {"value": value}
+        if isinstance(value, dict):
+            normalized = dict(value)
+            period = normalized.get("period")
+            if isinstance(period, dict):
+                unit = period.get("unit")
+                count = period.get("count")
+                if count == 1 and unit in {"day", "week", "month", "year"}:
+                    normalized["period"] = {
+                        "day": "daily",
+                        "week": "weekly",
+                        "month": "monthly",
+                        "year": "yearly",
+                    }[unit]
+            if "on_exceed" not in normalized and "action" in normalized:
+                normalized["on_exceed"] = normalized["action"]
+            normalized.pop("action", None)
+            return normalized
         return value
 
 
@@ -270,8 +277,8 @@ class MigratePlanUsersResult(BaseModel):
 
 
 class RefundResult(BaseModel):
-    refund_transaction_id: str
-    original_transaction_id: str
+    refund_entry_id: str
+    original_entry_id: str
     user_id: str
     amount: Decimal = Decimal(0)
     new_balance: Decimal = Decimal(0)
@@ -303,13 +310,13 @@ class BucketBalancesResult(BaseModel):
 class SpendByUserRow(BaseModel):
     user_id: str = ""
     total_spend: Decimal = Decimal(0)
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class SpendByModelRow(BaseModel):
     model: str = ""
     total_spend: Decimal = Decimal(0)
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class TopUserRow(BaseModel):
@@ -320,7 +327,7 @@ class TopUserRow(BaseModel):
 class DailySpendRow(BaseModel):
     date: str = ""
     total_spend: Decimal = Decimal(0)
-    transaction_count: int = 0
+    entry_count: int = 0
 
 
 class AggregateStatsRow(BaseModel):
@@ -331,16 +338,26 @@ class AggregateStatsRow(BaseModel):
     top_user: str = ""
 
 
-class TransactionRow(BaseModel):
-    id: str = ""
-    user_id: str = ""
+class LedgerEntry(BaseModel):
+    entry_id: str = ""
+    account_id: str = ""
+    actor_user_id: str | None = None
     amount: Decimal = Decimal(0)
-    type: str = ""
-    reference_type: str | None = None
-    reference_id: str | None = None
+    entry_type: str = ""
+    reference_entry_id: str | None = None
+    idempotency_key: str | None = None
     metadata: dict[str, Any] | None = None
     created_at: str = ""
-    total_count: int = 0
+
+
+class LedgerCursor(BaseModel):
+    created_at: str
+    entry_id: str
+
+
+class LedgerPage(BaseModel):
+    items: list[LedgerEntry] = Field(default_factory=list)
+    next_cursor: LedgerCursor | None = None
 
 
 class SpendCap(BaseModel):
@@ -395,7 +412,7 @@ class AddTeamMemberResult(BaseModel):
 
 
 class TeamDeductionResult(BaseModel):
-    transaction_id: str = ""
+    entry_id: str = ""
     team_id: str = ""
     user_id: str = ""
     amount: Decimal = Decimal(0)

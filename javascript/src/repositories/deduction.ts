@@ -4,7 +4,7 @@ import { pgBoolean, safeParse } from "./_shared.js";
 
 export const DeductionRowSchema = z
   .object({
-    transaction_id: z.string().optional(),
+    entry_id: z.string().nullable().optional(),
     amount: z
       .union([z.string(), z.number()] as const)
       .nullable()
@@ -24,14 +24,14 @@ export const DeductionRowSchema = z
       .record(z.string(), z.union([z.string(), z.number()] as const))
       .nullable()
       .optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
     user_id: z.string().optional(),
   })
   .passthrough();
 
-export const RefundRowSchema = z
+const RefundRowSchema = z
   .object({
-    refund_transaction_id: z.string().optional(),
+    refund_entry_id: z.string().optional(),
     user_id: z.string().optional(),
     amount: z
       .union([z.string(), z.number()] as const)
@@ -45,11 +45,11 @@ export const RefundRowSchema = z
       .record(z.string(), z.union([z.string(), z.number()] as const))
       .nullable()
       .optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 
-export const RevokeRowSchema = z
+const RevokeRowSchema = z
   .object({
     user_id: z.string().optional(),
     amount: z
@@ -128,18 +128,22 @@ export class DeductionRepository {
 
   /** Refund a previous credit deduction. */
   async refundCredits(
-    transactionId: string,
+    entryId: string,
     amount: string | null,
     reason: string | null,
     metadata: string,
   ): Promise<RefundRow> {
-    const rows = await this.callproc("refund_credits", [transactionId, amount, reason, metadata]);
+    const rows = await this.callproc("refund_credits", [entryId, amount, reason, metadata]);
     return safeParse(RefundRowSchema, rows?.[0] ?? {}, "DeductionRepository.refundCredits");
   }
 
   /** Revoke credits by transaction type. */
-  async revokeCreditsByTxType(userId: string, txType: string): Promise<RevokeRow> {
-    const rows = await this.callproc("revoke_credits_by_tx_type", [userId, txType]);
-    return safeParse(RevokeRowSchema, rows?.[0] ?? {}, "DeductionRepository.revokeCreditsByTxType");
+  async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeRow> {
+    const rows = await this.callproc("revoke_credits_by_entry_type", [userId, entryType]);
+    return safeParse(
+      RevokeRowSchema,
+      rows?.[0] ?? {},
+      "DeductionRepository.revokeCreditsByEntryType",
+    );
   }
 }

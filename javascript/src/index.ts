@@ -66,13 +66,13 @@ export type {
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
-  SetupResult,
   SpendByModelRow,
   SpendByUserRow,
-  ListTransactionsOptions,
-  ListUsageEventsOptions,
-  PaginatedTransactions,
-  UserTransactionRow,
+  ListLedgerEntriesOptions,
+  ListUsageEntriesOptions,
+  LedgerCursor,
+  LedgerPage,
+  LedgerEntry,
   SpendCap,
   SweepResult,
   Team,
@@ -98,8 +98,6 @@ export { BillingStore, PostgresBillingStore } from "./billing/index.js";
 export { AUTO_RECHARGE_STATES, BillingEventType } from "./billing/index.js";
 
 export type {
-  BillingConfig,
-  BillingAutoRechargeConfig,
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingAutoRechargeStatus,

@@ -6,11 +6,13 @@ import psycopg2
 import pytest
 
 from bursar.credits_service import CreditsService
-from bursar.interface.postgres import PostgresStore
 from bursar.metrics import UsageMetrics
+from bursar.stores.base import StoreError
+from bursar.stores.postgres import PostgresStore, run_migrations
 
 pytestmark = [pytest.mark.integration]
 USER_ID = "00000000-0000-0000-0000-000000000901"
+REPLAY_USER_ID = "00000000-0000-0000-0000-000000000911"
 
 CONFIG = {
     "version": 1,
@@ -38,8 +40,6 @@ CONFIG = {
 
 @pytest.fixture
 def store(pg_database_url: str) -> PostgresStore:
-    result = PostgresStore(pg_database_url).setup()
-    assert result.success
     return PostgresStore(pg_database_url)
 
 
@@ -47,6 +47,82 @@ def _ensure_user(store: PostgresStore) -> None:
     with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
         cursor.execute("INSERT INTO auth.users (id) VALUES (%s) ON CONFLICT DO NOTHING", [USER_ID])
         cursor.execute('INSERT INTO public."user" (id) VALUES (%s) ON CONFLICT DO NOTHING', [USER_ID])
+
+
+def test_migrations_are_idempotent_and_detect_checksum_mismatch(
+    pg_database_url: str,
+) -> None:
+    run_migrations(pg_database_url)
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT version, checksum FROM bursar.schema_migrations ORDER BY version LIMIT 1")
+        version, checksum = cursor.fetchone()
+        cursor.execute(
+            "UPDATE bursar.schema_migrations SET checksum = 'tampered' WHERE version = %s",
+            [version],
+        )
+
+    try:
+        with pytest.raises(StoreError, match="checksum mismatch"):
+            run_migrations(pg_database_url)
+    finally:
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE bursar.schema_migrations SET checksum = %s WHERE version = %s",
+                [checksum, version],
+            )
+
+    run_migrations(pg_database_url)
+
+
+def test_removed_compatibility_objects_are_absent(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                to_regclass('bursar.credit_transactions'),
+                to_regclass('bursar.user_credit_buckets'),
+                to_regclass('bursar.user_credits'),
+                to_regclass('bursar.credit_reservations')
+            """
+        )
+        assert cursor.fetchone() == (None, None, None, None)
+
+        cursor.execute(
+            """
+            SELECT proname
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'bursar'
+              AND p.proname = ANY(%s)
+            """,
+            [
+                [
+                    "project_credit_transaction",
+                    "list_transactions",
+                    "list_transactions_cursor_with_total",
+                ]
+            ],
+        )
+        assert cursor.fetchall() == []
+
+
+def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:
+    service = CreditsService(store=store)
+    first = service.add_credits(
+        REPLAY_USER_ID,
+        Decimal("25"),
+        entry_type="purchase",
+        idempotency_key="integration:add-replay",
+    )
+    replay = service.add_credits(
+        REPLAY_USER_ID,
+        Decimal("25"),
+        entry_type="purchase",
+        idempotency_key="integration:add-replay",
+    )
+
+    assert replay.entry_id == first.entry_id
+    assert service.get_balance(REPLAY_USER_ID).balance == Decimal("25")
 
 
 def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore) -> None:

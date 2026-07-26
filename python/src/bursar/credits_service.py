@@ -8,13 +8,13 @@ commit (or roll back) together inside the store (contract §2, C1).
 Example::
 
     from bursar import CreditsService, UsageMetrics
-    from bursar.interface.supabase import HttpxSupabaseStore
+    from bursar.stores.supabase import HttpxSupabaseStore
 
     store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
     manager = CreditsService(store=store)
 
     # One-time setup (creates tables + RPCs)
-    manager.setup()
+    # Apply database migrations with the CLI before constructing the service.
 
     # Load pricing from store (bursar_config table)
     manager.load_pricing_from_store()
@@ -46,8 +46,9 @@ from typing import Any
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter, CreditEventType
-from bursar.interface.base import CapReachedError, CreditStore, FeatureLimitReachedError
-from bursar.interface.models import (
+from bursar.metrics import UsageMetrics
+from bursar.stores.base import CapReachedError, CreditStore, FeatureLimitReachedError
+from bursar.stores.models import (
     AddCreditsResult,
     AggregateStatsRow,
     AllowanceResult,
@@ -65,20 +66,20 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    LedgerCursor,
+    LedgerEntry,
+    LedgerPage,
     MigratePlanUsersResult,
     OperationPolicy,
     RefundResult,
     ReleaseResult,
-    SetupResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
     SweepResult,
     TeamDeductionResult,
     TopUserRow,
-    TransactionRow,
 )
-from bursar.metrics import UsageMetrics
 
 
 class CreditError(Exception):
@@ -315,12 +316,6 @@ class CreditsService:
         min_bal = self._engine.min_balance if self._engine else Decimal(0)
         return min_bal * DEFAULT_LOW_BALANCE_MULTIPLIER
 
-    # -- Schema management -----------------------------------------------
-
-    def setup(self) -> SetupResult:
-        """Run bundled SQL migrations through the store."""
-        return self._store.setup()
-
     # -- Pricing configuration -------------------------------------------
 
     def publish_pricing_from_dict(self, data: dict[str, Any]) -> None:
@@ -428,10 +423,11 @@ class CreditsService:
         self,
         user_id: str,
         amount: Decimal | int,
-        tx_type: str = "adjustment",
+        entry_type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
         bucket: str | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Add credits to a user's account (``amount`` is a ``Decimal``).
 
@@ -439,15 +435,23 @@ class CreditsService:
         :meth:`get_bucket_balances`); omitted resolves to the configured
         ``is_default`` bucket, or ``"default"`` when no buckets are configured.
         """
-        result = self._store.add_credits(user_id, self._to_decimal(amount), tx_type, metadata, expires_at, bucket)
+        result = self._store.add_credits(
+            user_id,
+            self._to_decimal(amount),
+            entry_type,
+            metadata,
+            expires_at,
+            bucket,
+            idempotency_key,
+        )
         self._emit(
             "credits.added",
             user_id,
             {
-                "transaction_id": result.transaction_id,
+                "entry_id": result.entry_id,
                 "amount": result.amount,
                 "new_balance": result.new_balance,
-                "type": tx_type,
+                "type": entry_type,
             },
         )
         # Re-arm multi-level low_balance: any level the topped-up balance is now back
@@ -465,20 +469,21 @@ class CreditsService:
         user_id: str,
         amount: Decimal | int,
         *,
-        tx_type: str = "adjustment",
+        entry_type: str = "adjustment",
         bucket: str | None = None,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> AddCreditsResult:
         """Deduct a raw credit amount from a user's account.
 
-        Uses the store's ``add_credits`` with the given ``tx_type`` and a
+        Uses the store's ``add_credits`` with the given ``entry_type`` and a
         negative amount. Use this for refund clawbacks and other administrative
         deductions that bypass the usage-based ``deduct()`` flow.
 
         Args:
             user_id: The user to deduct from.
             amount: The positive amount to deduct (internally negated).
-            tx_type: Semantic label (e.g. ``"adjustment"``, ``"refund"``). Must be
+            entry_type: Semantic label (e.g. ``"adjustment"``, ``"refund"``). Must be
                 in the SQL allow-list for negative amounts (currently ``adjustment``, ``refund``).
             bucket: The bucket to deduct from.
             metadata: Extra metadata (Pydantic model, passed through to the store).
@@ -486,19 +491,20 @@ class CreditsService:
         result = self._store.add_credits(
             user_id,
             -self._to_decimal(amount),
-            tx_type,
+            entry_type,
             metadata,
             None,
             bucket,
+            idempotency_key,
         )
         self._emit(
             "credits.deducted",
             user_id,
             {
-                "transaction_id": result.transaction_id,
+                "entry_id": result.entry_id,
                 "amount": result.amount,
                 "new_balance": result.new_balance,
-                "tx_type": tx_type,
+                "entry_type": entry_type,
             },
         )
         return result
@@ -720,7 +726,7 @@ class CreditsService:
         # check_allowance overrides period_end after the store call).
         return result.model_copy(update={"limited": True, "action": limit.action})
 
-    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict[str, Any]:
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> dict[str, Any]:
         """Revoke all credits of a given transaction type for a user (LIFO across tiers).
 
         Used by the subscription lifecycle to replace cycle-grant credits on renewal.
@@ -730,7 +736,7 @@ class CreditsService:
         it delegates directly to the store with no event emission. This divergence
         is intentional (Python adds observability).
         """
-        result = self._store.revoke_credits_by_tx_type(user_id, tx_type)
+        result = self._store.revoke_credits_by_entry_type(user_id, entry_type)
         amount = abs(Decimal(str(result.get("amount", 0))))
         if amount > 0:
             self._emit(
@@ -739,7 +745,7 @@ class CreditsService:
                 {
                     "user_id": user_id,
                     "amount": str(amount),
-                    "tx_type": tx_type,
+                    "entry_type": entry_type,
                 },
             )
         return result
@@ -1045,7 +1051,7 @@ class CreditsService:
             "credits.deducted",
             user_id,
             {
-                "transaction_id": result.transaction_id,
+                "entry_id": result.entry_id,
                 "amount": result.amount,
                 "allowance_consumed": result.allowance_consumed,
                 "balance_after": result.balance_after,
@@ -1330,7 +1336,7 @@ class CreditsService:
         idempotency_key: str | None,
         metadata: CreditMetadata | None,
     ) -> CreditMetadata:
-        """Build transaction metadata: caller fields first, system fields last.
+        """Build ledger metadata: caller fields first, system fields last.
 
         System-owned keys (``idempotency_key``, ``model``, ``breakdown_total``)
         are applied after caller metadata so they always win (contract §5, M7).
@@ -1435,7 +1441,7 @@ class CreditsService:
         if cost <= 0:
             balance = self._store.get_balance(user_id)
             result = DeductionResult(
-                transaction_id="",
+                entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
                 balance_after=balance.balance,
@@ -1480,7 +1486,7 @@ class CreditsService:
             "credits.deducted",
             user_id,
             {
-                "transaction_id": result.transaction_id,
+                "entry_id": result.entry_id,
                 "amount": result.amount,
                 "allowance_consumed": result.allowance_consumed,
                 "balance_after": result.balance_after,
@@ -1528,7 +1534,7 @@ class CreditsService:
 
     def refund_credits(
         self,
-        transaction_id: str,
+        entry_id: str,
         amount: Decimal | int | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
@@ -1536,13 +1542,13 @@ class CreditsService:
         """Refund a previous credit deduction.
 
         Args:
-            transaction_id: The transaction to refund.
+            entry_id: The transaction to refund.
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
-            metadata: Extra metadata to attach to the refund transaction.
+            metadata: Extra metadata to attach to the refund entry.
 
         Returns:
-            ``RefundResult`` with the refund transaction details. On a business
+            ``RefundResult`` with the refund ledger entry details. On a business
             failure (over-refund, duplicate, wrong type, not found) ``error`` is
             set, ``credits.refund_failed`` is emitted, and **no**
             ``credits.refunded`` event fires (contract §4, H3). Inspect
@@ -1550,7 +1556,7 @@ class CreditsService:
             ``not_found``) to handle the failure.
         """
         refund_amount = self._to_decimal(amount) if amount is not None else None
-        result = self._store.refund_credits(transaction_id, refund_amount, reason, metadata)
+        result = self._store.refund_credits(entry_id, refund_amount, reason, metadata)
 
         # Check the error BEFORE emitting (H3): a failed/duplicate/over-refund
         # must never fire a success event.
@@ -1559,7 +1565,7 @@ class CreditsService:
                 "credits.refund_failed",
                 result.user_id,
                 {
-                    "transaction_id": transaction_id,
+                    "entry_id": entry_id,
                     "error": result.error,
                     "reason": reason,
                 },
@@ -1570,8 +1576,8 @@ class CreditsService:
             "credits.refunded",
             result.user_id,
             {
-                "transaction_id": transaction_id,
-                "refund_transaction_id": result.refund_transaction_id,
+                "entry_id": entry_id,
+                "refund_entry_id": result.refund_entry_id,
                 "amount": result.amount,
                 "new_balance": result.new_balance,
                 "reason": reason,
@@ -1599,7 +1605,7 @@ class CreditsService:
             metadata: Extra metadata.
 
         Returns:
-            ``TeamDeductionResult`` with transaction details.
+            ``TeamDeductionResult`` with ledger entry details.
         """
         self._maybe_lazy_expire(user_id)
         if not self._engine:
@@ -1613,7 +1619,7 @@ class CreditsService:
         if cost <= 0:
             team_bal = self._store.get_team_balance(team_id)
             return TeamDeductionResult(
-                transaction_id="",
+                entry_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=Decimal(0),
@@ -1649,7 +1655,7 @@ class CreditsService:
             "credits.deducted",
             user_id,
             {
-                "transaction_id": result.transaction_id,
+                "entry_id": result.entry_id,
                 "amount": result.amount,
                 "team_balance_after": result.team_balance_after,
                 "team_id": team_id,
@@ -1722,29 +1728,32 @@ class CreditsService:
         """Daily spend aggregation in a time window."""
         return self._store.daily_spend(start, end)
 
-    def list_user_transactions(
+    def list_ledger_entries(
         self,
         user_id: str,
-        types: list[str] | None = None,
+        entry_types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> list[TransactionRow]:
-        """List credit transactions for a user with pagination."""
-        return self._store.list_user_transactions(user_id, types, from_date, to_date, limit, offset)
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        """List account ledger history with a stable cursor."""
+        return self._store.list_ledger_entries(user_id, entry_types, from_date, to_date, limit, cursor)
 
-    def list_user_transactions_cursor(
+    def list_usage_entries(
         self,
         user_id: str,
-        types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        cursor: tuple[datetime | str, str] | None = None,
-    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
-        """List mutable transaction history with a stable cursor."""
-        return self._store.list_user_transactions_cursor(user_id, types, from_date, to_date, limit, cursor)
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        """List usage entries with the canonical ledger cursor."""
+        return self._store.list_usage_entries(user_id, from_date, to_date, limit, cursor)
+
+    def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
+        """Return one ledger entry for a user account."""
+        return self._store.get_ledger_entry(user_id, entry_id)
 
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window."""

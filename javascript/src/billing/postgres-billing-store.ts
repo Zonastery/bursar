@@ -1,5 +1,4 @@
 import type {
-  BillingConfig,
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
@@ -11,7 +10,6 @@ import type {
   BillingSubscriptionStatus,
   CheckoutIntent,
   BillingTopupResult,
-  ProviderRef,
 } from "./billing-types.js";
 import { BillingStore } from "./billing-store.js";
 import type { QueryFn } from "../repositories/types.js";
@@ -24,7 +22,6 @@ import { BillingPaymentRepository } from "../repositories/billing/payment.js";
 import { BillingRefundRepository } from "../repositories/billing/refund.js";
 import { BillingInvoiceRepository } from "../repositories/billing/invoice.js";
 import { BillingDisputeRepository } from "../repositories/billing/dispute.js";
-import { BillingConfigRepository } from "../repositories/billing/config.js";
 import { BillingPreferencesRepository } from "../repositories/billing/preferences.js";
 import { BillingAutoRechargeRepository } from "../repositories/billing/auto-recharge.js";
 
@@ -36,78 +33,6 @@ function toIso(value: unknown): string | null {
     return (value as Date).toISOString();
   }
   return String(value);
-}
-
-function billingConfigToSnake(config: BillingConfig): Record<string, unknown> {
-  const providerRefs = (refs: Record<string, ProviderRef> | undefined) =>
-    refs
-      ? Object.fromEntries(
-          Object.entries(refs).map(([provider, ref]) => [
-            provider,
-            {
-              ...(ref.productId != null ? { product_id: ref.productId } : {}),
-              ...(ref.priceId != null ? { price_id: ref.priceId } : {}),
-              ...(ref.variantId != null ? { variant_id: ref.variantId } : {}),
-              ...(ref.lookupKey != null ? { lookup_key: ref.lookupKey } : {}),
-            },
-          ]),
-        )
-      : undefined;
-
-  return {
-    currency: config.currency,
-    subscriptions: Object.fromEntries(
-      Object.entries(config.subscriptions ?? {}).map(([key, offer]) => [
-        key,
-        {
-          plan: offer.plan,
-          interval: offer.interval,
-          ...(offer.intervalCount != null ? { interval_count: offer.intervalCount } : {}),
-          ...(offer.grant
-            ? {
-                grant:
-                  offer.grant.mode === "cycle_grant"
-                    ? {
-                        mode: offer.grant.mode,
-                        credits: offer.grant.credits,
-                        bucket: offer.grant.bucket,
-                        replace_prior: offer.grant.replacePrior,
-                      }
-                    : { mode: offer.grant.mode },
-              }
-            : {}),
-          ...(providerRefs(offer.providers) ? { providers: providerRefs(offer.providers) } : {}),
-          ...(offer.validFrom != null ? { valid_from: offer.validFrom } : {}),
-          ...(offer.validTo != null ? { valid_to: offer.validTo } : {}),
-        },
-      ]),
-    ),
-    topups: Object.fromEntries(
-      Object.entries(config.topups ?? {}).map(([key, topup]) => [
-        key,
-        {
-          deposit_to: topup.depositTo,
-          ...(topup.creditsPerUnit != null ? { credits_per_unit: topup.creditsPerUnit } : {}),
-          ...(topup.minAmountMinor != null ? { min_amount_minor: topup.minAmountMinor } : {}),
-          ...(topup.maxAmountMinor != null ? { max_amount_minor: topup.maxAmountMinor } : {}),
-          ...(topup.taxBehavior != null ? { tax_behavior: topup.taxBehavior } : {}),
-          ...(providerRefs(topup.providers) ? { providers: providerRefs(topup.providers) } : {}),
-        },
-      ]),
-    ),
-    ...(config.autoRecharge
-      ? {
-          auto_recharge: {
-            enabled: config.autoRecharge.enabled,
-            threshold_credits: config.autoRecharge.thresholdCredits,
-            topup_key: config.autoRecharge.topupKey,
-            quantity: config.autoRecharge.quantity,
-            max_recharges: config.autoRecharge.maxRecharges,
-            window_days: config.autoRecharge.windowDays,
-          },
-        }
-      : {}),
-  };
 }
 
 export class PostgresBillingStore extends BillingStore {
@@ -123,7 +48,6 @@ export class PostgresBillingStore extends BillingStore {
   private _refund: BillingRefundRepository | null = null;
   private _invoice: BillingInvoiceRepository | null = null;
   private _dispute: BillingDisputeRepository | null = null;
-  private _config: BillingConfigRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
   private ownsPool: boolean = false;
@@ -213,11 +137,6 @@ export class PostgresBillingStore extends BillingStore {
     return this._dispute;
   }
 
-  private get billingConfig(): BillingConfigRepository {
-    if (!this._config) this._config = new BillingConfigRepository(this.queryFn);
-    return this._config;
-  }
-
   private get billingPreferences(): BillingPreferencesRepository {
     if (!this._preferences) this._preferences = new BillingPreferencesRepository(this.queryFn);
     return this._preferences;
@@ -226,10 +145,6 @@ export class PostgresBillingStore extends BillingStore {
   private get billingAutoRecharge(): BillingAutoRechargeRepository {
     if (!this._autoRecharge) this._autoRecharge = new BillingAutoRechargeRepository(this.queryFn);
     return this._autoRecharge;
-  }
-
-  async syncBillingFromConfig(config: BillingConfig): Promise<void> {
-    await this.billingConfig.syncFromConfig(JSON.stringify(billingConfigToSnake(config)));
   }
 
   async createOrGetCheckoutIntent(input: {
@@ -242,41 +157,35 @@ export class PostgresBillingStore extends BillingStore {
   }): Promise<CheckoutIntent> {
     await this.queryFn(
       `UPDATE bursar.billing_checkout_intents
-          SET status = 'expired', updated_at = now()
-        WHERE actor_key = $1 AND status = 'open' AND expires_at <= now()
-        RETURNING id`,
+       SET status = 'expired', updated_at = now()
+       WHERE actor_key = $1 AND status = 'open' AND expires_at <= now()`,
       [input.actorKey],
     );
-    const result = await this.queryFn(
-      `INSERT INTO bursar.billing_checkout_intents
-        (actor_key, provider, type, product_id, request_fingerprint, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (actor_key) WHERE status = 'open'
-       DO UPDATE SET updated_at = now()
-       RETURNING id, actor_key, provider, type, product_id, request_fingerprint, status,
-                 provider_session_id, checkout_url, expires_at`,
-      [
-        input.actorKey,
-        input.provider,
-        input.type,
-        input.productId,
-        input.requestFingerprint,
-        input.expiresAt,
-      ],
+    const existing = await this.queryFn(
+      `SELECT * FROM bursar.billing_checkout_intents
+       WHERE actor_key = $1 AND provider = $2 AND type = $3
+         AND product_id = $4 AND request_fingerprint = $5 AND status = 'open'
+       LIMIT 1`,
+      [input.actorKey, input.provider, input.type, input.productId, input.requestFingerprint],
     );
-    const row = result[0] as Record<string, unknown>;
-    return {
-      id: String(row.id),
-      actorKey: String(row.actor_key),
-      provider: String(row.provider),
-      type: row.type as "subscription" | "credit_pack",
-      productId: String(row.product_id),
-      requestFingerprint: String(row.request_fingerprint),
-      status: row.status as CheckoutIntent["status"],
-      providerSessionId: row.provider_session_id ? String(row.provider_session_id) : null,
-      checkoutUrl: row.checkout_url ? String(row.checkout_url) : null,
-      expiresAt: toIso(row.expires_at) ?? input.expiresAt,
-    };
+    const rows =
+      existing.length > 0
+        ? existing
+        : await this.queryFn(
+            `INSERT INTO bursar.billing_checkout_intents
+             (actor_key, provider, type, product_id, request_fingerprint, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [
+              input.actorKey,
+              input.provider,
+              input.type,
+              input.productId,
+              input.requestFingerprint,
+              input.expiresAt,
+            ],
+          );
+    return this.rowToCheckoutIntent(rows[0] as Record<string, unknown>);
   }
 
   async updateCheckoutIntent(
@@ -289,52 +198,52 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<void> {
     await this.queryFn(
       `UPDATE bursar.billing_checkout_intents
-          SET status = COALESCE($2, status),
-              provider_session_id = COALESCE($3, provider_session_id),
-              checkout_url = COALESCE($4, checkout_url),
-              updated_at = now()
-        WHERE id = $1`,
+       SET status = COALESCE($2, status),
+           provider_session_id = COALESCE($3, provider_session_id),
+           checkout_url = COALESCE($4, checkout_url),
+           updated_at = now()
+       WHERE id = $1`,
       [id, update.status ?? null, update.providerSessionId ?? null, update.checkoutUrl ?? null],
     );
   }
 
   async getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null> {
-    const result = await this.queryFn(
-      `SELECT id, actor_key, provider, type, product_id, request_fingerprint, status,
-              provider_session_id, checkout_url, expires_at
-         FROM bursar.billing_checkout_intents
-        WHERE id = $1 AND actor_key = $2
-        LIMIT 1`,
+    const rows = await this.queryFn(
+      `SELECT * FROM bursar.billing_checkout_intents
+       WHERE id = $1 AND actor_key = $2
+       LIMIT 1`,
       [id, actorKey],
     );
-    const row = result[0] as Record<string, unknown> | undefined;
-    if (!row) return null;
+    return rows.length > 0 ? this.rowToCheckoutIntent(rows[0] as Record<string, unknown>) : null;
+  }
+
+  private rowToCheckoutIntent(row: Record<string, unknown>): CheckoutIntent {
     return {
       id: String(row.id),
       actorKey: String(row.actor_key),
       provider: String(row.provider),
-      type: row.type as "subscription" | "credit_pack",
+      type: row.type as CheckoutIntent["type"],
       productId: String(row.product_id),
       requestFingerprint: String(row.request_fingerprint),
       status: row.status as CheckoutIntent["status"],
-      providerSessionId: row.provider_session_id ? String(row.provider_session_id) : null,
-      checkoutUrl: row.checkout_url ? String(row.checkout_url) : null,
+      providerSessionId: row.provider_session_id == null ? null : String(row.provider_session_id),
+      checkoutUrl: row.checkout_url == null ? null : String(row.checkout_url),
       expiresAt: toIso(row.expires_at) ?? new Date(0).toISOString(),
     };
   }
 
-  private rowToOffer(r: Record<string, unknown>): BillingOfferResult | null {
-    if (!r?.offer_key) return null;
+  private rowToOffer(row: Record<string, unknown> | null): BillingOfferResult | null {
+    if (!row?.offer_key) return null;
     return {
-      offerKey: r.offer_key as string,
-      plan: (r.plan as string | undefined) ?? null,
-      interval: (r.interval as string | undefined) ?? "month",
-      intervalCount: Number(r.interval_count ?? 1),
+      offerKey: String(row.offer_key),
+      plan: row.plan == null ? null : String(row.plan),
+      interval: row.interval == null ? "month" : String(row.interval),
+      intervalCount: Number(row.interval_count ?? 1),
       grant: {
-        mode: r.grant_mode as string | undefined,
-        credits: r.grant_credits != null ? Number(r.grant_credits) : null,
-        bucket: (r.grant_bucket as string | undefined) ?? undefined,
-        replacePrior: r.grant_replace_prior === true,
+        mode: row.grant_mode == null ? undefined : String(row.grant_mode),
+        credits: row.grant_credits == null ? null : Number(row.grant_credits),
+        bucket: row.grant_bucket == null ? undefined : String(row.grant_bucket),
+        replacePrior: row.grant_replace_prior === true,
       },
     };
   }
@@ -496,8 +405,8 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<void> {
     await this.queryFn(
       `UPDATE bursar.billing_subscription_changes SET state = COALESCE($2, state),
-       provider_operation_id = COALESCE($3, provider_operation_id), effective_date = COALESCE($4, effective_date),
-       completed_at = CASE WHEN $2 = 'completed' THEN now() ELSE completed_at END, updated_at = now() WHERE id = $1`,
+ provider_operation_id = COALESCE($3, provider_operation_id), effective_date = COALESCE($4, effective_date),
+ updated_at = now() WHERE id = $1`,
       [id, update.state ?? null, update.providerOperationId ?? null, update.effectiveDate ?? null],
     );
   }

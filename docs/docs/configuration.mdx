@@ -1,197 +1,41 @@
-# Pricing Configuration
+---
+title: Canonical configuration
+---
 
-Bursar configuration is one versioned YAML or JSON document. `version: 1` is
-the schema version; catalog publication versions are storage metadata and are
-not part of this file.
+# Canonical configuration
 
-The document has four independent sections:
-
-| Section | Required | Purpose |
-| --- | --- | --- |
-| `usage` | no | Declares billable operations and credit rate cards. |
-| `credits` | no | Declares credit buckets, spending order, and signup credit. |
-| `plans` | no | Defines the single recurring plan a user may hold. |
-| `payments` | no | Maps plans and top-ups to provider-owned catalog objects. |
+The public `BursarConfig` contains only `usage`, `credits`, `plans`, and
+`payments`. Unknown keys are rejected, including removed historical shapes.
 
 ```yaml
-version: 1
-
 usage:
-  operations:
-    completion:
-      measures: [input_tokens, output_tokens, cached_input_tokens]
-      dimensions: [model]
-    image_generation:
-      measures: [images]
-      dimensions: [model]
-
-  rate_cards:
-    standard:
-      prices:
-        completion:
-          - match:
-              model: { prefix: claude-sonnet- }
-            formula: input_tokens * 3 + output_tokens * 10 + cached_input_tokens * 0.5
-          - default: true
-            formula: input_tokens * 10 + output_tokens * 30
-        image_generation:
-          - default: true
-            formula: images * 500
-
-    pro:
-      extends: standard
-      prices:
-        completion:
-          - default: true
-            formula: input_tokens * 2 + output_tokens * 8 + cached_input_tokens * 0.25
-
+  models:
+    _default: input_tokens + output_tokens
 credits:
   buckets:
-    gifted:
-      expires_after: { unit: day, count: 7 }
-    subscription: {}
-    purchased: {}
-  spend_order: [gifted, subscription, purchased]
-  default_bucket: purchased
-  overdraft_bucket: purchased
-  signup_grant: { amount: 50, bucket: gifted }
-
+    purchased:
+      priority: 10
 plans:
   free:
-    display_name: Free
-    rate_card: standard
-    included_credits:
-      amount: 5000
-      reset: { unit: month, anchor: calendar, timezone: UTC }
-    features:
-      chat: true
-    limits:
-      image_generation:
-        max_calls: 5
-        period: { unit: month, anchor: calendar, timezone: UTC }
-        action: deny
-    spending:
-      mode: strict
-      max_concurrent: 1
-
+    label: Free
+    included_credits: 1000
 payments:
-  subscriptions:
-    pro_monthly:
-      plan: free
-      billing_period: { unit: month }
-      providers:
-        stripe:
-          lookup: { type: price_id, value: price_pro_monthly }
-
-  topups:
-    small_pack:
-      credits: 1000
-      bucket: purchased
-      providers:
-        stripe:
-          lookup: { type: price_id, value: price_small_pack }
-
-  auto_recharge:
-    trigger: { balance_below: 500 }
-    purchase: { topup: small_pack, quantity: 1 }
-    limit:
-      max_purchases: 3
-      period: { unit: day, count: 30, anchor: rolling }
+  subscriptions: {}
+  topups: {}
 ```
 
-## Usage and rate cards
-
-An application reports one operation at a time:
+Publish a draft, then activate it atomically:
 
 ```python
-UsageMetrics(
-    operation="completion",
-    measures={"input_tokens": 1200, "output_tokens": 400},
-    dimensions={"model": "claude-sonnet-4-6"},
-)
+version = bursar.catalog.publish_draft(config, label="2026-07")
+bursar.catalog.activate(version)
 ```
 
-Measures are finite, non-negative decimals and are the only names available to
-that operation's price formulas. Dimensions select a rule but are not formula
-variables. This prevents provider-specific concepts such as tools, search, or
-model names from becoming permanent Bursar schema fields.
-
-Price rules are evaluated in YAML order. A rule either has `match` or
-`default: true`; every operation must end with exactly one default rule.
-Matchers are explicit:
-
-```yaml
-match:
-  model: { exact: gpt-4.1 }
+```ts
+const version = await bursar.catalog.publishDraft(config, "2026-07");
+await bursar.catalog.activate(Number(version));
 ```
 
-```yaml
-match:
-  model: { prefix: gpt-4.1- }
-```
-
-There is no implicit model-prefix fallback and no silent zero-priced operation.
-Every operation must be priced by every rate card, directly or through its one
-acyclic `extends` parent. A child replaces all rules for an overridden
-operation and inherits untouched operations.
-
-## Credits and plans
-
-`credits.buckets` declares wallet classes. `spend_order` is a complete ordered
-list, avoiding priority ties. `default_bucket` and `overdraft_bucket` are
-central references rather than flags repeated on bucket objects.
-
-`included_credits` is a virtual, non-rollover plan quota. It is separate from
-wallet grants: it is consumed before stored credits and resets over its period.
-Periods use `{ unit, count, anchor, timezone }`; `anchor` is `calendar`,
-`plan_assignment`, or `rolling`.
-
-Feature values and feature limits are separate. Use `features` for entitlement
-values and `limits` for invocation caps. `action: deny` blocks the operation;
-`warn` and `notify` are non-blocking signals.
-
-Plan `spending` controls admission policy. `overdraft_limit` is a positive
-amount and is valid only with `mode: overdraft`; an overdraft-enabled plan
-requires `credits.overdraft_bucket`.
-
-## Payments
-
-Payment providers own fiat prices, currencies, and taxes. Bursar maps a
-logical subscription or top-up to an opaque provider lookup:
-
-```yaml
-providers:
-  stripe:
-    lookup: { type: price_id, value: price_123 }
-```
-
-Each provider reference has exactly one lookup type/value pair. The provider
-adapter decides supported lookup types.
-
-Top-ups are fixed credit packs. A subscription may optionally define
-`renewal_credits`:
-
-```yaml
-renewal_credits:
-  amount: 5000
-  bucket: subscription
-  behavior: replace        # replace | accumulate
-  on_subscription_end: expire # expire | keep
-```
-
-A plan's `included_credits` and subscription `renewal_credits` cannot be
-combined accidentally. Set `stack_credits: true` when that combination is
-intentional.
-
-`payments.auto_recharge` has one shape: a balance trigger, top-up purchase,
-and purchase-count limit. Omitting the section disables auto-recharge.
-
-## Validation guarantees
-
-- All identifiers are non-empty snake_case.
-- Unknown keys and legacy `metering`, `ledger`, and `billing` sections fail.
-- Decimal amounts are stored canonically as strings.
-- References, provider lookup uniqueness, price-rule defaults, rate-card
-  inheritance, bucket order, and credit-stacking policy are validated at load
-  time.
-- Formula results must be finite and non-negative at calculation time.
+Activation synchronizes the catalog and marks the selected document active in
+one database operation. Pricing, billing offers, and auto-recharge policy all
+read that active document.

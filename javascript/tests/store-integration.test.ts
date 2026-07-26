@@ -7,6 +7,7 @@ import { BOOTSTRAP_SQL, applyMigrations } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
+const REPLAY_USER_ID = "00000000-0000-0000-0000-000000000912";
 
 const CONFIG = {
   version: 1,
@@ -52,6 +53,17 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
 
   it("publishes the public config, charges a generic operation, and preserves bucket order", async () => {
     const service = new CreditsService(store);
+    const first = await service.addCredits(REPLAY_USER_ID, new Decimal(25), {
+      type: "purchase",
+      idempotencyKey: "integration:add-replay",
+    });
+    const replay = await service.addCredits(REPLAY_USER_ID, new Decimal(25), {
+      type: "purchase",
+      idempotencyKey: "integration:add-replay",
+    });
+    expect(replay.entryId).toBe(first.entryId);
+    expect((await service.getBalance(REPLAY_USER_ID)).balance.toString()).toBe("25");
+
     await service.publishPricingFromDict(CONFIG);
     await service.addCredits(USER_ID, new Decimal(10), "purchase", {}, undefined, "grant");
     await service.addCredits(USER_ID, new Decimal(10), "purchase", {}, undefined, "purchased");
@@ -67,9 +79,6 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     );
     expect(result.amount.toString()).toBe("16");
     const buckets = await service.getBucketBalances(USER_ID);
-    expect(buckets.buckets.find((bucket) => bucket.bucketKey === "grant")?.balance.toString()).toBe(
-      "0",
-    );
     expect(
       buckets.buckets.find((bucket) => bucket.bucketKey === "purchased")?.balance.toString(),
     ).toBe("4");

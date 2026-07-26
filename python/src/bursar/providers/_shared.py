@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from bursar.billing.models import BillingEvent, BillingEventResult, BillingSubscriptionStatus
-from bursar.bursar import BillingEventSink
+
+if TYPE_CHECKING:
+    from bursar.bursar import BillingEventSink
 
 
 def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> BillingEventResult:

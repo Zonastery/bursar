@@ -9,7 +9,7 @@ import type { AllowancePeriod, FeatureLimitPeriod } from "./allowance.js";
  */
 export type BillingMode = "strict" | "overdraft";
 
-/** Flexible metadata attached to credit transactions. */
+/** Flexible metadata attached to ledger entries. */
 export interface CreditMetadata {
   operation?: string | null;
   measures?: Record<string, unknown> | null;
@@ -69,7 +69,7 @@ export interface BalanceResult {
 
 /** Result of adding credits to a user's account. */
 export interface AddCreditsResult {
-  transactionId: string;
+  entryId: string;
   userId: string;
   amount: Decimal;
   newBalance: Decimal;
@@ -82,7 +82,7 @@ export interface AddCreditsResult {
 
 /** Result of deducting credits. */
 export interface DeductionResult {
-  transactionId: string;
+  entryId: string;
   userId: string;
   amount: Decimal;
   allowanceConsumed: Decimal;
@@ -137,23 +137,7 @@ export interface BursarConfigHistoryItem {
   createdAt: string;
 }
 
-/** Report of SQL setup results. */
-export interface SetupResult {
-  tablesCreated: string[];
-  rpcsCreated: string[];
-  errors: string[];
-  readonly success: boolean;
-}
-
-/**
- * Per-operation financial-safety policy (interface plan §1).
- *
- * Resolved per call as: explicit arg → ``PlanDefinition.perOperation[type]`` →
- * plan default → the manager's constructor preset. ``maxConcurrent`` bounds the
- * number of simultaneously-active leases for an operation type; ``overdraftFloor``
- * (only meaningful when ``billingMode === "overdraft"``) is the negative balance
- * floor admission is allowed down to.
- */
+/** Per-operation financial-safety policy. */
 export interface OperationPolicy {
   billingMode: BillingMode;
   maxConcurrent?: number | null;
@@ -358,8 +342,8 @@ export interface MigratePlanUsersResult {
 
 /** Result of refunding a credit deduction. */
 export interface RefundResult {
-  refundTransactionId: string;
-  originalTransactionId: string;
+  refundEntryId: string;
+  originalEntryId: string;
   userId: string;
   amount: Decimal;
   newBalance: Decimal;
@@ -377,52 +361,48 @@ export interface SweepResult {
   expiredByBucket?: Record<string, Decimal> | null;
 }
 
-// ── Transaction listing ──────────────────────────────────────────────
-/** A single credit transaction row. */
-export interface UserTransactionRow {
-  id: string;
-  userId: string;
+// ── Canonical ledger history ─────────────────────────────────────────
+
+/** One immutable monetary entry on a canonical credit account. */
+export interface LedgerEntry {
+  entryId: string;
+  accountId: string;
+  actorUserId: string | null;
   amount: Decimal;
-  type: string;
-  referenceType: string | null;
-  referenceId: string | null;
+  entryType: string;
+  referenceEntryId: string | null;
+  idempotencyKey: string | null;
   metadata: Record<string, unknown> | null;
   createdAt: string;
 }
 
-/** Options for listing user transactions. */
-export interface ListTransactionsOptions {
-  types?: string[];
-  fromDate?: Date;
-  toDate?: Date;
-  limit?: number;
-  offset?: number;
-}
-
-/** Paginated result of listing user transactions. */
-export interface PaginatedTransactions {
-  items: UserTransactionRow[];
-  total: number;
-}
-
-/** Stable position in a mutable transaction history. */
-export interface TransactionCursor {
+/** Stable position in an account ledger. */
+export interface LedgerCursor {
   createdAt: string;
-  id: string;
+  entryId: string;
 }
 
-/** Cursor-paginated transaction history. `nextCursor` is null at the end. */
-export interface CursorPaginatedTransactions {
-  items: UserTransactionRow[];
-  nextCursor: TransactionCursor | null;
-}
-
-/** Options for listing usage events. */
-export interface ListUsageEventsOptions {
+/** Cursor-only options for listing account ledger entries. */
+export interface ListLedgerEntriesOptions {
+  entryTypes?: string[];
   fromDate?: Date;
   toDate?: Date;
   limit?: number;
-  offset?: number;
+  cursor?: LedgerCursor | null;
+}
+
+/** One stable cursor page. */
+export interface LedgerPage {
+  items: LedgerEntry[];
+  nextCursor: LedgerCursor | null;
+}
+
+/** Cursor-only options for the usage-only ledger view. */
+export interface ListUsageEntriesOptions {
+  fromDate?: Date;
+  toDate?: Date;
+  limit?: number;
+  cursor?: LedgerCursor | null;
 }
 
 // ── Usage analytics ─────────────────────────────────────────────────
@@ -430,14 +410,14 @@ export interface ListUsageEventsOptions {
 export interface SpendByUserRow {
   userId: string;
   totalSpend: Decimal;
-  transactionCount: number;
+  entryCount: number;
 }
 
 /** Aggregated spend for a single model in a time window. */
 export interface SpendByModelRow {
   model: string;
   totalSpend: Decimal;
-  transactionCount: number;
+  entryCount: number;
 }
 
 /** Top-spending user in a time window. */
@@ -450,7 +430,7 @@ export interface TopUserRow {
 export interface DailySpendRow {
   date: string;
   totalSpend: Decimal;
-  transactionCount: number;
+  entryCount: number;
 }
 
 /** Aggregate statistics across all users in a time window. */
@@ -522,7 +502,7 @@ export interface AddTeamMemberResult {
 
 /** Result of deducting credits from a team pool. */
 export interface TeamDeductionResult {
-  transactionId: string;
+  entryId: string;
   teamId: string;
   userId: string;
   amount: Decimal;

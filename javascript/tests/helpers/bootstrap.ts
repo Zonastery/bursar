@@ -74,7 +74,7 @@ GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
 
 export { BOOTSTRAP_SQL };
 
-export function migrationFiles(): string[] {
+function migrationFiles(): string[] {
   return readdirSync(SQL_DIR)
     .filter((f) => f.endsWith(".sql"))
     .sort();

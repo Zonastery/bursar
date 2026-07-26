@@ -5,15 +5,11 @@ import type { CreditStore } from "../src/stores/credit-store.js";
 
 describe("Bursar facade", () => {
   it("owns one credit service and exposes catalog operations", async () => {
-    const setup = vi.fn().mockResolvedValue({});
-    const creditStore = { setup } as unknown as CreditStore;
+    const creditStore = {} as CreditStore;
     const bursar = new Bursar({ creditStore });
 
     expect(bursar.billing).toBeNull();
     expect(bursar.catalog).toBeDefined();
-    await bursar.setup();
-    expect(setup).toHaveBeenCalledOnce();
-
     const active = { version: 3 };
     vi.spyOn(bursar.credits, "getActivePricing").mockReturnValue(active as never);
     expect(bursar.catalog.active).toBe(active);

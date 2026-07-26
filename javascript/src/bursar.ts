@@ -199,11 +199,6 @@ export class Bursar implements BillingEventSink {
       : null;
   }
 
-  /** Run core database setup through the credit store. */
-  async setup(): Promise<Awaited<ReturnType<CreditStore["setup"]>>> {
-    return this.credits.setup();
-  }
-
   /** Load the active catalog into the pricing engine. */
   async loadCatalog(): Promise<void> {
     await this.credits.loadPricingFromStore();

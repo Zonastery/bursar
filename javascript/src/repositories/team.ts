@@ -2,14 +2,14 @@ import { z } from "zod";
 import type { CallProc } from "./types.js";
 import { safeParse } from "./_shared.js";
 
-export const CreateTeamRowSchema = z
+const CreateTeamRowSchema = z
   .object({
     team_id: z.string().optional(),
     name: z.string().optional(),
   })
   .passthrough();
 
-export const TeamBalanceRowSchema = z
+const TeamBalanceRowSchema = z
   .object({
     team_id: z.string().optional(),
     name: z.string().optional(),
@@ -18,11 +18,11 @@ export const TeamBalanceRowSchema = z
       .nullable()
       .optional(),
     member_count: z.number().optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 
-export const AddTeamMemberRowSchema = z
+const AddTeamMemberRowSchema = z
   .object({
     team_id: z.string().optional(),
     user_id: z.string().optional(),
@@ -30,7 +30,7 @@ export const AddTeamMemberRowSchema = z
   })
   .passthrough();
 
-export const TeamMemberRowSchema = z
+const TeamMemberRowSchema = z
   .object({
     user_id: z.string().optional(),
     role: z.string().optional(),
@@ -45,9 +45,9 @@ export const TeamMemberRowSchema = z
   })
   .passthrough();
 
-export const TeamDeductionRowSchema = z
+const TeamDeductionRowSchema = z
   .object({
-    transaction_id: z.string().optional(),
+    entry_id: z.string().optional(),
     team_id: z.string().optional(),
     user_id: z.string().optional(),
     amount: z
@@ -58,7 +58,7 @@ export const TeamDeductionRowSchema = z
       .union([z.string(), z.number()] as const)
       .nullable()
       .optional(),
-    error: z.string().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 

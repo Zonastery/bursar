@@ -1,10 +1,6 @@
 import type { BillingService } from "./billing-service.js";
 import { loadConfigFromDict } from "../config.js";
-import type {
-  BillingAutoRechargeConfig,
-  BillingAutoRechargeProfile,
-  BillingAutoRechargeStatus,
-} from "./billing-types.js";
+import type { BillingAutoRechargeProfile, BillingAutoRechargeStatus } from "./billing-types.js";
 import type {
   PaymentProvider,
   SavedPaymentChargeQuote,
@@ -26,12 +22,20 @@ export interface AutoRechargeProcessResult {
   charge?: SavedPaymentChargeResult | null;
 }
 
+interface ResolvedAutoRechargePolicy {
+  enabled: true;
+  thresholdCredits: number;
+  topupKey: string;
+  quantity: number;
+  maxRecharges: number;
+  windowDays: number;
+  productId: string;
+}
+
 export class AutoRechargeService {
   constructor(private readonly billing: BillingService) {}
 
-  private async policy(
-    provider: PaymentProvider,
-  ): Promise<(BillingAutoRechargeConfig & { productId: string }) | null> {
+  private async policy(provider: PaymentProvider): Promise<ResolvedAutoRechargePolicy | null> {
     const raw = await this.billing.getActiveBursarConfig();
     if (!raw) return null;
     const config = loadConfigFromDict(raw);

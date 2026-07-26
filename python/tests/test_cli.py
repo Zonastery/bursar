@@ -8,16 +8,26 @@ from pathlib import Path
 import pytest
 
 from bursar import __main__ as cli
-from bursar.interface.base import StoreError
+from bursar.stores.base import StoreError
 
 
 def test_load_pricing_file_supports_json_yaml_and_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     json_path = tmp_path / "pricing.json"
-    json_path.write_text(json.dumps({"version": 1, "metering": {"models": {"*": "input_tokens"}}}))
+    json_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "usage": {"models": {"*": "input_tokens"}},
+                "credits": {},
+                "plans": {},
+                "payments": {},
+            }
+        )
+    )
     assert cli._load_pricing_file(str(json_path))["version"] == 1
 
     yaml_path = tmp_path / "pricing.yaml"
-    yaml_path.write_text("version: 1\nmetering:\n  models:\n    '*': input_tokens\n")
+    yaml_path.write_text("version: 1\nusage:\n  models:\n    '*': input_tokens\ncredits: {}\nplans: {}\npayments: {}\n")
     assert cli._load_pricing_file(str(yaml_path))["version"] == 1
 
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO('{"version": 1}'))

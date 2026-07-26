@@ -13,9 +13,7 @@ except PackageNotFoundError:  # pragma: no cover - source checkout without insta
 from bursar.billing import (
     AllowanceGrant,
     BillingAutoRechargeAttempt,
-    BillingAutoRechargeConfig,
     BillingAutoRechargeProfile,
-    BillingConfig,
     BillingCreditTopup,
     BillingCustomerInfo,
     BillingCustomerRecord,
@@ -57,14 +55,26 @@ from bursar.credits_service import (
 from bursar.engine import PricingEngine
 from bursar.events import CreditEvent, CreditEventEmitter
 from bursar.expr import ExpressionError, evaluate_expression, validate_expression
-from bursar.interface.base import (
+from bursar.metrics import UsageMetrics
+from bursar.providers.types import (
+    CheckoutParams,
+    CreateCustomerParams,
+    PaymentMethodInfo,
+    PaymentMethodSetupParams,
+    PaymentProvider,
+    PortalParams,
+    ProviderLogger,
+    UpdatePaymentMethodParams,
+    WebhookRequest,
+)
+from bursar.stores.base import (
     CapabilityNotSupportedError,
     CapReachedError,
     FeatureLimitReachedError,
     RefundError,
     StoreError,
 )
-from bursar.interface.models import (
+from bursar.stores.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -86,11 +96,13 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    LedgerCursor,
+    LedgerEntry,
+    LedgerPage,
     OperationPolicy,
     PlanDefinition,
     RefundResult,
     ReleaseResult,
-    SetupResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
@@ -101,19 +113,6 @@ from bursar.interface.models import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
-    TransactionRow,
-)
-from bursar.metrics import UsageMetrics
-from bursar.providers.types import (
-    CheckoutParams,
-    CreateCustomerParams,
-    PaymentMethodInfo,
-    PaymentMethodSetupParams,
-    PaymentProvider,
-    PortalParams,
-    ProviderLogger,
-    UpdatePaymentMethodParams,
-    WebhookRequest,
 )
 
 
@@ -129,7 +128,6 @@ def __getattr__(name: str):
 
 __all__ = [
     "BillingAutoRechargeAttempt",
-    "BillingAutoRechargeConfig",
     "BillingAutoRechargeProfile",
     "AutoRechargeService",
     "AddCreditsResult",
@@ -139,7 +137,6 @@ __all__ = [
     "AllowanceResult",
     "AvailableResult",
     "BalanceResult",
-    "BillingConfig",
     "BillingCreditTopup",
     "BillingCustomerInfo",
     "BillingCustomerRecord",
@@ -213,7 +210,9 @@ __all__ = [
     "RefundError",
     "RefundResult",
     "ReleaseResult",
-    "SetupResult",
+    "LedgerCursor",
+    "LedgerEntry",
+    "LedgerPage",
     "SetUserPlanResult",
     "SpendByModelRow",
     "SpendByUserRow",
@@ -225,7 +224,6 @@ __all__ = [
     "TeamDeductionResult",
     "TeamMember",
     "TopUserRow",
-    "TransactionRow",
     "UpdatePaymentMethodParams",
     "UsageMetrics",
     "validate_expression",

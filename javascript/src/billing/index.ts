@@ -8,8 +8,6 @@ export { AutoRechargeService } from "./auto-recharge-service.js";
 export type { AutoRechargeOutcome, AutoRechargeProcessResult } from "./auto-recharge-service.js";
 
 export type {
-  BillingConfig,
-  BillingAutoRechargeConfig,
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingAutoRechargeStatus,

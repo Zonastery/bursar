@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { QueryFn } from "../types.js";
 import { unwrapJsonb, safeParse } from "../_shared.js";
 
-export const BillingPaymentRowSchema = z
+const BillingPaymentRowSchema = z
   .object({
     provider: z.string().optional(),
     provider_payment_id: z.string().optional(),
@@ -25,7 +25,7 @@ export const BillingPaymentRowSchema = z
   })
   .passthrough();
 
-export const ForRefundRowSchema = z
+const ForRefundRowSchema = z
   .object({
     credits_per_unit: z
       .union([z.string(), z.number()] as const)

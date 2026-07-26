@@ -19,16 +19,15 @@ import type {
   FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
-  ListTransactionsOptions,
-  ListUsageEventsOptions,
+  ListLedgerEntriesOptions,
+  ListUsageEntriesOptions,
   MigratePlanUsersResult,
-  PaginatedTransactions,
+  LedgerPage,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
-  SetupResult,
   SpendByModelRow,
   SpendByUserRow,
   SweepResult,
@@ -36,14 +35,14 @@ import type {
   TeamDeductionResult,
   TeamMember,
   TopUserRow,
-  UserTransactionRow,
+  LedgerEntry,
 } from "../types.js";
 
 /**
  * Per-feature invocation-count limit enforcement inputs, threaded through the
  * three atomic ops by the manager (resolved once via `getUserPlan` +
  * `resolveCalendarWindow`). `feature` alone (with `featureLimit`/
- * `featurePeriodStart` omitted) still tags the inserted transaction's
+ * `featurePeriodStart` omitted) still tags the inserted entry's
  * `metadata.feature` — enforcement only runs when `featureLimit` is given.
  *
  * Mirrors Python `base.py` exactly: only the window START is threaded down
@@ -92,14 +91,13 @@ export interface SettleLeaseOptions extends FeatureLimitOptions {
  *    lease lifecycle, bursar-config versioning, plan management, spend caps,
  *    refunds, and expiry sweeping. Every backend needs these.
  *  - **Optional capabilities** (concrete, default-throwing): usage analytics,
- *    transaction listing, and shared team-balance pools. A custom store that
+ *    ledger listing, and shared team-balance pools. A custom store that
  *    doesn't need these can skip them entirely — the default implementation
  *    throws {@link CapabilityNotSupportedError} instead of forcing a stub.
  */
 export abstract class CreditStore {
   constructor() {}
 
-  abstract setup(databaseUrl?: string | null): Promise<SetupResult>;
   abstract getBalance(userId: string): Promise<BalanceResult>;
   abstract addCredits(
     userId: string,
@@ -247,11 +245,14 @@ export abstract class CreditStore {
   ): Promise<FeatureLimitResult>;
 
   // ── Revoke credits by tx type ──────────────────────────────────────
-  abstract revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>>;
+  abstract revokeCreditsByEntryType(
+    userId: string,
+    entryType: string,
+  ): Promise<Record<string, unknown>>;
 
   // ── Refunds ────────────────────────────────────────────────────────
   abstract refundCredits(
-    transactionId: string,
+    entryId: string,
     amount?: Decimal,
     reason?: string,
     metadata?: CreditMetadata | null,
@@ -296,27 +297,21 @@ export abstract class CreditStore {
   }
 
   // ── Transaction listing (optional capability — WS8) ──────────────────
-  async listUserTransactions(
+  async listLedgerEntries(
     _userId: string,
-    _options?: ListTransactionsOptions,
-  ): Promise<PaginatedTransactions> {
-    throw new CapabilityNotSupportedError("listUserTransactions is not supported by this store");
+    _options?: ListLedgerEntriesOptions,
+  ): Promise<LedgerPage> {
+    throw new CapabilityNotSupportedError("listLedgerEntries is not supported by this store");
   }
-  abstract listUsageEvents(
-    userId: string,
-    options?: ListUsageEventsOptions,
-  ): Promise<PaginatedTransactions>;
+  abstract listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage>;
 
   // ── Single transaction lookup (optional capability — WS8) ────────────
   /**
    * Fetch a single transaction by ID. Returns `null` when the transaction
    * does not exist or belongs to a different user.
    */
-  async getTransaction(
-    _userId: string,
-    _transactionId: string,
-  ): Promise<UserTransactionRow | null> {
-    throw new CapabilityNotSupportedError("getTransaction is not supported by this store");
+  async getLedgerEntry(_userId: string, _entryId: string): Promise<LedgerEntry | null> {
+    throw new CapabilityNotSupportedError("getLedgerEntry is not supported by this store");
   }
 
   // ── Team/shared balance pools (optional capability — WS8) ────────────

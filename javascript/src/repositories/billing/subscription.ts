@@ -15,7 +15,7 @@ export const SUBSCRIPTION_STATUS = {
   EXPIRED: "expired",
 } as const;
 
-export const SubscriptionRowSchema = z
+const SubscriptionRowSchema = z
   .object({
     user_id: z.string(),
     provider: z.string(),

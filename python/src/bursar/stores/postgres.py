@@ -17,8 +17,22 @@ import psycopg2.extras
 import psycopg2.pool
 
 from bursar.allowance import resolve_calendar_window
-from bursar.interface.base import CreditStore, StoreError
-from bursar.interface.models import (
+from bursar.repositories.analytics import AnalyticsRepository
+from bursar.repositories.balance import BalanceRepository
+from bursar.repositories.bucket import BucketRepository
+from bursar.repositories.deduction import DeductionRepository
+from bursar.repositories.lease import LeaseRepository
+from bursar.repositories.plan import PlanRepository
+from bursar.repositories.pricing import PricingRepository
+from bursar.repositories.schemas import (
+    CreateLeaseParams,
+    DeductParams,
+    SettleLeaseParams,
+)
+from bursar.repositories.team import TeamRepository
+from bursar.sql import _get_sql_files
+from bursar.stores.base import CreditStore, StoreError
+from bursar.stores.models import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -38,11 +52,13 @@ from bursar.interface.models import (
     FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
+    LedgerCursor,
+    LedgerEntry,
+    LedgerPage,
     MigratePlanUsersResult,
     OperationPolicy,
     RefundResult,
     ReleaseResult,
-    SetupResult,
     SetUserPlanResult,
     SpendByModelRow,
     SpendByUserRow,
@@ -51,22 +67,7 @@ from bursar.interface.models import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
-    TransactionRow,
 )
-from bursar.repositories.analytics import AnalyticsRepository
-from bursar.repositories.balance import BalanceRepository
-from bursar.repositories.bucket import BucketRepository
-from bursar.repositories.deduction import DeductionRepository
-from bursar.repositories.lease import LeaseRepository
-from bursar.repositories.plan import PlanRepository
-from bursar.repositories.pricing import PricingRepository
-from bursar.repositories.schemas import (
-    CreateLeaseParams,
-    DeductParams,
-    SettleLeaseParams,
-)
-from bursar.repositories.team import TeamRepository
-from bursar.sql import _get_sql_files
 
 
 def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
@@ -230,15 +231,15 @@ class PostgresStore(CreditStore):
         """Execute an RPC and return all result rows, using the connection pool.
 
         For single-column results (e.g. JSONB functions), each row is unwrapped
-        to its scalar value. For multi-column results (TABLE functions), rows
-        are returned as tuples.
+        to its scalar value. Multi-column TABLE functions are returned as
+        dictionaries keyed by their declared column names.
         """
         pool = self._pool
         if pool is None:
             raise RuntimeError("cannot call RPC on a closed PostgresStore")
         conn = pool.getconn()
         try:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 # Bursar is deliberately isolated from Supabase's API schema.
                 # Keep public as a trailing compatibility namespace for the
                 # small number of host-owned auth objects it references.
@@ -246,7 +247,7 @@ class PostgresStore(CreditStore):
                 cur.callproc(name, params)
                 rows = cur.fetchall()
             conn.commit()
-            return [r[0] if isinstance(r, (list, tuple)) and len(r) == 1 else r for r in (rows or [])]
+            return [next(iter(row.values())) if len(row) == 1 else dict(row) for row in (rows or [])]
         except BaseException:
             # Rollback on any exception to avoid pool poisoning
             conn.rollback()
@@ -263,7 +264,7 @@ class PostgresStore(CreditStore):
 
     # ── Schema management ──────────────────────────────────────────────
 
-    def setup(self, database_url: str | None = None) -> SetupResult:
+    def _migrate(self) -> None:
         """Apply bundled migrations exactly once, transactionally.
 
         The old implementation replayed every SQL file and accumulated errors,
@@ -272,7 +273,6 @@ class PostgresStore(CreditStore):
         an advisory transaction lock serializes concurrent deploys and any
         failed migration aborts the whole setup transaction.
         """
-        result = SetupResult()
         conn = self._conn()
         try:
             conn.autocommit = False
@@ -316,7 +316,6 @@ class PostgresStore(CreditStore):
                         "INSERT INTO bursar.schema_migrations(version, checksum) VALUES (%s, %s)",
                         (sql_file.name, checksum),
                     )
-                    result.tables_created.append(sql_file.name)
             conn.commit()
         except StoreError:
             conn.rollback()
@@ -326,88 +325,6 @@ class PostgresStore(CreditStore):
             raise StoreError(f"Bursar setup failed transactionally: {exc}") from exc
         finally:
             conn.close()
-        return result
-
-    def stamp(self) -> SetupResult:
-        """Stamp the current HEAD migrations into the ledger without executing them.
-
-        This is an explicit operator action to recover from a cleared ledger.
-        The caller attests that the schema is already at HEAD — the method records
-        each migration's checksum without re-applying the SQL.  After stamping,
-        subsequent ``setup()`` calls see a complete ledger and are idempotent.
-
-        Uses the same ``read_text().encode("utf-8")`` hashing as ``setup()`` so
-        checksums remain consistent regardless of platform newline handling.
-
-        Raises ``StoreError`` if:
-        * The bursar schema does not yet exist (run normal migrations instead).
-        * The migration ledger already has entries (run normal migrations
-          to apply any pending files, or if the ledger is partial recover by
-          clearing it first and re-stamping).
-        """
-        conn = self._conn()
-        try:
-            conn.autocommit = False
-            with conn.cursor() as cur:
-                cur.execute("CREATE SCHEMA IF NOT EXISTS bursar")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS bursar.schema_migrations (
-                        version text PRIMARY KEY,
-                        checksum text NOT NULL,
-                        applied_at timestamptz NOT NULL DEFAULT now()
-                    )
-                """)
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
-
-                # Guard: refuse to stamp a database that never had bursar objects
-                # (the operator should run normal migrate instead).
-                cur.execute("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM pg_tables
-                        WHERE schemaname = 'bursar' AND tablename = 'credit_buckets'
-                    )
-                """)
-                row = cur.fetchone()
-                if row is None or not row[0]:
-                    raise StoreError("bursar schema is empty — run 'bursar migrate' to create it, not --baseline-head")
-
-                # Guard: refuse when ledger already has entries — the operator
-                # might be trying to stub in a newly-added migration.  They
-                # should run normal migrate, or if they are sure, clear the
-                # ledger first then re-stamp.
-                cur.execute("SELECT count(*) FROM bursar.schema_migrations")
-                row = cur.fetchone()
-                if row is not None and row[0] > 0:
-                    raise StoreError(
-                        "migration ledger is not empty — run 'bursar migrate' to "
-                        "apply pending migrations, or clear the ledger first "
-                        "then retry --baseline-head"
-                    )
-
-                sql_files = _get_sql_files()
-                result = SetupResult()
-                for sql_file in sql_files:
-                    sql = sql_file.read_text(encoding="utf-8")
-                    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
-                    cur.execute(
-                        "INSERT INTO bursar.schema_migrations(version, checksum) "
-                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                        (sql_file.name, checksum),
-                    )
-                    if cur.rowcount > 0:
-                        result.tables_created.append(sql_file.name)
-            conn.commit()
-            return result
-        except StoreError:
-            conn.rollback()
-            raise
-        except Exception as exc:
-            conn.rollback()
-            raise StoreError(f"Bursar stamp failed: {exc}") from exc
-        finally:
-            conn.close()
-
-    # ── Runtime operations ─────────────────────────────────────────────
 
     def get_balance(self, user_id: str) -> BalanceResult:
         """Get the current balance for a user.
@@ -451,7 +368,7 @@ class PostgresStore(CreditStore):
             idempotency_key: Idempotency key for replay protection.
 
         Returns:
-            AddCreditsResult with transaction details.
+            AddCreditsResult with ledger entry details.
 
         Raises:
             StoreError: If the RPC returns no result or an error.
@@ -465,6 +382,7 @@ class PostgresStore(CreditStore):
             str(amount),
             type,
             json.dumps(meta),
+            expires_at.isoformat() if expires_at else None,
             bucket,
             idempotency_key,
         )
@@ -473,7 +391,7 @@ class PostgresStore(CreditStore):
         if result.error is not None:
             raise StoreError(f"credits_add failed: {result.error}")
         return AddCreditsResult(
-            transaction_id=str(getattr(result, "id", "")),
+            entry_id=str(result.entry_id),
             user_id=str(getattr(result, "user_id", user_id)),
             amount=_dec(result.amount, amount),
             new_balance=_dec(result.new_balance),
@@ -539,7 +457,7 @@ class PostgresStore(CreditStore):
 
         if result is None:
             return DeductionResult(
-                transaction_id="",
+                entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
                 balance_after=Decimal(0),
@@ -547,7 +465,7 @@ class PostgresStore(CreditStore):
             )
         if result.error is not None:
             return DeductionResult(
-                transaction_id="",
+                entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
                 balance_after=_dec(result.balance_after),
@@ -555,7 +473,7 @@ class PostgresStore(CreditStore):
             )
 
         return DeductionResult(
-            transaction_id=str(getattr(result, "transaction_id", "")),
+            entry_id=str(getattr(result, "entry_id", "")),
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
@@ -688,7 +606,7 @@ class PostgresStore(CreditStore):
             feature_period_start: Feature limit period start, or None.
 
         Returns:
-            DeductionResult with transaction details.
+            DeductionResult with ledger entry details.
         """
         amount = _dec(amount)
         min_balance = _dec(min_balance)
@@ -715,18 +633,18 @@ class PostgresStore(CreditStore):
 
         if result is None:
             return DeductionResult(
-                transaction_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
+                entry_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
             )
         if result.error is not None:
             return DeductionResult(
-                transaction_id="",
+                entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
                 balance_after=_dec(result.balance_after),
                 error=str(result.error),
             )
         return DeductionResult(
-            transaction_id=str(getattr(result, "transaction_id", "")),
+            entry_id=str(getattr(result, "entry_id", "")),
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
@@ -1076,32 +994,32 @@ class PostgresStore(CreditStore):
 
     def refund_credits(
         self,
-        transaction_id: str,
+        entry_id: str,
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> RefundResult:
-        """Refund a previous credit transaction.
+        """Refund a previous ledger entry.
 
         Args:
-            transaction_id: The original transaction ID to refund.
+            entry_id: The original ledger entry ID to refund.
             amount: The amount to refund, or None for full refund.
             reason: The refund reason, or None.
             metadata: Optional structured metadata.
 
         Returns:
-            RefundResult with refund transaction details.
+            RefundResult with refund ledger entry details.
         """
         result = self._deduction_repo.refund_credits(
-            transaction_id,
+            entry_id,
             str(_dec(amount)) if amount is not None else None,
             reason,
             json.dumps(metadata.model_dump(mode="json") if metadata else {}),
         )
         if result is None:
             return RefundResult(
-                refund_transaction_id="",
-                original_transaction_id=transaction_id,
+                refund_entry_id="",
+                original_entry_id=entry_id,
                 user_id="",
                 amount=Decimal(0),
                 new_balance=Decimal(0),
@@ -1109,33 +1027,33 @@ class PostgresStore(CreditStore):
             )
         if result.error is not None:
             return RefundResult(
-                refund_transaction_id="",
-                original_transaction_id=transaction_id,
+                refund_entry_id="",
+                original_entry_id=entry_id,
                 user_id=str(getattr(result, "user_id", "")),
                 amount=Decimal(0),
                 new_balance=_dec(result.new_balance),
                 error=str(result.error),
             )
         return RefundResult(
-            refund_transaction_id=str(getattr(result, "refund_transaction_id", "")),
-            original_transaction_id=transaction_id,
+            refund_entry_id=str(getattr(result, "refund_entry_id", "")),
+            original_entry_id=entry_id,
             user_id=str(getattr(result, "user_id", "")),
             amount=_dec(result.amount),
             new_balance=_dec(result.new_balance),
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
-    def revoke_credits_by_tx_type(self, user_id: str, tx_type: str) -> dict:
+    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> dict:
         """Revoke credits for all transactions of a given type for a user.
 
         Args:
             user_id: The user ID.
-            tx_type: The transaction type to revoke.
+            entry_type: The transaction type to revoke.
 
         Returns:
             Dict with user_id, amount, new_balance, and bucket.
         """
-        result = self._deduction_repo.revoke_credits_by_tx_type(user_id, tx_type)
+        result = self._deduction_repo.revoke_credits_by_entry_type(user_id, entry_type)
         if result is None:
             return {"user_id": user_id, "amount": 0, "new_balance": "", "bucket": None}
         return {
@@ -1162,7 +1080,7 @@ class PostgresStore(CreditStore):
             SpendByUserRow(
                 user_id=str(r.user_id),
                 total_spend=_dec(r.total_spend),
-                transaction_count=int(r.transaction_count),
+                entry_count=int(r.entry_count),
             )
             for r in rows
         ]
@@ -1182,7 +1100,7 @@ class PostgresStore(CreditStore):
             SpendByModelRow(
                 model=str(r.model),
                 total_spend=_dec(r.total_spend),
-                transaction_count=int(r.transaction_count),
+                entry_count=int(r.entry_count),
             )
             for r in rows
         ]
@@ -1222,7 +1140,7 @@ class PostgresStore(CreditStore):
             DailySpendRow(
                 date=str(r.date),
                 total_spend=_dec(r.total_spend),
-                transaction_count=int(r.transaction_count),
+                entry_count=int(r.entry_count),
             )
             for r in rows
         ]
@@ -1250,94 +1168,92 @@ class PostgresStore(CreditStore):
 
     # ── Transaction listing ─────────────────────────────────────────────────
 
-    def list_user_transactions(
+    @staticmethod
+    def _ledger_entry(row: Any) -> LedgerEntry:
+        return LedgerEntry(
+            entry_id=str(row.entry_id),
+            account_id=str(row.account_id),
+            actor_user_id=str(row.actor_user_id) if row.actor_user_id else None,
+            amount=_dec(row.amount),
+            entry_type=str(row.entry_type),
+            reference_entry_id=str(row.reference_entry_id) if row.reference_entry_id else None,
+            idempotency_key=row.idempotency_key,
+            metadata=row.metadata,
+            created_at=str(row.created_at),
+        )
+
+    def _list_ledger_page(
         self,
         user_id: str,
-        types: list[str] | None = None,
+        entry_types: list[str] | None,
+        from_date: datetime | None,
+        to_date: datetime | None,
+        limit: int,
+        cursor: LedgerCursor | None,
+        *,
+        usage_only: bool,
+    ) -> LedgerPage:
+        if limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        rows = self._analytics_repo.list_ledger_entries(
+            user_id,
+            entry_types,
+            from_date.isoformat() if from_date else None,
+            to_date.isoformat() if to_date else None,
+            limit + 1,
+            cursor.created_at if cursor else None,
+            cursor.entry_id if cursor else None,
+            usage_only=usage_only,
+        )
+        has_more = len(rows) > limit
+        visible = rows[:limit]
+        items = [self._ledger_entry(row) for row in visible]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = LedgerCursor(created_at=last.created_at, entry_id=last.entry_id)
+        return LedgerPage(items=items, next_cursor=next_cursor)
+
+    def list_ledger_entries(
+        self,
+        user_id: str,
+        entry_types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        offset: int = 0,
-    ) -> list[TransactionRow]:
-        """List credit transactions for a user with optional filters.
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        return self._list_ledger_page(user_id, entry_types, from_date, to_date, limit, cursor, usage_only=False)
 
-        Args:
-            user_id: The user ID.
-            types: Filter by transaction types, or None for all.
-            from_date: Start of date range, or None.
-            to_date: End of date range, or None.
-            limit: Maximum number of rows to return (default 50).
-            offset: Number of rows to skip (default 0).
-
-        Returns:
-            List of TransactionRow (may be empty).
-        """
-        rows = self._analytics_repo.list_user_transactions(
-            user_id,
-            types,
-            from_date.isoformat() if from_date else None,
-            to_date.isoformat() if to_date else None,
-            limit,
-            offset,
-        )
-        return [
-            TransactionRow(
-                id=str(r.id),
-                user_id=str(r.user_id),
-                amount=_dec(r.amount),
-                type=str(r.type),
-                reference_type=r.reference_type,
-                reference_id=r.reference_id,
-                metadata=r.metadata,
-                created_at=str(r.created_at),
-                total_count=int(r.total_count),
-            )
-            for r in rows
-        ]
-
-    def list_user_transactions_cursor(
+    def list_usage_entries(
         self,
         user_id: str,
-        types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
-        cursor: tuple[datetime | str, str] | None = None,
-    ) -> tuple[list[TransactionRow], tuple[str, str] | None]:
-        cursor_created_at = None if cursor is None else str(cursor[0])
-        cursor_id = None if cursor is None else cursor[1]
-        rows = self._analytics_repo.list_transactions_cursor(
-            user_id,
-            types,
-            from_date.isoformat() if from_date else None,
-            to_date.isoformat() if to_date else None,
-            limit,
-            cursor_created_at,
-            cursor_id,
-        )
-        transactions = [
-            TransactionRow(
-                id=str(r.id),
-                user_id=str(r.user_id),
-                amount=_dec(r.amount),
-                type=str(r.type),
-                reference_type=r.reference_type,
-                reference_id=r.reference_id,
-                metadata=r.metadata,
-                created_at=str(r.created_at),
-                total_count=0,
-            )
-            for r in rows
-        ]
-        marker = rows[-1] if rows else None
-        next_cursor = (
-            (str(marker.next_cursor_created_at), str(marker.next_cursor_id))
-            if marker and marker.next_cursor_created_at is not None and marker.next_cursor_id is not None
-            else None
-        )
-        return transactions, next_cursor
+        cursor: LedgerCursor | None = None,
+    ) -> LedgerPage:
+        return self._list_ledger_page(user_id, ["usage"], from_date, to_date, limit, cursor, usage_only=True)
 
-    # ── Team/shared balance pools ─────────────────────────────────────────
+    def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
+        rows = self._callproc("get_ledger_entry", [user_id, entry_id])
+        if not rows:
+            return None
+        row = rows[0]
+        if isinstance(row, dict):
+            return LedgerEntry.model_validate(row)
+        fields = [
+            "entry_id",
+            "account_id",
+            "actor_user_id",
+            "amount",
+            "entry_type",
+            "reference_entry_id",
+            "idempotency_key",
+            "metadata",
+            "created_at",
+        ]
+        return LedgerEntry.model_validate(dict(zip(fields, row, strict=True)))
 
     def create_team(self, name: str, initial_balance: Decimal = Decimal(0)) -> CreateTeamResult:
         """Create a new team with an initial credit balance.
@@ -1454,7 +1370,7 @@ class PostgresStore(CreditStore):
             idempotency_key: Idempotency key threaded through metadata.
 
         Returns:
-            TeamDeductionResult with transaction details.
+            TeamDeductionResult with ledger entry details.
 
         Raises:
             StoreError: If the RPC returns no result.
@@ -1470,7 +1386,7 @@ class PostgresStore(CreditStore):
             raise StoreError("deduct_team returned no result")
         if result.error is not None:
             return TeamDeductionResult(
-                transaction_id="",
+                entry_id="",
                 team_id=team_id,
                 user_id=user_id,
                 amount=Decimal(0),
@@ -1478,7 +1394,7 @@ class PostgresStore(CreditStore):
                 error=str(result.error),
             )
         return TeamDeductionResult(
-            transaction_id=str(getattr(result, "transaction_id", "")),
+            entry_id=str(getattr(result, "entry_id", "")),
             team_id=str(getattr(result, "team_id", team_id)),
             user_id=str(getattr(result, "user_id", user_id)),
             amount=_dec(result.amount, -amount),
@@ -1538,19 +1454,10 @@ class PostgresStore(CreditStore):
         )
 
 
-def run_migrations(database_url: str) -> SetupResult:
+def run_migrations(database_url: str) -> None:
     """Run bundled SQL migrations against *database_url*.
 
     Standalone entry point for the CLI ``migrate`` command.
     """
     store = PostgresStore(database_url)
-    return store.setup(database_url)
-
-
-def stamp_migrations(database_url: str) -> SetupResult:
-    """Stamp the current HEAD migrations into the ledger without executing them.
-
-    Standalone entry point for the CLI ``migrate --baseline-head`` command.
-    """
-    store = PostgresStore(database_url)
-    return store.stamp()
+    store._migrate()

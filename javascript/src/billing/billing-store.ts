@@ -1,5 +1,4 @@
 import type {
-  BillingConfig,
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
@@ -39,8 +38,6 @@ export abstract class BillingStore {
   ): Promise<void>;
 
   abstract getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null>;
-
-  abstract syncBillingFromConfig(config: BillingConfig): Promise<void>;
 
   abstract resolveBillingOffer(
     provider: string,

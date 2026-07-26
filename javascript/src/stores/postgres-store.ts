@@ -6,7 +6,6 @@ import type { AllowancePeriod } from "../allowance.js";
 import type {
   AddCreditsResult,
   AddTeamMemberResult,
-  AggregateStats,
   AllowanceResult,
   AvailableResult,
   BalanceResult,
@@ -21,17 +20,16 @@ import type {
   FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
-  ListTransactionsOptions,
-  ListUsageEventsOptions,
+  ListLedgerEntriesOptions,
+  ListUsageEntriesOptions,
   MigratePlanUsersResult,
   OperationPolicy,
-  PaginatedTransactions,
+  LedgerPage,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
-  SetupResult,
   SpendByModelRow,
   SpendByUserRow,
   SweepResult,
@@ -41,7 +39,7 @@ import type {
   BucketBalance,
   BucketBalancesResult,
   TopUserRow,
-  UserTransactionRow,
+  LedgerEntry,
 } from "../types.js";
 import { CreditStore } from "./credit-store.js";
 import type { CreateLeaseOptions, SettleLeaseOptions } from "./credit-store.js";
@@ -58,6 +56,7 @@ const ZERO = new Decimal(0);
 
 const DEFAULT_LEASE_TTL_SECONDS = 600;
 const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 200;
 
 function dec(value: unknown, fallback: Decimal = ZERO): Decimal {
   if (value === null || value === undefined) return fallback;
@@ -101,11 +100,19 @@ function parseFeatureLimits(raw: unknown): Record<string, FeatureLimit> {
       const fl = v as Record<string, unknown>;
       const valueRaw = fl.value;
       const rawMax = fl.max_calls;
+      const periodValue = fl.period;
+      const period =
+        typeof periodValue === "object" && periodValue !== null
+          ? (({ day: "daily", week: "weekly", month: "monthly", year: "yearly" } as const)[
+              String((periodValue as { unit?: unknown }).unit)
+            ] ?? "monthly")
+          : String(periodValue ?? "monthly");
       out[k] = {
         ...(valueRaw !== undefined ? { value: valueRaw } : {}),
         maxCalls: rawMax === undefined || rawMax === null ? null : Number(rawMax),
-        period: (String(fl.period ?? "monthly") as FeatureLimit["period"]) ?? "monthly",
-        onExceed: (String(fl.on_exceed ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
+        period: period as FeatureLimit["period"],
+        onExceed:
+          (String(fl.on_exceed ?? fl.action ?? "deny") as FeatureLimit["onExceed"]) ?? "deny",
       };
     }
   }
@@ -282,15 +289,6 @@ export class PostgresStore extends CreditStore {
     return rows;
   }
 
-  async setup(_databaseUrl?: string | null): Promise<SetupResult> {
-    throw new StoreError(
-      "PostgresStore.setup() does not run migrations. Apply the bundled SQL " +
-        "migrations first — run `bursar migrate` via the Python CLI, or execute the " +
-        "files in `python/src/bursar/sql/*.sql` (in filename order) against your " +
-        "database. This store assumes the schema already exists.",
-    );
-  }
-
   async getBalance(userId: string): Promise<BalanceResult> {
     const row = await this.balanceRepo.getBalance(userId);
     if (!row) {
@@ -321,6 +319,7 @@ export class PostgresStore extends CreditStore {
       decParam(amount),
       type,
       JSON.stringify(meta),
+      expiresAt ? expiresAt.toISOString() : null,
       bucket ?? null,
       idempotencyKey ?? null,
     );
@@ -328,7 +327,7 @@ export class PostgresStore extends CreditStore {
       throw new StoreError(`credits_add: ${String(row.error)}`);
     }
     return {
-      transactionId: String(row.id ?? ""),
+      entryId: String(row.entry_id ?? ""),
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
@@ -377,7 +376,7 @@ export class PostgresStore extends CreditStore {
 
     if ("error" in row && row.error) {
       return {
-        transactionId: "",
+        entryId: "",
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -390,7 +389,7 @@ export class PostgresStore extends CreditStore {
     }
 
     return {
-      transactionId: String(row.transaction_id ?? ""),
+      entryId: String(row.entry_id ?? ""),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
@@ -514,7 +513,7 @@ export class PostgresStore extends CreditStore {
 
     if (!row || Object.keys(row).length === 0) {
       return {
-        transactionId: "",
+        entryId: "",
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -527,7 +526,7 @@ export class PostgresStore extends CreditStore {
     }
     if ("error" in row && row.error) {
       return {
-        transactionId: "",
+        entryId: "",
         userId,
         amount: ZERO,
         allowanceConsumed: ZERO,
@@ -539,7 +538,7 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      transactionId: String(row.transaction_id ?? ""),
+      entryId: String(row.entry_id ?? ""),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
@@ -607,11 +606,11 @@ export class PostgresStore extends CreditStore {
   ): BursarConfigResult {
     const config = row.config as Record<string, unknown> | undefined;
     if (!config) {
-      return { id: String(row.id ?? ""), config: {}, version: defaultVersion };
+      return { id: String(row.entry_id ?? ""), config: {}, version: defaultVersion };
     }
 
     const result: BursarConfigResult = {
-      id: String(row.id ?? ""),
+      id: String(row.entry_id ?? ""),
       // Config is a shared snake_case wire document. Dynamic keys (plan IDs,
       // model IDs, bucket names, etc.) must remain byte-for-byte unchanged.
       config,
@@ -630,13 +629,13 @@ export class PostgresStore extends CreditStore {
   async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
     const row = await this.pricingRepo.setActivePricing(JSON.stringify(canonical), label ?? null);
-    return String(row.id ?? "");
+    return String(row.entry_id ?? "");
   }
 
   async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
     const row = await this.pricingRepo.publishPricing(JSON.stringify(canonical), label ?? null);
-    return String(row.id ?? "");
+    return String(row.entry_id ?? "");
   }
 
   async getPricingHistory(): Promise<BursarConfigHistoryItem[]> {
@@ -659,7 +658,7 @@ export class PostgresStore extends CreditStore {
 
   async activatePricing(version: number): Promise<string> {
     const row = await this.pricingRepo.activatePricing(version);
-    return String(row.id ?? "");
+    return String(row.entry_id ?? "");
   }
 
   async migratePlanUsers(
@@ -813,26 +812,29 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async revokeCreditsByTxType(userId: string, txType: string): Promise<Record<string, unknown>> {
-    return this.deductionRepo.revokeCreditsByTxType(userId, txType);
+  async revokeCreditsByEntryType(
+    userId: string,
+    entryType: string,
+  ): Promise<Record<string, unknown>> {
+    return this.deductionRepo.revokeCreditsByEntryType(userId, entryType);
   }
 
   async refundCredits(
-    transactionId: string,
+    entryId: string,
     amount?: Decimal,
     reason?: string,
     metadata?: CreditMetadata | null,
   ): Promise<RefundResult> {
     const row = await this.deductionRepo.refundCredits(
-      transactionId,
+      entryId,
       amount != null ? decParam(amount) : null,
       reason ?? null,
       JSON.stringify(metadata ?? {}),
     );
     if ("error" in row && row.error) {
       return {
-        refundTransactionId: "",
-        originalTransactionId: transactionId,
+        refundEntryId: "",
+        originalEntryId: entryId,
         userId: String(row.user_id ?? ""),
         amount: ZERO,
         newBalance: dec(row.new_balance),
@@ -840,8 +842,8 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      refundTransactionId: String(row.refund_transaction_id ?? ""),
-      originalTransactionId: transactionId,
+      refundEntryId: String(row.refund_entry_id ?? ""),
+      originalEntryId: entryId,
       userId: String(row.user_id ?? ""),
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
@@ -854,7 +856,7 @@ export class PostgresStore extends CreditStore {
     return (rows ?? []).map((r) => ({
       userId: String(r.user_id ?? ""),
       totalSpend: dec(r.total_spend),
-      transactionCount: Number(r.transaction_count ?? 0),
+      entryCount: Number(r.entry_count ?? 0),
     }));
   }
 
@@ -863,7 +865,7 @@ export class PostgresStore extends CreditStore {
     return (rows ?? []).map((r) => ({
       model: String(r.model ?? ""),
       totalSpend: dec(r.total_spend),
-      transactionCount: Number(r.transaction_count ?? 0),
+      entryCount: Number(r.entry_count ?? 0),
     }));
   }
 
@@ -880,130 +882,80 @@ export class PostgresStore extends CreditStore {
     return (rows ?? []).map((r) => ({
       date: String(r.date ?? ""),
       totalSpend: dec(r.total_spend),
-      transactionCount: Number(r.transaction_count ?? 0),
+      entryCount: Number(r.entry_count ?? 0),
     }));
   }
 
-  async getTransaction(userId: string, transactionId: string): Promise<UserTransactionRow | null> {
-    const rows = await this.query(
-      `SELECT id, user_id, amount, type, reference_type, reference_id, metadata, created_at
-       FROM bursar.credit_transactions
-       WHERE id = $1 AND user_id = $2`,
-      [transactionId, userId],
-    );
-    if (rows.length === 0) return null;
-    const r = rows[0] as Record<string, unknown>;
+  private mapLedgerEntry(row: import("../repositories/analytics.js").LedgerEntryRow): LedgerEntry {
     return {
-      id: String(r.id ?? ""),
-      userId: String(r.user_id ?? ""),
-      amount: dec(r.amount),
-      type: String(r.type ?? ""),
-      referenceType: r.reference_type != null ? String(r.reference_type) : null,
-      referenceId: r.reference_id != null ? String(r.reference_id) : null,
-      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
-      createdAt: String(r.created_at ?? ""),
+      entryId: String(row.entry_id),
+      accountId: String(row.account_id),
+      actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
+      amount: dec(row.amount),
+      entryType: String(row.entry_type),
+      referenceEntryId: row.reference_entry_id == null ? null : String(row.reference_entry_id),
+      idempotencyKey: row.idempotency_key == null ? null : String(row.idempotency_key),
+      metadata: row.metadata ?? null,
+      createdAt:
+        row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
     };
   }
 
-  async listUserTransactions(
-    userId: string,
-    options?: ListTransactionsOptions,
-  ): Promise<PaginatedTransactions> {
-    const rows = await this.analyticsRepo.listUserTransactions(
-      userId,
-      options?.types ?? null,
-      options?.fromDate?.toISOString() ?? null,
-      options?.toDate?.toISOString() ?? null,
-      options?.limit ?? DEFAULT_PAGE_SIZE,
-      options?.offset ?? 0,
-    );
-    const items = (rows ?? []).map((r) => ({
-      id: String(r.id ?? ""),
-      userId: String(r.user_id ?? ""),
-      amount: dec(r.amount),
-      type: String(r.type ?? ""),
-      referenceType: r.reference_type != null ? String(r.reference_type) : null,
-      referenceId: r.reference_id != null ? String(r.reference_id) : null,
-      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
-      createdAt: String(r.created_at ?? ""),
-    }));
-    const total = rows.length > 0 ? Number(rows[0].total_count ?? 0) : 0;
-    return { items, total };
+  async getLedgerEntry(userId: string, entryId: string): Promise<LedgerEntry | null> {
+    const rows = await this.callproc("get_ledger_entry", [userId, entryId]);
+    if (!rows?.length) return null;
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      entryId: String(row.entry_id ?? ""),
+      accountId: String(row.account_id ?? ""),
+      actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
+      amount: dec(row.amount),
+      entryType: String(row.entry_type ?? ""),
+      referenceEntryId: row.reference_entry_id == null ? null : String(row.reference_entry_id),
+      idempotencyKey: row.idempotency_key == null ? null : String(row.idempotency_key),
+      metadata: (row.metadata as Record<string, unknown> | null | undefined) ?? null,
+      createdAt: String(row.created_at ?? ""),
+    };
   }
 
-  /**
-   * Read transaction history with a stable `(createdAt, id)` cursor.
-   * Prefer this to offset pagination for histories that can receive writes
-   * while callers are paging.
-   */
-  async listUserTransactionsCursor(
+  private async listLedgerPage(
     userId: string,
-    options?: Omit<ListTransactionsOptions, "offset"> & {
-      cursor?: { createdAt: string; id: string } | null;
-    },
-  ): Promise<import("../types.js").CursorPaginatedTransactions> {
+    options: ListLedgerEntriesOptions | ListUsageEntriesOptions | undefined,
+    usageOnly: boolean,
+  ): Promise<LedgerPage> {
+    const limit = options?.limit ?? DEFAULT_PAGE_SIZE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
+      throw new RangeError(`limit must be an integer between 1 and `);
+    }
     const cursor = options?.cursor ?? null;
-    const rows = await this.analyticsRepo.listTransactionsCursor(
+    const entryTypes = usageOnly
+      ? ["usage"]
+      : ((options as ListLedgerEntriesOptions | undefined)?.entryTypes ?? null);
+    const rows = await this.analyticsRepo.listLedgerEntries(
       userId,
-      options?.types ?? null,
+      entryTypes,
       options?.fromDate?.toISOString() ?? null,
       options?.toDate?.toISOString() ?? null,
-      options?.limit ?? DEFAULT_PAGE_SIZE,
+      limit + 1,
       cursor?.createdAt ?? null,
-      cursor?.id ?? null,
+      cursor?.entryId ?? null,
+      usageOnly,
     );
-    const items = rows.map((r) => ({
-      id: String(r.id ?? ""),
-      userId: String(r.user_id ?? ""),
-      amount: dec(r.amount),
-      type: String(r.type ?? ""),
-      referenceType: r.reference_type != null ? String(r.reference_type) : null,
-      referenceId: r.reference_id != null ? String(r.reference_id) : null,
-      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
-      createdAt: String(r.created_at ?? ""),
-    }));
-    const marker = rows[rows.length - 1];
-    const nextCursor =
-      marker?.next_cursor_created_at && marker?.next_cursor_id
-        ? { createdAt: String(marker.next_cursor_created_at), id: String(marker.next_cursor_id) }
-        : null;
-    return { items, nextCursor };
-  }
-
-  async listUsageEvents(
-    userId: string,
-    options?: ListUsageEventsOptions,
-  ): Promise<PaginatedTransactions> {
-    const rows = await this.analyticsRepo.listUsageEvents(
-      userId,
-      options?.fromDate?.toISOString() ?? null,
-      options?.toDate?.toISOString() ?? null,
-      options?.limit ?? DEFAULT_PAGE_SIZE,
-      options?.offset ?? 0,
-    );
-    const items = (rows ?? []).map((r) => ({
-      id: String(r.id ?? ""),
-      userId: String(r.user_id ?? ""),
-      amount: dec(r.amount),
-      type: String(r.type ?? ""),
-      referenceType: r.reference_type != null ? String(r.reference_type) : null,
-      referenceId: r.reference_id != null ? String(r.reference_id) : null,
-      metadata: (r.metadata ?? null) as Record<string, unknown> | null,
-      createdAt: String(r.created_at ?? ""),
-    }));
-    const total = rows.length > 0 ? Number(rows[0].total_count ?? 0) : 0;
-    return { items, total };
-  }
-
-  async aggregateStats(start: Date, end: Date): Promise<AggregateStats> {
-    const row = await this.analyticsRepo.aggregateStats(start.toISOString(), end.toISOString());
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map((row) => this.mapLedgerEntry(row));
+    const last = items.at(-1);
     return {
-      totalCreditsConsumed: dec(row.total_credits_consumed),
-      activeUsers: Number(row.active_users ?? 0),
-      avgDailySpend: dec(row.avg_daily_spend),
-      topModel: String(row.top_model ?? ""),
-      topUser: String(row.top_user ?? ""),
+      items,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, entryId: last.entryId } : null,
     };
+  }
+
+  async listLedgerEntries(userId: string, options?: ListLedgerEntriesOptions): Promise<LedgerPage> {
+    return this.listLedgerPage(userId, options, false);
+  }
+
+  async listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage> {
+    return this.listLedgerPage(userId, options, true);
   }
 
   async createTeam(name: string, initialBalance: Decimal = ZERO): Promise<CreateTeamResult> {
@@ -1076,7 +1028,7 @@ export class PostgresStore extends CreditStore {
     );
     if ("error" in row && row.error) {
       return {
-        transactionId: "",
+        entryId: "",
         teamId,
         userId,
         amount: ZERO,
@@ -1085,7 +1037,7 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      transactionId: String(row.transaction_id ?? ""),
+      entryId: String(row.entry_id ?? ""),
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount, amount.negated()),

@@ -2,24 +2,28 @@ import { z } from "zod";
 import type { CallProc } from "./types.js";
 import { pgBoolean, safeParse } from "./_shared.js";
 
-export const ActivePricingRowSchema = z
+const ActivePricingRowSchema = z
   .object({
     id: z.string().optional(),
     config: z.record(z.string(), z.unknown()).optional(),
     version: z.number().optional(),
     label: z.string().nullable().optional(),
     active: pgBoolean.nullable().optional(),
-    created_at: z.string().optional(),
+    created_at: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .optional(),
   })
   .passthrough();
 
-export const PricingHistoryRowSchema = z
+const PricingHistoryRowSchema = z
   .object({
     id: z.string().optional(),
     version: z.number().optional(),
     label: z.string().nullable().optional(),
     active: pgBoolean.nullable().optional(),
-    created_at: z.string().optional(),
+    created_at: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .optional(),
   })
   .passthrough();
 

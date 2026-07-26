@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { QueryFn } from "../types.js";
 import { unwrapJsonb, safeParse } from "../_shared.js";
 
-export const BillingEventRowSchema = z
+const BillingEventRowSchema = z
   .object({
     status: z.string().optional(),
     claim_token: z.string().uuid().optional(),

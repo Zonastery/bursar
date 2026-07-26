@@ -55,7 +55,7 @@ CREDIT_EVENT_TYPES = frozenset(
         # Emitted by CreditsService.grant_subscription_cycle (webhook renewal/signup
         # grant helper).
         "credits.cycle_renewed",
-        # Emitted by CreditsService.revoke_credits_by_tx_type (subscription lifecycle).
+        # Emitted by CreditsService.revoke_credits_by_entry_type (subscription lifecycle).
         "credits.revoked",
     }
 )

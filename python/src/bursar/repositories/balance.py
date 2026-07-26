@@ -37,6 +37,7 @@ class BalanceRepository:
         amount: str,
         type_: str,
         metadata: str,
+        expires_at: str | None,
         bucket: str | None,
         idempotency_key: str | None,
     ) -> AddCreditsRow | None:
@@ -59,7 +60,10 @@ class BalanceRepository:
         validate_non_empty(user_id, "user_id")
         validate_non_empty(type_, "type_")
         validate_non_empty(metadata, "metadata")
-        rows = self._callproc("credits_add", [user_id, amount, type_, metadata, bucket, idempotency_key])
+        rows = self._callproc(
+            "credits_add",
+            [user_id, amount, type_, metadata, expires_at, bucket, idempotency_key],
+        )
         if not rows:
             return None
         return AddCreditsRow.model_validate(rows[0])

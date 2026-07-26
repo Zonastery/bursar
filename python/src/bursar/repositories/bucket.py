@@ -26,7 +26,7 @@ class BucketRepository:
             BucketEnvelopeRow if found, None if the user has no buckets.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("get_user_credit_buckets", [user_id])
+        rows = self._callproc("get_credit_bucket_balances", [user_id])
         if not rows:
             return None
         return BucketEnvelopeRow.model_validate(rows[0])

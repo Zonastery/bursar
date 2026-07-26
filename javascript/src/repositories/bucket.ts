@@ -1,21 +1,8 @@
 import { z } from "zod";
 import type { CallProc } from "./types.js";
-import { pgBoolean, safeParse } from "./_shared.js";
+import { safeParse } from "./_shared.js";
 
-export const BucketBalanceRowSchema = z
-  .object({
-    bucket_key: z.string().optional(),
-    label: z.string().optional(),
-    priority: z.number().optional(),
-    expires: pgBoolean.nullable().optional(),
-    balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-  })
-  .passthrough();
-
-export const BucketEnvelopeRowSchema = z
+const BucketEnvelopeRowSchema = z
   .object({
     user_id: z.string().optional(),
     buckets: z.array(z.record(z.string(), z.unknown())).optional(),
@@ -26,7 +13,7 @@ export const BucketEnvelopeRowSchema = z
   })
   .passthrough();
 
-export const SweepRowSchema = z
+const SweepRowSchema = z
   .object({
     expired_count: z.number().optional(),
     expired_amount: z
@@ -40,7 +27,6 @@ export const SweepRowSchema = z
   })
   .passthrough();
 
-export type BucketBalanceRow = z.infer<typeof BucketBalanceRowSchema>;
 export type BucketEnvelopeRow = z.infer<typeof BucketEnvelopeRowSchema>;
 export type SweepRow = z.infer<typeof SweepRowSchema>;
 
@@ -50,7 +36,7 @@ export class BucketRepository {
 
   /** Fetch per-bucket credit balances for a user. */
   async getBucketBalances(userId: string): Promise<BucketEnvelopeRow> {
-    const rows = await this.callproc("get_user_credit_buckets", [userId]);
+    const rows = await this.callproc("get_credit_bucket_balances", [userId]);
     return safeParse(
       BucketEnvelopeRowSchema,
       rows?.[0] ?? {},

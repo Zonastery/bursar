@@ -313,74 +313,23 @@ export interface BillingCreditTopup {
   providers?: Record<string, ProviderRef>;
 }
 
-export interface BillingAutoRechargeConfig {
-  enabled: boolean;
-  /** Canonical policy shape. Legacy flattened fields remain during migration. */
-  defaultPolicy?: BillingAutoRechargePolicy;
-  thresholdCredits: number;
-  topupKey: string;
-  quantity: number;
-  maxRecharges: number;
-  windowDays: number;
-}
-
-export interface BillingAutoRechargePolicy {
-  trigger: { type: "balance_below"; thresholdCredits: number };
-  topup: { key: string; quantity: number };
-  limit?: {
-    period: "calendar_day" | "calendar_month" | "rolling_days";
-    maxCharges?: number;
-    maxAmountMinor?: number;
-    currency?: string;
-    rollingDays?: number;
-  };
-}
-
-export const AUTO_RECHARGE_STATES = {
-  DISABLED: "disabled",
-  ACTIVE: "active",
-  PROCESSING: "processing",
-  SUSPENDED: "suspended",
-  LIMIT_REACHED: "limit_reached",
-} as const;
-
-export type AutoRechargeState = (typeof AUTO_RECHARGE_STATES)[keyof typeof AUTO_RECHARGE_STATES];
-
-export interface BillingAutoRechargeStatus {
-  enabled: boolean;
-  state: AutoRechargeState;
-  thresholdCredits: number;
-  topupKey: string;
-  quantity: number;
-  maxRecharges: number;
-  windowDays: number;
-  rechargesInWindow: number;
-  paymentMethodId?: string | null;
-  paymentMethodLast4?: string | null;
-  paymentMethodBrand?: string | null;
-  suspendedReason?: string | null;
-  pendingAttemptId?: string | null;
-  quoteAmountMinor?: number | null;
-  quoteCurrency?: string | null;
-}
-
-export type AutoRechargeAttemptState =
-  "claimed" | "processing" | "succeeded" | "retryable" | "failed" | "action_required";
+export const AUTO_RECHARGE_STATES = ["disabled", "active", "suspended"] as const;
+export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];
 
 export interface BillingAutoRechargeProfile {
   userId: string;
   enabled: boolean;
-  state: AutoRechargeState;
-  provider?: string | null;
-  providerCustomerId?: string | null;
-  paymentMethodId?: string | null;
-  suspendedReason?: string | null;
-  consentedAt?: string | null;
+  state: BillingAutoRechargeState;
+  armed?: boolean;
+  provider: string | null;
+  providerCustomerId: string | null;
+  paymentMethodId: string | null;
   policySnapshot?: Record<string, unknown> | null;
   policyHash?: string | null;
   quoteSnapshot?: Record<string, unknown> | null;
   consentReference?: string | null;
-  armed?: boolean;
+  suspendedReason: string | null;
+  consentedAt: string | null;
 }
 
 export interface BillingAutoRechargeAttempt {
@@ -388,22 +337,34 @@ export interface BillingAutoRechargeAttempt {
   userId: string;
   provider: string;
   idempotencyKey: string;
-  providerPaymentId?: string | null;
+  providerPaymentId: string | null;
   topupKey: string;
   quantity: number;
-  state: AutoRechargeAttemptState;
-  credits?: number | null;
-  failureCode?: string | null;
-  actionUrl?: string | null;
+  state:
+    "claimed" | "submitted" | "processing" | "unknown" | "succeeded" | "failed" | "action_required";
+  credits: number | null;
+  failureCode: string | null;
+  actionUrl: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface BillingConfig {
-  currency?: string;
-  subscriptions?: Record<string, BillingOffer>;
-  topups?: Record<string, BillingCreditTopup>;
-  autoRecharge?: BillingAutoRechargeConfig | null;
+export interface BillingAutoRechargeStatus {
+  enabled: boolean;
+  state: BillingAutoRechargeState;
+  thresholdCredits: number;
+  topupKey: string;
+  quantity: number;
+  maxRecharges: number;
+  windowDays: number;
+  rechargesInWindow: number;
+  paymentMethodId: string | null;
+  paymentMethodLast4: string | null;
+  paymentMethodBrand: string | null;
+  suspendedReason: string | null;
+  pendingAttemptId: string | null;
+  quoteAmountMinor: number | null;
+  quoteCurrency: string | null;
 }
 
 // ── Billing preferences ──────────────────────────────────────────────────

@@ -17,7 +17,7 @@ from bursar.billing.models import (
 from bursar.billing.store import BillingStore
 from bursar.credits_service import CreditsService as CreditsServiceImpl
 from bursar.events import CreditEventEmitter
-from bursar.interface.base import CreditStore
+from bursar.stores.base import CreditStore
 
 
 class BillingEventSink(Protocol):
@@ -148,10 +148,6 @@ class Bursar:
             else None
         )
         return cls(credits=credits, billing=billing, catalog=CatalogService(credits))
-
-    def setup(self):
-        """Run the core database setup migrations."""
-        return self.credits.setup()
 
     def load_catalog(self) -> None:
         """Load the active catalog into the pricing engine."""

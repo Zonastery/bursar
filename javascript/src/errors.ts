@@ -59,7 +59,7 @@ export class LeaseNotFoundError extends Error {
 
 /**
  * Thrown by the default (concrete) implementation of an optional `CreditStore`
- * capability (analytics, transaction listing, teams — WS8) when a custom store
+ * capability (analytics, ledger listing, teams — WS8) when a custom store
  * subclass does not override it.
  */
 export class CapabilityNotSupportedError extends Error {

@@ -699,7 +699,3 @@ function toSnakeCase(value: unknown): unknown {
 export function canonicalBursarConfigDict(data: BursarConfigData): BursarConfigData {
   return toSnakeCase(loadConfigFromDict(data)) as BursarConfigData;
 }
-
-/** Internal persistence projection until the SQL catalogue is migrated. */
-
-export const bursarConfigToSnakeDict = canonicalBursarConfigDict;

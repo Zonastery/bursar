@@ -29,7 +29,7 @@ Only if Docker itself is unreachable do the Postgres/Supabase-setup tests
 
 For every source the fixture bootstraps the Supabase ``auth`` schema stubs +
 standard roles so bursar's bundled SQL migrations apply cleanly on a bare
-``postgres:16`` (migrations themselves are applied by ``store.setup()`` in the
+``postgres:16`` (migrations themselves are applied by ``run_migrations()`` in the
 per-store fixtures). Every test gets a clean slate: bursar's tables are
 TRUNCATEd before each test so cross-test state never bleeds, whether the
 underlying Postgres is a persistent DB or the session-scoped container.
@@ -46,7 +46,7 @@ from collections.abc import Generator, Iterator
 import psycopg2
 import pytest
 
-from bursar.interface.postgres import PostgresStore
+from bursar.stores.postgres import PostgresStore, run_migrations
 
 
 def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
@@ -144,8 +144,8 @@ def _preseed_supabase_objects(dsn: str) -> None:
                 $$;
                 """
             )
-            # Seed test users so migration 021's FK from user_credits to
-            # public."user" does not reject credit operations. Insert a range
+            # Seed host-owned users used by integration fixtures;
+            # the range covers the deterministic UUIDs used by the suite.
             # covering the fixed IDs (1–17, 99) plus the dynamic _new_uuid
             # range used across test_store_integration (9000–9514).
             cur.execute(
@@ -218,7 +218,7 @@ def _truncate_bursar_tables(dsn: str) -> None:
     """Give each test a clean slate on a persistent DB so state never bleeds.
 
     No-op the first time (tables don't exist yet); safe to call before
-    ``store.setup()`` has ever run.
+    ``run_migrations()`` has ever run.
     """
     import psycopg2
 
@@ -234,7 +234,8 @@ def _truncate_bursar_tables(dsn: str) -> None:
                     FOR t IN
                         SELECT tablename FROM pg_tables
                         WHERE schemaname = 'bursar'
-                          AND (tablename LIKE 'credit_%' OR tablename = 'user_credits'
+                          AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
+                                           OR tablename IN ('teams', 'team_members')
                                OR tablename LIKE 'billing_%'
                                OR tablename IN ('bursar_config', 'signup_grant_failures'))
                     LOOP
@@ -343,21 +344,18 @@ def pg_database_url() -> Iterator[str]:
                 "BURSAR_TEST_PG_URL, or make Docker available for testcontainers."
             )
 
-    # Clean slate per test so cross-test state never bleeds (store.setup() in
-    # the per-store fixtures then applies all migrations idempotently).
+    # Installation is a migration-runner responsibility, never a store method.
+    run_migrations(dsn)
+    # Clean slate per test so cross-test state never bleeds.
     _truncate_bursar_tables(dsn)
     yield dsn
 
 
 @pytest.fixture(scope="function")
 def pg_store(pg_database_url: str) -> Iterator[PostgresStore]:
-    """Yield a ``PostgresStore`` with migrations applied against a real Postgres.
-
-    Depends on ``pg_database_url``, so this fixture auto-skips when no Postgres
-    is available. The store's cleanup (migration replay) is idempotent.
-    """
+    """Yield a ``PostgresStore`` against a migrated real Postgres."""
     store = PostgresStore(pg_database_url, max_pool_size=2)
-    result = store.setup()
-    assert result.success
-    yield store
-    store.close()
+    try:
+        yield store
+    finally:
+        store.close()

@@ -1,6 +1,6 @@
 """Shared helper for bursar notebooks.
 
-Starts a temporary Postgres cluster, runs bursar schema setup, and returns a
+Starts a temporary Postgres cluster, runs Bursar migrations, and returns a
 configured ``PostgresStore``.  Requires Postgres binaries on PATH.
 
 Usage::
@@ -48,7 +48,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         ``(store, pgdata_path)``.  Caller **must** call ``cleanup(pgdata_path)``
         when done (e.g. in a ``finally`` block or final notebook cell).
     """
-    from bursar.interface.postgres import PostgresStore
+    from bursar.stores.postgres import PostgresStore, run_migrations
 
     pg_bin = _find_pg()
     pgdata = pgdata or tempfile.mkdtemp(prefix="bursar_demo_")
@@ -81,8 +81,8 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
     )
 
     dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
+    run_migrations(dsn)
     store = PostgresStore(dsn)
-    store.setup()
     return store, pgdata
 
 

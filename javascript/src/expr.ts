@@ -3,8 +3,8 @@ import { ExpressionError } from "./errors.js";
 
 // Quantization: all credit amounts round to 4 decimal places, ROUND_HALF_UP.
 // This must match the Python SDK's Decimal quantize(0.0001, ROUND_HALF_UP).
-export const MONEY_DP = 4;
-export const MONEY_ROUNDING = Decimal.ROUND_HALF_UP;
+const MONEY_DP = 4;
+const MONEY_ROUNDING = Decimal.ROUND_HALF_UP;
 
 /** Quantize a Decimal credit amount to 4dp, ROUND_HALF_UP. */
 export function quantizeMoney(value: Decimal): Decimal {

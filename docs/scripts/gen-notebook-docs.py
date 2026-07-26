@@ -15,7 +15,7 @@ for nb in sorted(NB_DIR.glob("[0-9]*.ipynb")):
     name = nb.stem
     stem = re.sub(r"^0?\d+_", "", name).replace("_", " ")
     title = stem.title()
-    pos = name.split("_")[0].lstrip("0")
+    pos = int(name.split("_")[0]) + 1
 
     md = subprocess.run(
         [sys.executable, "-m", "jupyter", "nbconvert", "--to", "markdown", str(nb), "--stdout"],

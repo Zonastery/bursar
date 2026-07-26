@@ -8,7 +8,7 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 
-def validate_first_row(rows: list[Any], model: type[T]) -> T | None:
+def validate_first_row[T: BaseModel](rows: list[Any], model: type[T]) -> T | None:
     """Return the first row as a validated model if present, else None."""
     if not rows or not isinstance(rows[0], dict):
         return None

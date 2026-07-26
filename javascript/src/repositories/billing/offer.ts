@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { QueryFn } from "../types.js";
 import { pgBoolean, unwrapJsonb, safeParse } from "../_shared.js";
 
-export const BillingOfferRowSchema = z
+const BillingOfferRowSchema = z
   .object({
     offer_key: z.string().optional(),
     plan: z.string().nullable().optional(),

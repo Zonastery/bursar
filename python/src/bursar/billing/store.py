@@ -4,7 +4,6 @@ from typing import Any
 from bursar.billing.models import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
-    BillingConfig,
     BillingCustomerRecord,
     BillingEventClaim,
     BillingOfferResult,
@@ -18,8 +17,8 @@ from bursar.billing.models import (
 
 class BillingStore(ABC):
     @abstractmethod
-    def sync_billing_from_config(self, config: BillingConfig) -> None: ...
-
+    @abstractmethod
+    def get_active_bursar_config(self) -> dict[str, Any] | None: ...
     @abstractmethod
     def create_or_get_checkout_intent(
         self,

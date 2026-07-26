@@ -11,6 +11,7 @@ if python3 -c "import sphinx; import sphinx_markdown_builder" 2>/dev/null; then
   PYTHON_SRC="$REPO_DIR/python/src/bursar"
   PYTHON_OUT="$DOCS_DIR/docs/python-api/reference"
   mkdir -p "$PYTHON_OUT" /tmp/bursar-sphinx /tmp/bursar-sphinx-out
+  find "$PYTHON_OUT" -maxdepth 1 -type f -name '*.md' -delete
 
   echo "[python] Running sphinx-apidoc..."
   python3 -m sphinx.ext.apidoc --separate --force -o /tmp/bursar-sphinx "$PYTHON_SRC"
