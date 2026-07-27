@@ -1,5 +1,13 @@
-CREATE FUNCTION bursar.get_credit_bucket_balances(p_subject_id uuid)
-RETURNS TABLE(bucket_key text,balance numeric)
+-- Read-only reporting and catalog resolution RPCs.
+-- Generated from the pre-production Bursar baseline; keep this file self-contained.
+
+CREATE FUNCTION bursar.get_credit_bucket_balances(
+    p_subject_id uuid
+)
+RETURNS TABLE(
+    bucket_key text,
+    balance numeric
+)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     WITH active_buckets AS (
         SELECT b.bucket_key
@@ -23,8 +31,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY 1
 $$;
 
-CREATE FUNCTION bursar.spend_by_operation(p_start timestamptz,p_end timestamptz)
-RETURNS TABLE(operation text,total_spend numeric,charge_count bigint)
+CREATE FUNCTION bursar.spend_by_operation(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE(
+    operation text,
+    total_spend numeric,
+    charge_count bigint
+)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT operation,SUM(charged),COUNT(*)
     FROM bursar.credit_usage_charges
@@ -73,8 +88,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     LIMIT p_page_size
 $$;
 
-CREATE FUNCTION bursar.spend_by_user(p_start timestamptz,p_end timestamptz)
-RETURNS TABLE(subject_id uuid,total_spend numeric,charge_count bigint)
+CREATE FUNCTION bursar.spend_by_user(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE(
+    subject_id uuid,
+    total_spend numeric,
+    charge_count bigint
+)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT a.subject_id,SUM(c.charged),COUNT(*)
     FROM bursar.credit_usage_charges c
@@ -84,8 +106,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY SUM(c.charged) DESC
 $$;
 
-CREATE FUNCTION bursar.spend_by_model(p_start timestamptz,p_end timestamptz)
-RETURNS TABLE(model text,total_spend numeric,charge_count bigint)
+CREATE FUNCTION bursar.spend_by_model(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE(
+    model text,
+    total_spend numeric,
+    charge_count bigint
+)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT COALESCE(model,'unknown'),SUM(charged),COUNT(*)
     FROM bursar.credit_usage_charges
@@ -94,8 +123,15 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     ORDER BY SUM(charged) DESC
 $$;
 
-CREATE FUNCTION bursar.daily_spend(p_start timestamptz,p_end timestamptz)
-RETURNS TABLE(day date,total_spend numeric,charge_count bigint)
+CREATE FUNCTION bursar.daily_spend(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE(
+    day date,
+    total_spend numeric,
+    charge_count bigint
+)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     SELECT (created_at AT TIME ZONE 'UTC')::date,SUM(charged),COUNT(*)
     FROM bursar.credit_usage_charges
@@ -105,7 +141,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_customer(
- p_subject_id uuid,p_provider text DEFAULT NULL
+    p_subject_id uuid,
+    p_provider text DEFAULT NULL
 )
 RETURNS SETOF bursar.billing_customers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -117,7 +154,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_customer_by_provider(
- p_provider text,p_provider_customer_id text
+    p_provider text,
+    p_provider_customer_id text
 )
 RETURNS bursar.billing_customers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -128,7 +166,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_subscription_by_provider(
- p_provider text,p_provider_subscription_id text
+    p_provider text,
+    p_provider_subscription_id text
 )
 RETURNS bursar.billing_subscriptions
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -138,7 +177,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  AND provider_subscription_id=p_provider_subscription_id
 $$;
 
-CREATE FUNCTION bursar.list_billing_subscriptions(p_subject_id uuid)
+CREATE FUNCTION bursar.list_billing_subscriptions(
+    p_subject_id uuid
+)
 RETURNS SETOF bursar.billing_subscriptions
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
@@ -148,7 +189,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_payment_by_provider(
- p_provider text,p_provider_payment_id text
+    p_provider text,
+    p_provider_payment_id text
 )
 RETURNS bursar.billing_payments
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -159,7 +201,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_refund_by_provider(
- p_provider text,p_provider_refund_id text
+    p_provider text,
+    p_provider_refund_id text
 )
 RETURNS bursar.billing_refunds
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -169,7 +212,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  AND provider_refund_id=p_provider_refund_id
 $$;
 
-CREATE FUNCTION bursar.get_billing_preferences(p_subject_id uuid)
+CREATE FUNCTION bursar.get_billing_preferences(
+    p_subject_id uuid
+)
 RETURNS bursar.billing_preferences
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
@@ -177,7 +222,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  WHERE subject_id=p_subject_id
 $$;
 
-CREATE FUNCTION bursar.get_auto_recharge_profile(p_subject_id uuid)
+CREATE FUNCTION bursar.get_auto_recharge_profile(
+    p_subject_id uuid
+)
 RETURNS bursar.billing_auto_recharge_profiles
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
@@ -185,7 +232,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  WHERE subject_id=p_subject_id
 $$;
 
-CREATE FUNCTION bursar.get_auto_recharge_attempt(p_attempt_id uuid)
+CREATE FUNCTION bursar.get_auto_recharge_attempt(
+    p_attempt_id uuid
+)
 RETURNS bursar.billing_auto_recharge_attempts
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
@@ -194,7 +243,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.resolve_catalog_offer(
- p_provider text,p_lookup_type text,p_lookup_value text
+    p_provider text,
+    p_lookup_type text,
+    p_lookup_value text
 )
 RETURNS bursar.catalog_offers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
@@ -212,7 +263,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 $$;
 
 CREATE FUNCTION bursar.resolve_catalog_topup(
- p_provider text,p_lookup_type text,p_lookup_value text
+    p_provider text,
+    p_lookup_type text,
+    p_lookup_value text
 )
 RETURNS bursar.catalog_topups
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$

@@ -21,6 +21,12 @@ pre-commit:
       run: |
         uvx ruff check {staged_files} \
           || { echo "↳ run: uvx ruff check --fix <files>  (then review & re-stage)" >&2; exit 1; }
+    sql-lint:
+      root: "."
+      glob: "python/src/bursar/sql/*.sql"
+      run: |
+        uvx --from sqlfluff==4.2.2 sqlfluff lint {staged_files} --config .sqlfluff --nocolor \
+        || { echo "↳ run: uvx --from sqlfluff==4.2.2 sqlfluff lint python/src/bursar/sql --config .sqlfluff" >&2; exit 1; }
     js-format:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"

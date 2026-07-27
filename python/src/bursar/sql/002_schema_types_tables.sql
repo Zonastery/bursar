@@ -1,24 +1,34 @@
 CREATE SCHEMA IF NOT EXISTS bursar;
+
 CREATE SCHEMA IF NOT EXISTS extensions;
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
 CREATE TYPE bursar.catalog_revision_status AS ENUM ('draft', 'published', 'active', 'retired');
+
 CREATE TYPE bursar.ledger_entry_kind AS ENUM ('grant', 'purchase', 'usage', 'expiry', 'revocation', 'refund', 'refund_clawback', 'adjustment', 'reservation', 'release');
+
 CREATE TYPE bursar.lease_status AS ENUM ('active', 'settled', 'released', 'expired');
+
 CREATE TYPE bursar.billing_payment_status AS ENUM ('pending', 'succeeded', 'failed', 'refunded', 'partially_refunded');
+
 CREATE TYPE bursar.billing_subscription_status AS ENUM ('incomplete', 'incomplete_expired', 'trialing', 'active', 'past_due', 'paused', 'canceled', 'unpaid', 'expired');
+
 CREATE TYPE bursar.billing_event_status AS ENUM ('processing', 'completed', 'failed');
+
 CREATE TYPE bursar.recharge_attempt_status AS ENUM ('claimed', 'submitted', 'processing', 'succeeded', 'failed', 'unknown', 'action_required');
 
 CREATE TABLE bursar.subjects (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
 CREATE TABLE bursar.external_identities (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_id uuid NOT NULL REFERENCES bursar.subjects(id) ON DELETE CASCADE,
     provider text NOT NULL, external_subject text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, external_subject)
 );
+
 CREATE TABLE bursar.catalog_revisions (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), revision_no bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     yaml_schema_version integer NOT NULL CHECK (yaml_schema_version > 0), source_document jsonb NOT NULL,
@@ -26,6 +36,7 @@ CREATE TABLE bursar.catalog_revisions (
     label text, created_at timestamptz NOT NULL DEFAULT now(), published_at timestamptz, activated_at timestamptz,
     retired_at timestamptz
 );
+
 CREATE TABLE bursar.catalog_buckets (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
     bucket_key text NOT NULL, label text NOT NULL, priority integer NOT NULL CHECK (priority >= 0),
@@ -39,6 +50,7 @@ CREATE TABLE bursar.catalog_buckets (
     allow_overdraft boolean NOT NULL DEFAULT false, is_default boolean NOT NULL DEFAULT false,
     UNIQUE (catalog_revision_id, bucket_key)
 );
+
 CREATE TABLE bursar.catalog_plans (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
  plan_key text NOT NULL, display_name text NOT NULL, rate_card text,
@@ -69,6 +81,7 @@ CREATE TABLE bursar.catalog_plans (
          AND included_credits_reset_timezone IS NOT NULL)
     )
 );
+
 CREATE TABLE bursar.catalog_signup_grants (
     catalog_revision_id uuid PRIMARY KEY REFERENCES bursar.catalog_revisions(id) ON DELETE CASCADE,
     amount numeric(20,6) NOT NULL CHECK (amount > 0),
@@ -76,6 +89,7 @@ CREATE TABLE bursar.catalog_signup_grants (
     FOREIGN KEY (catalog_revision_id, bucket_key)
         REFERENCES bursar.catalog_buckets(catalog_revision_id, bucket_key)
 );
+
 CREATE TABLE bursar.catalog_offers (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
     offer_key text NOT NULL, plan_key text NOT NULL, billing_unit text NOT NULL CHECK (billing_unit IN ('day','week','month','year')),
@@ -96,6 +110,7 @@ CREATE TABLE bursar.catalog_offers (
         OR (grant_mode <> 'credits' AND grant_credits = 0 AND grant_bucket_key IS NULL)
     )
 );
+
 CREATE TABLE bursar.catalog_topups (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
     topup_key text NOT NULL, credits_per_unit numeric(20,6) NOT NULL CHECK (credits_per_unit > 0), bucket_key text NOT NULL,
@@ -105,12 +120,14 @@ CREATE TABLE bursar.catalog_topups (
     FOREIGN KEY (catalog_revision_id, bucket_key)
         REFERENCES bursar.catalog_buckets(catalog_revision_id, bucket_key)
 );
+
 CREATE TABLE bursar.catalog_provider_refs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
     provider text NOT NULL, lookup_type text NOT NULL CHECK (length(trim(lookup_type)) > 0),
     lookup_value text NOT NULL, object_type text NOT NULL CHECK (object_type IN ('offer','topup','plan')), object_key text NOT NULL,
     UNIQUE (catalog_revision_id, provider, lookup_type, lookup_value)
 );
+
 CREATE TABLE bursar.credit_accounts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_id uuid NOT NULL REFERENCES bursar.subjects(id), account_kind text NOT NULL CHECK (account_kind IN ('personal','team')),
     balance numeric(20,6) NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now(),

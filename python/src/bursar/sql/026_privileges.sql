@@ -1,12 +1,20 @@
+-- RLS, backend-only policies, and explicit RPC grants.
+-- Generated from the pre-production Bursar baseline; keep this file self-contained.
+
 REVOKE ALL ON SCHEMA bursar FROM PUBLIC;
+
 REVOKE ALL ON ALL TABLES IN SCHEMA bursar FROM PUBLIC;
+
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA bursar FROM PUBLIC;
+
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bursar FROM PUBLIC;
 
 DO $$
 DECLARE
     t record;
+
     v_roles text;
+
 BEGIN
     SELECT string_agg(quote_ident(rolname),',')
     INTO v_roles
@@ -20,6 +28,7 @@ BEGIN
             'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
             t.tablename
         );
+
         IF v_roles IS NOT NULL THEN
             EXECUTE format(
                 'CREATE POLICY %I ON bursar.%I FOR ALL TO %s USING (false) WITH CHECK (false)',
@@ -27,13 +36,17 @@ BEGIN
                 t.tablename,
                 v_roles
             );
+
         END IF;
+
     END LOOP;
+
 END $$;
 
 DO $$
 DECLARE
     v_function text;
+
     v_service_functions constant text[]:=ARRAY[
         'bursar.publish_and_activate_catalog(integer,jsonb,text)',
         'bursar.active_catalog_revision()',
@@ -94,23 +107,32 @@ DECLARE
         'bursar.spend_by_model(timestamptz,timestamptz)',
         'bursar.daily_spend(timestamptz,timestamptz)'
     ];
+
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='service_role') THEN
         GRANT USAGE ON SCHEMA bursar TO service_role;
+
         REVOKE ALL ON ALL TABLES IN SCHEMA bursar FROM service_role;
+
         REVOKE ALL ON ALL SEQUENCES IN SCHEMA bursar FROM service_role;
+
         FOREACH v_function IN ARRAY v_service_functions LOOP
             EXECUTE format(
                 'GRANT EXECUTE ON FUNCTION %s TO service_role',
                 v_function
             );
+
         END LOOP;
+
     END IF;
+
 END $$;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
     REVOKE ALL ON TABLES FROM PUBLIC;
+
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
     REVOKE ALL ON SEQUENCES FROM PUBLIC;
+
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
     REVOKE ALL ON FUNCTIONS FROM PUBLIC;
