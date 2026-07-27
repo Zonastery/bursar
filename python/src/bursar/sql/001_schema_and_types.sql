@@ -1,3 +1,6 @@
+CREATE SCHEMA IF NOT EXISTS bursar;
+CREATE SCHEMA IF NOT EXISTS extensions;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SET client_min_messages = warning;
@@ -14,6 +17,15 @@ SET search_path TO ''
 AS $$
     SELECT p_value IS NOT NULL
        AND p_value NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)
+$$;
+
+CREATE FUNCTION bursar.digest_numeric_text(p_value numeric) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path TO '' AS $$
+    SELECT CASE
+        WHEN p_value IS NULL THEN NULL
+        WHEN p_value = trunc(p_value) THEN trunc(p_value)::text
+        ELSE rtrim(rtrim(p_value::text,'0'),'.')
+    END
 $$;
 
 CREATE FUNCTION bursar.current_provider_environment()
