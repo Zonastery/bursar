@@ -16,16 +16,16 @@ DECLARE
 
     v_balance numeric;
 
-    v_step interval;
-
     v_window_start timestamptz;
 
     v_window_end timestamptz;
+    v_environment text:=bursar.current_provider_environment();
 
 BEGIN
     SELECT * INTO v_profile
     FROM bursar.billing_auto_recharge_profiles
     WHERE subject_id=p_subject_id
+      AND provider_environment=v_environment
     FOR UPDATE;
 
  IF p_idempotency_key IS NULL OR p_idempotency_key='' OR NOT FOUND THEN RETURN;
@@ -33,7 +33,9 @@ BEGIN
 
  SELECT * INTO v_attempt
  FROM bursar.billing_auto_recharge_attempts
- WHERE subject_id=p_subject_id AND idempotency_key=p_idempotency_key;
+ WHERE subject_id=p_subject_id
+   AND provider_environment=v_environment
+   AND idempotency_key=p_idempotency_key;
 
  IF FOUND THEN RETURN NEXT v_attempt;
  RETURN;
@@ -44,6 +46,13 @@ BEGIN
  THEN
   RETURN;
 
+ END IF;
+
+ IF v_profile.last_attempt_at IS NOT NULL
+    AND v_profile.last_attempt_at
+        + make_interval(secs=>v_profile.cooldown_seconds)>now()
+ THEN
+  RETURN;
  END IF;
 
  SELECT balance INTO v_balance
@@ -59,6 +68,7 @@ BEGIN
     SELECT * INTO v_attempt
     FROM bursar.billing_auto_recharge_attempts
     WHERE subject_id=p_subject_id
+      AND provider_environment=v_environment
       AND state IN ('claimed','submitted','processing','unknown','action_required')
     ORDER BY created_at DESC
     LIMIT 1;
@@ -67,33 +77,20 @@ BEGIN
  RETURN;
  END IF;
 
-    v_step:=CASE v_profile.window_unit
-        WHEN 'day' THEN make_interval(days=>v_profile.window_count)
-        WHEN 'week' THEN make_interval(weeks=>v_profile.window_count)
-        WHEN 'month' THEN make_interval(months=>v_profile.window_count)
-        WHEN 'year' THEN make_interval(years=>v_profile.window_count)
-    END;
-
-    IF v_profile.window_anchor='rolling' THEN
-        v_window_end:=now();
-
-        v_window_start:=(now() AT TIME ZONE v_profile.window_timezone-v_step)
-                        AT TIME ZONE v_profile.window_timezone;
-
-    ELSE
-        v_window_start:=date_trunc(
-            v_profile.window_unit,
-            now() AT TIME ZONE v_profile.window_timezone
-        ) AT TIME ZONE v_profile.window_timezone;
-
-        v_window_end:=(v_window_start AT TIME ZONE v_profile.window_timezone+v_step)
-                      AT TIME ZONE v_profile.window_timezone;
-
-    END IF;
+    SELECT window_start, window_end
+    INTO v_window_start, v_window_end
+    FROM bursar.policy_period_window(
+        NULL,
+        v_profile.window_unit,
+        v_profile.window_count,
+        v_profile.window_anchor,
+        v_profile.window_timezone
+    );
 
     SELECT count(*) INTO v_count
     FROM bursar.billing_auto_recharge_attempts
     WHERE subject_id=p_subject_id
+      AND provider_environment=v_environment
       AND created_at>=v_window_start
       AND created_at<v_window_end
       AND state IN ('submitted','processing','succeeded','action_required');
@@ -106,17 +103,20 @@ BEGIN
     END IF;
 
     INSERT INTO bursar.billing_auto_recharge_attempts(
-        subject_id,provider,idempotency_key,topup_id,quantity,window_start,window_end
+        subject_id,provider,provider_environment,idempotency_key,topup_id,
+        catalog_revision_id,quantity,window_start,window_end
     )
     VALUES (
-        p_subject_id,v_profile.provider,p_idempotency_key,
-        v_profile.topup_id,v_profile.quantity,v_window_start,v_window_end
+        p_subject_id,v_profile.provider,v_profile.provider_environment,
+        p_idempotency_key,v_profile.topup_id,v_profile.catalog_revision_id,
+        v_profile.quantity,v_window_start,v_window_end
     )
     RETURNING * INTO v_attempt;
 
     UPDATE bursar.billing_auto_recharge_profiles
-    SET armed=false
-    WHERE subject_id=p_subject_id;
+    SET armed=false,last_attempt_at=now()
+    WHERE subject_id=p_subject_id
+      AND provider_environment=v_environment;
 
     RETURN NEXT v_attempt;
 
@@ -136,9 +136,11 @@ DECLARE
     v_old bursar.recharge_attempt_status;
 
     v_subject uuid;
+    v_environment text;
 
 BEGIN
-    SELECT state,subject_id INTO v_old,v_subject
+    SELECT state,subject_id,provider_environment
+    INTO v_old,v_subject,v_environment
     FROM bursar.billing_auto_recharge_attempts
     WHERE id=p_attempt_id
     FOR UPDATE;
@@ -176,8 +178,26 @@ BEGIN
     -- is posted.
     IF p_state='failed' THEN
         UPDATE bursar.billing_auto_recharge_profiles
-        SET armed=true
-        WHERE subject_id=v_subject AND enabled;
+        SET consecutive_failures=consecutive_failures+1,
+            armed=CASE
+                WHEN consecutive_failures+1>=max_consecutive_failures
+                    THEN false
+                ELSE true
+            END,
+            state=CASE
+                WHEN consecutive_failures+1>=max_consecutive_failures
+                    THEN 'paused'
+                ELSE state
+            END
+        WHERE subject_id=v_subject
+          AND provider_environment=v_environment
+          AND enabled;
+
+    ELSIF p_state='succeeded' THEN
+        UPDATE bursar.billing_auto_recharge_profiles
+        SET consecutive_failures=0
+        WHERE subject_id=v_subject
+          AND provider_environment=v_environment;
 
     END IF;
 

@@ -53,7 +53,11 @@ export interface PaymentMethodInfo {
 }
 
 export type SavedPaymentChargeStatus =
-  "succeeded" | "processing" | "failed" | "requires_customer_action" | "requires_payment_method";
+  | "succeeded"
+  | "processing"
+  | "failed"
+  | "requires_customer_action"
+  | "requires_payment_method";
 
 export interface SavedPaymentChargeParams {
   customerId: string;
@@ -102,30 +106,11 @@ export type ResolveUserCallback = (
   eventType?: string,
 ) => Promise<string | null>;
 
-export interface ProviderLogger {
-  debug?: (msg: string, ctx?: Record<string, unknown>) => void;
-  info?: (msg: string, ctx?: Record<string, unknown>) => void;
-  warn?: (msg: string, ctx?: Record<string, unknown>) => void;
-  error?: (msg: string, ctx?: Record<string, unknown>) => void;
-}
-
-export type NormalizedProviderLogger = Required<ProviderLogger>;
-
-export const noopLogger: NormalizedProviderLogger = {
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-};
-
-export function normalizeProviderLogger(logger?: ProviderLogger | null): NormalizedProviderLogger {
-  return {
-    debug: logger?.debug ?? noopLogger.debug,
-    info: logger?.info ?? noopLogger.info,
-    warn: logger?.warn ?? noopLogger.warn,
-    error: logger?.error ?? noopLogger.error,
-  };
-}
+export { noopLogger, normalizeLogger as normalizeProviderLogger } from "../shared/logger.js";
+export type {
+  Logger as ProviderLogger,
+  NormalizedLogger as NormalizedProviderLogger,
+} from "../shared/logger.js";
 
 export type CheckoutPaymentStatus =
   | null
@@ -145,7 +130,10 @@ export interface ChangePlanParams {
   providerSubscriptionId: string;
   productId: string;
   prorationBillingMode:
-    "prorated_immediately" | "full_immediately" | "difference_immediately" | "do_not_bill";
+    | "prorated_immediately"
+    | "full_immediately"
+    | "difference_immediately"
+    | "do_not_bill";
   effectiveAt?: "immediately" | "next_billing_date";
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;

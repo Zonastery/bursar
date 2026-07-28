@@ -37,6 +37,35 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path TO '' AS $$
     END
 $$;
 
+CREATE FUNCTION bursar.require_json_object(
+    p_value jsonb,
+    p_name text
+) RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+SET search_path TO ''
+AS $$
+BEGIN
+    IF p_value IS NULL OR jsonb_typeof(p_value) <> 'object' THEN
+        RAISE EXCEPTION '% must be a JSON object', p_name
+            USING ERRCODE = '22023';
+    END IF;
+
+    RETURN p_value;
+END
+$$;
+
+CREATE FUNCTION bursar.is_nonempty_text(
+    p_value text
+) RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+SET search_path TO ''
+AS $$
+    SELECT p_value IS NOT NULL AND length(btrim(p_value)) > 0
+$$;
+
 CREATE FUNCTION bursar.current_provider_environment()
 RETURNS text
 LANGUAGE sql

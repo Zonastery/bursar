@@ -7,11 +7,13 @@ export type { UsageMetrics } from "./metrics.js";
 export type {
   BursarConfigData,
   ParsedBursarConfig,
-  UsageConfig,
+  PricingConfig,
   CreditsConfig,
   PlanDefinition as PricingPlanDefinition,
-  PaymentsConfig,
-  Period,
+  CommerceConfig,
+  Window,
+  Charge,
+  FeatureDefinition,
 } from "./config.js";
 export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
 export {
@@ -26,8 +28,10 @@ export {
   InsufficientCreditsError,
   LeaseExpiredError,
   LeaseNotFoundError,
+  OperationNotAllowedError,
   PricingNotLoadedError,
   RefundError,
+  QuotaExceededError,
   StoreError,
 } from "./errors.js";
 export { validateExpression, evaluateExpression } from "./expr.js";
@@ -45,6 +49,8 @@ export type {
   AvailableResult,
   BalanceResult,
   BillingMode,
+  BursarConfigHistoryItem,
+  BursarConfigResult,
   BucketBalance,
   BucketBalancesResult,
   BucketDefinition,
@@ -60,9 +66,17 @@ export type {
   FeatureLimitResult,
   GetUserPlanResult,
   LeaseResult,
+  ListQuotaEventsOptions,
+  MigratePlanUsersResult,
   OperationPolicy,
+  PlanAllowancePolicy,
+  PlanAdmissionPolicy,
+  PlanCreditPolicy,
   PlanDefinition,
-  BursarConfigResult,
+  PlanMigrationBatchResult,
+  PlanMigrationStartResult,
+  QuotaEvent,
+  QuotaState,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -80,18 +94,18 @@ export type {
   TeamDeductionResult,
   TeamMember,
   TopUserRow,
-} from "./types.js";
+} from "./credits/types/index.js";
 
 // Store options
-export type { CreateLeaseOptions, SettleLeaseOptions } from "./stores/credit-store.js";
+export type { CreateLeaseOptions, SettleLeaseOptions } from "./credits/store.js";
 
 // Stores
-export { CreditStore } from "./stores/credit-store.js";
-export { PostgresStore } from "./stores/postgres-store.js";
+export { CreditStore } from "./credits/store.js";
+export { PostgresStore } from "./credits/postgres/store.js";
 
 // Events
-export type { CreditEvent, CreditEventType } from "./stores/events.js";
-export { CreditEventEmitter } from "./stores/events.js";
+export type { CreditEvent, CreditEventType } from "./credits/events.js";
+export { CreditEventEmitter } from "./credits/events.js";
 
 // Billing
 export { BillingStore, PostgresBillingStore } from "./billing/index.js";
@@ -118,6 +132,9 @@ export type {
   BillingProvider,
   BillingRefundInfo,
   BillingSubscriptionInfo,
+  BillingSubscriptionChange,
+  BillingSubscriptionChangeInput,
+  BillingSubscriptionChangeState,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   EntitlementMode,

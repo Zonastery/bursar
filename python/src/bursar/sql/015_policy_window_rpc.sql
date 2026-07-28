@@ -3,8 +3,7 @@
 
 CREATE FUNCTION bursar.effective_subject_policy(
     p_subject_id uuid,
-    p_operation text,
-    p_feature text DEFAULT NULL
+    p_operation text
 )
 RETURNS TABLE(
     catalog_revision_id uuid,
@@ -16,28 +15,45 @@ RETURNS TABLE(
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     WITH assignment AS (
-        SELECT a.catalog_revision_id, a.plan_id, p.spending, p.limits
+        SELECT
+            a.catalog_revision_id,
+            a.plan_id,
+            credit_policy.policy_type,
+            credit_policy.credit_limit,
+            COALESCE(
+                operation_policy.max_in_flight,
+                admission_policy.max_in_flight
+            ) AS max_in_flight
         FROM bursar.credit_accounts ca
         JOIN bursar.account_plan_assignments a ON a.account_id = ca.id
         JOIN bursar.catalog_plans p ON p.id = a.plan_id AND p.catalog_revision_id = a.catalog_revision_id
+        LEFT JOIN bursar.catalog_credit_policies AS credit_policy
+          ON credit_policy.catalog_revision_id = p.catalog_revision_id
+         AND credit_policy.policy_key = p.credit_policy_key
+        LEFT JOIN bursar.catalog_admission_policies AS admission_policy
+          ON admission_policy.catalog_revision_id = p.catalog_revision_id
+         AND admission_policy.policy_key = p.admission_policy_key
+        LEFT JOIN bursar.catalog_admission_operation_policies
+            AS operation_policy
+          ON operation_policy.catalog_revision_id =
+             admission_policy.catalog_revision_id
+         AND operation_policy.admission_policy_key =
+             admission_policy.policy_key
+         AND operation_policy.operation_key = p_operation
         WHERE ca.subject_id = p_subject_id AND ca.account_kind = 'personal'
           AND a.starts_at <= now() AND (a.ends_at IS NULL OR a.ends_at > now())
-    ), policy AS (
-        SELECT *, COALESCE(spending->'operations'->p_operation, '{}'::jsonb) AS operation_policy,
-               COALESCE(limits->p_feature, '{}'::jsonb) AS feature_policy
-        FROM assignment
     )
-    SELECT catalog_revision_id,
-           plan_id,
-           CASE WHEN COALESCE(operation_policy->>'mode', spending->>'mode', 'strict') = 'overdraft'
-                THEN -COALESCE(NULLIF(operation_policy->>'overdraft_limit', '')::numeric,
-                               NULLIF(spending->>'overdraft_limit', '')::numeric, 0)
-                ELSE 0 END,
-           COALESCE(NULLIF(operation_policy->>'max_concurrent', '')::integer,
-                    NULLIF(spending->>'max_concurrent', '')::integer),
-           NULLIF(feature_policy->>'max_calls', '')::integer,
-           COALESCE(feature_policy->>'action', 'deny')
-FROM policy
+    SELECT
+        catalog_revision_id,
+        plan_id,
+        CASE policy_type
+            WHEN 'credit_line' THEN -credit_limit
+            ELSE 0
+        END,
+        max_in_flight,
+        NULL::integer,
+        NULL::text
+    FROM assignment
 $$;
 
 CREATE FUNCTION bursar.policy_period_window(
@@ -62,22 +78,51 @@ DECLARE
     v_start_month integer;
 
 BEGIN
-    IF p_unit NOT IN ('day','week','month','year') OR p_count IS NULL OR p_count < 1
+    IF p_unit NOT IN ('second','minute','hour','day','week','month','year')
+       OR p_count IS NULL OR p_count < 1
        OR p_anchor NOT IN ('calendar','plan_assignment','rolling')
        OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = p_timezone) THEN
         RAISE EXCEPTION 'invalid policy period' USING ERRCODE = '22023';
 
     END IF;
 
-    v_step := CASE p_unit WHEN 'day' THEN make_interval(days => p_count)
+    v_step := CASE p_unit WHEN 'second' THEN make_interval(secs => p_count)
+                          WHEN 'minute' THEN make_interval(mins => p_count)
+                          WHEN 'hour' THEN make_interval(hours => p_count)
+                          WHEN 'day' THEN make_interval(days => p_count)
                           WHEN 'week' THEN make_interval(weeks => p_count)
                           WHEN 'month' THEN make_interval(months => p_count)
                           WHEN 'year' THEN make_interval(years => p_count) END;
 
-    IF p_anchor = 'calendar' THEN
+    IF p_anchor = 'rolling' THEN
+        window_end := now();
+        window_start := (
+            window_end AT TIME ZONE p_timezone - v_step
+        ) AT TIME ZONE p_timezone;
+        RETURN NEXT;
+        RETURN;
+    ELSIF p_anchor = 'calendar' THEN
         v_local := now() AT TIME ZONE p_timezone;
 
-        IF p_unit = 'day' THEN
+        IF p_unit = 'second' THEN
+            window_start := date_bin(
+                make_interval(secs => p_count),
+                v_local,
+                timestamp '2000-01-01'
+            ) AT TIME ZONE p_timezone;
+        ELSIF p_unit = 'minute' THEN
+            window_start := date_bin(
+                make_interval(mins => p_count),
+                v_local,
+                timestamp '2000-01-01'
+            ) AT TIME ZONE p_timezone;
+        ELSIF p_unit = 'hour' THEN
+            window_start := date_bin(
+                make_interval(hours => p_count),
+                v_local,
+                timestamp '2000-01-01'
+            ) AT TIME ZONE p_timezone;
+        ELSIF p_unit = 'day' THEN
             window_start := date_bin(make_interval(days => p_count), v_local, timestamp '2000-01-01') AT TIME ZONE p_timezone;
 
         ELSIF p_unit = 'week' THEN

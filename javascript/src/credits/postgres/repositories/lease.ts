@@ -1,0 +1,183 @@
+import { z } from "zod";
+import type { CallProc } from "../../../shared/postgres-types.js";
+import { DeductionRowSchema } from "./deduction.js";
+import type { DeductionRow } from "./deduction.js";
+import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+
+const LeaseRowSchema = z
+  .object({
+    lease_id: z.string().nullable().optional(),
+    user_id: z.string().optional(),
+    amount: z
+      .union([z.string(), z.number()] as const)
+      .nullable()
+      .optional(),
+    available: z
+      .union([z.string(), z.number()] as const)
+      .nullable()
+      .optional(),
+    reserved: z
+      .union([z.string(), z.number()] as const)
+      .nullable()
+      .optional(),
+    billing_mode: z.string().optional(),
+    minimum_balance: z
+      .union([z.string(), z.number()] as const)
+      .nullable()
+      .optional(),
+    expires_at: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .optional(),
+    error: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+const ReleaseRowSchema = z
+  .object({
+    released: pgBoolean.nullable().optional(),
+    reason: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export type LeaseRow = z.infer<typeof LeaseRowSchema>;
+export type ReleaseRow = z.infer<typeof ReleaseRowSchema>;
+
+/** Repository for lease lifecycle operations (admission control). */
+export class LeaseRepository {
+  constructor(private callproc: CallProc) {}
+
+  /** Atomically acquire a lease (hold) — admission control. */
+  async createLease(params: {
+    userId: string;
+    amount: string;
+    operationType: string;
+    idempotencyKey: string;
+    ttlSeconds: number;
+    metadata: string;
+    feature: string | null;
+    measures: string;
+    dimensions: string;
+    minimumBalance: string | null;
+    maxConcurrent: number | null;
+  }): Promise<LeaseRow> {
+    const rows = await this.callproc("create_lease_for_operation", [
+      params.userId,
+      params.operationType,
+      params.amount,
+      params.idempotencyKey,
+      `${params.ttlSeconds} seconds`,
+      params.metadata,
+      params.feature,
+      params.measures,
+      params.dimensions,
+      params.minimumBalance,
+      params.maxConcurrent,
+    ]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const lease =
+      row.lease_id == null
+        ? null
+        : ((await this.callproc("get_credit_lease", [params.userId, row.lease_id]))[0] as
+            | Record<string, unknown>
+            | undefined);
+    return safeParse(
+      LeaseRowSchema,
+      {
+        ...row,
+        user_id: params.userId,
+        amount: row.reserved_amount,
+        expires_at: lease?.expires_at,
+        minimum_balance: lease?.minimum_balance,
+        error: row.error_code,
+      },
+      "LeaseRepository.createLease",
+    );
+  }
+
+  /** Charge the actual cost against a lease and mark it settled. */
+  async settleLease(params: {
+    userId: string;
+    leaseId: string;
+    amount: string;
+    idempotencyKey: string;
+    feature: string | null;
+    model: string | null;
+    region: string | null;
+    measures: string;
+    dimensions: string;
+    metadata: string;
+  }): Promise<DeductionRow> {
+    const rows = await this.callproc("settle_lease", [
+      params.userId,
+      params.leaseId,
+      params.amount,
+      params.idempotencyKey,
+      params.feature,
+      params.model,
+      params.region,
+      params.measures,
+      params.dimensions,
+      params.metadata,
+    ]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const charge = (
+      await this.callproc("get_credit_operation_details", [
+        params.userId,
+        row.ledger_entry_id ?? null,
+        params.idempotencyKey,
+      ])
+    )[0] as Record<string, unknown> | undefined;
+    return safeParse(
+      DeductionRowSchema,
+      {
+        ...row,
+        entry_id: row.ledger_entry_id,
+        amount: row.settled_amount,
+        allowance_consumed: charge?.allowance_covered,
+        balance_after: charge?.balance_after,
+        idempotent: row.replayed,
+        error: row.error_code,
+      },
+      "LeaseRepository.settleLease",
+    );
+  }
+
+  /** Release a lease without charging — idempotent. */
+  async releaseLease(userId: string, leaseId: string): Promise<ReleaseRow> {
+    const rows = await this.callproc("release_lease", [userId, leaseId]);
+    const result = rows?.[0] as { released?: boolean } | undefined;
+    const reason =
+      typeof rows?.[0] === "string" ? rows[0] : result?.released === true ? "released" : null;
+    return safeParse(
+      ReleaseRowSchema,
+      {
+        released: reason === "released",
+        reason,
+      },
+      "LeaseRepository.releaseLease",
+    );
+  }
+
+  /** Extend an active lease without changing its captured policy snapshot. */
+  async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseRow> {
+    const rows = await this.callproc("renew_lease", [userId, leaseId, `${ttlSeconds} seconds`]);
+    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const lease =
+      row.error_code == null && row.lease_id != null
+        ? ((await this.callproc("get_credit_lease", [userId, row.lease_id]))[0] as
+            | Record<string, unknown>
+            | undefined)
+        : undefined;
+    return safeParse(
+      LeaseRowSchema,
+      {
+        ...row,
+        ...lease,
+        user_id: userId,
+        amount: row.reserved_amount,
+        error: row.error_code,
+      },
+      "LeaseRepository.renewLease",
+    );
+  }
+}

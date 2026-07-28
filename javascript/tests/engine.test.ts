@@ -1,94 +1,74 @@
+import Decimal from "decimal.js";
 import { describe, expect, it } from "vitest";
 
 import { PricingEngine } from "../src/engine.js";
 import { ConfigError } from "../src/errors.js";
+import { baseConfig } from "./config.test.js";
 
-const pricing = () => ({
-  version: 1,
-  usage: {
-    operations: {
-      completion: { measures: ["input_tokens", "output_tokens"], dimensions: ["model"] },
-      image: { measures: ["images"], dimensions: [] },
-    },
-    rate_cards: {
-      standard: {
-        prices: {
-          completion: [
-            { match: { model: { exact: "fast" } }, formula: "input_tokens * 2" },
-            {
-              match: { model: { prefix: "premium-" } },
-              formula: "input_tokens * 3 + output_tokens * 4",
-            },
-            { default: true, formula: "input_tokens + output_tokens" },
-          ],
-          image: [{ default: true, formula: "images * 5" }],
-        },
-      },
-      discount: {
-        extends: "standard",
-        prices: { completion: [{ default: true, formula: "input_tokens * 0.5 + output_tokens" }] },
-      },
-    },
-  },
-  plans: { pro: { display_name: "Pro", rate_card: "discount" } },
-});
-
-describe("generic operation pricing", () => {
-  it("uses exact and prefix matchers deterministically", () => {
-    const engine = PricingEngine.fromDict(pricing());
-    expect(
-      engine
-        .calculate(
-          { operation: "completion", measures: { input_tokens: 2 }, dimensions: { model: "fast" } },
-          { rateCard: "standard" },
-        )
-        .total.toString(),
-    ).toBe("4");
-    expect(
-      engine
-        .calculate(
-          {
-            operation: "completion",
-            measures: { input_tokens: 2, output_tokens: 1 },
-            dimensions: { model: "premium-x" },
-          },
-          { rateCard: "standard" },
-        )
-        .total.toString(),
-    ).toBe("10");
+describe("typed pricing engine", () => {
+  it("serializes its parsed configuration without re-validating camelCase fields", () => {
+    const engine = PricingEngine.fromDict(baseConfig());
+    const schema = engine.pricingSchema;
+    expect(schema.version).toBe(1);
+    expect(schema).toHaveProperty("pricing.rate_cards.standard");
+    expect(schema).not.toHaveProperty("pricing.rateCards");
   });
 
-  it("inherits untouched operations and replaces overridden rules", () => {
-    const engine = PricingEngine.fromDict(pricing());
-    expect(
-      engine
-        .calculate(
-          {
-            operation: "completion",
-            measures: { input_tokens: 2, output_tokens: 1 },
-            dimensions: { model: "fast" },
-          },
-          { rateCard: "discount" },
-        )
-        .total.toString(),
-    ).toBe("2");
-    expect(
-      engine
-        .calculate({ operation: "image", measures: { images: 2 } }, { rateCard: "discount" })
-        .total.toString(),
-    ).toBe("10");
+  it("uses a matching typed rule", () => {
+    const engine = PricingEngine.fromDict(baseConfig());
+    const result = engine.calculate({
+      operation: "completion",
+      measures: { input_tokens: 2 },
+      dimensions: { model: "gpt-fast" },
+    });
+    expect(result.total.eq(new Decimal("4.000000"))).toBe(true);
   });
 
-  it("fails closed for unknown input and ambiguous rate-card choice", () => {
-    const engine = PricingEngine.fromDict(pricing());
-    expect(() => engine.calculate({ operation: "audio" }, { rateCard: "standard" })).toThrow(
-      ConfigError,
-    );
+  it("uses explicit unmatched charge", () => {
+    const engine = PricingEngine.fromDict(baseConfig());
+    const result = engine.calculate({
+      operation: "completion",
+      measures: { input_tokens: 2, output_tokens: 1 },
+      dimensions: { model: "other" },
+    });
+    expect(result.total.eq(new Decimal("3.000000"))).toBe(true);
+  });
+
+  it("rejects unmatched dimensions when configured", () => {
+    const config = baseConfig();
+    config.pricing.rate_cards.standard.operations.completion.unmatched = {
+      action: "reject",
+    };
+    const engine = PricingEngine.fromDict(config);
     expect(() =>
-      engine.calculate({ operation: "image", measures: { seconds: 2 } }, { rateCard: "standard" }),
+      engine.calculate({
+        operation: "completion",
+        measures: { input_tokens: 1 },
+        dimensions: { model: "other" },
+      }),
     ).toThrow(ConfigError);
-    expect(() => engine.calculate({ operation: "image", measures: { images: 1 } })).toThrow(
-      /rateCard is required/,
-    );
+  });
+
+  it("calculates graduated pricing", () => {
+    const config = baseConfig();
+    config.pricing.rate_cards.standard.operations.completion.rules = [];
+    config.pricing.rate_cards.standard.operations.completion.unmatched = {
+      action: "charge",
+      charge: {
+        type: "graduated",
+        measure: "input_tokens",
+        tiers: [
+          { up_to: "10", rate: "1" },
+          { up_to: null, rate: "2" },
+        ],
+      },
+    };
+    const engine = PricingEngine.fromDict(config);
+    const result = engine.calculate({
+      operation: "completion",
+      measures: { input_tokens: 15 },
+      dimensions: { model: "other" },
+    });
+    expect(result.total.toFixed(6)).toBe("20.000000");
   });
 });

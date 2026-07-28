@@ -1,27 +1,33 @@
--- Account creation and credit posting RPCs.
--- Generated from the pre-production Bursar baseline; keep this file self-contained.
+-- Account creation, account-created grant programs, and credit posting.
 
 CREATE FUNCTION bursar.account_for_subject(
     p_subject_id uuid,
     p_kind text DEFAULT 'personal'
 )
-RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
 DECLARE
     v_id uuid;
-
     v_created boolean := false;
-
-    v_signup record;
-
-    v_post record;
-
+    v_revision uuid;
+    v_program_key text;
 BEGIN
     IF p_subject_id IS NULL OR p_kind NOT IN ('personal', 'team') THEN
-        RAISE EXCEPTION 'invalid account subject or kind' USING ERRCODE = '22023';
-
+        RAISE EXCEPTION 'invalid account subject or kind'
+            USING ERRCODE = '22023';
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT DO NOTHING;
+
+    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+        RAISE EXCEPTION 'subject is pseudonymized'
+            USING ERRCODE = '55000';
+    END IF;
 
     INSERT INTO bursar.credit_accounts(subject_id, account_kind)
     VALUES (p_subject_id, p_kind)
@@ -31,43 +37,447 @@ BEGIN
     v_created := FOUND;
 
     IF NOT v_created THEN
-        SELECT id INTO v_id FROM bursar.credit_accounts
-        WHERE subject_id = p_subject_id AND account_kind = p_kind FOR UPDATE;
-
+        SELECT id
+        INTO v_id
+        FROM bursar.credit_accounts
+        WHERE subject_id = p_subject_id
+          AND account_kind = p_kind
+        FOR UPDATE;
     END IF;
 
-    -- A signup grant is a one-time entitlement for a personal subject.  Keeping
-    -- an explicit row makes retries and later catalogue changes harmless.
-    IF v_created AND p_kind = 'personal' THEN
-        SELECT sg.catalog_revision_id, sg.amount, sg.bucket_key
-        INTO v_signup
-        FROM bursar.catalog_signup_grants sg
-        JOIN bursar.catalog_revisions cr ON cr.id = sg.catalog_revision_id
-        WHERE cr.status = 'active';
-
-        IF FOUND THEN
-            SELECT * INTO v_post FROM bursar.post_credit(
-                p_subject_id, 'grant', v_signup.amount, 'signup_grant',
-                'signup:' || p_subject_id::text,
-                jsonb_build_object('catalog_revision_id', v_signup.catalog_revision_id),
-                v_signup.bucket_key, v_signup.catalog_revision_id
-            );
-
-            IF v_post.error_code IS NOT NULL THEN
-                RAISE EXCEPTION 'signup grant failed: %', v_post.error_code USING ERRCODE = '23514';
-
-            END IF;
-
-            INSERT INTO bursar.signup_credit_grants(subject_id, catalog_revision_id, ledger_entry_id)
-            VALUES (p_subject_id, v_signup.catalog_revision_id, v_post.entry_id);
-
-        END IF;
-
+    IF NOT v_created OR p_kind <> 'personal' THEN
+        RETURN v_id;
     END IF;
+
+    SELECT id
+    INTO v_revision
+    FROM bursar.catalog_revisions
+    WHERE status = 'active';
+
+    IF v_revision IS NULL THEN
+        RETURN v_id;
+    END IF;
+
+    FOR v_program_key IN
+        SELECT program.program_key
+        FROM bursar.catalog_grant_programs AS program
+        WHERE program.catalog_revision_id = v_revision
+          AND program.trigger_type = 'account_created'
+        ORDER BY program.program_key, program.id
+    LOOP
+        PERFORM result.grant_event_id
+        FROM bursar.execute_grant_program(
+            'account_created',
+            v_program_key,
+            p_subject_id,
+            p_subject_id::text,
+            NULL,
+            NULL,
+            jsonb_build_object('source', 'account_provisioning')
+        ) AS result;
+    END LOOP;
 
     RETURN v_id;
+END
+$$;
 
-END $$;
+CREATE FUNCTION bursar.execute_grant_program(
+    p_trigger_type text,
+    p_program_key text,
+    p_subject_id uuid,
+    p_event_key text,
+    p_referrer_subject_id uuid DEFAULT NULL,
+    p_region text DEFAULT NULL,
+    p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS TABLE(
+    grant_event_id uuid,
+    grant_award_id uuid,
+    recipient_subject_id uuid,
+    ledger_entry_id uuid,
+    amount numeric,
+    replayed boolean,
+    error_code text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_revision uuid;
+    v_program bursar.catalog_grant_programs;
+    v_event bursar.grant_program_events;
+    v_award record;
+    v_post record;
+    v_account uuid;
+    v_recipient uuid;
+    v_plan_key text;
+    v_idempotency_key text;
+    v_award_count integer;
+    v_expiry_policy jsonb;
+    v_expires_at timestamptz;
+BEGIN
+    IF p_subject_id IS NULL
+       OR p_trigger_type NOT IN (
+           'account_created',
+           'referral_completed',
+           'promo_code_redeemed',
+           'manual'
+       )
+       OR NOT bursar.is_nonempty_text(p_program_key)
+       OR NOT bursar.is_nonempty_text(p_event_key)
+       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR (
+           p_trigger_type = 'referral_completed'
+           AND p_referrer_subject_id IS NULL
+       )
+    THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'invalid_request';
+        RETURN;
+    END IF;
+
+    SELECT id
+    INTO v_revision
+    FROM bursar.catalog_revisions
+    WHERE status = 'active';
+
+    IF v_revision IS NULL THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'missing_active_catalog';
+        RETURN;
+    END IF;
+
+    SELECT program.*
+    INTO v_program
+    FROM bursar.catalog_grant_programs AS program
+    WHERE program.catalog_revision_id = v_revision
+      AND program.program_key = p_program_key
+      AND program.trigger_type = p_trigger_type;
+
+    IF NOT FOUND THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'unknown_grant_program';
+        RETURN;
+    END IF;
+
+    IF (
+        v_program.availability->>'starts_at' IS NOT NULL
+        AND (v_program.availability->>'starts_at')::timestamptz > now()
+    ) OR (
+        v_program.availability->>'ends_at' IS NOT NULL
+        AND (v_program.availability->>'ends_at')::timestamptz <= now()
+    ) OR (
+        jsonb_array_length(
+            COALESCE(v_program.availability->'regions', '[]'::jsonb)
+        ) > 0
+        AND (
+            p_region IS NULL
+            OR NOT (
+                v_program.availability->'regions' ? upper(p_region)
+            )
+        )
+    )
+    THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'grant_unavailable';
+        RETURN;
+    END IF;
+
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT DO NOTHING;
+
+    IF p_referrer_subject_id IS NOT NULL THEN
+        INSERT INTO bursar.subjects(id)
+        VALUES (p_referrer_subject_id)
+        ON CONFLICT DO NOTHING;
+    END IF;
+
+    -- Account locking serializes the award-limit check, event insertion, and
+    -- all resulting ledger mutations for a recipient.
+    v_account := bursar.account_for_subject(p_subject_id);
+
+    PERFORM 1
+    FROM bursar.credit_accounts
+    WHERE id = v_account
+    FOR UPDATE;
+
+    SELECT assignment.plan_key
+    INTO v_plan_key
+    FROM bursar.account_plan_assignments AS assignment
+    WHERE assignment.account_id = v_account
+      AND assignment.starts_at <= now()
+      AND (
+          assignment.ends_at IS NULL
+          OR assignment.ends_at > now()
+      );
+
+    IF (
+        jsonb_array_length(
+            COALESCE(v_program.eligibility->'plans', '[]'::jsonb)
+        ) > 0
+        AND (
+            v_plan_key IS NULL
+            OR NOT (v_program.eligibility->'plans' ? v_plan_key)
+        )
+    ) OR (
+        jsonb_array_length(
+            COALESCE(v_program.eligibility->'regions', '[]'::jsonb)
+        ) > 0
+        AND (
+            p_region IS NULL
+            OR NOT (
+                v_program.eligibility->'regions' ? upper(p_region)
+            )
+        )
+    )
+    THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'grant_ineligible';
+        RETURN;
+    END IF;
+
+    v_idempotency_key := CASE v_program.idempotency_scope
+        WHEN 'subject' THEN p_subject_id::text
+        ELSE p_event_key
+    END;
+
+    SELECT event.*
+    INTO v_event
+    FROM bursar.grant_program_events AS event
+    WHERE event.program_key = v_program.program_key
+      AND event.subject_id = p_subject_id
+      AND event.idempotency_key = v_idempotency_key;
+
+    IF FOUND THEN
+        RETURN QUERY
+        SELECT
+            v_event.id,
+            execution.catalog_grant_award_id,
+            execution.recipient_subject_id,
+            execution.ledger_entry_id,
+            entry.amount,
+            true,
+            NULL::text
+        FROM bursar.grant_award_executions AS execution
+        JOIN bursar.credit_ledger_entries AS entry
+          ON entry.id = execution.ledger_entry_id
+        WHERE execution.grant_event_id = v_event.id
+        ORDER BY execution.id;
+        RETURN;
+    END IF;
+
+    SELECT count(*)::integer
+    INTO v_award_count
+    FROM bursar.grant_program_events AS event
+    WHERE event.program_key = v_program.program_key
+      AND event.subject_id = p_subject_id;
+
+    IF v_award_count >= v_program.max_awards_per_subject THEN
+        RETURN QUERY
+        SELECT
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::uuid,
+            NULL::numeric,
+            false,
+            'grant_award_limit_reached';
+        RETURN;
+    END IF;
+
+    INSERT INTO bursar.grant_program_events(
+        catalog_revision_id,
+        grant_program_id,
+        program_key,
+        subject_id,
+        event_key,
+        idempotency_scope,
+        idempotency_key,
+        referrer_subject_id,
+        metadata
+    )
+    VALUES (
+        v_revision,
+        v_program.id,
+        v_program.program_key,
+        p_subject_id,
+        p_event_key,
+        v_program.idempotency_scope,
+        v_idempotency_key,
+        p_referrer_subject_id,
+        COALESCE(p_metadata, '{}'::jsonb)
+            || jsonb_build_object('region', upper(p_region))
+    )
+    RETURNING * INTO v_event;
+
+    FOR v_award IN
+        SELECT award.*
+        FROM bursar.catalog_grant_awards AS award
+        WHERE award.grant_program_id = v_program.id
+        ORDER BY award.award_index
+    LOOP
+        v_recipient := CASE v_award.recipient
+            WHEN 'referrer' THEN p_referrer_subject_id
+            ELSE p_subject_id
+        END;
+
+        IF v_recipient IS NULL THEN
+            RAISE EXCEPTION
+                'grant award requires a referrer recipient'
+                USING ERRCODE = '22023';
+        END IF;
+
+        SELECT COALESCE(
+            v_award.expiry_policy,
+            bucket.expiry_policy
+        )
+        INTO v_expiry_policy
+        FROM bursar.catalog_buckets AS bucket
+        WHERE bucket.catalog_revision_id = v_revision
+          AND bucket.bucket_key = v_award.bucket_key;
+
+        v_expires_at := bursar.expiry_policy_at(
+            v_recipient,
+            v_revision,
+            v_expiry_policy,
+            now(),
+            NULL
+        );
+
+        SELECT *
+        INTO v_post
+        FROM bursar.post_credit(
+            v_recipient,
+            'grant',
+            v_award.amount,
+            'grant_program:' || v_program.program_key,
+            concat_ws(
+                ':',
+                'grant',
+                v_program.program_key,
+                v_event.id,
+                v_award.award_index,
+                v_recipient
+            ),
+            COALESCE(p_metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'grant_event_id', v_event.id,
+                    'grant_program_id', v_program.id,
+                    'grant_award_id', v_award.id,
+                    'trigger', p_trigger_type,
+                    'region', upper(p_region)
+                ),
+            v_award.bucket_key,
+            v_revision,
+            v_expires_at,
+            NULL
+        );
+
+        IF v_post.error_code IS NOT NULL THEN
+            RAISE EXCEPTION 'grant program posting failed: %',
+                v_post.error_code
+                USING ERRCODE = '23514';
+        END IF;
+
+        INSERT INTO bursar.grant_award_executions(
+            grant_event_id,
+            catalog_grant_award_id,
+            catalog_revision_id,
+            recipient_subject_id,
+            ledger_entry_id
+        )
+        VALUES (
+            v_event.id,
+            v_award.id,
+            v_revision,
+            v_recipient,
+            v_post.entry_id
+        );
+
+        IF p_trigger_type = 'account_created' THEN
+            INSERT INTO bursar.account_creation_grants(
+                subject_id,
+                catalog_revision_id,
+                grant_program_id,
+                catalog_grant_award_id,
+                ledger_entry_id
+            )
+            VALUES (
+                p_subject_id,
+                v_revision,
+                v_program.id,
+                v_award.id,
+                v_post.entry_id
+            )
+            ON CONFLICT DO NOTHING;
+        END IF;
+
+        RETURN QUERY
+        SELECT
+            v_event.id,
+            v_award.id,
+            v_recipient,
+            v_post.entry_id,
+            v_award.amount,
+            false,
+            NULL::text;
+    END LOOP;
+END
+$$;
+
+-- Host applications attach this hook to their own principal table. Bursar
+-- deliberately does not guess or mutate a host table during installation.
+CREATE FUNCTION bursar.provision_subject_account_on_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+BEGIN
+    PERFORM bursar.account_for_subject(NEW.id, 'personal');
+    RETURN NEW;
+END
+$$;
+
+COMMENT ON FUNCTION bursar.provision_subject_account_on_insert() IS
+    'Host-table trigger hook that provisions a personal account and runs eligible account_created grant programs.';
 
 CREATE FUNCTION bursar.post_credit(
     p_subject_id uuid,
@@ -79,7 +489,7 @@ CREATE FUNCTION bursar.post_credit(
     p_bucket_key text DEFAULT 'default',
     p_catalog_revision_id uuid DEFAULT NULL,
     p_expires_at timestamptz DEFAULT NULL,
-    p_minimum_balance numeric DEFAULT 0
+    p_minimum_balance numeric DEFAULT NULL
 )
 RETURNS TABLE(
     entry_id uuid,
@@ -87,162 +497,542 @@ RETURNS TABLE(
     replayed boolean,
     error_code text
 )
-LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-DECLARE v_account uuid;
- v_old bursar.credit_ledger_entries;
- v_entry uuid;
- v_balance numeric;
- v_digest bytea;
- v_available numeric;
- v_remaining numeric;
- v_take numeric;
- v_lot record;
- v_revision uuid;
- v_effective_expiry timestamptz;
- v_bucket_key text;
-
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_account uuid;
+    v_old bursar.credit_ledger_entries;
+    v_entry uuid;
+    v_balance numeric;
+    v_digest bytea;
+    v_available numeric;
+    v_reserved numeric := 0;
+    v_remaining numeric;
+    v_take numeric;
+    v_lot record;
+    v_revision uuid;
+    v_effective_expiry timestamptz;
+    v_bucket_key text;
+    v_bucket bursar.catalog_buckets;
+    v_policy_minimum numeric := 0;
+    v_lot_amount numeric;
+    v_debt_repayment numeric;
+    v_lot_id uuid;
+    v_source_type text;
+    v_debit_bucket_key text;
+    v_allocation_id uuid;
+    v_source record;
+    v_source_remaining numeric;
+    v_source_take numeric;
+    v_settling_minimum numeric;
 BEGIN
-    IF p_amount = 0 OR p_idempotency_key IS NULL OR p_idempotency_key = '' OR p_minimum_balance IS NULL THEN
-    RETURN QUERY SELECT NULL::uuid, NULL::numeric, false, 'invalid_request';
- RETURN;
-
-  END IF;
-
-  v_account := bursar.account_for_subject(p_subject_id);
-
-    v_digest := extensions.digest(convert_to(jsonb_build_object('amount',p_amount,'kind',p_kind::text,'operation',p_operation,'bucket',p_bucket_key,'catalog_revision_id',p_catalog_revision_id,'expires_at',p_expires_at,'minimum_balance',p_minimum_balance,'request',p_request)::text,'UTF8'),'sha256');
-
-  SELECT * INTO v_old FROM bursar.credit_ledger_entries WHERE account_id = v_account AND idempotency_key = p_idempotency_key FOR UPDATE;
-
-    IF FOUND THEN
-        IF v_old.request_digest <> v_digest THEN RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'idempotency_conflict';
-
-        ELSE RETURN QUERY SELECT v_old.id,v_old.balance_after,true,NULL::text;
- END IF;
- RETURN;
-
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_finite_numeric(p_amount)
+       OR p_amount = 0
+       OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_nonempty_text(p_idempotency_key)
+       OR jsonb_typeof(COALESCE(p_request, '{}'::jsonb)) <> 'object'
+       OR (
+           p_amount > 0
+           AND p_kind NOT IN (
+               'grant', 'purchase', 'refund', 'release', 'adjustment'
+           )
+       )
+       OR (
+           p_amount < 0
+           AND p_kind NOT IN (
+               'usage',
+               'expiry',
+               'revocation',
+               'refund_clawback',
+               'reservation',
+               'adjustment'
+           )
+       )
+    THEN
+        RETURN QUERY
+        SELECT NULL::uuid, NULL::numeric, false, 'invalid_request';
+        RETURN;
     END IF;
 
-    IF p_amount>0 THEN
-        v_revision:=p_catalog_revision_id;
+    v_account := bursar.account_for_subject(p_subject_id);
 
-        IF v_revision IS NULL THEN
-            SELECT id INTO v_revision
- FROM bursar.catalog_revisions
- WHERE status='active';
+    -- This lock serializes both the balance snapshot and the idempotency check.
+    -- Checking idempotency before this lock allows two first attempts to race
+    -- into the unique index.
+    SELECT balance
+    INTO v_balance
+    FROM bursar.credit_accounts
+    WHERE id = v_account
+    FOR UPDATE;
 
- END IF;
-
- v_bucket_key:=p_bucket_key;
-
- IF v_bucket_key IS NULL OR (
-  v_bucket_key='default'
-  AND NOT EXISTS (
-   SELECT 1 FROM bursar.catalog_buckets
-   WHERE catalog_revision_id=v_revision AND bucket_key='default'
-  )
- ) THEN
-  SELECT bucket_key INTO v_bucket_key
-  FROM bursar.catalog_buckets
-  WHERE catalog_revision_id=v_revision AND is_default;
-
- END IF;
-
-        IF v_revision IS NULL OR NOT EXISTS (
-            SELECT 1 FROM bursar.catalog_buckets
- WHERE catalog_revision_id=v_revision AND bucket_key=v_bucket_key
-        ) THEN
-            RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'missing_catalog_bucket';
-
-            RETURN;
-
-        END IF;
-
-        v_effective_expiry:=p_expires_at;
-
-        IF v_effective_expiry IS NULL THEN
-            BEGIN
-                v_effective_expiry:=bursar.bucket_expiry_at(
- p_subject_id,v_revision,v_bucket_key
-                );
-
-            EXCEPTION WHEN invalid_parameter_value THEN
-                RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'expiry_context_required';
-
-                RETURN;
-
-            END;
-
-        ELSIF v_effective_expiry<=now() THEN
-            RETURN QUERY SELECT NULL::uuid,NULL::numeric,false,'invalid_expiry';
-
-            RETURN;
-
-        END IF;
-
-    END IF;
-
-  SELECT balance INTO v_balance FROM bursar.credit_accounts WHERE id = v_account FOR UPDATE;
-
-    IF p_amount < 0 AND p_kind <> 'refund_clawback' THEN
-        SELECT COALESCE(SUM(granted-consumed),0) INTO v_available FROM bursar.credit_lots WHERE account_id=v_account AND (expires_at IS NULL OR expires_at > now());
-
-        IF v_balance + p_amount < p_minimum_balance
-           OR (p_minimum_balance >= 0 AND v_available < -p_amount) THEN
-            RETURN QUERY SELECT NULL::uuid,v_balance,false,'insufficient_credits';
- RETURN;
-
-        END IF;
-
-    END IF;
-
-  PERFORM set_config('bursar.mutation_context','internal',true);
-
-  INSERT INTO bursar.credit_ledger_entries(account_id,kind,amount,balance_after,idempotency_key,request_digest,operation,metadata)
-  VALUES(v_account,p_kind,p_amount,v_balance+p_amount,p_idempotency_key,v_digest,p_operation,p_request) RETURNING credit_ledger_entries.id,credit_ledger_entries.balance_after INTO v_entry,v_balance;
-
-  UPDATE bursar.credit_accounts SET balance=v_balance WHERE id=v_account;
-
-  IF p_amount < 0 THEN
-    v_remaining := -p_amount;
-
+    -- Expiry is an accounting event, not merely a read filter. Settle this
+    -- account's due lots before using its cached balance so a credit line
+    -- cannot spend against expired credits and later make expiry impossible.
     FOR v_lot IN
-      SELECT id, granted-consumed AS available FROM bursar.credit_lots
-      WHERE account_id=v_account AND consumed < granted AND (expires_at IS NULL OR expires_at > now())
-      ORDER BY priority, expires_at NULLS LAST, created_at, id FOR UPDATE
+        SELECT id, granted - consumed AS amount
+        FROM bursar.credit_lots
+        WHERE account_id = v_account
+          AND expires_at <= now()
+          AND consumed < granted
+        ORDER BY expires_at, id
+        FOR UPDATE
     LOOP
-      v_take := LEAST(v_remaining, v_lot.available);
-
-      UPDATE bursar.credit_lots SET consumed=consumed+v_take WHERE id=v_lot.id;
-
-        INSERT INTO bursar.credit_lot_allocations(debit_entry_id,lot_id,amount,allocation_kind)
-        VALUES (
-            v_entry,v_lot.id,v_take,
-            CASE p_kind
-                WHEN 'expiry' THEN 'expiry'
-                WHEN 'revocation' THEN 'revocation'
-                WHEN 'refund_clawback' THEN 'clawback'
-                ELSE 'spend'
-            END
+        PERFORM bursar.targeted_lot_debit(
+            v_lot.id,
+            'expiry',
+            v_lot.amount,
+            'expiry:' || v_lot.id::text
         );
-
-      v_remaining := v_remaining-v_take;
-
-      EXIT WHEN v_remaining <= 0;
-
     END LOOP;
 
-  END IF;
+    SELECT balance
+    INTO v_balance
+    FROM bursar.credit_accounts
+    WHERE id = v_account;
 
-  IF p_amount > 0 THEN
-    INSERT INTO bursar.credit_lots(account_id,source_entry_id,catalog_revision_id,bucket_key,priority,granted,expires_at)
- SELECT v_account,v_entry,v_revision,v_bucket_key,
-               (SELECT priority FROM bursar.catalog_buckets
- WHERE catalog_revision_id=v_revision AND bucket_key=v_bucket_key),
-               p_amount,v_effective_expiry;
+    -- An in-flight lease is a durable admission decision. Settlement uses the
+    -- minimum-balance policy captured at reservation time even if the subject
+    -- changed plans while the operation was running. Only settle_lease can
+    -- create the transaction-local `settling` state.
+    IF p_kind = 'usage'
+       AND p_request->>'lease_id'
+            ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    THEN
+        SELECT lease.minimum_balance
+        INTO v_settling_minimum
+        FROM bursar.credit_leases AS lease
+        WHERE lease.id = (p_request->>'lease_id')::uuid
+          AND lease.account_id = v_account
+          AND lease.status = 'settling'
+        FOR UPDATE;
+    END IF;
 
-  END IF;
+    IF v_settling_minimum IS NOT NULL THEN
+        v_policy_minimum := v_settling_minimum;
+    ELSE
+        BEGIN
+            SELECT minimum_balance
+            INTO v_policy_minimum
+            FROM bursar.effective_subject_policy(
+                p_subject_id,
+                p_operation
+            );
 
-  RETURN QUERY SELECT v_entry,v_balance,false,NULL::text;
+            v_policy_minimum := COALESCE(v_policy_minimum, 0);
+        EXCEPTION
+            WHEN undefined_function THEN
+                v_policy_minimum := 0;
+        END;
+    END IF;
 
-END $$;
+    IF p_minimum_balance IS NULL THEN
+        p_minimum_balance := v_policy_minimum;
+    ELSIF NOT bursar.is_finite_numeric(p_minimum_balance)
+          OR (
+              v_settling_minimum IS NULL
+              AND p_minimum_balance < v_policy_minimum
+          )
+          OR (
+              v_settling_minimum IS NOT NULL
+              AND p_minimum_balance <> v_settling_minimum
+          )
+    THEN
+        RETURN QUERY
+        SELECT NULL::uuid, v_balance, false, 'policy_mismatch';
+        RETURN;
+    END IF;
+
+    v_digest := extensions.digest(
+        convert_to(
+            jsonb_build_object(
+                'amount', bursar.digest_numeric_text(p_amount),
+                'kind', p_kind::text,
+                'operation', p_operation,
+                'bucket', p_bucket_key,
+                'catalog_revision_id', p_catalog_revision_id,
+                'expires_at', p_expires_at,
+                'minimum_balance',
+                    bursar.digest_numeric_text(p_minimum_balance),
+                'request', COALESCE(p_request, '{}'::jsonb)
+            )::text,
+            'UTF8'
+        ),
+        'sha256'
+    );
+
+    SELECT *
+    INTO v_old
+    FROM bursar.credit_ledger_entries
+    WHERE account_id = v_account
+      AND idempotency_key = p_idempotency_key;
+
+    IF FOUND THEN
+        IF v_old.request_digest <> v_digest THEN
+            RETURN QUERY
+            SELECT NULL::uuid, NULL::numeric, false, 'idempotency_conflict';
+        ELSE
+            RETURN QUERY
+            SELECT v_old.id, v_old.balance_after, true, NULL::text;
+        END IF;
+        RETURN;
+    END IF;
+
+    IF p_amount > 0 THEN
+        v_revision := p_catalog_revision_id;
+
+        IF v_revision IS NULL THEN
+            SELECT id
+            INTO v_revision
+            FROM bursar.catalog_revisions
+            WHERE status = 'active';
+        END IF;
+
+        v_bucket_key := p_bucket_key;
+
+        IF v_bucket_key IS NULL
+           OR (
+               v_bucket_key = 'default'
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM bursar.catalog_buckets
+                   WHERE catalog_revision_id = v_revision
+                     AND bucket_key = 'default'
+               )
+           )
+        THEN
+            SELECT bucket_key
+            INTO v_bucket_key
+            FROM bursar.catalog_buckets
+            WHERE catalog_revision_id = v_revision
+              AND is_default;
+        END IF;
+
+        SELECT *
+        INTO v_bucket
+        FROM bursar.catalog_buckets
+        WHERE catalog_revision_id = v_revision
+          AND bucket_key = v_bucket_key;
+
+        IF NOT FOUND THEN
+            RETURN QUERY
+            SELECT NULL::uuid, NULL::numeric, false, 'missing_catalog_bucket';
+            RETURN;
+        END IF;
+
+        v_effective_expiry := p_expires_at;
+
+        IF v_effective_expiry IS NULL THEN
+            v_effective_expiry := bursar.expiry_policy_at(
+                p_subject_id,
+                v_revision,
+                v_bucket.expiry_policy,
+                now(),
+                NULL
+            );
+        ELSIF v_effective_expiry <= now() THEN
+            RETURN QUERY
+            SELECT NULL::uuid, NULL::numeric, false, 'invalid_expiry';
+            RETURN;
+        END IF;
+    ELSE
+        -- Administrative adjustments may intentionally target one bucket
+        -- (for example replacing unused subscription-cycle credits). Usage,
+        -- expiry, revocation, and clawbacks retain their own allocation rules.
+        IF p_kind = 'adjustment' AND p_bucket_key IS NOT NULL THEN
+            v_debit_bucket_key := p_bucket_key;
+        END IF;
+
+        SELECT COALESCE(sum(granted - consumed), 0)
+        INTO v_available
+        FROM bursar.credit_lots
+        WHERE account_id = v_account
+          AND consumed < granted
+          AND (expires_at IS NULL OR expires_at > now())
+          AND (
+              v_debit_bucket_key IS NULL
+              OR bucket_key = v_debit_bucket_key
+          );
+
+        IF p_kind IN ('usage', 'reservation') THEN
+            SELECT COALESCE(
+                sum(lease.reserved_amount - lease.reserved_allowance),
+                0
+            )
+            INTO v_reserved
+            FROM bursar.credit_leases AS lease
+            WHERE lease.account_id = v_account
+              AND lease.status = 'active'
+              AND lease.expires_at > now();
+        END IF;
+
+        IF p_kind <> 'refund_clawback'
+           AND (
+               v_balance + p_amount - v_reserved < p_minimum_balance
+               OR (
+                   p_minimum_balance >= 0
+                   AND v_available - v_reserved < -p_amount
+               )
+           )
+        THEN
+            RETURN QUERY
+            SELECT NULL::uuid, v_balance, false, 'insufficient_credits';
+            RETURN;
+        END IF;
+
+        v_revision := p_catalog_revision_id;
+
+        IF v_revision IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1
+               FROM bursar.catalog_revisions
+               WHERE id = v_revision
+           )
+        THEN
+            RETURN QUERY
+            SELECT NULL::uuid, v_balance, false, 'missing_catalog_revision';
+            RETURN;
+        END IF;
+
+        IF v_revision IS NULL THEN
+            SELECT catalog_revision_id
+            INTO v_revision
+            FROM bursar.account_plan_assignments
+            WHERE account_id = v_account
+              AND starts_at <= now()
+              AND (ends_at IS NULL OR ends_at > now());
+        END IF;
+
+        IF v_revision IS NULL THEN
+            SELECT id
+            INTO v_revision
+            FROM bursar.catalog_revisions
+            WHERE status = 'active';
+        END IF;
+    END IF;
+
+    PERFORM set_config('bursar.mutation_context', 'internal', true);
+
+    INSERT INTO bursar.credit_ledger_entries(
+        account_id,
+        kind,
+        amount,
+        balance_after,
+        catalog_revision_id,
+        idempotency_key,
+        request_digest,
+        operation,
+        metadata
+    )
+    VALUES (
+        v_account,
+        p_kind,
+        p_amount,
+        v_balance + p_amount,
+        v_revision,
+        p_idempotency_key,
+        v_digest,
+        p_operation,
+        COALESCE(p_request, '{}'::jsonb)
+    )
+    RETURNING
+        credit_ledger_entries.id,
+        credit_ledger_entries.balance_after
+    INTO v_entry, v_balance;
+
+    UPDATE bursar.credit_accounts
+    SET balance = v_balance,
+        version = version + 1
+    WHERE id = v_account;
+
+    IF p_amount < 0 THEN
+        v_remaining := -p_amount;
+
+        FOR v_lot IN
+            SELECT id, granted - consumed AS available
+            FROM bursar.credit_lots
+            WHERE account_id = v_account
+              AND consumed < granted
+              AND (expires_at IS NULL OR expires_at > now())
+              AND (
+                  v_debit_bucket_key IS NULL
+                  OR bucket_key = v_debit_bucket_key
+              )
+            ORDER BY priority, expires_at NULLS LAST, created_at, id
+            FOR UPDATE
+        LOOP
+            v_take := LEAST(v_remaining, v_lot.available);
+
+            UPDATE bursar.credit_lots
+            SET consumed = consumed + v_take
+            WHERE id = v_lot.id;
+
+            INSERT INTO bursar.credit_lot_allocations(
+                debit_entry_id,
+                lot_id,
+                amount,
+                allocation_kind
+            )
+            VALUES (
+                v_entry,
+                v_lot.id,
+                v_take,
+                CASE p_kind
+                    WHEN 'expiry' THEN 'expiry'
+                    WHEN 'revocation' THEN 'revocation'
+                    WHEN 'refund_clawback' THEN 'clawback'
+                    ELSE 'spend'
+                END
+            )
+            RETURNING id INTO v_allocation_id;
+
+            v_source_remaining := v_take;
+
+            FOR v_source IN
+                SELECT
+                    source.id,
+                    source.amount
+                        - COALESCE(allocated.amount, 0)
+                        + COALESCE(restored.amount, 0) AS available
+                FROM bursar.credit_lot_sources AS source
+                LEFT JOIN LATERAL (
+                    SELECT sum(source_allocation.amount) AS amount
+                    FROM bursar.credit_lot_source_allocations
+                        AS source_allocation
+                    WHERE source_allocation.lot_source_id = source.id
+                ) AS allocated ON true
+                LEFT JOIN LATERAL (
+                    SELECT sum(source_restoration.amount) AS amount
+                    FROM bursar.credit_lot_source_restorations
+                        AS source_restoration
+                    JOIN bursar.credit_lot_source_allocations
+                        AS source_allocation
+                      ON source_allocation.id =
+                         source_restoration.source_allocation_id
+                    WHERE source_allocation.lot_source_id = source.id
+                ) AS restored ON true
+                WHERE source.lot_id = v_lot.id
+                  AND source.amount
+                        - COALESCE(allocated.amount, 0)
+                        + COALESCE(restored.amount, 0) > 0
+                ORDER BY source.created_at, source.id
+                FOR UPDATE OF source
+            LOOP
+                v_source_take := LEAST(
+                    v_source_remaining,
+                    v_source.available
+                );
+
+                INSERT INTO bursar.credit_lot_source_allocations(
+                    lot_allocation_id,
+                    lot_source_id,
+                    amount
+                )
+                VALUES (
+                    v_allocation_id,
+                    v_source.id,
+                    v_source_take
+                );
+
+                v_source_remaining :=
+                    v_source_remaining - v_source_take;
+                EXIT WHEN v_source_remaining <= 0;
+            END LOOP;
+
+            IF v_source_remaining > 0 THEN
+                RAISE EXCEPTION 'credit lot source balance mismatch'
+                    USING ERRCODE = '23514';
+            END IF;
+
+            v_remaining := v_remaining - v_take;
+            EXIT WHEN v_remaining <= 0;
+        END LOOP;
+
+        IF v_remaining > 0 THEN
+            INSERT INTO bursar.credit_unallocated_debits(
+                ledger_entry_id,
+                account_id,
+                amount,
+                reason
+            )
+            VALUES (
+                v_entry,
+                v_account,
+                v_remaining,
+                CASE p_kind
+                    WHEN 'refund_clawback' THEN 'refund_debt'
+                    ELSE 'credit_line'
+                END
+            );
+        END IF;
+    ELSE
+        -- Positive credit first repays an existing negative balance. Only the
+        -- portion that increases spendable balance becomes a new lot.
+        v_debt_repayment := LEAST(p_amount, GREATEST(-(
+            v_balance - p_amount
+        ), 0));
+        v_lot_amount := p_amount - v_debt_repayment;
+
+        IF v_debt_repayment > 0 THEN
+            INSERT INTO bursar.credit_debt_repayments(
+                ledger_entry_id,
+                account_id,
+                amount
+            )
+            VALUES (v_entry, v_account, v_debt_repayment);
+        END IF;
+
+        IF v_lot_amount > 0 THEN
+            v_source_type := CASE p_kind
+                WHEN 'purchase' THEN 'topup'
+                WHEN 'grant' THEN 'grant_program'
+                WHEN 'refund' THEN 'refund'
+                WHEN 'adjustment' THEN 'adjustment'
+                ELSE 'ledger'
+            END;
+
+            INSERT INTO bursar.credit_lots(
+                account_id,
+                source_entry_id,
+                catalog_revision_id,
+                bucket_key,
+                priority,
+                granted,
+                expires_at,
+                expiry_policy_snapshot,
+                source_type
+            )
+            VALUES (
+                v_account,
+                v_entry,
+                v_revision,
+                v_bucket_key,
+                v_bucket.priority,
+                v_lot_amount,
+                v_effective_expiry,
+                v_bucket.expiry_policy,
+                v_source_type
+            )
+            RETURNING id INTO v_lot_id;
+
+            INSERT INTO bursar.credit_lot_sources(
+                lot_id,
+                ledger_entry_id,
+                amount,
+                source_type
+            )
+            VALUES (
+                v_lot_id,
+                v_entry,
+                v_lot_amount,
+                v_source_type
+            );
+        END IF;
+    END IF;
+
+    RETURN QUERY
+    SELECT v_entry, v_balance, false, NULL::text;
+END
+$$;

@@ -20,6 +20,10 @@ Keep a file executable on its own through `psycopg`/`psql`; do not use psql
 meta-commands such as `\\ir`. Keep functions in cohesive domain groups rather
 than creating one migration per function.
 
+`bursar.provision_subject_account_on_insert()` is an optional host-table
+trigger hook. Bursar never guesses or mutates an application-owned principal
+table; each integration attaches the hook explicitly from its own migration.
+
 ## Function conventions
 
 Public RPCs must document their purpose, idempotency key, locking assumptions,

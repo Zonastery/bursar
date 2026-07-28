@@ -22,12 +22,8 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object TH
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
 
--- Mirror of conftest.py::_preseed_supabase_objects: migration 018 moved the
--- signup-bonus trigger from auth.users to better-auth's public."user" table.
--- The migration's "IF to_regclass('public.user') IS NOT NULL" branch only
--- installs the on_signup_credit_bonus constraint trigger WHEN this table
--- exists at bootstrap time. Without it the trigger creation path silently
--- no-ops in JS, so the two SDKs would test different DB topologies.
+-- Mirror the host application's Better Auth user table so integration
+-- fixtures exercise the same database topology as the application.
 CREATE TABLE IF NOT EXISTS public."user" (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT,
@@ -145,5 +141,6 @@ export async function truncateBursarTables(pool: pg.Pool): Promise<void> {
       END LOOP;
     EXCEPTION WHEN undefined_table THEN NULL;
     END $$;
+    TRUNCATE TABLE bursar.subjects CASCADE;
   `);
 }

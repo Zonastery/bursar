@@ -1,24 +1,34 @@
 import Decimal from "decimal.js";
 
+import { makeCostBreakdown } from "./breakdown.js";
+import type { CostBreakdown } from "./breakdown.js";
+import {
+  canonicalParsedBursarConfigDict,
+  loadConfigFromDict,
+  type Charge,
+  type BursarConfigData,
+  type DimensionMatcher,
+  type OperationPricing,
+  type ParsedBursarConfig,
+  type PriceRule,
+} from "./config.js";
 import { ConfigError } from "./errors.js";
 import { evaluateExpression } from "./expr.js";
-import type { ParsedBursarConfig, PriceRule } from "./config.js";
-import { canonicalBursarConfigDict, loadConfigFromDict } from "./config.js";
-import type { CostBreakdown } from "./breakdown.js";
-import { makeCostBreakdown } from "./breakdown.js";
 import type { UsageMetrics } from "./metrics.js";
 
-const quantize = (value: Decimal): Decimal => value.toDecimalPlaces(4, Decimal.ROUND_HALF_UP);
+const quantize = (value: Decimal): Decimal => value.toDecimalPlaces(6, Decimal.ROUND_HALF_UP);
+
+type DimensionValue = string | Decimal | boolean;
 
 export class PricingEngine {
   constructor(private readonly config: ParsedBursarConfig) {}
 
-  static fromDict(data: Record<string, unknown>): PricingEngine {
+  static fromDict(data: BursarConfigData | Record<string, unknown>): PricingEngine {
     return new PricingEngine(loadConfigFromDict(data));
   }
 
   get pricingSchema(): Record<string, unknown> {
-    return canonicalBursarConfigDict(this.config as unknown as Record<string, unknown>);
+    return canonicalParsedBursarConfigDict(this.config) as unknown as Record<string, unknown>;
   }
 
   get minBalance(): Decimal {
@@ -29,19 +39,15 @@ export class PricingEngine {
     metrics: UsageMetrics,
     options: { rateCard?: string } | Record<string, string> | null = {},
   ): CostBreakdown {
-    const usage = this.config.usage;
-    if (!usage) throw new ConfigError("usage pricing is not configured");
-    const operationName = metrics.operation;
-    const operation = usage.operations[operationName];
-    if (!operation) throw new ConfigError(`unknown usage operation '${operationName}'`);
-    const measures: Record<string, Decimal.Value> = { ...(metrics.measures ?? {}) };
-    const dimensions: Record<string, string> = { ...(metrics.dimensions ?? {}) };
-
-    const unknownMeasures = Object.keys(measures).filter(
-      (key) => !operation.measures.includes(key),
-    );
-    const unknownDimensions = Object.keys(dimensions).filter(
-      (key) => !operation.dimensions.includes(key),
+    const pricing = this.config.pricing;
+    if (!pricing) throw new ConfigError("usage pricing not configured");
+    const operation = pricing.operations[metrics.operation];
+    if (!operation) throw new ConfigError(`unknown usage operation '${metrics.operation}'`);
+    const measuresInput = metrics.measures ?? {};
+    const dimensionsInput = metrics.dimensions ?? {};
+    const unknownMeasures = Object.keys(measuresInput).filter((key) => !operation.measures[key]);
+    const unknownDimensions = Object.keys(dimensionsInput).filter(
+      (key) => !operation.dimensions[key],
     );
     if (unknownMeasures.length)
       throw new ConfigError(
@@ -51,36 +57,70 @@ export class PricingEngine {
       throw new ConfigError(
         `operation '${metrics.operation}' received undeclared dimensions ${unknownDimensions.join(", ")}`,
       );
-    const requestedRateCard =
-      options != null && "rateCard" in options ? options.rateCard : undefined;
-    const card = this.resolveRateCard(requestedRateCard);
-    const rules = this.rulesFor(card, operationName);
-    const rule = rules.find((candidate) => this.matches(candidate, dimensions));
-    if (!rule)
-      throw new ConfigError(
-        `no price rule matched operation '${operationName}' in rate card '${card}'`,
-      );
-    const variables: Record<string, Decimal> = {};
-    for (const name of operation.measures) {
-      const value = new Decimal(measures[name] ?? 0);
+
+    const dimensions: Record<string, DimensionValue> = {};
+    for (const [name, definition] of Object.entries(operation.dimensions)) {
+      const input = dimensionsInput[name];
+      if (input == null) {
+        if (definition.required)
+          throw new ConfigError(`operation '${metrics.operation}' requires dimension '${name}'`);
+        continue;
+      }
+      if (definition.type === "string") {
+        if (typeof input !== "string") throw new ConfigError(`dimension '${name}' must be string`);
+        dimensions[name] = input;
+      } else if (definition.type === "boolean") {
+        if (typeof input !== "boolean")
+          throw new ConfigError(`dimension '${name}' must be boolean`);
+        dimensions[name] = input;
+      } else {
+        const numeric = new Decimal(input as Decimal.Value);
+        if (!numeric.isFinite()) throw new ConfigError(`dimension '${name}' must be finite`);
+        dimensions[name] = numeric;
+      }
+    }
+
+    const measures: Record<string, Decimal> = {};
+    for (const name of Object.keys(operation.measures)) {
+      const value = new Decimal(measuresInput[name] ?? 0);
       if (!value.isFinite() || value.isNegative())
         throw new ConfigError(`usage measure '${name}' must be finite and non-negative`);
-      variables[name] = value;
+      measures[name] = value;
     }
-    const value = evaluateExpression(rule.formula, variables);
+    const requestedRateCard =
+      options != null && "rateCard" in options ? options.rateCard : undefined;
+    const cardKey = this.resolveRateCard(requestedRateCard);
+    const operationPrice = this.operationPricing(cardKey, metrics.operation);
+    const matched = operationPrice.rules.find((rule) => this.matches(rule, dimensions));
+    const selected =
+      matched?.charge ??
+      (operationPrice.unmatched.action === "charge" ? operationPrice.unmatched.charge : undefined);
+    if (!selected)
+      throw new ConfigError(
+        `no price rule matched operation '${metrics.operation}' in rate card '${cardKey}'`,
+      );
+    const value = this.evaluateCharge(selected, measures);
     if (!value.isFinite() || value.isNegative())
       throw new ConfigError(
-        `price formula for '${operationName}' produced a negative or non-finite credit cost`,
+        `price charge for '${metrics.operation}' produced a negative or non-finite credit cost`,
       );
     const total = quantize(value);
     return makeCostBreakdown({
       operationCredits: total,
-      breakdown: { operation: operationName, rateCard: card, measures, dimensions },
+      breakdown: {
+        operation: metrics.operation,
+        rateCard: cardKey,
+        chargeType: selected.type,
+        measures: Object.fromEntries(
+          Object.entries(measures).map(([key, amount]) => [key, amount.toString()]),
+        ),
+        dimensions: dimensionsInput,
+      },
     });
   }
 
   calculateBatch(metrics: UsageMetrics[], options: { rateCard?: string } = {}): CostBreakdown[] {
-    return metrics.map((metric) => this.calculate(metric, options));
+    return metrics.map((item) => this.calculate(item, options));
   }
 
   getRateCardForPlan(planId: string | null | undefined): string | undefined {
@@ -89,7 +129,7 @@ export class PricingEngine {
   }
 
   private resolveRateCard(requested?: string): string {
-    const cards = this.config.usage!.rateCards;
+    const cards = this.config.pricing!.rateCards;
     if (requested) {
       if (!cards[requested]) throw new ConfigError(`unknown rate card '${requested}'`);
       return requested;
@@ -99,22 +139,90 @@ export class PricingEngine {
     throw new ConfigError("rateCard is required when more than one rate card is configured");
   }
 
-  private rulesFor(cardKey: string, operation: string): PriceRule[] {
-    const card = this.config.usage!.rateCards[cardKey];
-    if (card.prices[operation]) return card.prices[operation];
+  private operationPricing(cardKey: string, operation: string): OperationPricing {
+    const card = this.config.pricing!.rateCards[cardKey];
+    if (card.operations[operation]) return card.operations[operation];
     if (!card.extends)
       throw new ConfigError(`rate card '${cardKey}' has no price for operation '${operation}'`);
-    return this.rulesFor(card.extends, operation);
+    return this.operationPricing(card.extends, operation);
   }
 
-  private matches(rule: PriceRule, dimensions: Record<string, string>): boolean {
-    if (rule.default) return true;
-    for (const [key, matcher] of Object.entries(rule.match ?? {})) {
-      const value = dimensions[key];
-      if (value == null) return false;
-      if (matcher.exact != null && value !== matcher.exact) return false;
-      if (matcher.prefix != null && !value.startsWith(matcher.prefix)) return false;
-    }
+  private matches(rule: PriceRule, dimensions: Record<string, DimensionValue>): boolean {
+    return Object.entries(rule.when).every(([name, matcher]) =>
+      this.matchesOne(matcher, dimensions[name]),
+    );
+  }
+
+  private matchesOne(matcher: DimensionMatcher, value: DimensionValue | undefined): boolean {
+    if (value == null) return false;
+    if (matcher.op === "eq") return this.scalarEquals(value, matcher.value);
+    if (matcher.op === "in")
+      return matcher.values.some((candidate) => this.scalarEquals(value, candidate));
+    if (matcher.op === "not_in")
+      return !matcher.values.some((candidate) => this.scalarEquals(value, candidate));
+    if (matcher.op === "prefix")
+      return typeof value === "string" && value.startsWith(matcher.value);
+    if (matcher.op !== "range" || !(value instanceof Decimal)) return false;
+    if (matcher.gt && !value.gt(matcher.gt)) return false;
+    if (matcher.gte && !value.gte(matcher.gte)) return false;
+    if (matcher.lt && !value.lt(matcher.lt)) return false;
+    if (matcher.lte && !value.lte(matcher.lte)) return false;
     return true;
+  }
+
+  private scalarEquals(left: DimensionValue, right: string | Decimal | boolean): boolean {
+    if (left instanceof Decimal || right instanceof Decimal) {
+      try {
+        return new Decimal(left as Decimal.Value).eq(new Decimal(right as Decimal.Value));
+      } catch {
+        return false;
+      }
+    }
+    return left === right;
+  }
+
+  private evaluateCharge(charge: Charge, measures: Record<string, Decimal>): Decimal {
+    if (charge.type === "flat") return charge.amount;
+    if (charge.type === "per_unit")
+      return measures[charge.measure].div(charge.unitSize).mul(charge.rate);
+    if (charge.type === "package") {
+      const packages = measures[charge.measure].div(charge.units);
+      const rounded =
+        charge.rounding === "ceil"
+          ? packages.ceil()
+          : charge.rounding === "floor"
+            ? packages.floor()
+            : packages.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+      return rounded.mul(charge.amount);
+    }
+    if (charge.type === "graduated") {
+      let remaining = measures[charge.measure];
+      let previous = new Decimal(0);
+      let total = new Decimal(0);
+      for (const tier of charge.tiers) {
+        const units =
+          tier.upTo == null ? remaining : Decimal.min(remaining, tier.upTo.sub(previous));
+        if (units.isPositive()) {
+          total = total.add(units.mul(tier.rate));
+          remaining = remaining.sub(units);
+        }
+        if (!remaining.isPositive()) break;
+        if (tier.upTo != null) previous = tier.upTo;
+      }
+      return total;
+    }
+    if (charge.type === "volume") {
+      const value = measures[charge.measure];
+      const tier = charge.tiers.find(
+        (candidate) => candidate.upTo == null || value.lte(candidate.upTo),
+      );
+      return value.mul((tier ?? charge.tiers.at(-1)!).rate);
+    }
+    if (charge.type === "expression") return evaluateExpression(charge.formula, measures);
+    if (charge.type === "sum")
+      return Decimal.sum(
+        ...charge.components.map((component) => this.evaluateCharge(component, measures)),
+      );
+    throw new ConfigError(`unsupported charge type '${String((charge as Charge).type)}'`);
   }
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NotFoundError } from "dodopayments";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
 import { MockPaymentProvider } from "../src/providers/mock/provider.js";
 import { StripeProvider } from "../src/providers/stripe/provider.js";
@@ -124,6 +125,7 @@ describe("payment provider adapter contracts", () => {
 
   it("maps Stripe checkout calls and rejects missing webhook signatures", async () => {
     const calls: Record<string, unknown>[] = [];
+    const checkoutCalls: unknown[][] = [];
     const stripe: any = {
       customers: {
         create: async (args: Record<string, unknown>) => {
@@ -133,8 +135,8 @@ describe("payment provider adapter contracts", () => {
       },
       checkout: {
         sessions: {
-          create: async (args: Record<string, unknown>) => {
-            calls.push(args);
+          create: async (...args: unknown[]) => {
+            checkoutCalls.push(args);
             return { url: "https://checkout.test" };
           },
           retrieve: async () => ({ status: "expired" }),
@@ -173,10 +175,10 @@ describe("payment provider adapter contracts", () => {
         idempotencyKey: "idem_1",
       }),
     ).resolves.toEqual({ url: "https://checkout.test", customerId: "cus_1" });
-    expect(calls[1]).toMatchObject({
+    expect(checkoutCalls[0]?.[0]).toMatchObject({
       line_items: [{ price: "price_1", quantity: 1 }],
-      idempotencyKey: "idem_1",
     });
+    expect(checkoutCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1" });
     await expect(provider.getCheckoutSessionStatus("sess_1")).resolves.toEqual({
       paymentStatus: "cancelled",
     });
@@ -198,20 +200,30 @@ describe("payment provider adapter contracts", () => {
     });
   });
 
-  it.each(["status", "statusCode", "status_code"])(
-    "contains Dodo SDK status aliases at the provider boundary (%s)",
-    async (key) => {
-      const client = {
-        checkoutSessions: {
-          retrieve: async () => {
-            throw { [key]: 404 };
-          },
+  it("uses the Dodo SDK's typed not-found error", async () => {
+    const client = {
+      checkoutSessions: {
+        retrieve: async () => {
+          throw new NotFoundError(404, {}, "missing", new Headers());
         },
-      } as any;
-      const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
-      await expect(provider.getCheckoutSessionStatus("missing")).resolves.toBeNull();
-    },
-  );
+      },
+    } as any;
+    const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
+    await expect(provider.getCheckoutSessionStatus("missing")).resolves.toBeNull();
+  });
+
+  it("does not reinterpret arbitrary provider error shapes", async () => {
+    const error = { statusCode: 404 };
+    const client = {
+      checkoutSessions: {
+        retrieve: async () => {
+          throw error;
+        },
+      },
+    } as any;
+    const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
+    await expect(provider.getCheckoutSessionStatus("missing")).rejects.toBe(error);
+  });
 
   it("keeps the mock provider deterministic and complete", async () => {
     const provider = new MockPaymentProvider(sink);

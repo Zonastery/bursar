@@ -1,110 +1,583 @@
 CREATE TABLE bursar.credit_ledger_entries (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
-    kind bursar.ledger_entry_kind NOT NULL, amount numeric(20,6) NOT NULL CHECK (amount <> 0), balance_after numeric(20,6) NOT NULL,
-    reference_entry_id uuid REFERENCES bursar.credit_ledger_entries(id), idempotency_key text NOT NULL, request_digest bytea NOT NULL CHECK (octet_length(request_digest)=32),
-    operation text NOT NULL, metadata jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    kind bursar.ledger_entry_kind NOT NULL,
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount <> 0),
+    balance_after numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(balance_after)),
+    reference_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
+    catalog_revision_id uuid REFERENCES bursar.catalog_revisions(id),
+    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
+    operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, idempotency_key),
     CHECK (
-        (kind IN ('grant','purchase','refund','release') AND amount > 0)
-        OR (kind IN ('usage','expiry','revocation','refund_clawback','reservation') AND amount < 0)
+        (kind IN ('grant', 'purchase', 'refund', 'release') AND amount > 0)
+        OR
+        (kind IN (
+            'usage', 'expiry', 'revocation', 'refund_clawback', 'reservation'
+        ) AND amount < 0)
         OR kind = 'adjustment'
-    )
+    ),
+    CHECK (reference_entry_id IS NULL OR reference_entry_id <> id)
 );
 
 CREATE TABLE bursar.credit_lots (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id), source_entry_id uuid NOT NULL UNIQUE REFERENCES bursar.credit_ledger_entries(id),
-    catalog_revision_id uuid NOT NULL, bucket_key text NOT NULL, priority integer NOT NULL CHECK (priority >= 0),
-    granted numeric(20,6) NOT NULL CHECK (granted > 0), consumed numeric(20,6) NOT NULL DEFAULT 0 CHECK (consumed >= 0 AND consumed <= granted),
-    expires_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    source_entry_id uuid NOT NULL UNIQUE
+        REFERENCES bursar.credit_ledger_entries(id),
+    catalog_revision_id uuid NOT NULL,
+    bucket_key text NOT NULL,
+    priority integer NOT NULL CHECK (priority >= 0),
+    granted numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(granted) AND granted > 0),
+    consumed numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (
+            bursar.is_finite_numeric(consumed)
+            AND consumed >= 0
+            AND consumed <= granted
+        ),
+    expires_at timestamptz,
+    expiry_policy_snapshot jsonb NOT NULL DEFAULT '{"type":"never"}'::jsonb
+        CHECK (jsonb_typeof(expiry_policy_snapshot) = 'object'),
+    source_type text NOT NULL DEFAULT 'ledger'
+        CHECK (source_type IN (
+            'ledger', 'grant_program', 'topup', 'subscription_cycle',
+            'refund', 'adjustment'
+        )),
+    source_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY (catalog_revision_id, bucket_key)
         REFERENCES bursar.catalog_buckets(catalog_revision_id, bucket_key)
 );
 
+CREATE TABLE bursar.credit_lot_sources (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    lot_id uuid NOT NULL REFERENCES bursar.credit_lots(id) ON DELETE CASCADE,
+    ledger_entry_id uuid NOT NULL UNIQUE
+        REFERENCES bursar.credit_ledger_entries(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    source_type text NOT NULL,
+    source_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE bursar.credit_lot_allocations (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), debit_entry_id uuid NOT NULL REFERENCES bursar.credit_ledger_entries(id), lot_id uuid NOT NULL REFERENCES bursar.credit_lots(id),
-    amount numeric(20,6) NOT NULL CHECK (amount > 0), allocation_kind text NOT NULL CHECK (allocation_kind IN ('spend','expiry','revocation','clawback')), created_at timestamptz NOT NULL DEFAULT now(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    debit_entry_id uuid NOT NULL
+        REFERENCES bursar.credit_ledger_entries(id),
+    lot_id uuid NOT NULL REFERENCES bursar.credit_lots(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    allocation_kind text NOT NULL
+        CHECK (allocation_kind IN ('spend', 'expiry', 'revocation', 'clawback')),
+    created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (debit_entry_id, lot_id)
 );
 
-CREATE TABLE bursar.credit_usage_charges (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id), operation text NOT NULL, feature text,
-    model text, region text, requested numeric(20,6) NOT NULL CHECK (requested >= 0), charged numeric(20,6) NOT NULL CHECK (charged >= 0),
-    allowance_requested numeric(20,6) NOT NULL DEFAULT 0 CHECK (allowance_requested >= 0),
-    allowance_covered numeric(20,6) NOT NULL DEFAULT 0 CHECK (allowance_covered >= 0),
- ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id), metadata jsonb NOT NULL DEFAULT '{}'::jsonb, idempotency_key text NOT NULL, request_digest bytea NOT NULL CHECK (octet_length(request_digest)=32), created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (account_id, idempotency_key),
-    CHECK (charged + allowance_covered = requested),
-    CHECK (allowance_covered <= allowance_requested)
+CREATE TABLE bursar.credit_lot_source_allocations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    lot_allocation_id uuid NOT NULL
+        REFERENCES bursar.credit_lot_allocations(id),
+    lot_source_id uuid NOT NULL REFERENCES bursar.credit_lot_sources(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (lot_allocation_id, lot_source_id)
 );
 
-CREATE TABLE bursar.account_plan_assignments (
-    account_id uuid PRIMARY KEY REFERENCES bursar.credit_accounts(id), plan_id uuid NOT NULL, catalog_revision_id uuid NOT NULL,
-    starts_at timestamptz NOT NULL DEFAULT now(), ends_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now(),
+CREATE TABLE bursar.credit_lot_restorations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    refund_entry_id uuid NOT NULL
+        REFERENCES bursar.credit_ledger_entries(id),
+    original_allocation_id uuid NOT NULL
+        REFERENCES bursar.credit_lot_allocations(id),
+    lot_id uuid NOT NULL REFERENCES bursar.credit_lots(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (refund_entry_id, original_allocation_id)
+);
+
+CREATE TABLE bursar.credit_lot_source_restorations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    lot_restoration_id uuid NOT NULL
+        REFERENCES bursar.credit_lot_restorations(id),
+    source_allocation_id uuid NOT NULL
+        REFERENCES bursar.credit_lot_source_allocations(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (lot_restoration_id, source_allocation_id)
+);
+
+CREATE TABLE bursar.credit_unallocated_debits (
+    ledger_entry_id uuid PRIMARY KEY
+        REFERENCES bursar.credit_ledger_entries(id),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    reason text NOT NULL CHECK (reason IN ('credit_line', 'refund_debt')),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE bursar.credit_debt_repayments (
+    ledger_entry_id uuid PRIMARY KEY
+        REFERENCES bursar.credit_ledger_entries(id),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE bursar.credit_usage_charges (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
+    event_at timestamptz NOT NULL DEFAULT now(),
+    measures jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(measures) = 'object'),
+    dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(dimensions) = 'object'),
+    feature text,
+    model text,
+    region text,
+    requested numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(requested) AND requested >= 0),
+    charged numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(charged) AND charged >= 0),
+    allowance_requested numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (
+            bursar.is_finite_numeric(allowance_requested)
+            AND allowance_requested >= 0
+        ),
+    allowance_covered numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (
+            bursar.is_finite_numeric(allowance_covered)
+            AND allowance_covered >= 0
+        ),
+    catalog_revision_id uuid REFERENCES bursar.catalog_revisions(id),
+    plan_id uuid,
+    rate_card_key text,
+    pricing_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(pricing_snapshot) = 'object'),
+    ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
+    correction_of_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (account_id, idempotency_key),
     FOREIGN KEY (plan_id, catalog_revision_id)
         REFERENCES bursar.catalog_plans(id, catalog_revision_id),
+    CHECK (charged + allowance_covered = requested),
+    CHECK (allowance_covered <= allowance_requested),
+    CHECK (correction_of_charge_id IS NULL OR correction_of_charge_id <> id)
+);
+
+-- This is the hot current-state row. Replaced assignments are copied to the
+-- append-only history table by a trigger before every update or delete.
+CREATE TABLE bursar.account_plan_assignments (
+    account_id uuid PRIMARY KEY REFERENCES bursar.credit_accounts(id),
+    assignment_id uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    plan_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    plan_key text NOT NULL,
+    revision_policy text NOT NULL
+        CHECK (revision_policy IN ('immediate', 'next_renewal', 'pinned')),
+    source_type text NOT NULL DEFAULT 'manual'
+        CHECK (source_type IN ('manual', 'subscription', 'migration', 'system')),
+    source_id uuid,
+    starts_at timestamptz NOT NULL DEFAULT now(),
+    ends_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (plan_id, catalog_revision_id)
+        REFERENCES bursar.catalog_plans(id, catalog_revision_id),
+    FOREIGN KEY (catalog_revision_id, plan_key)
+        REFERENCES bursar.catalog_plans(catalog_revision_id, plan_key),
     CHECK (ends_at IS NULL OR ends_at > starts_at)
 );
 
+CREATE TABLE bursar.account_plan_assignment_history (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    assignment_id uuid NOT NULL,
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    plan_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    plan_key text NOT NULL,
+    revision_policy text NOT NULL
+        CHECK (revision_policy IN ('immediate', 'next_renewal', 'pinned')),
+    source_type text NOT NULL,
+    source_id uuid,
+    starts_at timestamptz NOT NULL,
+    ends_at timestamptz NOT NULL,
+    replaced_at timestamptz NOT NULL DEFAULT now(),
+    replacement_reason text NOT NULL DEFAULT 'reassigned',
+    FOREIGN KEY (plan_id, catalog_revision_id)
+        REFERENCES bursar.catalog_plans(id, catalog_revision_id),
+    CHECK (ends_at > starts_at),
+    UNIQUE (assignment_id, ends_at)
+);
+
+CREATE TABLE bursar.plan_assignment_changes (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    from_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans(id),
+    to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans(id),
+    strategy text NOT NULL CHECK (strategy IN ('immediate', 'next_renewal')),
+    effective_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'scheduled'
+        CHECK (state IN ('scheduled', 'applied', 'canceled', 'failed')),
+    reason text NOT NULL,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    applied_at timestamptz,
+    UNIQUE (account_id, to_plan_id, effective_at),
+    CHECK (from_plan_id <> to_plan_id),
+    CHECK (
+        (state = 'applied' AND applied_at IS NOT NULL)
+        OR (state <> 'applied' AND applied_at IS NULL)
+    )
+);
+
 CREATE TABLE bursar.allowance_windows (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id), plan_id uuid NOT NULL,
-    catalog_revision_id uuid NOT NULL, feature text NOT NULL, window_start timestamptz NOT NULL, window_end timestamptz NOT NULL,
- period_unit text NOT NULL CHECK (period_unit IN ('day','week','month','year')), period_count integer NOT NULL CHECK (period_count > 0), period_anchor text NOT NULL CHECK (period_anchor IN ('calendar','plan_assignment','subscription_start','rolling')),
-    period_timezone text NOT NULL, allowance numeric(20,6) NOT NULL CHECK (allowance >= 0), reserved numeric(20,6) NOT NULL DEFAULT 0 CHECK (reserved >= 0), consumed numeric(20,6) NOT NULL DEFAULT 0 CHECK (consumed >= 0),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    plan_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    allowance_key text NOT NULL
+        CHECK (bursar.is_nonempty_text(allowance_key)),
+    window_start timestamptz NOT NULL,
+    window_end timestamptz NOT NULL,
+    period_unit text NOT NULL CHECK (
+        period_unit IN (
+            'second', 'minute', 'hour', 'day', 'week', 'month', 'year'
+        )
+    ),
+    period_count integer NOT NULL CHECK (period_count > 0),
+    period_anchor text NOT NULL
+        CHECK (period_anchor IN ('calendar', 'plan_assignment', 'rolling')),
+    period_timezone text NOT NULL,
+    allowance numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(allowance) AND allowance >= 0),
+    reserved numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(reserved) AND reserved >= 0),
+    consumed numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
+    policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(policy_snapshot) = 'object'),
     CHECK (window_end > window_start),
     CHECK (reserved + consumed <= allowance),
-    UNIQUE (account_id, plan_id, catalog_revision_id, feature, window_start, window_end),
+    UNIQUE (
+        account_id,
+        plan_id,
+        catalog_revision_id,
+        allowance_key,
+        window_start,
+        window_end
+    ),
     FOREIGN KEY (plan_id, catalog_revision_id)
         REFERENCES bursar.catalog_plans(id, catalog_revision_id)
 );
 
-CREATE TABLE bursar.feature_call_windows (
-    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id), feature text NOT NULL, window_start timestamptz NOT NULL, window_end timestamptz NOT NULL,
-    admitted integer NOT NULL DEFAULT 0 CHECK (admitted >= 0), reserved integer NOT NULL DEFAULT 0 CHECK (reserved >= 0), consumed integer NOT NULL DEFAULT 0 CHECK (consumed >= 0), limit_value integer CHECK (limit_value IS NULL OR limit_value >= 0),
-    PRIMARY KEY (account_id, feature, window_start),
-    CHECK (window_end > window_start),
-    CHECK (reserved + consumed = admitted),
-    CHECK (limit_value IS NULL OR admitted <= limit_value)
-);
-
-CREATE TABLE bursar.feature_limit_events (
+CREATE TABLE bursar.quota_windows (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
-    feature text NOT NULL,
+    plan_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    quota_key text NOT NULL,
+    operation_key text NOT NULL,
+    measure_key text NOT NULL,
     window_start timestamptz NOT NULL,
-    action text NOT NULL CHECK (action IN ('warn','notify')),
+    window_end timestamptz NOT NULL,
+    quota_limit numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(quota_limit) AND quota_limit >= 0),
+    reserved numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(reserved) AND reserved >= 0),
+    consumed numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
+    enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
+    policy_snapshot jsonb NOT NULL CHECK (jsonb_typeof(policy_snapshot) = 'object'),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (window_end > window_start),
+    UNIQUE (
+        account_id,
+        plan_id,
+        catalog_revision_id,
+        quota_key,
+        window_start,
+        window_end
+    ),
+    FOREIGN KEY (plan_id, catalog_revision_id)
+        REFERENCES bursar.catalog_plans(id, catalog_revision_id)
+);
+
+-- Immutable measurements are the source of truth for rolling-window quotas
+-- and corrections. quota_windows remains a materialized cache for admission.
+CREATE TABLE bursar.quota_usage_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    plan_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    catalog_quota_id uuid NOT NULL REFERENCES bursar.catalog_plan_quotas(id),
+    quota_key text NOT NULL,
+    operation_key text NOT NULL,
+    measure_key text NOT NULL,
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount <> 0),
+    event_at timestamptz NOT NULL,
+    usage_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
+    correction_of_event_id uuid REFERENCES bursar.quota_usage_events(id),
+    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (account_id, catalog_quota_id, idempotency_key),
+    FOREIGN KEY (plan_id, catalog_revision_id)
+        REFERENCES bursar.catalog_plans(id, catalog_revision_id),
+    CHECK (
+        correction_of_event_id IS NULL
+        OR correction_of_event_id <> id
+    ),
+    CHECK (
+        (amount > 0 AND correction_of_event_id IS NULL)
+        OR (amount < 0 AND correction_of_event_id IS NOT NULL)
+    )
+);
+
+CREATE TABLE bursar.quota_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    quota_window_id uuid NOT NULL REFERENCES bursar.quota_windows(id),
+    usage_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
+    event_type text NOT NULL CHECK (event_type IN ('threshold', 'blocked')),
+    threshold_percent integer,
     idempotency_key text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (account_id,feature,window_start,idempotency_key)
+    UNIQUE NULLS NOT DISTINCT (
+        quota_window_id,
+        idempotency_key,
+        event_type,
+        threshold_percent
+    ),
+    CHECK (
+        (event_type = 'threshold'
+         AND threshold_percent BETWEEN 1 AND 100)
+        OR
+        (event_type = 'blocked' AND threshold_percent IS NULL)
+    )
 );
 
 CREATE TABLE bursar.credit_leases (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id), operation text NOT NULL, feature text,
-    policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb, metadata jsonb NOT NULL DEFAULT '{}'::jsonb, catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
-    reserved_amount numeric(20,6) NOT NULL CHECK (reserved_amount > 0), minimum_balance numeric(20,6) NOT NULL DEFAULT 0, max_concurrent integer CHECK (max_concurrent IS NULL OR max_concurrent > 0), reserved_calls integer NOT NULL DEFAULT 0 CHECK (reserved_calls >= 0),
-    feature_window_start timestamptz, feature_window_end timestamptz,
-    expires_at timestamptz NOT NULL, status bursar.lease_status NOT NULL DEFAULT 'active', idempotency_key text NOT NULL, request_digest bytea NOT NULL CHECK (octet_length(request_digest)=32),
-    settled_amount numeric(20,6), ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    operation text NOT NULL,
+    feature text,
+    measures jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(measures) = 'object'),
+    dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(dimensions) = 'object'),
+    policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(policy_snapshot) = 'object'),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
+    plan_id uuid,
+    reserved_amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(reserved_amount) AND reserved_amount >= 0),
+    reserved_allowance numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (
+            bursar.is_finite_numeric(reserved_allowance)
+            AND reserved_allowance >= 0
+            AND reserved_allowance <= reserved_amount
+        ),
+    allowance_window_id uuid REFERENCES bursar.allowance_windows(id),
+    minimum_balance numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(minimum_balance)),
+    max_concurrent integer CHECK (max_concurrent IS NULL OR max_concurrent > 0),
+    expires_at timestamptz NOT NULL,
+    status bursar.lease_status NOT NULL DEFAULT 'active',
+    idempotency_key text NOT NULL,
+    request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
+    settled_amount numeric(20, 6),
+    settlement_idempotency_key text,
+    settlement_request_digest bytea
+        CHECK (
+            settlement_request_digest IS NULL
+            OR octet_length(settlement_request_digest) = 32
+        ),
+    ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, idempotency_key),
+    FOREIGN KEY (plan_id, catalog_revision_id)
+        REFERENCES bursar.catalog_plans(id, catalog_revision_id),
     CHECK (
-        (reserved_calls = 0 AND feature_window_start IS NULL AND feature_window_end IS NULL)
-        OR (reserved_calls > 0 AND feature IS NOT NULL AND feature_window_start IS NOT NULL AND feature_window_end > feature_window_start)
+        settled_amount IS NULL
+        OR (bursar.is_finite_numeric(settled_amount) AND settled_amount >= 0)
     ),
-    CHECK (settled_amount IS NULL OR settled_amount >= 0)
+    CHECK (
+        (
+            status = 'settled'
+            AND settled_amount IS NOT NULL
+            AND settlement_idempotency_key IS NOT NULL
+            AND settlement_request_digest IS NOT NULL
+        )
+        OR (
+            status <> 'settled'
+            AND settled_amount IS NULL
+            AND settlement_idempotency_key IS NULL
+            AND settlement_request_digest IS NULL
+            AND ledger_entry_id IS NULL
+        )
+    ),
+    CHECK (
+        reserved_allowance = 0
+        OR plan_id IS NOT NULL
+    ),
+    CHECK (
+        allowance_window_id IS NULL
+        OR plan_id IS NOT NULL
+    ),
+    CHECK (expires_at > created_at)
 );
 
-CREATE TABLE bursar.credit_teams (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), subject_id uuid NOT NULL UNIQUE REFERENCES bursar.subjects(id), name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200), created_at timestamptz NOT NULL DEFAULT now());
+-- A lease can reserve several independently metered plan quotas. Fixed
+-- windows point at their materialized quota window; rolling windows retain
+-- their admission-time bounds and are recomputed from immutable usage events.
+CREATE TABLE bursar.credit_lease_quota_reservations (
+    lease_id uuid NOT NULL REFERENCES bursar.credit_leases(id),
+    catalog_quota_id uuid NOT NULL REFERENCES bursar.catalog_plan_quotas(id),
+    quota_window_id uuid REFERENCES bursar.quota_windows(id),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount >= 0),
+    window_start timestamptz NOT NULL,
+    window_end timestamptz NOT NULL,
+    released_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (lease_id, catalog_quota_id),
+    CHECK (window_end > window_start),
+    CHECK (released_at IS NULL OR released_at >= created_at)
+);
 
-CREATE TABLE bursar.credit_team_members (team_id uuid NOT NULL REFERENCES bursar.credit_teams(id) ON DELETE CASCADE, subject_id uuid NOT NULL REFERENCES bursar.subjects(id), role text NOT NULL CHECK (role IN ('owner','admin','member')), created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (team_id, subject_id));
+CREATE TABLE bursar.credit_teams (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    subject_id uuid NOT NULL UNIQUE REFERENCES bursar.subjects(id),
+    name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 200),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
 
-CREATE TABLE bursar.signup_credit_grants (
-    subject_id uuid PRIMARY KEY REFERENCES bursar.subjects(id) ON DELETE CASCADE,
+CREATE TABLE bursar.credit_team_members (
+    team_id uuid NOT NULL
+        REFERENCES bursar.credit_teams(id) ON DELETE CASCADE,
+    subject_id uuid NOT NULL REFERENCES bursar.subjects(id),
+    role text NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    spend_cap numeric(20, 6)
+        CHECK (
+            spend_cap IS NULL
+            OR (
+                bursar.is_finite_numeric(spend_cap)
+                AND spend_cap >= 0
+            )
+        ),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, subject_id)
+);
+
+-- Team usage is attributed to the member that initiated it. This keeps the
+-- monetary ledger account-centric while making member spend caps auditable
+-- and atomically enforceable.
+CREATE TABLE bursar.credit_team_usage_charges (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id uuid NOT NULL REFERENCES bursar.credit_teams(id),
+    subject_id uuid NOT NULL REFERENCES bursar.subjects(id),
+    ledger_entry_id uuid NOT NULL UNIQUE
+        REFERENCES bursar.credit_ledger_entries(id),
+    operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
+    amount numeric(20, 6) NOT NULL
+        CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    idempotency_key text NOT NULL
+        CHECK (bursar.is_nonempty_text(idempotency_key)),
+    request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (team_id, idempotency_key),
+    FOREIGN KEY (team_id, subject_id)
+        REFERENCES bursar.credit_team_members(team_id, subject_id)
+);
+
+CREATE TABLE bursar.grant_program_events (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    catalog_revision_id uuid NOT NULL,
+    grant_program_id uuid NOT NULL,
+    program_key text NOT NULL CHECK (bursar.is_nonempty_text(program_key)),
+    subject_id uuid NOT NULL REFERENCES bursar.subjects(id),
+    event_key text NOT NULL CHECK (bursar.is_nonempty_text(event_key)),
+    idempotency_scope text NOT NULL
+        CHECK (idempotency_scope IN ('subject', 'event')),
+    idempotency_key text NOT NULL
+        CHECK (bursar.is_nonempty_text(idempotency_key)),
+    referrer_subject_id uuid REFERENCES bursar.subjects(id),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    occurred_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    -- Program keys are stable business identities across catalog revisions.
+    -- This prevents a catalog publish from accidentally re-awarding a
+    -- lifetime promotion whose projection received a new UUID.
+    UNIQUE (program_key, subject_id, idempotency_key),
+    FOREIGN KEY (grant_program_id, catalog_revision_id)
+        REFERENCES bursar.catalog_grant_programs(id, catalog_revision_id)
+);
+
+CREATE TABLE bursar.grant_award_executions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    grant_event_id uuid NOT NULL REFERENCES bursar.grant_program_events(id),
+    catalog_grant_award_id uuid NOT NULL,
+    catalog_revision_id uuid NOT NULL,
+    recipient_subject_id uuid NOT NULL REFERENCES bursar.subjects(id),
+    ledger_entry_id uuid NOT NULL UNIQUE
+        REFERENCES bursar.credit_ledger_entries(id),
+    granted_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (grant_event_id, catalog_grant_award_id),
+    FOREIGN KEY (catalog_grant_award_id, catalog_revision_id)
+        REFERENCES bursar.catalog_grant_awards(id, catalog_revision_id)
+);
+
+CREATE TABLE bursar.account_creation_grants (
+    subject_id uuid NOT NULL
+        REFERENCES bursar.subjects(id) ON DELETE CASCADE,
     catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
-    ledger_entry_id uuid NOT NULL UNIQUE REFERENCES bursar.credit_ledger_entries(id),
-    granted_at timestamptz NOT NULL DEFAULT now()
+    grant_program_id uuid NOT NULL REFERENCES bursar.catalog_grant_programs(id),
+    catalog_grant_award_id uuid NOT NULL REFERENCES bursar.catalog_grant_awards(id),
+    ledger_entry_id uuid NOT NULL UNIQUE
+        REFERENCES bursar.credit_ledger_entries(id),
+    granted_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (subject_id, grant_program_id, catalog_grant_award_id)
 );
 
 CREATE TABLE bursar.credit_plan_migrations (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), from_plan_id uuid REFERENCES bursar.catalog_plans(id), to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans(id),
-    cursor_account_id uuid, migrated_count integer NOT NULL DEFAULT 0 CHECK (migrated_count >= 0), status text NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')), created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    from_plan_id uuid REFERENCES bursar.catalog_plans(id),
+    to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans(id),
+    strategy text NOT NULL DEFAULT 'immediate'
+        CHECK (strategy IN ('immediate', 'next_renewal')),
+    effective_at timestamptz,
+    cursor_account_id uuid,
+    migrated_count integer NOT NULL DEFAULT 0 CHECK (migrated_count >= 0),
+    status text NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed', 'canceled')),
+    last_error text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK (from_plan_id IS NULL OR from_plan_id <> to_plan_id)
 );

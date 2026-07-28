@@ -1,5 +1,12 @@
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
+
+  constructor(
+    message: string,
+    readonly validationErrors: readonly unknown[] = [],
+  ) {
+    super(message);
+  }
 }
 
 export class ExpressionError extends Error {
@@ -47,6 +54,14 @@ export class ConcurrencyLimitError extends Error {
 
 export class FeatureNotEntitledError extends Error {
   override readonly name = "FeatureNotEntitledError";
+}
+
+export class OperationNotAllowedError extends Error {
+  override readonly name = "OperationNotAllowedError";
+}
+
+export class QuotaExceededError extends Error {
+  override readonly name = "QuotaExceededError";
 }
 
 export class LeaseExpiredError extends Error {

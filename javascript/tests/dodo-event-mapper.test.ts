@@ -241,7 +241,7 @@ describe("event type routing", () => {
     );
   });
 
-  it("subscription.renewed → subscription.activated", async () => {
+  it("subscription.renewed → subscription.renewed", async () => {
     const sink = makeSink();
     await handleDodoBillingEvent(
       "subscription.renewed",
@@ -251,7 +251,7 @@ describe("event type routing", () => {
       sink,
     );
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: "subscription.activated" }),
+      expect.objectContaining({ eventType: "subscription.renewed" }),
     );
   });
 

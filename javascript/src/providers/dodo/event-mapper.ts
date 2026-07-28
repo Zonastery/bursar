@@ -4,7 +4,7 @@ import type {
   BillingPaymentInfo,
   BillingRefundInfo,
   BillingDisputeInfo,
-} from "../../billing/billing-types.js";
+} from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import { callBillingEventSink } from "../_shared.js";
 
@@ -67,10 +67,13 @@ export async function handleDodoBillingEvent(
   };
 
   function baseEvent(eventId: string) {
+    const occurredAt =
+      normalizeDate(data.updated_at ?? data.created_at ?? data.timestamp) ??
+      new Date().toISOString();
     return {
       provider: "dodo" as const,
       eventId,
-      occurredAt: new Date().toISOString(),
+      occurredAt,
       ...(userId ? { userId } : {}),
       ...(customerInfo.providerCustomerId ? { customer: customerInfo } : {}),
       ...(Object.keys(metadata).length ? { metadata } : {}),
@@ -128,7 +131,7 @@ export async function handleDodoBillingEvent(
 
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),
-        eventType: "subscription.activated",
+        eventType: "subscription.renewed",
         subscription: {
           providerSubscriptionId: subId,
           status: "active",
@@ -258,6 +261,7 @@ export async function handleDodoBillingEvent(
         taxMinor: data.settlement_tax ? Number(data.settlement_tax) : null,
         currency: String(data.settlement_currency ?? data.currency ?? "USD").toUpperCase(),
         purpose: subscriptionId ? "subscription" : "credit_topup",
+        status: "succeeded",
         refs: data.product_id ? { productId: String(data.product_id) } : undefined,
       };
 
@@ -296,6 +300,7 @@ export async function handleDodoBillingEvent(
                 taxMinor: data.settlement_tax ? Number(data.settlement_tax) : null,
                 currency: String(data.settlement_currency ?? data.currency ?? "USD").toUpperCase(),
                 purpose: "subscription" as const,
+                status: "failed" as const,
                 refs: data.product_id ? { productId: String(data.product_id) } : undefined,
               },
             }
@@ -312,6 +317,7 @@ export async function handleDodoBillingEvent(
         amountMinor: Number(data.refund_amount ?? data.amount ?? 0),
         currency: String(data.currency ?? "USD").toUpperCase(),
         reason: (data.reason as string | undefined) ?? null,
+        status: "succeeded",
       };
       await callBillingEventSink(sink, {
         ...baseEvent(rawId),

@@ -36,6 +36,11 @@ BEGIN
     VALUES (p_owner_subject_id),(v_team_subject)
     ON CONFLICT DO NOTHING;
 
+    IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
+        RETURN QUERY SELECT NULL::uuid,NULL::uuid,NULL::uuid,'subject_pseudonymized';
+        RETURN;
+    END IF;
+
     INSERT INTO bursar.credit_teams(subject_id,name)
     VALUES (v_team_subject,trim(p_name))
     RETURNING id INTO v_team;
@@ -68,12 +73,20 @@ END $$;
 CREATE FUNCTION bursar.set_team_member(
     p_team_id uuid,
     p_subject_id uuid,
-    p_role text
+    p_role text,
+    p_spend_cap numeric DEFAULT NULL
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
     IF p_role NOT IN ('owner','admin','member')
+       OR (
+           p_spend_cap IS NOT NULL
+           AND (
+               NOT bursar.is_finite_numeric(p_spend_cap)
+               OR p_spend_cap < 0
+           )
+       )
        OR NOT EXISTS (SELECT 1 FROM bursar.credit_teams WHERE id=p_team_id)
     THEN
         RETURN false;
@@ -82,9 +95,20 @@ BEGIN
 
     INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
 
-    INSERT INTO bursar.credit_team_members(team_id,subject_id,role)
-    VALUES (p_team_id,p_subject_id,p_role)
-    ON CONFLICT (team_id,subject_id) DO UPDATE SET role=EXCLUDED.role;
+    IF bursar.is_subject_pseudonymized(p_subject_id) THEN
+        RETURN false;
+    END IF;
+
+    INSERT INTO bursar.credit_team_members(
+        team_id,
+        subject_id,
+        role,
+        spend_cap
+    )
+    VALUES (p_team_id,p_subject_id,p_role,p_spend_cap)
+    ON CONFLICT (team_id,subject_id) DO UPDATE
+    SET role=EXCLUDED.role,
+        spend_cap=EXCLUDED.spend_cap;
 
     RETURN true;
 
@@ -125,21 +149,60 @@ END $$;
 CREATE FUNCTION bursar.list_team_members(
     p_team_id uuid
 )
-RETURNS SETOF bursar.credit_team_members
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT * FROM bursar.credit_team_members
-    WHERE team_id=p_team_id
-    ORDER BY created_at,subject_id
+RETURNS TABLE(
+    user_id uuid,
+    role text,
+    spend_cap numeric,
+    total_spent numeric
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT
+        member.subject_id,
+        member.role,
+        member.spend_cap,
+        COALESCE(sum(team_usage.amount), 0)
+    FROM bursar.credit_team_members AS member
+    LEFT JOIN bursar.credit_team_usage_charges AS team_usage
+      ON team_usage.team_id = member.team_id
+     AND team_usage.subject_id = member.subject_id
+    WHERE member.team_id=p_team_id
+    GROUP BY
+        member.subject_id,
+        member.role,
+        member.spend_cap,
+        member.created_at
+    ORDER BY member.created_at,member.subject_id
 $$;
 
 CREATE FUNCTION bursar.get_team_balance(
     p_team_id uuid
 )
-RETURNS numeric
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT a.balance
-    FROM bursar.credit_teams t
-    JOIN bursar.credit_accounts a
-      ON a.subject_id=t.subject_id AND a.account_kind='team'
-    WHERE t.id=p_team_id
+RETURNS TABLE(
+    team_id uuid,
+    name text,
+    balance numeric,
+    member_count bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT
+        team.id,
+        team.name,
+        account.balance,
+        count(member.subject_id)
+    FROM bursar.credit_teams AS team
+    JOIN bursar.credit_accounts AS account
+      ON account.subject_id=team.subject_id
+     AND account.account_kind='team'
+    LEFT JOIN bursar.credit_team_members AS member
+      ON member.team_id = team.id
+    WHERE team.id=p_team_id
+    GROUP BY team.id, team.name, account.balance
 $$;

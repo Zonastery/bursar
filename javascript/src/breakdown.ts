@@ -5,7 +5,7 @@ import { quantizeMoney } from "./expr.js";
  * Granular credit cost report for a usage event.
  *
  * All money fields are `Decimal` (never binary `number`) and are quantized to
- * 4dp ROUND_HALF_UP. `total` is the single source of truth: it is recomputed
+ * 6dp ROUND_HALF_UP. `total` is the single source of truth: it is recomputed
  * from the components (clamped at 0) and quantized — there is NO implicit
  * integer truncation of the total (that was the revenue-leak bug).
  */
@@ -37,7 +37,7 @@ export function makeCostBreakdown(partial?: {
   const operationCredits = quantizeMoney(partial?.operationCredits ?? new Decimal(0));
 
   // Single source of truth for the total: sum of components, clamped at 0,
-  // quantized to 4dp HALF_UP.
+  // quantized to 6dp HALF_UP.
   const rawTotal = modelCredits
     .plus(toolCredits)
     .plus(searchCredits)

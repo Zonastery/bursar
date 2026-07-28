@@ -6,11 +6,26 @@ import type {
   BillingOfferResult,
   BillingPreferences,
   BillingSubscriptionChange,
+  BillingSubscriptionChangeInput,
   BillingSubscriptionState,
   CheckoutIntent,
   BillingTopupResult,
   BillingInvoiceInfo,
-} from "./billing-types.js";
+} from "./types/index.js";
+import type {
+  AutoRechargeAttemptClaim,
+  AutoRechargeAttemptUpdate,
+  AutoRechargeProviderPaymentUpdate,
+  BillingCreditGrantCreate,
+  BillingDisputeUpsert,
+  BillingInvoiceUpsert,
+  BillingPaymentUpsert,
+  BillingRefundUpsert,
+  BillingSubscriptionChangeUpdate,
+  BillingSubscriptionConflictCreate,
+  CheckoutIntentCreate,
+  CheckoutIntentUpdate,
+} from "./contracts.js";
 
 /**
  * Abstract billing store — provider-agnostic persistence layer for
@@ -19,25 +34,11 @@ import type {
  * Mirrors Python bursar/billing/store.py.
  */
 export abstract class BillingStore {
-  abstract createOrGetCheckoutIntent(input: {
-    actorKey: string;
-    provider: string;
-    type: "subscription" | "credit_pack";
-    productId: string;
-    requestFingerprint: string;
-    expiresAt: string;
-  }): Promise<CheckoutIntent>;
+  abstract createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent>;
 
-  abstract updateCheckoutIntent(
-    id: string,
-    update: {
-      status?: "open" | "completed" | "failed" | "expired";
-      providerSessionId?: string | null;
-      checkoutUrl?: string | null;
-    },
-  ): Promise<void>;
+  abstract updateCheckoutIntent(id: string, update: CheckoutIntentUpdate): Promise<void>;
 
-  abstract getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null>;
+  abstract getCheckoutIntent(id: string, subjectId: string): Promise<CheckoutIntent | null>;
 
   abstract resolveBillingOffer(
     provider: string,
@@ -49,6 +50,7 @@ export abstract class BillingStore {
     provider: string,
     eventId: string,
     eventType: string,
+    envelope?: Record<string, unknown>,
   ): Promise<BillingEventClaim>;
 
   abstract completeBillingEvent(
@@ -81,7 +83,7 @@ export abstract class BillingStore {
   ): Promise<BillingSubscriptionState | null>;
 
   abstract createBillingSubscriptionChange(
-    input: Omit<BillingSubscriptionChange, "id">,
+    input: BillingSubscriptionChangeInput,
   ): Promise<BillingSubscriptionChange>;
 
   abstract getOpenBillingSubscriptionChange(
@@ -89,13 +91,20 @@ export abstract class BillingStore {
     providerSubscriptionId: string,
   ): Promise<BillingSubscriptionChange | null>;
 
-  abstract listExpiredGraceSubscriptions(now: string): Promise<BillingSubscriptionState[]>;
+  abstract listExpiredGraceSubscriptions(
+    now: string,
+    limit?: number,
+  ): Promise<BillingSubscriptionState[]>;
+
+  abstract markSubscriptionGraceExpired(
+    subscriptionId: string,
+    expectedGraceEndsAt: string,
+    expiredAt?: string,
+  ): Promise<boolean>;
 
   abstract updateBillingSubscriptionChange(
     id: string,
-    update: Partial<
-      Pick<BillingSubscriptionChange, "state" | "providerOperationId" | "effectiveDate">
-    >,
+    update: BillingSubscriptionChangeUpdate,
   ): Promise<void>;
 
   abstract getUserSubscription(
@@ -108,6 +117,10 @@ export abstract class BillingStore {
     productId?: string | null,
     priceId?: string | null,
   ): Promise<BillingTopupResult | null>;
+  abstract resolveCreditTopupByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<BillingTopupResult | null>;
 
   abstract resolveBillingOfferByLookup(
     provider: string,
@@ -119,54 +132,27 @@ export abstract class BillingStore {
     topupConfig: BillingTopupResult,
   ): Promise<number>;
 
-  abstract upsertBillingPayment(options: {
-    provider: string;
-    providerPaymentId: string;
-    providerInvoiceId?: string | null;
-    userId?: string | null;
-    amountMinor?: number;
-    taxMinor?: number | null;
-    currency?: string | null;
-    purpose?: string;
-    metadata?: Record<string, unknown> | null;
-  }): Promise<void>;
+  abstract upsertBillingPayment(options: BillingPaymentUpsert): Promise<string>;
+  abstract createBillingCreditGrant(input: BillingCreditGrantCreate): Promise<string>;
+  abstract grantBillingCredit(
+    grantId: string,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>>;
+  abstract getBillingCreditGrantByPayment(paymentId: string): Promise<string | null>;
+  abstract postBillingRefund(
+    refundId: string,
+    grantId: string,
+    amountMinor: number,
+    idempotencyKey: string,
+  ): Promise<Record<string, unknown>>;
 
   abstract listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
 
-  abstract upsertBillingRefund(options: {
-    provider: string;
-    providerRefundId: string;
-    providerPaymentId?: string | null;
-    userId?: string | null;
-    amountMinor?: number;
-    currency?: string | null;
-    reason?: string | null;
-    metadata?: Record<string, unknown> | null;
-  }): Promise<void>;
+  abstract upsertBillingRefund(options: BillingRefundUpsert): Promise<string>;
 
-  abstract upsertBillingInvoice(options: {
-    provider: string;
-    providerInvoiceId: string;
-    providerSubscriptionId?: string | null;
-    userId?: string | null;
-    status?: string | null;
-    amountPaidMinor?: number | null;
-    amountDueMinor?: number | null;
-    currency?: string | null;
-    periodStart?: string | null;
-    periodEnd?: string | null;
-    metadata?: Record<string, unknown> | null;
-  }): Promise<void>;
+  abstract upsertBillingInvoice(options: BillingInvoiceUpsert): Promise<void>;
 
-  abstract upsertBillingDispute(options: {
-    provider: string;
-    providerDisputeId: string;
-    providerPaymentId?: string | null;
-    userId?: string | null;
-    status?: string;
-    reason?: string | null;
-    metadata?: Record<string, unknown> | null;
-  }): Promise<void>;
+  abstract upsertBillingDispute(options: BillingDisputeUpsert): Promise<void>;
 
   abstract getBillingPayment(
     provider: string,
@@ -175,22 +161,21 @@ export abstract class BillingStore {
 
   abstract getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
 
-  abstract pseudonymizeFinancialSubject(userId: string): Promise<void>;
+  abstract pseudonymizeFinancialSubject(userId: string): Promise<boolean>;
 
   abstract getUserSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
 
-  abstract recordSubscriptionConflict(input: {
-    userId?: string | null;
-    provider: string;
-    duplicateSubscriptionId: string;
-    existingSubscriptionId?: string | null;
-    eventId?: string | null;
-    metadata?: Record<string, unknown>;
-  }): Promise<void>;
+  abstract recordSubscriptionConflict(input: BillingSubscriptionConflictCreate): Promise<void>;
 
+  /**
+   * Switch the subject's selected entitlement to a current subscription from
+   * `keepProvider`. The compatibility name is retained, but implementations
+   * must not falsify provider-reported subscription status.
+   */
   abstract deactivateOtherProviderSubscriptions(
     userId: string,
     keepProvider: string,
+    keepProviderSubscriptionId?: string | null,
   ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }>;
 
   abstract getBillingPreferences(userId: string): Promise<BillingPreferences | null>;
@@ -198,33 +183,17 @@ export abstract class BillingStore {
   abstract upsertBillingPreferences(prefs: BillingPreferences): Promise<void>;
   abstract getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
   abstract upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
-  abstract claimAutoRechargeAttempt(input: {
-    userId: string;
-    provider: string;
-    topupKey: string;
-    quantity: number;
-    windowStart: string;
-    maxRecharges: number;
-    triggerBalance: number;
-    policySnapshot: Record<string, unknown>;
-    policyHash: string;
-    quotedAmountMinor: number | null;
-    currency: string | null;
-  }): Promise<BillingAutoRechargeAttempt | null>;
-  abstract updateAutoRechargeAttempt(input: {
-    id: string;
-    state: string;
-    providerPaymentId?: string | null;
-    failureCode?: string | null;
-    actionUrl?: string | null;
-  }): Promise<void>;
-  abstract updateAutoRechargeAttemptByProviderPayment(input: {
-    provider: string;
-    providerPaymentId: string;
-    state: string;
-    failureCode?: string | null;
-  }): Promise<void>;
-  abstract countAutoRechargeAttempts(userId: string, windowDays: number): Promise<number>;
+  abstract claimAutoRechargeAttempt(
+    input: AutoRechargeAttemptClaim,
+  ): Promise<BillingAutoRechargeAttempt | null>;
+  abstract updateAutoRechargeAttempt(input: AutoRechargeAttemptUpdate): Promise<void>;
+  abstract updateAutoRechargeAttemptByProviderPayment(
+    input: AutoRechargeProviderPaymentUpdate,
+  ): Promise<void>;
+  abstract countAutoRechargeAttempts(
+    userId: string,
+    since: string | Date | number,
+  ): Promise<number>;
 
   abstract getBillingCustomerByUserId(
     userId: string,

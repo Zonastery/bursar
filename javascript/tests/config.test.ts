@@ -3,86 +3,167 @@ import { describe, expect, it } from "vitest";
 import { canonicalBursarConfigDict, loadConfigFromDict } from "../src/config.js";
 import { ConfigError } from "../src/errors.js";
 
-const baseConfig = () => ({
+export const baseConfig = () => ({
   version: 1,
-  usage: {
+  pricing: {
     operations: {
-      completion: { measures: ["input_tokens", "output_tokens"], dimensions: ["model"] },
+      completion: {
+        measures: {
+          input_tokens: { unit: "token" },
+          output_tokens: { unit: "token" },
+        },
+        dimensions: { model: { type: "string" } },
+      },
+      image: {
+        measures: { images: { unit: "image" } },
+        dimensions: {},
+      },
     },
     rate_cards: {
       standard: {
-        prices: {
-          completion: [
-            { match: { model: { prefix: "gpt-" } }, formula: "input_tokens * 2" },
-            { default: true, formula: "input_tokens + output_tokens" },
-          ],
+        operations: {
+          completion: {
+            rules: [
+              {
+                when: { model: { op: "prefix", value: "gpt-" } },
+                charge: {
+                  type: "per_unit",
+                  measure: "input_tokens",
+                  rate: "2.000000",
+                },
+              },
+            ],
+            unmatched: {
+              action: "charge",
+              charge: {
+                type: "sum",
+                components: [
+                  {
+                    type: "per_unit",
+                    measure: "input_tokens",
+                    rate: "1.000000",
+                  },
+                  {
+                    type: "per_unit",
+                    measure: "output_tokens",
+                    rate: "1.000000",
+                  },
+                ],
+              },
+            },
+          },
         },
       },
     },
   },
   credits: {
-    buckets: { gifted: { expires_after: { unit: "day", count: 7 } }, purchased: {} },
-    spend_order: ["gifted", "purchased"],
-    default_bucket: "purchased",
-    overdraft_bucket: "purchased",
-  },
-  plans: { pro: { display_name: "Pro", rate_card: "standard" } },
-});
-
-describe("redesigned v1 config", () => {
-  it("accepts generic operation pricing", () => {
-    expect(loadConfigFromDict(baseConfig()).usage?.operations.completion.measures).toEqual([
-      "input_tokens",
-      "output_tokens",
-    ]);
-  });
-
-  it("canonicalizes decimals and uses snake_case", () => {
-    const config = baseConfig();
-    config.credits.signup_grant = { amount: "10.25", bucket: "gifted" };
-    const canonical = canonicalBursarConfigDict(config);
-    expect(canonical.credits.signup_grant.amount).toBe("10.25");
-    expect(canonical).not.toHaveProperty("metering");
-  });
-
-  it.each([{ metering: { models: { "*": "1" } } }, { ledger: {} }, { billing: {} }])(
-    "rejects legacy sections",
-    (legacy) => expect(() => loadConfigFromDict({ version: 1, ...legacy })).toThrow(ConfigError),
-  );
-
-  it("rejects an unpriced operation", () => {
-    const config = baseConfig();
-    config.usage.operations.image = { measures: ["images"], dimensions: [] };
-    expect(() => loadConfigFromDict(config)).toThrow(/no price/);
-  });
-
-  it("requires one final default rule", () => {
-    const config = baseConfig();
-    config.usage.rate_cards.standard.prices.completion = [
-      { default: true, formula: "input_tokens" },
-      { match: { model: { exact: "x" } }, formula: "input_tokens" },
-    ];
-    expect(() => loadConfigFromDict(config)).toThrow(/default rule/);
-  });
-
-  it("requires explicit credit stacking", () => {
-    const config = baseConfig();
-    config.plans.pro.included_credits = { amount: 10, reset: { unit: "month" } };
-    config.payments = {
-      subscriptions: {
-        pro_monthly: {
-          plan: "pro",
-          billing_period: { unit: "month" },
-          providers: { stripe: { lookup: { type: "price_id", value: "price_pro" } } },
-          renewal_credits: {
-            amount: 20,
-            bucket: "purchased",
-            behavior: "replace",
-            on_subscription_end: "expire",
-          },
+    accounting: { unit: "credit", scale: 6, rounding: "half_up" },
+    buckets: {
+      gifted: {
+        priority: 10,
+        expiry: {
+          type: "after_grant",
+          interval: { unit: "day", count: 7 },
+          timezone: "UTC",
         },
       },
+      purchased: { priority: 20 },
+    },
+    default_bucket: "purchased",
+    policies: {
+      prepaid: { type: "prepaid" },
+      invoice: { type: "credit_line", limit: "500.000000" },
+    },
+  },
+  entitlements: {
+    features: {
+      tutor_chat: { type: "boolean", default: false },
+      access_level: {
+        type: "enum",
+        values: ["basic", "full"],
+        default: "basic",
+      },
+    },
+  },
+  admission: {
+    policies: {
+      interactive: {
+        max_in_flight: 5,
+        operations: { completion: { max_in_flight: 2 } },
+      },
+    },
+  },
+  plans: {
+    pro: {
+      display_name: "Pro",
+      rate_card: "standard",
+      allowed_operations: ["completion"],
+      features: { tutor_chat: true, access_level: "full" },
+      credit_allowance: {
+        amount: "10.000000",
+        window: { type: "calendar", unit: "month", timezone: "UTC" },
+      },
+      quotas: {
+        token_budget: {
+          operation: "completion",
+          measure: "input_tokens",
+          limit: "1000.000000",
+          window: {
+            type: "rolling",
+            duration: { unit: "day", count: 30 },
+          },
+          enforcement: "block",
+          emit_at_percent: [80, 100],
+        },
+      },
+      credit_policy: "invoice",
+      admission_policy: "interactive",
+    },
+  },
+});
+
+describe("typed v1 config", () => {
+  it("accepts and canonicalizes the typed catalog", () => {
+    const parsed = loadConfigFromDict(baseConfig());
+    expect(parsed.plans.pro.creditAllowance?.amount.toString()).toBe("10");
+    expect(parsed.plans.pro.revisionPolicy).toBe("immediate");
+    const canonical = canonicalBursarConfigDict(baseConfig());
+    expect(
+      ((canonical.credits as Record<string, unknown>).policies as Record<string, unknown>).invoice,
+    ).toEqual({ type: "credit_line", limit: "500.000000" });
+  });
+
+  it("allows partial rate cards for unused operations", () => {
+    const parsed = loadConfigFromDict(baseConfig());
+    expect(parsed.pricing?.rateCards.standard.operations.image).toBeUndefined();
+  });
+
+  it("requires pricing for every operation enabled by a plan", () => {
+    const config = baseConfig();
+    config.plans.pro.allowed_operations.push("image");
+    expect(() => loadConfigFromDict(config)).toThrow(/without pricing/);
+  });
+
+  it("validates feature references and values", () => {
+    const config = baseConfig();
+    config.plans.pro.features.access_level = "enterprise";
+    expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
+  });
+
+  it("requires version explicitly", () => {
+    const { version: _, ...config } = baseConfig();
+    expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
+  });
+
+  it("validates RFC 3339 timestamps declared by the JSON Schema", () => {
+    const config = baseConfig();
+    const gifted = config.credits.buckets.gifted as unknown as {
+      expiry: { type: string; at: string };
     };
-    expect(() => loadConfigFromDict(config)).toThrow(/stack_credits/);
+    gifted.expiry = { type: "fixed_at", at: "2026-02-30T25:61:00Z" };
+    expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
+
+    gifted.expiry = { type: "fixed_at", at: "2028-02-29T23:59:59Z" };
+    expect(() => loadConfigFromDict(config)).not.toThrow();
   });
 });

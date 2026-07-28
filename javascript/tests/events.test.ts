@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { CreditEventEmitter } from "../src/stores/events.js";
-import type { CreditEvent, CreditEventType } from "../src/stores/events.js";
+import { CreditEventEmitter } from "../src/credits/events.js";
+import type { CreditEvent, CreditEventType } from "../src/credits/events.js";
 
 function makeEvent(type: CreditEventType = "credits.deducted"): CreditEvent {
   return { type, timestamp: new Date(), userId: "u1" };
@@ -182,6 +182,18 @@ describe("CreditEventEmitter", () => {
       });
 
       expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
+      consoleSpy.mockRestore();
+    });
+
+    it("thenable handler rejections are isolated like native promises", async () => {
+      const emitter = new CreditEventEmitter();
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      emitter.on("credits.added", () => ({
+        then: (_resolve, reject) => reject?.(new Error("thenable rejection")),
+      }));
+
+      expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
+      await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalledOnce());
       consoleSpy.mockRestore();
     });
   });

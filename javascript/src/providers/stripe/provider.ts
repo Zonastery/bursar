@@ -56,9 +56,7 @@ export class StripeProvider implements PaymentProvider {
       customerId = customer.id;
     }
 
-    const sessionOpts: Stripe.Checkout.SessionCreateParams & {
-      idempotencyKey?: string;
-    } = {
+    const sessionOpts: Stripe.Checkout.SessionCreateParams = {
       customer: customerId,
       mode: params.type === "subscription" ? "subscription" : "payment",
       line_items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
@@ -71,10 +69,10 @@ export class StripeProvider implements PaymentProvider {
         ? { subscription_data: { metadata: { userId: params.userId, ...params.metadata } } }
         : { payment_intent_data: { metadata: { userId: params.userId, ...params.metadata } } }),
     };
-    if (params.idempotencyKey) {
-      sessionOpts.idempotencyKey = params.idempotencyKey;
-    }
-    const session = await stripe.checkout.sessions.create(sessionOpts);
+    const session = await stripe.checkout.sessions.create(
+      sessionOpts,
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+    );
 
     if (!session.url) throw new Error("Stripe checkout session returned no URL");
     return { url: session.url, customerId };

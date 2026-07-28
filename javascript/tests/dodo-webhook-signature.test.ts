@@ -1,3 +1,4 @@
+import { NotFoundError } from "dodopayments";
 import { describe, it, expect, vi, beforeAll, beforeEach, Mock } from "vitest";
 import type { BillingService, BillingEventResult } from "../src/billing/index.js";
 import type { WebhookRequest } from "../src/providers/types.js";
@@ -150,7 +151,7 @@ describe("DodoProvider webhook signature verification", () => {
     const retrieve = vi
       .fn()
       .mockResolvedValueOnce({ payment_status: "requires_customer_action" })
-      .mockRejectedValueOnce(Object.assign(new Error("not found"), { status: 404 }));
+      .mockRejectedValueOnce(new NotFoundError(404, {}, "not found", new Headers()));
     const provider = new DodoProvider(
       () => ({ checkoutSessions: { retrieve } }) as never,
       { webhookKey: WEBHOOK_KEY },

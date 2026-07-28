@@ -1,0 +1,81 @@
+import type { QueryFn } from "./postgres-types.js";
+
+export interface PostgresPool {
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  end(): Promise<void>;
+}
+
+export interface PostgresPoolConstructor {
+  new (config: { connectionString: string }): PostgresPool;
+}
+
+export interface PostgresClientOptions {
+  poolConstructor?: PostgresPoolConstructor;
+  closedError?: () => Error;
+}
+
+/**
+ * Owns the lifecycle and lazy initialization of a PostgreSQL pool.
+ *
+ * A supplied pool is borrowed and therefore never ended. A connection string
+ * creates an owned pool on first use and closes it exactly once.
+ */
+export class PostgresClient {
+  private pool: PostgresPool | null;
+  private poolPromise: Promise<PostgresPool> | null = null;
+  private poolConstructor: PostgresPoolConstructor | null;
+  private readonly databaseUrl: string | null;
+  private readonly ownsPool: boolean;
+  private readonly closedError: () => Error;
+  private closed = false;
+
+  constructor(poolOrUrl: PostgresPool | string, options: PostgresClientOptions = {}) {
+    this.databaseUrl = typeof poolOrUrl === "string" ? poolOrUrl : null;
+    this.pool = typeof poolOrUrl === "string" ? null : poolOrUrl;
+    this.poolConstructor = options.poolConstructor ?? null;
+    this.ownsPool = typeof poolOrUrl === "string";
+    this.closedError =
+      options.closedError ?? (() => new Error("PostgreSQL client has been closed"));
+  }
+
+  readonly query: QueryFn = async (text: string, params?: unknown[]) => {
+    const result = await (await this.getPool()).query(text, params);
+    return result.rows;
+  };
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+
+    if (!this.ownsPool) return;
+    const pool = this.poolPromise ? await this.poolPromise : this.pool;
+    if (pool) await pool.end();
+    this.pool = null;
+    this.poolPromise = null;
+  }
+
+  private async getPool(): Promise<PostgresPool> {
+    if (this.closed) throw this.closedError();
+    if (this.pool) return this.pool;
+    if (!this.databaseUrl) throw new Error("PostgreSQL client has no connection source");
+
+    if (!this.poolPromise) {
+      this.poolPromise = this.createPool(this.databaseUrl);
+    }
+    return this.poolPromise;
+  }
+
+  private async createPool(databaseUrl: string): Promise<PostgresPool> {
+    const Pool = await this.getPoolConstructor();
+    const pool = new Pool({ connectionString: databaseUrl });
+    this.pool = pool;
+    return pool;
+  }
+
+  private async getPoolConstructor(): Promise<PostgresPoolConstructor> {
+    if (this.poolConstructor) return this.poolConstructor;
+    const pg = await import("pg");
+    this.poolConstructor = pg.Pool as unknown as PostgresPoolConstructor;
+    return this.poolConstructor;
+  }
+}

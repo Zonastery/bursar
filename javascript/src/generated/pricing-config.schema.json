@@ -1,0 +1,2331 @@
+{
+  "$defs": {
+    "AdmissionConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "policies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AdmissionPolicy"
+          },
+          "title": "Policies",
+          "type": "object"
+        }
+      },
+      "title": "AdmissionConfig",
+      "type": "object"
+    },
+    "AdmissionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "max_in_flight": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max In Flight"
+        },
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OperationAdmission"
+          },
+          "title": "Operations",
+          "type": "object"
+        }
+      },
+      "title": "AdmissionPolicy",
+      "type": "object"
+    },
+    "AfterGrantExpiry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "after_grant",
+          "title": "Type",
+          "type": "string"
+        },
+        "interval": {
+          "$ref": "#/$defs/BillingInterval"
+        },
+        "timezone": {
+          "default": "UTC",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": ["type", "interval"],
+      "title": "AfterGrantExpiry",
+      "type": "object"
+    },
+    "AutoRechargeGuardrails": {
+      "additionalProperties": false,
+      "properties": {
+        "eligible_topups": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Eligible Topups",
+          "type": "array"
+        },
+        "balance_below": {
+          "$ref": "#/$defs/DecimalRange"
+        },
+        "rearm_above": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Rearm Above",
+          "type": "string"
+        },
+        "quantity": {
+          "$ref": "#/$defs/IntegerRange"
+        },
+        "limits": {
+          "$ref": "#/$defs/AutoRechargeLimits"
+        }
+      },
+      "required": ["eligible_topups", "balance_below", "rearm_above", "quantity", "limits"],
+      "title": "AutoRechargeGuardrails",
+      "type": "object"
+    },
+    "AutoRechargeLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_purchases": {
+          "minimum": 1,
+          "title": "Max Purchases",
+          "type": "integer"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CalendarWindow"
+            },
+            {
+              "$ref": "#/$defs/RollingWindow"
+            }
+          ],
+          "title": "Window"
+        },
+        "max_charge_minor": {
+          "minimum": 1,
+          "title": "Max Charge Minor",
+          "type": "integer"
+        },
+        "cooldown": {
+          "$ref": "#/$defs/Duration"
+        },
+        "max_consecutive_failures": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Max Consecutive Failures",
+          "type": "integer"
+        },
+        "failure_action": {
+          "const": "pause",
+          "default": "pause",
+          "title": "Failure Action",
+          "type": "string"
+        }
+      },
+      "required": ["max_purchases", "window", "max_charge_minor", "cooldown"],
+      "title": "AutoRechargeLimits",
+      "type": "object"
+    },
+    "Availability": {
+      "additionalProperties": false,
+      "properties": {
+        "starts_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Starts At"
+        },
+        "ends_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ends At"
+        },
+        "regions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Regions",
+          "type": "array"
+        }
+      },
+      "title": "Availability",
+      "type": "object"
+    },
+    "BillingInterval": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "enum": ["day", "week", "month", "year"],
+          "title": "Unit",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": ["unit"],
+      "title": "BillingInterval",
+      "type": "object"
+    },
+    "BooleanFeature": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "boolean",
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "type": "boolean",
+          "title": "Default"
+        }
+      },
+      "required": ["type", "default"],
+      "title": "BooleanFeature",
+      "type": "object"
+    },
+    "BucketDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "expiry": {
+          "discriminator": {
+            "mapping": {
+              "after_grant": "#/$defs/AfterGrantExpiry",
+              "end_of_window": "#/$defs/EndOfWindowExpiry",
+              "fixed_at": "#/$defs/FixedExpiry",
+              "never": "#/$defs/NeverExpiry",
+              "subscription_end": "#/$defs/SubscriptionEndExpiry"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/NeverExpiry"
+            },
+            {
+              "$ref": "#/$defs/AfterGrantExpiry"
+            },
+            {
+              "$ref": "#/$defs/EndOfWindowExpiry"
+            },
+            {
+              "$ref": "#/$defs/FixedExpiry"
+            },
+            {
+              "$ref": "#/$defs/SubscriptionEndExpiry"
+            }
+          ],
+          "title": "Expiry"
+        }
+      },
+      "required": ["priority"],
+      "title": "BucketDefinition",
+      "type": "object"
+    },
+    "CalendarWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "calendar",
+          "title": "Type",
+          "type": "string"
+        },
+        "unit": {
+          "enum": ["day", "week", "month", "year"],
+          "title": "Unit",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "timezone": {
+          "default": "UTC",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": ["type", "unit"],
+      "title": "CalendarWindow",
+      "type": "object"
+    },
+    "CatalogConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "activation": {
+          "$ref": "#/$defs/OnPublishActivation"
+        }
+      },
+      "title": "CatalogConfig",
+      "type": "object"
+    },
+    "ChargeUnmatched": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "charge",
+          "title": "Action",
+          "type": "string"
+        },
+        "charge": {
+          "discriminator": {
+            "mapping": {
+              "expression": "#/$defs/ExpressionCharge",
+              "flat": "#/$defs/FlatCharge",
+              "graduated": "#/$defs/GraduatedCharge",
+              "package": "#/$defs/PackageCharge",
+              "per_unit": "#/$defs/PerUnitCharge",
+              "sum": "#/$defs/SumCharge",
+              "volume": "#/$defs/VolumeCharge"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/FlatCharge"
+            },
+            {
+              "$ref": "#/$defs/PerUnitCharge"
+            },
+            {
+              "$ref": "#/$defs/PackageCharge"
+            },
+            {
+              "$ref": "#/$defs/GraduatedCharge"
+            },
+            {
+              "$ref": "#/$defs/VolumeCharge"
+            },
+            {
+              "$ref": "#/$defs/ExpressionCharge"
+            },
+            {
+              "$ref": "#/$defs/SumCharge"
+            }
+          ],
+          "title": "Charge"
+        }
+      },
+      "required": ["action", "charge"],
+      "title": "ChargeUnmatched",
+      "type": "object"
+    },
+    "CommerceConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "providers": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "custom": "#/$defs/CustomProvider",
+                "dodo": "#/$defs/DodoProvider",
+                "stripe": "#/$defs/StripeProvider"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StripeProvider"
+              },
+              {
+                "$ref": "#/$defs/DodoProvider"
+              },
+              {
+                "$ref": "#/$defs/CustomProvider"
+              }
+            ]
+          },
+          "title": "Providers",
+          "type": "object"
+        },
+        "offers": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "subscription": "#/$defs/SubscriptionOffer",
+                "topup": "#/$defs/TopupOffer"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/SubscriptionOffer"
+              },
+              {
+                "$ref": "#/$defs/TopupOffer"
+              }
+            ]
+          },
+          "title": "Offers",
+          "type": "object"
+        },
+        "auto_recharge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutoRechargeGuardrails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "CommerceConfig",
+      "type": "object"
+    },
+    "CreditAccounting": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "const": "credit",
+          "title": "Unit",
+          "type": "string"
+        },
+        "scale": {
+          "const": 6,
+          "title": "Scale",
+          "type": "integer"
+        },
+        "rounding": {
+          "const": "half_up",
+          "title": "Rounding",
+          "type": "string"
+        }
+      },
+      "required": ["unit", "scale", "rounding"],
+      "title": "CreditAccounting",
+      "type": "object"
+    },
+    "CreditAllowance": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Amount",
+          "type": "string"
+        },
+        "window": {
+          "discriminator": {
+            "mapping": {
+              "calendar": "#/$defs/CalendarWindow",
+              "plan_assignment": "#/$defs/PlanAssignmentWindow",
+              "rolling": "#/$defs/RollingWindow"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CalendarWindow"
+            },
+            {
+              "$ref": "#/$defs/RollingWindow"
+            },
+            {
+              "$ref": "#/$defs/PlanAssignmentWindow"
+            }
+          ],
+          "title": "Window"
+        }
+      },
+      "required": ["amount", "window"],
+      "title": "CreditAllowance",
+      "type": "object"
+    },
+    "CreditLinePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "credit_line",
+          "title": "Type",
+          "type": "string"
+        },
+        "limit": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Limit",
+          "type": "string"
+        }
+      },
+      "required": ["type", "limit"],
+      "title": "CreditLinePolicy",
+      "type": "object"
+    },
+    "CreditsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "accounting": {
+          "$ref": "#/$defs/CreditAccounting"
+        },
+        "buckets": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BucketDefinition"
+          },
+          "title": "Buckets",
+          "type": "object"
+        },
+        "default_bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Bucket"
+        },
+        "policies": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "credit_line": "#/$defs/CreditLinePolicy",
+                "prepaid": "#/$defs/PrepaidCreditPolicy"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/PrepaidCreditPolicy"
+              },
+              {
+                "$ref": "#/$defs/CreditLinePolicy"
+              }
+            ]
+          },
+          "title": "Policies",
+          "type": "object"
+        },
+        "grant_programs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/GrantProgram"
+          },
+          "title": "Grant Programs",
+          "type": "object"
+        }
+      },
+      "required": ["accounting"],
+      "title": "CreditsConfig",
+      "type": "object"
+    },
+    "CustomObjectReference": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "custom_object",
+          "title": "Type",
+          "type": "string"
+        },
+        "object_kind": {
+          "enum": ["subscription", "one_time"],
+          "title": "Object Kind",
+          "type": "string"
+        },
+        "external_id": {
+          "minLength": 1,
+          "title": "External Id",
+          "type": "string"
+        }
+      },
+      "required": ["type", "object_kind", "external_id"],
+      "title": "CustomObjectReference",
+      "type": "object"
+    },
+    "CustomProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "custom",
+          "title": "Type",
+          "type": "string"
+        },
+        "adapter": {
+          "minLength": 1,
+          "title": "Adapter",
+          "type": "string"
+        }
+      },
+      "required": ["type", "adapter"],
+      "title": "CustomProvider",
+      "type": "object"
+    },
+    "CycleGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Amount",
+          "type": "string"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "renewal": {
+          "enum": ["replace_previous", "accumulate"],
+          "title": "Renewal",
+          "type": "string"
+        },
+        "expiry": {
+          "discriminator": {
+            "mapping": {
+              "after_grant": "#/$defs/AfterGrantExpiry",
+              "end_of_window": "#/$defs/EndOfWindowExpiry",
+              "fixed_at": "#/$defs/FixedExpiry",
+              "never": "#/$defs/NeverExpiry",
+              "subscription_end": "#/$defs/SubscriptionEndExpiry"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/NeverExpiry"
+            },
+            {
+              "$ref": "#/$defs/AfterGrantExpiry"
+            },
+            {
+              "$ref": "#/$defs/EndOfWindowExpiry"
+            },
+            {
+              "$ref": "#/$defs/FixedExpiry"
+            },
+            {
+              "$ref": "#/$defs/SubscriptionEndExpiry"
+            }
+          ],
+          "title": "Expiry"
+        }
+      },
+      "required": ["amount", "bucket", "renewal"],
+      "title": "CycleGrant",
+      "type": "object"
+    },
+    "DecimalRange": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Minimum",
+          "type": "string"
+        },
+        "maximum": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Maximum",
+          "type": "string"
+        },
+        "default": {
+          "type": "string",
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "examples": ["10.500000"],
+          "title": "Default"
+        }
+      },
+      "required": ["minimum", "maximum", "default"],
+      "title": "DecimalRange",
+      "type": "object"
+    },
+    "DimensionDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["string", "number", "boolean"],
+          "title": "Type",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": ["type"],
+      "title": "DimensionDefinition",
+      "type": "object"
+    },
+    "DodoProductReference": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "dodo_product",
+          "title": "Type",
+          "type": "string"
+        },
+        "product_id": {
+          "minLength": 1,
+          "title": "Product Id",
+          "type": "string"
+        }
+      },
+      "required": ["type", "product_id"],
+      "title": "DodoProductReference",
+      "type": "object"
+    },
+    "DodoProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "dodo",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "DodoProvider",
+      "type": "object"
+    },
+    "Duration": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "enum": ["second", "minute", "hour", "day", "week"],
+          "title": "Unit",
+          "type": "string"
+        },
+        "count": {
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": ["unit", "count"],
+      "title": "Duration",
+      "type": "object"
+    },
+    "EndOfWindowExpiry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "end_of_window",
+          "title": "Type",
+          "type": "string"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CalendarWindow"
+            },
+            {
+              "$ref": "#/$defs/PlanAssignmentWindow"
+            }
+          ],
+          "title": "Window"
+        }
+      },
+      "required": ["type", "window"],
+      "title": "EndOfWindowExpiry",
+      "type": "object"
+    },
+    "EntitlementsConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "features": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "boolean": "#/$defs/BooleanFeature",
+                "enum": "#/$defs/EnumFeature",
+                "integer": "#/$defs/IntegerFeature",
+                "string": "#/$defs/StringFeature"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/BooleanFeature"
+              },
+              {
+                "$ref": "#/$defs/EnumFeature"
+              },
+              {
+                "$ref": "#/$defs/IntegerFeature"
+              },
+              {
+                "$ref": "#/$defs/StringFeature"
+              }
+            ]
+          },
+          "title": "Features",
+          "type": "object"
+        }
+      },
+      "title": "EntitlementsConfig",
+      "type": "object"
+    },
+    "EnumFeature": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "enum",
+          "title": "Type",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        },
+        "default": {
+          "type": "string",
+          "title": "Default"
+        }
+      },
+      "required": ["type", "values", "default"],
+      "title": "EnumFeature",
+      "type": "object"
+    },
+    "EqualMatcher": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "eq",
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": ["op", "value"],
+      "title": "EqualMatcher",
+      "type": "object"
+    },
+    "ExpressionCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "expression",
+          "title": "Type",
+          "type": "string"
+        },
+        "formula": {
+          "minLength": 1,
+          "title": "Formula",
+          "type": "string"
+        }
+      },
+      "required": ["type", "formula"],
+      "title": "ExpressionCharge",
+      "type": "object"
+    },
+    "FixedExpiry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "fixed_at",
+          "title": "Type",
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "title": "At",
+          "type": "string"
+        }
+      },
+      "required": ["type", "at"],
+      "title": "FixedExpiry",
+      "type": "object"
+    },
+    "FlatCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "flat",
+          "title": "Type",
+          "type": "string"
+        },
+        "amount": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Amount",
+          "type": "string"
+        }
+      },
+      "required": ["type", "amount"],
+      "title": "FlatCharge",
+      "type": "object"
+    },
+    "GraduatedCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "graduated",
+          "title": "Type",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/GraduatedTier"
+          },
+          "minItems": 1,
+          "title": "Tiers",
+          "type": "array"
+        }
+      },
+      "required": ["type", "measure", "tiers"],
+      "title": "GraduatedCharge",
+      "type": "object"
+    },
+    "GraduatedTier": {
+      "additionalProperties": false,
+      "properties": {
+        "up_to": {
+          "anyOf": [
+            {
+              "examples": ["10.500000"],
+              "gt": 0,
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Up To"
+        },
+        "rate": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Rate",
+          "type": "string"
+        }
+      },
+      "required": ["rate"],
+      "title": "GraduatedTier",
+      "type": "object"
+    },
+    "GrantAward": {
+      "additionalProperties": false,
+      "properties": {
+        "recipient": {
+          "default": "subject",
+          "enum": ["subject", "referrer"],
+          "title": "Recipient",
+          "type": "string"
+        },
+        "amount": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Amount",
+          "type": "string"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "expiry": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "after_grant": "#/$defs/AfterGrantExpiry",
+                  "end_of_window": "#/$defs/EndOfWindowExpiry",
+                  "fixed_at": "#/$defs/FixedExpiry",
+                  "never": "#/$defs/NeverExpiry",
+                  "subscription_end": "#/$defs/SubscriptionEndExpiry"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/NeverExpiry"
+                },
+                {
+                  "$ref": "#/$defs/AfterGrantExpiry"
+                },
+                {
+                  "$ref": "#/$defs/EndOfWindowExpiry"
+                },
+                {
+                  "$ref": "#/$defs/FixedExpiry"
+                },
+                {
+                  "$ref": "#/$defs/SubscriptionEndExpiry"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiry"
+        }
+      },
+      "required": ["amount", "bucket"],
+      "title": "GrantAward",
+      "type": "object"
+    },
+    "GrantEligibility": {
+      "additionalProperties": false,
+      "properties": {
+        "plans": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Plans",
+          "type": "array"
+        },
+        "regions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Regions",
+          "type": "array"
+        }
+      },
+      "title": "GrantEligibility",
+      "type": "object"
+    },
+    "GrantProgram": {
+      "additionalProperties": false,
+      "properties": {
+        "trigger": {
+          "enum": ["account_created", "referral_completed", "promo_code_redeemed", "manual"],
+          "title": "Trigger",
+          "type": "string"
+        },
+        "awards": {
+          "items": {
+            "$ref": "#/$defs/GrantAward"
+          },
+          "minItems": 1,
+          "title": "Awards",
+          "type": "array"
+        },
+        "availability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Availability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "eligibility": {
+          "$ref": "#/$defs/GrantEligibility"
+        },
+        "max_awards_per_subject": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Max Awards Per Subject",
+          "type": "integer"
+        },
+        "idempotency_scope": {
+          "default": "subject",
+          "enum": ["subject", "event"],
+          "title": "Idempotency Scope",
+          "type": "string"
+        }
+      },
+      "required": ["trigger", "awards"],
+      "title": "GrantProgram",
+      "type": "object"
+    },
+    "InMatcher": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "in",
+          "title": "Op",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": ["op", "values"],
+      "title": "InMatcher",
+      "type": "object"
+    },
+    "IntegerFeature": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "integer",
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "type": "integer",
+          "title": "Default"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        }
+      },
+      "required": ["type", "default"],
+      "title": "IntegerFeature",
+      "type": "object"
+    },
+    "IntegerRange": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum": {
+          "minimum": 1,
+          "title": "Minimum",
+          "type": "integer"
+        },
+        "maximum": {
+          "minimum": 1,
+          "title": "Maximum",
+          "type": "integer"
+        },
+        "default": {
+          "type": "integer",
+          "minimum": 1,
+          "title": "Default"
+        }
+      },
+      "required": ["minimum", "maximum", "default"],
+      "title": "IntegerRange",
+      "type": "object"
+    },
+    "MeasureDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "unit": {
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": ["unit"],
+      "title": "MeasureDefinition",
+      "type": "object"
+    },
+    "NeverExpiry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "never",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "NeverExpiry",
+      "type": "object"
+    },
+    "NotInMatcher": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "not_in",
+          "title": "Op",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": ["op", "values"],
+      "title": "NotInMatcher",
+      "type": "object"
+    },
+    "OfferPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_minor": {
+          "minimum": 0,
+          "title": "Amount Minor",
+          "type": "integer"
+        },
+        "currency": {
+          "title": "Currency",
+          "type": "string"
+        },
+        "tax_behavior": {
+          "default": "unspecified",
+          "enum": ["inclusive", "exclusive", "unspecified"],
+          "title": "Tax Behavior",
+          "type": "string"
+        }
+      },
+      "required": ["amount_minor", "currency"],
+      "title": "OfferPrice",
+      "type": "object"
+    },
+    "OnPublishActivation": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "on_publish",
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": ["mode"],
+      "title": "OnPublishActivation",
+      "type": "object"
+    },
+    "OperationAdmission": {
+      "additionalProperties": false,
+      "properties": {
+        "max_in_flight": {
+          "minimum": 1,
+          "title": "Max In Flight",
+          "type": "integer"
+        }
+      },
+      "required": ["max_in_flight"],
+      "title": "OperationAdmission",
+      "type": "object"
+    },
+    "OperationDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "measures": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MeasureDefinition"
+          },
+          "title": "Measures",
+          "type": "object"
+        },
+        "dimensions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DimensionDefinition"
+          },
+          "title": "Dimensions",
+          "type": "object"
+        }
+      },
+      "required": ["measures"],
+      "title": "OperationDefinition",
+      "type": "object"
+    },
+    "OperationPricing": {
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PriceRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "unmatched": {
+          "discriminator": {
+            "mapping": {
+              "charge": "#/$defs/ChargeUnmatched",
+              "reject": "#/$defs/RejectUnmatched"
+            },
+            "propertyName": "action"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/RejectUnmatched"
+            },
+            {
+              "$ref": "#/$defs/ChargeUnmatched"
+            }
+          ],
+          "title": "Unmatched"
+        }
+      },
+      "required": ["unmatched"],
+      "title": "OperationPricing",
+      "type": "object"
+    },
+    "PackageCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "package",
+          "title": "Type",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "units": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Units",
+          "type": "string"
+        },
+        "amount": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Amount",
+          "type": "string"
+        },
+        "rounding": {
+          "default": "ceil",
+          "enum": ["ceil", "floor", "nearest"],
+          "title": "Rounding",
+          "type": "string"
+        }
+      },
+      "required": ["type", "measure", "units", "amount"],
+      "title": "PackageCharge",
+      "type": "object"
+    },
+    "PerUnitCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "per_unit",
+          "title": "Type",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "rate": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Rate",
+          "type": "string"
+        },
+        "unit_size": {
+          "default": "1",
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Unit Size",
+          "type": "string"
+        }
+      },
+      "required": ["type", "measure", "rate"],
+      "title": "PerUnitCharge",
+      "type": "object"
+    },
+    "PlanAssignmentWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "plan_assignment",
+          "title": "Type",
+          "type": "string"
+        },
+        "interval": {
+          "$ref": "#/$defs/BillingInterval"
+        },
+        "timezone": {
+          "default": "UTC",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": ["type", "interval"],
+      "title": "PlanAssignmentWindow",
+      "type": "object"
+    },
+    "PlanDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "rate_card": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Card"
+        },
+        "allowed_operations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Operations",
+          "type": "array"
+        },
+        "features": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "title": "Features",
+          "type": "object"
+        },
+        "credit_allowance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditAllowance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "quotas": {
+          "additionalProperties": {
+            "$ref": "#/$defs/QuotaDefinition"
+          },
+          "title": "Quotas",
+          "type": "object"
+        },
+        "credit_policy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Credit Policy"
+        },
+        "admission_policy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Admission Policy"
+        },
+        "revision_policy": {
+          "anyOf": [
+            {
+              "enum": ["immediate", "next_renewal", "pinned"],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision Policy"
+        }
+      },
+      "required": ["display_name"],
+      "title": "PlanDefinition",
+      "type": "object"
+    },
+    "PrefixMatcher": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "prefix",
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": ["op", "value"],
+      "title": "PrefixMatcher",
+      "type": "object"
+    },
+    "PrepaidCreditPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "prepaid",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "PrepaidCreditPolicy",
+      "type": "object"
+    },
+    "PriceRule": {
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "eq": "#/$defs/EqualMatcher",
+                "in": "#/$defs/InMatcher",
+                "not_in": "#/$defs/NotInMatcher",
+                "prefix": "#/$defs/PrefixMatcher",
+                "range": "#/$defs/RangeMatcher"
+              },
+              "propertyName": "op"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/EqualMatcher"
+              },
+              {
+                "$ref": "#/$defs/InMatcher"
+              },
+              {
+                "$ref": "#/$defs/NotInMatcher"
+              },
+              {
+                "$ref": "#/$defs/PrefixMatcher"
+              },
+              {
+                "$ref": "#/$defs/RangeMatcher"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "title": "When",
+          "type": "object"
+        },
+        "charge": {
+          "discriminator": {
+            "mapping": {
+              "expression": "#/$defs/ExpressionCharge",
+              "flat": "#/$defs/FlatCharge",
+              "graduated": "#/$defs/GraduatedCharge",
+              "package": "#/$defs/PackageCharge",
+              "per_unit": "#/$defs/PerUnitCharge",
+              "sum": "#/$defs/SumCharge",
+              "volume": "#/$defs/VolumeCharge"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/FlatCharge"
+            },
+            {
+              "$ref": "#/$defs/PerUnitCharge"
+            },
+            {
+              "$ref": "#/$defs/PackageCharge"
+            },
+            {
+              "$ref": "#/$defs/GraduatedCharge"
+            },
+            {
+              "$ref": "#/$defs/VolumeCharge"
+            },
+            {
+              "$ref": "#/$defs/ExpressionCharge"
+            },
+            {
+              "$ref": "#/$defs/SumCharge"
+            }
+          ],
+          "title": "Charge"
+        }
+      },
+      "required": ["when", "charge"],
+      "title": "PriceRule",
+      "type": "object"
+    },
+    "PricingConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OperationDefinition"
+          },
+          "title": "Operations",
+          "type": "object"
+        },
+        "rate_cards": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RateCard"
+          },
+          "title": "Rate Cards",
+          "type": "object"
+        }
+      },
+      "required": ["operations", "rate_cards"],
+      "title": "PricingConfig",
+      "type": "object"
+    },
+    "QuantityBounds": {
+      "additionalProperties": false,
+      "properties": {
+        "minimum": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Minimum",
+          "type": "integer"
+        },
+        "maximum": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Maximum",
+          "type": "integer"
+        },
+        "default": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "title": "Default"
+        }
+      },
+      "title": "QuantityBounds",
+      "type": "object"
+    },
+    "QuotaDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "title": "Operation",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "limit": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Limit",
+          "type": "string"
+        },
+        "window": {
+          "discriminator": {
+            "mapping": {
+              "calendar": "#/$defs/CalendarWindow",
+              "plan_assignment": "#/$defs/PlanAssignmentWindow",
+              "rolling": "#/$defs/RollingWindow"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CalendarWindow"
+            },
+            {
+              "$ref": "#/$defs/RollingWindow"
+            },
+            {
+              "$ref": "#/$defs/PlanAssignmentWindow"
+            }
+          ],
+          "title": "Window"
+        },
+        "enforcement": {
+          "enum": ["block", "allow"],
+          "title": "Enforcement",
+          "type": "string"
+        },
+        "emit_at_percent": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Emit At Percent",
+          "type": "array"
+        }
+      },
+      "required": ["operation", "measure", "limit", "window", "enforcement"],
+      "title": "QuotaDefinition",
+      "type": "object"
+    },
+    "RangeMatcher": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "range",
+          "title": "Op",
+          "type": "string"
+        },
+        "gt": {
+          "anyOf": [
+            {
+              "examples": ["10.500000"],
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gt"
+        },
+        "gte": {
+          "anyOf": [
+            {
+              "examples": ["10.500000"],
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gte"
+        },
+        "lt": {
+          "anyOf": [
+            {
+              "examples": ["10.500000"],
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lt"
+        },
+        "lte": {
+          "anyOf": [
+            {
+              "examples": ["10.500000"],
+              "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lte"
+        }
+      },
+      "required": ["op"],
+      "title": "RangeMatcher",
+      "type": "object"
+    },
+    "RateCard": {
+      "additionalProperties": false,
+      "properties": {
+        "extends": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Extends"
+        },
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OperationPricing"
+          },
+          "title": "Operations",
+          "type": "object"
+        }
+      },
+      "title": "RateCard",
+      "type": "object"
+    },
+    "RejectUnmatched": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "reject",
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": ["action"],
+      "title": "RejectUnmatched",
+      "type": "object"
+    },
+    "RollingWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "rolling",
+          "title": "Type",
+          "type": "string"
+        },
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "required": ["type", "duration"],
+      "title": "RollingWindow",
+      "type": "object"
+    },
+    "StringFeature": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "string",
+          "title": "Type",
+          "type": "string"
+        },
+        "default": {
+          "type": "string",
+          "title": "Default"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pattern"
+        }
+      },
+      "required": ["type", "default"],
+      "title": "StringFeature",
+      "type": "object"
+    },
+    "StripePriceReference": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "stripe_price",
+          "title": "Type",
+          "type": "string"
+        },
+        "price_id": {
+          "minLength": 1,
+          "title": "Price Id",
+          "type": "string"
+        }
+      },
+      "required": ["type", "price_id"],
+      "title": "StripePriceReference",
+      "type": "object"
+    },
+    "StripeProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "stripe",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "StripeProvider",
+      "type": "object"
+    },
+    "SubscriptionEndExpiry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "subscription_end",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "title": "SubscriptionEndExpiry",
+      "type": "object"
+    },
+    "SubscriptionOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "sort_order": {
+          "default": 0,
+          "title": "Sort Order",
+          "type": "integer"
+        },
+        "availability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Availability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "price": {
+          "$ref": "#/$defs/OfferPrice"
+        },
+        "providers": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "custom_object": "#/$defs/CustomObjectReference",
+                "dodo_product": "#/$defs/DodoProductReference",
+                "stripe_price": "#/$defs/StripePriceReference"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StripePriceReference"
+              },
+              {
+                "$ref": "#/$defs/DodoProductReference"
+              },
+              {
+                "$ref": "#/$defs/CustomObjectReference"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "title": "Providers",
+          "type": "object"
+        },
+        "type": {
+          "const": "subscription",
+          "title": "Type",
+          "type": "string"
+        },
+        "plan": {
+          "title": "Plan",
+          "type": "string"
+        },
+        "billing_interval": {
+          "$ref": "#/$defs/BillingInterval"
+        },
+        "trial": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BillingInterval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cycle_grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CycleGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": ["display_name", "price", "providers", "type", "plan", "billing_interval"],
+      "title": "SubscriptionOffer",
+      "type": "object"
+    },
+    "SumCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "sum",
+          "title": "Type",
+          "type": "string"
+        },
+        "components": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "expression": "#/$defs/ExpressionCharge",
+                "flat": "#/$defs/FlatCharge",
+                "graduated": "#/$defs/GraduatedCharge",
+                "package": "#/$defs/PackageCharge",
+                "per_unit": "#/$defs/PerUnitCharge",
+                "sum": "#/$defs/SumCharge",
+                "volume": "#/$defs/VolumeCharge"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/FlatCharge"
+              },
+              {
+                "$ref": "#/$defs/PerUnitCharge"
+              },
+              {
+                "$ref": "#/$defs/PackageCharge"
+              },
+              {
+                "$ref": "#/$defs/GraduatedCharge"
+              },
+              {
+                "$ref": "#/$defs/VolumeCharge"
+              },
+              {
+                "$ref": "#/$defs/ExpressionCharge"
+              },
+              {
+                "$ref": "#/$defs/SumCharge"
+              }
+            ]
+          },
+          "minItems": 1,
+          "title": "Components",
+          "type": "array"
+        }
+      },
+      "required": ["type", "components"],
+      "title": "SumCharge",
+      "type": "object"
+    },
+    "TopupOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "sort_order": {
+          "default": 0,
+          "title": "Sort Order",
+          "type": "integer"
+        },
+        "availability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Availability"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "price": {
+          "$ref": "#/$defs/OfferPrice"
+        },
+        "providers": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "custom_object": "#/$defs/CustomObjectReference",
+                "dodo_product": "#/$defs/DodoProductReference",
+                "stripe_price": "#/$defs/StripePriceReference"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StripePriceReference"
+              },
+              {
+                "$ref": "#/$defs/DodoProductReference"
+              },
+              {
+                "$ref": "#/$defs/CustomObjectReference"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "title": "Providers",
+          "type": "object"
+        },
+        "type": {
+          "const": "topup",
+          "title": "Type",
+          "type": "string"
+        },
+        "credits_per_unit": {
+          "examples": ["10.500000"],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Credits Per Unit",
+          "type": "string"
+        },
+        "quantity": {
+          "$ref": "#/$defs/QuantityBounds"
+        },
+        "bucket": {
+          "title": "Bucket",
+          "type": "string"
+        },
+        "expiry": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "after_grant": "#/$defs/AfterGrantExpiry",
+                  "end_of_window": "#/$defs/EndOfWindowExpiry",
+                  "fixed_at": "#/$defs/FixedExpiry",
+                  "never": "#/$defs/NeverExpiry",
+                  "subscription_end": "#/$defs/SubscriptionEndExpiry"
+                },
+                "propertyName": "type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/NeverExpiry"
+                },
+                {
+                  "$ref": "#/$defs/AfterGrantExpiry"
+                },
+                {
+                  "$ref": "#/$defs/EndOfWindowExpiry"
+                },
+                {
+                  "$ref": "#/$defs/FixedExpiry"
+                },
+                {
+                  "$ref": "#/$defs/SubscriptionEndExpiry"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expiry"
+        },
+        "lot_behavior": {
+          "default": "separate_lots",
+          "enum": ["separate_lots", "merge_and_refresh"],
+          "title": "Lot Behavior",
+          "type": "string"
+        }
+      },
+      "required": ["display_name", "price", "providers", "type", "credits_per_unit", "bucket"],
+      "title": "TopupOffer",
+      "type": "object"
+    },
+    "VolumeCharge": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "volume",
+          "title": "Type",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "tiers": {
+          "items": {
+            "$ref": "#/$defs/GraduatedTier"
+          },
+          "minItems": 1,
+          "title": "Tiers",
+          "type": "array"
+        }
+      },
+      "required": ["type", "measure", "tiers"],
+      "title": "VolumeCharge",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "title": "Version",
+      "type": "integer"
+    },
+    "catalog": {
+      "$ref": "#/$defs/CatalogConfig"
+    },
+    "pricing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PricingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "credits": {
+      "$ref": "#/$defs/CreditsConfig"
+    },
+    "entitlements": {
+      "$ref": "#/$defs/EntitlementsConfig"
+    },
+    "admission": {
+      "$ref": "#/$defs/AdmissionConfig"
+    },
+    "plans": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PlanDefinition"
+      },
+      "title": "Plans",
+      "type": "object"
+    },
+    "commerce": {
+      "$ref": "#/$defs/CommerceConfig"
+    }
+  },
+  "required": ["version", "credits"],
+  "title": "BursarConfig",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zonastery.github.io/bursar/pricing-config.schema.json",
+  "$comment": "Structural schema. Run `bursar config validate` for cross-reference and pricing semantics."
+}

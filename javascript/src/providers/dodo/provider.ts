@@ -1,4 +1,4 @@
-import DodoPayments from "dodopayments";
+import DodoPayments, { NotFoundError } from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
 import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
 import {
@@ -24,15 +24,6 @@ import type {
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
-
-/** Dodo SDK versions expose HTTP status under different transport keys. */
-function dodoErrorStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  const details = error as { status?: unknown; statusCode?: unknown; status_code?: unknown };
-  const raw = details.status ?? details.statusCode ?? details.status_code;
-  const status = Number(raw);
-  return Number.isFinite(status) ? status : undefined;
-}
 
 export class DodoProvider implements PaymentProvider {
   readonly provider = "dodo" as const;
@@ -85,8 +76,7 @@ export class DodoProvider implements PaymentProvider {
       const session = await client.checkoutSessions.retrieve(providerSessionId);
       return { paymentStatus: session.payment_status ?? null };
     } catch (error) {
-      const status = dodoErrorStatus(error);
-      if (status === 404) return null;
+      if (error instanceof NotFoundError) return null;
       throw error;
     }
   }
