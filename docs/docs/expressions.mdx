@@ -2,7 +2,7 @@
 
 bursar uses a safe expression language for pricing formulas. Same syntax works identically in Python and JavaScript.
 
-All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 4 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
+All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 6 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
 
 ## Arithmetic
 
@@ -68,7 +68,7 @@ output_tokens * 0.5 if output_tokens > 1000 else output_tokens * 0.3
 
 Every function validates its argument count (and `percentile`'s range) at config-load time. A wrong arity raises `ExpressionError` so a typo'd config fails fast rather than silently mispricing.
 
-`round()` uses `ROUND_HALF_UP` in both SDKs (it deliberately diverges from Python's built-in banker's rounding) so the two engines agree to the last digit. Note that these are *expression-level* helpers a config author can call — the engine itself never implicitly truncates or rounds the total beyond the final 4dp quantization.
+`round()` uses `ROUND_HALF_UP` in both SDKs (it deliberately diverges from Python's built-in banker's rounding) so the two engines agree to the last digit. Note that these are *expression-level* helpers a config author can call — the engine itself never implicitly truncates or rounds the total beyond the final 6dp quantization.
 
 ### `tier()` details
 

@@ -43,7 +43,7 @@ def test_parity_expression_cases(case: dict) -> None:
     else:
         result = evaluate_expression(expr, variables)
         assert _q(result) == Decimal(case["expected"])
-        # Byte-identical decimal string, quantized to 4dp.
+        # Byte-identical decimal string, quantized to 6dp.
         assert str(_q(result)) == case["expected"]
 
 
@@ -563,7 +563,7 @@ class TestLargeNumericLiterals:
 
     def test_large_literal_exact(self) -> None:
         result = evaluate_expression("x * 999999999999.9999", {"x": 1})
-        assert str(_q(result)) == "999999999999.9999"
+        assert str(_q(result)) == "999999999999.999900"
 
 
 # ── E8: Expression with no variables ─────────────────────────────────────────
@@ -607,22 +607,22 @@ class TestNestedFunctionCalls:
 
 
 class TestDecimalQuantizationBoundary:
-    """E10 — values near the 4dp boundary quantize with ROUND_HALF_UP."""
+    """E10 — values near the 6dp boundary quantize with ROUND_HALF_UP."""
 
     def test_below_half_ulp_rounds_to_zero(self) -> None:
-        # a * 0.00001 = 0.00001; 4dp quantize rounds down to 0.0000
-        result = evaluate_expression("a * 0.00001", {"a": 1})
-        assert str(_q(result)) == "0.0000"
+        # a * 0.00001 = 0.00001; 6dp quantize rounds down to 0.0000
+        result = evaluate_expression("a * 0.0000004", {"a": 1})
+        assert str(_q(result)) == "0.000000"
 
     def test_exactly_half_ulp_rounds_up(self) -> None:
-        # a * 0.000050 = 0.000050; exactly half a 4dp unit -> ROUND_HALF_UP -> 0.0001
-        result = evaluate_expression("a * 0.000050", {"a": 1})
-        assert str(_q(result)) == "0.0001"
+        # a * 0.000050 = 0.000050; exactly half a 6dp unit -> ROUND_HALF_UP -> 0.0001
+        result = evaluate_expression("a * 0.0000005", {"a": 1})
+        assert str(_q(result)) == "0.000001"
 
     def test_just_below_half_ulp_rounds_down(self) -> None:
         # a * 0.000049 = 0.000049 < 0.00005 -> rounds down to 0.0000
-        result = evaluate_expression("a * 0.000049", {"a": 1})
-        assert str(_q(result)) == "0.0000"
+        result = evaluate_expression("a * 0.00000049", {"a": 1})
+        assert str(_q(result)) == "0.000000"
 
 
 # ── E11: Parity pricing_cases via PricingEngine ──────────────────────────────

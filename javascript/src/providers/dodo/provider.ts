@@ -1,4 +1,4 @@
-import DodoPayments, { NotFoundError } from "dodopayments";
+import { NotFoundError } from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
 import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
 import {
@@ -23,13 +23,14 @@ import type {
   SavedPaymentChargeQuote,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
+import type { DodoClient } from "./client-contract.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
 
 export class DodoProvider implements PaymentProvider {
   readonly provider = "dodo" as const;
 
   constructor(
-    private getClient: () => DodoPayments,
+    private getClient: () => DodoClient,
     private config: { webhookKey: string; setupProductId?: string },
     private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
@@ -330,6 +331,15 @@ export class DodoProvider implements PaymentProvider {
     const lineItems: ChangePlanLineItem[] = [];
     for (const item of response.immediate_charge.line_items) {
       if (item.type === "subscription") {
+        if (
+          !item.product_id ||
+          item.unit_price == null ||
+          item.quantity == null ||
+          item.proration_factor == null ||
+          !item.currency
+        ) {
+          throw new Error("Dodo plan-change preview returned an incomplete subscription item");
+        }
         lineItems.push({
           productId: item.product_id,
           name: item.name ?? item.description ?? "",

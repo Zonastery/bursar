@@ -6,7 +6,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from bursar.billing.models import BillingEventResult
+from bursar.billing.types import BillingEventResult
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
 from bursar.providers.stripe.provider import StripeProvider

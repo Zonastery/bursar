@@ -69,11 +69,22 @@ export type BillingSubscriptionChangeState =
   | "failed"
   | "canceled";
 
+export interface BillingSubscriptionOfferContext {
+  offerId: string;
+  offerKey: string;
+  planId?: string | null;
+  plan?: string | null;
+  interval?: string | null;
+  intervalCount?: number | null;
+}
+
 export interface BillingSubscriptionChange {
   id: string;
   subscriptionId: string;
   fromOfferId: string;
   toOfferId: string;
+  fromOffer: BillingSubscriptionOfferContext;
+  toOffer: BillingSubscriptionOfferContext;
   effectiveAt: string | null;
   state: BillingSubscriptionChangeState;
   prorationBehavior: "provider_default" | "invoice_immediately" | "none";

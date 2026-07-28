@@ -96,18 +96,22 @@ export class BillingManagement {
   }
 
   async listCancellableProviderSubscriptionIds(userId: string): Promise<string[]> {
+    const subscriptions = await this.listCancellableSubscriptions(userId);
+    return subscriptions.map((subscription) => subscription.providerSubscriptionId);
+  }
+
+  async listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
     const cancellableStatuses = new Set<BillingSubscriptionStatus>([
       SUBSCRIPTION_STATUS.ACTIVE,
       SUBSCRIPTION_STATUS.TRIALING,
       SUBSCRIPTION_STATUS.INCOMPLETE,
     ]);
     const subscriptions = await this.store.getUserSubscriptions(userId);
-    return subscriptions.flatMap((subscription) =>
-      subscription.status &&
-      cancellableStatuses.has(subscription.status) &&
-      subscription.providerSubscriptionId
-        ? [subscription.providerSubscriptionId]
-        : [],
+    return subscriptions.filter(
+      (subscription) =>
+        subscription.status != null &&
+        cancellableStatuses.has(subscription.status) &&
+        Boolean(subscription.providerSubscriptionId),
     );
   }
 

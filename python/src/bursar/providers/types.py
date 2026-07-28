@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol
 
 class ProviderLogger(Protocol):
     def debug(self, msg: str, ctx: dict | None = None) -> None: ...
+    def info(self, msg: str, ctx: dict | None = None) -> None: ...
     def warning(self, msg: str, ctx: dict | None = None) -> None: ...
     def error(self, msg: str, ctx: dict | None = None) -> None: ...
 
@@ -22,11 +23,47 @@ class StdlibProviderLogger:
     def debug(self, msg: str, ctx: dict | None = None) -> None:
         self._logger.debug(msg, extra={"ctx": ctx} if ctx else None)
 
+    def info(self, msg: str, ctx: dict | None = None) -> None:
+        self._logger.info(msg, extra={"ctx": ctx} if ctx else None)
+
     def warning(self, msg: str, ctx: dict | None = None) -> None:
         self._logger.warning(msg, extra={"ctx": ctx} if ctx else None)
 
     def error(self, msg: str, ctx: dict | None = None) -> None:
         self._logger.error(msg, extra={"ctx": ctx} if ctx else None)
+
+
+def _noop(*args: Any, **kwargs: Any) -> None:
+    pass
+
+
+class _NormalizedProviderLogger:
+    """Wraps a logger, filling missing methods with no-ops.
+
+    Mirrors JS ``normalizeLogger`` in ``shared/logger.ts``.
+    """
+
+    def __init__(self, logger: Any = None) -> None:
+        self._debug = getattr(logger, "debug", _noop)
+        self._info = getattr(logger, "info", _noop)
+        self._warning = getattr(logger, "warning", _noop)
+        self._error = getattr(logger, "error", _noop)
+
+    def debug(self, msg: str, ctx: dict | None = None) -> None:
+        self._debug(msg, ctx)
+
+    def info(self, msg: str, ctx: dict | None = None) -> None:
+        self._info(msg, ctx)
+
+    def warning(self, msg: str, ctx: dict | None = None) -> None:
+        self._warning(msg, ctx)
+
+    def error(self, msg: str, ctx: dict | None = None) -> None:
+        self._error(msg, ctx)
+
+
+def normalize_provider_logger(logger: Any = None) -> ProviderLogger:
+    return _NormalizedProviderLogger(logger)
 
 
 ProviderResolveUserFn = Callable[[dict[str, Any], dict[str, str]], Awaitable[str | None]]

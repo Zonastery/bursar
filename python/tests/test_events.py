@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from bursar.events import CreditEvent, CreditEventEmitter
+from bursar.credits.events import CreditEvent, CreditEventEmitter
 
 
 def _event(event_type: str = "credits.deducted") -> CreditEvent:

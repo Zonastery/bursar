@@ -4,38 +4,89 @@ title: Canonical configuration
 
 # Canonical configuration
 
-The public `BursarConfig` contains only `usage`, `credits`, `plans`, and
-`payments`. Unknown keys are rejected, including removed historical shapes.
+`BursarConfig` is one strict versioned document. Pydantic defines the Python
+contract, generates the published JSON Schema, and AJV validates the same
+contract in JavaScript. Unknown fields and legacy shapes are rejected.
 
 ```yaml
-usage:
-  models:
-    _default: input_tokens + output_tokens
+version: 1
+
+pricing:
+  operations:
+    completion:
+      measures:
+        input_tokens: { unit: token }
+        output_tokens: { unit: token }
+      dimensions:
+        model: { type: string }
+  rate_cards:
+    standard:
+      operations:
+        completion:
+          rules: []
+          unmatched:
+            action: charge
+            charge:
+              type: sum
+              components:
+                - { type: per_unit, measure: input_tokens, rate: "0.05" }
+                - { type: per_unit, measure: output_tokens, rate: "0.10" }
+
 credits:
+  accounting: { unit: credit, scale: 6, rounding: half_up }
   buckets:
     purchased:
       priority: 10
+      expiry: { type: never }
+  default_bucket: purchased
+
+entitlements:
+  features:
+    api_access: { type: boolean, default: false }
+
 plans:
   free:
-    label: Free
-    included_credits: 1000
-payments:
-  subscriptions: {}
-  topups: {}
+    display_name: Free
+    rate_card: standard
+    allowed_operations: [completion]
+    features:
+      api_access: true
 ```
 
-Publish a draft, then activate it atomically:
+The optional `catalog`, `admission`, and `commerce` sections configure
+publication behavior, concurrency policies, provider-backed offers, and
+auto-recharge guardrails. All exact decimal values are strings; offer prices
+are integer minor units with an explicit currency.
 
-```python
-version = bursar.catalog.publish_draft(config, label="2026-07")
-bursar.catalog.activate(version)
+Validate before publication:
+
+```bash
+bursar config validate bursar.yaml
 ```
 
-```ts
-const version = await bursar.catalog.publishDraft(config, "2026-07");
-await bursar.catalog.activate(Number(version));
+Use `--json` to receive native Pydantic diagnostics suitable for CI and editor
+integrations.
+
+## Signup account trigger
+
+For immediate `account_created` grants, Bursar automatically installs its
+trigger hook on Better Auth's default `public."user"` table when that table
+exists during migration. No application code or setup call is required for
+that default table.
+
+To override the table, drop the default trigger and attach Bursar's trigger
+function in the SaaS's own migration:
+
+```sql
+DROP TRIGGER IF EXISTS bursar_account_created ON public."user";
+CREATE TRIGGER bursar_account_created
+AFTER INSERT ON app.users
+FOR EACH ROW
+EXECUTE FUNCTION bursar.provision_subject_account_on_insert();
 ```
 
-Activation synchronizes the catalog and marks the selected document active in
-one database operation. Pricing, billing offers, and auto-recharge policy all
-read that active document.
+The hook calls `bursar.account_for_subject(NEW.id, 'personal')`. It is
+idempotent and applies active `account_created` grant programs. If the user ID
+is not `NEW.id`, or the account kind is not `personal`, define a local wrapper
+trigger function that calls `bursar.account_for_subject()` with the appropriate
+mapping.

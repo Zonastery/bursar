@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from bursar.billing.billing_service import BillingServiceImpl
-from bursar.billing.models import (
+from bursar.billing.billing_store import BillingStore
+from bursar.billing.types import (
     BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
@@ -14,10 +15,9 @@ from bursar.billing.models import (
     BillingTopupResult,
     CheckoutIntent,
 )
-from bursar.billing.store import BillingStore
-from bursar.credits_service import CreditsService as CreditsServiceImpl
-from bursar.events import CreditEventEmitter
-from bursar.stores.base import CreditStore
+from bursar.credits.events import CreditEventEmitter
+from bursar.credits.service import CreditsService as CreditsServiceImpl
+from bursar.credits.store import CreditStore
 
 
 class BillingEventSink(Protocol):
@@ -55,11 +55,11 @@ class BillingService(BillingEventSink, Protocol):
 
     def create_or_get_checkout_intent(
         self,
-        actor_key: str,
+        subject_id: str,
         provider: str,
-        type: str,
-        product_id: str,
-        request_fingerprint: str,
+        checkout_kind: str,
+        product_key: str,
+        request_digest: str,
         expires_at: str,
     ) -> CheckoutIntent: ...
 
@@ -69,16 +69,6 @@ class BillingService(BillingEventSink, Protocol):
         status: str | None = None,
         provider_session_id: str | None = None,
         checkout_url: str | None = None,
-    ) -> None: ...
-
-    def record_subscription_conflict(
-        self,
-        user_id: str | None = None,
-        provider: str = "",
-        duplicate_subscription_id: str = "",
-        existing_subscription_id: str | None = None,
-        event_id: str | None = None,
-        metadata: dict | None = None,
     ) -> None: ...
 
 

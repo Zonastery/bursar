@@ -29,6 +29,7 @@ export type {
   BillingSubscriptionInfo,
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
+  BillingSubscriptionOfferContext,
   BillingSubscriptionChangeState,
   BillingSubscriptionState,
   BillingSubscriptionStatus,

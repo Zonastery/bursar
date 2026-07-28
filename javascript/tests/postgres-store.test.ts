@@ -400,6 +400,79 @@ describe("PostgresStore", () => {
     });
   });
 
+  it("hydrates subscription changes with revision-pinned offer context", async () => {
+    const pool = {
+      query: vi.fn((text: string, params?: unknown[]) => {
+        if (text.includes("get_open_billing_subscription_change")) {
+          return Promise.resolve({
+            rows: [
+              {
+                id: "change-1",
+                subscription_id: "subscription-1",
+                from_offer_id: "offer-old",
+                from_catalog_revision_id: "revision-old",
+                to_offer_id: "offer-new",
+                to_catalog_revision_id: "revision-new",
+                effective_at: new Date("2027-01-01T00:00:00.000Z"),
+                state: "scheduled",
+                proration_behavior: "none",
+                idempotency_key: "change-key",
+              },
+            ],
+          });
+        }
+        if (text.includes("get_catalog_offer_context")) {
+          return Promise.resolve({
+            rows: [
+              {
+                side: "from",
+                offer_id: params?.[0],
+                offer_key: "monk_monthly",
+                plan_id: "plan-old",
+                plan_key: "monk",
+                billing_unit: "month",
+                billing_count: 1,
+              },
+              {
+                side: "to",
+                offer_id: params?.[2],
+                offer_key: "sage_yearly",
+                plan_id: "plan-new",
+                plan_key: "sage",
+                billing_unit: "year",
+                billing_count: 1,
+              },
+            ],
+          });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+
+    const store = new PostgresBillingStore(pool);
+    const change = await store.getOpenBillingSubscriptionChange("dodo", "provider-subscription");
+
+    expect(change).toMatchObject({
+      fromOfferId: "offer-old",
+      toOfferId: "offer-new",
+      fromOffer: {
+        offerId: "offer-old",
+        offerKey: "monk_monthly",
+        plan: "monk",
+        interval: "month",
+      },
+      toOffer: {
+        offerId: "offer-new",
+        offerKey: "sage_yearly",
+        plan: "sage",
+        interval: "year",
+      },
+      effectiveAt: "2027-01-01T00:00:00.000Z",
+      prorationBehavior: "none",
+    });
+  });
+
   it("setActivePricing returns empty id for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
     const result = await store.setActivePricing({

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bursar.billing.models import BillingEventResult
+from bursar.billing.types import BillingEventResult
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 
 

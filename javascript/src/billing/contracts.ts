@@ -150,6 +150,7 @@ export interface BillingCapability extends BillingEventSink {
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
   getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
   listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
+  listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
   listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
   createBillingSubscriptionChange(
     input: BillingSubscriptionChangeInput,

@@ -15,14 +15,22 @@ from bursar.config import BursarConfig  # noqa: E402
 
 _REPO_ROOT = _ROOT.parent
 OUTPUT = _REPO_ROOT / "docs" / "pricing-config.schema.json"
+JAVASCRIPT_OUTPUT = _REPO_ROOT / "javascript" / "src" / "generated" / "pricing-config.schema.json"
 
 
 def main() -> None:
     schema = BursarConfig.model_json_schema()
     schema.setdefault("$schema", "https://json-schema.org/draft/2020-12/schema")
     schema.setdefault("$id", "https://zonastery.github.io/bursar/pricing-config.schema.json")
+    schema.setdefault(
+        "$comment",
+        "Structural schema. Run `bursar config validate` for cross-reference and pricing semantics.",
+    )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+    rendered = json.dumps(schema, indent=2) + "\n"
+    OUTPUT.write_text(rendered, encoding="utf-8")
+    JAVASCRIPT_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    JAVASCRIPT_OUTPUT.write_text(rendered, encoding="utf-8")
     print(f"Wrote {OUTPUT}")
 
 

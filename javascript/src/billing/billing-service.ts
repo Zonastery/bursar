@@ -116,6 +116,10 @@ export class BillingService {
     return this.management.listCancellableProviderSubscriptionIds(userId);
   }
 
+  async listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]> {
+    return this.management.listCancellableSubscriptions(userId);
+  }
+
   async pseudonymizeFinancialSubject(userId: string): Promise<void> {
     await this.management.pseudonymizeFinancialSubject(userId);
   }

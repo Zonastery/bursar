@@ -23,8 +23,8 @@ from pydantic import ValidationError
 from bursar.expr import ExpressionError
 
 if TYPE_CHECKING:
-    from bursar.stores.base import CreditStore
-    from bursar.stores.models import BursarConfigResult
+    from bursar.credits.store import CreditStore
+    from bursar.credits.types import BursarConfigResult
 
 try:
     from dotenv import load_dotenv
@@ -82,7 +82,7 @@ def _require_extra(extra: str) -> None:
 
 def _is_transient(exc: Exception) -> bool:
     """True only for the PostgREST schema-cache / connection errors worth retrying."""
-    from bursar.stores.base import StoreError
+    from bursar.credits.store import StoreError
 
     if not isinstance(exc, StoreError):
         return False
@@ -134,7 +134,7 @@ def _store_from_env(store_type: str | None = None) -> CreditStore:
     if not database_url:
         print("DATABASE_URL required", file=sys.stderr)
         raise SystemExit(1)
-    from bursar.stores.postgres import PostgresStore
+    from bursar.credits.postgres.store import PostgresStore
 
     return PostgresStore(database_url=database_url)
 
@@ -224,22 +224,28 @@ def _cmd_migrate(_args: argparse.Namespace) -> None:
     if not database_url:
         print("DATABASE_URL is required", file=sys.stderr)
         raise SystemExit(1)
-    from bursar.stores.postgres import run_migrations
+    from bursar.credits.postgres.store import run_migrations
 
     run_migrations(database_url)
     print("Migrations applied successfully.")
 
 
 def _cmd_config_validate(args: argparse.Namespace) -> None:
-    from bursar.config import BursarConfig
+    from bursar.config import ConfigError, load_config_from_dict
 
     data = _load_pricing_file(args.file)
     try:
-        BursarConfig.model_validate(data)
-    except (ValidationError, ExpressionError) as exc:
-        print(f"Validation failed: {exc}", file=sys.stderr)
+        load_config_from_dict(data)
+    except ConfigError as exc:
+        if args.json:
+            print(json.dumps({"valid": False, "errors": exc.errors()}, indent=2, default=str))
+        else:
+            print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-    print("Pricing config is valid.")
+    if args.json:
+        print(json.dumps({"valid": True, "errors": []}, indent=2))
+    else:
+        print("Pricing config is valid.")
 
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
@@ -385,6 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_validate = psub.add_parser("validate", help="Validate a pricing file without applying it")
     p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
+    p_validate.add_argument("--json", action="store_true", help="Emit native validator errors as JSON")
     p_validate.set_defaults(func=_cmd_config_validate)
 
     p_schema = psub.add_parser("schema", help="Print the Bursar config JSON Schema")

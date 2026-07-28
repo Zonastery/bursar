@@ -1,0 +1,170 @@
+"""Bursar configuration validation and loading — mirrors JS SDK ``config.ts``."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import ValidationError
+
+from bursar.config.parse_pricing import _validate_pricing
+from bursar.config.types import (
+    AutoRechargeGuardrails,
+    BursarConfig,
+    Charge,
+    ChargeUnmatched,
+    ConfigError,
+    CustomObjectReference,
+    DodoProductReference,
+    EnumFeature,
+    EqualMatcher,
+    ExpressionCharge,
+    FlatCharge,
+    GraduatedCharge,
+    InMatcher,
+    NotInMatcher,
+    OperationPricing,
+    PackageCharge,
+    PerUnitCharge,
+    PrefixMatcher,
+    PriceRule,
+    PricingConfig,
+    RangeMatcher,
+    StripePriceReference,
+    SubscriptionEndExpiry,
+    SubscriptionOffer,
+    SumCharge,
+    TopupOffer,
+    VolumeCharge,
+    _validate_map_keys,
+)
+
+
+def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
+    if config.pricing is not None:
+        _validate_pricing(config.pricing)
+    _validate_map_keys(config.plans, "plans")
+    subscription_plans = {
+        offer.plan for offer in config.commerce.offers.values() if isinstance(offer, SubscriptionOffer)
+    }
+    for plan_key, plan in config.plans.items():
+        if plan.revision_policy is None:
+            plan.revision_policy = "next_renewal" if plan_key in subscription_plans else "immediate"
+        if plan.rate_card is not None and (config.pricing is None or plan.rate_card not in config.pricing.rate_cards):
+            raise ValueError(f"plans.{plan_key}.rate_card references unknown rate card '{plan.rate_card}'")
+        if plan.allowed_operations and config.pricing is None:
+            raise ValueError(f"plans.{plan_key}.allowed_operations requires pricing")
+        for operation in plan.allowed_operations:
+            if config.pricing is None or operation not in config.pricing.operations:
+                raise ValueError(f"plans.{plan_key} references unknown operation '{operation}'")
+            if plan.rate_card is None or not config.pricing.resolves_operation(plan.rate_card, operation):
+                raise ValueError(f"plans.{plan_key} enables operation '{operation}' without pricing in its rate card")
+        for feature_key, value in plan.features.items():
+            definition = config.entitlements.features.get(feature_key)
+            if definition is None:
+                raise ValueError(f"plans.{plan_key}.features.{feature_key} references unknown feature '{feature_key}'")
+            if isinstance(definition, EnumFeature) and value not in definition.values:
+                raise ValueError(
+                    f"plans.{plan_key}.features.{feature_key}: '{value}' must be one of {definition.values}"
+                )
+        for quota_key, quota in plan.quotas.items():
+            if config.pricing is None or quota.operation not in config.pricing.operations:
+                raise ValueError(
+                    f"plans.{plan_key}.quotas.{quota_key} references unknown operation '{quota.operation}'"
+                )
+            measures = config.pricing.operations[quota.operation].measures
+            if quota.measure not in measures:
+                raise ValueError(f"plans.{plan_key}.quotas.{quota_key} references unknown measure '{quota.measure}'")
+    priorities = list(config.credits.buckets.values())
+    if len({b.priority for b in priorities}) != len(priorities):
+        raise ValueError("bucket priorities must be unique")
+    if config.pricing is not None:
+        for policy_key, policy in config.admission.policies.items():
+            unknown = set(policy.operations) - set(config.pricing.operations)
+            if unknown:
+                raise ValueError(
+                    f"admission.policies.{policy_key}.operations references unknown operations {sorted(unknown)}"
+                )
+    for program_key, program in config.credits.grant_programs.items():
+        unknown_plans = set(program.eligibility.plans) - set(config.plans)
+        if unknown_plans:
+            raise ValueError(
+                f"credits.grant_programs.{program_key}.eligibility references unknown plans {sorted(unknown_plans)}"
+            )
+        for award in program.awards:
+            if award.bucket not in config.credits.buckets:
+                raise ValueError(
+                    f"credits.grant_programs.{program_key}.awards bucket '{award.bucket}' references unknown bucket"
+                )
+    for offer_key, offer in config.commerce.offers.items():
+        if isinstance(offer, SubscriptionOffer):
+            if offer.plan not in config.plans:
+                raise ValueError(f"commerce.offers.{offer_key}.plan references unknown plan '{offer.plan}'")
+            if offer.cycle_grant is not None and offer.cycle_grant.bucket not in config.credits.buckets:
+                raise ValueError(f"commerce.offers.{offer_key}.cycle_grant references unknown bucket")
+        else:
+            if offer.bucket not in config.credits.buckets:
+                raise ValueError(f"commerce.offers.{offer_key}.bucket references unknown bucket")
+            if isinstance(offer.expiry, SubscriptionEndExpiry):
+                raise ValueError(f"commerce.offers.{offer_key} top-up cannot use subscription_end expiry")
+    auto = config.commerce.auto_recharge
+    if auto is not None:
+        currencies: set[str] = set()
+        for topup_key in auto.eligible_topups:
+            offer = config.commerce.offers.get(topup_key)
+            if not isinstance(offer, TopupOffer):
+                raise ValueError(f"commerce.auto_recharge references non-top-up offer '{topup_key}'")
+            currencies.add(offer.price.currency)
+        if len(currencies) != 1:
+            raise ValueError("commerce.auto_recharge eligible top-ups must use one currency")
+    return config
+
+
+def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
+    try:
+        config = BursarConfig.model_validate(data)
+        validate_bursar_config(config)
+        return config
+    except ConfigError:
+        raise
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    except ValidationError as exc:
+        raise ConfigError(validation_error=exc) from exc
+
+
+def canonical_bursar_config_dict(data: dict[str, Any]) -> dict[str, Any]:
+    return load_config_from_dict(data).model_dump(mode="json", exclude_none=True)
+
+
+__all__ = [
+    "AutoRechargeGuardrails",
+    "BursarConfig",
+    "canonical_bursar_config_dict",
+    "Charge",
+    "ChargeUnmatched",
+    "ConfigError",
+    "CustomObjectReference",
+    "DodoProductReference",
+    "EqualMatcher",
+    "ExpressionCharge",
+    "FlatCharge",
+    "GraduatedCharge",
+    "InMatcher",
+    "load_config_from_dict",
+    "NotInMatcher",
+    "OperationPricing",
+    "PackageCharge",
+    "PerUnitCharge",
+    "PrefixMatcher",
+    "PriceRule",
+    "PricingConfig",
+    "RangeMatcher",
+    "StripePriceReference",
+    "SubscriptionEndExpiry",
+    "SubscriptionOffer",
+    "SumCharge",
+    "TopupOffer",
+    "validate_bursar_config",
+    "VolumeCharge",
+    "_validate_map_keys",
+]

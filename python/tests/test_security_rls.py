@@ -2,7 +2,7 @@
 
 import pytest
 
-from bursar.stores.postgres import PostgresStore
+from bursar.credits.postgres.store import PostgresStore
 
 pytestmark = [pytest.mark.integration]
 

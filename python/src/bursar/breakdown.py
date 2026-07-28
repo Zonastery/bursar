@@ -26,11 +26,11 @@ class CostBreakdown(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model_credits: Decimal = Decimal("0.0000")
-    tool_credits: Decimal = Decimal("0.0000")
-    search_credits: Decimal = Decimal("0.0000")
-    cache_savings: Decimal = Decimal("0.0000")
-    flat_job_credits: Decimal = Decimal("0.0000")
-    operation_credits: Decimal = Decimal("0.0000")
-    total: Decimal = Decimal("0.0000")
+    model_credits: Decimal = Decimal("0.000000")
+    tool_credits: Decimal = Decimal("0.000000")
+    search_credits: Decimal = Decimal("0.000000")
+    cache_savings: Decimal = Decimal("0.000000")
+    flat_job_credits: Decimal = Decimal("0.000000")
+    operation_credits: Decimal = Decimal("0.000000")
+    total: Decimal = Decimal("0.000000")
     breakdown: dict[str, Any] = Field(default_factory=dict)

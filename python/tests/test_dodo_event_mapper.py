@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bursar.billing.models import BillingEventResult, BillingEventType
+from bursar.billing.types import BillingEventResult, BillingEventType
 from bursar.providers.dodo.event_mapper import (
     _normalize_date,
     handle_dodo_billing_event,

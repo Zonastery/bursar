@@ -25,6 +25,7 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    normalize_provider_logger,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class DodoProvider(PaymentProvider):
         self._config = config
         self._sink = sink
         self._resolve_user = resolve_user
-        self._logger = logger
+        self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> dict:
         client = self._get_client()
@@ -100,15 +101,8 @@ class DodoProvider(PaymentProvider):
                 key=webhook_key,
             )
         except Exception as exc:
-            logger.error("Dodo webhook unwrap failed: %s", exc)
-            is_transient = isinstance(exc, (ConnectionError, TimeoutError))
-            if not is_transient:
-                err_str = str(exc).lower()
-                is_transient = any(
-                    kw in err_str
-                    for kw in ("timeout", "connection refused", "connection reset", "eof", "name resolution")
-                )
-            return {"received": False, "retryable": is_transient, "error": str(exc)}
+            self._logger.warning("Dodo webhook verification failed", {"error": str(exc)})
+            return {"received": False, "retryable": False}
 
         event_type = getattr(event, "type", None) or event.get("type", "")
         event_data = getattr(event, "data", None) or event.get("data", {})
@@ -131,7 +125,7 @@ class DodoProvider(PaymentProvider):
         metadata = {str(k): str(v) for k, v in raw_metadata.items()}
 
         user_id: str | None = metadata.get("userId")
-        if not user_id and self._resolve_user:
+        if not user_id and self._resolve_user is not None and event_type not in ("payment.failed", "checkout.expired"):
             user_id = await self._resolve_user(data_dict, metadata)
 
         await handle_dodo_billing_event(
@@ -178,13 +172,12 @@ class DodoProvider(PaymentProvider):
 
     async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
         client = self._get_client()
-        session = await client.checkout_sessions.retrieve(provider_session_id)
+        try:
+            session = await client.checkout_sessions.retrieve(provider_session_id)
+        except Exception:
+            return None
         status = getattr(session, "payment_status", None) or session.get("payment_status")
-        if status in ("succeeded", "paid"):
-            return {"paymentStatus": "succeeded"}
-        if status in ("failed", "unpaid"):
-            return {"paymentStatus": "failed"}
-        return {"paymentStatus": None}
+        return {"paymentStatus": status}
 
     async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
         product_id = params.product_id or self._config.get("setup_product_id")

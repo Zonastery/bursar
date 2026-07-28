@@ -1,14 +1,15 @@
 """PostgreSQL integration coverage for the public v1 Bursar configuration."""
 
+from copy import deepcopy
 from decimal import Decimal
 
 import psycopg2
 import pytest
 
-from bursar.credits_service import CreditsService
+from bursar.credits.postgres.store import PostgresStore, run_migrations
+from bursar.credits.service import CreditsService
+from bursar.credits.store import StoreError
 from bursar.metrics import UsageMetrics
-from bursar.stores.base import StoreError
-from bursar.stores.postgres import PostgresStore, run_migrations
 
 pytestmark = [pytest.mark.integration]
 USER_ID = "00000000-0000-0000-0000-000000000901"
@@ -16,22 +17,59 @@ REPLAY_USER_ID = "00000000-0000-0000-0000-000000000911"
 
 CONFIG = {
     "version": 1,
-    "usage": {
-        "operations": {"completion": {"measures": ["input_tokens", "output_tokens"], "dimensions": ["model"]}},
+    "pricing": {
+        "operations": {
+            "completion": {
+                "measures": {
+                    "input_tokens": {"unit": "token"},
+                    "output_tokens": {"unit": "token"},
+                },
+                "dimensions": {"model": {"type": "string"}},
+            }
+        },
         "rate_cards": {
             "standard": {
-                "prices": {
-                    "completion": [
-                        {"match": {"model": {"prefix": "premium-"}}, "formula": "input_tokens * 2 + output_tokens * 3"},
-                        {"default": True, "formula": "input_tokens + output_tokens"},
-                    ]
+                "operations": {
+                    "completion": {
+                        "rules": [
+                            {
+                                "when": {
+                                    "model": {
+                                        "op": "prefix",
+                                        "value": "premium-",
+                                    }
+                                },
+                                "charge": {
+                                    "type": "expression",
+                                    "formula": "input_tokens * 2 + output_tokens * 3",
+                                },
+                            }
+                        ],
+                        "unmatched": {
+                            "action": "charge",
+                            "charge": {
+                                "type": "expression",
+                                "formula": "input_tokens + output_tokens",
+                            },
+                        },
+                    }
                 }
             }
         },
     },
     "credits": {
-        "buckets": {"grant": {"expires_after": {"unit": "day", "count": 7}}, "purchased": {}},
-        "spend_order": ["grant", "purchased"],
+        "accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"},
+        "buckets": {
+            "grant": {
+                "priority": 10,
+                "expiry": {
+                    "type": "after_grant",
+                    "interval": {"unit": "day", "count": 7},
+                    "timezone": "UTC",
+                },
+            },
+            "purchased": {"priority": 20, "expiry": {"type": "never"}},
+        },
         "default_bucket": "purchased",
     },
     "plans": {"pro": {"display_name": "Pro", "rate_card": "standard"}},
@@ -108,6 +146,7 @@ def test_removed_compatibility_objects_are_absent(pg_database_url: str) -> None:
 
 def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:
     service = CreditsService(store=store)
+    service.publish_pricing_from_dict(CONFIG)
     first = service.add_credits(
         REPLAY_USER_ID,
         Decimal("25"),
@@ -128,8 +167,13 @@ def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStor
 def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore) -> None:
     service = CreditsService(store=store)
     service.publish_pricing_from_dict(CONFIG)
-    _ensure_user(store)
-    service.add_credits(USER_ID, Decimal("100"), "purchase", bucket="purchased")
+    service.add_credits(
+        USER_ID,
+        Decimal("100"),
+        "purchase",
+        bucket="purchased",
+        idempotency_key="new-schema-grant-1",
+    )
 
     deduction = service.deduct(
         USER_ID,
@@ -143,21 +187,141 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     assert service.get_balance(USER_ID).balance == Decimal("84")
     loaded = store.get_active_pricing()
     assert loaded is not None
-    assert loaded.config["usage"]["operations"]["completion"]
+    assert loaded.config["pricing"]["operations"]["completion"]
 
 
-def test_spend_order_is_applied_by_postgres_store(store: PostgresStore) -> None:
+def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> None:
     service = CreditsService(store=store)
     service.publish_pricing_from_dict(CONFIG)
-    _ensure_user(store)
-    service.add_credits(USER_ID, Decimal("10"), "purchase", bucket="grant")
-    service.add_credits(USER_ID, Decimal("10"), "purchase", bucket="purchased")
+    service.add_credits(
+        USER_ID,
+        Decimal("10"),
+        "purchase",
+        bucket="grant",
+        idempotency_key="spend-order-grant",
+    )
+    service.add_credits(
+        USER_ID,
+        Decimal("10"),
+        "purchase",
+        bucket="purchased",
+        idempotency_key="spend-order-purchased",
+    )
 
     service.deduct(
         USER_ID,
-        UsageMetrics(operation="completion", measures={"input_tokens": 5, "output_tokens": 0}),
+        UsageMetrics(
+            operation="completion",
+            measures={"input_tokens": 5, "output_tokens": 0},
+            dimensions={"model": "standard"},
+        ),
         idempotency_key="new-schema-charge-2",
     )
     buckets = {row.bucket_key: row.balance for row in service.get_bucket_balances(USER_ID).buckets}
     assert buckets["grant"] == Decimal("5")
     assert buckets["purchased"] == Decimal("10")
+
+
+def test_account_created_grant_program_posts_every_award(
+    store: PostgresStore,
+) -> None:
+    config = deepcopy(CONFIG)
+    config["credits"]["grant_programs"] = {
+        "welcome": {
+            "trigger": "account_created",
+            "awards": [
+                {
+                    "recipient": "subject",
+                    "amount": "2",
+                    "bucket": "purchased",
+                },
+                {
+                    "recipient": "subject",
+                    "amount": "3",
+                    "bucket": "purchased",
+                },
+            ],
+            "max_awards_per_subject": 1,
+            "idempotency_scope": "subject",
+        }
+    }
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(config)
+
+    service.add_credits(
+        REPLAY_USER_ID,
+        Decimal("1"),
+        entry_type="purchase",
+        idempotency_key="grant-program-trigger",
+    )
+
+    assert service.get_balance(REPLAY_USER_ID).balance == Decimal("6")
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.account_creation_grants
+            WHERE subject_id = %s
+            """,
+            [REPLAY_USER_ID],
+        )
+        assert cursor.fetchone() == (2,)
+
+
+def test_plan_policies_project_from_typed_references(
+    store: PostgresStore,
+) -> None:
+    config = deepcopy(CONFIG)
+    config["pricing"]["operations"]["completion"]["measures"]["calls"] = {"unit": "call"}
+    config["credits"]["policies"] = {"line": {"type": "credit_line", "limit": "20"}}
+    config["admission"] = {
+        "policies": {
+            "pro": {
+                "max_in_flight": 2,
+                "operations": {"completion": {"max_in_flight": 1}},
+            }
+        }
+    }
+    config["plans"]["pro"].update(
+        {
+            "credit_policy": "line",
+            "admission_policy": "pro",
+            "quotas": {
+                "completion_calls": {
+                    "operation": "completion",
+                    "measure": "calls",
+                    "limit": "5",
+                    "window": {
+                        "type": "rolling",
+                        "duration": {"unit": "hour", "count": 1},
+                    },
+                    "enforcement": "block",
+                }
+            },
+        }
+    )
+
+    CreditsService(store=store).publish_pricing_from_dict(config)
+
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT spending, limits, quotas
+            FROM bursar.catalog_plans
+            WHERE plan_key = 'pro'
+              AND catalog_revision_id = (
+                SELECT id
+                FROM bursar.catalog_revisions
+                WHERE status = 'active'
+              )
+            """
+        )
+        spending, limits, quotas = cursor.fetchone()
+
+    assert spending["mode"] == "overdraft"
+    assert spending["overdraft_limit"] == "20"
+    assert spending["max_concurrent"] == "2"
+    assert spending["operations"]["completion"]["max_concurrent"] == 1
+    assert limits["completion_calls"]["max_calls"] == 5
+    assert limits["completion_calls"]["action"] == "deny"
+    assert quotas["completion_calls"]["measure"] == "calls"

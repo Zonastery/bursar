@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
-from bursar.billing.auto_recharge import AutoRechargeService
+from bursar.billing.auto_recharge_service import AutoRechargeService
 
 try:
     __version__ = version("bursar")
@@ -43,7 +43,8 @@ from bursar.bursar import BillingEventSink, BillingService, Bursar, CatalogServi
 if TYPE_CHECKING:
     from bursar.billing import PostgresBillingStore
 from bursar.config import BursarConfig, ConfigError
-from bursar.credits_service import (
+from bursar.credits.events import CreditEvent, CreditEventEmitter
+from bursar.credits.service import (
     ConcurrencyLimitError,
     CreditError,
     FeatureNotEntitledError,
@@ -52,29 +53,14 @@ from bursar.credits_service import (
     LeaseNotFoundError,
     PricingNotLoadedError,
 )
-from bursar.engine import PricingEngine
-from bursar.events import CreditEvent, CreditEventEmitter
-from bursar.expr import ExpressionError, evaluate_expression, validate_expression
-from bursar.metrics import UsageMetrics
-from bursar.providers.types import (
-    CheckoutParams,
-    CreateCustomerParams,
-    PaymentMethodInfo,
-    PaymentMethodSetupParams,
-    PaymentProvider,
-    PortalParams,
-    ProviderLogger,
-    UpdatePaymentMethodParams,
-    WebhookRequest,
-)
-from bursar.stores.base import (
+from bursar.credits.store import (
     CapabilityNotSupportedError,
     CapReachedError,
     FeatureLimitReachedError,
     RefundError,
     StoreError,
 )
-from bursar.stores.models import (
+from bursar.credits.types import (
     AddCreditsResult,
     AddTeamMemberResult,
     AggregateStatsRow,
@@ -93,7 +79,6 @@ from bursar.stores.models import (
     DailySpendRow,
     DeductionResult,
     FeatureLimit,
-    FeatureLimitResult,
     GetUserPlanResult,
     LeaseResult,
     LedgerCursor,
@@ -101,6 +86,8 @@ from bursar.stores.models import (
     LedgerPage,
     OperationPolicy,
     PlanDefinition,
+    PlanMigrationBatchResult,
+    PlanMigrationStartResult,
     RefundResult,
     ReleaseResult,
     SetUserPlanResult,
@@ -113,6 +100,20 @@ from bursar.stores.models import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
+)
+from bursar.engine import PricingEngine
+from bursar.expr import ExpressionError, evaluate_expression, validate_expression
+from bursar.metrics import UsageMetrics
+from bursar.providers.types import (
+    CheckoutParams,
+    CreateCustomerParams,
+    PaymentMethodInfo,
+    PaymentMethodSetupParams,
+    PaymentProvider,
+    PortalParams,
+    ProviderLogger,
+    UpdatePaymentMethodParams,
+    WebhookRequest,
 )
 
 
@@ -187,7 +188,6 @@ __all__ = [
     "ExpressionError",
     "FeatureLimit",
     "FeatureLimitReachedError",
-    "FeatureLimitResult",
     "FeatureNotEntitledError",
     "GetUserPlanResult",
     "InsufficientCreditsError",
@@ -195,6 +195,8 @@ __all__ = [
     "LeaseNotFoundError",
     "LeaseResult",
     "OperationPolicy",
+    "PlanMigrationBatchResult",
+    "PlanMigrationStartResult",
     "PaymentMethodInfo",
     "PaymentMethodSetupParams",
     "PaymentProvider",

@@ -23,18 +23,36 @@ expiry. `credit_leases` hold temporary reservations. Plan membership is
 non-monetary state in `account_plan_assignments`; usage windows and allowance
 consumption are keyed by account.
 
-The baseline is ordered for readability:
+The baseline is ordered by dependency and domain for readability:
 
 ```text
 001_schema_and_types.sql
-010_tables.sql
-020_functions.sql
-025_billing_functions.sql
-026_billing_event_functions.sql
-027_auto_recharge_functions.sql
-030_triggers.sql
-040_security.sql
-050_privileges.sql
+002_schema_types_tables.sql
+003_financial_policy_tables.sql
+004_billing_tables.sql
+005_constraints.sql
+006_triggers.sql
+007_indexes.sql
+008_catalog_rpc.sql
+009_credit_account_rpc.sql
+010_usage_charge_rpc.sql
+011_credit_lot_rpc.sql
+012_team_credit_rpc.sql
+013_allowance_charge_rpc.sql
+014_lease_capacity_rpc.sql
+015_policy_window_rpc.sql
+016_operation_charge_rpc.sql
+017_operation_lease_rpc.sql
+018_team_rpc.sql
+019_billing_lifecycle_rpc.sql
+020_auto_recharge_rpc.sql
+021_billing_customer_rpc.sql
+022_billing_credit_recharge_rpc.sql
+023_billing_document_rpc.sql
+024_query_rpc.sql
+025_plan_migration_rpc.sql
+026_privileges.sql
+027_documentation.sql
 ```
 
 Each object is created once. Future production changes append migration files

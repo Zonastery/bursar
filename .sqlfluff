@@ -1,0 +1,19 @@
+[sqlfluff]
+dialect = postgres
+templater = raw
+large_file_skip_byte_limit = 0
+max_line_length = 120
+# The baseline contains legacy PL/pgSQL layout and quoted JSON expressions that
+# SQLFluff currently reports as style violations. Keep structural checks on;
+# tighten these exclusions incrementally as individual domains are rewritten.
+exclude_rules = LT01,LT02,LT05,CP02,CP04,RF04,PG01
+
+[sqlfluff:indentation]
+indent_unit = space
+tab_space_size = 4
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = upper
+
+[sqlfluff:rules:layout.long_lines]
+max_line_length = 120

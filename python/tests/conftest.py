@@ -46,7 +46,7 @@ from collections.abc import Generator, Iterator
 import psycopg2
 import pytest
 
-from bursar.stores.postgres import PostgresStore, run_migrations
+from bursar.credits.postgres.store import PostgresStore, run_migrations
 
 
 def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
@@ -110,7 +110,7 @@ def _preseed_supabase_objects(dsn: str) -> None:
                 else:
                     conn.commit()
 
-            # 2. Minimal auth.users table for the signup-bonus trigger
+            # 2. Minimal Supabase auth.users table.
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS auth.users (
@@ -121,9 +121,7 @@ def _preseed_supabase_objects(dsn: str) -> None:
                 """
             )
 
-            # 2b. Minimal public.user table for the signup-bonus trigger
-            # (migration 018 moved the trigger from auth.users to
-            # better-auth's "user" table).
+            # 2b. Minimal Better Auth user table matching the host application.
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS public."user" (
@@ -237,7 +235,8 @@ def _truncate_bursar_tables(dsn: str) -> None:
                           AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
                                            OR tablename IN ('teams', 'team_members')
                                OR tablename LIKE 'billing_%'
-                               OR tablename IN ('bursar_config', 'signup_grant_failures'))
+                               OR tablename LIKE 'catalog_%'
+                               OR tablename = 'account_creation_grants')
                     LOOP
                         EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
                     END LOOP;

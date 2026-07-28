@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
 
@@ -20,7 +20,8 @@ import psycopg2.pool
 import pytest
 
 from bursar.billing.billing_service import BillingServiceImpl
-from bursar.billing.models import (
+from bursar.billing.postgres.store import PostgresBillingStore
+from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
@@ -31,8 +32,7 @@ from bursar.billing.models import (
     BillingSubscriptionStatus,
     ProviderRef,
 )
-from bursar.billing.postgres import PostgresBillingStore
-from bursar.credits_service import CreditsService
+from bursar.credits.service import CreditsService
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 
 pytestmark = [pytest.mark.integration]
@@ -55,71 +55,166 @@ DODO_PRODUCT_ID = "prod_dodo_monthly"
 
 PRICING_DICT = {
     "version": 1,
-    "usage": {
-        "operations": {"inference": {"measures": ["tokens"]}},
-        "rate_cards": {"standard": {"prices": {"inference": [{"default": True, "formula": "tokens"}]}}},
+    "pricing": {
+        "operations": {
+            "inference": {
+                "measures": {"tokens": {"unit": "token"}},
+                "dimensions": {},
+            }
+        },
+        "rate_cards": {
+            "standard": {
+                "operations": {
+                    "inference": {
+                        "rules": [],
+                        "unmatched": {
+                            "action": "charge",
+                            "charge": {
+                                "type": "per_unit",
+                                "measure": "tokens",
+                                "rate": "1",
+                            },
+                        },
+                    }
+                }
+            }
+        },
     },
     "credits": {
-        "buckets": {"purchased": {}},
-        "spend_order": ["purchased"],
+        "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up",
+        },
+        "buckets": {
+            "purchased": {
+                "priority": 10,
+                "expiry": {"type": "never"},
+            }
+        },
         "default_bucket": "purchased",
     },
     "plans": {
         "free": {
             "display_name": "Free",
             "rate_card": "standard",
-            "included_credits": {"amount": 1000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "1000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
         "pro": {
             "display_name": "Pro",
             "rate_card": "standard",
-            "included_credits": {"amount": 100000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "100000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
         "enterprise": {
             "display_name": "Enterprise",
             "rate_card": "standard",
-            "included_credits": {"amount": 1000000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "1000000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
     },
-    "payments": {
-        "subscriptions": {
+    "commerce": {
+        "providers": {
+            "stripe": {"type": "stripe"},
+            "dodo": {"type": "dodo"},
+        },
+        "offers": {
             "pro_monthly": {
-                "plan": "pro",
-                "billing_period": {"unit": "month", "count": 1},
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_monthly_1000"}},
-                    "dodo": {"lookup": {"type": "product_id", "value": DODO_PRODUCT_ID}},
+                "type": "subscription",
+                "display_name": "Pro Monthly",
+                "price": {
+                    "amount_minor": 1000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_monthly_1000",
+                    },
+                    "dodo": {
+                        "type": "dodo_product",
+                        "product_id": "prod_dodo_monthly",
+                    },
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month", "count": 1},
             },
             "enterprise_yearly": {
-                "plan": "enterprise",
-                "billing_period": {"unit": "year", "count": 1},
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_yearly_10000"}},
+                "type": "subscription",
+                "display_name": "Enterprise Yearly",
+                "price": {
+                    "amount_minor": 10000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_yearly_10000",
+                    }
+                },
+                "plan": "enterprise",
+                "billing_interval": {"unit": "year", "count": 1},
             },
             "cycle_grant_monthly": {
-                "plan": "pro",
-                "billing_period": {"unit": "month", "count": 1},
-                "stack_credits": True,
-                "renewal_credits": {
-                    "amount": 5000,
-                    "bucket": "purchased",
-                    "behavior": "replace",
-                    "on_subscription_end": "expire",
+                "type": "subscription",
+                "display_name": "Cycle Grant Monthly",
+                "price": {
+                    "amount_minor": 5000,
+                    "currency": "USD",
                 },
                 "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_cycle_grant_5000"}},
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_cycle_grant_5000",
+                    }
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month", "count": 1},
+                "cycle_grant": {
+                    "amount": "5000",
+                    "bucket": "purchased",
+                    "renewal": "replace_previous",
+                    "expiry": {"type": "subscription_end"},
                 },
             },
-        },
-        "topups": {
             "standard_topup": {
-                "credits": 1000,
-                "bucket": "purchased",
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_topup_credits"}},
+                "type": "topup",
+                "display_name": "Standard Top-up",
+                "price": {
+                    "amount_minor": 1000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_topup_credits",
+                    }
+                },
+                "credits_per_unit": "1000",
+                "bucket": "purchased",
+                "quantity": {"minimum": 1, "maximum": 100, "default": 1},
             },
         },
     },
@@ -213,8 +308,8 @@ class TestCustomerCrud:
         _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
-        result = bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
-        assert result.get("error") == "user_id_mismatch"
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
         assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:
@@ -264,6 +359,7 @@ class TestSubscriptionCrud:
                 user_id=USER_ID,
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
+                offer_key="pro_monthly",
                 status="active",
             )
         )
@@ -674,11 +770,17 @@ class TestBillingServiceImplLifecycle:
         _bootstrap_auth_users(pg_database_url)
         bs, cm, _sink = _make_components(pg_database_url, pg_store)
         config = deepcopy(PRICING_DICT)
-        config["payments"]["subscriptions"]["new_offer"] = {
+        config["commerce"]["offers"]["new_offer"] = {
+            "type": "subscription",
+            "display_name": "New Offer",
+            "price": {"amount_minor": 1000, "currency": "USD"},
             "plan": "free",
-            "billing_period": {"unit": "month", "count": 1},
+            "billing_interval": {"unit": "month", "count": 1},
             "providers": {
-                "stripe": {"lookup": {"type": "price_id", "value": "price_new_offer"}},
+                "stripe": {
+                    "type": "stripe_price",
+                    "price_id": "price_new_offer",
+                },
             },
         }
         cm.publish_pricing_from_dict(config)
@@ -821,7 +923,7 @@ class TestDodoBillingIntegration:
                     "previous_billing_date": datetime.now(UTC).strftime(
                         "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
                     ),
-                    "next_billing_date": datetime.now(UTC).strftime(
+                    "next_billing_date": (datetime.now(UTC) + timedelta(days=30)).strftime(
                         "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
                     ),
                 },
@@ -943,7 +1045,9 @@ class TestDodoBillingIntegration:
         )
 
         js_date = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
-        js_date_future = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        js_date_future = (datetime.now(UTC) + timedelta(days=30)).strftime(
+            "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
+        )
 
         asyncio.run(
             handle_dodo_billing_event(

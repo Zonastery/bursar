@@ -7,6 +7,7 @@ import type {
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
+  BillingSubscriptionOfferContext,
   BillingSubscriptionState,
   BillingSubscriptionStatus,
   CheckoutIntent,
@@ -621,12 +622,57 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  private rowToSubscriptionChange(r: Record<string, unknown>): BillingSubscriptionChange {
+  private async getSubscriptionOfferContexts(r: Record<string, unknown>): Promise<{
+    fromOffer: BillingSubscriptionOfferContext;
+    toOffer: BillingSubscriptionOfferContext;
+  }> {
+    const rows = await this.queryFn(
+      `SELECT requested.side, requested.offer_id, context.*
+       FROM (
+         VALUES
+           ('from', $1::uuid, $2::uuid),
+           ('to', $3::uuid, $4::uuid)
+       ) AS requested(side, offer_id, catalog_revision_id)
+       CROSS JOIN LATERAL bursar.get_catalog_offer_context(
+         requested.offer_id,
+         requested.catalog_revision_id
+       ) AS context`,
+      [r.from_offer_id, r.from_catalog_revision_id, r.to_offer_id, r.to_catalog_revision_id],
+    );
+    const bySide = new Map(
+      rows.map((row) => {
+        const context = row as Record<string, unknown>;
+        return [String(context.side), context] as const;
+      }),
+    );
+    const mapContext = (side: "from" | "to"): BillingSubscriptionOfferContext => {
+      const context = bySide.get(side);
+      if (context?.offer_key == null) {
+        throw new Error(`subscription change ${side}-offer context not found`);
+      }
+      return {
+        offerId: String(context.offer_id),
+        offerKey: String(context.offer_key),
+        planId: context.plan_id ? String(context.plan_id) : null,
+        plan: context.plan_key ? String(context.plan_key) : null,
+        interval: context.billing_unit ? String(context.billing_unit) : null,
+        intervalCount: context.billing_count == null ? null : Number(context.billing_count),
+      };
+    };
+    return { fromOffer: mapContext("from"), toOffer: mapContext("to") };
+  }
+
+  private async rowToSubscriptionChange(
+    r: Record<string, unknown>,
+  ): Promise<BillingSubscriptionChange> {
+    const { fromOffer, toOffer } = await this.getSubscriptionOfferContexts(r);
     return {
       id: String(r.id),
       subscriptionId: String(r.subscription_id),
       fromOfferId: String(r.from_offer_id),
       toOfferId: String(r.to_offer_id),
+      fromOffer,
+      toOffer,
       effectiveAt: toIso(r.effective_at),
       state: String(r.state) as BillingSubscriptionChange["state"],
       prorationBehavior: String(

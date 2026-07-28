@@ -7,89 +7,152 @@ from bursar.engine import PricingEngine
 from bursar.metrics import UsageMetrics
 
 
-def pricing() -> dict:
+def base_config() -> dict:
     return {
         "version": 1,
-        "usage": {
+        "pricing": {
             "operations": {
-                "completion": {"measures": ["input_tokens", "output_tokens"], "dimensions": ["model"]},
-                "image": {"measures": ["images"], "dimensions": []},
+                "completion": {
+                    "measures": {
+                        "input_tokens": {"unit": "token"},
+                        "output_tokens": {"unit": "token"},
+                    },
+                    "dimensions": {"model": {"type": "string"}},
+                }
             },
             "rate_cards": {
                 "standard": {
-                    "prices": {
-                        "completion": [
-                            {"match": {"model": {"exact": "fast"}}, "formula": "input_tokens * 2"},
-                            {
-                                "match": {"model": {"prefix": "premium-"}},
-                                "formula": "input_tokens * 3 + output_tokens * 4",
+                    "operations": {
+                        "completion": {
+                            "rules": [
+                                {
+                                    "when": {"model": {"op": "prefix", "value": "gpt-"}},
+                                    "charge": {
+                                        "type": "per_unit",
+                                        "measure": "input_tokens",
+                                        "rate": "2",
+                                    },
+                                }
+                            ],
+                            "unmatched": {
+                                "action": "charge",
+                                "charge": {
+                                    "type": "sum",
+                                    "components": [
+                                        {
+                                            "type": "per_unit",
+                                            "measure": "input_tokens",
+                                            "rate": "1",
+                                        },
+                                        {
+                                            "type": "per_unit",
+                                            "measure": "output_tokens",
+                                            "rate": "1",
+                                        },
+                                    ],
+                                },
                             },
-                            {"default": True, "formula": "input_tokens + output_tokens"},
-                        ],
-                        "image": [{"default": True, "formula": "images * 5"}],
+                        }
                     }
-                },
-                "discount": {
-                    "extends": "standard",
-                    "prices": {"completion": [{"default": True, "formula": "input_tokens * 0.5 + output_tokens"}]},
-                },
+                }
             },
         },
-        "plans": {"pro": {"display_name": "Pro", "rate_card": "discount"}},
+        "credits": {"accounting": {"unit": "credit", "scale": 6, "rounding": "half_up"}},
     }
 
 
-def test_exact_match_wins_before_default() -> None:
-    engine = PricingEngine.from_dict(pricing())
-    result = engine.calculate(
-        UsageMetrics(operation="completion", measures={"input_tokens": 2}, dimensions={"model": "fast"}),
-        rate_card="standard",
-    )
-    assert result.total == Decimal("4.0000")
-
-
-def test_explicit_prefix_match() -> None:
-    engine = PricingEngine.from_dict(pricing())
+def test_typed_match_rule_wins() -> None:
+    engine = PricingEngine.from_dict(base_config())
     result = engine.calculate(
         UsageMetrics(
-            operation="completion", measures={"input_tokens": 2, "output_tokens": 1}, dimensions={"model": "premium-x"}
-        ),
-        rate_card="standard",
+            operation="completion",
+            measures={"input_tokens": 2},
+            dimensions={"model": "gpt-fast"},
+        )
     )
-    assert result.total == Decimal("10.0000")
+    assert result.total == Decimal("4.000000")
 
 
-def test_inherited_rate_card_replaces_complete_operation_rules() -> None:
-    engine = PricingEngine.from_dict(pricing())
+def test_unmatched_charge_is_explicit() -> None:
+    engine = PricingEngine.from_dict(base_config())
     result = engine.calculate(
         UsageMetrics(
-            operation="completion", measures={"input_tokens": 2, "output_tokens": 1}, dimensions={"model": "fast"}
-        ),
-        rate_card="discount",
+            operation="completion",
+            measures={"input_tokens": 2, "output_tokens": 1},
+            dimensions={"model": "other"},
+        )
     )
-    assert result.total == Decimal("2.0000")
+    assert result.total == Decimal("3.000000")
 
 
-def test_inherited_rate_card_keeps_other_operations() -> None:
-    engine = PricingEngine.from_dict(pricing())
-    assert engine.calculate(
-        UsageMetrics(operation="image", measures={"images": 2}), rate_card="discount"
-    ).total == Decimal("10.0000")
+def test_unmatched_rejects_when_configured() -> None:
+    config = base_config()
+    config["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["unmatched"] = {"action": "reject"}
+    engine = PricingEngine.from_dict(config)
+    with pytest.raises(ConfigError, match="no price rule"):
+        engine.calculate(
+            UsageMetrics(
+                operation="completion",
+                measures={"input_tokens": 1},
+                dimensions={"model": "other"},
+            )
+        )
 
 
-def test_unknown_usage_is_rejected() -> None:
-    engine = PricingEngine.from_dict(pricing())
-    with pytest.raises(ConfigError, match="unknown usage operation"):
-        engine.calculate(UsageMetrics(operation="audio"), rate_card="standard")
-
-
-def test_undeclared_measure_is_rejected() -> None:
-    engine = PricingEngine.from_dict(pricing())
-    with pytest.raises(ConfigError, match="undeclared measures"):
-        engine.calculate(UsageMetrics(operation="image", measures={"seconds": 2}), rate_card="standard")
-
-
-def test_multiple_rate_cards_require_selection() -> None:
-    engine = PricingEngine.from_dict(pricing())
-    with pytest.raises(ConfigError, match="rate_card is required"):
-        engine.calculate(UsageMetrics(operation="image", measures={"images": 1}))
+@pytest.mark.parametrize(
+    ("charge", "measure", "expected"),
+    [
+        ({"type": "flat", "amount": "3.000000"}, Decimal("7"), Decimal("3.000000")),
+        (
+            {
+                "type": "package",
+                "measure": "input_tokens",
+                "units": "10",
+                "amount": "2",
+                "rounding": "ceil",
+            },
+            Decimal("11"),
+            Decimal("4.000000"),
+        ),
+        (
+            {
+                "type": "graduated",
+                "measure": "input_tokens",
+                "tiers": [
+                    {"up_to": "10", "rate": "1"},
+                    {"up_to": None, "rate": "2"},
+                ],
+            },
+            Decimal("15"),
+            Decimal("20.000000"),
+        ),
+        (
+            {
+                "type": "volume",
+                "measure": "input_tokens",
+                "tiers": [
+                    {"up_to": "10", "rate": "2"},
+                    {"up_to": None, "rate": "1"},
+                ],
+            },
+            Decimal("15"),
+            Decimal("15.000000"),
+        ),
+    ],
+)
+def test_typed_charge_rules(charge: dict, measure: Decimal, expected: Decimal) -> None:
+    config = base_config()
+    config["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["rules"] = []
+    config["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["unmatched"] = {
+        "action": "charge",
+        "charge": charge,
+    }
+    engine = PricingEngine.from_dict(config)
+    result = engine.calculate(
+        UsageMetrics(
+            operation="completion",
+            measures={"input_tokens": measure},
+            dimensions={"model": "anything"},
+        )
+    )
+    assert result.total == expected

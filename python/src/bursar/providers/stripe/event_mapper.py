@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from bursar.billing.models import (
+from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
