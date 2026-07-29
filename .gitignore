@@ -19,3 +19,5 @@ javascript/coverage/
 .claude/
 .serena/
 .recovery
+
+.tokensave

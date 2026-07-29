@@ -38,6 +38,55 @@ class CheckFeatureResult(BaseModel):
 
 class SweepResult(BaseModel):
     expired_count: int = 0
+    expired_amount: Decimal = Decimal(0)
+    dry_run: bool = False
+    expired_by_bucket: dict[str, Decimal] | None = None
+
+
+class QuotaState(BaseModel):
+    user_id: str
+    quota_key: str
+    operation: str
+    measure: str
+    limit: Decimal
+    consumed: Decimal
+    reserved: Decimal
+    remaining: Decimal
+    overage: Decimal
+    enforcement: str
+    window_start: str
+    window_end: str
+    emit_at_percent: list[float]
+
+
+class QuotaEvent(BaseModel):
+    event_id: str
+    quota_key: str
+    operation: str
+    measure: str
+    event_type: str
+    threshold_percent: float | None = None
+    idempotency_key: str
+    usage_charge_id: str | None = None
+    created_at: str
+
+
+class ListQuotaEventsOptions(BaseModel):
+    after: datetime | None = None
+    limit: int | None = None
+    idempotency_key: str | None = None
+
+
+class FeatureLimitResult(BaseModel):
+    user_id: str
+    feature: str
+    limited: bool = False
+    limit: int = 0
+    used: int = 0
+    remaining: int = 0
+    period_start: str = ""
+    period_end: str = ""
+    action: str | None = None
 
 
 class Entitlement(BaseModel):

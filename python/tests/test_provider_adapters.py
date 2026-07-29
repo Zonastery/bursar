@@ -126,7 +126,7 @@ def test_dodo_webhook_failures_are_classified_without_network() -> None:
 
     result = run(DodoProvider(lambda: Broken(), {"webhook_key": "k"}, Sink()).handle_webhook(WebhookRequest("{}", {})))
     assert result["received"] is False
-    assert result["retryable"] is True
+    assert result["retryable"] is False
 
 
 def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -> None:

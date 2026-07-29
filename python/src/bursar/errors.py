@@ -42,6 +42,14 @@ class FeatureNotEntitledError(BursarError):
     """Raised when an operation requires a plan feature the user does not have."""
 
 
+class OperationNotAllowedError(BursarError):
+    """Raised when a user's plan does not allow the requested operation."""
+
+
+class QuotaExceededError(BursarError):
+    """Raised when an operation would exceed a blocking usage quota."""
+
+
 class ConcurrencyLimitError(BursarError):
     """Raised when a ``reserve`` would exceed an operation's ``max_concurrent`` leases."""
 

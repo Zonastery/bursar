@@ -76,8 +76,17 @@ class LeaseRow(BaseModel):
     available: str | Decimal | None = None
     reserved: str | Decimal | None = None
     billing_mode: str = "strict"
-    expires_at: datetime | str = ""
+    minimum_balance: str | Decimal | None = None
+    expires_at: datetime | None = None
     error: str | None = None
+
+
+class LeasePricingContextRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    catalog_revision_no: int
+    plan_id: str | None = None
+    plan_key: str | None = None
+    rate_card: str | None = None
 
 
 class ReleaseRow(BaseModel):
@@ -365,21 +374,14 @@ class CreateLeaseParams(BaseModel):
     user_id: str = ""
     amount: str = "0"
     operation_type: str = ""
-    billing_mode: str = ""
-    floor: str = "0"
-    ceiling: str = "0"
-    model: str | None = None
+    idempotency_key: str
     metadata: str = "{}"
     ttl_seconds: int = 600
-    skip_allowance: bool = False
-    period_start: str | None = None
     feature: str | None = None
-    feature_max_calls: int | None = None
-    feature_action: str | None = None
-    feature_period_start: str | None = None
-    feature_period_end: str | None = None
-    max_concurrent: str | None = None
-    overdraft_floor: str | None = None
+    measures: str = "{}"
+    dimensions: str = "{}"
+    minimum_balance: str | None = None
+    max_concurrent: int | None = None
 
 
 class SettleLeaseParams(BaseModel):
@@ -387,17 +389,10 @@ class SettleLeaseParams(BaseModel):
     user_id: str = ""
     lease_id: str = ""
     amount: str = "0"
-    metadata: str = "{}"
-    billing_mode: str = ""
-    skip_allowance: bool = False
-    period_start: str | None = None
+    idempotency_key: str
     feature: str | None = None
-    feature_max_calls: int | None = None
-    feature_action: str | None = None
-    feature_period_start: str | None = None
-    feature_period_end: str | None = None
-    idempotency_key: str | None = None
-    min_balance: str = "0"
     model: str | None = None
-    id: str = ""
-    plan_id: str | None = None
+    region: str | None = None
+    measures: str = "{}"
+    dimensions: str = "{}"
+    metadata: str = "{}"

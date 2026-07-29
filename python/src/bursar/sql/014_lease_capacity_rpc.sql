@@ -999,8 +999,8 @@ BEGIN
     IF v_revision IS NULL THEN
         SELECT id
         INTO v_revision
-        FROM bursar.catalog_revisions
-        WHERE status = 'active';
+        FROM bursar.catalog_revisions AS revision
+        WHERE revision.status = 'active';
     END IF;
 
     IF v_revision IS NULL THEN

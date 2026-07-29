@@ -633,7 +633,7 @@ BEGIN
         SELECT 1
         FROM bursar.billing_subscription_changes
         WHERE subscription_id = p_subscription_id
-          AND state IN ('awaiting_payment', 'scheduled')
+          AND billing_subscription_changes.state IN ('awaiting_payment', 'scheduled')
     )
     THEN
         RETURN QUERY SELECT NULL::uuid, NULL::text, 'open_change_exists';

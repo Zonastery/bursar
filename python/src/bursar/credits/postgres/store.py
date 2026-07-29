@@ -11,6 +11,7 @@ import json
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 import psycopg2
 import psycopg2.extras
@@ -49,6 +50,7 @@ from bursar.credits.types import (
     Entitlement,
     FeatureLimit,
     GetUserPlanResult,
+    LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
@@ -251,8 +253,11 @@ class PostgresStore(CreditStore):
                 rows = cur.fetchall()
             conn.commit()
             return [next(iter(row.values())) if len(row) == 1 else dict(row) for row in (rows or [])]
+        except psycopg2.Error as e:
+            conn.rollback()
+            raise StoreError(f"database RPC {name!r} failed: {e}") from e
         except BaseException:
-            # Rollback on any exception to avoid pool poisoning
+            # Rollback on non-database exceptions to avoid pool poisoning.
             conn.rollback()
             raise
         finally:
@@ -270,6 +275,9 @@ class PostgresStore(CreditStore):
                 rows = cur.fetchall()
             conn.commit()
             return [dict(row) for row in (rows or [])]
+        except psycopg2.Error as e:
+            conn.rollback()
+            raise StoreError(f"database query failed: {e}") from e
         except BaseException:
             conn.rollback()
             raise
@@ -524,6 +532,9 @@ class PostgresStore(CreditStore):
         feature: str | None = None,
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
+        idempotency_key: str | None = None,
+        measures: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> LeaseResult:
         """Create a credit lease (reservation) for admission control.
 
@@ -551,27 +562,30 @@ class PostgresStore(CreditStore):
         """
         amount = _dec(amount)
         floor = _dec(floor)
-        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
+        del overdraft_floor, period_start, feature_limit, feature_period_start
+        effective_idempotency_key = idempotency_key or f"lease:{uuid4()}"
+        effective_dimensions = dict(dimensions or {})
+        if model is not None:
+            effective_dimensions.setdefault("model", model)
 
         params = CreateLeaseParams(
             user_id=user_id,
             amount=str(amount),
             operation_type=operation_type,
-            billing_mode=billing_mode,
-            floor=str(floor),
-            max_concurrent=str(max_concurrent) if max_concurrent is not None else None,
+            idempotency_key=effective_idempotency_key,
             ttl_seconds=ttl_seconds,
-            model=model,
-            overdraft_floor=str(overdraft_floor) if overdraft_floor is not None else None,
-            metadata=json.dumps(metadata.model_dump(mode="json")) if metadata else "{}",
-            period_start=period_start.isoformat() if period_start is not None else None,
+            metadata=json.dumps(
+                metadata.model_dump(mode="json", exclude_none=True) if metadata else {},
+                cls=DecimalEncoder,
+            ),
             feature=feature,
-            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
-            feature_action=feature_limit.action if feature_limit is not None else None,
-            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
-            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
+            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            dimensions=json.dumps(effective_dimensions, cls=DecimalEncoder),
+            minimum_balance=str(floor),
+            max_concurrent=max_concurrent,
         )
         result = self._lease_repo.create_lease(params)
+        availability = self.get_available(user_id)
 
         if result is None:
             return LeaseResult(lease_id="", user_id=user_id, error="no result")
@@ -579,18 +593,20 @@ class PostgresStore(CreditStore):
             return LeaseResult(
                 lease_id="",
                 user_id=user_id,
-                available=_dec(result.available),
-                reserved_total=_dec(result.reserved),
+                available=availability.available,
+                reserved_total=availability.reserved,
                 billing_mode=_safe_billing_mode(billing_mode),
                 error=str(result.error),
             )
+        minimum_balance = _dec(result.minimum_balance, floor)
         return LeaseResult(
             lease_id=str(getattr(result, "lease_id", "")),
             user_id=user_id,
             amount=_dec(result.amount),
-            available=_dec(result.available),
-            reserved_total=_dec(result.reserved),
-            billing_mode=_safe_billing_mode(str(getattr(result, "billing_mode", billing_mode))),
+            available=availability.available,
+            reserved_total=availability.reserved,
+            minimum_balance=minimum_balance,
+            billing_mode="overdraft" if minimum_balance < 0 else "strict",
             expires_at=getattr(result, "expires_at", None),
         )
 
@@ -609,6 +625,8 @@ class PostgresStore(CreditStore):
         feature: str | None = None,
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
+        measures: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> DeductionResult:
         """Settle a lease by deducting the actual amount used.
 
@@ -630,25 +648,24 @@ class PostgresStore(CreditStore):
             DeductionResult with ledger entry details.
         """
         amount = _dec(amount)
-        min_balance = _dec(min_balance)
+        del min_balance, skip_allowance, period_start, feature_limit, feature_period_start
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
+        effective_idempotency_key = idempotency_key or f"lease:{lease_id}:settle"
+        effective_dimensions = dimensions or {}
+        region_value = effective_dimensions.get("region")
+        region = str(region_value) if region_value is not None else None
 
         params = SettleLeaseParams(
             user_id=user_id,
             lease_id=lease_id,
             amount=str(amount),
-            idempotency_key=idempotency_key,
-            min_balance=str(min_balance),
+            idempotency_key=effective_idempotency_key,
             model=model,
-            metadata=json.dumps(meta),
-            skip_allowance=skip_allowance,
-            period_start=period_start.isoformat() if period_start is not None else None,
             feature=feature,
-            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
-            feature_action=feature_limit.action if feature_limit is not None else None,
-            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
-            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
+            region=region,
+            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            dimensions=json.dumps(effective_dimensions, cls=DecimalEncoder),
+            metadata=json.dumps(meta, cls=DecimalEncoder),
         )
         result = self._lease_repo.settle_lease(params)
 
@@ -676,6 +693,18 @@ class PostgresStore(CreditStore):
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
+    def get_lease_pricing_context(self, user_id: str, lease_id: str) -> LeasePricingContext | None:
+        """Read the immutable pricing context captured by a subject-owned lease."""
+        result = self._lease_repo.get_pricing_context(user_id, lease_id)
+        if result is None:
+            return None
+        return LeasePricingContext(
+            catalog_version=result.catalog_revision_no,
+            plan_id=result.plan_id,
+            plan_key=result.plan_key,
+            rate_card=result.rate_card,
+        )
+
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
         """Release a lease without deducting credits (cancels the reservation).
 
@@ -694,6 +723,31 @@ class PostgresStore(CreditStore):
             user_id=user_id,
             released=bool(getattr(result, "released", False)),
             reason=result.reason,
+        )
+
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        """Extend an active lease's expiry without changing its policy snapshot."""
+        result = self._lease_repo.renew_lease(user_id, lease_id, ttl_seconds)
+        availability = self.get_available(user_id)
+        if result is None:
+            return LeaseResult(
+                lease_id=lease_id,
+                user_id=user_id,
+                available=availability.available,
+                reserved_total=availability.reserved,
+                error="no result",
+            )
+        minimum_balance = _dec(result.minimum_balance)
+        return LeaseResult(
+            lease_id=str(result.lease_id or lease_id),
+            user_id=user_id,
+            amount=_dec(result.amount),
+            available=availability.available,
+            reserved_total=availability.reserved,
+            minimum_balance=minimum_balance,
+            billing_mode="overdraft" if minimum_balance < 0 else "strict",
+            expires_at=result.expires_at,
+            error=result.error,
         )
 
     def get_available(self, user_id: str) -> AvailableResult:
@@ -833,6 +887,7 @@ class PostgresStore(CreditStore):
         return GetUserPlanResult(
             user_id=str(getattr(result, "user_id", user_id)),
             plan_id=result.plan_id or None,
+            plan_key=result.plan_key or None,
             plan_label=result.plan_label or None,
             allowance_amount=_dec(result.allowance_amount) if result.allowance_amount is not None else _dec(0),
             allowance_period=_safe_allowance_period(str(result.allowance_period or "calendar_month")),
@@ -950,6 +1005,7 @@ class PostgresStore(CreditStore):
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous ledger entry.
 
@@ -965,8 +1021,12 @@ class PostgresStore(CreditStore):
         result = self._deduction_repo.refund_credits(
             entry_id,
             str(_dec(amount)) if amount is not None else None,
+            idempotency_key or f"refund:{entry_id}:{_dec(amount) if amount is not None else 'remaining'}",
             reason,
-            json.dumps(metadata.model_dump(mode="json") if metadata else {}),
+            json.dumps(
+                metadata.model_dump(mode="json", exclude_none=True) if metadata else {},
+                cls=DecimalEncoder,
+            ),
         )
         if result is None:
             return RefundResult(

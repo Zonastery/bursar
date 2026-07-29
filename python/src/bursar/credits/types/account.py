@@ -138,3 +138,14 @@ class SpendCap(BaseModel):
     model: str | None = None
     limit: Decimal = Field(default=Decimal(0), ge=0)
     action: str = "deny"
+
+
+class DeductWithAllowanceOptions(BaseModel):
+    idempotency_key: str | None = None
+    operation: str | None = None
+    feature: str | None = None
+    model: str | None = None
+    region: str | None = None
+    measures: dict[str, Any] | None = None
+    dimensions: dict[str, Any] | None = None
+    metadata: CreditMetadata | None = None

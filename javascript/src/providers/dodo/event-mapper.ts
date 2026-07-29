@@ -27,6 +27,9 @@ function normalizeInterval(value: unknown): string | undefined {
 /** Dodo sometimes sends dates in JS toString() format (e.g. "Sat Jul 18 2026 05:15:24 GMT+0000..."). Normalize to ISO 8601. */
 export function normalizeDate(raw: unknown): string | null {
   if (!raw) return null;
+  if (raw instanceof Date) {
+    return isNaN(raw.getTime()) ? null : raw.toISOString();
+  }
   const d = new Date(String(raw));
   return isNaN(d.getTime()) ? null : d.toISOString();
 }

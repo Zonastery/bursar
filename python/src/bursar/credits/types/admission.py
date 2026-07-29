@@ -15,9 +15,19 @@ class LeaseResult(BaseModel):
     amount: Decimal = Decimal(0)
     available: Decimal = Decimal(0)
     reserved_total: Decimal = Decimal(0)
+    minimum_balance: Decimal = Decimal(0)
     billing_mode: str = "strict"
     expires_at: datetime | None = None
     error: str | None = None
+
+
+class LeasePricingContext(BaseModel):
+    """Immutable pricing references captured when an operation lease is admitted."""
+
+    catalog_version: int
+    plan_id: str | None = None
+    plan_key: str | None = None
+    rate_card: str | None = None
 
 
 class ReleaseResult(BaseModel):

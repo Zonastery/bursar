@@ -29,6 +29,7 @@ from bursar.credits.types import (
     DeductionResult,
     FeatureLimit,
     GetUserPlanResult,
+    LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
@@ -99,6 +100,15 @@ class CreditStore(ABC):
     def __init__(self) -> None:
         """Initialize the store."""
         super().__init__()
+
+    def close(self) -> None:
+        """Release resources owned by the store.
+
+        Stateless/custom stores need no cleanup. Connection-backed stores should
+        override this method so applications can close them through the Bursar
+        facade instead of retaining an adapter-specific reference.
+        """
+        return
 
     # ── Runtime operations ─────────────────────────────────────────────
 
@@ -256,6 +266,9 @@ class CreditStore(ABC):
         feature: str | None = None,
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
+        idempotency_key: str | None = None,
+        measures: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease (hold) — the only admission control (D4).
 
@@ -305,6 +318,8 @@ class CreditStore(ABC):
         feature: str | None = None,
         feature_limit: FeatureLimit | None = None,
         feature_period_start: date | None = None,
+        measures: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
     ) -> DeductionResult:
         """Charge the **actual** cost against a lease, then mark it settled (D5).
 
@@ -341,6 +356,16 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
+    def get_lease_pricing_context(self, user_id: str, lease_id: str) -> LeasePricingContext | None:
+        """Return the catalog revision and rate card captured by a lease.
+
+        Usage-metric settlement must price against this immutable context rather
+        than the subject's current plan, which may have changed after admission.
+        ``None`` means the lease is missing or does not belong to ``user_id``.
+        """
+        ...
+
+    @abstractmethod
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
         """Release a lease without charging (work failed/aborted).
 
@@ -348,6 +373,11 @@ class CreditStore(ABC):
         transitions an ``active``/``expired`` lease to ``released`` and reports
         ``released=True``; otherwise reports ``released=False`` with a ``reason``.
         """
+        ...
+
+    @abstractmethod
+    def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseResult:
+        """Extend an active lease without changing its captured policy."""
         ...
 
     @abstractmethod
@@ -514,6 +544,7 @@ class CreditStore(ABC):
         amount: Decimal | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous credit deduction.
 
@@ -522,6 +553,8 @@ class CreditStore(ABC):
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
             metadata: Extra metadata to attach to the refund entry.
+            idempotency_key: Stable replay key. A deterministic key is generated
+                from ``entry_id`` and ``amount`` when omitted.
 
         Returns:
             ``RefundResult`` with the refund ledger entry details, or

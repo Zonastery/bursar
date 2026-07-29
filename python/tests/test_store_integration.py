@@ -190,6 +190,89 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     assert loaded.config["pricing"]["operations"]["completion"]
 
 
+def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: PostgresStore) -> None:
+    config = deepcopy(CONFIG)
+    config["entitlements"] = {
+        "features": {
+            "tutor_chat": {
+                "type": "boolean",
+                "default": False,
+            }
+        }
+    }
+    config["plans"]["pro"].update(
+        {
+            "allowed_operations": ["completion"],
+            "features": {"tutor_chat": True},
+        }
+    )
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(config)
+    service.set_user_plan(USER_ID, "pro")
+    service.add_credits(
+        USER_ID,
+        Decimal("100"),
+        "purchase",
+        bucket="purchased",
+        idempotency_key="lease-contract-grant",
+    )
+    estimate = UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": 5, "output_tokens": 2},
+        dimensions={"model": "standard"},
+    )
+    actual = UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": 3, "output_tokens": 1},
+        dimensions={"model": "standard"},
+    )
+
+    lease = service.reserve(
+        USER_ID,
+        estimate,
+        operation_type="completion",
+        feature="tutor_chat",
+        idempotency_key="lease-contract-reserve",
+    )
+    renewed = service.renew(USER_ID, lease.lease_id, ttl=300)
+
+    # A plan/catalog change after admission must not reprice work already in
+    # flight. The lease's immutable revision and rate card own settlement.
+    changed_config = deepcopy(config)
+    changed_config["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["unmatched"]["charge"][
+        "formula"
+    ] = "input_tokens * 100 + output_tokens * 100"
+    service.publish_pricing_from_dict(changed_config)
+    service.set_user_plan(USER_ID, "pro")
+
+    deduction = service.settle(
+        USER_ID,
+        lease.lease_id,
+        actual,
+        feature="tutor_chat",
+        idempotency_key="lease-contract-settle",
+    )
+    refund = service.refund_credits(
+        deduction.entry_id,
+        reason="integration_test",
+        idempotency_key="lease-contract-refund",
+    )
+    replay = service.refund_credits(
+        deduction.entry_id,
+        reason="integration_test",
+        idempotency_key="lease-contract-refund",
+    )
+
+    assert lease.expires_at is not None
+    assert renewed.expires_at is not None
+    assert deduction.amount == Decimal("4")
+    assert deduction.balance_after == Decimal("96")
+    assert refund.amount == Decimal("4")
+    assert refund.new_balance == Decimal("100")
+    assert replay.refund_entry_id == refund.refund_entry_id
+    assert service.get_balance(USER_ID).balance == Decimal("100")
+
+
 def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> None:
     service = CreditsService(store=store)
     service.publish_pricing_from_dict(CONFIG)

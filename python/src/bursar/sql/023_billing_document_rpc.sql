@@ -385,7 +385,7 @@ BEGIN
             USING ERRCODE='22023';
     END IF;
 
-    INSERT INTO bursar.billing_checkout_intents(
+    INSERT INTO bursar.billing_checkout_intents AS intent(
         subject_id,provider,provider_environment,checkout_kind,product_key,
         region,catalog_revision_id,request_digest,expires_at,provider_session_id,
         checkout_url
@@ -399,7 +399,33 @@ BEGIN
         subject_id,provider,provider_environment,checkout_kind,product_key,
         catalog_revision_id,request_digest
     )
-    DO UPDATE SET updated_at=now()
+    DO UPDATE SET
+        -- A caller may deliberately expire an abandoned checkout before its
+        -- natural expiry. Reopen it without a provider session so the next
+        -- request creates a fresh provider session. Completed and failed
+        -- intents remain terminal, preserving webhook idempotency.
+        status = CASE
+            WHEN intent.status = 'open'
+                 AND intent.expires_at <= now() THEN 'open'
+            WHEN intent.status = 'expired' THEN 'open'
+            ELSE intent.status
+        END,
+        expires_at = CASE
+            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN EXCLUDED.expires_at
+            WHEN intent.status = 'expired' THEN EXCLUDED.expires_at
+            ELSE intent.expires_at
+        END,
+        provider_session_id = CASE
+            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN NULL
+            WHEN intent.status = 'expired' THEN NULL
+            ELSE intent.provider_session_id
+        END,
+        checkout_url = CASE
+            WHEN intent.status = 'open' AND intent.expires_at <= now() THEN NULL
+            WHEN intent.status = 'expired' THEN NULL
+            ELSE intent.checkout_url
+        END,
+        updated_at=now()
     RETURNING id INTO v_id;
 
     RETURN v_id;

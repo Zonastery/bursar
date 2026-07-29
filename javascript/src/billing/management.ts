@@ -104,6 +104,7 @@ export class BillingManagement {
     const cancellableStatuses = new Set<BillingSubscriptionStatus>([
       SUBSCRIPTION_STATUS.ACTIVE,
       SUBSCRIPTION_STATUS.TRIALING,
+      SUBSCRIPTION_STATUS.PAST_DUE,
       SUBSCRIPTION_STATUS.INCOMPLETE,
     ]);
     const subscriptions = await this.store.getUserSubscriptions(userId);

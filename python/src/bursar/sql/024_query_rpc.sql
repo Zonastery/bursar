@@ -709,6 +709,39 @@ AS $$
       AND lease.id = p_lease_id
 $$;
 
+CREATE FUNCTION bursar.get_credit_lease_pricing_context(
+    p_subject_id uuid,
+    p_lease_id uuid
+)
+RETURNS TABLE(
+    catalog_revision_no bigint,
+    plan_id uuid,
+    plan_key text,
+    rate_card text
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT
+        revision.revision_no,
+        lease.plan_id,
+        plan.plan_key,
+        plan.rate_card
+    FROM bursar.credit_leases AS lease
+    JOIN bursar.credit_accounts AS account
+      ON account.id = lease.account_id
+    JOIN bursar.catalog_revisions AS revision
+      ON revision.id = lease.catalog_revision_id
+    LEFT JOIN bursar.catalog_plans AS plan
+      ON plan.id = lease.plan_id
+     AND plan.catalog_revision_id = lease.catalog_revision_id
+    WHERE account.subject_id = p_subject_id
+      AND account.account_kind = 'personal'
+      AND lease.id = p_lease_id
+$$;
+
 CREATE FUNCTION bursar.resolve_active_plan(
     p_plan_reference text
 )

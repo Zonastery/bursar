@@ -55,8 +55,14 @@ const AllowanceRowSchema = z
       .union([z.string(), z.number()] as const)
       .nullable()
       .optional(),
-    period_start: z.string().nullable().optional(),
-    period_end: z.string().nullable().optional(),
+    period_start: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .nullable()
+      .optional(),
+    period_end: z
+      .union([z.string(), z.date().transform((value) => value.toISOString())])
+      .nullable()
+      .optional(),
   })
   .passthrough();
 

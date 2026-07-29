@@ -84,6 +84,11 @@ class CatalogService:
     def active(self):
         return self.credits.get_active_pricing()
 
+    @property
+    def loaded(self) -> bool:
+        """Whether an active catalog is loaded into the pricing runtime."""
+        return self.credits.engine is not None
+
     def publish_draft(self, config: dict, label: str | None = None) -> str:
         return self.credits.publish_pricing_draft(config, label)
 
@@ -142,6 +147,10 @@ class Bursar:
     def load_catalog(self) -> None:
         """Load the active catalog into the pricing engine."""
         self.credits.load_pricing_from_store()
+
+    def close(self) -> None:
+        """Release resources owned by configured Bursar capabilities."""
+        self.credits.close()
 
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         """Submit a normalized provider event through the facade."""

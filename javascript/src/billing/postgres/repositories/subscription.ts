@@ -23,6 +23,12 @@ const SubscriptionRowSchema = z
     metadata: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .passthrough();
+
+function timestampValue(value: unknown): number {
+  if (value instanceof Date) return value.getTime();
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
 export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 
 export class BillingSubscriptionRepository {
@@ -132,8 +138,7 @@ export class BillingSubscriptionRepository {
       .filter((row) => allowed.includes(String(row.status)))
       .sort(
         (left, right) =>
-          new Date(String(right.provider_updated_at)).getTime() -
-          new Date(String(left.provider_updated_at)).getTime(),
+          timestampValue(right.provider_updated_at) - timestampValue(left.provider_updated_at),
       );
     return candidates[0] ? this.map(await this.withOfferContext(candidates[0])) : null;
   }
@@ -220,8 +225,7 @@ export class BillingSubscriptionRepository {
       )
       .sort(
         (left, right) =>
-          new Date(String(right.provider_updated_at)).getTime() -
-          new Date(String(left.provider_updated_at)).getTime(),
+          timestampValue(right.provider_updated_at) - timestampValue(left.provider_updated_at),
       )[0];
 
     if (replacement?.id == null) return 0;

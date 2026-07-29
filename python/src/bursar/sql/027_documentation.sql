@@ -40,6 +40,7 @@ COMMENT ON TABLE bursar.quota_windows IS 'Current numeric usage and reservations
 COMMENT ON TABLE bursar.quota_usage_events IS 'Immutable metered quota deltas supporting rolling windows, late events, and corrections.';
 COMMENT ON TABLE bursar.quota_events IS 'Idempotent quota threshold and blocked-admission notifications.';
 COMMENT ON TABLE bursar.credit_leases IS 'Temporary credit and concurrent-operation admission reservations.';
+COMMENT ON TABLE bursar.credit_lease_quota_reservations IS 'Per-quota capacity reserved by an active credit lease.';
 COMMENT ON TABLE bursar.credit_teams IS 'Team principals backed by team credit accounts.';
 COMMENT ON TABLE bursar.credit_team_members IS 'Subject membership and role assignments for teams.';
 COMMENT ON TABLE bursar.credit_team_usage_charges IS 'Member-attributed team usage used for audit and atomic member spend-cap enforcement.';
@@ -79,6 +80,8 @@ COMMENT ON FUNCTION bursar.settle_lease(uuid, uuid, numeric, text, text, text, t
     IS 'Settle or replay a lease while preserving ledger and reservation invariants.';
 COMMENT ON FUNCTION bursar.renew_lease(uuid, uuid, interval)
     IS 'Extend an active lease without weakening its captured plan, allowance, quota, or credit policy.';
+COMMENT ON FUNCTION bursar.get_credit_lease_pricing_context(uuid, uuid)
+    IS 'Read the immutable catalog revision and rate-card context captured by a subject-owned lease for deterministic settlement pricing.';
 COMMENT ON FUNCTION bursar.upsert_auto_recharge_profile(uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text)
     IS 'Upsert subject auto-recharge settings validated against the active catalog policy.';
 COMMENT ON FUNCTION bursar.record_subscription_conflict(uuid, text, text, text, text, jsonb)
@@ -94,4 +97,4 @@ COMMENT ON FUNCTION bursar.get_subject_quota_state(uuid, text)
 COMMENT ON FUNCTION bursar.list_subject_quota_events(uuid, timestamptz, integer, text)
     IS 'List persisted threshold and blocked-admission quota notifications for a subject.';
 COMMENT ON FUNCTION bursar.create_checkout_intent(uuid, text, text, text, bytea, timestamptz, text, text, text)
-    IS 'Create an idempotent checkout pinned to an available catalog product, provider environment, and region.';
+    IS 'Create or replay an idempotent checkout pinned to an available catalog product, provider environment, and region; terminal attempts require a new request digest.';

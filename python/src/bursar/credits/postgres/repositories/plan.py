@@ -33,22 +33,47 @@ class PlanRepository:
             UserPlanRow if found, None if the user has no plan assigned.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("effective_subject_policy", [user_id, ""])
+        rows = self._callproc("get_subject_plan", [user_id])
         if not rows:
             return None
-        assignment = self._query(
-            """SELECT starts_at AS plan_assigned_at
-               FROM bursar.account_plan_assignments
-               WHERE account_id = bursar.account_for_subject(%s::uuid)
-                 AND starts_at <= now()
-                 AND (ends_at IS NULL OR ends_at > now())""",
-            [user_id],
-        )
         row = dict(rows[0]) if isinstance(rows[0], dict) else None
         if row is None:
             return None
-        if assignment and isinstance(assignment[0], dict):
-            row["plan_assigned_at"] = assignment[0].get("plan_assigned_at")
+
+        credit_policy_type = row.get("credit_policy_type")
+        credit_limit = row.get("credit_limit")
+        operation_admission = row.get("operation_admission")
+        per_operation = {}
+        if isinstance(operation_admission, dict):
+            per_operation = {
+                str(operation): {"max_concurrent": policy.get("max_in_flight")}
+                for operation, policy in operation_admission.items()
+                if isinstance(policy, dict) and policy.get("max_in_flight") is not None
+            }
+
+        reset_unit = row.get("credit_allowance_reset_unit")
+        reset_count = row.get("credit_allowance_reset_count")
+        reset_anchor = row.get("credit_allowance_reset_anchor")
+        allowance_period = "calendar_month"
+        if reset_anchor == "rolling" and reset_unit == "day" and reset_count == 30:
+            allowance_period = "rolling_30d"
+        elif reset_anchor == "plan_assignment":
+            allowance_period = "anniversary"
+
+        row.update(
+            {
+                "allowance_amount": row.get("credit_allowance_amount"),
+                "allowance_period": allowance_period,
+                "billing_mode": "overdraft" if credit_policy_type == "credit_line" else "strict",
+                "overdraft_floor": f"-{credit_limit}"
+                if credit_policy_type == "credit_line" and credit_limit is not None
+                else None,
+                "max_concurrent": row.get("admission_max_in_flight"),
+                "per_operation": per_operation,
+                "config_version": row.get("catalog_revision_no"),
+                "catalog_version": row.get("catalog_revision_no"),
+            }
+        )
         return UserPlanRow.model_validate(row)
 
     def set_user_plan(

@@ -38,6 +38,10 @@ describe("normalizeDate", () => {
     expect(normalizeDate(DODO_JS_DATE)).toBe(DODO_ISO_DATE);
   });
 
+  it("preserves milliseconds from SDK Date values", () => {
+    expect(normalizeDate(new Date("2026-07-18T05:15:24.987Z"))).toBe("2026-07-18T05:15:24.987Z");
+  });
+
   it("passes through valid ISO 8601 unchanged", () => {
     expect(normalizeDate("2026-07-18T05:15:24.000Z")).toBe("2026-07-18T05:15:24.000Z");
     expect(normalizeDate("2026-07-18T00:00:00Z")).toBe("2026-07-18T00:00:00.000Z");

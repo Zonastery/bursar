@@ -288,7 +288,206 @@ class TestBillingSync:
         assert bs.resolve_billing_offer("nonexistent_provider", product_id=None, price_id=PRICE_ID) is None
 
 
-# ── Customer CRUD ──────────────────────────────────────────────────────
+# ── Checkout intent idempotency ───────────────────────────────────────
+
+
+class TestCheckoutIntentIdempotency:
+    def test_terminal_checkout_replay_does_not_reopen_provider_attempt(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+        first_expiry = datetime.now(UTC) + timedelta(hours=1)
+        retry_expiry = first_expiry + timedelta(hours=1)
+        digest = "11" * 32
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::timestamptz, %s, %s
+                )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    first_expiry,
+                    "session-original",
+                    "https://example.test/original",
+                ),
+            )
+            intent_id = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT bursar.advance_checkout_intent(%s::uuid, 'failed', NULL, NULL)",
+                (intent_id,),
+            )
+            assert cursor.fetchone() == (True,)
+
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::timestamptz, %s, %s
+                )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    retry_expiry,
+                    "session-retry",
+                    "https://example.test/retry",
+                ),
+            )
+            assert cursor.fetchone() == (intent_id,)
+
+            cursor.execute(
+                """
+                SELECT status, provider_session_id, checkout_url, expires_at
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s
+                """,
+                (intent_id,),
+            )
+            assert cursor.fetchone() == (
+                "failed",
+                "session-original",
+                "https://example.test/original",
+                first_expiry,
+            )
+
+    def test_checkout_replay_lazily_expires_stale_open_intent(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+        digest = "22" * 32
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                )
+                """,
+                (
+                    USER_ID2,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    datetime.now(UTC) + timedelta(hours=1),
+                ),
+            )
+            intent_id = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                UPDATE bursar.billing_checkout_intents
+                SET created_at = now() - interval '2 hours',
+                    expires_at = now() - interval '1 hour'
+                WHERE id = %s
+                """,
+                (intent_id,),
+            )
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                )
+                """,
+                (
+                    USER_ID2,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    datetime.now(UTC) + timedelta(hours=2),
+                ),
+            )
+            assert cursor.fetchone() == (intent_id,)
+            cursor.execute(
+                "SELECT status FROM bursar.billing_checkout_intents WHERE id = %s",
+                (intent_id,),
+            )
+            assert cursor.fetchone() == ("expired",)
+
+
+# ── Auto-recharge profile ─────────────────────────────────────────────
+
+
+class TestAutoRechargeProfile:
+    def test_eligible_projected_topup_can_enable_auto_recharge(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        config = deepcopy(PRICING_DICT)
+        config["commerce"]["auto_recharge"] = {
+            "eligible_topups": ["standard_topup"],
+            "balance_below": {
+                "minimum": "100",
+                "maximum": "5000",
+                "default": "1000",
+            },
+            "rearm_above": "6000",
+            "quantity": {"minimum": 1, "maximum": 3, "default": 1},
+            "limits": {
+                "max_purchases": 3,
+                "window": {
+                    "type": "rolling",
+                    "duration": {"unit": "day", "count": 30},
+                },
+                "max_charge_minor": 3000,
+                "cooldown": {"unit": "hour", "count": 1},
+            },
+        }
+        CreditsService(pg_store).publish_pricing_from_dict(config)  # type: ignore[arg-type]
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT topup.id
+                FROM bursar.catalog_topups AS topup
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = topup.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE topup.topup_key = 'standard_topup'
+                """
+            )
+            topup_id = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT bursar.upsert_auto_recharge_profile(
+                    %s::uuid, true, %s, %s::uuid, 1, 1000,
+                    3, 'day', 30, 'rolling', 'UTC'
+                )
+                """,
+                (USER_ID, PROVIDER, topup_id),
+            )
+            assert cursor.fetchone() == (True,)
+            cursor.execute(
+                """
+                SELECT enabled, provider, topup_id
+                FROM bursar.billing_auto_recharge_profiles
+                WHERE subject_id = %s::uuid
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchone() == (True, PROVIDER, topup_id)
+
+
+# ── Customer CRUD ─────────────────────────────────────────────────────
 
 
 class TestCustomerCrud:

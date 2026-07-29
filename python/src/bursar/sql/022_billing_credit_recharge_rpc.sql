@@ -317,9 +317,9 @@ BEGIN
 
         END IF;
 
-        SELECT * INTO v_policy
-        FROM bursar.catalog_auto_recharge_policies
-        WHERE catalog_revision_id=v_revision AND topup_key=v_topup_key;
+        SELECT policy.* INTO v_policy
+        FROM bursar.catalog_auto_recharge_policies AS policy
+        WHERE policy.catalog_revision_id = v_revision;
 
         IF NOT FOUND
            OR NOT (v_topup_key=ANY(v_policy.eligible_topup_keys))
@@ -340,9 +340,9 @@ BEGIN
                FROM bursar.catalog_provider_refs AS provider_ref
                WHERE provider_ref.catalog_revision_id = v_revision
                  AND provider_ref.provider_environment = v_environment
-                 AND provider_ref.provider_key = p_provider
+                 AND provider_ref.provider = p_provider
                  AND provider_ref.object_type = 'topup'
-                 AND provider_ref.object_id = p_topup_id
+                 AND provider_ref.object_key = v_topup_key
            )
         THEN
             RAISE EXCEPTION 'auto-recharge profile does not match active catalog policy' USING ERRCODE='22023';

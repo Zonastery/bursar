@@ -3,7 +3,6 @@ import Decimal from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import { PostgresBillingStore } from "../src/billing/postgres/store.js";
-import { StoreError } from "../src/errors.js";
 
 const D = (n: number | string) => new Decimal(n);
 

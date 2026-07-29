@@ -109,6 +109,7 @@ DECLARE
  'bursar.get_credit_operation_details(uuid,uuid,text)',
  'bursar.get_credit_grant_details(uuid,uuid)',
  'bursar.get_credit_lease(uuid,uuid)',
+ 'bursar.get_credit_lease_pricing_context(uuid,uuid)',
  'bursar.resolve_active_plan(text)',
  'bursar.get_subject_plan(uuid)',
  'bursar.get_subject_allowance(uuid,timestamptz)',

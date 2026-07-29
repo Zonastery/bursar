@@ -46,17 +46,30 @@ class DeductionRepository:
         )
         return DeductionRow.model_validate(row)
 
-    def refund_credits(self, entry_id: str, amount: str | None, reason: str | None, metadata: str) -> RefundRow | None:
+    def refund_credits(
+        self,
+        entry_id: str,
+        amount: str | None,
+        idempotency_key: str,
+        reason: str | None,
+        metadata: str,
+    ) -> RefundRow | None:
         validate_non_empty(entry_id, "entry_id")
-        del reason
-        rows = self._callproc("refund_credit", ["", amount or "0", metadata, entry_id]) or []
+        validate_non_empty(idempotency_key, "idempotency_key")
+        rows = (
+            self._callproc(
+                "refund_credit_by_entry",
+                [entry_id, amount, idempotency_key, reason, metadata],
+            )
+            or []
+        )
         if not rows:
             return None
         row = dict(rows[0])
         row.update(
             {
                 "refund_entry_id": row.get("entry_id"),
-                "amount": amount,
+                "user_id": row.get("subject_id"),
                 "new_balance": row.get("balance_after"),
                 "error": row.get("error_code"),
             }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -28,3 +29,18 @@ class LedgerCursor(BaseModel):
 class LedgerPage(BaseModel):
     items: list[LedgerEntry] = Field(default_factory=list)
     next_cursor: LedgerCursor | None = None
+
+
+class ListLedgerEntriesOptions(BaseModel):
+    entry_types: list[str] | None = None
+    from_date: datetime | None = None
+    to_date: datetime | None = None
+    limit: int | None = None
+    cursor: LedgerCursor | None = None
+
+
+class ListUsageEntriesOptions(BaseModel):
+    from_date: datetime | None = None
+    to_date: datetime | None = None
+    limit: int | None = None
+    cursor: LedgerCursor | None = None

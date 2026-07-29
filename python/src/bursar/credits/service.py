@@ -44,6 +44,7 @@ from decimal import Decimal
 from typing import Any
 
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
+from bursar.config import ConfigError
 from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.credits.store import CapReachedError, CreditStore, FeatureLimitReachedError
 from bursar.credits.types import (
@@ -62,6 +63,7 @@ from bursar.credits.types import (
     DeductionResult,
     FeatureLimit,
     GetUserPlanResult,
+    LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
@@ -104,6 +106,14 @@ class ConcurrencyLimitError(CreditError):
 
 class FeatureNotEntitledError(CreditError):
     """Raised when an operation requires a plan feature the user does not have."""
+
+
+class OperationNotAllowedError(CreditError):
+    """Raised when the user's plan does not allow the requested operation."""
+
+
+class QuotaExceededError(CreditError):
+    """Raised when an operation would exceed a blocking usage quota."""
 
 
 class LeaseExpiredError(CreditError):
@@ -246,6 +256,20 @@ class CreditsService:
         self._pricing_refresh_lock = threading.Lock()
         self._version_engines: dict[int, PricingEngine] = {}
 
+    def _engine_for_catalog_version(self, catalog_version: int) -> PricingEngine:
+        """Load and cache an immutable historical catalog revision."""
+        cached = self._version_engines.get(catalog_version)
+        if cached is not None:
+            return cached
+
+        cfg = self._store.get_bursar_config(catalog_version)
+        if cfg is None or cfg.config is None:
+            raise PricingNotLoadedError(f"No pricing config for pinned catalog version {catalog_version}")
+
+        engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
+        self._version_engines[catalog_version] = engine
+        return engine
+
     def _engine_for_user(self, user_id: str | None) -> PricingEngine:
         """Return the pricing engine pinned to the user's catalog version."""
         if user_id is None:
@@ -265,17 +289,7 @@ class CreditsService:
                 )
             return self._engine
 
-        cached = self._version_engines.get(catalog_version)
-        if cached is not None:
-            return cached
-
-        cfg = self._store.get_bursar_config(catalog_version)
-        if cfg is None or cfg.config is None:
-            raise PricingNotLoadedError(f"No pricing config for pinned catalog version {catalog_version}")
-
-        engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
-        self._version_engines[catalog_version] = engine
-        return engine
+        return self._engine_for_catalog_version(catalog_version)
 
     def _emit(self, type_: CreditEventType, user_id: str, data: dict[str, Any] | None = None) -> None:
         """Emit a credit lifecycle event. No-op if no emitter is configured."""
@@ -805,7 +819,13 @@ class CreditsService:
         entitlement = plan.entitlements.get(feature)
         if entitlement is None or entitlement.max_calls is None:
             return _FeatureLimitResult(limit=None, period_start=None, period_end=None)
-        limit = FeatureLimit(max_calls=entitlement.max_calls, period=entitlement.period, action=entitlement.on_exceed)
+        limit = FeatureLimit.model_validate(
+            {
+                "max_calls": entitlement.max_calls,
+                "period": entitlement.period,
+                "action": entitlement.on_exceed,
+            }
+        )
         period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
         return _FeatureLimitResult(limit=limit, period_start=period_start, period_end=period_end)
 
@@ -813,36 +833,57 @@ class CreditsService:
         self,
         metrics_or_amount: UsageMetrics | Decimal | int,
         user_id: str | None = None,
+        *,
+        lease_id: str | None = None,
     ) -> tuple[Decimal, str | None]:
-        """Compute the credit cost and model from metrics, or pass a raw amount."""
+        """Compute a credit cost, pinning leased work to its admission catalog."""
         if not isinstance(metrics_or_amount, UsageMetrics):
             return Decimal(metrics_or_amount), None
 
-        engine = self._engine_for_user(user_id)
-        rate_card: str | None = None
-        if user_id is not None:
+        pricing_context: LeasePricingContext | None = None
+        if lease_id is not None:
+            if user_id is None:
+                raise ValueError("user_id is required when pricing a lease")
+            pricing_context = self._store.get_lease_pricing_context(user_id, lease_id)
+            if pricing_context is None:
+                raise LeaseNotFoundError(f"Lease not found. User={user_id}")
+            engine = self._engine_for_catalog_version(pricing_context.catalog_version)
+            rate_card = pricing_context.rate_card or engine.get_rate_card_for_plan(pricing_context.plan_key)
+        else:
+            engine = self._engine_for_user(user_id)
+            rate_card = None
+        if user_id is not None and pricing_context is None:
             plan = self._store.get_user_plan(user_id)
-            rate_card = engine.get_rate_card_for_plan(getattr(plan, "plan_id", None))
+            rate_card = engine.get_rate_card_for_plan(plan.plan_key)
         breakdown = engine.calculate(metrics_or_amount, rate_card=rate_card)
-        return breakdown.total, metrics_or_amount.dimensions.get("model")
+        model = metrics_or_amount.dimensions.get("model")
+        return breakdown.total, str(model) if model is not None else None
 
     def _raise_lease_error(self, error: str, user_id: str, amount: Decimal) -> None:
         """Map a store business code to the coherent typed exception (M2)."""
-        if error == "concurrency_limit":
+        if error in ("concurrency_limit", "max_concurrent_reached"):
             raise ConcurrencyLimitError(f"Concurrency limit reached. User={user_id}")
+        if error == "quota_exceeded":
+            raise QuotaExceededError(f"Usage quota exceeded. User={user_id}")
         if error == "cap_reached":
             raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={amount}")
         if error == "feature_limit_reached":
             raise FeatureLimitReachedError(f"Feature limit exceeded. User={user_id}")
         if error == "feature_not_entitled":
             raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
-        if error == "insufficient_credits":
+        if error == "operation_not_allowed":
+            raise OperationNotAllowedError(f"Operation is not allowed. User={user_id}")
+        if error in ("insufficient_credits", "insufficient_headroom"):
             raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={amount}")
-        if error == "lease_expired":
+        if error in ("lease_expired", "expired_lease"):
             raise LeaseExpiredError(f"Lease expired. User={user_id}")
-        if error in ("lease_not_found", "not_found"):
+        if error in ("lease_not_found", "not_found", "missing_lease"):
             raise LeaseNotFoundError(f"Lease not found. User={user_id}")
-        if error == "invalid_amount":
+        if error in ("released_lease", "settled_lease"):
+            raise LeaseNotFoundError(f"Lease is already finalized. User={user_id}")
+        if error in ("missing_quota_measure", "invalid_measure", "policy_mismatch"):
+            raise ConfigError(f"Invalid operation policy for user {user_id}: {error}")
+        if error in ("invalid_amount", "invalid_request"):
             raise ValueError(f"Invalid amount: {amount}")
         raise CreditError(f"Operation failed: {error}. User={user_id}")
 
@@ -851,13 +892,14 @@ class CreditsService:
         user_id: str,
         metrics_or_amount: UsageMetrics | Decimal | int,
         *,
-        operation_type: str = "usage",
+        operation_type: str | None = None,
         billing_mode: BillingMode | None = None,
         required_feature: str | None = None,
         ttl: int | None = None,
         metadata: CreditMetadata | None = None,
         model: str | None = None,
         feature: str | None = None,
+        idempotency_key: str | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease — the only admission control (D4).
 
@@ -885,26 +927,30 @@ class CreditsService:
         On any business failure raises the coherent typed exception; on success emits
         ``credits.reserved`` and returns the :class:`LeaseResult`.
         """
-        if required_feature is not None:
-            check = self._store.check_feature(user_id, required_feature)
-            if not check.has_feature:
-                raise FeatureNotEntitledError(f"Feature {required_feature!r} not entitled. User={user_id}")
-
-        policy = self._resolve_policy(user_id, operation_type, billing_mode)
+        if feature is not None and required_feature is not None and feature != required_feature:
+            raise ConfigError("reserve feature and required_feature must match when both are set")
+        effective_feature = feature or required_feature
+        effective_operation = (
+            operation_type
+            if operation_type is not None
+            else metrics_or_amount.operation
+            if isinstance(metrics_or_amount, UsageMetrics)
+            else "usage"
+        )
+        policy = self._resolve_policy(user_id, effective_operation, billing_mode)
         floor = self._resolve_floor(policy)
         amount, derived_model = self._cost_of(metrics_or_amount, user_id)
         # When caller passes a raw Decimal/int (no model in metrics), fall back to
         # the explicit ``model`` kwarg so cap checks and analytics are not blind.
         effective_model = derived_model if derived_model is not None else model
         ttl_seconds = ttl if ttl is not None else self._default_ttl
-        period_start = self._resolve_allowance_period_start(user_id)
-        flr = self._resolve_feature_limit(user_id, feature)
-        feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
+        measures = dict(metrics_or_amount.measures) if isinstance(metrics_or_amount, UsageMetrics) else {}
+        dimensions = dict(metrics_or_amount.dimensions) if isinstance(metrics_or_amount, UsageMetrics) else {}
 
         result = self._store.create_lease(
             user_id,
             amount,
-            operation_type,
+            effective_operation,
             billing_mode=policy.billing_mode,
             floor=floor,
             max_concurrent=policy.max_concurrent,
@@ -912,17 +958,22 @@ class CreditsService:
             model=effective_model,
             overdraft_floor=policy.overdraft_floor,
             metadata=metadata,
-            period_start=period_start,
-            feature=feature,
-            feature_limit=feature_limit,
-            feature_period_start=feature_period_start,
+            feature=effective_feature,
+            idempotency_key=idempotency_key,
+            measures=measures,
+            dimensions=dimensions,
         )
 
         if result.error:
             self._emit(
                 "credits.deduct_failed",
                 user_id,
-                {"error": result.error, "amount": amount, "stage": "reserve", "operation_type": operation_type},
+                {
+                    "error": result.error,
+                    "amount": amount,
+                    "stage": "reserve",
+                    "operation_type": effective_operation,
+                },
             )
             self._raise_lease_error(result.error, user_id, amount)
 
@@ -934,7 +985,7 @@ class CreditsService:
                 "amount": result.amount,
                 "available": result.available,
                 "billing_mode": result.billing_mode,
-                "operation_type": operation_type,
+                "operation_type": effective_operation,
                 "expires_at": result.expires_at,
             },
         )
@@ -973,32 +1024,32 @@ class CreditsService:
         ``credits.feature_limit_warning``/``credits.feature_limit_reached``
         signal, never a raised exception.
         """
-        amount, model = self._cost_of(metrics_or_amount, user_id)
+        amount, model = self._cost_of(metrics_or_amount, user_id, lease_id=lease_id)
+        effective_idempotency_key = idempotency_key or f"lease:{lease_id}:settle"
 
         if isinstance(metrics_or_amount, UsageMetrics):
-            tx_meta = self._build_tx_metadata(metrics_or_amount, amount, idempotency_key, metadata)
+            tx_meta = self._build_tx_metadata(metrics_or_amount, amount, effective_idempotency_key, metadata)
+            measures = dict(metrics_or_amount.measures)
+            dimensions = dict(metrics_or_amount.dimensions)
         else:
             base: dict[str, Any] = metadata.model_dump(exclude_none=True) if metadata else {}
-            if idempotency_key:
-                base["idempotency_key"] = idempotency_key
+            base["idempotency_key"] = effective_idempotency_key
             tx_meta = CreditMetadata(**base)
-
-        flr = self._resolve_feature_limit(user_id, feature)
-        feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
+            measures = {}
+            dimensions = {}
 
         result = self._store.settle_lease(
             user_id,
             lease_id,
             amount,
-            idempotency_key=idempotency_key,
+            idempotency_key=effective_idempotency_key,
             min_balance=self._engine.min_balance if self._engine else Decimal(0),
             model=model,
             metadata=tx_meta,
             skip_allowance=skip_allowance,
-            period_start=self._resolve_allowance_period_start(user_id),
             feature=feature,
-            feature_limit=feature_limit,
-            feature_period_start=feature_period_start,
+            measures=measures,
+            dimensions=dimensions,
         )
 
         if result.error:
@@ -1007,7 +1058,7 @@ class CreditsService:
                 user_id,
                 {"error": result.error, "amount": amount, "stage": "settle", "lease_id": lease_id},
             )
-            if result.error == "lease_expired":
+            if result.error in ("lease_expired", "expired_lease"):
                 self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
             self._raise_lease_error(result.error, user_id, amount)
 
@@ -1074,6 +1125,18 @@ class CreditsService:
                 user_id,
                 {"lease_id": lease_id, "reason": result.reason},
             )
+        return result
+
+    def renew(self, user_id: str, lease_id: str, ttl: int | None = None) -> LeaseResult:
+        """Extend an active lease without changing its captured policy snapshot."""
+        ttl_seconds = ttl if ttl is not None else self._default_ttl
+        if ttl_seconds < 1:
+            raise ValueError("ttl must be a positive integer")
+        result = self._store.renew_lease(user_id, lease_id, ttl_seconds)
+        if result.error:
+            if result.error in ("lease_expired", "expired_lease"):
+                self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
+            self._raise_lease_error(result.error, user_id, Decimal(0))
         return result
 
     def can_afford(
@@ -1412,12 +1475,13 @@ class CreditsService:
         tx_meta = self._build_tx_metadata(metrics, breakdown.total, idempotency_key, metadata)
         flr = self._resolve_feature_limit(user_id, feature)
         feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
+        model_dimension = metrics.dimensions.get("model")
         result = self._store.deduct_with_allowance(
             user_id,
             cost,
             idempotency_key=idempotency_key,
             min_balance=self._engine.min_balance,
-            model=metrics.dimensions.get("model"),
+            model=str(model_dimension) if model_dimension is not None else None,
             metadata=tx_meta,
             skip_allowance=skip_allowance,
             period_start=self._resolve_allowance_period_start(user_id),
@@ -1488,6 +1552,7 @@ class CreditsService:
         amount: Decimal | int | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> RefundResult:
         """Refund a previous credit deduction.
 
@@ -1496,6 +1561,8 @@ class CreditsService:
             amount: Optional partial refund amount. Full refund if omitted.
             reason: Optional reason for the refund.
             metadata: Extra metadata to attach to the refund entry.
+            idempotency_key: Stable replay key. Omitted full refunds use a
+                deterministic key derived from the original entry.
 
         Returns:
             ``RefundResult`` with the refund ledger entry details. On a business
@@ -1506,7 +1573,13 @@ class CreditsService:
             ``not_found``) to handle the failure.
         """
         refund_amount = self._to_decimal(amount) if amount is not None else None
-        result = self._store.refund_credits(entry_id, refund_amount, reason, metadata)
+        result = self._store.refund_credits(
+            entry_id,
+            refund_amount,
+            reason,
+            metadata,
+            idempotency_key,
+        )
 
         # Check the error BEFORE emitting (H3): a failed/duplicate/over-refund
         # must never fire a success event.
@@ -1672,3 +1745,7 @@ class CreditsService:
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window."""
         return self._store.aggregate_stats(start, end)
+
+    def close(self) -> None:
+        """Release resources owned by the configured credit store."""
+        self._store.close()

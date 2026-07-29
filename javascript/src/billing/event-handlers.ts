@@ -550,6 +550,15 @@ export class BillingEventHandlers {
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
     const { offer, offerId, offerKey, plan } = await this.resolveOfferAndKeys(event);
+    const pending = await this.store.getOpenBillingSubscriptionChange(
+      event.provider,
+      event.subscription.providerSubscriptionId,
+    );
+    if (pending) {
+      await this.store.updateBillingSubscriptionChange(pending.id, {
+        state: "applied",
+      });
+    }
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: event.subscription.status ?? "active",
@@ -574,15 +583,6 @@ export class BillingEventHandlers {
         plan ?? existing?.plan ?? undefined,
         true,
       );
-    }
-    const pending = await this.store.getOpenBillingSubscriptionChange(
-      event.provider,
-      event.subscription.providerSubscriptionId,
-    );
-    if (pending) {
-      await this.store.updateBillingSubscriptionChange(pending.id, {
-        state: "applied",
-      });
     }
     return { handled: true, action: "subscription_plan_changed" };
   }
@@ -627,6 +627,9 @@ export class BillingEventHandlers {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
+    if (!existing) {
+      return { handled: true, action: "subscription_canceled_unknown" };
+    }
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: "canceled",
