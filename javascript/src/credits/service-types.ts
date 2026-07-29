@@ -3,10 +3,29 @@ import type Decimal from "decimal.js";
 import type { UsageMetrics } from "../metrics.js";
 import type { Logger } from "../shared/logger.js";
 import type { CreditEvent } from "./events.js";
-import type { BillingMode, CreditMetadata, UsageAnalyticsStore } from "./types/index.js";
+import type {
+  BillingMode,
+  CreditMetadata,
+  DeductionResult,
+  UsageAnalyticsStore,
+} from "./types/index.js";
 
 export type PolicyPreset = "strict_prepaid" | "overdraft";
 export type MetricsOrAmount = UsageMetrics | Decimal | number;
+
+export interface PostDeductionContext {
+  userId: string;
+  source: "deduct" | "settle" | "raw";
+  deduction:
+    | DeductionResult
+    | {
+        entryId: string;
+        userId: string;
+        amount: Decimal;
+        balanceAfter: Decimal;
+        idempotent: boolean;
+      };
+}
 
 export interface LowBalanceConfig {
   thresholds?: (Decimal | number)[] | null;
@@ -45,6 +64,11 @@ export interface CreditsServiceOptions {
    * reloads. Concurrent reloads are deduplicated.
    */
   pricingTtl?: number;
+  /**
+   * Awaited after a committed, non-replayed deduction. Hook failures are
+   * isolated from the committed credit charge.
+   */
+  postDeduction?: ((context: PostDeductionContext) => void | Promise<void>) | null;
 }
 
 export interface ReserveOptions {

@@ -3,6 +3,14 @@ export interface WebhookRequest {
   headers: Record<string, string>;
 }
 
+export interface WebhookResult {
+  received: boolean;
+  retryable: boolean;
+  provider: string;
+  eventId: string | null;
+  eventType: string | null;
+}
+
 export interface CheckoutParams {
   userId?: string;
   customerId?: string;
@@ -53,11 +61,7 @@ export interface PaymentMethodInfo {
 }
 
 export type SavedPaymentChargeStatus =
-  | "succeeded"
-  | "processing"
-  | "failed"
-  | "requires_customer_action"
-  | "requires_payment_method";
+  "succeeded" | "processing" | "failed" | "requires_customer_action" | "requires_payment_method";
 
 export interface SavedPaymentChargeParams {
   customerId: string;
@@ -130,10 +134,7 @@ export interface ChangePlanParams {
   providerSubscriptionId: string;
   productId: string;
   prorationBillingMode:
-    | "prorated_immediately"
-    | "full_immediately"
-    | "difference_immediately"
-    | "do_not_bill";
+    "prorated_immediately" | "full_immediately" | "difference_immediately" | "do_not_bill";
   effectiveAt?: "immediately" | "next_billing_date";
   onPaymentFailure?: "prevent_change" | "apply_change";
   quantity?: number;
@@ -178,7 +179,7 @@ export interface ChangePlanPreview {
 }
 
 export interface PaymentProvider {
-  readonly provider: "stripe" | "dodo" | "mock";
+  readonly provider: string;
 
   /** Retrieve the provider state for a checkout session, or null if it no longer exists. */
   getCheckoutSessionStatus?(providerSessionId: string): Promise<{
@@ -189,19 +190,19 @@ export interface PaymentProvider {
     params: CheckoutParams,
   ): Promise<{ url: string; customerId?: string; providerSessionId?: string }>;
 
-  createCustomerPortalSession(params: PortalParams): Promise<{ url: string }>;
+  createCustomerPortalSession?(params: PortalParams): Promise<{ url: string }>;
 
-  createUpdatePaymentMethodSession(params: UpdatePaymentMethodParams): Promise<{ url: string }>;
+  createUpdatePaymentMethodSession?(params: UpdatePaymentMethodParams): Promise<{ url: string }>;
 
-  createPaymentMethodSetupSession(params: PaymentMethodSetupParams): Promise<{ url: string }>;
+  createPaymentMethodSetupSession?(params: PaymentMethodSetupParams): Promise<{ url: string }>;
 
-  createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }>;
+  createCustomer?(params: CreateCustomerParams): Promise<{ customerId: string }>;
 
-  handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }>;
+  handleWebhook(req: WebhookRequest): Promise<WebhookResult>;
 
-  cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  cancelSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
-  reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  reactivateSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
   /** Removes a pending plan switch while retaining the current subscription. */
   cancelScheduledPlanChange?(
@@ -210,17 +211,17 @@ export interface PaymentProvider {
     idempotencyKey?: string,
   ): Promise<void>;
 
-  listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]>;
+  listPaymentMethods?(customerId: string): Promise<PaymentMethodInfo[]>;
 
   getDefaultPaymentMethod?(customerId: string): Promise<PaymentMethodInfo | null>;
 
   previewSavedPaymentCharge?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeQuote>;
 
-  chargeSavedPaymentMethod(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
+  chargeSavedPaymentMethod?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
 
-  getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null>;
+  getInvoiceUrl?(providerPaymentId: string): Promise<{ url: string } | null>;
 
-  changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string } | void>;
+  changePlan?(params: ChangePlanParams): Promise<{ providerOperationId?: string } | void>;
 
-  previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
+  previewChangePlan?(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
 }

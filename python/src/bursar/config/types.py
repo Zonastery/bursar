@@ -527,6 +527,7 @@ class QuotaDefinition(StrictModel):
 
 class PlanDefinition(StrictModel):
     display_name: str = Field(min_length=1)
+    rank: int = Field(ge=0)
     description: str | None = None
     rate_card: str | None = None
     allowed_operations: list[str] = Field(default_factory=list)
@@ -680,9 +681,23 @@ class AutoRechargeGuardrails(StrictModel):
     limits: AutoRechargeLimits
 
 
+class SubscriptionChangePolicy(StrictModel):
+    effective: Literal["immediate", "renewal"]
+    proration: Literal["prorated", "none"]
+    payment_failure: Literal["prevent_change", "apply_change"] = "prevent_change"
+
+
+class SubscriptionChanges(StrictModel):
+    upgrade: SubscriptionChangePolicy | None = None
+    downgrade: SubscriptionChangePolicy | None = None
+    lateral: SubscriptionChangePolicy | None = None
+    cadence_change: SubscriptionChangePolicy | None = None
+
+
 class CommerceConfig(StrictModel):
     providers: dict[str, ProviderDefinition] = Field(default_factory=dict)
     offers: dict[str, CommerceOffer] = Field(default_factory=dict)
+    subscription_changes: SubscriptionChanges | None = None
     auto_recharge: AutoRechargeGuardrails | None = None
 
 

@@ -20,6 +20,8 @@ import type {
   OfferPrice,
   ProviderDefinition,
   ProviderReference,
+  SubscriptionChangeClassification,
+  SubscriptionChangePolicy,
   TopupOffer,
   Window,
 } from "./types.js";
@@ -174,9 +176,42 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
     };
   }
 
+  const subscriptionChanges = parseSubscriptionChanges(raw.subscription_changes);
   const autoRecharge =
     raw.auto_recharge == null ? undefined : parseAutoRecharge(raw.auto_recharge, offers);
-  return { providers, offers, ...(autoRecharge == null ? {} : { autoRecharge }) };
+  return {
+    providers,
+    offers,
+    ...(subscriptionChanges == null ? {} : { subscriptionChanges }),
+    ...(autoRecharge == null ? {} : { autoRecharge }),
+  };
+}
+
+const SUBSCRIPTION_CHANGE_CLASSIFICATIONS = [
+  "upgrade",
+  "downgrade",
+  "lateral",
+  "cadence_change",
+] as const satisfies readonly SubscriptionChangeClassification[];
+
+function parseSubscriptionChanges(
+  value: unknown,
+): CommerceConfig["subscriptionChanges"] | undefined {
+  if (value == null) return undefined;
+  const raw = asObject(value);
+  const result: Partial<Record<SubscriptionChangeClassification, SubscriptionChangePolicy>> = {};
+  for (const classification of SUBSCRIPTION_CHANGE_CLASSIFICATIONS) {
+    if (raw[classification] == null) continue;
+    const policy = asObject(raw[classification]);
+    result[classification] = {
+      effective: asString(policy.effective) as SubscriptionChangePolicy["effective"],
+      proration: asString(policy.proration) as SubscriptionChangePolicy["proration"],
+      paymentFailure: asString(
+        policy.payment_failure ?? "prevent_change",
+      ) as SubscriptionChangePolicy["paymentFailure"],
+    };
+  }
+  return result;
 }
 
 function parseAutoRecharge(

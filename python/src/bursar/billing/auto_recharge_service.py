@@ -199,7 +199,7 @@ class AutoRechargeService:
         provider: PaymentProvider,
         *,
         balance: Decimal | int,
-        return_url: str,
+        return_url: str | None,
         consent_reference: str | None = None,
     ) -> BillingAutoRechargeStatus | None:
         policy = self._policy(provider)
@@ -254,7 +254,7 @@ class AutoRechargeService:
         provider: PaymentProvider,
         *,
         balance: Decimal | int,
-        return_url: str,
+        return_url: str | None,
     ) -> AutoRechargeProcessResult:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled:
@@ -273,7 +273,7 @@ class AutoRechargeService:
         provider: PaymentProvider,
         *,
         balance: Decimal | int,
-        return_url: str,
+        return_url: str | None,
     ) -> AutoRechargeProcessResult:
         policy = self._policy(provider)
         if policy is None:

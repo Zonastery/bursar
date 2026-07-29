@@ -73,6 +73,7 @@ const CONFIG = {
   plans: {
     pro: {
       display_name: "Pro",
+      rank: 1,
       rate_card: "standard",
       allowed_operations: ["completion"],
       features: { premium_tools: true },
@@ -94,6 +95,7 @@ const CONFIG = {
     },
     basic: {
       display_name: "Basic",
+      rank: 0,
       rate_card: "standard",
       allowed_operations: ["completion"],
     },

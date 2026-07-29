@@ -43,6 +43,7 @@ export class CreditLeaseWorkflow {
     ) => void,
     private readonly emitQuotaEvents: (userId: string, idempotencyKey: string) => Promise<void>,
     private readonly maybeLazyExpire: (userId: string) => Promise<void>,
+    private readonly afterDeduction: (userId: string, result: DeductionResult) => Promise<void>,
   ) {}
 
   private async expectedAdmissionPolicy(
@@ -251,6 +252,7 @@ export class CreditLeaseWorkflow {
     await this.balanceMonitor.afterCharge(userId, result);
     if (!result.idempotent) {
       await this.emitQuotaEvents(userId, idempotencyKey);
+      await this.afterDeduction(userId, result);
     }
     return result;
   }

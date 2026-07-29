@@ -70,6 +70,7 @@ const PRICING_DICT = {
   plans: {
     free: {
       display_name: "Free",
+      rank: 0,
       rate_card: "standard",
       credit_allowance: {
         amount: "1000",
@@ -83,6 +84,7 @@ const PRICING_DICT = {
     },
     pro: {
       display_name: "Pro",
+      rank: 1,
       rate_card: "standard",
       credit_allowance: {
         amount: "100000",
@@ -96,6 +98,7 @@ const PRICING_DICT = {
     },
     enterprise: {
       display_name: "Enterprise",
+      rank: 2,
       rate_card: "standard",
       credit_allowance: {
         amount: "1000000",

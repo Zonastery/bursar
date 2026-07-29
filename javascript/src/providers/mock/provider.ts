@@ -14,6 +14,7 @@ import type {
   SavedPaymentChargeParams,
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
+  WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
@@ -90,15 +91,27 @@ export class MockPaymentProvider implements PaymentProvider {
     return { url: "https://example.com/invoice" };
   }
 
-  async handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }> {
+  async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
     let payload: Record<string, unknown> | null;
     try {
       payload = JSON.parse(req.rawBody);
     } catch {
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
     if (!payload || typeof payload !== "object") {
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
 
     const data = (payload.data ?? {}) as Record<string, unknown>;
@@ -118,7 +131,15 @@ export class MockPaymentProvider implements PaymentProvider {
       this.logger,
     );
 
-    return { received: true };
+    const rawEventId =
+      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
+    return {
+      received: true,
+      retryable: false,
+      provider: this.provider,
+      eventId: rawEventId == null ? null : String(rawEventId),
+      eventType: typeof payload.type === "string" ? payload.type : null,
+    };
   }
 
   async changePlan(_params: ChangePlanParams): Promise<void> {}

@@ -72,7 +72,7 @@ CONFIG = {
         },
         "default_bucket": "purchased",
     },
-    "plans": {"pro": {"display_name": "Pro", "rate_card": "standard"}},
+    "plans": {"pro": {"display_name": "Pro", "rank": 0, "rate_card": "standard"}},
 }
 
 

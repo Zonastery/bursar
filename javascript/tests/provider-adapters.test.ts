@@ -197,6 +197,9 @@ describe("payment provider adapter contracts", () => {
     await expect(provider.handleWebhook({ rawBody: "{}", headers: {} })).resolves.toEqual({
       received: false,
       retryable: false,
+      provider: "stripe",
+      eventId: null,
+      eventType: null,
     });
   });
 
@@ -239,6 +242,9 @@ describe("payment provider adapter contracts", () => {
     await expect(provider.handleWebhook({ rawBody: "not-json", headers: {} })).resolves.toEqual({
       received: false,
       retryable: false,
+      provider: "mock",
+      eventId: null,
+      eventType: null,
     });
   });
 });

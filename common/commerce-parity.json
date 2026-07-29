@@ -1,0 +1,220 @@
+{
+  "catalog": {
+    "version": 1,
+    "credits": {
+      "accounting": {
+        "unit": "credit",
+        "scale": 6,
+        "rounding": "half_up"
+      },
+      "buckets": {
+        "general": {
+          "priority": 10
+        }
+      },
+      "default_bucket": "general",
+      "policies": {
+        "prepaid": {
+          "type": "prepaid"
+        }
+      }
+    },
+    "entitlements": {
+      "features": {}
+    },
+    "admission": {
+      "policies": {}
+    },
+    "plans": {
+      "starter": {
+        "display_name": "Starter",
+        "rank": 0,
+        "allowed_operations": [],
+        "features": {},
+        "quotas": {},
+        "credit_policy": "prepaid"
+      },
+      "peer": {
+        "display_name": "Peer",
+        "rank": 0,
+        "allowed_operations": [],
+        "features": {},
+        "quotas": {},
+        "credit_policy": "prepaid"
+      },
+      "pro": {
+        "display_name": "Pro",
+        "rank": 1,
+        "allowed_operations": [],
+        "features": {},
+        "quotas": {},
+        "credit_policy": "prepaid"
+      }
+    },
+    "commerce": {
+      "providers": {
+        "alpha": {
+          "type": "custom",
+          "adapter": "alpha"
+        }
+      },
+      "offers": {
+        "starter_month": {
+          "type": "subscription",
+          "display_name": "Starter monthly",
+          "plan": "starter",
+          "billing_interval": {
+            "unit": "month",
+            "count": 1
+          },
+          "price": {
+            "amount_minor": 1000,
+            "currency": "USD"
+          },
+          "providers": {
+            "alpha": {
+              "type": "custom_object",
+              "object_kind": "subscription",
+              "external_id": "alpha-starter-month"
+            }
+          }
+        },
+        "starter_year": {
+          "type": "subscription",
+          "display_name": "Starter yearly",
+          "plan": "starter",
+          "billing_interval": {
+            "unit": "year",
+            "count": 1
+          },
+          "price": {
+            "amount_minor": 10000,
+            "currency": "USD"
+          },
+          "providers": {
+            "alpha": {
+              "type": "custom_object",
+              "object_kind": "subscription",
+              "external_id": "alpha-starter-year"
+            }
+          }
+        },
+        "peer_month": {
+          "type": "subscription",
+          "display_name": "Peer monthly",
+          "plan": "peer",
+          "billing_interval": {
+            "unit": "month",
+            "count": 1
+          },
+          "price": {
+            "amount_minor": 1000,
+            "currency": "USD"
+          },
+          "providers": {
+            "alpha": {
+              "type": "custom_object",
+              "object_kind": "subscription",
+              "external_id": "alpha-peer-month"
+            }
+          }
+        },
+        "pro_month": {
+          "type": "subscription",
+          "display_name": "Pro monthly",
+          "plan": "pro",
+          "billing_interval": {
+            "unit": "month",
+            "count": 1
+          },
+          "price": {
+            "amount_minor": 2000,
+            "currency": "USD"
+          },
+          "providers": {
+            "alpha": {
+              "type": "custom_object",
+              "object_kind": "subscription",
+              "external_id": "alpha-pro-month"
+            }
+          }
+        }
+      },
+      "subscription_changes": {
+        "upgrade": {
+          "effective": "immediate",
+          "proration": "prorated",
+          "payment_failure": "prevent_change"
+        },
+        "downgrade": {
+          "effective": "renewal",
+          "proration": "none",
+          "payment_failure": "prevent_change"
+        },
+        "lateral": {
+          "effective": "immediate",
+          "proration": "prorated",
+          "payment_failure": "prevent_change"
+        },
+        "cadence_change": {
+          "effective": "renewal",
+          "proration": "none",
+          "payment_failure": "prevent_change"
+        }
+      }
+    }
+  },
+  "transitions": [
+    {
+      "current_plan": "starter",
+      "current_interval": "month",
+      "target_offer": "starter_month",
+      "classification": "unchanged",
+      "effective": null,
+      "proration": null
+    },
+    {
+      "current_plan": "starter",
+      "current_interval": "month",
+      "target_offer": "pro_month",
+      "classification": "upgrade",
+      "effective": "immediate",
+      "proration": "prorated"
+    },
+    {
+      "current_plan": "pro",
+      "current_interval": "month",
+      "target_offer": "starter_month",
+      "classification": "downgrade",
+      "effective": "renewal",
+      "proration": "none"
+    },
+    {
+      "current_plan": "starter",
+      "current_interval": "month",
+      "target_offer": "peer_month",
+      "classification": "lateral",
+      "effective": "immediate",
+      "proration": "prorated"
+    },
+    {
+      "current_plan": "starter",
+      "current_interval": "month",
+      "target_offer": "starter_year",
+      "classification": "cadence_change",
+      "effective": "renewal",
+      "proration": "none"
+    }
+  ],
+  "error_codes": {
+    "unknown_offer": "UNKNOWN_OFFER",
+    "invalid_quantity": "INVALID_OFFER_QUANTITY",
+    "quote_changed": "QUOTE_CHANGED",
+    "provider_capability": "PROVIDER_CAPABILITY_NOT_SUPPORTED"
+  },
+  "public_contract": {
+    "offer_input": "offerKey",
+    "quote_field": "quoteFingerprint",
+    "provider_product_ids": "provider_internal"
+  }
+}

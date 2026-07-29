@@ -184,6 +184,7 @@ export interface BillingCapability extends BillingEventSink {
     productId?: string | null,
     priceId?: string | null,
   ): Promise<BillingOfferResult | null>;
+  resolveOfferByLookup(provider: string, lookupKey: string): Promise<BillingOfferResult | null>;
   resolveTopup(
     provider: string,
     productId?: string | null,

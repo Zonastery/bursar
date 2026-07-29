@@ -1,10 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PostgresPool } from "../src/shared/postgres-client.js";
 import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
-import { S3BillingArchive, type S3PutObjectRequest } from "../src/storage/adapters/s3.js";
+import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
+
+const s3Mock = vi.hoisted(() => ({
+  send: vi.fn(),
+  destroy: vi.fn(),
+}));
+
+vi.mock("@aws-sdk/client-s3", () => ({
+  S3Client: class {
+    readonly send = s3Mock.send;
+    readonly destroy = s3Mock.destroy;
+  },
+  PutObjectCommand: class {
+    constructor(readonly input: Record<string, unknown>) {}
+  },
+}));
 
 const outboxEvent: OutboxEvent = {
   eventId: "42",
@@ -64,14 +79,15 @@ describe("OutboxWorker", () => {
 
 describe("S3BillingArchive", () => {
   it("uses a deterministic object key and preserves the raw envelope", async () => {
-    let request: S3PutObjectRequest | null = null;
+    s3Mock.send.mockResolvedValue({ VersionId: "v1" });
     const archive = new S3BillingArchive({
       bucket: "billing-archive",
-      prefix: "/tenant-a/",
-      putObject: async (input) => {
-        request = input;
-        return { versionId: "v1" };
+      region: "us-east-1",
+      credentials: {
+        accessKeyId: "access-key",
+        secretAccessKey: "secret-key",
       },
+      prefix: "/tenant-a/",
     });
 
     await expect(
@@ -94,9 +110,19 @@ describe("S3BillingArchive", () => {
       versionId: "v1",
     });
 
-    expect(request).not.toBeNull();
-    const saved = JSON.parse(new TextDecoder().decode(request?.body)) as Record<string, unknown>;
+    const command = s3Mock.send.mock.calls[0]?.[0] as {
+      input: Record<string, unknown>;
+    };
+    expect(command.input.Bucket).toBe("billing-archive");
+    expect(command.input.ContentType).toBe("application/json");
+    const saved = JSON.parse(new TextDecoder().decode(command.input.Body as Uint8Array)) as Record<
+      string,
+      unknown
+    >;
     expect(saved.envelope).toEqual({ id: "evt_1", data: { amount: 1200 } });
+
+    await archive.close();
+    expect(s3Mock.destroy).toHaveBeenCalledOnce();
   });
 });
 

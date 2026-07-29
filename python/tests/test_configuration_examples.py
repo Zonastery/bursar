@@ -62,6 +62,7 @@ def test_generic_operation_example_validates() -> None:
         "plans": {
             "free": {
                 "display_name": "Free",
+                "rank": 0,
                 "rate_card": "standard",
             }
         },

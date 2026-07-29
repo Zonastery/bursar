@@ -11,7 +11,10 @@ import type { CreditStore } from "./credits/store.js";
 import type { CreditEventEmitter } from "./credits/events.js";
 import type { BillingEvent, BillingEventResult } from "./billing/types/index.js";
 import type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+import { CommerceService as CommerceServiceImpl } from "./commerce/service.js";
+import type { CommerceOptions } from "./commerce/types.js";
 export type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+export type { CommerceOptions } from "./commerce/types.js";
 
 /** Public credit capability. The implementation remains package-private. */
 export type CreditsService = Pick<CreditsServiceImpl, keyof CreditsServiceImpl>;
@@ -23,6 +26,7 @@ export interface BursarOptions {
   credits?: CreditsService | null;
   creditsOptions?: CreditsServiceOptions | null;
   billingOptions?: BillingServiceOptions | null;
+  commerceOptions?: CommerceOptions | null;
   emitter?: CreditEventEmitter | null;
 }
 
@@ -58,6 +62,7 @@ export class CatalogService {
 export class Bursar implements BillingEventSink {
   readonly credits: CreditsService;
   readonly billing: BillingService | null;
+  readonly commerce: CommerceServiceImpl | null;
   readonly catalog: CatalogService;
 
   constructor(options: BursarOptions) {
@@ -77,6 +82,15 @@ export class Bursar implements BillingEventSink {
           provisioning: this.credits,
         })
       : null;
+    this.commerce =
+      this.billing && options.commerceOptions
+        ? new CommerceServiceImpl(this.billing, this.credits, this, options.commerceOptions)
+        : null;
+    if (this.commerce) {
+      this.credits.addPostDeductionHook(async ({ userId }) => {
+        await this.commerce!.autoRecharge.processIfNeeded({ accountId: userId });
+      });
+    }
   }
 
   /** Load the active catalog into the pricing engine. */

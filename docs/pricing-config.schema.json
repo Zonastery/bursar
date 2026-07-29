@@ -434,6 +434,17 @@
           "title": "Offers",
           "type": "object"
         },
+        "subscription_changes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChanges"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "auto_recharge": {
           "anyOf": [
             {
@@ -1655,6 +1666,11 @@
           "title": "Display Name",
           "type": "string"
         },
+        "rank": {
+          "minimum": 0,
+          "title": "Rank",
+          "type": "integer"
+        },
         "description": {
           "anyOf": [
             {
@@ -1764,7 +1780,8 @@
         }
       },
       "required": [
-        "display_name"
+        "display_name",
+        "rank"
       ],
       "title": "PlanDefinition",
       "type": "object"
@@ -2210,6 +2227,93 @@
         "type"
       ],
       "title": "StripeProvider",
+      "type": "object"
+    },
+    "SubscriptionChangePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "effective": {
+          "enum": [
+            "immediate",
+            "renewal"
+          ],
+          "title": "Effective",
+          "type": "string"
+        },
+        "proration": {
+          "enum": [
+            "prorated",
+            "none"
+          ],
+          "title": "Proration",
+          "type": "string"
+        },
+        "payment_failure": {
+          "default": "prevent_change",
+          "enum": [
+            "prevent_change",
+            "apply_change"
+          ],
+          "title": "Payment Failure",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effective",
+        "proration"
+      ],
+      "title": "SubscriptionChangePolicy",
+      "type": "object"
+    },
+    "SubscriptionChanges": {
+      "additionalProperties": false,
+      "properties": {
+        "upgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "downgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lateral": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cadence_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SubscriptionChanges",
       "type": "object"
     },
     "SubscriptionEndExpiry": {

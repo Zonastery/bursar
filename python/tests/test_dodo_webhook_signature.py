@@ -93,7 +93,11 @@ async def test_returns_received_true_when_unwrap_succeeds(sink: FakeSink, logger
         headers={"content-type": "application/json", "x-webhook-signature": "valid_signature"},
     )
     result = await provider.handle_webhook(req)
-    assert result == {"received": True}
+    assert result.received is True
+    assert result.retryable is False
+    assert result.provider == "dodo"
+    assert result.event_id == "evt_test_valid"
+    assert result.event_type == "subscription.active"
 
 
 @pytest.mark.asyncio
@@ -111,7 +115,10 @@ async def test_returns_non_retryable_on_signature_failure(sink: FakeSink, logger
         headers={"content-type": "application/json", "x-webhook-signature": "tampered_signature"},
     )
     result = await provider.handle_webhook(req)
-    assert result == {"received": False, "retryable": False}
+    assert result.received is False
+    assert result.retryable is False
+    assert result.provider == "dodo"
+    assert result.event_id is None
 
 
 @pytest.mark.asyncio
@@ -129,7 +136,8 @@ async def test_returns_non_retryable_regardless_of_error(sink: FakeSink, logger:
         headers={"content-type": "application/json"},
     )
     result = await provider.handle_webhook(req)
-    assert result == {"received": False, "retryable": False}
+    assert result.received is False
+    assert result.retryable is False
 
 
 @pytest.mark.asyncio
@@ -160,7 +168,10 @@ async def test_does_not_resolve_anonymous_user_for_payment_failed(
         headers={},
     )
     result = await provider.handle_webhook(req)
-    assert result == {"received": True}
+    assert result.received is True
+    assert result.provider == "dodo"
+    assert result.event_id == "evt_payment_failed"
+    assert result.event_type == "payment.failed"
     assert not resolve_user.called
     assert sink.called
 

@@ -175,6 +175,13 @@ export class BillingService {
     return this.management.resolveOffer(provider, productId, priceId);
   }
 
+  async resolveOfferByLookup(
+    provider: string,
+    lookupKey: string,
+  ): Promise<BillingOfferResult | null> {
+    return this.management.resolveOfferByLookup(provider, lookupKey);
+  }
+
   async resolveTopup(
     provider: string,
     productId?: string | null,

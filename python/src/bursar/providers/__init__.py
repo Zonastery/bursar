@@ -18,6 +18,7 @@ from bursar.providers.types import (
     StdlibProviderLogger,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    WebhookResult,
 )
 
 if TYPE_CHECKING:
@@ -64,4 +65,5 @@ __all__ = [
     "StripeProvider",
     "UpdatePaymentMethodParams",
     "WebhookRequest",
+    "WebhookResult",
 ]

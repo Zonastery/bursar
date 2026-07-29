@@ -106,6 +106,7 @@ export class BursarRuntime {
     if (this.closed) return;
     this.closed = true;
     await this.worker?.stop();
+    await this.s3?.close?.();
     await Promise.all([this.creditStore.close(), this.billingStore.close()]);
     if (this.ownsPool) await this.pool.end();
   }

@@ -175,6 +175,10 @@ class BursarRuntime:
         self._closed = True
         if self.worker is not None:
             self.worker.stop()
+        if self.s3 is not None:
+            close = getattr(self.s3, "close", None)
+            if callable(close):
+                close()
         self.credit_store.close()
         self.billing_store.close()
         if self._owns_pool:

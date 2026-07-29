@@ -97,6 +97,9 @@ export class AutoRechargeService {
   ): Promise<{ customerId: string; method: PaymentMethodInfo } | null> {
     const customer = await this.billing.getCustomerByUserId(userId, provider.provider);
     if (!customer) return null;
+    if (!provider.listPaymentMethods) {
+      throw new Error(`provider_capability_not_supported:listPaymentMethods:${provider.provider}`);
+    }
     const methods = await provider.listPaymentMethods(customer.providerCustomerId);
     const method =
       (await provider.getDefaultPaymentMethod?.(customer.providerCustomerId)) ??
@@ -162,7 +165,7 @@ export class AutoRechargeService {
     userId: string;
     provider: PaymentProvider;
     balance: number;
-    returnUrl: string;
+    returnUrl?: string;
     consentReference?: string;
   }): Promise<BillingAutoRechargeStatus | null> {
     const policy = await this.policy(input.provider);
@@ -205,7 +208,7 @@ export class AutoRechargeService {
     userId: string;
     provider: PaymentProvider;
     balance: number;
-    returnUrl: string;
+    returnUrl?: string;
   }): Promise<AutoRechargeProcessResult> {
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
     if (!profile?.enabled) throw new Error("auto_recharge_disabled");
@@ -221,7 +224,7 @@ export class AutoRechargeService {
     userId: string;
     provider: PaymentProvider;
     balance: number;
-    returnUrl: string;
+    returnUrl?: string;
   }): Promise<AutoRechargeProcessResult> {
     const policy = await this.policy(input.provider);
     if (!policy) return { outcome: "not_configured" };
@@ -242,6 +245,11 @@ export class AutoRechargeService {
     });
     if (!attempt) return { outcome: "limit_reached" };
 
+    if (!input.provider.chargeSavedPaymentMethod) {
+      throw new Error(
+        `provider_capability_not_supported:chargeSavedPaymentMethod:${input.provider.provider}`,
+      );
+    }
     const charge = await input.provider.chargeSavedPaymentMethod({
       customerId: payment.customerId,
       paymentMethodId: payment.method.id,

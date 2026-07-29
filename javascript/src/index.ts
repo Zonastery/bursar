@@ -38,7 +38,14 @@ export { validateExpression, evaluateExpression } from "./expr.js";
 
 // Application facade. Credit/billing orchestration is internal to Bursar.
 export { Bursar, CatalogService } from "./bursar.js";
-export type { BursarOptions, BillingEventSink, BillingService, CreditsService } from "./bursar.js";
+export type {
+  BursarOptions,
+  BillingEventSink,
+  BillingService,
+  CommerceOptions,
+  CreditsService,
+} from "./bursar.js";
+export * from "./commerce/index.js";
 
 // Types
 export type {

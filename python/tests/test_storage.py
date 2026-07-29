@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock
+
+import pytest
 
 from bursar.storage import (
     BillingEventPayloadExport,
@@ -20,8 +22,7 @@ from bursar.storage import (
     OutboxWorkerOptions,
     S3BillingArchive,
     S3BillingArchiveOptions,
-    S3PutObjectRequest,
-    S3PutObjectResult,
+    S3Credentials,
     UsageChargeExport,
     create_bursar_runtime,
 )
@@ -206,18 +207,22 @@ def test_outbox_worker_releases_failure_with_bounded_backoff() -> None:
     ]
 
 
-def test_s3_archive_uses_deterministic_key_and_preserves_envelope() -> None:
-    requests: list[S3PutObjectRequest] = []
-
-    def put_object(request: S3PutObjectRequest) -> S3PutObjectResult:
-        requests.append(request)
-        return S3PutObjectResult(version_id="v1")
-
+def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = Mock()
+    client.put_object.return_value = {"VersionId": "v1"}
+    boto3_client = Mock(return_value=client)
+    monkeypatch.setattr("boto3.client", boto3_client)
     archive = S3BillingArchive(
         S3BillingArchiveOptions(
             bucket="billing-archive",
+            region="us-east-1",
+            credentials=S3Credentials(
+                access_key_id="access-key",
+                secret_access_key="secret-key",
+            ),
             prefix="/tenant-a/",
-            put_object=put_object,
         )
     )
     result = archive.archive(
@@ -239,10 +244,16 @@ def test_s3_archive_uses_deterministic_key_and_preserves_envelope() -> None:
 
     assert result.key == ("tenant-a/billing-events/2026/07/29/00000000-0000-0000-0000-000000000001.json")
     assert result.version_id == "v1"
-    assert json.loads(requests[0].body)["envelope"] == {
+    boto3_client.assert_called_once()
+    request = client.put_object.call_args.kwargs
+    assert request["Bucket"] == "billing-archive"
+    assert request["ContentType"] == "application/json"
+    assert json.loads(request["Body"])["envelope"] == {
         "id": "evt_1",
         "data": {"amount": 1200},
     }
+    archive.close()
+    client.close.assert_called_once_with()
 
 
 def test_clickhouse_writes_projection_and_serves_analytics() -> None:
@@ -265,6 +276,17 @@ def test_clickhouse_writes_projection_and_serves_analytics() -> None:
     assert analytics[0].user_id == usage.subject_id
     assert str(analytics[0].total_spend) == "12.5"
     assert analytics[0].entry_count == 2
+
+
+def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
+    client = FakeClickHouseClient()
+    store = ClickHouseUsageStore(ClickHouseUsageStoreOptions(client=client, create_table=False))
+
+    with pytest.raises(ValueError, match="Invalid usage timestamp"):
+        store.write_usage(
+            replace(_usage_export(), event_at="2026-07-29T12:00:00"),
+            "99",
+        )
 
 
 def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:

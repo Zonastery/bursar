@@ -34,10 +34,12 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -167,6 +169,13 @@ class RunBilledResult:
     deduction: DeductionResult
 
 
+@dataclass(frozen=True, slots=True)
+class PostDeductionContext:
+    user_id: str
+    source: str
+    deduction: DeductionResult
+
+
 class LowBalanceConfig:
     """Configuration for the ``credits.low_balance`` signal (interface plan §6 / WS7).
 
@@ -265,6 +274,67 @@ class CreditsService:
         # acquiring the lock) prevents stampede when the TTL expires concurrently.
         self._pricing_refresh_lock = threading.Lock()
         self._version_engines: dict[int, PricingEngine] = {}
+        self._post_deduction_hooks: set[Callable[[PostDeductionContext], None | Awaitable[None]]] = set()
+
+    def add_post_deduction_hook(
+        self,
+        hook: Callable[[PostDeductionContext], None | Awaitable[None]],
+    ) -> Callable[[], None]:
+        """Register an awaited, failure-isolated post-commit deduction hook."""
+        self._post_deduction_hooks.add(hook)
+
+        def remove() -> None:
+            self._post_deduction_hooks.discard(hook)
+
+        return remove
+
+    @staticmethod
+    def _wait_for_hook(awaitable: Awaitable[None]) -> None:
+        async def wait() -> None:
+            await awaitable
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(wait())
+            return
+
+        error: list[BaseException] = []
+
+        def runner() -> None:
+            try:
+                asyncio.run(wait())
+            except BaseException as exc:  # pragma: no cover - re-raised below
+                error.append(exc)
+
+        worker = threading.Thread(target=runner, daemon=True)
+        worker.start()
+        worker.join()
+        if error:
+            raise error[0]
+
+    def _after_deduction(
+        self,
+        user_id: str,
+        source: str,
+        deduction: DeductionResult,
+    ) -> None:
+        context = PostDeductionContext(
+            user_id=user_id,
+            source=source,
+            deduction=deduction,
+        )
+        for hook in tuple(self._post_deduction_hooks):
+            try:
+                result = hook(context)
+                if inspect.isawaitable(result):
+                    self._wait_for_hook(result)
+            except Exception:
+                logger.warning(
+                    "post-deduction hook failed",
+                    extra={"user_id": user_id, "source": source},
+                    exc_info=True,
+                )
 
     def _engine_for_catalog_version(self, catalog_version: int) -> PricingEngine:
         """Load and cache an immutable historical catalog revision."""
@@ -545,6 +615,16 @@ class CreditsService:
                 "new_balance": result.new_balance,
                 "entry_type": entry_type,
             },
+        )
+        self._after_deduction(
+            user_id,
+            "raw",
+            DeductionResult(
+                entry_id=result.entry_id,
+                user_id=user_id,
+                amount=abs(result.amount),
+                balance_after=result.new_balance,
+            ),
         )
         return result
 
@@ -1187,6 +1267,7 @@ class CreditsService:
         self._post_charge_signals(user_id, result)
         if not result.idempotent:
             self._emit_quota_events(user_id, effective_idempotency_key)
+            self._after_deduction(user_id, "settle", result)
         return result
 
     def release(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -1598,6 +1679,7 @@ class CreditsService:
             balance_before = result.balance_after + result.amount
             self._emit_low_balance(user_id, balance_before, result.balance_after)
             self._emit_quota_events(user_id, effective_idempotency_key)
+            self._after_deduction(user_id, "deduct", result)
 
         return result
 

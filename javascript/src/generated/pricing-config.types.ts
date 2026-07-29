@@ -112,11 +112,7 @@ export type Scale = 6;
 export type Rounding1 = "half_up";
 export type Priority = number;
 export type Expiry =
-  | NeverExpiry
-  | AfterGrantExpiry
-  | EndOfWindowExpiry
-  | FixedExpiry
-  | SubscriptionEndExpiry;
+  NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry;
 export type Type8 = "never";
 export type Type9 = "after_grant";
 export type Unit2 = "day" | "week" | "month" | "year";
@@ -146,8 +142,7 @@ export type Recipient = "subject" | "referrer";
 export type Amount2 = string;
 export type Bucket = string;
 export type Expiry1 =
-  | (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry)
-  | null;
+  (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry) | null;
 export type StartsAt = string | null;
 export type EndsAt = string | null;
 export type Regions = string[];
@@ -173,6 +168,7 @@ export type Pattern = string | null;
 export type MaxInFlight = number | null;
 export type MaxInFlight1 = number;
 export type DisplayName = string;
+export type Rank = number;
 export type Description = string | null;
 export type RateCard1 = string | null;
 export type AllowedOperations = string[];
@@ -213,11 +209,7 @@ export type Amount4 = string;
 export type Bucket1 = string;
 export type Renewal = "replace_previous" | "accumulate";
 export type Expiry2 =
-  | NeverExpiry
-  | AfterGrantExpiry
-  | EndOfWindowExpiry
-  | FixedExpiry
-  | SubscriptionEndExpiry;
+  NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry;
 export type DisplayName2 = string;
 export type Description2 = string | null;
 export type SortOrder1 = number;
@@ -228,9 +220,11 @@ export type Maximum1 = number;
 export type Default4 = number;
 export type Bucket2 = string;
 export type Expiry3 =
-  | (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry)
-  | null;
+  (NeverExpiry | AfterGrantExpiry | EndOfWindowExpiry | FixedExpiry | SubscriptionEndExpiry) | null;
 export type LotBehavior = "separate_lots" | "merge_and_refresh";
+export type Effective = "immediate" | "renewal";
+export type Proration = "prorated" | "none";
+export type PaymentFailure = "prevent_change" | "apply_change";
 /**
  * @minItems 1
  */
@@ -514,6 +508,7 @@ export interface Plans1 {
 }
 export interface PlanDefinition {
   display_name: DisplayName;
+  rank: Rank;
   description?: Description;
   rate_card?: RateCard1;
   allowed_operations?: AllowedOperations;
@@ -553,6 +548,7 @@ export interface QuotaDefinition {
 export interface CommerceConfig {
   providers?: Providers;
   offers?: Offers;
+  subscription_changes?: SubscriptionChanges | null;
   auto_recharge?: AutoRechargeGuardrails | null;
 }
 export interface Providers {
@@ -632,6 +628,17 @@ export interface QuantityBounds {
   minimum?: Minimum1;
   maximum?: Maximum1;
   default?: Default4;
+}
+export interface SubscriptionChanges {
+  upgrade?: SubscriptionChangePolicy | null;
+  downgrade?: SubscriptionChangePolicy | null;
+  lateral?: SubscriptionChangePolicy | null;
+  cadence_change?: SubscriptionChangePolicy | null;
+}
+export interface SubscriptionChangePolicy {
+  effective: Effective;
+  proration: Proration;
+  payment_failure?: PaymentFailure;
 }
 export interface AutoRechargeGuardrails {
   eligible_topups: EligibleTopups;

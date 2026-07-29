@@ -158,6 +158,8 @@ export interface QuotaDefinition {
 
 export interface PlanDefinition {
   displayName: string;
+  /** Explicit commercial ordering; never inferred from declaration order. */
+  rank: number;
   description?: string;
   rateCard?: string;
   allowedOperations: string[];
@@ -170,9 +172,7 @@ export interface PlanDefinition {
 }
 
 export type ProviderDefinition =
-  | { type: "stripe" }
-  | { type: "dodo" }
-  | { type: "custom"; adapter: string };
+  { type: "stripe" } | { type: "dodo" } | { type: "custom"; adapter: string };
 
 export type ProviderReference =
   | { type: "stripe_price"; priceId: string }
@@ -236,7 +236,17 @@ export interface AutoRechargeGuardrails {
 export interface CommerceConfig {
   providers: Record<string, ProviderDefinition>;
   offers: Record<string, CommerceOffer>;
+  subscriptionChanges?: Partial<Record<SubscriptionChangeClassification, SubscriptionChangePolicy>>;
   autoRecharge?: AutoRechargeGuardrails;
+}
+
+export type SubscriptionChangeClassification =
+  "upgrade" | "downgrade" | "lateral" | "cadence_change";
+
+export interface SubscriptionChangePolicy {
+  effective: "immediate" | "renewal";
+  proration: "prorated" | "none";
+  paymentFailure: "prevent_change" | "apply_change";
 }
 
 export interface ParsedBursarConfig {

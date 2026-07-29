@@ -25,6 +25,7 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    WebhookResult,
     normalize_provider_logger,
 )
 
@@ -91,7 +92,7 @@ class DodoProvider(PaymentProvider):
         link = getattr(session, "link", None) or session.get("link")
         return {"url": link}
 
-    async def handle_webhook(self, req: WebhookRequest) -> dict:
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         client = self._get_client()
         webhook_key = self._config.get("webhook_key")
         try:
@@ -102,7 +103,7 @@ class DodoProvider(PaymentProvider):
             )
         except Exception as exc:
             self._logger.warning("Dodo webhook verification failed", {"error": str(exc)})
-            return {"received": False, "retryable": False}
+            return WebhookResult(False, False, self.provider, None, None)
 
         event_type = getattr(event, "type", None) or event.get("type", "")
         event_data = getattr(event, "data", None) or event.get("data", {})
@@ -112,6 +113,8 @@ class DodoProvider(PaymentProvider):
             data_dict = event_data.model_dump()
         elif isinstance(event_data, dict):
             data_dict = event_data
+        elif hasattr(event_data, "__dict__"):
+            data_dict = vars(event_data)
         else:
             with suppress(TypeError, ValueError):
                 data_dict = dict(event_data)
@@ -136,7 +139,27 @@ class DodoProvider(PaymentProvider):
             self._sink,
             self._logger,
         )
-        return {"received": True}
+        raw_event_id = next(
+            (
+                data_dict.get(key)
+                for key in (
+                    "id",
+                    "payment_id",
+                    "subscription_id",
+                    "refund_id",
+                    "dispute_id",
+                )
+                if data_dict.get(key) is not None
+            ),
+            None,
+        )
+        return WebhookResult(
+            True,
+            False,
+            self.provider,
+            str(raw_event_id) if raw_event_id is not None else None,
+            str(event_type) or None,
+        )
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         client = self._get_client()

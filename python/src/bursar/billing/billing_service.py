@@ -343,6 +343,13 @@ class BillingServiceImpl:
         """
         return self._store.resolve_billing_offer(provider, product_id, price_id)
 
+    def resolve_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> BillingOfferResult | None:
+        return self._resolve_offer_by_lookup(provider, lookup_key)
+
     def resolve_topup(
         self,
         provider: str,

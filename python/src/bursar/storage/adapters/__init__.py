@@ -9,9 +9,7 @@ from bursar.storage.adapters.clickhouse import (
 from bursar.storage.adapters.s3 import (
     S3BillingArchive,
     S3BillingArchiveOptions,
-    S3PutObject,
-    S3PutObjectRequest,
-    S3PutObjectResult,
+    S3Credentials,
 )
 
 __all__ = [
@@ -21,7 +19,5 @@ __all__ = [
     "ClickHouseUsageStoreOptions",
     "S3BillingArchive",
     "S3BillingArchiveOptions",
-    "S3PutObject",
-    "S3PutObjectRequest",
-    "S3PutObjectResult",
+    "S3Credentials",
 ]

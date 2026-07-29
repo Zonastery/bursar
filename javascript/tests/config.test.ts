@@ -96,6 +96,7 @@ export const baseConfig = () => ({
   plans: {
     pro: {
       display_name: "Pro",
+      rank: 1,
       rate_card: "standard",
       allowed_operations: ["completion"],
       features: { tutor_chat: true, access_level: "full" },

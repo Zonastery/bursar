@@ -14,7 +14,7 @@ DECLARE
 BEGIN
     PERFORM bursar.publish_and_activate_catalog(
         1,
-        '{"version":1,"credits":{"accounting":{"unit":"credit","scale":6,"rounding":"half_up"},"buckets":{"included":{"priority":10,"expiry":{"type":"never"}},"purchased":{"priority":20,"expiry":{"type":"never"}}},"default_bucket":"purchased","policies":{"line":{"type":"credit_line","limit":"20"}},"grant_programs":{"welcome":{"trigger":"account_created","awards":[{"recipient":"subject","amount":"2","bucket":"included"}],"max_awards_per_subject":1,"idempotency_scope":"subject"}}},"admission":{"policies":{"pro":{"max_in_flight":1}}},"plans":{"pro":{"display_name":"Pro","credit_policy":"line","admission_policy":"pro"}}}'::jsonb,
+        '{"version":1,"credits":{"accounting":{"unit":"credit","scale":6,"rounding":"half_up"},"buckets":{"included":{"priority":10,"expiry":{"type":"never"}},"purchased":{"priority":20,"expiry":{"type":"never"}}},"default_bucket":"purchased","policies":{"line":{"type":"credit_line","limit":"20"}},"grant_programs":{"welcome":{"trigger":"account_created","awards":[{"recipient":"subject","amount":"2","bucket":"included"}],"max_awards_per_subject":1,"idempotency_scope":"subject"}}},"admission":{"policies":{"pro":{"max_in_flight":1}}},"plans":{"pro":{"display_name":"Pro","rank":0,"credit_policy":"line","admission_policy":"pro"}}}'::jsonb,
         'smoke'
     );
     INSERT INTO bursar_trigger_users(id) VALUES (v_subject);

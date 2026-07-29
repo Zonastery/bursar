@@ -75,6 +75,7 @@ def config() -> dict:
         "plans": {
             "pro": {
                 "display_name": "Pro",
+                "rank": 0,
                 "rate_card": "pro",
             }
         },

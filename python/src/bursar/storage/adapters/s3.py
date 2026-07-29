@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any
 
 from bursar.storage.ports import (
     BillingEventPayloadExport,
@@ -14,27 +15,19 @@ from bursar.storage.ports import (
 
 
 @dataclass(frozen=True, slots=True)
-class S3PutObjectRequest:
-    bucket: str
-    key: str
-    body: bytes
-    content_type: str
-    metadata: dict[str, str]
-
-
-@dataclass(frozen=True, slots=True)
-class S3PutObjectResult:
-    version_id: str | None = None
-
-
-class S3PutObject(Protocol):
-    def __call__(self, request: S3PutObjectRequest) -> S3PutObjectResult: ...
+class S3Credentials:
+    access_key_id: str
+    secret_access_key: str
+    session_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class S3BillingArchiveOptions:
     bucket: str
-    put_object: S3PutObject
+    region: str
+    credentials: S3Credentials
+    endpoint: str | None = None
+    force_path_style: bool = False
     prefix: str = "bursar"
     purge_postgres_payload: bool = True
 
@@ -52,9 +45,22 @@ class S3BillingArchive:
 
     def __init__(self, options: S3BillingArchiveOptions) -> None:
         self._bucket = _require_nonempty(options.bucket, "S3 bucket")
+        self._region = _require_nonempty(options.region, "S3 region")
+        self._credentials = S3Credentials(
+            access_key_id=_require_nonempty(options.credentials.access_key_id, "S3 access key ID"),
+            secret_access_key=_require_nonempty(options.credentials.secret_access_key, "S3 secret access key"),
+            session_token=(
+                _require_nonempty(options.credentials.session_token, "S3 session token")
+                if options.credentials.session_token
+                else None
+            ),
+        )
+        self._endpoint = _require_nonempty(options.endpoint, "S3 endpoint") if options.endpoint else None
+        self._force_path_style = options.force_path_style
         self._prefix = options.prefix.strip("/")
-        self._put_object = options.put_object
         self._purge_postgres_payload = options.purge_postgres_payload
+        self._client: Any | None = None
+        self._client_lock = threading.Lock()
 
     @property
     def purge_postgres_payload(self) -> bool:
@@ -65,7 +71,7 @@ class S3BillingArchive:
             msg = f"Billing event {event.event_id} has no PostgreSQL payload to archive"
             raise RuntimeError(msg)
         try:
-            received_at = datetime.fromisoformat(event.received_at.replace("Z", "+00:00"))
+            received_at = datetime.fromisoformat(event.received_at)
         except ValueError as error:
             msg = f"Billing event {event.event_id} has an invalid received_at timestamp"
             raise RuntimeError(msg) from error
@@ -95,17 +101,47 @@ class S3BillingArchive:
             "completedAt": event.completed_at,
             "envelope": event.envelope,
         }
-        result = self._put_object(
-            S3PutObjectRequest(
-                bucket=self._bucket,
-                key=key,
-                body=json.dumps(document, separators=(",", ":")).encode(),
-                content_type="application/json",
-                metadata={
-                    "bursar-event-id": event.event_id,
-                    "bursar-provider": event.provider,
-                    "bursar-environment": event.provider_environment,
-                },
-            )
+        result = self._get_client().put_object(
+            Bucket=self._bucket,
+            Key=key,
+            Body=json.dumps(document, separators=(",", ":")).encode(),
+            ContentType="application/json",
+            Metadata={
+                "bursar-event-id": event.event_id,
+                "bursar-provider": event.provider,
+                "bursar-environment": event.provider_environment,
+            },
         )
-        return BillingPayloadArchiveResult(key=key, version_id=result.version_id)
+        version_id = result.get("VersionId")
+        return BillingPayloadArchiveResult(
+            key=key,
+            version_id=str(version_id) if version_id is not None else None,
+        )
+
+    def close(self) -> None:
+        with self._client_lock:
+            client = self._client
+            self._client = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._client is None:
+                import boto3
+                from botocore.config import Config
+
+                self._client = boto3.client(
+                    "s3",
+                    region_name=self._region,
+                    endpoint_url=self._endpoint,
+                    aws_access_key_id=self._credentials.access_key_id,
+                    aws_secret_access_key=self._credentials.secret_access_key,
+                    aws_session_token=self._credentials.session_token,
+                    config=Config(s3={"addressing_style": ("path" if self._force_path_style else "auto")}),
+                )
+        return self._client

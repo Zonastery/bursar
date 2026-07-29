@@ -1,7 +1,8 @@
 """Optional high-volume storage infrastructure.
 
 Importing this module requires the ``postgres`` extra, mirroring the
-JavaScript SDK's Node-only storage entry point.
+JavaScript SDK's Node-only storage entry point. Using the native S3 adapter
+additionally requires the ``s3`` extra.
 """
 
 from bursar.storage.adapters import (
@@ -11,9 +12,7 @@ from bursar.storage.adapters import (
     ClickHouseUsageStoreOptions,
     S3BillingArchive,
     S3BillingArchiveOptions,
-    S3PutObject,
-    S3PutObjectRequest,
-    S3PutObjectResult,
+    S3Credentials,
 )
 from bursar.storage.outbox_worker import (
     OutboxRunResult,
@@ -57,9 +56,7 @@ __all__ = [
     "OutboxWorkerOptions",
     "S3BillingArchive",
     "S3BillingArchiveOptions",
-    "S3PutObject",
-    "S3PutObjectRequest",
-    "S3PutObjectResult",
+    "S3Credentials",
     "UsageAnalyticsSink",
     "UsageChargeExport",
     "UsageEventSink",

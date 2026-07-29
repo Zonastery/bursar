@@ -25,12 +25,7 @@ export type {
   ClickHouseUsageStoreOptions,
 } from "./storage/adapters/clickhouse.js";
 export { S3BillingArchive } from "./storage/adapters/s3.js";
-export type {
-  S3BillingArchiveOptions,
-  S3PutObject,
-  S3PutObjectRequest,
-  S3PutObjectResult,
-} from "./storage/adapters/s3.js";
+export type { S3BillingArchiveOptions, S3Credentials } from "./storage/adapters/s3.js";
 export type {
   BillingEventPayloadExport,
   BillingPayloadArchive,

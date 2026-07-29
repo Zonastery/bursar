@@ -114,6 +114,81 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_each(
+            COALESCE(p_source_document->'plans', '{}'::jsonb)
+        ) AS plan_entry(key, value)
+        WHERE CASE
+            WHEN jsonb_typeof(plan_entry.value->'rank') = 'number'
+            THEN (plan_entry.value->>'rank')::numeric < 0
+              OR mod((plan_entry.value->>'rank')::numeric, 1) <> 0
+            ELSE true
+        END
+    )
+    THEN
+        RAISE EXCEPTION 'plans.*.rank must be a non-negative integer'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF p_source_document #> '{commerce,subscription_changes}' IS NOT NULL THEN
+        PERFORM bursar.require_json_object(
+            p_source_document #> '{commerce,subscription_changes}',
+            'commerce.subscription_changes'
+        );
+
+        IF EXISTS (
+            SELECT 1
+            FROM jsonb_each(
+                p_source_document #> '{commerce,subscription_changes}'
+            ) AS change_policy(key, value)
+            WHERE change_policy.key NOT IN (
+                'upgrade',
+                'downgrade',
+                'lateral',
+                'cadence_change'
+            )
+               OR jsonb_typeof(change_policy.value) <> 'object'
+               OR change_policy.value->>'effective' IS NULL
+               OR change_policy.value->>'effective' NOT IN (
+                   'immediate',
+                   'renewal'
+               )
+               OR change_policy.value->>'proration' IS NULL
+               OR change_policy.value->>'proration' NOT IN (
+                   'prorated',
+                   'none'
+               )
+               OR COALESCE(
+                   change_policy.value->>'payment_failure',
+                   'prevent_change'
+               ) NOT IN (
+                   'prevent_change',
+                   'apply_change'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM jsonb_object_keys(
+                       CASE
+                           WHEN jsonb_typeof(change_policy.value) = 'object'
+                           THEN change_policy.value
+                           ELSE '{}'::jsonb
+                       END
+                   )
+                       AS policy_field(field_name)
+                   WHERE policy_field.field_name NOT IN (
+                       'effective',
+                       'proration',
+                       'payment_failure'
+                   )
+               )
+        )
+        THEN
+            RAISE EXCEPTION 'invalid commerce subscription change policy'
+                USING ERRCODE = '22023';
+        END IF;
+    END IF;
+
     IF p_source_document #> '{commerce,auto_recharge}' IS NOT NULL
        AND EXISTS (
            SELECT 1

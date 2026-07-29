@@ -85,7 +85,7 @@ def _quote_table(table: str) -> str:
 
 
 def _timestamp(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         msg = f"Invalid usage timestamp: {value}"
         raise ValueError(msg)

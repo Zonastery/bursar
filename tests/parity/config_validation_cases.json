@@ -108,6 +108,7 @@
         "plans": {
           "free": {
             "display_name": "Free",
+            "rank": 0,
             "rate_card": "standard",
             "allowed_operations": [
               "completion"
@@ -186,6 +187,7 @@
         "plans": {
           "pro": {
             "display_name": "Pro",
+            "rank": 0,
             "features": {
               "typo_feature": true
             }

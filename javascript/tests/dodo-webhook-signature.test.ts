@@ -67,7 +67,13 @@ describe("DodoProvider webhook signature verification", () => {
     };
 
     const result = await provider.handleWebhook(req);
-    expect(result).toEqual({ received: true });
+    expect(result).toEqual({
+      received: true,
+      retryable: false,
+      provider: "dodo",
+      eventId: "evt_test_valid",
+      eventType: "subscription.active",
+    });
   });
 
   it("returns received:false retryable:false on signature verification failure", async () => {
@@ -91,7 +97,13 @@ describe("DodoProvider webhook signature verification", () => {
     };
 
     const result = await provider.handleWebhook(req);
-    expect(result).toEqual({ received: false, retryable: false });
+    expect(result).toEqual({
+      received: false,
+      retryable: false,
+      provider: "dodo",
+      eventId: null,
+      eventType: null,
+    });
   });
 
   it("returns non-retryable when verifyWebhookPayload rejects regardless of reason", async () => {
@@ -112,7 +124,13 @@ describe("DodoProvider webhook signature verification", () => {
     };
 
     const result = await provider.handleWebhook(req);
-    expect(result).toEqual({ received: false, retryable: false });
+    expect(result).toEqual({
+      received: false,
+      retryable: false,
+      provider: "dodo",
+      eventId: null,
+      eventType: null,
+    });
   });
 
   it("does not resolve an anonymous user for payment.failed", async () => {
@@ -142,7 +160,13 @@ describe("DodoProvider webhook signature verification", () => {
       headers: {},
     });
 
-    expect(result).toEqual({ received: true });
+    expect(result).toEqual({
+      received: true,
+      retryable: false,
+      provider: "dodo",
+      eventId: "evt_payment_failed",
+      eventType: "payment.failed",
+    });
     expect(resolveUser).not.toHaveBeenCalled();
     expect(mockBm.ingestBillingEvent).toHaveBeenCalled();
   });

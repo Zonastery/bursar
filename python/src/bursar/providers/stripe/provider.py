@@ -24,6 +24,7 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    WebhookResult,
 )
 
 
@@ -144,11 +145,11 @@ class StripeProvider(PaymentProvider):
             raise ValueError("Stripe setup session returned no URL")
         return {"url": url}
 
-    async def handle_webhook(self, req: WebhookRequest) -> dict:
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         stripe = self._get_stripe()
         signature = req.headers.get("stripe-signature")
         if not signature:
-            return {"received": False, "retryable": False}
+            return WebhookResult(False, False, self.provider, None, None)
 
         try:
             event = stripe.Webhook.construct_event(
@@ -157,11 +158,13 @@ class StripeProvider(PaymentProvider):
                 self._webhook_secret,
             )
         except stripe_mod.error.SignatureVerificationError:  # type: ignore[attr-defined]
-            return {"received": False, "retryable": False}
+            return WebhookResult(False, False, self.provider, None, None)
         except stripe_mod.error.APIError as e:  # type: ignore[attr-defined]
-            return {"received": False, "retryable": True, "error": str(e)}
+            self._logger.error("Stripe webhook temporarily unavailable", {"error": str(e)})
+            return WebhookResult(False, True, self.provider, None, None)
         except Exception as e:
-            return {"received": False, "retryable": False, "error": str(e)}
+            self._logger.warning("Stripe webhook verification failed", {"error": str(e)})
+            return WebhookResult(False, False, self.provider, None, None)
 
         data = event.data.object
         data_dict = _stripe_dict(data)
@@ -180,7 +183,13 @@ class StripeProvider(PaymentProvider):
             self._logger,
             getattr(event, "created", None),
         )
-        return {"received": True}
+        return WebhookResult(
+            True,
+            False,
+            self.provider,
+            str(event.id) if event.id is not None else None,
+            str(event.type) if event.type is not None else None,
+        )
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         stripe = self._get_stripe()

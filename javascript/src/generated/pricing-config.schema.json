@@ -58,7 +58,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "interval"],
+      "required": [
+        "type",
+        "interval"
+      ],
       "title": "AfterGrantExpiry",
       "type": "object"
     },
@@ -77,7 +80,9 @@
           "$ref": "#/$defs/DecimalRange"
         },
         "rearm_above": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Rearm Above",
           "type": "string"
@@ -89,7 +94,13 @@
           "$ref": "#/$defs/AutoRechargeLimits"
         }
       },
-      "required": ["eligible_topups", "balance_below", "rearm_above", "quantity", "limits"],
+      "required": [
+        "eligible_topups",
+        "balance_below",
+        "rearm_above",
+        "quantity",
+        "limits"
+      ],
       "title": "AutoRechargeGuardrails",
       "type": "object"
     },
@@ -133,7 +144,12 @@
           "type": "string"
         }
       },
-      "required": ["max_purchases", "window", "max_charge_minor", "cooldown"],
+      "required": [
+        "max_purchases",
+        "window",
+        "max_charge_minor",
+        "cooldown"
+      ],
       "title": "AutoRechargeLimits",
       "type": "object"
     },
@@ -181,7 +197,12 @@
       "additionalProperties": false,
       "properties": {
         "unit": {
-          "enum": ["day", "week", "month", "year"],
+          "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ],
           "title": "Unit",
           "type": "string"
         },
@@ -192,7 +213,9 @@
           "type": "integer"
         }
       },
-      "required": ["unit"],
+      "required": [
+        "unit"
+      ],
       "title": "BillingInterval",
       "type": "object"
     },
@@ -209,7 +232,10 @@
           "title": "Default"
         }
       },
-      "required": ["type", "default"],
+      "required": [
+        "type",
+        "default"
+      ],
       "title": "BooleanFeature",
       "type": "object"
     },
@@ -252,7 +278,9 @@
           "title": "Expiry"
         }
       },
-      "required": ["priority"],
+      "required": [
+        "priority"
+      ],
       "title": "BucketDefinition",
       "type": "object"
     },
@@ -265,7 +293,12 @@
           "type": "string"
         },
         "unit": {
-          "enum": ["day", "week", "month", "year"],
+          "enum": [
+            "day",
+            "week",
+            "month",
+            "year"
+          ],
           "title": "Unit",
           "type": "string"
         },
@@ -281,7 +314,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "unit"],
+      "required": [
+        "type",
+        "unit"
+      ],
       "title": "CalendarWindow",
       "type": "object"
     },
@@ -342,7 +378,10 @@
           "title": "Charge"
         }
       },
-      "required": ["action", "charge"],
+      "required": [
+        "action",
+        "charge"
+      ],
       "title": "ChargeUnmatched",
       "type": "object"
     },
@@ -395,6 +434,17 @@
           "title": "Offers",
           "type": "object"
         },
+        "subscription_changes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChanges"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "auto_recharge": {
           "anyOf": [
             {
@@ -429,7 +479,11 @@
           "type": "string"
         }
       },
-      "required": ["unit", "scale", "rounding"],
+      "required": [
+        "unit",
+        "scale",
+        "rounding"
+      ],
       "title": "CreditAccounting",
       "type": "object"
     },
@@ -437,7 +491,9 @@
       "additionalProperties": false,
       "properties": {
         "amount": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Amount",
           "type": "string"
@@ -465,7 +521,10 @@
           "title": "Window"
         }
       },
-      "required": ["amount", "window"],
+      "required": [
+        "amount",
+        "window"
+      ],
       "title": "CreditAllowance",
       "type": "object"
     },
@@ -478,13 +537,18 @@
           "type": "string"
         },
         "limit": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Limit",
           "type": "string"
         }
       },
-      "required": ["type", "limit"],
+      "required": [
+        "type",
+        "limit"
+      ],
       "title": "CreditLinePolicy",
       "type": "object"
     },
@@ -542,7 +606,9 @@
           "type": "object"
         }
       },
-      "required": ["accounting"],
+      "required": [
+        "accounting"
+      ],
       "title": "CreditsConfig",
       "type": "object"
     },
@@ -555,7 +621,10 @@
           "type": "string"
         },
         "object_kind": {
-          "enum": ["subscription", "one_time"],
+          "enum": [
+            "subscription",
+            "one_time"
+          ],
           "title": "Object Kind",
           "type": "string"
         },
@@ -565,7 +634,11 @@
           "type": "string"
         }
       },
-      "required": ["type", "object_kind", "external_id"],
+      "required": [
+        "type",
+        "object_kind",
+        "external_id"
+      ],
       "title": "CustomObjectReference",
       "type": "object"
     },
@@ -583,7 +656,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "adapter"],
+      "required": [
+        "type",
+        "adapter"
+      ],
       "title": "CustomProvider",
       "type": "object"
     },
@@ -591,7 +667,9 @@
       "additionalProperties": false,
       "properties": {
         "amount": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Amount",
           "type": "string"
@@ -601,7 +679,10 @@
           "type": "string"
         },
         "renewal": {
-          "enum": ["replace_previous", "accumulate"],
+          "enum": [
+            "replace_previous",
+            "accumulate"
+          ],
           "title": "Renewal",
           "type": "string"
         },
@@ -636,7 +717,11 @@
           "title": "Expiry"
         }
       },
-      "required": ["amount", "bucket", "renewal"],
+      "required": [
+        "amount",
+        "bucket",
+        "renewal"
+      ],
       "title": "CycleGrant",
       "type": "object"
     },
@@ -644,13 +729,17 @@
       "additionalProperties": false,
       "properties": {
         "minimum": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Minimum",
           "type": "string"
         },
         "maximum": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Maximum",
           "type": "string"
@@ -658,11 +747,17 @@
         "default": {
           "type": "string",
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "title": "Default"
         }
       },
-      "required": ["minimum", "maximum", "default"],
+      "required": [
+        "minimum",
+        "maximum",
+        "default"
+      ],
       "title": "DecimalRange",
       "type": "object"
     },
@@ -670,7 +765,11 @@
       "additionalProperties": false,
       "properties": {
         "type": {
-          "enum": ["string", "number", "boolean"],
+          "enum": [
+            "string",
+            "number",
+            "boolean"
+          ],
           "title": "Type",
           "type": "string"
         },
@@ -680,7 +779,9 @@
           "type": "boolean"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "DimensionDefinition",
       "type": "object"
     },
@@ -698,7 +799,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "product_id"],
+      "required": [
+        "type",
+        "product_id"
+      ],
       "title": "DodoProductReference",
       "type": "object"
     },
@@ -711,7 +815,9 @@
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "DodoProvider",
       "type": "object"
     },
@@ -719,7 +825,13 @@
       "additionalProperties": false,
       "properties": {
         "unit": {
-          "enum": ["second", "minute", "hour", "day", "week"],
+          "enum": [
+            "second",
+            "minute",
+            "hour",
+            "day",
+            "week"
+          ],
           "title": "Unit",
           "type": "string"
         },
@@ -729,7 +841,10 @@
           "type": "integer"
         }
       },
-      "required": ["unit", "count"],
+      "required": [
+        "unit",
+        "count"
+      ],
       "title": "Duration",
       "type": "object"
     },
@@ -753,7 +868,10 @@
           "title": "Window"
         }
       },
-      "required": ["type", "window"],
+      "required": [
+        "type",
+        "window"
+      ],
       "title": "EndOfWindowExpiry",
       "type": "object"
     },
@@ -814,7 +932,11 @@
           "title": "Default"
         }
       },
-      "required": ["type", "values", "default"],
+      "required": [
+        "type",
+        "values",
+        "default"
+      ],
       "title": "EnumFeature",
       "type": "object"
     },
@@ -845,7 +967,10 @@
           "title": "Value"
         }
       },
-      "required": ["op", "value"],
+      "required": [
+        "op",
+        "value"
+      ],
       "title": "EqualMatcher",
       "type": "object"
     },
@@ -863,7 +988,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "formula"],
+      "required": [
+        "type",
+        "formula"
+      ],
       "title": "ExpressionCharge",
       "type": "object"
     },
@@ -881,7 +1009,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "at"],
+      "required": [
+        "type",
+        "at"
+      ],
       "title": "FixedExpiry",
       "type": "object"
     },
@@ -894,13 +1025,18 @@
           "type": "string"
         },
         "amount": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Amount",
           "type": "string"
         }
       },
-      "required": ["type", "amount"],
+      "required": [
+        "type",
+        "amount"
+      ],
       "title": "FlatCharge",
       "type": "object"
     },
@@ -925,7 +1061,11 @@
           "type": "array"
         }
       },
-      "required": ["type", "measure", "tiers"],
+      "required": [
+        "type",
+        "measure",
+        "tiers"
+      ],
       "title": "GraduatedCharge",
       "type": "object"
     },
@@ -935,7 +1075,9 @@
         "up_to": {
           "anyOf": [
             {
-              "examples": ["10.500000"],
+              "examples": [
+                "10.500000"
+              ],
               "gt": 0,
               "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
               "type": "string"
@@ -948,13 +1090,17 @@
           "title": "Up To"
         },
         "rate": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Rate",
           "type": "string"
         }
       },
-      "required": ["rate"],
+      "required": [
+        "rate"
+      ],
       "title": "GraduatedTier",
       "type": "object"
     },
@@ -963,12 +1109,17 @@
       "properties": {
         "recipient": {
           "default": "subject",
-          "enum": ["subject", "referrer"],
+          "enum": [
+            "subject",
+            "referrer"
+          ],
           "title": "Recipient",
           "type": "string"
         },
         "amount": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Amount",
           "type": "string"
@@ -1016,7 +1167,10 @@
           "title": "Expiry"
         }
       },
-      "required": ["amount", "bucket"],
+      "required": [
+        "amount",
+        "bucket"
+      ],
       "title": "GrantAward",
       "type": "object"
     },
@@ -1045,7 +1199,12 @@
       "additionalProperties": false,
       "properties": {
         "trigger": {
-          "enum": ["account_created", "referral_completed", "promo_code_redeemed", "manual"],
+          "enum": [
+            "account_created",
+            "referral_completed",
+            "promo_code_redeemed",
+            "manual"
+          ],
           "title": "Trigger",
           "type": "string"
         },
@@ -1079,12 +1238,18 @@
         },
         "idempotency_scope": {
           "default": "subject",
-          "enum": ["subject", "event"],
+          "enum": [
+            "subject",
+            "event"
+          ],
           "title": "Idempotency Scope",
           "type": "string"
         }
       },
-      "required": ["trigger", "awards"],
+      "required": [
+        "trigger",
+        "awards"
+      ],
       "title": "GrantProgram",
       "type": "object"
     },
@@ -1119,7 +1284,10 @@
           "type": "array"
         }
       },
-      "required": ["op", "values"],
+      "required": [
+        "op",
+        "values"
+      ],
       "title": "InMatcher",
       "type": "object"
     },
@@ -1160,7 +1328,10 @@
           "title": "Maximum"
         }
       },
-      "required": ["type", "default"],
+      "required": [
+        "type",
+        "default"
+      ],
       "title": "IntegerFeature",
       "type": "object"
     },
@@ -1183,7 +1354,11 @@
           "title": "Default"
         }
       },
-      "required": ["minimum", "maximum", "default"],
+      "required": [
+        "minimum",
+        "maximum",
+        "default"
+      ],
       "title": "IntegerRange",
       "type": "object"
     },
@@ -1195,7 +1370,9 @@
           "type": "string"
         }
       },
-      "required": ["unit"],
+      "required": [
+        "unit"
+      ],
       "title": "MeasureDefinition",
       "type": "object"
     },
@@ -1208,7 +1385,9 @@
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "NeverExpiry",
       "type": "object"
     },
@@ -1243,7 +1422,10 @@
           "type": "array"
         }
       },
-      "required": ["op", "values"],
+      "required": [
+        "op",
+        "values"
+      ],
       "title": "NotInMatcher",
       "type": "object"
     },
@@ -1261,12 +1443,19 @@
         },
         "tax_behavior": {
           "default": "unspecified",
-          "enum": ["inclusive", "exclusive", "unspecified"],
+          "enum": [
+            "inclusive",
+            "exclusive",
+            "unspecified"
+          ],
           "title": "Tax Behavior",
           "type": "string"
         }
       },
-      "required": ["amount_minor", "currency"],
+      "required": [
+        "amount_minor",
+        "currency"
+      ],
       "title": "OfferPrice",
       "type": "object"
     },
@@ -1279,7 +1468,9 @@
           "type": "string"
         }
       },
-      "required": ["mode"],
+      "required": [
+        "mode"
+      ],
       "title": "OnPublishActivation",
       "type": "object"
     },
@@ -1292,7 +1483,9 @@
           "type": "integer"
         }
       },
-      "required": ["max_in_flight"],
+      "required": [
+        "max_in_flight"
+      ],
       "title": "OperationAdmission",
       "type": "object"
     },
@@ -1314,7 +1507,9 @@
           "type": "object"
         }
       },
-      "required": ["measures"],
+      "required": [
+        "measures"
+      ],
       "title": "OperationDefinition",
       "type": "object"
     },
@@ -1347,7 +1542,9 @@
           "title": "Unmatched"
         }
       },
-      "required": ["unmatched"],
+      "required": [
+        "unmatched"
+      ],
       "title": "OperationPricing",
       "type": "object"
     },
@@ -1364,25 +1561,38 @@
           "type": "string"
         },
         "units": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Units",
           "type": "string"
         },
         "amount": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Amount",
           "type": "string"
         },
         "rounding": {
           "default": "ceil",
-          "enum": ["ceil", "floor", "nearest"],
+          "enum": [
+            "ceil",
+            "floor",
+            "nearest"
+          ],
           "title": "Rounding",
           "type": "string"
         }
       },
-      "required": ["type", "measure", "units", "amount"],
+      "required": [
+        "type",
+        "measure",
+        "units",
+        "amount"
+      ],
       "title": "PackageCharge",
       "type": "object"
     },
@@ -1399,20 +1609,28 @@
           "type": "string"
         },
         "rate": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Rate",
           "type": "string"
         },
         "unit_size": {
           "default": "1",
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Unit Size",
           "type": "string"
         }
       },
-      "required": ["type", "measure", "rate"],
+      "required": [
+        "type",
+        "measure",
+        "rate"
+      ],
       "title": "PerUnitCharge",
       "type": "object"
     },
@@ -1433,7 +1651,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "interval"],
+      "required": [
+        "type",
+        "interval"
+      ],
       "title": "PlanAssignmentWindow",
       "type": "object"
     },
@@ -1444,6 +1665,11 @@
           "minLength": 1,
           "title": "Display Name",
           "type": "string"
+        },
+        "rank": {
+          "minimum": 0,
+          "title": "Rank",
+          "type": "integer"
         },
         "description": {
           "anyOf": [
@@ -1538,7 +1764,11 @@
         "revision_policy": {
           "anyOf": [
             {
-              "enum": ["immediate", "next_renewal", "pinned"],
+              "enum": [
+                "immediate",
+                "next_renewal",
+                "pinned"
+              ],
               "type": "string"
             },
             {
@@ -1549,7 +1779,10 @@
           "title": "Revision Policy"
         }
       },
-      "required": ["display_name"],
+      "required": [
+        "display_name",
+        "rank"
+      ],
       "title": "PlanDefinition",
       "type": "object"
     },
@@ -1567,7 +1800,10 @@
           "type": "string"
         }
       },
-      "required": ["op", "value"],
+      "required": [
+        "op",
+        "value"
+      ],
       "title": "PrefixMatcher",
       "type": "object"
     },
@@ -1580,7 +1816,9 @@
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "PrepaidCreditPolicy",
       "type": "object"
     },
@@ -1660,7 +1898,10 @@
           "title": "Charge"
         }
       },
-      "required": ["when", "charge"],
+      "required": [
+        "when",
+        "charge"
+      ],
       "title": "PriceRule",
       "type": "object"
     },
@@ -1682,7 +1923,10 @@
           "type": "object"
         }
       },
-      "required": ["operations", "rate_cards"],
+      "required": [
+        "operations",
+        "rate_cards"
+      ],
       "title": "PricingConfig",
       "type": "object"
     },
@@ -1723,7 +1967,9 @@
           "type": "string"
         },
         "limit": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Limit",
           "type": "string"
@@ -1751,7 +1997,10 @@
           "title": "Window"
         },
         "enforcement": {
-          "enum": ["block", "allow"],
+          "enum": [
+            "block",
+            "allow"
+          ],
           "title": "Enforcement",
           "type": "string"
         },
@@ -1763,7 +2012,13 @@
           "type": "array"
         }
       },
-      "required": ["operation", "measure", "limit", "window", "enforcement"],
+      "required": [
+        "operation",
+        "measure",
+        "limit",
+        "window",
+        "enforcement"
+      ],
       "title": "QuotaDefinition",
       "type": "object"
     },
@@ -1778,7 +2033,9 @@
         "gt": {
           "anyOf": [
             {
-              "examples": ["10.500000"],
+              "examples": [
+                "10.500000"
+              ],
               "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
               "type": "string"
             },
@@ -1792,7 +2049,9 @@
         "gte": {
           "anyOf": [
             {
-              "examples": ["10.500000"],
+              "examples": [
+                "10.500000"
+              ],
               "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
               "type": "string"
             },
@@ -1806,7 +2065,9 @@
         "lt": {
           "anyOf": [
             {
-              "examples": ["10.500000"],
+              "examples": [
+                "10.500000"
+              ],
               "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
               "type": "string"
             },
@@ -1820,7 +2081,9 @@
         "lte": {
           "anyOf": [
             {
-              "examples": ["10.500000"],
+              "examples": [
+                "10.500000"
+              ],
               "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
               "type": "string"
             },
@@ -1832,7 +2095,9 @@
           "title": "Lte"
         }
       },
-      "required": ["op"],
+      "required": [
+        "op"
+      ],
       "title": "RangeMatcher",
       "type": "object"
     },
@@ -1871,7 +2136,9 @@
           "type": "string"
         }
       },
-      "required": ["action"],
+      "required": [
+        "action"
+      ],
       "title": "RejectUnmatched",
       "type": "object"
     },
@@ -1887,7 +2154,10 @@
           "$ref": "#/$defs/Duration"
         }
       },
-      "required": ["type", "duration"],
+      "required": [
+        "type",
+        "duration"
+      ],
       "title": "RollingWindow",
       "type": "object"
     },
@@ -1916,7 +2186,10 @@
           "title": "Pattern"
         }
       },
-      "required": ["type", "default"],
+      "required": [
+        "type",
+        "default"
+      ],
       "title": "StringFeature",
       "type": "object"
     },
@@ -1934,7 +2207,10 @@
           "type": "string"
         }
       },
-      "required": ["type", "price_id"],
+      "required": [
+        "type",
+        "price_id"
+      ],
       "title": "StripePriceReference",
       "type": "object"
     },
@@ -1947,8 +2223,97 @@
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "StripeProvider",
+      "type": "object"
+    },
+    "SubscriptionChangePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "effective": {
+          "enum": [
+            "immediate",
+            "renewal"
+          ],
+          "title": "Effective",
+          "type": "string"
+        },
+        "proration": {
+          "enum": [
+            "prorated",
+            "none"
+          ],
+          "title": "Proration",
+          "type": "string"
+        },
+        "payment_failure": {
+          "default": "prevent_change",
+          "enum": [
+            "prevent_change",
+            "apply_change"
+          ],
+          "title": "Payment Failure",
+          "type": "string"
+        }
+      },
+      "required": [
+        "effective",
+        "proration"
+      ],
+      "title": "SubscriptionChangePolicy",
+      "type": "object"
+    },
+    "SubscriptionChanges": {
+      "additionalProperties": false,
+      "properties": {
+        "upgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "downgrade": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lateral": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cadence_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubscriptionChangePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "SubscriptionChanges",
       "type": "object"
     },
     "SubscriptionEndExpiry": {
@@ -1960,7 +2325,9 @@
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "title": "SubscriptionEndExpiry",
       "type": "object"
     },
@@ -2064,7 +2431,14 @@
           "default": null
         }
       },
-      "required": ["display_name", "price", "providers", "type", "plan", "billing_interval"],
+      "required": [
+        "display_name",
+        "price",
+        "providers",
+        "type",
+        "plan",
+        "billing_interval"
+      ],
       "title": "SubscriptionOffer",
       "type": "object"
     },
@@ -2119,7 +2493,10 @@
           "type": "array"
         }
       },
-      "required": ["type", "components"],
+      "required": [
+        "type",
+        "components"
+      ],
       "title": "SumCharge",
       "type": "object"
     },
@@ -2194,7 +2571,9 @@
           "type": "string"
         },
         "credits_per_unit": {
-          "examples": ["10.500000"],
+          "examples": [
+            "10.500000"
+          ],
           "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
           "title": "Credits Per Unit",
           "type": "string"
@@ -2246,12 +2625,22 @@
         },
         "lot_behavior": {
           "default": "separate_lots",
-          "enum": ["separate_lots", "merge_and_refresh"],
+          "enum": [
+            "separate_lots",
+            "merge_and_refresh"
+          ],
           "title": "Lot Behavior",
           "type": "string"
         }
       },
-      "required": ["display_name", "price", "providers", "type", "credits_per_unit", "bucket"],
+      "required": [
+        "display_name",
+        "price",
+        "providers",
+        "type",
+        "credits_per_unit",
+        "bucket"
+      ],
       "title": "TopupOffer",
       "type": "object"
     },
@@ -2276,7 +2665,11 @@
           "type": "array"
         }
       },
-      "required": ["type", "measure", "tiers"],
+      "required": [
+        "type",
+        "measure",
+        "tiers"
+      ],
       "title": "VolumeCharge",
       "type": "object"
     }
@@ -2322,7 +2715,10 @@
       "$ref": "#/$defs/CommerceConfig"
     }
   },
-  "required": ["version", "credits"],
+  "required": [
+    "version",
+    "credits"
+  ],
   "title": "BursarConfig",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",

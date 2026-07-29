@@ -1,6 +1,7 @@
 import { resolvesOperation } from "./parse-pricing.js";
 import {
   asDecimal,
+  asInteger,
   asObject,
   asString,
   parseWindow,
@@ -108,6 +109,7 @@ export function parsePlans(
 
     plans[planKey] = {
       displayName: asString(plan.display_name),
+      rank: asInteger(plan.rank),
       ...(plan.description == null ? {} : { description: asString(plan.description) }),
       ...(rateCard == null ? {} : { rateCard }),
       allowedOperations,

@@ -81,4 +81,5 @@ export interface BillingPayloadArchiveResult {
 export interface BillingPayloadArchive {
   readonly purgePostgresPayload: boolean;
   archive(event: BillingEventPayloadExport): Promise<BillingPayloadArchiveResult>;
+  close?(): Promise<void> | void;
 }

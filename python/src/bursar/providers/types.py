@@ -75,6 +75,15 @@ class WebhookRequest:
     headers: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class WebhookResult:
+    received: bool
+    retryable: bool
+    provider: str
+    event_id: str | None
+    event_type: str | None
+
+
 @dataclass
 class CheckoutParams:
     user_id: str | None = None
@@ -209,29 +218,29 @@ class PaymentProvider(ABC):
     @abstractmethod
     async def create_checkout_session(self, params: CheckoutParams) -> dict: ...
 
-    @abstractmethod
-    async def create_customer_portal_session(self, params: PortalParams) -> dict: ...
+    async def create_customer_portal_session(self, params: PortalParams) -> dict:
+        raise NotImplementedError("provider does not support create_customer_portal_session")
+
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
+        raise NotImplementedError("provider does not support create_update_payment_method_session")
+
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
+        raise NotImplementedError("provider does not support create_payment_method_setup_session")
+
+    async def create_customer(self, params: CreateCustomerParams) -> dict:
+        raise NotImplementedError("provider does not support create_customer")
 
     @abstractmethod
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict: ...
-
-    @abstractmethod
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict: ...
-
-    @abstractmethod
-    async def create_customer(self, params: CreateCustomerParams) -> dict: ...
-
-    @abstractmethod
-    async def handle_webhook(self, req: WebhookRequest) -> dict: ...
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult: ...
 
     async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
         return None
 
-    @abstractmethod
-    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+        raise NotImplementedError("provider does not support cancel_subscription")
 
-    @abstractmethod
-    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None: ...
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+        raise NotImplementedError("provider does not support reactivate_subscription")
 
     async def cancel_scheduled_plan_change(
         self,
@@ -242,8 +251,8 @@ class PaymentProvider(ABC):
         """Remove a pending plan switch while retaining the subscription."""
         raise NotImplementedError
 
-    @abstractmethod
-    async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]: ...
+    async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
+        raise NotImplementedError("provider does not support list_payment_methods")
 
     async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
         methods = await self.list_payment_methods(customer_id)
@@ -252,14 +261,14 @@ class PaymentProvider(ABC):
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
         raise NotImplementedError("provider does not support saved-payment previews")
 
-    @abstractmethod
-    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult: ...
+    async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
+        raise NotImplementedError("provider does not support charge_saved_payment_method")
 
-    @abstractmethod
-    async def get_invoice_url(self, provider_payment_id: str) -> dict | None: ...
+    async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
+        raise NotImplementedError("provider does not support get_invoice_url")
 
-    @abstractmethod
-    async def change_plan(self, params: ChangePlanParams) -> None: ...
+    async def change_plan(self, params: ChangePlanParams) -> None:
+        raise NotImplementedError("provider does not support change_plan")
 
-    @abstractmethod
-    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview: ...
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+        raise NotImplementedError("provider does not support preview_change_plan")

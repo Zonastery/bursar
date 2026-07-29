@@ -21,6 +21,7 @@ import type {
   SavedPaymentChargeParams,
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
+  WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import type { DodoClient } from "./client-contract.js";
@@ -90,7 +91,7 @@ export class DodoProvider implements PaymentProvider {
     return { url: session.link };
   }
 
-  async handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }> {
+  async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
     const { verifyWebhookPayload } = await import("@dodopayments/core/webhook");
 
     let payload: { type: string; data?: unknown };
@@ -104,7 +105,13 @@ export class DodoProvider implements PaymentProvider {
       this.logger.warn("[DodoProvider] webhook verification failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
 
     // The Dodo SDK verifier validates and returns the event, but some SDK
@@ -122,7 +129,7 @@ export class DodoProvider implements PaymentProvider {
     const cartProductId = Array.isArray(productCart)
       ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
       : undefined;
-    const data = {
+    const data: Record<string, unknown> = {
       ...verifiedData,
       ...(verifiedData.metadata == null && signedData.metadata != null
         ? { metadata: signedData.metadata }
@@ -141,7 +148,15 @@ export class DodoProvider implements PaymentProvider {
     }
 
     await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);
-    return { received: true };
+    const rawEventId =
+      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
+    return {
+      received: true,
+      retryable: false,
+      provider: this.provider,
+      eventId: rawEventId == null ? null : String(rawEventId),
+      eventType: type,
+    };
   }
 
   async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {

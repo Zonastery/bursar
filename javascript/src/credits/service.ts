@@ -51,6 +51,7 @@ import type {
   GrantSubscriptionCycleOptions,
   MetricsOrAmount,
   PolicyPreset,
+  PostDeductionContext,
   ReserveOptions,
   RunBilledOptions,
   SettleOptions,
@@ -64,6 +65,7 @@ export type {
   ReserveOptions,
   RunBilledOptions,
   SettleOptions,
+  PostDeductionContext,
 } from "./service-types.js";
 /**
  * Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
@@ -101,6 +103,9 @@ export class CreditsService {
   // behaviour; explicit `sweepExpiredCredits`/cron remains required.
   private lazyExpiry: boolean;
   private logger: NormalizedLogger;
+  private readonly postDeductionHooks = new Set<
+    (context: PostDeductionContext) => void | Promise<void>
+  >();
   constructor(
     store: CreditStore,
     engine?: PricingEngine | null,
@@ -117,6 +122,7 @@ export class CreditsService {
     }
     if (emitter) this.emitter = emitter;
     this.logger = normalizeLogger(options?.logger);
+    if (options?.postDeduction) this.postDeductionHooks.add(options.postDeduction);
     this.pricing = new PricingRuntime(
       store,
       engine ?? null,
@@ -142,7 +148,35 @@ export class CreditsService {
       (type, userId, data) => this.emit(type, userId, data),
       (userId, idempotencyKey) => this.emitQuotaEvents(userId, idempotencyKey),
       (userId) => this.maybeLazyExpire(userId),
+      (userId, result) => this.afterDeduction(userId, "settle", result),
     );
+  }
+
+  /**
+   * Register an awaited post-commit deduction hook. A failing hook is logged
+   * and isolated so it can never roll back an already committed charge.
+   */
+  addPostDeductionHook(hook: (context: PostDeductionContext) => void | Promise<void>): () => void {
+    this.postDeductionHooks.add(hook);
+    return () => this.postDeductionHooks.delete(hook);
+  }
+
+  private async afterDeduction(
+    userId: string,
+    source: PostDeductionContext["source"],
+    deduction: PostDeductionContext["deduction"],
+  ): Promise<void> {
+    for (const hook of this.postDeductionHooks) {
+      try {
+        await hook({ userId, source, deduction });
+      } catch (error) {
+        this.logger.warn("[CreditsService] post-deduction hook failed", {
+          userId,
+          source,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   async getActivePricing(): Promise<BursarConfigResult | null> {
@@ -446,6 +480,13 @@ export class CreditsService {
       newBalance: result.newBalance,
       entryType,
     });
+    await this.afterDeduction(userId, "raw", {
+      entryId: result.entryId,
+      userId,
+      amount: result.amount.abs(),
+      balanceAfter: result.newBalance,
+      idempotent: result.idempotent ?? false,
+    });
     return result;
   }
 
@@ -693,6 +734,7 @@ export class CreditsService {
       const balanceBefore = result.balanceAfter.plus(result.amount);
       await this.balanceMonitor.signalCrossing(userId, balanceBefore, result.balanceAfter);
       await this.emitQuotaEvents(userId, effectiveIdempotencyKey);
+      await this.afterDeduction(userId, "deduct", result);
     }
 
     return result;

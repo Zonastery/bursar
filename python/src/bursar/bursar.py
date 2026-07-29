@@ -23,6 +23,8 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
 )
+from bursar.commerce.service import CommerceService
+from bursar.commerce.types import AutoRechargeInput, CommerceOptions
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.service import CreditsService as CreditsServiceImpl
 from bursar.credits.store import CreditStore
@@ -154,6 +156,12 @@ class BillingService(BillingEventSink, Protocol):
         self, provider: str, product_id: str | None = None, price_id: str | None = None
     ) -> BillingOfferResult | None: ...
 
+    def resolve_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> BillingOfferResult | None: ...
+
     def resolve_topup(
         self, provider: str, product_id: str | None = None, price_id: str | None = None
     ) -> BillingTopupResult | None: ...
@@ -206,6 +214,7 @@ class Bursar:
     credits: CreditsService
     catalog: CatalogService
     billing: BillingService | None = None
+    commerce: CommerceService | None = None
 
     @classmethod
     def create(
@@ -216,6 +225,7 @@ class Bursar:
         credits: CreditsService | None = None,
         credits_options: dict | None = None,
         billing_options: dict | None = None,
+        commerce_options: CommerceOptions | None = None,
         emitter: CreditEventEmitter | None = None,
     ) -> Bursar:
         credits = credits or CreditsServiceImpl(
@@ -236,7 +246,24 @@ class Bursar:
             if billing_store is not None
             else None
         )
-        return cls(credits=credits, billing=billing, catalog=CatalogService(credits))
+        bursar = cls(
+            credits=credits,
+            billing=billing,
+            catalog=CatalogService(credits),
+        )
+        if billing is not None and commerce_options is not None:
+            bursar.commerce = CommerceService(
+                billing,
+                credits,
+                bursar,
+                commerce_options,
+            )
+
+            async def process_auto_recharge(context) -> None:
+                await bursar.commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
+
+            credits.add_post_deduction_hook(process_auto_recharge)
+        return bursar
 
     def load_catalog(self) -> None:
         """Load the active catalog into the pricing engine."""

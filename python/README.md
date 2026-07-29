@@ -83,47 +83,38 @@ runtime.start()
 bursar = runtime.bursar
 ```
 
-S3 and ClickHouse clients are injected structurally, so neither SDK is required
-by PostgreSQL-only applications:
+Install `bursar[postgres,s3]` and add S3 connection settings when an archive is
+needed. ClickHouse remains structurally injected:
 
 ```python
 import os
 
-import boto3
 import clickhouse_connect
 
 from bursar.storage import (
     BursarRuntimeOptions,
     ClickHouseUsageStoreOptions,
     S3BillingArchiveOptions,
-    S3PutObjectRequest,
-    S3PutObjectResult,
+    S3Credentials,
     create_bursar_runtime,
 )
 
-s3_client = boto3.client("s3")
 clickhouse_client = clickhouse_connect.get_client(
     dsn=os.environ["CLICKHOUSE_URL"]
 )
-
-
-def put_object(obj: S3PutObjectRequest) -> S3PutObjectResult:
-    result = s3_client.put_object(
-        Bucket=obj.bucket,
-        Key=obj.key,
-        Body=obj.body,
-        ContentType=obj.content_type,
-        Metadata=obj.metadata,
-    )
-    return S3PutObjectResult(version_id=result.get("VersionId"))
-
 
 runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=os.environ["DATABASE_URL"],
         s3=S3BillingArchiveOptions(
-            bucket=os.environ["BURSAR_ARCHIVE_BUCKET"],
-            put_object=put_object,
+            bucket=os.environ["BURSAR_S3_BUCKET"],
+            region=os.environ["BURSAR_S3_REGION"],
+            endpoint=os.getenv("BURSAR_S3_ENDPOINT"),
+            force_path_style=os.getenv("BURSAR_S3_FORCE_PATH_STYLE") == "true",
+            credentials=S3Credentials(
+                access_key_id=os.environ["BURSAR_S3_ACCESS_KEY_ID"],
+                secret_access_key=os.environ["BURSAR_S3_SECRET_ACCESS_KEY"],
+            ),
         ),
         clickhouse=ClickHouseUsageStoreOptions(
             client=clickhouse_client,

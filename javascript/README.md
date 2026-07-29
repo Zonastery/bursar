@@ -15,11 +15,10 @@ import { Bursar, PostgresStore } from "@zonastery/bursar";
 const store = new PostgresStore(process.env.DATABASE_URL!);
 const bursar = new Bursar({ creditStore: store });
 
-const grant = await bursar.credits.addCredits(
-  userId,
-  500,
-  { type: "purchase", idempotencyKey: "checkout:42" },
-);
+const grant = await bursar.credits.addCredits(userId, 500, {
+  type: "purchase",
+  idempotencyKey: "checkout:42",
+});
 const charge = await bursar.credits.deductCredits(userId, 20, {
   idempotencyKey: "job:42",
 });
@@ -66,32 +65,25 @@ await runtime.start();
 const bursar = runtime.bursar;
 ```
 
-S3 and ClickHouse clients are injected structurally, so neither SDK is required
-by PostgreSQL-only applications:
+S3 connection settings and a structural ClickHouse client can be added when
+those projections are needed:
 
 ```ts
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { createClient } from "@clickhouse/client";
 import { createBursarRuntime } from "@zonastery/bursar/node";
 
-const s3Client = new S3Client({ region: "us-east-1" });
 const clickhouseClient = createClient({ url: process.env.CLICKHOUSE_URL! });
 
 const runtime = await createBursarRuntime({
   postgres: process.env.DATABASE_URL!,
   s3: {
-    bucket: process.env.BURSAR_ARCHIVE_BUCKET!,
-    putObject: async (object) => {
-      const result = await s3Client.send(
-        new PutObjectCommand({
-          Bucket: object.bucket,
-          Key: object.key,
-          Body: object.body,
-          ContentType: object.contentType,
-          Metadata: object.metadata,
-        }),
-      );
-      return { versionId: result.VersionId };
+    bucket: process.env.BURSAR_S3_BUCKET!,
+    region: process.env.BURSAR_S3_REGION!,
+    endpoint: process.env.BURSAR_S3_ENDPOINT,
+    forcePathStyle: process.env.BURSAR_S3_FORCE_PATH_STYLE === "true",
+    credentials: {
+      accessKeyId: process.env.BURSAR_S3_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.BURSAR_S3_SECRET_ACCESS_KEY!,
     },
   },
   clickhouse: {

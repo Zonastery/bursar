@@ -49,6 +49,26 @@ from bursar.billing import (
 from bursar.billing.billing_service import BillingProvisioningPort
 from bursar.breakdown import CostBreakdown, make_cost_breakdown
 from bursar.bursar import BillingEventSink, BillingService, Bursar, CatalogService, CreditsService
+from bursar.commerce import (
+    AccountCommerceOverview,
+    ActiveSubscriptionError,
+    CheckoutCompletedError,
+    CheckoutConflictError,
+    CommerceError,
+    CommerceNotConfiguredError,
+    CommerceOptions,
+    CommerceProviderRegistry,
+    CommerceResourceNotFoundError,
+    CommerceService,
+    CoreBillingDataUnavailableError,
+    InvalidOfferQuantityError,
+    MissingPaymentMethodError,
+    MissingPlanChangePolicyError,
+    ProviderCapabilityNotSupportedError,
+    ProviderSelectionError,
+    QuoteChangedError,
+    UnknownOfferError,
+)
 
 if TYPE_CHECKING:
     from bursar.billing import PostgresBillingStore
@@ -188,6 +208,24 @@ __all__ = [
     "BillingEventSink",
     "BillingService",
     "CatalogService",
+    "CommerceService",
+    "CommerceOptions",
+    "CommerceProviderRegistry",
+    "CommerceError",
+    "CommerceNotConfiguredError",
+    "UnknownOfferError",
+    "InvalidOfferQuantityError",
+    "ActiveSubscriptionError",
+    "CheckoutConflictError",
+    "CheckoutCompletedError",
+    "CommerceResourceNotFoundError",
+    "ProviderSelectionError",
+    "ProviderCapabilityNotSupportedError",
+    "QuoteChangedError",
+    "MissingPaymentMethodError",
+    "MissingPlanChangePolicyError",
+    "CoreBillingDataUnavailableError",
+    "AccountCommerceOverview",
     "BillingSubscriptionChange",
     "BillingSubscriptionChangeInput",
     "BillingSubscriptionChangeState",

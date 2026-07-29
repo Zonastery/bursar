@@ -21,6 +21,7 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    WebhookResult,
 )
 
 
@@ -95,14 +96,14 @@ class MockPaymentProvider(PaymentProvider):
             effective_at=datetime.now(UTC).isoformat(),
         )
 
-    async def handle_webhook(self, req: WebhookRequest) -> dict:
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         try:
             payload = json.loads(req.raw_body)
         except (json.JSONDecodeError, ValueError):
-            return {"received": False, "retryable": False}
+            return WebhookResult(False, False, self.provider, None, None)
 
         if not isinstance(payload, dict):
-            return {"received": False, "retryable": False}
+            return WebhookResult(False, False, self.provider, None, None)
 
         data = payload.get("data", {}) or {}
         metadata = data.get("metadata", {}) or {}
@@ -120,4 +121,25 @@ class MockPaymentProvider(PaymentProvider):
             self._sink,
         )
 
-        return {"received": True}
+        event_type = str(payload.get("type", "")) or None
+        raw_event_id = next(
+            (
+                data.get(key)
+                for key in (
+                    "id",
+                    "payment_id",
+                    "subscription_id",
+                    "refund_id",
+                    "dispute_id",
+                )
+                if data.get(key) is not None
+            ),
+            None,
+        )
+        return WebhookResult(
+            True,
+            False,
+            self.provider,
+            str(raw_event_id) if raw_event_id is not None else None,
+            event_type,
+        )
