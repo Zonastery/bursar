@@ -9,7 +9,7 @@ CREATE TABLE bursar.billing_customers (
         CHECK (bursar.is_nonempty_text(provider_customer_id)),
     email text,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_environment, provider_customer_id),
@@ -40,7 +40,7 @@ CREATE TABLE bursar.billing_subscriptions (
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     status_changed_at timestamptz NOT NULL DEFAULT now(),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_environment, provider_subscription_id),
@@ -105,7 +105,7 @@ CREATE TABLE bursar.billing_payments (
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     status_changed_at timestamptz NOT NULL DEFAULT now(),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_environment, provider_payment_id),
@@ -114,21 +114,42 @@ CREATE TABLE bursar.billing_payments (
 
 CREATE TABLE bursar.billing_events (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
+    provider text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(provider)
+            AND bursar.is_bounded_text(provider, 100)
+        ),
     provider_environment text NOT NULL
         DEFAULT bursar.current_provider_environment()
         CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     provider_event_id text NOT NULL
-        CHECK (bursar.is_nonempty_text(provider_event_id)),
-    event_type text NOT NULL CHECK (bursar.is_nonempty_text(event_type)),
-    envelope jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(envelope) = 'object'),
+        CHECK (
+            bursar.is_nonempty_text(provider_event_id)
+            AND bursar.is_bounded_text(provider_event_id, 255)
+        ),
+    event_type text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(event_type)
+            AND bursar.is_bounded_text(event_type, 255)
+        ),
     envelope_digest bytea NOT NULL CHECK (octet_length(envelope_digest) = 32),
+    payload_received_at timestamptz NOT NULL DEFAULT now(),
+    payload_archived_at timestamptz,
+    payload_object_key text CHECK (
+        payload_object_key IS NULL
+        OR bursar.is_bounded_text(payload_object_key, 2048)
+    ),
+    payload_object_version text CHECK (
+        payload_object_version IS NULL
+        OR bursar.is_bounded_text(payload_object_version, 255)
+    ),
     status bursar.billing_event_status NOT NULL DEFAULT 'processing',
     attempt_count integer NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     claim_token uuid,
     claim_expires_at timestamptz,
-    last_error text,
+    last_error text CHECK (
+        last_error IS NULL OR bursar.is_bounded_text(last_error, 8192)
+    ),
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -146,8 +167,25 @@ CREATE TABLE bursar.billing_events (
         (status IN ('completed', 'ignored') AND completed_at IS NOT NULL)
         OR
         (status NOT IN ('completed', 'ignored') AND completed_at IS NULL)
+    ),
+    CHECK (
+        (payload_archived_at IS NULL
+         AND payload_object_key IS NULL
+         AND payload_object_version IS NULL)
+        OR
+        (payload_archived_at IS NOT NULL AND payload_object_key IS NOT NULL)
     )
 );
+
+CREATE TABLE bursar.billing_event_payloads (
+    event_id uuid NOT NULL
+        REFERENCES bursar.billing_events(id) ON DELETE CASCADE,
+    received_at timestamptz NOT NULL,
+    envelope jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (bursar.is_bounded_json_object(envelope, 1048576)),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (received_at, event_id)
+) PARTITION BY RANGE (received_at);
 
 CREATE TABLE bursar.billing_subscription_conflicts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -161,7 +199,7 @@ CREATE TABLE bursar.billing_subscription_conflicts (
     existing_subscription_id uuid REFERENCES bursar.billing_subscriptions(id),
     billing_event_id uuid REFERENCES bursar.billing_events(id),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (
         provider,
@@ -181,7 +219,10 @@ CREATE TABLE bursar.billing_credit_grants (
     configured_credits numeric(20, 6) NOT NULL
         CHECK (bursar.is_finite_numeric(configured_credits) AND configured_credits > 0),
     quantity integer NOT NULL DEFAULT 1 CHECK (quantity > 0),
-    expiry_policy_snapshot jsonb,
+    expiry_policy_snapshot jsonb CHECK (
+        expiry_policy_snapshot IS NULL
+        OR octet_length(expiry_policy_snapshot::text) <= 32768
+    ),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
     billing_event_id uuid REFERENCES bursar.billing_events(id),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -214,7 +255,7 @@ CREATE TABLE bursar.billing_refunds (
         CHECK (status IN ('pending', 'succeeded', 'failed', 'canceled')),
     reason text,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -322,7 +363,7 @@ CREATE TABLE bursar.billing_auto_recharge_attempts (
     failure_code text,
     failure_message text,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (subject_id, provider_environment, idempotency_key),
@@ -361,7 +402,8 @@ CREATE TABLE bursar.catalog_auto_recharge_policies (
     period_count integer NOT NULL CHECK (period_count > 0),
     period_anchor text NOT NULL CHECK (period_anchor IN ('calendar', 'rolling')),
     period_timezone text NOT NULL,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     FOREIGN KEY (catalog_revision_id, default_topup_key)
         REFERENCES bursar.catalog_topups(catalog_revision_id, topup_key)
 );
@@ -417,7 +459,7 @@ CREATE TABLE bursar.billing_invoices (
     period_end timestamptz,
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_environment, provider_invoice_id),
@@ -445,7 +487,7 @@ CREATE TABLE bursar.billing_disputes (
     reason text,
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (provider, provider_environment, provider_dispute_id)

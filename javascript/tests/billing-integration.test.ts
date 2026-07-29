@@ -1351,6 +1351,51 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   // ── Cancellation schedule + unschedule ──────────────────────────────────
 
+  it("persists cancellation tombstones for previously unseen subscriptions", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_cancel_unknown_with_refs",
+      eventType: "subscription.canceled",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_cancel_unknown_with_refs",
+        status: "canceled",
+        refs: { productId: PRODUCT_ID, priceId: PRICE_ID },
+      },
+    });
+
+    expect(result).toEqual({ handled: true, action: "subscription_canceled" });
+    await expect(
+      bs.getBillingSubscription(PROVIDER, "sub_cancel_unknown_with_refs"),
+    ).resolves.toMatchObject({
+      status: "canceled",
+      offerKey: "pro_monthly",
+    });
+  });
+
+  it("fails an unknown cancellation that cannot be persisted safely", async () => {
+    const { bm, bs } = await makePgComponents(pool);
+    const result = await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_cancel_unknown_without_refs",
+      eventType: "subscription.canceled",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID,
+      subscription: {
+        providerSubscriptionId: "sub_cancel_unknown_without_refs",
+        status: "canceled",
+      },
+    });
+
+    expect(result.handled).toBe(false);
+    expect(result.error).toContain("offer could not be resolved");
+    await expect(
+      bs.getBillingSubscription(PROVIDER, "sub_cancel_unknown_without_refs"),
+    ).resolves.toBeNull();
+  });
+
   it("subscription cancellation scheduled and unscheduled", async () => {
     const { bm, bs } = await makePgComponents(pool);
     await bm.ingestBillingEvent({

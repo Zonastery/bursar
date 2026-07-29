@@ -2,7 +2,7 @@ import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import Decimal from "decimal.js";
 
-import { readFileSync } from "node:fs";
+import schema from "./generated/pricing-config.schema.json" with { type: "json" };
 import { ConfigError } from "./errors.js";
 import { parseAdmission, parseEntitlements } from "./config/parse-access.js";
 import { parseCommerce } from "./config/parse-commerce.js";
@@ -13,10 +13,6 @@ import { asObject, semanticError, type JsonObject } from "./config/parse-utils.j
 import type { BursarConfigData, ParsedBursarConfig, SubscriptionOffer } from "./config/types.js";
 
 export type * from "./config/types.js";
-
-const schema = JSON.parse(
-  readFileSync(new URL("./generated/pricing-config.schema.json", import.meta.url), "utf8"),
-);
 
 const ajv = new Ajv2020({
   allErrors: true,

@@ -51,6 +51,7 @@ DODO_SUBSCRIPTION_UPDATED = {
 
 DODO_SUBSCRIPTION_CANCELLED = {
     "subscription_id": "sub_dodo_cancelled_001",
+    "product_id": "prod_monk",
 }
 
 DODO_SUBSCRIPTION_EXPIRED = {

@@ -94,6 +94,7 @@ export type {
   TeamDeductionResult,
   TeamMember,
   TopUserRow,
+  UsageAnalyticsStore,
 } from "./credits/types/index.js";
 
 // Store options

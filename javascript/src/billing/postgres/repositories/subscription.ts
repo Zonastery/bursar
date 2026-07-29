@@ -24,10 +24,24 @@ const SubscriptionRowSchema = z
   })
   .passthrough();
 
-function timestampValue(value: unknown): number {
-  if (value instanceof Date) return value.getTime();
+function timestampValue(value: unknown): number | null {
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isNaN(timestamp) ? null : timestamp;
+  }
   const timestamp = Date.parse(String(value ?? ""));
-  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+  return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function compareProviderTimestampsDescending(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): number {
+  const leftTimestamp = timestampValue(left.provider_updated_at);
+  const rightTimestamp = timestampValue(right.provider_updated_at);
+  if (leftTimestamp === null) return rightTimestamp === null ? 0 : 1;
+  if (rightTimestamp === null) return -1;
+  return rightTimestamp - leftTimestamp;
 }
 export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 
@@ -136,10 +150,7 @@ export class BillingSubscriptionRepository {
     const allowed = statuses ?? ["active", "trialing"];
     const candidates = (rows as Array<Record<string, unknown>>)
       .filter((row) => allowed.includes(String(row.status)))
-      .sort(
-        (left, right) =>
-          timestampValue(right.provider_updated_at) - timestampValue(left.provider_updated_at),
-      );
+      .sort(compareProviderTimestampsDescending);
     return candidates[0] ? this.map(await this.withOfferContext(candidates[0])) : null;
   }
   async getUserSubscriptions(userId: string): Promise<SubscriptionRow[]> {
@@ -223,10 +234,7 @@ export class BillingSubscriptionRepository {
           (!keepProviderSubscriptionId ||
             row.provider_subscription_id === keepProviderSubscriptionId),
       )
-      .sort(
-        (left, right) =>
-          timestampValue(right.provider_updated_at) - timestampValue(left.provider_updated_at),
-      )[0];
+      .sort(compareProviderTimestampsDescending)[0];
 
     if (replacement?.id == null) return 0;
 

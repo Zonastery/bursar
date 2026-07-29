@@ -45,11 +45,18 @@ BEGIN
         RAISE EXCEPTION 'canonical usage replay failed';
     END IF;
     IF NOT EXISTS (
-        SELECT 1 FROM bursar.credit_usage_charges
-        WHERE id=v_first.charge_id AND model='model-x' AND region='region-y'
-          AND measures='{"calls":1}'::jsonb
-          AND dimensions='{"model":"model-x","region":"region-y"}'::jsonb
-          AND metadata='{"trace":"a"}'::jsonb
+        SELECT 1
+        FROM bursar.credit_usage_charges AS charge
+        JOIN bursar.usage_charge_payloads AS payload
+          ON payload.charge_id = charge.id
+         AND payload.event_at = charge.event_at
+        WHERE charge.id = v_first.charge_id
+          AND charge.model = 'model-x'
+          AND charge.region = 'region-y'
+          AND charge.measures = '{"calls":1}'::jsonb
+          AND payload.dimensions =
+              '{"model":"model-x","region":"region-y"}'::jsonb
+          AND payload.metadata = '{"trace":"a"}'::jsonb
     ) THEN
         RAISE EXCEPTION 'usage dimensions or metadata were lost';
     END IF;

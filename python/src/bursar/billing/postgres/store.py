@@ -7,7 +7,8 @@ schema installed. Wraps all billing repositories under a single store class.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
 
@@ -25,16 +26,24 @@ from bursar.billing.postgres.repositories.offer import BillingOfferRepository
 from bursar.billing.postgres.repositories.payment import BillingPaymentRepository
 from bursar.billing.postgres.repositories.preferences import BillingPreferencesRepository
 from bursar.billing.postgres.repositories.refund import BillingRefundRepository
-from bursar.billing.postgres.repositories.subscription import BillingSubscriptionRepository
+from bursar.billing.postgres.repositories.subscription import (
+    BillingSubscriptionRepository,
+    provider_timestamp_sort_key,
+)
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
     BillingCustomerRecord,
     BillingEventClaim,
     BillingGrantResult,
+    BillingInvoiceInfo,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
+    BillingSubscriptionChangeInput,
+    BillingSubscriptionChangeState,
+    BillingSubscriptionOfferContext,
+    BillingSubscriptionProrationBehavior,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
@@ -50,13 +59,13 @@ def _dec_credits(value: str | Decimal | None) -> Decimal | None:
     return Decimal(str(value))
 
 
-def _to_utc_iso(dt_str: str | None) -> str | None:
-    if dt_str is None:
+def _to_utc_iso(value: str | datetime | None) -> str | None:
+    if value is None:
         return None
-    try:
-        return datetime.fromisoformat(dt_str).isoformat()
-    except (ValueError, TypeError):
-        return dt_str
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("billing timestamp must include timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 class PostgresBillingStore(BillingStore):
@@ -171,6 +180,7 @@ class PostgresBillingStore(BillingStore):
         if r is None:
             return None
         return BillingSubscriptionState(
+            subscription_id=str(r.id) if r.id else None,
             user_id=str(r.user_id),
             provider=str(r.provider),
             provider_subscription_id=str(r.provider_subscription_id),
@@ -179,41 +189,79 @@ class PostgresBillingStore(BillingStore):
             offer_key=str(r.offer_key) if r.offer_key else None,
             plan=str(r.plan) if r.plan else None,
             status=BillingSubscriptionStatus(str(r.status)) if r.status else BillingSubscriptionStatus.incomplete,
-            current_period_start=str(r.current_period_start) if r.current_period_start else None,
-            current_period_end=str(r.current_period_end) if r.current_period_end else None,
+            current_period_start=_to_utc_iso(r.current_period_start),
+            current_period_end=_to_utc_iso(r.current_period_end),
+            trial_end=_to_utc_iso(r.trial_end),
+            cancel_at=_to_utc_iso(r.cancel_at),
+            ended_at=_to_utc_iso(r.ended_at),
             cancel_at_period_end=bool(r.cancel_at_period_end),
             interval=str(r.interval) if r.interval else None,
             interval_count=int(r.interval_count) if r.interval_count is not None else None,
-            grace_ends_at=str(r.grace_ends_at) if getattr(r, "grace_ends_at", None) else None,
+            grace_ends_at=_to_utc_iso(getattr(r, "grace_ends_at", None)),
+            grace_expired_at=_to_utc_iso(getattr(r, "grace_expired_at", None)),
+            provider_updated_at=_to_utc_iso(getattr(r, "provider_updated_at", None)),
             metadata=r.metadata if isinstance(r.metadata, dict) else None,
-            catalog_version=int(cv) if (cv := getattr(r, "catalog_version", None)) is not None else None,
-            plan_version_id=str(pv) if (pv := getattr(r, "plan_version_id", None)) else None,
         )
 
-    @staticmethod
-    def _row_to_subscription_change(row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
+    def _subscription_offer_contexts(
+        self,
+        row: dict[str, Any],
+    ) -> tuple[BillingSubscriptionOfferContext, BillingSubscriptionOfferContext]:
+        rows = self._execute(
+            """SELECT requested.side, requested.offer_id, context.*
+               FROM (
+                   VALUES
+                       ('from', %s::uuid, %s::uuid),
+                       ('to', %s::uuid, %s::uuid)
+               ) AS requested(side, offer_id, catalog_revision_id)
+               CROSS JOIN LATERAL bursar.get_catalog_offer_context(
+                   requested.offer_id,
+                   requested.catalog_revision_id
+               ) AS context""",
+            [
+                row["from_offer_id"],
+                row["from_catalog_revision_id"],
+                row["to_offer_id"],
+                row["to_catalog_revision_id"],
+            ],
+        )
+        by_side = {str(context["side"]): context for context in rows}
+
+        def map_context(side: str) -> BillingSubscriptionOfferContext:
+            context = by_side.get(side)
+            if context is None or context.get("offer_key") is None:
+                raise RuntimeError(f"subscription change {side}-offer context not found")
+            return BillingSubscriptionOfferContext(
+                offer_id=str(context["offer_id"]),
+                offer_key=str(context["offer_key"]),
+                plan_id=str(context["plan_id"]) if context.get("plan_id") else None,
+                plan=str(context["plan_key"]) if context.get("plan_key") else None,
+                interval=str(context["billing_unit"]) if context.get("billing_unit") else None,
+                interval_count=(int(context["billing_count"]) if context.get("billing_count") is not None else None),
+            )
+
+        return map_context("from"), map_context("to")
+
+    def _row_to_subscription_change(self, row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
         if not row:
             return None
+        from_offer, to_offer = self._subscription_offer_contexts(row)
         return BillingSubscriptionChange(
             id=str(row["id"]),
-            user_id=str(row["user_id"]),
-            provider=str(row["provider"]),
-            provider_subscription_id=str(row["provider_subscription_id"]),
-            from_plan=row.get("from_plan"),
-            from_interval=row.get("from_interval"),
-            to_plan=str(row["to_plan"]),
-            to_interval=str(row["to_interval"]),
-            effective_at=cast(Literal["immediately", "next_billing_date", "trial_end"], str(row["effective_at"])),
-            state=cast(
-                Literal["draft", "awaiting_payment", "scheduled", "completed", "failed", "canceled", "superseded"],
-                str(row["state"]),
+            subscription_id=str(row["subscription_id"]),
+            from_offer_id=str(row["from_offer_id"]),
+            to_offer_id=str(row["to_offer_id"]),
+            from_offer=from_offer,
+            to_offer=to_offer,
+            effective_at=_to_utc_iso(row.get("effective_at")),
+            state=cast(BillingSubscriptionChangeState, str(row["state"])),
+            proration_behavior=cast(
+                BillingSubscriptionProrationBehavior,
+                str(row["proration_behavior"]),
             ),
-            proration_billing_mode=str(row["proration_billing_mode"]),
-            quote=row.get("quote") or {},
-            quote_hash=str(row["quote_hash"]),
-            provider_operation_id=row.get("provider_operation_id"),
-            effective_date=str(row["effective_date"]) if row.get("effective_date") else None,
-            expires_at=str(row["expires_at"]) if row.get("expires_at") else None,
+            idempotency_key=str(row["idempotency_key"]),
+            provider_operation_id=(str(row["provider_operation_id"]) if row.get("provider_operation_id") else None),
+            error_message=str(row["error_message"]) if row.get("error_message") else None,
         )
 
     @staticmethod
@@ -239,23 +287,24 @@ class PostgresBillingStore(BillingStore):
     def _row_to_topup(result: Any) -> BillingTopupResult | None:
         if result is None:
             return None
-        min_amt = (
-            int(result.min_amount_minor)
-            if hasattr(result, "min_amount_minor") and result.min_amount_minor is not None
-            else 500
-        )
-        max_amt = (
-            int(result.max_amount_minor)
-            if hasattr(result, "max_amount_minor") and result.max_amount_minor is not None
-            else 500000
+        amount_minor = int(result.amount_minor) if result.amount_minor is not None else None
+        min_quantity = int(result.min_quantity) if result.min_quantity is not None else None
+        max_quantity = int(result.max_quantity) if result.max_quantity is not None else None
+        credits_per_unit = _dec_credits(
+            result.credits_per_unit if result.credits_per_unit is not None else result.credits_per_major_unit
         )
         return BillingTopupResult(
             topup_id=str(result.id),
             topup_key=str(result.topup_key),
-            credits_per_unit=_dec_credits(result.credits_per_unit),
-            deposit_to=result.deposit_to or "purchased",
-            min_amount_minor=min_amt,
-            max_amount_minor=max_amt,
+            credits_per_unit=credits_per_unit if credits_per_unit is not None else Decimal(1000),
+            deposit_to=result.bucket_key or "purchased",
+            amount_minor=amount_minor,
+            currency=result.currency,
+            min_quantity=min_quantity,
+            max_quantity=max_quantity,
+            default_quantity=int(result.default_quantity) if result.default_quantity is not None else None,
+            min_amount_minor=amount_minor * (min_quantity or 1) if amount_minor is not None else None,
+            max_amount_minor=amount_minor * (max_quantity or 1) if amount_minor is not None else None,
         )
 
     # ── Public API ─────────────────────────────────────────────────────
@@ -282,28 +331,19 @@ class PostgresBillingStore(BillingStore):
         Atomically expires any old open intents for the same actor,
         then inserts a new one (or returns the existing one via ON CONFLICT).
         """
-        if len(request_digest) != 64:
+        if re.fullmatch(r"[0-9a-fA-F]{64}", request_digest) is None:
             raise ValueError("request_digest must be a 32-byte hex string")
         rows = self._execute(
             "SELECT bursar.create_checkout_intent(%s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz) AS id",
             [subject_id, provider, checkout_kind, product_key, request_digest, expires_at],
         )
-        r = self._execute(
-            "SELECT * FROM bursar.billing_checkout_intents WHERE id = %s AND subject_id = %s",
-            [rows[0]["id"], subject_id],
-        )[0]
-        return CheckoutIntent(
-            id=str(r["id"]),
-            subject_id=str(r["subject_id"]),
-            provider=str(r["provider"]),
-            checkout_kind=r["checkout_kind"],
-            product_key=str(r["product_key"]),
-            request_digest=bytes(r["request_digest"]).hex(),
-            status=CheckoutIntentStatus(str(r["status"])),
-            provider_session_id=str(r["provider_session_id"]) if r.get("provider_session_id") else None,
-            checkout_url=str(r["checkout_url"]) if r.get("checkout_url") else None,
-            expires_at=str(r["expires_at"]),
-        )
+        intent_id = rows[0].get("id") if rows else None
+        if intent_id is None:
+            raise RuntimeError("checkout intent creation returned no ID")
+        intent = self.get_checkout_intent(str(intent_id), subject_id)
+        if intent is None:
+            raise RuntimeError("checkout intent could not be read after creation")
+        return intent
 
     def update_checkout_intent(
         self,
@@ -313,15 +353,17 @@ class PostgresBillingStore(BillingStore):
         checkout_url: str | None = None,
     ) -> None:
         """Update a checkout intent's status and optional session/URL fields."""
-        self._execute(
-            "UPDATE bursar.billing_checkout_intents"
-            " SET status = COALESCE(%s, status),"
-            "     provider_session_id = COALESCE(%s, provider_session_id),"
-            "     checkout_url = COALESCE(%s, checkout_url),"
-            "     updated_at = now()"
-            " WHERE id = %s",
-            [status, provider_session_id, checkout_url, id],
+        rows = self._execute(
+            """SELECT bursar.advance_checkout_intent(
+                   %s::uuid,
+                   %s,
+                   %s,
+                   %s
+               ) AS advanced""",
+            [id, status, provider_session_id, checkout_url],
         )
+        if not rows or not rows[0].get("advanced"):
+            raise RuntimeError(f"checkout intent update rejected: {id}")
 
     def resolve_billing_offer(
         self,
@@ -347,6 +389,7 @@ class PostgresBillingStore(BillingStore):
         provider: str,
         event_id: str,
         event_type: str,
+        envelope: dict[str, Any] | None = None,
     ) -> BillingEventClaim:
         """Claim a billing event for processing (idempotent).
 
@@ -362,14 +405,22 @@ class PostgresBillingStore(BillingStore):
             provider,
             event_id,
             event_type,
-            json.dumps({"event_type": event_type}),
+            json.dumps(envelope or {"eventType": event_type}),
         )
         if result is None:
             return BillingEventClaim(status="retry")
         raw_status = (result.status or "retry").lower()
-        if raw_status not in ("claimed", "duplicate", "retry"):
-            raw_status = "retry"
-        return BillingEventClaim(status=raw_status, claim_token=getattr(result, "claim_token", None))
+        claim_token = getattr(result, "claim_token", None)
+        billing_event_id = getattr(result, "event_id", None)
+        if raw_status == "claimed" and isinstance(claim_token, str) and billing_event_id is not None:
+            return BillingEventClaim(
+                status="claimed",
+                claim_token=claim_token,
+                billing_event_id=str(billing_event_id),
+            )
+        if raw_status == "duplicate":
+            return BillingEventClaim(status="duplicate")
+        return BillingEventClaim(status="retry")
 
     def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> None:
         """Mark a billing event as completed.
@@ -417,13 +468,15 @@ class PostgresBillingStore(BillingStore):
                 "status": state.status,
                 "current_period_start": _to_utc_iso(state.current_period_start),
                 "current_period_end": _to_utc_iso(state.current_period_end),
+                "trial_end": _to_utc_iso(state.trial_end),
+                "cancel_at": _to_utc_iso(state.cancel_at),
+                "ended_at": _to_utc_iso(state.ended_at),
+                "provider_updated_at": _to_utc_iso(state.provider_updated_at),
                 "cancel_at_period_end": state.cancel_at_period_end,
                 "interval": state.interval,
                 "interval_count": state.interval_count,
                 "grace_ends_at": _to_utc_iso(state.grace_ends_at),
                 "metadata": state.metadata,
-                "catalog_version": state.catalog_version,
-                "plan_version_id": state.plan_version_id,
             }
         )
 
@@ -478,59 +531,75 @@ class PostgresBillingStore(BillingStore):
         result = self._subscription_repo.get_user_subscription(user_id, statuses=statuses)
         return self._row_to_subscription_state(result)
 
-    def create_billing_subscription_change(self, change: BillingSubscriptionChange) -> BillingSubscriptionChange:
+    def create_billing_subscription_change(
+        self,
+        input: BillingSubscriptionChangeInput,
+    ) -> BillingSubscriptionChange:
+        subscription = self._subscription_repo.get(
+            input.provider,
+            input.provider_subscription_id,
+        )
+        if subscription is None or subscription.id is None:
+            raise RuntimeError("subscription change requires persisted subscription")
+
         rows = self._execute(
-            """INSERT INTO bursar.billing_subscription_changes
-            (id, user_id, provider, provider_subscription_id, from_plan, from_interval, to_plan, to_interval,
-             effective_at, state, proration_billing_mode, quote, quote_hash, provider_operation_id,
-             effective_date, expires_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) RETURNING *""",
+            """SELECT * FROM bursar.open_subscription_change(
+                   %s::uuid,
+                   %s::uuid,
+                   %s::timestamptz,
+                   %s,
+                   %s
+               )""",
             [
-                change.id,
-                change.user_id,
-                change.provider,
-                change.provider_subscription_id,
-                change.from_plan,
-                change.from_interval,
-                change.to_plan,
-                change.to_interval,
-                change.effective_at,
-                change.state,
-                change.proration_billing_mode,
-                json.dumps(change.quote),
-                change.quote_hash,
-                change.provider_operation_id,
-                change.effective_date,
-                change.expires_at,
+                subscription.id,
+                input.to_offer_id,
+                input.effective_at,
+                input.idempotency_key,
+                input.proration_behavior,
             ],
         )
-        parsed_change = self._row_to_subscription_change(rows[0])
+        result = rows[0] if rows else {}
+        if result.get("error_code"):
+            raise RuntimeError(f"subscription change: {result['error_code']}")
+        change_rows = self._execute(
+            "SELECT * FROM bursar.get_billing_subscription_change(%s::uuid)",
+            [result.get("change_id")],
+        )
+        parsed_change = self._row_to_subscription_change(change_rows[0] if change_rows else None)
         if parsed_change is None:
-            raise RuntimeError("billing subscription change INSERT returned no row")
+            raise RuntimeError("subscription change creation returned no row")
         return parsed_change
 
     def get_open_billing_subscription_change(
         self, provider: str, provider_subscription_id: str
     ) -> BillingSubscriptionChange | None:
         rows = self._execute(
-            "SELECT * FROM bursar.billing_subscription_changes "
-            "WHERE provider=%s AND provider_subscription_id=%s "
-            "AND state IN ('awaiting_payment','scheduled') "
-            "ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM bursar.get_open_billing_subscription_change(%s, %s)",
             [provider, provider_subscription_id],
         )
         return self._row_to_subscription_change(rows[0]) if rows else None
 
-    def update_billing_subscription_change(self, id: str, **updates: Any) -> None:
-        allowed = {"state", "provider_operation_id", "effective_date"}
-        fields = [(key, value) for key, value in updates.items() if key in allowed]
-        if not fields:
+    def update_billing_subscription_change(
+        self,
+        id: str,
+        *,
+        state: BillingSubscriptionChangeState | None = None,
+        provider_operation_id: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if state is None:
             return
-        assignments = ", ".join(f"{key} = %s" for key, _ in fields)
-        self._execute(
-            f"UPDATE bursar.billing_subscription_changes SET {assignments}, updated_at=now() WHERE id=%s",
-            [*(value for _, value in fields), id],
+        rows = self._execute(
+            """SELECT bursar.advance_subscription_change(
+                   %s::uuid,
+                   %s,
+                   %s,
+                   %s
+               ) AS advanced""",
+            [id, state, provider_operation_id, error_message],
         )
+        if not rows or not rows[0].get("advanced"):
+            raise RuntimeError(f"subscription change transition rejected: {id}")
 
     def resolve_credit_topup(
         self,
@@ -596,8 +665,10 @@ class PostgresBillingStore(BillingStore):
         tax_minor: int | None = None,
         currency: str = "USD",
         purpose: str = "unknown",
+        status: str = "succeeded",
+        provider_updated_at: str | None = None,
         metadata: dict | None = None,
-    ) -> None:
+    ) -> str:
         """Insert or update a billing payment record.
 
         Args:
@@ -609,6 +680,8 @@ class PostgresBillingStore(BillingStore):
             tax_minor: The tax amount in minor currency units, or None.
             currency: The ISO 4217 currency code (default "USD").
             purpose: The payment purpose (default "unknown").
+            status: The payment status (default "succeeded").
+            provider_updated_at: Optional provider timestamp.
             metadata: Optional structured metadata dict.
         """
         return self._payment_repo.upsert(
@@ -621,6 +694,8 @@ class PostgresBillingStore(BillingStore):
             currency,
             purpose,
             json.dumps(metadata) if metadata else None,
+            status,
+            provider_updated_at,
         )
 
     def upsert_billing_refund(
@@ -633,8 +708,10 @@ class PostgresBillingStore(BillingStore):
         amount_minor: int = 0,
         currency: str = "USD",
         reason: str | None = None,
+        status: str = "pending",
+        provider_updated_at: str | None = None,
         metadata: dict | None = None,
-    ) -> None:
+    ) -> str:
         """Insert or update a billing refund record.
 
         Args:
@@ -645,6 +722,8 @@ class PostgresBillingStore(BillingStore):
             amount_minor: The refund amount in minor currency units.
             currency: The ISO 4217 currency code (default "USD").
             reason: The refund reason, or None.
+            status: The refund status (default "pending").
+            provider_updated_at: Optional provider timestamp.
             metadata: Optional structured metadata dict.
         """
         return self._refund_repo.upsert(
@@ -656,6 +735,8 @@ class PostgresBillingStore(BillingStore):
             currency,
             reason,
             json.dumps(metadata) if metadata else None,
+            status,
+            provider_updated_at,
         )
 
     def upsert_billing_invoice(
@@ -671,6 +752,7 @@ class PostgresBillingStore(BillingStore):
         currency: str = "USD",
         period_start: str | None = None,
         period_end: str | None = None,
+        provider_updated_at: str | None = None,
         metadata: dict | None = None,
     ) -> None:
         """Insert or update a billing invoice record.
@@ -688,19 +770,29 @@ class PostgresBillingStore(BillingStore):
             period_end: The billing period end, or None.
             metadata: Optional structured metadata dict.
         """
+        subscription = (
+            self._subscription_repo.get(provider, provider_subscription_id) if provider_subscription_id else None
+        )
+        subject_id = user_id or (str(subscription.user_id) if subscription and subscription.user_id else None)
+        if not subject_id:
+            raise ValueError("invoice subject is required")
         self._invoice_repo.upsert(
+            subject_id,
             provider,
             provider_invoice_id,
-            provider_subscription_id,
-            user_id,
+            str(subscription.id) if subscription and subscription.id else None,
             status,
-            amount_paid_minor,
             amount_due_minor,
+            amount_paid_minor,
             currency,
             period_start,
             period_end,
-            json.dumps(metadata) if metadata else None,
+            json.dumps(metadata or {}),
+            provider_updated_at or datetime.now(UTC).isoformat(),
         )
+
+    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]:
+        return self._invoice_repo.list_for_user(user_id)
 
     def upsert_billing_dispute(
         self,
@@ -711,6 +803,7 @@ class PostgresBillingStore(BillingStore):
         user_id: str | None = None,
         status: str = "needs_response",
         reason: str | None = None,
+        provider_updated_at: str | None = None,
         metadata: dict | None = None,
     ) -> None:
         """Insert or update a billing dispute record.
@@ -724,26 +817,33 @@ class PostgresBillingStore(BillingStore):
             reason: The dispute reason, or None.
             metadata: Optional structured metadata dict.
         """
+        del user_id
+        payment = self._payment_repo.get_for_refund(provider, provider_payment_id) if provider_payment_id else None
+        if not payment or not payment.id:
+            raise ValueError("dispute payment is required")
         self._dispute_repo.upsert(
             provider,
             provider_dispute_id,
-            provider_payment_id,
-            user_id,
+            str(payment.id),
             status,
             reason,
-            json.dumps(metadata) if metadata else None,
+            json.dumps(metadata or {}),
+            provider_updated_at or datetime.now(UTC).isoformat(),
         )
 
     def create_billing_credit_grant(
         self,
-        payment_id: str,
-        topup_id: str,
+        *,
+        payment_id: str | None = None,
+        subscription_id: str | None = None,
+        topup_id: str | None = None,
         configured_credits: str,
         quantity: int = 1,
+        billing_event_id: str | None = None,
     ) -> str:
         rows = self._execute(
-            "SELECT bursar.create_billing_credit_grant(%s::uuid, NULL::uuid, %s::uuid, %s, %s)",
-            [payment_id, topup_id, configured_credits, quantity],
+            "SELECT bursar.create_billing_credit_grant(%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid)",
+            [payment_id, subscription_id, topup_id, configured_credits, quantity, billing_event_id],
         )
         return str(next(iter(rows[0].values())))
 
@@ -753,14 +853,11 @@ class PostgresBillingStore(BillingStore):
 
     def get_billing_credit_grant_by_payment(self, payment_id: str) -> str | None:
         rows = self._execute(
-            """SELECT id
-               FROM bursar.billing_credit_grants
-               WHERE payment_id = %s::uuid
-               ORDER BY created_at, id
-               LIMIT 1""",
+            "SELECT * FROM bursar.get_billing_credit_grant_by_payment(%s::uuid)",
             [payment_id],
         )
-        return str(next(iter(rows[0].values()))) if rows and next(iter(rows[0].values())) else None
+        grant_id = rows[0].get("id") if rows else None
+        return str(grant_id) if grant_id else None
 
     def post_billing_refund(self, refund_id: str, grant_id: str, amount_minor: int, idempotency_key: str) -> dict:
         rows = self._execute(
@@ -828,101 +925,207 @@ class PostgresBillingStore(BillingStore):
         self._preferences_repo.upsert(prefs.model_dump())
 
     def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None:
-        rows = self._execute("SELECT * FROM bursar.billing_auto_recharge_profiles WHERE user_id=%s", [user_id])
+        rows = self._execute(
+            "SELECT * FROM bursar.get_auto_recharge_profile(%s::uuid)",
+            [user_id],
+        )
         if not rows:
             return None
         row = rows[0]
         return BillingAutoRechargeProfile(
-            user_id=str(row["user_id"]),
+            user_id=str(row["subject_id"]),
             enabled=bool(row["enabled"]),
-            state=cast(Literal["disabled", "active", "processing", "suspended", "limit_reached"], str(row["state"])),
-            provider=row.get("provider"),
-            provider_customer_id=row.get("provider_customer_id"),
-            payment_method_id=row.get("payment_method_id"),
-            suspended_reason=row.get("suspended_reason"),
-            consented_at=str(row["consented_at"]) if row.get("consented_at") else None,
-            consent_reference=row.get("consent_reference"),
-            consent_metadata=row.get("consent_metadata"),
-            policy_override=row.get("policy_override"),
-            policy_snapshot=row.get("policy_snapshot"),
-            policy_hash=row.get("policy_hash"),
-            quote_snapshot=row.get("quote_snapshot"),
+            state=cast(Literal["disabled", "active", "paused"], str(row["state"])),
             armed=bool(row.get("armed", True)),
+            provider=str(row["provider"]) if row.get("provider") is not None else None,
+            topup_id=str(row["topup_id"]) if row.get("topup_id") is not None else None,
+            quantity=int(row["quantity"]),
+            threshold=Decimal(str(row["threshold"])),
+            max_charges_per_window=(
+                int(row["max_charges_per_window"]) if row.get("max_charges_per_window") is not None else None
+            ),
+            window_unit=cast(
+                Literal["second", "minute", "hour", "day", "week", "month", "year"],
+                str(row["window_unit"]),
+            ),
+            window_count=int(row["window_count"]),
+            window_anchor=cast(
+                Literal["calendar", "plan_assignment", "rolling"],
+                str(row["window_anchor"]),
+            ),
+            window_timezone=str(row["window_timezone"]),
+            updated_at=_to_utc_iso(row.get("updated_at")),
         )
 
     def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
-        self._execute(
-            """INSERT INTO bursar.billing_auto_recharge_profiles
-              (user_id,enabled,state,provider,provider_customer_id,payment_method_id,suspended_reason,consented_at)
-              VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-              ON CONFLICT (user_id) DO UPDATE SET enabled=EXCLUDED.enabled,state=EXCLUDED.state,
-              provider=EXCLUDED.provider,provider_customer_id=EXCLUDED.provider_customer_id,
-              payment_method_id=EXCLUDED.payment_method_id,suspended_reason=EXCLUDED.suspended_reason,
-              consented_at=EXCLUDED.consented_at,consent_reference=EXCLUDED.consent_reference,
-                 consent_metadata=EXCLUDED.consent_metadata,policy_override=EXCLUDED.policy_override,
-                 policy_snapshot=EXCLUDED.policy_snapshot,policy_hash=EXCLUDED.policy_hash,
-                 quote_snapshot=EXCLUDED.quote_snapshot,armed=EXCLUDED.armed,updated_at=now()""",
+        rows = self._execute(
+            """SELECT bursar.upsert_auto_recharge_profile(
+                   %s::uuid,
+                   %s,
+                   %s,
+                   %s::uuid,
+                   %s,
+                   %s,
+                   %s,
+                   %s,
+                   %s,
+                   %s,
+                   %s
+               ) AS profile_updated""",
             [
                 profile.user_id,
                 profile.enabled,
-                profile.state,
                 profile.provider,
-                profile.provider_customer_id,
-                profile.payment_method_id,
-                profile.suspended_reason,
-                profile.consented_at,
-                profile.consent_reference,
-                json.dumps(profile.consent_metadata) if profile.consent_metadata is not None else None,
-                json.dumps(profile.policy_override) if profile.policy_override is not None else None,
-                json.dumps(profile.policy_snapshot) if profile.policy_snapshot is not None else None,
-                profile.policy_hash,
-                json.dumps(profile.quote_snapshot) if profile.quote_snapshot is not None else None,
-                profile.armed,
+                profile.topup_id,
+                profile.quantity,
+                profile.threshold,
+                profile.max_charges_per_window,
+                profile.window_unit,
+                profile.window_count,
+                profile.window_anchor,
+                profile.window_timezone,
             ],
         )
+        if not rows or not rows[0].get("profile_updated"):
+            raise RuntimeError(f"auto-recharge profile update rejected: {profile.user_id}")
 
     def claim_auto_recharge_attempt(
-        self, user_id: str, provider: str, topup_key: str, quantity: int, max_recharges: int, window_days: int
+        self,
+        user_id: str,
+        idempotency_key: str,
     ) -> BillingAutoRechargeAttempt | None:
         rows = self._execute(
-            "SELECT * FROM bursar.claim_auto_recharge_attempt(%s,%s,%s,%s,%s,%s)",
-            [user_id, provider, topup_key, quantity, max_recharges, window_days],
+            "SELECT * FROM bursar.claim_auto_recharge_attempt(%s::uuid, %s)",
+            [user_id, idempotency_key],
         )
         if not rows:
             return None
-        row = rows[0]
+        return self._row_to_auto_recharge_attempt(rows[0])
+
+    @staticmethod
+    def _row_to_auto_recharge_attempt(row: dict[str, Any]) -> BillingAutoRechargeAttempt:
         return BillingAutoRechargeAttempt(
             id=str(row["id"]),
-            user_id=str(row["user_id"]),
+            user_id=str(row["subject_id"]),
             provider=str(row["provider"]),
             idempotency_key=str(row["idempotency_key"]),
-            provider_payment_id=row.get("provider_payment_id"),
-            topup_key=str(row["topup_key"]),
+            provider_attempt_id=(
+                str(row["provider_attempt_id"]) if row.get("provider_attempt_id") is not None else None
+            ),
+            topup_id=str(row["topup_id"]),
             quantity=int(row["quantity"]),
             state=cast(
-                Literal["claimed", "processing", "succeeded", "retryable", "failed", "action_required"],
+                Literal[
+                    "claimed",
+                    "submitted",
+                    "processing",
+                    "unknown",
+                    "succeeded",
+                    "failed",
+                    "action_required",
+                ],
                 str(row["state"]),
             ),
-            credits=row.get("credits"),
-            failure_code=row.get("failure_code"),
-            action_url=row.get("action_url"),
-            created_at=str(row["created_at"]),
-            updated_at=str(row["updated_at"]),
+            window_start=cast(str, _to_utc_iso(row["window_start"])),
+            window_end=cast(str, _to_utc_iso(row["window_end"])),
+            quoted_amount_minor=(
+                int(row["quoted_amount_minor"]) if row.get("quoted_amount_minor") is not None else None
+            ),
+            currency=str(row["currency"]) if row.get("currency") is not None else None,
+            failure_code=(str(row["failure_code"]) if row.get("failure_code") is not None else None),
+            failure_message=(str(row["failure_message"]) if row.get("failure_message") is not None else None),
+            metadata=row["metadata"] if isinstance(row.get("metadata"), dict) else {},
+            created_at=cast(str, _to_utc_iso(row["created_at"])),
+            updated_at=cast(str, _to_utc_iso(row["updated_at"])),
         )
+
+    def _advance_auto_recharge_attempt(
+        self,
+        attempt_id: str,
+        state: str,
+        provider_attempt_id: str | None = None,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        current_rows = self._execute(
+            "SELECT * FROM bursar.get_auto_recharge_attempt(%s::uuid)",
+            [attempt_id],
+        )
+        current = str(current_rows[0].get("state", "")) if current_rows else ""
+        transitions: dict[str, dict[str, list[str]]] = {
+            "claimed": {
+                "submitted": ["submitted"],
+                "processing": ["submitted", "processing"],
+                "succeeded": ["submitted", "processing", "succeeded"],
+                "failed": ["submitted", "processing", "failed"],
+                "unknown": ["submitted", "processing", "unknown"],
+            },
+            "submitted": {
+                "submitted": [],
+                "processing": ["processing"],
+                "succeeded": ["processing", "succeeded"],
+                "failed": ["processing", "failed"],
+                "unknown": ["processing", "unknown"],
+            },
+            "processing": {
+                "processing": [],
+                "succeeded": ["succeeded"],
+                "failed": ["failed"],
+                "unknown": ["unknown"],
+            },
+            "unknown": {
+                "unknown": [],
+                "processing": ["processing"],
+                "action_required": ["action_required"],
+            },
+            "action_required": {
+                "action_required": [],
+                "processing": ["processing"],
+            },
+        }
+        path = transitions.get(current, {}).get(state)
+        if path is None:
+            raise RuntimeError(f"auto-recharge attempt transition rejected: {attempt_id}")
+
+        for next_state in path:
+            rows = self._execute(
+                """SELECT bursar.advance_auto_recharge_attempt(
+                       %s::uuid,
+                       %s::bursar.recharge_attempt_status,
+                       %s,
+                       %s,
+                       %s,
+                       %s::jsonb
+                   ) AS advanced""",
+                [
+                    attempt_id,
+                    next_state,
+                    provider_attempt_id,
+                    failure_code,
+                    failure_message,
+                    json.dumps(metadata or {}),
+                ],
+            )
+            if not rows or not rows[0].get("advanced"):
+                raise RuntimeError(f"auto-recharge attempt transition rejected: {attempt_id}")
 
     def update_auto_recharge_attempt(
         self,
         attempt_id: str,
         state: str,
-        provider_payment_id: str | None = None,
+        provider_attempt_id: str | None = None,
         failure_code: str | None = None,
-        action_url: str | None = None,
+        failure_message: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        self._execute(
-            "UPDATE bursar.billing_auto_recharge_attempts "
-            "SET state=%s, provider_payment_id=COALESCE(%s,provider_payment_id), "
-            "failure_code=%s, action_url=%s, updated_at=now() WHERE id=%s",
-            [state, provider_payment_id, failure_code, action_url, attempt_id],
+        self._advance_auto_recharge_attempt(
+            attempt_id,
+            state,
+            provider_attempt_id,
+            failure_code,
+            failure_message,
+            metadata,
         )
 
     def get_billing_customer_by_user_id(
@@ -946,3 +1149,157 @@ class PostgresBillingStore(BillingStore):
             provider=str(row.get("provider", "")),
             provider_customer_id=str(row.get("provider_customer_id", "")),
         )
+
+    def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None:
+        rows = self._execute(
+            "SELECT * FROM bursar.get_checkout_intent(%s::uuid, %s::uuid)",
+            [id, subject_id],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return CheckoutIntent(
+            id=str(row["id"]),
+            subject_id=str(row["subject_id"]),
+            provider=str(row["provider"]),
+            checkout_kind=row["checkout_kind"],
+            product_key=str(row["product_key"]),
+            request_digest=bytes(row["request_digest"]).hex(),
+            status=CheckoutIntentStatus(str(row["status"])),
+            provider_session_id=(str(row["provider_session_id"]) if row.get("provider_session_id") else None),
+            checkout_url=(str(row["checkout_url"]) if row.get("checkout_url") else None),
+            expires_at=cast(str, _to_utc_iso(row["expires_at"])),
+        )
+
+    def list_expired_grace_subscriptions(self, now: datetime, limit: int = 100) -> list[dict]:
+        rows = self._execute(
+            "SELECT * FROM bursar.list_expired_grace_subscriptions(%s, %s)",
+            [now.isoformat(), limit],
+        )
+        return [dict(r) for r in rows if isinstance(r, dict)]
+
+    def mark_subscription_grace_expired(self, id: str, expected_grace_ends_at: str, expired_at: str) -> bool:
+        rows = self._execute(
+            "SELECT bursar.mark_subscription_grace_expired(%s::uuid, %s, %s) AS marked",
+            [id, expected_grace_ends_at, expired_at],
+        )
+        return bool(rows[0]["marked"]) if rows else False
+
+    def deactivate_other_provider_subscriptions(
+        self, user_id: str, keep_provider: str, subscription_id: str | None = None
+    ) -> dict:
+        rows = self._execute(
+            "SELECT * FROM bursar.list_billing_subscriptions(%s::uuid)",
+            [user_id],
+        )
+        eligible_statuses = {"trialing", "active", "past_due", "paused"}
+        candidates = [
+            r
+            for r in rows
+            if str(r.get("provider", "")) == keep_provider
+            and str(r.get("status", "")) in eligible_statuses
+            and (subscription_id is None or str(r.get("provider_subscription_id", "")) == subscription_id)
+        ]
+        if not candidates:
+            return {"user_id": user_id, "keep_provider": keep_provider, "deactivated_count": 0}
+        replacement = max(candidates, key=provider_timestamp_sort_key)
+        selected = self._execute(
+            "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid) AS selected",
+            [user_id, replacement["id"]],
+        )
+        if not selected or not selected[0].get("selected"):
+            raise RuntimeError("entitlement source selection was rejected")
+        deactivated = sum(
+            1
+            for r in rows
+            if str(r.get("provider", "")) != keep_provider and str(r.get("status", "")) in eligible_statuses
+        )
+        return {"user_id": user_id, "keep_provider": keep_provider, "deactivated_count": deactivated}
+
+    def record_subscription_conflict(
+        self,
+        user_id: str | None,
+        provider: str,
+        duplicate_subscription_id: str,
+        existing_subscription_id: str | None = None,
+        event_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        rows = self._execute(
+            "SELECT bursar.record_subscription_conflict(%s::uuid, %s, %s, %s, %s, %s::jsonb) AS id",
+            [
+                user_id,
+                provider,
+                duplicate_subscription_id,
+                existing_subscription_id,
+                event_id,
+                json.dumps(metadata or {}),
+            ],
+        )
+        conflict_id = rows[0].get("id") if rows and isinstance(rows[0], dict) else None
+        if conflict_id is None:
+            raise RuntimeError("subscription conflict audit returned no ID")
+
+    def compute_topup_credits(self, amount_minor: int, topup_config: BillingTopupResult) -> Decimal:
+        unit_amount = topup_config.amount_minor
+        if not unit_amount:
+            return Decimal(0)
+        credits_per = Decimal(str(topup_config.credits_per_unit or 0))
+        if amount_minor % unit_amount != 0:
+            return Decimal(0)
+        quantity = amount_minor // unit_amount
+        min_qty = topup_config.min_quantity or 1
+        max_qty = topup_config.max_quantity or 1
+        if quantity < min_qty or quantity > max_qty:
+            return Decimal(0)
+        return Decimal(str(quantity)) * credits_per
+
+    def pseudonymize_financial_subject(self, user_id: str) -> bool:
+        rows = self._execute(
+            "SELECT bursar.pseudonymize_financial_subject(%s::uuid) AS pseudonymized",
+            [user_id],
+        )
+        return bool(rows[0].get("pseudonymized")) if rows else False
+
+    def update_auto_recharge_attempt_by_provider_payment(
+        self,
+        provider: str,
+        provider_payment_id: str,
+        state: str,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+    ) -> None:
+        attempts = self._execute(
+            "SELECT * FROM bursar.get_auto_recharge_attempt_by_provider(%s, %s)",
+            [provider, provider_payment_id],
+        )
+        for attempt in attempts:
+            attempt_id = attempt.get("id")
+            if not attempt_id:
+                continue
+            self._advance_auto_recharge_attempt(
+                str(attempt_id),
+                state,
+                provider_payment_id,
+                failure_code,
+                failure_message,
+            )
+
+    def count_auto_recharge_attempts(
+        self,
+        user_id: str,
+        since: str | datetime | int | float,
+    ) -> int:
+        if isinstance(since, datetime):
+            since_date = since
+        elif isinstance(since, int | float):
+            since_date = datetime.now(UTC) - timedelta(milliseconds=max(float(since), 1))
+        else:
+            since_date = datetime.fromisoformat(since)
+        if since_date.tzinfo is None:
+            raise ValueError("auto-recharge attempt window must include timezone")
+        rows = self._execute(
+            "SELECT bursar.count_auto_recharge_attempts(%s::uuid, %s::timestamptz) AS count",
+            [user_id, since_date.astimezone(UTC).isoformat()],
+        )
+        return int(rows[0]["count"]) if rows else 0

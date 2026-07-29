@@ -53,7 +53,7 @@ class QuotaState(BaseModel):
     reserved: Decimal
     remaining: Decimal
     overage: Decimal
-    enforcement: str
+    enforcement: Literal["block", "allow"]
     window_start: str
     window_end: str
     emit_at_percent: list[float]
@@ -64,7 +64,7 @@ class QuotaEvent(BaseModel):
     quota_key: str
     operation: str
     measure: str
-    event_type: str
+    event_type: Literal["threshold", "blocked"]
     threshold_percent: float | None = None
     idempotency_key: str
     usage_charge_id: str | None = None
@@ -73,7 +73,7 @@ class QuotaEvent(BaseModel):
 
 class ListQuotaEventsOptions(BaseModel):
     after: datetime | None = None
-    limit: int | None = None
+    limit: int | None = Field(default=None, ge=1, le=500)
     idempotency_key: str | None = None
 
 
@@ -86,7 +86,7 @@ class FeatureLimitResult(BaseModel):
     remaining: int = 0
     period_start: str = ""
     period_end: str = ""
-    action: str | None = None
+    action: Literal["deny", "warn", "notify"] | None = None
 
 
 class Entitlement(BaseModel):

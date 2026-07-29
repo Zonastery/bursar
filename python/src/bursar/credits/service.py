@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 from bursar.config import ConfigError
@@ -62,15 +63,20 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
     LedgerPage,
+    ListQuotaEventsOptions,
+    MigratePlanUsersResult,
     OperationPolicy,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
+    QuotaEvent,
+    QuotaState,
     RefundResult,
     ReleaseResult,
     SetUserPlanResult,
@@ -79,12 +85,14 @@ from bursar.credits.types import (
     SweepResult,
     TeamDeductionResult,
     TopUserRow,
+    UsageAnalyticsStore,
 )
 from bursar.engine import PricingEngine
+from bursar.errors import BursarError
 from bursar.metrics import UsageMetrics
 
 
-class CreditError(Exception):
+class CreditError(BursarError):
     """Coherent base for bursar credit-domain errors raised by the manager.
 
     Lets callers ``except CreditError`` to catch any admission/settle failure
@@ -221,10 +229,12 @@ class CreditsService:
         low_balance: LowBalanceConfig | None = None,
         default_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
         pricing_ttl: int = 300,
+        analytics: UsageAnalyticsStore | None = None,
     ) -> None:
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
         self._store = store
+        self._analytics = analytics or store
         self._engine = engine
         self._emitter = emitter
         # Financial-safety policy (interface plan §1/§2). ``policy`` is the preset
@@ -302,6 +312,31 @@ class CreditsService:
                     data=data,
                 )
             )
+
+    def _emit_quota_events(self, user_id: str, idempotency_key: str) -> None:
+        events = self._store.list_quota_events(
+            user_id,
+            ListQuotaEventsOptions(idempotency_key=idempotency_key, limit=100),
+        )
+        for event in events:
+            data = {
+                "quota_key": event.quota_key,
+                "operation": event.operation,
+                "measure": event.measure,
+                "threshold_percent": event.threshold_percent,
+                "usage_charge_id": event.usage_charge_id,
+                "idempotency_key": event.idempotency_key,
+            }
+            if event.event_type == "blocked":
+                self._emit("credits.quota_blocked", user_id, data)
+                self._emit("credits.feature_limit_reached", user_id, {**data, "feature": event.quota_key})
+            elif event.event_type == "threshold":
+                self._emit("credits.quota_threshold", user_id, data)
+                self._emit(
+                    "credits.feature_limit_warning",
+                    user_id,
+                    {**data, "feature": event.quota_key, "action": "notify"},
+                )
 
     @staticmethod
     def _to_decimal(value: Decimal | int | float | str) -> Decimal:
@@ -611,7 +646,9 @@ class CreditsService:
             "credits.cycle_renewed",
             user_id,
             {
+                "entry_id": result.entry_id,
                 "amount": amount_dec,
+                "new_balance": result.new_balance,
                 "bucket": bucket,
                 "plan_key": plan_key,
                 "idempotency_key": idempotency_key,
@@ -688,9 +725,37 @@ class CreditsService:
         """Advance a plan migration by one bounded batch."""
         return self._store.migrate_plan_batch(migration_id, batch_size)
 
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        """Deprecated one-shot migration; prefer resumable plan migrations."""
+        return self._store.migrate_plan_users(plan_key, target_config_version)
+
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         """Fetch user's current plan (including feature entitlements)."""
         return self._store.get_user_plan(user_id)
+
+    def get_quota_state(
+        self,
+        user_id: str,
+        quota_key: str | None = None,
+    ) -> list[QuotaState]:
+        """Return current quota windows for a user."""
+        return self._store.get_quota_state(user_id, quota_key)
+
+    def list_quota_events(
+        self,
+        user_id: str,
+        options: ListQuotaEventsOptions | None = None,
+    ) -> list[QuotaEvent]:
+        """List persisted quota threshold and blocking events."""
+        return self._store.list_quota_events(user_id, options)
+
+    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
+        """Deprecated quota-key compatibility query; mirrors JavaScript."""
+        return self._store.check_feature_limit(user_id, feature)
 
     def check_feature(self, user_id: str, feature: str) -> CheckFeatureResult:
         """Check whether a user's plan has a specific feature entitlement.
@@ -946,6 +1011,7 @@ class CreditsService:
         ttl_seconds = ttl if ttl is not None else self._default_ttl
         measures = dict(metrics_or_amount.measures) if isinstance(metrics_or_amount, UsageMetrics) else {}
         dimensions = dict(metrics_or_amount.dimensions) if isinstance(metrics_or_amount, UsageMetrics) else {}
+        lease_idempotency_key = idempotency_key or f"lease:{uuid4()}"
 
         result = self._store.create_lease(
             user_id,
@@ -959,7 +1025,7 @@ class CreditsService:
             overdraft_floor=policy.overdraft_floor,
             metadata=metadata,
             feature=effective_feature,
-            idempotency_key=idempotency_key,
+            idempotency_key=lease_idempotency_key,
             measures=measures,
             dimensions=dimensions,
         )
@@ -975,6 +1041,8 @@ class CreditsService:
                     "operation_type": effective_operation,
                 },
             )
+            if result.error == "quota_exceeded":
+                self._emit_quota_events(user_id, lease_idempotency_key)
             self._raise_lease_error(result.error, user_id, amount)
 
         self._emit(
@@ -989,6 +1057,7 @@ class CreditsService:
                 "expires_at": result.expires_at,
             },
         )
+        self._emit_quota_events(user_id, lease_idempotency_key)
         return result
 
     def settle(
@@ -1058,6 +1127,8 @@ class CreditsService:
                 user_id,
                 {"error": result.error, "amount": amount, "stage": "settle", "lease_id": lease_id},
             )
+            if result.error == "quota_exceeded":
+                self._emit_quota_events(user_id, effective_idempotency_key)
             if result.error in ("lease_expired", "expired_lease"):
                 self._emit("credits.lease_expired", user_id, {"lease_id": lease_id})
             self._raise_lease_error(result.error, user_id, amount)
@@ -1114,6 +1185,8 @@ class CreditsService:
             )
 
         self._post_charge_signals(user_id, result)
+        if not result.idempotent:
+            self._emit_quota_events(user_id, effective_idempotency_key)
         return result
 
     def release(self, user_id: str, lease_id: str) -> ReleaseResult:
@@ -1390,6 +1463,8 @@ class CreditsService:
             raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={cost}")
         if error == "feature_limit_reached":
             raise FeatureLimitReachedError(f"Feature limit exceeded for {feature!r}. User={user_id}")
+        if error == "quota_exceeded":
+            raise QuotaExceededError(f"Usage quota exceeded. User={user_id}")
         if error == "insufficient_credits":
             raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
         raise InsufficientCreditsError(f"Deduction failed: {error}. User={user_id}, requested={cost}")
@@ -1472,14 +1547,20 @@ class CreditsService:
             return result
 
         # 3) One atomic transaction in the store: allowance → cap → floor → debit.
-        tx_meta = self._build_tx_metadata(metrics, breakdown.total, idempotency_key, metadata)
+        effective_idempotency_key = idempotency_key or f"usage:{uuid4()}"
+        tx_meta = self._build_tx_metadata(
+            metrics,
+            breakdown.total,
+            effective_idempotency_key,
+            metadata,
+        )
         flr = self._resolve_feature_limit(user_id, feature)
         feature_limit, feature_period_start, _feature_period_end = flr.limit, flr.period_start, flr.period_end
         model_dimension = metrics.dimensions.get("model")
         result = self._store.deduct_with_allowance(
             user_id,
             cost,
-            idempotency_key=idempotency_key,
+            idempotency_key=effective_idempotency_key,
             min_balance=self._engine.min_balance,
             model=str(model_dimension) if model_dimension is not None else None,
             metadata=tx_meta,
@@ -1493,6 +1574,8 @@ class CreditsService:
         # 4) Error path: emit a failure event and raise the typed exception.
         #    Never emit a success event here.
         if result.error:
+            if result.error == "quota_exceeded":
+                self._emit_quota_events(user_id, effective_idempotency_key)
             self._raise_deduct_error(result.error, user_id, cost, metrics, feature)
 
         # 5) Success path.
@@ -1508,41 +1591,13 @@ class CreditsService:
             },
         )
 
-        # Non-blocking spend-cap signal surfaced by the store.
-        if result.cap_warning in ("warn", "notify"):
-            self._emit(
-                "credits.cap_warning",
-                user_id,
-                {
-                    "balance_after": result.balance_after,
-                    "amount": result.amount,
-                    "model": metrics.dimensions.get("model"),
-                    "action": result.cap_warning,
-                },
-            )
-
-        # Non-blocking feature-limit signal surfaced by the store (parallels cap_warning
-        # above). A 'deny' feature limit never reaches here — it aborts in the error
-        # path — so only warn/notify can appear on a successful deduction.
-        if result.feature_limit_warning in ("warn", "notify"):
-            self._emit(
-                "credits.feature_limit_warning",
-                user_id,
-                {
-                    "feature": feature,
-                    "balance_after": result.balance_after,
-                    "amount": result.amount,
-                    "model": metrics.dimensions.get("model"),
-                    "action": result.feature_limit_warning,
-                },
-            )
-
         # Edge-triggered low_balance (M18): multi-level if configured (WS7), else
         # single-threshold — see _emit_low_balance for the shared logic used by
         # both the direct-deduct path and the lease/settle path.
         if not result.idempotent:
             balance_before = result.balance_after + result.amount
             self._emit_low_balance(user_id, balance_before, result.balance_after)
+            self._emit_quota_events(user_id, effective_idempotency_key)
 
         return result
 
@@ -1686,34 +1741,45 @@ class CreditsService:
         )
         return result
 
-    def _run_sweep(self, limit: int) -> SweepResult:
+    def _run_sweep(self, dry_run: bool, user_id: str | None = None) -> SweepResult:
         """Run one bounded expiry-worker batch."""
-        result = self._store.sweep_expired_credits(limit)
-        if result.expired_count > 0:
-            self._emit("credits.expired", "system", {"expired_count": result.expired_count})
+        result = self._store.sweep_expired_credits(dry_run=dry_run, user_id=user_id)
+        if not dry_run and result.expired_count > 0:
+            self._emit(
+                "credits.expired",
+                user_id or "system",
+                {
+                    "expired_count": result.expired_count,
+                    "expired_amount": result.expired_amount,
+                    "expired_by_bucket": result.expired_by_bucket,
+                },
+            )
         return result
 
-    def sweep_expired_credits(self, limit: int = 100) -> SweepResult:
-        """Expire at most ``limit`` eligible credit lots."""
-        return self._run_sweep(limit)
+    def sweep_expired_credits(
+        self,
+        dry_run: bool = False,
+    ) -> SweepResult:
+        """Inspect or expire eligible credit lots."""
+        return self._run_sweep(dry_run)
 
     # ── Usage analytics ─────────────────────────────────────────────────
 
     def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
         """Aggregate spend by user in a time window."""
-        return self._store.spend_by_user(start, end)
+        return self._analytics.spend_by_user(start, end)
 
     def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
         """Aggregate spend by model in a time window."""
-        return self._store.spend_by_model(start, end)
+        return self._analytics.spend_by_model(start, end)
 
     def top_users(self, limit: int, start: datetime, end: datetime) -> list[TopUserRow]:
         """Top users by spend in a time window."""
-        return self._store.top_users(limit, start, end)
+        return self._analytics.top_users(limit, start, end)
 
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
         """Daily spend aggregation in a time window."""
-        return self._store.daily_spend(start, end)
+        return self._analytics.daily_spend(start, end)
 
     def list_ledger_entries(
         self,
@@ -1744,7 +1810,7 @@ class CreditsService:
 
     def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
         """Aggregate statistics across all users in a time window."""
-        return self._store.aggregate_stats(start, end)
+        return self._analytics.aggregate_stats(start, end)
 
     def close(self) -> None:
         """Release resources owned by the configured credit store."""

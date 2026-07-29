@@ -1071,6 +1071,8 @@ DECLARE
     v_refunded numeric;
     v_existing bursar.credit_ledger_entries;
     v_result record;
+    v_quota_event record;
+    v_correction_event_id uuid;
 BEGIN
     IF p_original_entry_id IS NULL
        OR NOT bursar.is_nonempty_text(p_idempotency_key)
@@ -1187,6 +1189,108 @@ BEGIN
             )
         )
         WHERE id = v_result.entry_id;
+
+        -- Quota usage measures the work represented by a usage charge, not
+        -- its monetary value. Reverse that usage only once the charge has
+        -- been refunded in full; a partial credit refund must not erase an
+        -- entire invocation from quota accounting.
+        IF v_refunded + v_refund_amount = -v_original.amount THEN
+            FOR v_quota_event IN
+                SELECT
+                    event.*,
+                    event.amount + COALESCE(sum(correction.amount), 0) AS remaining_amount
+                FROM bursar.quota_usage_events AS event
+                JOIN bursar.credit_usage_charges AS charge
+                  ON charge.id = event.usage_charge_id
+                LEFT JOIN bursar.quota_usage_events AS correction
+                  ON correction.correction_of_event_id = event.id
+                WHERE charge.ledger_entry_id = p_original_entry_id
+                  AND event.correction_of_event_id IS NULL
+                GROUP BY event.id
+                HAVING event.amount + COALESCE(sum(correction.amount), 0) > 0
+            LOOP
+                v_correction_event_id := NULL;
+
+                INSERT INTO bursar.quota_usage_events(
+                    account_id,
+                    plan_id,
+                    catalog_revision_id,
+                    catalog_quota_id,
+                    quota_key,
+                    operation_key,
+                    measure_key,
+                    amount,
+                    event_at,
+                    usage_charge_id,
+                    correction_of_event_id,
+                    idempotency_key,
+                    request_digest,
+                    metadata
+                )
+                VALUES(
+                    v_quota_event.account_id,
+                    v_quota_event.plan_id,
+                    v_quota_event.catalog_revision_id,
+                    v_quota_event.catalog_quota_id,
+                    v_quota_event.quota_key,
+                    v_quota_event.operation_key,
+                    v_quota_event.measure_key,
+                    -v_quota_event.remaining_amount,
+                    now(),
+                    v_quota_event.usage_charge_id,
+                    v_quota_event.id,
+                    concat_ws(
+                        ':',
+                        'refund-quota',
+                        v_result.entry_id,
+                        v_quota_event.id
+                    ),
+                    extensions.digest(
+                        convert_to(
+                            jsonb_build_object(
+                                'refund_entry_id', v_result.entry_id,
+                                'quota_event_id', v_quota_event.id,
+                                'amount', bursar.digest_numeric_text(
+                                    -v_quota_event.remaining_amount
+                                )
+                            )::text,
+                            'UTF8'
+                        ),
+                        'sha256'
+                    ),
+                    jsonb_strip_nulls(
+                        COALESCE(p_metadata, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'original_entry_id', p_original_entry_id,
+                            'refund_entry_id', v_result.entry_id,
+                            'reason', p_reason
+                        )
+                    )
+                )
+                ON CONFLICT (
+                    account_id,
+                    catalog_quota_id,
+                    idempotency_key
+                ) DO NOTHING
+                RETURNING id INTO v_correction_event_id;
+
+                -- Calendar quotas use quota_windows as their admission cache.
+                -- Rolling quotas read the immutable event stream directly.
+                IF v_correction_event_id IS NOT NULL THEN
+                    UPDATE bursar.quota_windows
+                    SET consumed = greatest(
+                        0,
+                        consumed - v_quota_event.remaining_amount
+                    )
+                    WHERE account_id = v_quota_event.account_id
+                      AND plan_id = v_quota_event.plan_id
+                      AND catalog_revision_id = v_quota_event.catalog_revision_id
+                      AND quota_key = v_quota_event.quota_key
+                      AND v_quota_event.event_at >= window_start
+                      AND v_quota_event.event_at < window_end;
+                END IF;
+            END LOOP;
+        END IF;
     END IF;
 
     RETURN QUERY

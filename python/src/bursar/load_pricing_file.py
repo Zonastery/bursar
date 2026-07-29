@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from bursar.errors import ConfigError
+from bursar.errors import BursarImportError, ConfigError
 
 
 def _read_clean(path: Path) -> str:
@@ -61,7 +61,7 @@ def load_pricing_file(path: str | Path) -> dict[str, Any]:
         try:
             import yaml
         except ImportError:
-            raise ImportError(
+            raise BursarImportError(
                 "PyYAML is required to load YAML pricing files. Install with: pip install pyyaml"
             ) from None
         content = _read_clean(path)

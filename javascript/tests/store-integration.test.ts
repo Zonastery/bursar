@@ -156,9 +156,12 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     );
     expect(result.amount.toString()).toBe("16");
     const persistedUsage = await pool.query(
-      `SELECT measures, dimensions
-       FROM bursar.credit_usage_charges
-       WHERE ledger_entry_id = $1::uuid`,
+      `SELECT charge.measures, payload.dimensions
+       FROM bursar.credit_usage_charges AS charge
+       JOIN bursar.usage_charge_payloads AS payload
+         ON payload.charge_id = charge.id
+        AND payload.event_at = charge.event_at
+       WHERE charge.ledger_entry_id = $1::uuid`,
       [result.entryId],
     );
     expect(persistedUsage.rows[0]?.measures).toEqual({

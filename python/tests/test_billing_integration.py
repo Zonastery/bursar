@@ -364,7 +364,7 @@ class TestCheckoutIntentIdempotency:
                 first_expiry,
             )
 
-    def test_checkout_replay_lazily_expires_stale_open_intent(
+    def test_checkout_replay_reopens_stale_intent_without_reusing_provider_session(
         self,
         pg_database_url: str,
         pg_store: object,
@@ -372,12 +372,14 @@ class TestCheckoutIntentIdempotency:
         _bootstrap_auth_users(pg_database_url)
         _make_components(pg_database_url, pg_store)
         digest = "22" * 32
+        retry_expiry = datetime.now(UTC) + timedelta(hours=2)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
-                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz,
+                    %s, %s
                 )
                 """,
                 (
@@ -387,6 +389,8 @@ class TestCheckoutIntentIdempotency:
                     "pro_monthly",
                     digest,
                     datetime.now(UTC) + timedelta(hours=1),
+                    "session-stale",
+                    "https://example.test/stale",
                 ),
             )
             intent_id = cursor.fetchone()[0]
@@ -411,15 +415,19 @@ class TestCheckoutIntentIdempotency:
                     "subscription",
                     "pro_monthly",
                     digest,
-                    datetime.now(UTC) + timedelta(hours=2),
+                    retry_expiry,
                 ),
             )
             assert cursor.fetchone() == (intent_id,)
             cursor.execute(
-                "SELECT status FROM bursar.billing_checkout_intents WHERE id = %s",
+                """
+                SELECT status, provider_session_id, checkout_url, expires_at
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s
+                """,
                 (intent_id,),
             )
-            assert cursor.fetchone() == ("expired",)
+            assert cursor.fetchone() == ("open", None, None, retry_expiry)
 
 
 # ── Auto-recharge profile ─────────────────────────────────────────────
@@ -675,15 +683,17 @@ class TestEventIdempotency:
 class TestTopup:
     def test_compute_topup_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
-        result = BillingServiceImpl._compute_topup_credits(2000, 1000)
-        assert result == 20000
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
+        assert topup is not None
+        assert bs.compute_topup_credits(2000, topup) == 2000
 
     def test_compute_topup_credits_odd_amount(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
-        result = BillingServiceImpl._compute_topup_credits(1999, 1000)
-        assert result == 19990
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
+        assert topup is not None
+        assert bs.compute_topup_credits(1999, topup) == 0
 
 
 # ── BillingServiceImpl lifecycle ───────────────────────────────────────────
@@ -791,7 +801,7 @@ class TestBillingServiceImplLifecycle:
         )
 
         balance = cm.get_balance(USER_ID2)
-        assert balance.balance == Decimal("20000")
+        assert balance.balance == Decimal("2000")
 
     def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
@@ -827,7 +837,7 @@ class TestBillingServiceImplLifecycle:
             )
         )
         balance_after_grant = cm.get_balance(uid)
-        assert balance_after_grant.balance == Decimal("20000")
+        assert balance_after_grant.balance == Decimal("2000")
 
         result = sink.ingest_billing_event(
             BillingEvent(
@@ -842,6 +852,7 @@ class TestBillingServiceImplLifecycle:
                     provider_payment_id=payment_id,
                     amount_minor=2000,
                     currency="USD",
+                    status="succeeded",
                 ),
             )
         )
@@ -867,7 +878,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_1",
-                event_type="subscription.created",
+                event_type="subscription.renewed",
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1005,7 +1016,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg1",
-                event_type="subscription.created",
+                event_type="subscription.renewed",
                 occurred_at=_now(),
                 user_id=USER_ID3,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1044,7 +1055,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2a",
-                event_type="subscription.created",
+                event_type="subscription.renewed",
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),

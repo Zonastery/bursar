@@ -399,6 +399,42 @@ describe("PostgresStore", () => {
     });
   });
 
+  it("orders subscription Date values without losing millisecond precision", async () => {
+    const pool = {
+      query: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            subject_id: "user-1",
+            provider: "stripe",
+            provider_subscription_id: "sub-invalid-date",
+            status: "active",
+            provider_updated_at: new Date(Number.NaN),
+          },
+          {
+            subject_id: "user-1",
+            provider: "stripe",
+            provider_subscription_id: "sub-older",
+            status: "active",
+            provider_updated_at: new Date("2026-07-18T05:15:24.100Z"),
+          },
+          {
+            subject_id: "user-1",
+            provider: "stripe",
+            provider_subscription_id: "sub-newer",
+            status: "active",
+            provider_updated_at: new Date("2026-07-18T05:15:24.900Z"),
+          },
+        ],
+      }),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+    const store = new PostgresBillingStore(pool);
+
+    await expect(store.getUserSubscription("user-1", ["active"])).resolves.toMatchObject({
+      providerSubscriptionId: "sub-newer",
+    });
+  });
+
   it("hydrates subscription changes with revision-pinned offer context", async () => {
     const pool = {
       query: vi.fn((text: string, params?: unknown[]) => {

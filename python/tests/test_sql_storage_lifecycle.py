@@ -1,0 +1,679 @@
+"""PostgreSQL-first bounded event-storage contract tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import psycopg2
+import pytest
+from psycopg2.extras import Json
+
+
+def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
+    cursor.execute("INSERT INTO bursar.subjects DEFAULT VALUES RETURNING id")
+    subject_id = str(cursor.fetchone()[0])
+    cursor.execute(
+        """
+        INSERT INTO bursar.credit_accounts(subject_id, account_kind)
+        VALUES (%s, 'personal')
+        RETURNING id
+        """,
+        (subject_id,),
+    )
+    return subject_id, str(cursor.fetchone()[0])
+
+
+def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
+    pg_database_url: str,
+) -> None:
+    maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    expired_at = maintenance_now - timedelta(days=91)
+    recent_at = maintenance_now - timedelta(days=1)
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        subject_id, account_id = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT bursar.configure_storage(
+                p_maintenance_batch_size => 2,
+                p_maintenance_partition_drop_limit => 0
+            )
+            """
+        )
+
+        charge_ids: list[str] = []
+        for index, event_at in enumerate(
+            [expired_at, expired_at + timedelta(minutes=1), expired_at + timedelta(minutes=2), recent_at]
+        ):
+            cursor.execute(
+                """
+                SELECT *
+                FROM bursar.charge_usage(
+                    %s::uuid,
+                    'completion',
+                    0,
+                    %s,
+                    p_model => 'small-model',
+                    p_region => 'in',
+                    p_event_at => %s,
+                    p_measures => %s::jsonb,
+                    p_dimensions => %s::jsonb,
+                    p_metadata => %s::jsonb
+                )
+                """,
+                (
+                    subject_id,
+                    f"bounded-usage-{index}",
+                    event_at,
+                    Json({"input_tokens": 12}),
+                    Json({"tenant_tier": "starter"}),
+                    Json({"trace_id": f"trace-{index}"}),
+                ),
+            )
+            charge_ids.append(str(cursor.fetchone()[0]))
+
+        cursor.execute(
+            """
+            SELECT sum(charge_count)
+            FROM bursar.usage_daily_rollups
+            WHERE account_id = %s::uuid
+              AND operation = 'completion'
+              AND model_key = 'small-model'
+            """,
+            (account_id,),
+        )
+        assert cursor.fetchone() == (4,)
+
+        cursor.execute(
+            "SELECT bursar.run_storage_maintenance(%s)",
+            (maintenance_now,),
+        )
+        first_pass = cursor.fetchone()[0]
+        assert first_pass["batch_size"] == 2
+        assert first_pass["usage_payloads_purged"] == 2
+        assert first_pass["has_more"] is True
+
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.usage_charge_payloads
+            WHERE charge_id = ANY(%s::uuid[])
+            """,
+            (charge_ids,),
+        )
+        assert cursor.fetchone() == (2,)
+
+        cursor.execute(
+            "SELECT bursar.run_storage_maintenance(%s)",
+            (maintenance_now,),
+        )
+        second_pass = cursor.fetchone()[0]
+        assert second_pass["usage_payloads_purged"] == 1
+        assert second_pass["has_more"] is False
+
+        cursor.execute(
+            """
+            SELECT charge_id::text
+            FROM bursar.usage_charge_payloads
+            WHERE charge_id = ANY(%s::uuid[])
+            """,
+            (charge_ids,),
+        )
+        assert cursor.fetchall() == [(charge_ids[-1],)]
+
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.credit_usage_charges
+            WHERE id = ANY(%s::uuid[])
+            """,
+            (charge_ids,),
+        )
+        assert cursor.fetchone() == (4,)
+
+
+def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
+    pg_database_url: str,
+) -> None:
+    maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    expired_at = datetime(2025, 1, 15, 12, tzinfo=UTC)
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        subject_id, _ = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.charge_usage(
+                %s::uuid,
+                'completion',
+                0,
+                'partition-drop-usage',
+                p_event_at => %s
+            )
+            """,
+            (subject_id, expired_at),
+        )
+        charge_id = str(cursor.fetchone()[0])
+
+        cursor.execute(
+            """
+            SELECT partition_table
+            FROM bursar.storage_partitions
+            WHERE parent_table = 'usage_charge_payloads'
+              AND range_start = '2025-01-01 00:00:00+00'::timestamptz
+            """
+        )
+        partition_table = cursor.fetchone()[0]
+
+        cursor.execute(
+            """
+            SELECT bursar.configure_storage(
+                p_usage_payload_retention_days => 90,
+                p_maintenance_partition_drop_limit => 12
+            )
+            """
+        )
+        cursor.execute(
+            """
+            SELECT bursar.run_storage_partition_maintenance(
+                'usage_charge_payloads',
+                %s
+            )
+            """,
+            (maintenance_now,),
+        )
+        result = cursor.fetchone()[0]
+
+        assert result["partitions_dropped"] >= 1
+        assert result["partition_lock_timeouts"] == 0
+
+        cursor.execute(
+            "SELECT to_regclass(%s)",
+            (f"bursar.{partition_table}",),
+        )
+        assert cursor.fetchone() == (None,)
+
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.credit_usage_charges
+            WHERE id = %s::uuid
+            """,
+            (charge_id,),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_maybe_run_storage_maintenance_respects_interval(
+    pg_database_url: str,
+) -> None:
+    maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT bursar.configure_storage(
+                p_maintenance_interval_seconds => 300
+            )
+            """
+        )
+        cursor.execute(
+            "SELECT bursar.maybe_run_storage_maintenance(%s)",
+            (maintenance_now,),
+        )
+        assert cursor.fetchone()[0]["status"] == "completed"
+
+        cursor.execute(
+            "SELECT bursar.maybe_run_storage_maintenance(%s)",
+            (maintenance_now + timedelta(seconds=60),),
+        )
+        skipped = cursor.fetchone()[0]
+        assert skipped["status"] == "not_due"
+
+        cursor.execute(
+            "SELECT bursar.maybe_run_storage_maintenance(%s)",
+            (maintenance_now + timedelta(seconds=301),),
+        )
+        assert cursor.fetchone()[0]["status"] == "completed"
+
+
+def test_partition_maintenance_does_not_wait_behind_ingestion(
+    pg_database_url: str,
+) -> None:
+    maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    expired_at = datetime(2025, 1, 15, 12, tzinfo=UTC)
+
+    with psycopg2.connect(pg_database_url) as setup, setup.cursor() as cursor:
+        subject_id, _ = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.charge_usage(
+                %s::uuid,
+                'completion',
+                0,
+                'partition-lock-timeout',
+                p_event_at => %s
+            )
+            """,
+            (subject_id, expired_at),
+        )
+        cursor.execute(
+            """
+            SELECT bursar.ensure_storage_partition(
+                'usage_charge_payloads',
+                %s
+            )
+            """,
+            (maintenance_now,),
+        )
+        cursor.execute(
+            """
+            SELECT bursar.ensure_storage_partition(
+                'usage_charge_payloads',
+                %s
+            )
+            """,
+            (maintenance_now + timedelta(days=31),),
+        )
+        cursor.execute(
+            """
+            SELECT bursar.configure_storage(
+                p_usage_payload_retention_days => 90,
+                p_maintenance_partition_drop_limit => 1,
+                p_maintenance_lock_timeout_ms => 50
+            )
+            """
+        )
+
+    locker = psycopg2.connect(pg_database_url)
+    worker = psycopg2.connect(pg_database_url)
+    try:
+        with locker.cursor() as cursor:
+            cursor.execute(
+                """
+                LOCK TABLE bursar.usage_charge_payloads
+                IN ROW EXCLUSIVE MODE
+                """
+            )
+
+        with worker.cursor() as cursor:
+            cursor.execute("SET statement_timeout = '2s'")
+            cursor.execute(
+                """
+                SELECT bursar.run_storage_partition_maintenance(
+                    'usage_charge_payloads',
+                    %s
+                )
+                """,
+                (maintenance_now,),
+            )
+            result = cursor.fetchone()[0]
+            assert result["partitions_dropped"] == 0
+            assert result["partition_lock_timeouts"] == 1
+            assert result["has_more"] is True
+    finally:
+        worker.rollback()
+        locker.rollback()
+        worker.close()
+        locker.close()
+
+
+def test_retention_scans_have_time_leading_indexes(
+    pg_database_url: str,
+) -> None:
+    expected_indexes = {
+        "event_outbox_retention_idx",
+        "event_outbox_delivered_retention_idx",
+        "quota_usage_events_retention_idx",
+        "quota_usage_events_correction_idx",
+        "quota_events_retention_idx",
+        "terminal_lease_payload_retention_idx",
+    }
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'bursar'
+              AND indexname = ANY(%s)
+            """,
+            (list(expected_indexes),),
+        )
+        actual_indexes = {row[0] for row in cursor.fetchall()}
+
+    assert actual_indexes == expected_indexes
+
+
+def test_billing_claim_stores_bounded_payload_separately(
+    pg_database_url: str,
+) -> None:
+    envelope = {"userId": "user-1", "kind": "invoice.paid"}
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.claim_billing_event(
+                'stripe',
+                'evt-bounded-1',
+                'invoice.paid',
+                %s::jsonb
+            )
+            """,
+            (Json(envelope),),
+        )
+        result, event_id, claim_token = cursor.fetchone()
+        assert result == "claimed"
+
+        cursor.execute(
+            """
+            SELECT payload.envelope
+            FROM bursar.billing_event_payloads AS payload
+            JOIN bursar.billing_events AS event
+              ON event.id = payload.event_id
+             AND event.payload_received_at = payload.received_at
+            WHERE event.id = %s::uuid
+            """,
+            (event_id,),
+        )
+        assert cursor.fetchone()[0] == envelope
+
+        cursor.execute(
+            """
+            SELECT bursar.complete_billing_event(
+                'stripe',
+                'evt-bounded-1',
+                %s::uuid
+            )
+            """,
+            (claim_token,),
+        )
+        assert cursor.fetchone() == (True,)
+        cursor.execute(
+            """
+            SELECT status
+            FROM bursar.event_outbox
+            WHERE aggregate_id = %s::uuid
+              AND topic = 'billing.webhook_completed'
+            """,
+            (event_id,),
+        )
+        assert cursor.fetchone() == ("pending",)
+
+        cursor.execute(
+            "SELECT bursar.export_billing_event_payload(%s::uuid)",
+            (event_id,),
+        )
+        exported = cursor.fetchone()[0]
+        assert exported["event_id"] == str(event_id)
+        assert exported["provider"] == "stripe"
+        assert exported["envelope"] == envelope
+        assert exported["object_key"] is None
+
+        cursor.execute(
+            """
+            SELECT bursar.archive_billing_event_payload(
+                %s::uuid,
+                'billing/stripe/evt-bounded-1.json',
+                'version-1',
+                true
+            )
+            """,
+            (event_id,),
+        )
+        assert cursor.fetchone() == (True,)
+        cursor.execute(
+            """
+            SELECT payload_object_key, payload_object_version
+            FROM bursar.billing_events
+            WHERE id = %s::uuid
+            """,
+            (event_id,),
+        )
+        object_key, object_version = cursor.fetchone()
+        assert object_key == "billing/stripe/evt-bounded-1.json"
+        assert object_version == "version-1"
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.billing_event_payloads
+            WHERE event_id = %s::uuid
+            """,
+            (event_id,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT bursar.export_billing_event_payload(%s::uuid)",
+            (event_id,),
+        )
+        exported = cursor.fetchone()[0]
+        assert exported["envelope"] is None
+        assert exported["object_key"] == "billing/stripe/evt-bounded-1.json"
+
+
+def test_outbox_claim_acknowledgement_and_payload_bounds(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        subject_id, _ = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT error_code
+            FROM bursar.charge_usage(
+                %s::uuid,
+                'completion',
+                0,
+                'oversized-metadata',
+                p_metadata => jsonb_build_object(
+                    'value',
+                    repeat('x', 17000)
+                )
+            )
+            """,
+            (subject_id,),
+        )
+        assert cursor.fetchone() == ("invalid_request",)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.claim_billing_event(
+                'stripe',
+                'evt-outbox-1',
+                'invoice.paid',
+                '{}'::jsonb
+            )
+            """
+        )
+        _, _, billing_claim_token = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT bursar.complete_billing_event(
+                'stripe',
+                'evt-outbox-1',
+                %s::uuid
+            )
+            """,
+            (billing_claim_token,),
+        )
+        assert cursor.fetchone() == (True,)
+
+        cursor.execute("SELECT * FROM bursar.claim_outbox_events(10, 60)")
+        claimed = cursor.fetchall()
+        assert claimed
+        for row in claimed:
+            cursor.execute(
+                "SELECT bursar.complete_outbox_event(%s, %s::uuid)",
+                (row[0], row[6]),
+            )
+            assert cursor.fetchone() == (True,)
+
+        cursor.execute("SELECT count(*) FROM bursar.event_outbox WHERE status = 'delivered'")
+        assert cursor.fetchone()[0] == len(claimed)
+
+
+def test_usage_export_and_topic_filtered_outbox_claim(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        subject_id, _ = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT charge_id, error_code
+            FROM bursar.charge_usage(
+                %s::uuid,
+                'completion',
+                0,
+                'usage-export-1',
+                p_model => 'small-model',
+                p_region => 'in',
+                p_measures => '{"input_tokens":12}'::jsonb,
+                p_dimensions => '{"tenant_tier":"starter"}'::jsonb,
+                p_metadata => '{"trace_id":"trace-1"}'::jsonb
+            )
+            """,
+            (subject_id,),
+        )
+        charge_id, error_code = cursor.fetchone()
+        assert error_code is None
+
+        cursor.execute("SELECT bursar.export_usage_charge(%s::uuid)", (charge_id,))
+        exported = cursor.fetchone()[0]
+        assert exported["charge_id"] == str(charge_id)
+        assert exported["subject_id"] == subject_id
+        assert exported["charged"] == "0.000000"
+        assert exported["model"] == "small-model"
+        assert exported["dimensions"]["tenant_tier"] == "starter"
+        assert exported["metadata"]["trace_id"] == "trace-1"
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.claim_outbox_events(
+                10,
+                60,
+                ARRAY['billing.webhook_completed']::text[]
+            )
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM bursar.claim_outbox_events(
+                10,
+                60,
+                ARRAY['usage.charge_recorded']::text[]
+            )
+            """
+        )
+        claimed = cursor.fetchall()
+        assert len(claimed) == 1
+        assert claimed[0][1] == "usage.charge_recorded"
+        assert str(claimed[0][3]) == str(charge_id)
+
+
+def test_catalog_rejects_rolling_quota_beyond_retention(
+    pg_database_url: str,
+) -> None:
+    connection = psycopg2.connect(pg_database_url)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT bursar.configure_storage(
+                    p_quota_event_retention_days => 10,
+                    p_quota_max_lateness_seconds => 0,
+                    p_quota_correction_window_days => 0,
+                    p_quota_retention_safety_days => 1
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.catalog_revisions(
+                    yaml_schema_version,
+                    source_document,
+                    digest
+                )
+                VALUES (
+                    1,
+                    '{}'::jsonb,
+                    extensions.digest('{}', 'sha256')
+                )
+                RETURNING id
+                """
+            )
+            revision_id = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                INSERT INTO bursar.catalog_operations(
+                    catalog_revision_id,
+                    operation_key,
+                    measures,
+                    dimensions,
+                    definition
+                )
+                VALUES (
+                    %s::uuid,
+                    'completion',
+                    '{"calls":{"unit":"call"}}'::jsonb,
+                    '{}'::jsonb,
+                    '{}'::jsonb
+                )
+                """,
+                (revision_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.catalog_plans(
+                    catalog_revision_id,
+                    plan_key,
+                    display_name,
+                    definition
+                )
+                VALUES (%s::uuid, 'pro', 'Pro', '{}'::jsonb)
+                """,
+                (revision_id,),
+            )
+
+            with pytest.raises(
+                psycopg2.errors.CheckViolation,
+                match="retention horizon",
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO bursar.catalog_plan_quotas(
+                        catalog_revision_id,
+                        plan_key,
+                        quota_key,
+                        operation_key,
+                        measure_key,
+                        quota_limit,
+                        window_policy,
+                        enforcement,
+                        definition
+                    )
+                    VALUES (
+                        %s::uuid,
+                        'pro',
+                        'monthly_calls',
+                        'completion',
+                        'calls',
+                        100,
+                        '{
+                            "type":"rolling",
+                            "duration":{"unit":"day","count":30}
+                        }'::jsonb,
+                        'block',
+                        '{}'::jsonb
+                    )
+                    """,
+                    (revision_id,),
+                )
+    finally:
+        connection.rollback()
+        connection.close()

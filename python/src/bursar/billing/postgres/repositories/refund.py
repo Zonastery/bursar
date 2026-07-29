@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_non_empty
 
@@ -23,6 +25,8 @@ class BillingRefundRepository:
         currency: str,
         reason: str | None,
         metadata: str | None,
+        status: str = "pending",
+        provider_updated_at: str | None = None,
     ) -> str:
         """Insert or update a billing refund record.
 
@@ -35,6 +39,8 @@ class BillingRefundRepository:
             currency: The ISO 4217 currency code.
             reason: The refund reason, or None.
             metadata: JSON metadata string, or None.
+            status: The refund status (default "pending").
+            provider_updated_at: Optional provider timestamp.
         """
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_refund_id, "provider_refund_id")
@@ -47,7 +53,17 @@ class BillingRefundRepository:
         if not payments or not isinstance(payments[0], dict) or not payments[0].get("id"):
             raise ValueError("refund payment not found")
         rows = self._execute(
-            "SELECT bursar.upsert_billing_refund(%s::uuid, %s, %s)",
-            [payments[0]["id"], provider_refund_id, amount_minor],
+            "SELECT bursar.upsert_billing_refund(%s::uuid, %s, %s, %s, %s, %s, %s::uuid, %s::char(3), %s::jsonb)",
+            [
+                payments[0]["id"],
+                provider_refund_id,
+                amount_minor,
+                status,
+                reason,
+                provider_updated_at or datetime.datetime.now(datetime.UTC).isoformat(),
+                user_id,
+                currency,
+                metadata or "{}",
+            ],
         )
         return str(next(iter(rows[0].values())))

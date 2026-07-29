@@ -5,6 +5,9 @@ from bursar.credits.postgres.repositories._utils import validate_non_empty
 from bursar.credits.postgres.repositories.schemas import (
     AllowanceRow,
     PlanMigrationBatchRow,
+    PlanMigrationUsersRow,
+    QuotaEventRow,
+    QuotaStateRow,
     SetUserPlanRow,
     UnsetUserPlanRow,
     UserPlanRow,
@@ -170,6 +173,30 @@ class PlanRepository:
             return None
         return PlanMigrationBatchRow.model_validate(rows[0])
 
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> PlanMigrationUsersRow:
+        validate_non_empty(plan_key, "plan_key")
+        rows = self._callproc(
+            "migrate_plan_users",
+            [plan_key, target_config_version],
+        )
+        return PlanMigrationUsersRow.model_validate((rows or [{}])[0])
+
+    def get_quota_state(
+        self,
+        user_id: str,
+        quota_key: str | None = None,
+    ) -> list[QuotaStateRow]:
+        validate_non_empty(user_id, "user_id")
+        rows = self._callproc(
+            "get_subject_quota_state",
+            [user_id, quota_key],
+        )
+        return [QuotaStateRow.model_validate(row) for row in rows if isinstance(row, dict)]
+
     def check_allowance(self, user_id: str, period_start: str | None) -> AllowanceRow | None:
         """Check the remaining plan allowance for a user.
 
@@ -201,3 +228,17 @@ class PlanRepository:
         if not rows:
             return None
         return AllowanceRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
+
+    def list_quota_events(
+        self,
+        user_id: str,
+        after: str | None,
+        limit: int,
+        idempotency_key: str | None,
+    ) -> list[QuotaEventRow]:
+        validate_non_empty(user_id, "user_id")
+        rows = self._callproc(
+            "list_subject_quota_events",
+            [user_id, after, limit, idempotency_key],
+        )
+        return [QuotaEventRow.model_validate(row) for row in rows if isinstance(row, dict)]

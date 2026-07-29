@@ -232,14 +232,26 @@ def _truncate_bursar_tables(dsn: str) -> None:
                     FOR t IN
                         SELECT tablename FROM pg_tables
                         WHERE schemaname = 'bursar'
-                          AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
-                                           OR tablename IN ('teams', 'team_members')
-                               OR tablename LIKE 'billing_%'
-                               OR tablename LIKE 'catalog_%'
-                               OR tablename = 'account_creation_grants')
+                      AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
+                           OR tablename IN (
+                               'teams',
+                               'team_members',
+                               'event_outbox',
+                               'quota_events',
+                               'quota_usage_events',
+                               'usage_charge_payloads',
+                               'usage_daily_rollups'
+                           )
+                           OR tablename LIKE 'billing_%'
+                           OR tablename LIKE 'catalog_%'
+                           OR tablename = 'account_creation_grants')
                     LOOP
                         EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
                     END LOOP;
+
+                    TRUNCATE TABLE bursar.storage_settings;
+                    INSERT INTO bursar.storage_settings(singleton)
+                    VALUES (true);
                 EXCEPTION WHEN undefined_table THEN NULL;
                 END $$;
                 """

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -10,6 +11,7 @@ from bursar.billing.types import (
     BillingEventType,
     BillingInvoiceInfo,
     BillingPaymentInfo,
+    BillingRefundInfo,
     BillingSubscriptionInfo,
     ProviderRef,
 )
@@ -34,6 +36,38 @@ def _build_start(sub: Any) -> str | None:
     if raw:
         return datetime.fromtimestamp(raw, tz=UTC).isoformat()
     return None
+
+
+def _timestamp(value: int | float | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, tz=UTC).isoformat()
+
+
+def _build_end_from_invoice(invoice: Any) -> str:
+    return _timestamp(invoice.get("period_end")) or datetime.now(UTC).isoformat()
+
+
+def _build_start_from_invoice(invoice: Any) -> str:
+    return _timestamp(invoice.get("period_start")) or datetime.now(UTC).isoformat()
+
+
+def _subscription_refs(sub: Any) -> ProviderRef | None:
+    items = sub.get("items") or {}
+    item_data = items.get("data") or []
+    price = (item_data[0].get("price") if item_data else None) or {}
+    price_id = price.get("id")
+    product = price.get("product")
+    product_id = (
+        product
+        if isinstance(product, str)
+        else product.get("id")
+        if hasattr(product, "get")
+        else getattr(product, "id", None)
+    )
+    if not price_id and not product_id:
+        return None
+    return ProviderRef(price_id=price_id, product_id=product_id)
 
 
 def _customer_id(raw: Any) -> str | None:
@@ -93,7 +127,7 @@ async def _handle_checkout_completed(
                 BillingEvent(
                     provider="stripe",
                     event_id=event_id,
-                    event_type=BillingEventType.subscription_created,
+                    event_type=BillingEventType.checkout_completed,
                     occurred_at=occurred_at,
                     user_id=uid,
                     customer=customer_info,
@@ -103,30 +137,13 @@ async def _handle_checkout_completed(
                         cancel_at_period_end=sub.get("cancel_at_period_end"),
                         period_start=period_start,
                         period_end=period_end,
-                        refs=ProviderRef(lookup_key=plan_slug) if plan_slug else None,
+                        trial_end=_timestamp(sub.get("trial_end")),
+                        cancel_at=_timestamp(sub.get("cancel_at")),
+                        ended_at=_timestamp(sub.get("ended_at")),
+                        refs=(ProviderRef(lookup_key=plan_slug) if plan_slug else _subscription_refs(sub)),
                     ),
                 ),
             )
-
-            sub_status = sub.get("status")
-            if sub_status in ("active", "trialing"):
-                call_billing_event_sink(
-                    sink,
-                    BillingEvent(
-                        provider="stripe",
-                        event_id=event_id,
-                        event_type=BillingEventType.subscription_activated,
-                        occurred_at=occurred_at,
-                        user_id=uid,
-                        customer=customer_info,
-                        subscription=BillingSubscriptionInfo(
-                            provider_subscription_id=sub_id,
-                            status=parse_status(sub_status),
-                            period_start=period_start,
-                            period_end=period_end,
-                        ),
-                    ),
-                )
         except Exception as exc:
             logger.error(
                 "Failed to process subscription",
@@ -212,6 +229,10 @@ async def _handle_subscription_updated(
                 cancel_at_period_end=cancel_at_end,
                 period_start=period_start,
                 period_end=period_end,
+                trial_end=_timestamp(sub.get("trial_end")),
+                cancel_at=_timestamp(sub.get("cancel_at")),
+                ended_at=_timestamp(sub.get("ended_at")),
+                refs=_subscription_refs(sub),
             ),
         ),
     )
@@ -240,6 +261,13 @@ async def _handle_subscription_deleted(
             ),
             subscription=BillingSubscriptionInfo(
                 provider_subscription_id=sub.get("id"),
+                status=parse_status("canceled"),
+                period_start=_build_start(sub),
+                period_end=_build_end(sub),
+                trial_end=_timestamp(sub.get("trial_end")),
+                cancel_at=_timestamp(sub.get("cancel_at")),
+                ended_at=_timestamp(sub.get("ended_at")) or occurred_at,
+                refs=_subscription_refs(sub),
             ),
         ),
     )
@@ -261,33 +289,36 @@ async def _handle_invoice_paid(
         logger.debug("invoice.paid: no subscription reference", {"invoiceId": invoice.get("id")})
         return
 
-    uid = user_id
+    invoice_metadata = invoice.get("metadata") or {}
+    parent = invoice.get("parent") or {}
+    subscription_details = (parent.get("subscription_details") if hasattr(parent, "get") else None) or {}
+    parent_metadata = (subscription_details.get("metadata") if hasattr(subscription_details, "get") else None) or {}
+    uid = invoice_metadata.get("userId") or parent_metadata.get("userId") or user_id
     stripe_sub: Any = None
-    if uid is None:
-        try:
-            stripe_sub = await stripe.Subscription.retrieve_async(subscription_id)
-        except Exception as exc:
-            logger.error(
-                "invoice.paid: failed to retrieve subscription",
-                {"subscriptionId": subscription_id, "err": str(exc)},
-            )
-            return
-        uid = (stripe_sub.get("metadata") or {}).get("userId")
+    try:
+        stripe_sub = await stripe.Subscription.retrieve_async(subscription_id)
         if not uid:
-            logger.warning("invoice.paid: no userId", {"subscriptionId": subscription_id})
-            return
-    else:
-        try:
-            stripe_sub = await stripe.Subscription.retrieve_async(subscription_id)
-        except Exception as exc:
+            uid = (stripe_sub.get("metadata") or {}).get("userId")
+    except Exception as exc:
+        if not uid:
             logger.error(
                 "invoice.paid: failed to retrieve subscription",
                 {"subscriptionId": subscription_id, "err": str(exc)},
             )
             return
+    if not uid:
+        logger.warning("invoice.paid: no userId", {"subscriptionId": subscription_id})
+        return
 
-    period_end = _build_end(stripe_sub)
-    period_start = _build_start(stripe_sub)
+    sub_status = (
+        stripe_sub.get("status")
+        if stripe_sub
+        else "active"
+        if invoice.get("collection_method") == "send_invoice"
+        else "incomplete"
+    )
+    period_end = _build_end(stripe_sub) if stripe_sub else _build_end_from_invoice(invoice)
+    period_start = _build_start(stripe_sub) if stripe_sub else _build_start_from_invoice(invoice)
 
     call_billing_event_sink(
         sink,
@@ -298,13 +329,17 @@ async def _handle_invoice_paid(
             occurred_at=occurred_at,
             user_id=uid,
             customer=BillingCustomerInfo(
-                provider_customer_id=_customer_id(stripe_sub.get("customer")),
+                provider_customer_id=_customer_id(invoice.get("customer")),
             ),
             subscription=BillingSubscriptionInfo(
                 provider_subscription_id=subscription_id,
-                status=parse_status(stripe_sub.get("status")),
+                status=parse_status(sub_status),
                 period_start=period_start,
                 period_end=period_end,
+                trial_end=_timestamp(stripe_sub.get("trial_end")) if stripe_sub else None,
+                cancel_at=_timestamp(stripe_sub.get("cancel_at")) if stripe_sub else None,
+                ended_at=_timestamp(stripe_sub.get("ended_at")) if stripe_sub else None,
+                refs=_subscription_refs(stripe_sub) if stripe_sub else None,
             ),
             invoice=BillingInvoiceInfo(
                 provider_invoice_id=invoice.get("id"),
@@ -317,11 +352,128 @@ async def _handle_invoice_paid(
     )
 
 
+async def _handle_payment_intent_event(
+    event_id: str,
+    data: Any,
+    user_id: str | None,
+    metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: Any,
+    logger: ProviderLogger,
+    occurred_at: str,
+    *,
+    billing_event_type: BillingEventType,
+    payment_status: Literal["pending", "succeeded", "failed", "canceled"],
+) -> None:
+    intent = data
+    md = intent.get("metadata") or {}
+    if not md.get("auto_recharge_attempt_id"):
+        return
+
+    payment_info = BillingPaymentInfo(
+        provider_payment_id=intent.get("id"),
+        amount_minor=intent.get("amount", 0),
+        currency=(intent.get("currency") or "usd").upper(),
+        purpose="credit_topup",
+        status=payment_status,
+        refs=ProviderRef(
+            product_id=md.get("product_id"),
+            price_id=md.get("price_id"),
+        ),
+    )
+
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=billing_event_type,
+            occurred_at=occurred_at,
+            user_id=user_id or md.get("userId"),
+            payment=payment_info,
+            metadata=md,
+        ),
+    )
+
+
+async def _handle_refund_event(
+    event_id: str,
+    data: Any,
+    user_id: str | None,
+    metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: Any,
+    logger: ProviderLogger,
+    occurred_at: str,
+    *,
+    billing_event_type: BillingEventType,
+    forced_status: str | None = None,
+) -> None:
+    refund = data
+    pi = refund.get("payment_intent") or {}
+    payment_intent_id = pi.get("id") if isinstance(pi, dict) else pi
+
+    ref_md = refund.get("metadata") or {}
+    match forced_status or refund.get("status"):
+        case "succeeded":
+            refund_status = "succeeded"
+        case "failed":
+            refund_status = "failed"
+        case "canceled":
+            refund_status = "canceled"
+        case _:
+            refund_status = "pending"
+    refund_info = BillingRefundInfo(
+        provider_refund_id=refund.get("id"),
+        provider_payment_id=payment_intent_id,
+        amount_minor=refund.get("amount", 0),
+        currency=(refund.get("currency") or "usd").upper(),
+        reason=refund.get("reason"),
+        status=refund_status,
+    )
+
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=billing_event_type,
+            occurred_at=occurred_at,
+            user_id=user_id or ref_md.get("userId"),
+            refund=refund_info,
+            metadata=ref_md,
+        ),
+    )
+
+
 _EVENT_HANDLERS: dict[str, Any] = {
     "checkout.session.completed": _handle_checkout_completed,
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
     "invoice.paid": _handle_invoice_paid,
+    "payment_intent.succeeded": partial(
+        _handle_payment_intent_event,
+        billing_event_type=BillingEventType.payment_succeeded,
+        payment_status="succeeded",
+    ),
+    "payment_intent.payment_failed": partial(
+        _handle_payment_intent_event,
+        billing_event_type=BillingEventType.payment_failed,
+        payment_status="failed",
+    ),
+    "refund.created": partial(
+        _handle_refund_event,
+        billing_event_type=BillingEventType.refund_created,
+    ),
+    "refund.updated": partial(
+        _handle_refund_event,
+        billing_event_type=BillingEventType.refund_updated,
+    ),
+    "refund.failed": partial(
+        _handle_refund_event,
+        billing_event_type=BillingEventType.refund_failed,
+        forced_status="failed",
+    ),
 }
 
 
@@ -334,8 +486,9 @@ async def handle_stripe_billing_event(
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger | None = None,
+    event_created: int | float | None = None,
 ) -> None:
-    occurred_at = datetime.now(UTC).isoformat()
+    occurred_at = _timestamp(event_created) or datetime.now(UTC).isoformat()
     if logger is None:
         logger = _log
 

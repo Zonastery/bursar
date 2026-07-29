@@ -3,6 +3,8 @@
 -- same domain language used by the SDKs.
 
 COMMENT ON TABLE bursar.subjects IS 'Stable application principals that own credit and billing state, with irreversible financial pseudonymization state.';
+COMMENT ON TABLE bursar.storage_settings IS 'Singleton PostgreSQL hot-storage retention, lateness, and maintenance policy.';
+COMMENT ON TABLE bursar.storage_partitions IS 'Registry of Bursar-managed monthly payload partitions used for low-cost expiry.';
 COMMENT ON TABLE bursar.external_identities IS 'Provider-specific identities mapped to a Bursar subject.';
 COMMENT ON TABLE bursar.catalog_revisions IS 'Immutable published pricing/configuration revisions.';
 COMMENT ON TABLE bursar.catalog_activation_history IS 'Append-only audit trail of catalog activation and supersession.';
@@ -31,7 +33,10 @@ COMMENT ON TABLE bursar.credit_lot_restorations IS 'Append-only audit of credits
 COMMENT ON TABLE bursar.credit_lot_source_restorations IS 'Source-level restoration audit preserving provenance when usage is refunded.';
 COMMENT ON TABLE bursar.credit_unallocated_debits IS 'Debit amounts not backed by lots when a policy permits debt.';
 COMMENT ON TABLE bursar.credit_debt_repayments IS 'Positive ledger amounts applied to outstanding account debt.';
-COMMENT ON TABLE bursar.credit_usage_charges IS 'Idempotent usage charge records and allowance attribution.';
+COMMENT ON TABLE bursar.credit_usage_charges IS 'Permanent compact idempotent usage charge, pricing, and allowance evidence.';
+COMMENT ON TABLE bursar.usage_charge_payloads IS 'Retention-bounded usage dimensions and application metadata, partitioned by event time.';
+COMMENT ON TABLE bursar.usage_daily_rollups IS 'Bounded exact daily usage aggregates for PostgreSQL-only analytics.';
+COMMENT ON TABLE bursar.event_outbox IS 'Bounded claimable versioned events for optional external delivery and analytics sinks.';
 COMMENT ON TABLE bursar.account_plan_assignments IS 'Current effective plan assignment for each account.';
 COMMENT ON TABLE bursar.account_plan_assignment_history IS 'Append-only effective-dated plan assignment history.';
 COMMENT ON TABLE bursar.plan_assignment_changes IS 'Scheduled or applied plan changes used for renewal-safe rollouts.';
@@ -53,7 +58,8 @@ COMMENT ON TABLE bursar.billing_subscriptions IS 'Provider subscription truth, c
 COMMENT ON TABLE bursar.billing_entitlement_sources IS 'Source-of-entitlement links for billing subscriptions.';
 COMMENT ON TABLE bursar.billing_subscription_conflicts IS 'Append-only audit of duplicate current-subscription admissions requiring reconciliation.';
 COMMENT ON TABLE bursar.billing_payments IS 'Provider payment records, invoice correlation, source metadata, and settlement state.';
-COMMENT ON TABLE bursar.billing_events IS 'Claimable, idempotent provider webhook envelopes.';
+COMMENT ON TABLE bursar.billing_events IS 'Permanent claim, digest, archive-pointer, and processing state for provider webhooks.';
+COMMENT ON TABLE bursar.billing_event_payloads IS 'Retention-bounded raw provider webhook envelopes, partitioned by receipt time.';
 COMMENT ON TABLE bursar.billing_credit_grants IS 'Credit grants linked to billing payments, subscriptions, or top-ups.';
 COMMENT ON TABLE bursar.billing_refunds IS 'Provider refund records, source metadata, payment-identity validation, and reconciliation state.';
 COMMENT ON TABLE bursar.billing_refund_grants IS 'Credit reversals allocated to billing refunds.';

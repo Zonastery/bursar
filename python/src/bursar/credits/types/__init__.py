@@ -13,6 +13,7 @@ from bursar.credits.types.account import (
     CreditMetadata,
     DeductionResult,
     DeductWithAllowanceOptions,
+    MigratePlanUsersResult,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
     RefundResult,
@@ -31,6 +32,7 @@ from bursar.credits.types.analytics import (
     SpendByModelRow,
     SpendByUserRow,
     TopUserRow,
+    UsageAnalyticsStore,
 )
 from bursar.credits.types.catalog import (
     BursarConfigHistoryItem,
@@ -99,6 +101,7 @@ __all__ = [
     "ListLedgerEntriesOptions",
     "ListQuotaEventsOptions",
     "ListUsageEntriesOptions",
+    "MigratePlanUsersResult",
     "OperationPolicy",
     "PlanDefinition",
     "PlanMigrationBatchResult",
@@ -118,4 +121,5 @@ __all__ = [
     "TeamDeductionResult",
     "TeamMember",
     "TopUserRow",
+    "UsageAnalyticsStore",
 ]

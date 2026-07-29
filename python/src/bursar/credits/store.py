@@ -28,14 +28,19 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
     LedgerPage,
+    ListQuotaEventsOptions,
+    MigratePlanUsersResult,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
+    QuotaEvent,
+    QuotaState,
     RefundResult,
     ReleaseResult,
     SetUserPlanResult,
@@ -526,6 +531,29 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        """Deprecated one-shot migration; prefer resumable plan migrations."""
+        ...
+
+    @abstractmethod
+    def get_quota_state(
+        self,
+        user_id: str,
+        quota_key: str | None = None,
+    ) -> list[QuotaState]:
+        """Return current quota windows for a user."""
+        ...
+
+    @abstractmethod
+    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
+        """Deprecated quota-key compatibility query; mirrors JavaScript."""
+        ...
+
+    @abstractmethod
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         """Get remaining free allowance for current billing period.
 
@@ -533,6 +561,15 @@ class CreditStore(ABC):
         plans (resolved by the manager via :func:`bursar.allowance.resolve_allowance_window`);
         ``None`` keeps the calendar-month default (WS9).
         """
+        ...
+
+    @abstractmethod
+    def list_quota_events(
+        self,
+        user_id: str,
+        options: ListQuotaEventsOptions | None = None,
+    ) -> list[QuotaEvent]:
+        """List persisted quota threshold and blocking events."""
         ...
 
     # ── Refunds ─────────────────────────────────────────────────────────
@@ -567,6 +604,8 @@ class CreditStore(ABC):
     @abstractmethod
     def sweep_expired_credits(
         self,
+        dry_run: bool = False,
+        user_id: str | None = None,
         limit: int = 100,
     ) -> SweepResult:
         """Expire at most ``limit`` eligible credit lots."""

@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class BillingProvider(StrEnum):
@@ -88,12 +88,15 @@ class BillingSubscriptionInfo(BaseModel):
     period_start: str | None = None
     period_end: str | None = None
     trial_end: str | None = None
+    cancel_at: str | None = None
+    ended_at: str | None = None
     refs: ProviderRef | None = None
     interval: str | None = None
     interval_count: int | None = None
 
 
 class BillingInvoiceInfo(BaseModel):
+    provider: str | None = None
     provider_invoice_id: str
     status: str | None = None
     amount_paid_minor: int | None = None
@@ -109,7 +112,8 @@ class BillingPaymentInfo(BaseModel):
     tax_minor: int | None = None
     currency: str
     refs: ProviderRef | None = None
-    purpose: Literal["subscription", "credit_topup", "unknown"] = "unknown"
+    purpose: Literal["subscription", "credit_topup", "unknown"]
+    status: Literal["pending", "succeeded", "failed", "canceled"] | None = None
 
 
 class BillingRefundInfo(BaseModel):
@@ -118,12 +122,13 @@ class BillingRefundInfo(BaseModel):
     amount_minor: int
     currency: str
     reason: str | None = None
+    status: Literal["pending", "succeeded", "failed", "canceled"] | None = None
 
 
 class BillingDisputeInfo(BaseModel):
     provider_dispute_id: str
     provider_payment_id: str | None = None
-    status: str = "needs_response"
+    status: str | None = None
     reason: str | None = None
 
 
@@ -142,6 +147,15 @@ class BillingEvent(BaseModel):
     dispute: BillingDisputeInfo | None = None
     metadata: dict[str, Any] | None = None
     raw: Any = None
+    billing_event_id: str | None = Field(default=None, exclude=True)
+
+    @field_validator("occurred_at")
+    @classmethod
+    def normalize_occurred_at(cls, value: str) -> str:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("occurred_at must include a timezone")
+        return parsed.astimezone(UTC).isoformat()
 
 
 class BillingEventResult(BaseModel):
@@ -191,14 +205,12 @@ class BillingOffer(BaseModel):
     def validate_validity_window(self) -> "BillingOffer":
         if self.valid_from is not None and self.valid_to is not None:
             try:
-                if datetime.fromisoformat(self.valid_to.replace("Z", "+00:00")) <= datetime.fromisoformat(
-                    self.valid_from.replace("Z", "+00:00")
-                ):
-                    raise ValueError("valid_to must be later than valid_from")
+                valid_from = datetime.fromisoformat(self.valid_from)
+                valid_to = datetime.fromisoformat(self.valid_to)
             except ValueError as exc:
-                if str(exc) == "valid_to must be later than valid_from":
-                    raise
                 raise ValueError("valid_from and valid_to must be ISO-8601 timestamps") from exc
+            if valid_to <= valid_from:
+                raise ValueError("valid_to must be later than valid_from")
         return self
 
 
@@ -224,6 +236,7 @@ class BillingCreditTopup(BaseModel):
 class BillingEventClaim(BaseModel):
     status: Literal["claimed", "duplicate", "retry"]
     claim_token: str | None = None
+    billing_event_id: str | None = None
 
 
 class CheckoutIntentStatus(StrEnum):
@@ -249,6 +262,7 @@ class CheckoutIntent(BaseModel):
 
 
 class BillingSubscriptionState(BaseModel):
+    subscription_id: str | None = None
     user_id: str
     provider: str
     provider_subscription_id: str
@@ -260,34 +274,75 @@ class BillingSubscriptionState(BaseModel):
     status: BillingSubscriptionStatus = BillingSubscriptionStatus.incomplete
     current_period_start: str | None = None
     current_period_end: str | None = None
+    trial_end: str | None = None
+    cancel_at: str | None = None
+    ended_at: str | None = None
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None
     grace_ends_at: str | None = None
+    grace_expired_at: str | None = None
+    provider_updated_at: str | None = None
     metadata: dict[str, Any] | None = None
-    catalog_version: int | None = None
-    plan_version_id: str | None = None
+
+
+BillingSubscriptionChangeState = Literal[
+    "awaiting_payment",
+    "scheduled",
+    "applied",
+    "failed",
+    "canceled",
+]
+BillingSubscriptionProrationBehavior = Literal[
+    "provider_default",
+    "invoice_immediately",
+    "none",
+]
+
+
+class BillingSubscriptionOfferContext(BaseModel):
+    """Catalog context captured for one side of a subscription change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    offer_id: str
+    offer_key: str
+    plan_id: str | None = None
+    plan: str | None = None
+    interval: str | None = None
+    interval_count: int | None = None
 
 
 class BillingSubscriptionChange(BaseModel):
-    """Durable provider-neutral state for a customer initiated plan switch."""
+    """Durable provider-neutral state for a customer-initiated offer change."""
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str
-    user_id: str
+    subscription_id: str
+    from_offer_id: str
+    to_offer_id: str
+    from_offer: BillingSubscriptionOfferContext
+    to_offer: BillingSubscriptionOfferContext
+    effective_at: str | None
+    state: BillingSubscriptionChangeState
+    proration_behavior: BillingSubscriptionProrationBehavior
+    idempotency_key: str
+    provider_operation_id: str | None = None
+    error_message: str | None = None
+
+
+class BillingSubscriptionChangeInput(BaseModel):
+    """Input for opening a subscription offer change."""
+
+    model_config = ConfigDict(extra="forbid")
+
     provider: str
     provider_subscription_id: str
-    from_plan: str | None = None
-    from_interval: str | None = None
-    to_plan: str
-    to_interval: str
-    effective_at: Literal["immediately", "next_billing_date", "trial_end"]
-    state: Literal["draft", "awaiting_payment", "scheduled", "completed", "failed", "canceled", "superseded"]
-    proration_billing_mode: str
-    quote: dict[str, Any] = Field(default_factory=dict)
-    quote_hash: str
-    provider_operation_id: str | None = None
-    effective_date: str | None = None
-    expires_at: str | None = None
+    to_offer_id: str
+    effective_at: str
+    idempotency_key: str
+    proration_behavior: BillingSubscriptionProrationBehavior = "provider_default"
 
 
 class BillingGrantResult(BaseModel):
@@ -296,7 +351,7 @@ class BillingGrantResult(BaseModel):
     mode: str | None = None
     credits: str | Decimal | None = None
     bucket: str | None = None
-    replace_prior: bool = False
+    replace_prior: bool | None = None
 
 
 class BillingOfferResult(BaseModel):
@@ -306,9 +361,9 @@ class BillingOfferResult(BaseModel):
     offer_key: str
     plan_id: str | None = None
     plan: str | None = None
-    interval: str = "month"
-    interval_count: int = 1
-    grant: BillingGrantResult = Field(default_factory=BillingGrantResult)
+    interval: str | None = None
+    interval_count: int | None = None
+    grant: BillingGrantResult | None = None
 
 
 class BillingTopupResult(BaseModel):
@@ -317,9 +372,14 @@ class BillingTopupResult(BaseModel):
     topup_id: str
     topup_key: str
     credits_per_unit: Decimal | int | None = None
-    deposit_to: str = "purchased"
-    min_amount_minor: int = 500
-    max_amount_minor: int = 500000
+    deposit_to: str | None = None
+    amount_minor: int | None = None
+    currency: str | None = None
+    min_quantity: int | None = None
+    max_quantity: int | None = None
+    default_quantity: int | None = None
+    min_amount_minor: int | None = None
+    max_amount_minor: int | None = None
 
 
 class BillingPreferences(BaseModel):
@@ -334,45 +394,74 @@ class BillingPreferences(BaseModel):
 
 
 class BillingAutoRechargeProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     user_id: str
     enabled: bool = False
-    state: Literal["disabled", "active", "processing", "suspended", "limit_reached"] = "disabled"
-    provider: str | None = None
-    provider_customer_id: str | None = None
-    payment_method_id: str | None = None
-    suspended_reason: str | None = None
-    consented_at: str | None = None
-    consent_reference: str | None = None
-    consent_metadata: dict[str, Any] | None = None
-    policy_override: dict[str, Any] | None = None
-    policy_snapshot: dict[str, Any] | None = None
-    policy_hash: str | None = None
-    quote_snapshot: dict[str, Any] | None = None
+    state: Literal["disabled", "active", "paused"] = "disabled"
     armed: bool = True
+    provider: str | None = None
+    topup_id: str | None = None
+    quantity: int = 1
+    threshold: Decimal = Decimal(0)
+    max_charges_per_window: int | None = None
+    window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"] = "month"
+    window_count: int = 1
+    window_anchor: Literal["calendar", "plan_assignment", "rolling"] = "calendar"
+    window_timezone: str = "UTC"
+    updated_at: str | None = None
 
 
 class BillingAutoRechargeAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     user_id: str
     provider: str
     idempotency_key: str
-    provider_payment_id: str | None = None
-    topup_key: str
+    provider_attempt_id: str | None = None
+    topup_id: str
     quantity: int
-    state: Literal["claimed", "processing", "succeeded", "retryable", "failed", "action_required"]
-    credits: Decimal | None = None
-    trigger_balance: Decimal | None = None
-    policy_snapshot: dict[str, Any] | None = None
-    policy_hash: str | None = None
+    state: Literal[
+        "claimed",
+        "submitted",
+        "processing",
+        "unknown",
+        "succeeded",
+        "failed",
+        "action_required",
+    ]
+    window_start: str
+    window_end: str
     quoted_amount_minor: int | None = None
-    final_amount_minor: int | None = None
     currency: str | None = None
     failure_code: str | None = None
-    failure_category: str | None = None
     failure_message: str | None = None
-    action_url: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
+
+
+class BillingAutoRechargeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    state: Literal["disabled", "active", "paused"]
+    threshold_credits: Decimal
+    topup_key: str
+    quantity: int
+    max_recharges: int
+    window_days: float
+    window_start: str
+    window_end: str
+    recharges_in_window: int
+    payment_method_id: str | None = None
+    payment_method_last4: str | None = None
+    payment_method_brand: str | None = None
+    suspended_reason: str | None = None
+    pending_attempt_id: str | None = None
+    quote_amount_minor: int | None = None
+    quote_currency: str | None = None
 
 
 class BillingCustomerRecord(BaseModel):

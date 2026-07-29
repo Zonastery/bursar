@@ -131,6 +131,15 @@ class PlanMigrationBatchResult(BaseModel):
     next_cursor: str | None = None
 
 
+class MigratePlanUsersResult(BaseModel):
+    """Deprecated one-shot migration result; mirrors the JavaScript SDK."""
+
+    plan_key: str
+    target_plan_id: str
+    target_config_version: int
+    migrated_count: int
+
+
 class SpendCap(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     user_id: str = ""

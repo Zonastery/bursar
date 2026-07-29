@@ -8,11 +8,19 @@ CREATE TABLE bursar.credit_ledger_entries (
         CHECK (bursar.is_finite_numeric(balance_after)),
     reference_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
     catalog_revision_id uuid REFERENCES bursar.catalog_revisions(id),
-    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    idempotency_key text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
-    operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
+    operation text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(operation)
+            AND bursar.is_bounded_text(operation, 255)
+        ),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, idempotency_key),
     CHECK (
@@ -44,7 +52,9 @@ CREATE TABLE bursar.credit_lots (
         ),
     expires_at timestamptz,
     expiry_policy_snapshot jsonb NOT NULL DEFAULT '{"type":"never"}'::jsonb
-        CHECK (jsonb_typeof(expiry_policy_snapshot) = 'object'),
+        CHECK (
+            bursar.is_bounded_json_object(expiry_policy_snapshot, 32768)
+        ),
     source_type text NOT NULL DEFAULT 'ledger'
         CHECK (source_type IN (
             'ledger', 'grant_program', 'topup', 'subscription_cycle',
@@ -139,15 +149,23 @@ CREATE TABLE bursar.credit_debt_repayments (
 CREATE TABLE bursar.credit_usage_charges (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
-    operation text NOT NULL CHECK (bursar.is_nonempty_text(operation)),
+    operation text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(operation)
+            AND bursar.is_bounded_text(operation, 255)
+        ),
     event_at timestamptz NOT NULL DEFAULT now(),
     measures jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(measures) = 'object'),
-    dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(dimensions) = 'object'),
-    feature text,
-    model text,
-    region text,
+        CHECK (bursar.is_bounded_json_object(measures, 16384)),
+    feature text CHECK (
+        feature IS NULL OR bursar.is_bounded_text(feature, 255)
+    ),
+    model text CHECK (
+        model IS NULL OR bursar.is_bounded_text(model, 255)
+    ),
+    region text CHECK (
+        region IS NULL OR bursar.is_bounded_text(region, 255)
+    ),
     requested numeric(20, 6) NOT NULL
         CHECK (bursar.is_finite_numeric(requested) AND requested >= 0),
     charged numeric(20, 6) NOT NULL
@@ -164,14 +182,18 @@ CREATE TABLE bursar.credit_usage_charges (
         ),
     catalog_revision_id uuid REFERENCES bursar.catalog_revisions(id),
     plan_id uuid,
-    rate_card_key text,
+    rate_card_key text CHECK (
+        rate_card_key IS NULL OR bursar.is_bounded_text(rate_card_key, 255)
+    ),
     pricing_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(pricing_snapshot) = 'object'),
+        CHECK (bursar.is_bounded_json_object(pricing_snapshot, 32768)),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries(id),
     correction_of_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
-    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
-    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    idempotency_key text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, idempotency_key),
@@ -180,6 +202,92 @@ CREATE TABLE bursar.credit_usage_charges (
     CHECK (charged + allowance_covered = requested),
     CHECK (allowance_covered <= allowance_requested),
     CHECK (correction_of_charge_id IS NULL OR correction_of_charge_id <> id)
+);
+
+CREATE TABLE bursar.usage_charge_payloads (
+    charge_id uuid NOT NULL
+        REFERENCES bursar.credit_usage_charges(id) ON DELETE CASCADE,
+    event_at timestamptz NOT NULL,
+    dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_at, charge_id)
+) PARTITION BY RANGE (event_at);
+
+CREATE TABLE bursar.usage_daily_rollups (
+    usage_day date NOT NULL,
+    account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
+    operation text NOT NULL,
+    model_key text NOT NULL DEFAULT '',
+    region_key text NOT NULL DEFAULT '',
+    charged numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (bursar.is_finite_numeric(charged) AND charged >= 0),
+    allowance_covered numeric(20, 6) NOT NULL DEFAULT 0
+        CHECK (
+            bursar.is_finite_numeric(allowance_covered)
+            AND allowance_covered >= 0
+        ),
+    charge_count bigint NOT NULL DEFAULT 0 CHECK (charge_count >= 0),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (
+        usage_day,
+        account_id,
+        operation,
+        model_key,
+        region_key
+    )
+);
+
+CREATE TABLE bursar.event_outbox (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    topic text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(topic)
+            AND bursar.is_bounded_text(topic, 255)
+        ),
+    aggregate_type text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(aggregate_type)
+            AND bursar.is_bounded_text(aggregate_type, 100)
+        ),
+    aggregate_id uuid NOT NULL,
+    idempotency_key text NOT NULL UNIQUE
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
+    payload_version smallint NOT NULL DEFAULT 1
+        CHECK (payload_version > 0),
+    payload jsonb NOT NULL DEFAULT '{}'::jsonb
+        CHECK (bursar.is_bounded_json_object(payload, 65536)),
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'delivered', 'dead_letter')),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    available_at timestamptz NOT NULL DEFAULT now(),
+    claim_token uuid,
+    claim_expires_at timestamptz,
+    last_error text CHECK (
+        last_error IS NULL OR bursar.is_bounded_text(last_error, 8192)
+    ),
+    delivered_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (
+        (status = 'processing'
+         AND claim_token IS NOT NULL
+         AND claim_expires_at IS NOT NULL)
+        OR
+        (status <> 'processing'
+         AND claim_token IS NULL
+         AND claim_expires_at IS NULL)
+    ),
+    CHECK (
+        (status = 'delivered' AND delivered_at IS NOT NULL)
+        OR
+        (status <> 'delivered' AND delivered_at IS NULL)
+    )
 );
 
 -- This is the hot current-state row. Replaced assignments are copied to the
@@ -273,7 +381,7 @@ CREATE TABLE bursar.allowance_windows (
     consumed numeric(20, 6) NOT NULL DEFAULT 0
         CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
     policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(policy_snapshot) = 'object'),
+        CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     CHECK (window_end > window_start),
     CHECK (reserved + consumed <= allowance),
     UNIQUE (
@@ -305,7 +413,8 @@ CREATE TABLE bursar.quota_windows (
     consumed numeric(20, 6) NOT NULL DEFAULT 0
         CHECK (bursar.is_finite_numeric(consumed) AND consumed >= 0),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
-    policy_snapshot jsonb NOT NULL CHECK (jsonb_typeof(policy_snapshot) = 'object'),
+    policy_snapshot jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (window_end > window_start),
     UNIQUE (
@@ -336,10 +445,14 @@ CREATE TABLE bursar.quota_usage_events (
     event_at timestamptz NOT NULL,
     usage_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
     correction_of_event_id uuid REFERENCES bursar.quota_usage_events(id),
-    idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
+    idempotency_key text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, catalog_quota_id, idempotency_key),
     FOREIGN KEY (plan_id, catalog_revision_id)
@@ -360,7 +473,11 @@ CREATE TABLE bursar.quota_events (
     usage_charge_id uuid REFERENCES bursar.credit_usage_charges(id),
     event_type text NOT NULL CHECK (event_type IN ('threshold', 'blocked')),
     threshold_percent integer,
-    idempotency_key text NOT NULL,
+    idempotency_key text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE NULLS NOT DISTINCT (
         quota_window_id,
@@ -379,16 +496,22 @@ CREATE TABLE bursar.quota_events (
 CREATE TABLE bursar.credit_leases (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     account_id uuid NOT NULL REFERENCES bursar.credit_accounts(id),
-    operation text NOT NULL,
-    feature text,
+    operation text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(operation)
+            AND bursar.is_bounded_text(operation, 255)
+        ),
+    feature text CHECK (
+        feature IS NULL OR bursar.is_bounded_text(feature, 255)
+    ),
     measures jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(measures) = 'object'),
+        CHECK (bursar.is_bounded_json_object(measures, 16384)),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(dimensions) = 'object'),
+        CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
     policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(policy_snapshot) = 'object'),
+        CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions(id),
     plan_id uuid,
     reserved_amount numeric(20, 6) NOT NULL
@@ -405,10 +528,17 @@ CREATE TABLE bursar.credit_leases (
     max_concurrent integer CHECK (max_concurrent IS NULL OR max_concurrent > 0),
     expires_at timestamptz NOT NULL,
     status bursar.lease_status NOT NULL DEFAULT 'active',
-    idempotency_key text NOT NULL,
+    idempotency_key text NOT NULL
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     settled_amount numeric(20, 6),
-    settlement_idempotency_key text,
+    settlement_idempotency_key text CHECK (
+        settlement_idempotency_key IS NULL
+        OR bursar.is_bounded_text(settlement_idempotency_key, 255)
+    ),
     settlement_request_digest bytea
         CHECK (
             settlement_request_digest IS NULL
@@ -505,9 +635,12 @@ CREATE TABLE bursar.credit_team_usage_charges (
     amount numeric(20, 6) NOT NULL
         CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     idempotency_key text NOT NULL
-        CHECK (bursar.is_nonempty_text(idempotency_key)),
+        CHECK (
+            bursar.is_nonempty_text(idempotency_key)
+            AND bursar.is_bounded_text(idempotency_key, 255)
+        ),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (team_id, idempotency_key),
@@ -528,7 +661,7 @@ CREATE TABLE bursar.grant_program_events (
         CHECK (bursar.is_nonempty_text(idempotency_key)),
     referrer_subject_id uuid REFERENCES bursar.subjects(id),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(metadata) = 'object'),
+        CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     occurred_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now(),
     -- Program keys are stable business identities across catalog revisions.

@@ -68,6 +68,72 @@ CREATE TYPE bursar.recharge_attempt_status AS ENUM (
     'canceled'
 );
 
+CREATE TABLE bursar.storage_settings (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    usage_payload_retention_days integer NOT NULL DEFAULT 90
+        CHECK (usage_payload_retention_days BETWEEN 1 AND 36500),
+    quota_event_retention_days integer NOT NULL DEFAULT 45
+        CHECK (quota_event_retention_days BETWEEN 1 AND 36500),
+    quota_max_lateness_seconds integer NOT NULL DEFAULT 604800
+        CHECK (quota_max_lateness_seconds BETWEEN 0 AND 31536000),
+    quota_correction_window_days integer NOT NULL DEFAULT 7
+        CHECK (quota_correction_window_days BETWEEN 0 AND 3650),
+    quota_retention_safety_days integer NOT NULL DEFAULT 1
+        CHECK (quota_retention_safety_days BETWEEN 1 AND 365),
+    billing_payload_retention_days integer NOT NULL DEFAULT 30
+        CHECK (billing_payload_retention_days BETWEEN 1 AND 36500),
+    quota_notification_retention_days integer NOT NULL DEFAULT 90
+        CHECK (quota_notification_retention_days BETWEEN 1 AND 36500),
+    terminal_lease_payload_retention_days integer NOT NULL DEFAULT 30
+        CHECK (terminal_lease_payload_retention_days BETWEEN 1 AND 36500),
+    usage_rollup_retention_days integer NOT NULL DEFAULT 730
+        CHECK (usage_rollup_retention_days BETWEEN 1 AND 36500),
+    outbox_delivered_retention_days integer NOT NULL DEFAULT 7
+        CHECK (outbox_delivered_retention_days BETWEEN 1 AND 36500),
+    outbox_max_retention_days integer NOT NULL DEFAULT 30
+        CHECK (outbox_max_retention_days BETWEEN 1 AND 36500),
+    maintenance_interval_seconds integer NOT NULL DEFAULT 60
+        CHECK (maintenance_interval_seconds BETWEEN 1 AND 86400),
+    maintenance_batch_size integer NOT NULL DEFAULT 500
+        CHECK (maintenance_batch_size BETWEEN 1 AND 5000),
+    maintenance_partition_drop_limit integer NOT NULL DEFAULT 2
+        CHECK (maintenance_partition_drop_limit BETWEEN 0 AND 12),
+    maintenance_lock_timeout_ms integer NOT NULL DEFAULT 100
+        CHECK (maintenance_lock_timeout_ms BETWEEN 1 AND 5000),
+    last_maintenance_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (
+        quota_event_retention_days * 86400::bigint
+        >= quota_max_lateness_seconds
+           + quota_correction_window_days * 86400::bigint
+           + quota_retention_safety_days * 86400::bigint
+    ),
+    CHECK (outbox_max_retention_days >= outbox_delivered_retention_days),
+    CHECK (usage_payload_retention_days >= outbox_max_retention_days),
+    CHECK (billing_payload_retention_days >= outbox_max_retention_days)
+);
+
+INSERT INTO bursar.storage_settings(singleton) VALUES (true);
+
+CREATE TABLE bursar.storage_partitions (
+    parent_table text NOT NULL CHECK (
+        parent_table IN (
+            'usage_charge_payloads',
+            'billing_event_payloads'
+        )
+    ),
+    partition_table text NOT NULL CHECK (
+        bursar.is_nonempty_text(partition_table)
+        AND bursar.is_bounded_text(partition_table, 63)
+    ),
+    range_start timestamptz NOT NULL,
+    range_end timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (parent_table, partition_table),
+    UNIQUE (parent_table, range_start),
+    CHECK (range_end > range_start)
+);
+
 CREATE TABLE bursar.subjects (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     pseudonymized_at timestamptz,
@@ -92,7 +158,7 @@ CREATE TABLE bursar.catalog_revisions (
     revision_no bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
     yaml_schema_version integer NOT NULL CHECK (yaml_schema_version > 0),
     source_document jsonb NOT NULL
-        CHECK (jsonb_typeof(source_document) = 'object'),
+        CHECK (bursar.is_bounded_json_object(source_document, 4194304)),
     digest bytea NOT NULL CHECK (octet_length(digest) = 32),
     status bursar.catalog_revision_status NOT NULL DEFAULT 'draft',
     label text,
@@ -123,8 +189,10 @@ CREATE TABLE bursar.catalog_buckets (
     bucket_key text NOT NULL CHECK (bursar.is_nonempty_text(bucket_key)),
     label text NOT NULL CHECK (bursar.is_nonempty_text(label)),
     priority integer NOT NULL CHECK (priority >= 0),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
-    expiry_policy jsonb NOT NULL CHECK (jsonb_typeof(expiry_policy) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
+    expiry_policy jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(expiry_policy, 32768)),
     expiry_type text NOT NULL
         CHECK (expiry_type IN (
             'never', 'after_grant', 'end_of_window', 'fixed_at'
@@ -172,10 +240,12 @@ CREATE TABLE bursar.catalog_operations (
     catalog_revision_id uuid NOT NULL
         REFERENCES bursar.catalog_revisions(id) ON DELETE CASCADE,
     operation_key text NOT NULL CHECK (bursar.is_nonempty_text(operation_key)),
-    measures jsonb NOT NULL CHECK (jsonb_typeof(measures) = 'object'),
+    measures jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(measures, 65536)),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(dimensions) = 'object'),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+        CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, operation_key)
 );
 
@@ -185,7 +255,8 @@ CREATE TABLE bursar.catalog_rate_cards (
         REFERENCES bursar.catalog_revisions(id) ON DELETE CASCADE,
     rate_card_key text NOT NULL CHECK (bursar.is_nonempty_text(rate_card_key)),
     extends_key text,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, rate_card_key),
     FOREIGN KEY (catalog_revision_id, extends_key)
         REFERENCES bursar.catalog_rate_cards(catalog_revision_id, rate_card_key)
@@ -199,7 +270,8 @@ CREATE TABLE bursar.catalog_credit_policies (
     policy_key text NOT NULL CHECK (bursar.is_nonempty_text(policy_key)),
     policy_type text NOT NULL CHECK (policy_type IN ('prepaid', 'credit_line')),
     credit_limit numeric(20, 6),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, policy_key),
     CHECK (
         (policy_type = 'prepaid' AND credit_limit IS NULL)
@@ -216,7 +288,8 @@ CREATE TABLE bursar.catalog_admission_policies (
         REFERENCES bursar.catalog_revisions(id) ON DELETE CASCADE,
     policy_key text NOT NULL CHECK (bursar.is_nonempty_text(policy_key)),
     max_in_flight integer CHECK (max_in_flight IS NULL OR max_in_flight > 0),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, policy_key)
 );
 
@@ -248,8 +321,10 @@ CREATE TABLE bursar.catalog_entitlement_features (
         REFERENCES bursar.catalog_revisions(id) ON DELETE CASCADE,
     feature_key text NOT NULL CHECK (bursar.is_nonempty_text(feature_key)),
     value_type text NOT NULL CHECK (value_type IN ('boolean', 'integer', 'string', 'enum')),
-    default_value jsonb NOT NULL,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    default_value jsonb NOT NULL
+        CHECK (octet_length(default_value::text) <= 65536),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, feature_key)
 );
 
@@ -290,7 +365,8 @@ CREATE TABLE bursar.catalog_plans (
             IN ('calendar', 'plan_assignment', 'rolling')
         ),
     credit_allowance_reset_timezone text,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, plan_key),
     UNIQUE (id, catalog_revision_id),
     FOREIGN KEY (catalog_revision_id, rate_card)
@@ -331,7 +407,8 @@ CREATE TABLE bursar.catalog_plan_features (
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
     feature_key text NOT NULL,
-    feature_value jsonb NOT NULL,
+    feature_value jsonb NOT NULL
+        CHECK (octet_length(feature_value::text) <= 65536),
     PRIMARY KEY (catalog_revision_id, plan_key, feature_key),
     FOREIGN KEY (catalog_revision_id, plan_key)
         REFERENCES bursar.catalog_plans(catalog_revision_id, plan_key)
@@ -352,10 +429,12 @@ CREATE TABLE bursar.catalog_plan_quotas (
     measure_key text NOT NULL CHECK (bursar.is_nonempty_text(measure_key)),
     quota_limit numeric(20, 6) NOT NULL
         CHECK (bursar.is_finite_numeric(quota_limit) AND quota_limit >= 0),
-    window_policy jsonb NOT NULL CHECK (jsonb_typeof(window_policy) = 'object'),
+    window_policy jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(window_policy, 32768)),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
     emit_at_percent integer[] NOT NULL DEFAULT ARRAY[]::integer[],
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, plan_key, quota_key),
     FOREIGN KEY (catalog_revision_id, plan_key)
         REFERENCES bursar.catalog_plans(catalog_revision_id, plan_key)
@@ -379,14 +458,17 @@ CREATE TABLE bursar.catalog_grant_programs (
             'promo_code_redeemed',
             'manual'
         )),
-    availability jsonb,
+    availability jsonb CHECK (
+        availability IS NULL OR octet_length(availability::text) <= 65536
+    ),
     eligibility jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(eligibility) = 'object'),
+        CHECK (bursar.is_bounded_json_object(eligibility, 32768)),
     max_awards_per_subject integer NOT NULL DEFAULT 1
         CHECK (max_awards_per_subject > 0),
     idempotency_scope text NOT NULL DEFAULT 'subject'
         CHECK (idempotency_scope IN ('subject', 'event')),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, program_key),
     UNIQUE (id, catalog_revision_id)
 );
@@ -400,8 +482,11 @@ CREATE TABLE bursar.catalog_grant_awards (
     amount numeric(20, 6) NOT NULL
         CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
     bucket_key text NOT NULL,
-    expiry_policy jsonb,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    expiry_policy jsonb CHECK (
+        expiry_policy IS NULL OR octet_length(expiry_policy::text) <= 32768
+    ),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (grant_program_id, award_index),
     UNIQUE (id, catalog_revision_id),
     FOREIGN KEY (grant_program_id, catalog_revision_id)
@@ -423,7 +508,9 @@ CREATE TABLE bursar.catalog_offers (
     display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
     description text,
     sort_order integer NOT NULL DEFAULT 0,
-    availability jsonb,
+    availability jsonb CHECK (
+        availability IS NULL OR octet_length(availability::text) <= 65536
+    ),
     amount_minor bigint NOT NULL CHECK (amount_minor >= 0),
     currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     tax_behavior text NOT NULL
@@ -432,7 +519,9 @@ CREATE TABLE bursar.catalog_offers (
     billing_unit text NOT NULL
         CHECK (billing_unit IN ('day', 'week', 'month', 'year')),
     billing_count integer NOT NULL CHECK (billing_count > 0),
-    trial_policy jsonb,
+    trial_policy jsonb CHECK (
+        trial_policy IS NULL OR octet_length(trial_policy::text) <= 32768
+    ),
     cycle_grant_amount numeric(20, 6)
         CHECK (
             cycle_grant_amount IS NULL
@@ -444,8 +533,12 @@ CREATE TABLE bursar.catalog_offers (
     cycle_grant_bucket_key text,
     cycle_grant_renewal text
         CHECK (cycle_grant_renewal IN ('replace_previous', 'accumulate')),
-    cycle_grant_expiry_policy jsonb,
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    cycle_grant_expiry_policy jsonb CHECK (
+        cycle_grant_expiry_policy IS NULL
+        OR octet_length(cycle_grant_expiry_policy::text) <= 32768
+    ),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, offer_key),
     UNIQUE (id, catalog_revision_id),
     FOREIGN KEY (catalog_revision_id, plan_key)
@@ -473,7 +566,9 @@ CREATE TABLE bursar.catalog_topups (
     display_name text NOT NULL CHECK (bursar.is_nonempty_text(display_name)),
     description text,
     sort_order integer NOT NULL DEFAULT 0,
-    availability jsonb,
+    availability jsonb CHECK (
+        availability IS NULL OR octet_length(availability::text) <= 65536
+    ),
     amount_minor bigint NOT NULL CHECK (amount_minor >= 0),
     currency char(3) NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     tax_behavior text NOT NULL
@@ -488,10 +583,13 @@ CREATE TABLE bursar.catalog_topups (
             default_quantity >= min_quantity
             AND default_quantity <= max_quantity
         ),
-    expiry_policy jsonb,
+    expiry_policy jsonb CHECK (
+        expiry_policy IS NULL OR octet_length(expiry_policy::text) <= 32768
+    ),
     lot_behavior text NOT NULL DEFAULT 'separate_lots'
         CHECK (lot_behavior IN ('separate_lots', 'merge_and_refresh')),
-    definition jsonb NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    definition jsonb NOT NULL
+        CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, topup_key),
     UNIQUE (id, catalog_revision_id),
     FOREIGN KEY (catalog_revision_id, bucket_key)

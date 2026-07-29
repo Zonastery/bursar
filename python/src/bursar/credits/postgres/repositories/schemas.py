@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -139,6 +139,14 @@ class PlanMigrationBatchRow(BaseModel):
     next_cursor: str | None = None
 
 
+class PlanMigrationUsersRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    plan_key: str
+    target_plan_id: str
+    target_config_version: int
+    migrated_count: int
+
+
 class AllowanceRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     plan_id: str | None = None
@@ -262,6 +270,40 @@ class BucketEnvelopeRow(BaseModel):
 class SweepRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     expired_count: int = 0
+    expired_amount: str | Decimal | None = None
+    dry_run: bool = False
+    expired_by_bucket: dict[str, Any] | None = None
+
+
+class QuotaStateRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    user_id: str
+    quota_key: str
+    operation_key: str
+    measure_key: str
+    quota_limit: str | Decimal
+    consumed: str | Decimal
+    reserved: str | Decimal
+    remaining: str | Decimal
+    overage: str | Decimal
+    enforcement: Literal["block", "allow"]
+    window_start: str
+    window_end: str
+    emit_at_percent: list[float]
+
+
+class QuotaEventRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    event_id: str = ""
+    quota_key: str = ""
+    operation_key: str = ""
+    measure_key: str = ""
+    event_type: Literal["threshold", "blocked"]
+    threshold_percent: float | None = None
+    idempotency_key: str = ""
+    usage_charge_id: str | None = None
+    created_at: str | datetime = ""
 
 
 # Billing schemas
@@ -275,7 +317,7 @@ class BillingOfferRow(BaseModel):
     plan: str | None = None
     interval: str = ""
     interval_count: int = 0
-    grant_mode: str = ""
+    grant_mode: str | None = None
     grant_credits: str | Decimal | None = None
     grant_bucket: str | None = None
     grant_replace_prior: bool = False
@@ -289,10 +331,17 @@ class BillingTopupRow(BaseModel):
     credits_per_major_unit: str | Decimal | None = None
     tier: str = ""
     deposit_to: str = ""
+    bucket_key: str | None = None
+    amount_minor: int | str | None = None
+    currency: str | None = None
+    min_quantity: int | None = None
+    max_quantity: int | None = None
+    default_quantity: int | None = None
 
 
 class SubscriptionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    id: str = ""
     user_id: str = ""
     provider: str = ""
     provider_subscription_id: str = ""
@@ -303,10 +352,15 @@ class SubscriptionRow(BaseModel):
     status: str = "incomplete"
     current_period_start: str | datetime | None = None
     current_period_end: str | datetime | None = None
+    trial_end: str | datetime | None = None
+    cancel_at: str | datetime | None = None
+    ended_at: str | datetime | None = None
     cancel_at_period_end: bool = False
     interval: str | None = None
     interval_count: int | None = None
     grace_ends_at: str | datetime | None = None
+    grace_expired_at: str | datetime | None = None
+    provider_updated_at: str | datetime | None = None
     metadata: dict[str, Any] | None = None
     catalog_version: int | None = None
     plan_version_id: str | None = None

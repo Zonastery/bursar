@@ -3,7 +3,7 @@ import type Decimal from "decimal.js";
 import type { UsageMetrics } from "../metrics.js";
 import type { Logger } from "../shared/logger.js";
 import type { CreditEvent } from "./events.js";
-import type { BillingMode, CreditMetadata } from "./types/index.js";
+import type { BillingMode, CreditMetadata, UsageAnalyticsStore } from "./types/index.js";
 
 export type PolicyPreset = "strict_prepaid" | "overdraft";
 export type MetricsOrAmount = UsageMetrics | Decimal | number;
@@ -20,6 +20,11 @@ export interface LowBalanceConfig {
 
 export interface CreditsServiceOptions {
   logger?: Logger | null;
+  /**
+   * Optional read-only analytics backend. Defaults to the credit store, which
+   * keeps PostgreSQL as the zero-infrastructure behavior.
+   */
+  analytics?: UsageAnalyticsStore | null;
   /** Fallback credit policy for subjects without a plan assignment. */
   policy?: PolicyPreset;
   /** Planless-subject floor used with the `overdraft` fallback. */

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bursar.billing.types import BillingInvoiceInfo
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_non_empty
 
@@ -13,19 +14,41 @@ class BillingInvoiceRepository:
     def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
+    def list_for_user(self, user_id: str) -> list[BillingInvoiceInfo]:
+        validate_non_empty(user_id, "user_id")
+        rows = self._execute(
+            "SELECT * FROM bursar.list_billing_invoices(%s::uuid)",
+            [user_id],
+        )
+        return [
+            BillingInvoiceInfo(
+                provider=str(row.get("provider") or ""),
+                provider_invoice_id=str(row.get("provider_invoice_id") or ""),
+                status=str(row["status"]) if row.get("status") is not None else None,
+                amount_paid_minor=(int(row["amount_paid_minor"]) if row.get("amount_paid_minor") is not None else None),
+                amount_due_minor=(int(row["amount_due_minor"]) if row.get("amount_due_minor") is not None else None),
+                currency=(str(row["currency"]) if row.get("currency") is not None else None),
+                period_start=(str(row["period_start"]) if row.get("period_start") is not None else None),
+                period_end=(str(row["period_end"]) if row.get("period_end") is not None else None),
+            )
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
     def upsert(
         self,
+        subject_id: str,
         provider: str,
         provider_invoice_id: str,
-        provider_subscription_id: str | None,
-        user_id: str | None,
+        subscription_id: str | None,
         status: str | None,
-        amount_paid_minor: int | None,
         amount_due_minor: int | None,
+        amount_paid_minor: int | None,
         currency: str,
         period_start: str | None,
         period_end: str | None,
-        metadata: str | None,
+        metadata: str,
+        provider_updated_at: str,
     ) -> None:
         """Insert or update a billing invoice record.
 
@@ -42,21 +65,23 @@ class BillingInvoiceRepository:
             period_end: The billing period end, or None.
             metadata: JSON metadata string, or None.
         """
+        validate_non_empty(subject_id, "subject_id")
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_invoice_id, "provider_invoice_id")
         self._execute(
-            "SELECT bursar.upsert_billing_invoice(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT bursar.upsert_billing_invoice(%s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)",
             [
+                subject_id,
                 provider,
                 provider_invoice_id,
-                provider_subscription_id,
-                user_id,
+                subscription_id,
                 status,
-                amount_paid_minor,
                 amount_due_minor,
+                amount_paid_minor,
                 currency,
                 period_start,
                 period_end,
                 metadata,
+                provider_updated_at,
             ],
         )

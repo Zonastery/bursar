@@ -19,12 +19,13 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
-    ValidationError,
     WithJsonSchema,
     field_validator,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
+
+from bursar.errors import ConfigError as ConfigError
 
 IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
@@ -45,26 +46,6 @@ DecimalValue = Annotated[
     WithJsonSchema({"type": "string", "pattern": DECIMAL_RE.pattern, "examples": ["10.500000"]}),
 ]
 FeatureValue = bool | int | str
-
-
-class ConfigError(ValueError):
-    """Raised when a Bursar configuration is invalid."""
-
-    def __init__(
-        self,
-        message: str | None = None,
-        *,
-        validation_error: ValidationError | None = None,
-    ) -> None:
-        super().__init__(
-            str(validation_error) if validation_error is not None else message or "invalid Bursar configuration"
-        )
-        self.validation_error = validation_error
-
-    def errors(self) -> list[dict[str, Any]]:
-        if self.validation_error is None:
-            return [{"type": "invalid_config", "loc": (), "msg": str(self), "input": None}]
-        return self.validation_error.errors(include_url=False)
 
 
 def _validate_identifier(value: str, path: str) -> None:

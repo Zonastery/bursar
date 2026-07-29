@@ -20,6 +20,7 @@ import type {
   SpendByModelRow,
   SpendByUserRow,
   TopUserRow,
+  UsageAnalyticsStore,
 } from "./types/index.js";
 
 /**
@@ -29,7 +30,10 @@ import type {
  * methods here intentionally contain no additional business behavior.
  */
 export class CreditQueries {
-  constructor(private readonly store: CreditStore) {}
+  constructor(
+    private readonly store: CreditStore,
+    private readonly analytics: UsageAnalyticsStore = store,
+  ) {}
 
   async getActivePricing(): Promise<BursarConfigResult | null> {
     return this.store.getActivePricing();
@@ -94,15 +98,15 @@ export class CreditQueries {
   }
 
   async aggregateStats(start: Date, end: Date): Promise<AggregateStats> {
-    return this.store.aggregateStats(start, end);
+    return this.analytics.aggregateStats(start, end);
   }
 
   async spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]> {
-    return this.store.spendByUser(start, end);
+    return this.analytics.spendByUser(start, end);
   }
 
   async spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]> {
-    return this.store.spendByModel(start, end);
+    return this.analytics.spendByModel(start, end);
   }
 
   async listLedgerEntries(userId: string, options?: ListLedgerEntriesOptions): Promise<LedgerPage> {
@@ -114,10 +118,10 @@ export class CreditQueries {
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {
-    return this.store.topUsers(limit, start, end);
+    return this.analytics.topUsers(limit, start, end);
   }
 
   async dailySpend(start: Date, end: Date): Promise<DailySpendRow[]> {
-    return this.store.dailySpend(start, end);
+    return this.analytics.dailySpend(start, end);
   }
 }

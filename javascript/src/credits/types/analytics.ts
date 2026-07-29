@@ -37,6 +37,21 @@ export interface AggregateStats {
   topUser: string;
 }
 
+/**
+ * Read-only usage analytics backend.
+ *
+ * PostgreSQL implements this contract by default. High-volume deployments can
+ * provide a ClickHouse implementation without moving transactional credit
+ * state out of PostgreSQL.
+ */
+export interface UsageAnalyticsStore {
+  spendByUser(start: Date, end: Date): Promise<SpendByUserRow[]>;
+  spendByModel(start: Date, end: Date): Promise<SpendByModelRow[]>;
+  topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]>;
+  dailySpend(start: Date, end: Date): Promise<DailySpendRow[]>;
+  aggregateStats(start: Date, end: Date): Promise<AggregateStats>;
+}
+
 // ── Spend caps and rate limiting ───────────────────────────────────────
 /** Configuration for a per-user spend cap. */
 export interface SpendCap {

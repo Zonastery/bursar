@@ -153,6 +153,95 @@ AS $$
     ORDER BY feature.feature_key
 $$;
 
+CREATE FUNCTION bursar.usage_analytics_slice(
+    p_start timestamptz,
+    p_end timestamptz
+)
+RETURNS TABLE(
+    usage_day date,
+    account_id uuid,
+    operation text,
+    model text,
+    region text,
+    charged numeric,
+    allowance_covered numeric,
+    charge_count bigint
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    WITH bounds AS (
+        SELECT
+            CASE
+                WHEN p_start = (
+                    date_trunc('day', p_start AT TIME ZONE 'UTC')
+                    AT TIME ZONE 'UTC'
+                )
+                THEN p_start
+                ELSE (
+                    date_trunc('day', p_start AT TIME ZONE 'UTC')
+                    + interval '1 day'
+                ) AT TIME ZONE 'UTC'
+            END AS full_start,
+            (
+                date_trunc('day', p_end AT TIME ZONE 'UTC')
+                AT TIME ZONE 'UTC'
+            ) AS full_end
+        WHERE p_start IS NOT NULL
+          AND p_end IS NOT NULL
+          AND p_end > p_start
+    ),
+    complete_days AS (
+        SELECT
+            rollup.usage_day,
+            rollup.account_id,
+            rollup.operation,
+            NULLIF(rollup.model_key, '') AS model,
+            NULLIF(rollup.region_key, '') AS region,
+            rollup.charged,
+            rollup.allowance_covered,
+            rollup.charge_count
+        FROM bursar.usage_daily_rollups AS rollup
+        CROSS JOIN bounds
+        WHERE bounds.full_start < bounds.full_end
+          AND rollup.usage_day
+                >= (bounds.full_start AT TIME ZONE 'UTC')::date
+          AND rollup.usage_day
+                < (bounds.full_end AT TIME ZONE 'UTC')::date
+    ),
+    edge_rows AS (
+        SELECT
+            (charge.created_at AT TIME ZONE 'UTC')::date AS usage_day,
+            charge.account_id,
+            charge.operation,
+            charge.model,
+            charge.region,
+            sum(charge.charged) AS charged,
+            sum(charge.allowance_covered) AS allowance_covered,
+            count(*) AS charge_count
+        FROM bursar.credit_usage_charges AS charge
+        CROSS JOIN bounds
+        WHERE charge.created_at >= p_start
+          AND charge.created_at < p_end
+          AND (
+              bounds.full_start >= bounds.full_end
+              OR charge.created_at < bounds.full_start
+              OR charge.created_at >= bounds.full_end
+          )
+        GROUP BY
+            (charge.created_at AT TIME ZONE 'UTC')::date,
+            charge.account_id,
+            charge.operation,
+            charge.model,
+            charge.region
+    )
+    SELECT * FROM complete_days
+    UNION ALL
+    SELECT * FROM edge_rows
+$$;
+
 CREATE FUNCTION bursar.spend_by_operation(
     p_start timestamptz,
     p_end timestamptz
@@ -163,11 +252,10 @@ RETURNS TABLE(
     charge_count bigint
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT operation,SUM(charged),COUNT(*)
-    FROM bursar.credit_usage_charges
-    WHERE created_at>=p_start AND created_at<p_end
+    SELECT operation, sum(charged), sum(charge_count)::bigint
+    FROM bursar.usage_analytics_slice(p_start, p_end)
     GROUP BY operation
-    ORDER BY SUM(charged) DESC
+    ORDER BY sum(charged) DESC
 $$;
 
 CREATE FUNCTION bursar.list_ledger(
@@ -280,12 +368,14 @@ RETURNS TABLE(
     charge_count bigint
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT a.subject_id,SUM(c.charged),COUNT(*)
-    FROM bursar.credit_usage_charges c
-    JOIN bursar.credit_accounts a ON a.id=c.account_id
-    WHERE c.created_at>=p_start AND c.created_at<p_end
-    GROUP BY a.subject_id
-    ORDER BY SUM(c.charged) DESC
+    SELECT
+        account.subject_id,
+        sum(usage.charged),
+        sum(usage.charge_count)::bigint
+    FROM bursar.usage_analytics_slice(p_start, p_end) AS usage
+    JOIN bursar.credit_accounts AS account ON account.id = usage.account_id
+    GROUP BY account.subject_id
+    ORDER BY sum(usage.charged) DESC
 $$;
 
 CREATE FUNCTION bursar.spend_by_model(
@@ -298,11 +388,13 @@ RETURNS TABLE(
     charge_count bigint
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT COALESCE(model,'unknown'),SUM(charged),COUNT(*)
-    FROM bursar.credit_usage_charges
-    WHERE created_at>=p_start AND created_at<p_end
-    GROUP BY COALESCE(model,'unknown')
-    ORDER BY SUM(charged) DESC
+    SELECT
+        COALESCE(model, 'unknown'),
+        sum(charged),
+        sum(charge_count)::bigint
+    FROM bursar.usage_analytics_slice(p_start, p_end)
+    GROUP BY COALESCE(model, 'unknown')
+    ORDER BY sum(charged) DESC
 $$;
 
 CREATE FUNCTION bursar.daily_spend(
@@ -315,11 +407,10 @@ RETURNS TABLE(
     charge_count bigint
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT (created_at AT TIME ZONE 'UTC')::date,SUM(charged),COUNT(*)
-    FROM bursar.credit_usage_charges
-    WHERE created_at>=p_start AND created_at<p_end
-    GROUP BY 1
- ORDER BY 1
+    SELECT usage_day, sum(charged), sum(charge_count)::bigint
+    FROM bursar.usage_analytics_slice(p_start, p_end)
+    GROUP BY usage_day
+    ORDER BY usage_day
 $$;
 
 CREATE FUNCTION bursar.aggregate_usage_stats(
@@ -340,17 +431,13 @@ SET search_path TO ''
 AS $$
     WITH usage AS (
         SELECT
-            charge.charged,
-            charge.model,
+            slice.charged,
+            slice.charge_count,
+            slice.model,
             account.subject_id
-        FROM bursar.credit_usage_charges AS charge
+        FROM bursar.usage_analytics_slice(p_start, p_end) AS slice
         JOIN bursar.credit_accounts AS account
-          ON account.id = charge.account_id
-        WHERE p_start IS NOT NULL
-          AND p_end IS NOT NULL
-          AND p_end > p_start
-          AND charge.created_at >= p_start
-          AND charge.created_at < p_end
+          ON account.id = slice.account_id
     ),
     totals AS (
         SELECT

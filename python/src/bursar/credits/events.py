@@ -57,6 +57,9 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.cycle_renewed",
         # Emitted by CreditsService.revoke_credits_by_entry_type (subscription lifecycle).
         "credits.revoked",
+        # Quota threshold events.
+        "credits.quota_blocked",
+        "credits.quota_threshold",
     }
 )
 
@@ -79,6 +82,8 @@ CreditEventType = Literal[
     "credits.overdraft",
     "credits.cycle_renewed",
     "credits.revoked",
+    "credits.quota_blocked",
+    "credits.quota_threshold",
 ]
 
 

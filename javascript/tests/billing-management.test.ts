@@ -25,6 +25,18 @@ describe("BillingManagement", () => {
       },
       {
         userId: "user-1",
+        provider: "stripe",
+        providerSubscriptionId: "sub-unpaid",
+        status: "unpaid",
+      },
+      {
+        userId: "user-1",
+        provider: "stripe",
+        providerSubscriptionId: "sub-paused",
+        status: "paused",
+      },
+      {
+        userId: "user-1",
         provider: "dodo",
         providerSubscriptionId: "sub-ended",
         status: "canceled",
@@ -38,11 +50,15 @@ describe("BillingManagement", () => {
       expect.objectContaining({ provider: "dodo", providerSubscriptionId: "sub-dodo" }),
       expect.objectContaining({ provider: "stripe", providerSubscriptionId: "sub-stripe" }),
       expect.objectContaining({ provider: "dodo", providerSubscriptionId: "sub-past-due" }),
+      expect.objectContaining({ provider: "stripe", providerSubscriptionId: "sub-unpaid" }),
+      expect.objectContaining({ provider: "stripe", providerSubscriptionId: "sub-paused" }),
     ]);
     await expect(management.listCancellableProviderSubscriptionIds("user-1")).resolves.toEqual([
       "sub-dodo",
       "sub-stripe",
       "sub-past-due",
+      "sub-unpaid",
+      "sub-paused",
     ]);
   });
 });

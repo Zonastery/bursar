@@ -106,6 +106,8 @@ export class BillingManagement {
       SUBSCRIPTION_STATUS.TRIALING,
       SUBSCRIPTION_STATUS.PAST_DUE,
       SUBSCRIPTION_STATUS.INCOMPLETE,
+      SUBSCRIPTION_STATUS.UNPAID,
+      SUBSCRIPTION_STATUS.PAUSED,
     ]);
     const subscriptions = await this.store.getUserSubscriptions(userId);
     return subscriptions.filter(

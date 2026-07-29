@@ -64,7 +64,7 @@ async def test_supported_stripe_routes_emit_canonical_events(
 
 
 @pytest.mark.asyncio
-async def test_checkout_subscription_emits_created_and_activated(sink: MagicMock) -> None:
+async def test_checkout_subscription_emits_checkout_completed(sink: MagicMock) -> None:
     stripe = SimpleNamespace(
         checkout=SimpleNamespace(
             Session=SimpleNamespace(retrieve_async=AsyncMock(return_value={"line_items": {"data": []}}))
@@ -83,10 +83,87 @@ async def test_checkout_subscription_emits_created_and_activated(sink: MagicMock
         "metadata": {"plan_slug": "pro"},
     }
     await handle_stripe_billing_event("checkout.session.completed", "evt_checkout", data, "u1", {}, sink, stripe)
-    assert [call.args[0].event_type for call in sink.ingest_billing_event.call_args_list] == [
-        "subscription.created",
-        "subscription.activated",
-    ]
+    assert [call.args[0].event_type for call in sink.ingest_billing_event.call_args_list] == ["checkout.completed"]
+
+
+@pytest.mark.parametrize(
+    ("provider_event", "provider_status", "expected_event", "expected_status"),
+    [
+        ("payment_intent.succeeded", "succeeded", "payment.succeeded", "succeeded"),
+        ("payment_intent.payment_failed", "requires_payment_method", "payment.failed", "failed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_payment_intent_event_uses_webhook_type_for_outcome(
+    provider_event: str,
+    provider_status: str,
+    expected_event: str,
+    expected_status: str,
+    sink: MagicMock,
+) -> None:
+    await handle_stripe_billing_event(
+        provider_event,
+        f"evt_{expected_status}",
+        {
+            "id": f"pi_{expected_status}",
+            "amount": 500,
+            "currency": "usd",
+            "status": provider_status,
+            "metadata": {
+                "auto_recharge_attempt_id": "attempt_1",
+                "userId": "u1",
+                "price_id": "price_topup",
+            },
+        },
+        None,
+        {},
+        sink,
+        SimpleNamespace(),
+    )
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == expected_event
+    assert event.payment is not None
+    assert event.payment.status == expected_status
+    assert event.payment.refs is not None
+    assert event.payment.refs.price_id == "price_topup"
+
+
+@pytest.mark.parametrize(
+    ("provider_event", "provider_status", "expected_event", "expected_status"),
+    [
+        ("refund.created", "pending", "refund.created", "pending"),
+        ("refund.updated", "succeeded", "refund.updated", "succeeded"),
+        ("refund.failed", "pending", "refund.failed", "failed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_refund_event_preserves_lifecycle_state(
+    provider_event: str,
+    provider_status: str,
+    expected_event: str,
+    expected_status: str,
+    sink: MagicMock,
+) -> None:
+    await handle_stripe_billing_event(
+        provider_event,
+        f"evt_{expected_status}",
+        {
+            "id": f"re_{expected_status}",
+            "payment_intent": "pi_1",
+            "amount": 500,
+            "currency": "usd",
+            "status": provider_status,
+            "metadata": {"userId": "u1"},
+        },
+        None,
+        {},
+        sink,
+        SimpleNamespace(),
+    )
+    event = sink.ingest_billing_event.call_args.args[0]
+    assert event.event_type == expected_event
+    assert event.refund is not None
+    assert event.refund.status == expected_status
 
 
 @pytest.mark.asyncio

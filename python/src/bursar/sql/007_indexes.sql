@@ -149,14 +149,41 @@ ON bursar.credit_usage_charges(
 INCLUDE (allowance_covered)
 WHERE allowance_covered > 0;
 
-CREATE INDEX usage_charge_dimensions_gin_idx
-ON bursar.credit_usage_charges USING gin(dimensions);
-
-CREATE INDEX usage_charge_measures_gin_idx
-ON bursar.credit_usage_charges USING gin(measures);
-
 CREATE INDEX usage_charge_created_brin_idx
 ON bursar.credit_usage_charges USING brin(created_at);
+
+CREATE INDEX usage_charge_payload_charge_idx
+ON bursar.usage_charge_payloads(charge_id, event_at);
+
+CREATE INDEX usage_rollup_account_day_idx
+ON bursar.usage_daily_rollups(account_id, usage_day);
+
+CREATE INDEX usage_rollup_operation_day_idx
+ON bursar.usage_daily_rollups(operation, usage_day);
+
+CREATE INDEX usage_rollup_model_day_idx
+ON bursar.usage_daily_rollups(model_key, usage_day);
+
+CREATE INDEX storage_partitions_expiry_idx
+ON bursar.storage_partitions(parent_table, range_end);
+
+CREATE INDEX event_outbox_claimable_idx
+ON bursar.event_outbox(available_at, created_at, id)
+WHERE status IN ('pending', 'processing');
+
+CREATE INDEX event_outbox_topic_claimable_idx
+ON bursar.event_outbox(topic, available_at, created_at, id)
+WHERE status IN ('pending', 'processing');
+
+CREATE INDEX event_outbox_aggregate_idx
+ON bursar.event_outbox(aggregate_type, aggregate_id);
+
+CREATE INDEX event_outbox_retention_idx
+ON bursar.event_outbox(created_at, id);
+
+CREATE INDEX event_outbox_delivered_retention_idx
+ON bursar.event_outbox(delivered_at, id)
+WHERE status = 'delivered';
 
 CREATE INDEX credit_usage_charges_ledger_entry_idx
 ON bursar.credit_usage_charges(ledger_entry_id)
@@ -226,6 +253,13 @@ ON bursar.quota_usage_events(
 )
 INCLUDE (amount);
 
+CREATE INDEX quota_usage_events_retention_idx
+ON bursar.quota_usage_events(event_at, id);
+
+CREATE INDEX quota_usage_events_correction_idx
+ON bursar.quota_usage_events(correction_of_event_id)
+WHERE correction_of_event_id IS NOT NULL;
+
 CREATE INDEX quota_usage_events_charge_idx
 ON bursar.quota_usage_events(usage_charge_id)
 WHERE usage_charge_id IS NOT NULL;
@@ -233,6 +267,9 @@ WHERE usage_charge_id IS NOT NULL;
 CREATE INDEX quota_events_charge_idx
 ON bursar.quota_events(usage_charge_id)
 WHERE usage_charge_id IS NOT NULL;
+
+CREATE INDEX quota_events_retention_idx
+ON bursar.quota_events(created_at, id);
 
 CREATE INDEX credit_lease_quota_active_idx
 ON bursar.credit_lease_quota_reservations(
@@ -250,6 +287,14 @@ WHERE status = 'active';
 CREATE INDEX active_operation_leases_idx
 ON bursar.credit_leases(account_id, operation, expires_at)
 WHERE status = 'active';
+
+CREATE INDEX terminal_lease_payload_retention_idx
+ON bursar.credit_leases(updated_at, id)
+WHERE status IN ('settled', 'released', 'expired')
+  AND (
+      dimensions <> '{}'::jsonb
+      OR metadata <> '{}'::jsonb
+  );
 
 CREATE INDEX active_plan_allowance_leases_idx
 ON bursar.credit_leases(
@@ -339,6 +384,9 @@ WHERE provider_invoice_id IS NOT NULL;
 CREATE INDEX billing_events_claimable_idx
 ON bursar.billing_events(claim_expires_at, created_at, id)
 WHERE status IN ('processing', 'failed');
+
+CREATE INDEX billing_event_payload_event_idx
+ON bursar.billing_event_payloads(event_id, received_at);
 
 CREATE INDEX billing_subscription_conflicts_subject_idx
 ON bursar.billing_subscription_conflicts(subject_id, created_at DESC)

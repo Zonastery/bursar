@@ -17,11 +17,11 @@ class BillingDisputeRepository:
         self,
         provider: str,
         provider_dispute_id: str,
-        provider_payment_id: str | None,
-        user_id: str | None,
+        payment_id: str,
         status: str,
         reason: str | None,
-        metadata: str | None,
+        metadata: str,
+        provider_updated_at: str,
     ) -> None:
         """Insert or update a billing dispute record.
 
@@ -36,7 +36,16 @@ class BillingDisputeRepository:
         """
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_dispute_id, "provider_dispute_id")
+        validate_non_empty(payment_id, "payment_id")
         self._execute(
-            "SELECT bursar.upsert_billing_dispute(%s, %s, %s, %s, %s, %s, %s)",
-            [provider, provider_dispute_id, provider_payment_id, user_id, status, reason, metadata],
+            "SELECT bursar.upsert_billing_dispute(%s,%s,%s::uuid,%s,%s,%s::jsonb,%s)",
+            [
+                provider,
+                provider_dispute_id,
+                payment_id,
+                status,
+                reason,
+                metadata,
+                provider_updated_at,
+            ],
         )

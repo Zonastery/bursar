@@ -11,6 +11,287 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION bursar.ensure_storage_partition(
+    p_parent_table text,
+    p_at timestamptz,
+    p_wait_for_lock boolean DEFAULT true
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_from timestamptz;
+    v_to timestamptz;
+    v_partition text;
+BEGIN
+    IF p_parent_table NOT IN (
+        'usage_charge_payloads',
+        'billing_event_payloads'
+    ) OR p_at IS NULL
+      OR p_wait_for_lock IS NULL
+    THEN
+        RAISE EXCEPTION 'invalid storage partition request'
+            USING ERRCODE = '22023';
+    END IF;
+
+    v_from := date_trunc('month', p_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC';
+    v_to := v_from + interval '1 month';
+    v_partition := format(
+        '%s_%s',
+        p_parent_table,
+        to_char(v_from, 'YYYYMM')
+    );
+
+    -- This function is on the ingestion path. Avoid catalog DDL and its locks
+    -- after the month's partition has been registered.
+    IF EXISTS (
+        SELECT 1
+        FROM bursar.storage_partitions AS partition
+        WHERE partition.parent_table = p_parent_table
+          AND partition.range_start = v_from
+    ) THEN
+        RETURN v_partition;
+    END IF;
+
+    IF p_wait_for_lock THEN
+        PERFORM pg_advisory_xact_lock(
+            hashtextextended('bursar.partition.' || v_partition, 0)
+        );
+    ELSIF NOT pg_try_advisory_xact_lock(
+        hashtextextended('bursar.partition.' || v_partition, 0)
+    ) THEN
+        RAISE EXCEPTION 'storage partition is being created'
+            USING ERRCODE = '55P03';
+    END IF;
+
+    -- Recheck after the lock because another writer may have created it.
+    IF EXISTS (
+        SELECT 1
+        FROM bursar.storage_partitions AS partition
+        WHERE partition.parent_table = p_parent_table
+          AND partition.range_start = v_from
+    ) THEN
+        RETURN v_partition;
+    END IF;
+
+    EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS bursar.%I '
+        'PARTITION OF bursar.%I FOR VALUES FROM (%L) TO (%L)',
+        v_partition,
+        p_parent_table,
+        v_from,
+        v_to
+    );
+
+    EXECUTE format(
+        'COMMENT ON TABLE bursar.%I IS %L',
+        v_partition,
+        'Managed monthly partition of bursar.' || p_parent_table || '.'
+    );
+
+    INSERT INTO bursar.storage_partitions(
+        parent_table,
+        partition_table,
+        range_start,
+        range_end
+    )
+    VALUES (
+        p_parent_table,
+        v_partition,
+        v_from,
+        v_to
+    )
+    ON CONFLICT (parent_table, range_start) DO UPDATE
+    SET partition_table = EXCLUDED.partition_table,
+        range_end = EXCLUDED.range_end;
+
+    RETURN v_partition;
+END
+$$;
+
+CREATE FUNCTION bursar.project_usage_charge()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+BEGIN
+    INSERT INTO bursar.usage_daily_rollups(
+        usage_day,
+        account_id,
+        operation,
+        model_key,
+        region_key,
+        charged,
+        allowance_covered,
+        charge_count
+    )
+    VALUES(
+        (NEW.created_at AT TIME ZONE 'UTC')::date,
+        NEW.account_id,
+        NEW.operation,
+        COALESCE(NEW.model, ''),
+        COALESCE(NEW.region, ''),
+        NEW.charged,
+        NEW.allowance_covered,
+        1
+    )
+    ON CONFLICT (
+        usage_day,
+        account_id,
+        operation,
+        model_key,
+        region_key
+    )
+    DO UPDATE
+    SET charged = bursar.usage_daily_rollups.charged + EXCLUDED.charged,
+        allowance_covered =
+            bursar.usage_daily_rollups.allowance_covered
+            + EXCLUDED.allowance_covered,
+        charge_count = bursar.usage_daily_rollups.charge_count + 1,
+        updated_at = now();
+
+    INSERT INTO bursar.event_outbox(
+        topic,
+        aggregate_type,
+        aggregate_id,
+        idempotency_key,
+        payload
+    )
+    VALUES(
+        'usage.charge_recorded',
+        'credit_usage_charge',
+        NEW.id,
+        'usage-charge:' || NEW.id::text,
+        jsonb_build_object(
+            'charge_id', NEW.id,
+            'account_id', NEW.account_id,
+            'event_at', NEW.event_at,
+            'created_at', NEW.created_at
+        )
+    )
+    ON CONFLICT (idempotency_key) DO NOTHING;
+
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION bursar.enqueue_quota_notification()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+BEGIN
+    INSERT INTO bursar.event_outbox(
+        topic,
+        aggregate_type,
+        aggregate_id,
+        idempotency_key,
+        payload
+    )
+    VALUES(
+        CASE NEW.event_type
+            WHEN 'threshold' THEN 'quota.threshold_reached'
+            ELSE 'quota.admission_blocked'
+        END,
+        'quota_event',
+        NEW.id,
+        'quota-event:' || NEW.id::text,
+        jsonb_strip_nulls(
+            jsonb_build_object(
+                'quota_event_id', NEW.id,
+                'quota_window_id', NEW.quota_window_id,
+                'usage_charge_id', NEW.usage_charge_id,
+                'event_type', NEW.event_type,
+                'threshold_percent', NEW.threshold_percent,
+                'created_at', NEW.created_at
+            )
+        )
+    )
+    ON CONFLICT (idempotency_key) DO NOTHING;
+
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION bursar.enqueue_quota_measurement()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+BEGIN
+    INSERT INTO bursar.event_outbox(
+        topic,
+        aggregate_type,
+        aggregate_id,
+        idempotency_key,
+        payload
+    )
+    VALUES(
+        'quota.measurement_recorded',
+        'quota_usage_event',
+        NEW.id,
+        'quota-usage-event:' || NEW.id::text,
+        jsonb_strip_nulls(
+            jsonb_build_object(
+                'quota_usage_event_id', NEW.id,
+                'account_id', NEW.account_id,
+                'catalog_quota_id', NEW.catalog_quota_id,
+                'quota_key', NEW.quota_key,
+                'operation_key', NEW.operation_key,
+                'measure_key', NEW.measure_key,
+                'amount', bursar.digest_numeric_text(NEW.amount),
+                'event_at', NEW.event_at,
+                'usage_charge_id', NEW.usage_charge_id,
+                'correction_of_event_id', NEW.correction_of_event_id
+            )
+        )
+    )
+    ON CONFLICT (idempotency_key) DO NOTHING;
+
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION bursar.enqueue_completed_billing_event()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path TO ''
+AS $$
+BEGIN
+    IF NEW.status IN ('completed', 'ignored')
+       AND OLD.status IS DISTINCT FROM NEW.status
+    THEN
+        INSERT INTO bursar.event_outbox(
+            topic,
+            aggregate_type,
+            aggregate_id,
+            idempotency_key,
+            payload
+        )
+        VALUES(
+            'billing.webhook_completed',
+            'billing_event',
+            NEW.id,
+            'billing-event-completed:' || NEW.id::text,
+            jsonb_build_object(
+                'billing_event_id', NEW.id,
+                'provider', NEW.provider,
+                'provider_environment', NEW.provider_environment,
+                'provider_event_id', NEW.provider_event_id,
+                'event_type', NEW.event_type,
+                'status', NEW.status,
+                'completed_at', NEW.completed_at
+            )
+        )
+        ON CONFLICT (idempotency_key) DO NOTHING;
+    END IF;
+
+    RETURN NEW;
+END
+$$;
+
 CREATE FUNCTION bursar.require_valid_timezone()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -468,7 +749,24 @@ DECLARE
     v_quota record;
     v_original bursar.quota_usage_events;
     v_corrected numeric;
+    v_storage bursar.storage_settings;
 BEGIN
+    SELECT *
+    INTO v_storage
+    FROM bursar.storage_settings
+    WHERE singleton;
+
+    IF NEW.correction_of_event_id IS NULL
+       AND (
+           NEW.event_at < now()
+               - make_interval(secs => v_storage.quota_max_lateness_seconds)
+           OR NEW.event_at > now() + interval '5 minutes'
+       )
+    THEN
+        RAISE EXCEPTION 'quota usage event outside accepted time horizon'
+            USING ERRCODE = '22023';
+    END IF;
+
     SELECT
         quota.catalog_revision_id,
         quota.plan_key,
@@ -756,6 +1054,9 @@ DECLARE
     v_measures jsonb;
     v_threshold integer;
     v_previous integer := 0;
+    v_duration_seconds bigint;
+    v_required_seconds bigint;
+    v_storage bursar.storage_settings;
 BEGIN
     SELECT measures
     INTO v_measures
@@ -779,6 +1080,39 @@ BEGIN
         END IF;
         v_previous := v_threshold;
     END LOOP;
+
+    v_duration_seconds := bursar.policy_duration_seconds(NEW.window_policy);
+
+    IF v_duration_seconds IS NULL THEN
+        RAISE EXCEPTION 'invalid rolling quota duration'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF v_duration_seconds > 0 THEN
+        SELECT *
+        INTO v_storage
+        FROM bursar.storage_settings
+        WHERE singleton;
+
+        v_required_seconds :=
+            v_duration_seconds
+            + v_storage.quota_max_lateness_seconds
+            + v_storage.quota_correction_window_days * 86400::bigint
+            + v_storage.quota_retention_safety_days * 86400::bigint;
+
+        IF v_required_seconds
+           > v_storage.quota_event_retention_days * 86400::bigint
+        THEN
+            RAISE EXCEPTION
+                'rolling quota exceeds configured event retention horizon'
+                USING ERRCODE = '23514',
+                      DETAIL = format(
+                          'required=%s seconds configured=%s seconds',
+                          v_required_seconds,
+                          v_storage.quota_event_retention_days * 86400::bigint
+                      );
+        END IF;
+    END IF;
 
     RETURN NEW;
 END

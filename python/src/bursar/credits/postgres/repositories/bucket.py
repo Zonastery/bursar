@@ -44,9 +44,24 @@ class BucketRepository:
             }
         )
 
-    def sweep_expired_credits(self, limit: int = 100) -> SweepRow:
+    def sweep_expired_credits(
+        self,
+        dry_run: bool = False,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> SweepRow:
         """Expire at most ``limit`` eligible credit lots."""
         if limit < 1:
             raise ValueError("limit must be positive")
-        rows = self._callproc("expire_lots", [limit])
-        return SweepRow(expired_count=int(rows[0]) if rows else 0)
+        rows = self._callproc("sweep_expired_lots", [limit, user_id, dry_run])
+        if not rows:
+            return SweepRow(expired_count=0)
+        row = rows[0]
+        if isinstance(row, int):
+            return SweepRow(expired_count=row)
+        return SweepRow(
+            expired_count=int(row.get("expired_count", 0)),
+            expired_amount=row.get("expired_amount", "0"),
+            dry_run=bool(row.get("dry_run", dry_run)),
+            expired_by_bucket=row.get("expired_by_bucket"),
+        )

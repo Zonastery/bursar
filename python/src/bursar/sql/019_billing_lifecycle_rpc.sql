@@ -22,6 +22,7 @@ DECLARE
     v_environment text:=bursar.current_provider_environment();
     v_envelope jsonb:=COALESCE(p_envelope,'{}'::jsonb);
     v_digest bytea;
+    v_received_at timestamptz := now();
 
 BEGIN
     IF p_provider IS NULL OR p_provider='' OR p_event_id IS NULL OR p_event_id=''
@@ -35,25 +36,48 @@ BEGIN
 
     END IF;
 
-    IF jsonb_typeof(v_envelope)<>'object' THEN
+    IF NOT bursar.is_bounded_json_object(v_envelope, 1048576)
+       OR NOT bursar.is_bounded_text(p_provider, 100)
+       OR NOT bursar.is_bounded_text(p_event_id, 255)
+       OR NOT bursar.is_bounded_text(p_event_type, 255)
+    THEN
         RETURN QUERY SELECT 'invalid_request',NULL::uuid,NULL::uuid;
         RETURN;
     END IF;
 
     v_digest:=extensions.digest(convert_to(v_envelope::text,'UTF8'),'sha256');
 
+    -- Establish the payload partition before taking locks in billing_events.
+    -- Creating a first-of-month partition after the event insert can invert the
+    -- lock order between concurrent claimers and deadlock the unique-key wait.
+    PERFORM bursar.ensure_storage_partition(
+        'billing_event_payloads',
+        v_received_at
+    );
+
     INSERT INTO bursar.billing_events(
-        provider,provider_environment,provider_event_id,event_type,envelope,
-        envelope_digest,status,claim_token,claim_expires_at
+        provider,provider_environment,provider_event_id,event_type,
+        envelope_digest,payload_received_at,status,claim_token,claim_expires_at
     )
     VALUES (
-        p_provider,v_environment,p_event_id,p_event_type,v_envelope,v_digest,
+        p_provider,v_environment,p_event_id,p_event_type,v_digest,v_received_at,
         'processing',v_token,now()+make_interval(secs=>p_lease_seconds)
     )
     ON CONFLICT DO NOTHING
     RETURNING * INTO v_event;
 
     IF FOUND THEN
+        INSERT INTO bursar.billing_event_payloads(
+            event_id,
+            received_at,
+            envelope
+        )
+        VALUES(
+            v_event.id,
+            v_received_at,
+            v_envelope
+        );
+
         RETURN QUERY SELECT 'claimed',v_event.id,v_token;
 
         RETURN;

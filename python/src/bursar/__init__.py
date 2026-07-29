@@ -3,7 +3,10 @@
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
-from bursar.billing.auto_recharge_service import AutoRechargeService
+from bursar.billing.auto_recharge_service import (
+    AutoRechargeProcessResult,
+    AutoRechargeService,
+)
 
 try:
     __version__ = version("bursar")
@@ -15,6 +18,7 @@ from bursar.billing import (
     AllowanceGrant,
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
+    BillingAutoRechargeStatus,
     BillingCreditTopup,
     BillingCustomerInfo,
     BillingCustomerRecord,
@@ -31,7 +35,12 @@ from bursar.billing import (
     BillingProvider,
     BillingRefundInfo,
     BillingStore,
+    BillingSubscriptionChange,
+    BillingSubscriptionChangeInput,
+    BillingSubscriptionChangeState,
     BillingSubscriptionInfo,
+    BillingSubscriptionOfferContext,
+    BillingSubscriptionProrationBehavior,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     CycleGrant,
@@ -94,6 +103,7 @@ from bursar.credits.types import (
     ListLedgerEntriesOptions,
     ListQuotaEventsOptions,
     ListUsageEntriesOptions,
+    MigratePlanUsersResult,
     OperationPolicy,
     PlanDefinition,
     PlanMigrationBatchResult,
@@ -146,6 +156,8 @@ def __getattr__(name: str):
 __all__ = [
     "BillingAutoRechargeAttempt",
     "BillingAutoRechargeProfile",
+    "BillingAutoRechargeStatus",
+    "AutoRechargeProcessResult",
     "AutoRechargeService",
     "AddCreditsResult",
     "AddTeamMemberResult",
@@ -175,7 +187,12 @@ __all__ = [
     "BillingEventSink",
     "BillingService",
     "CatalogService",
+    "BillingSubscriptionChange",
+    "BillingSubscriptionChangeInput",
+    "BillingSubscriptionChangeState",
     "BillingSubscriptionInfo",
+    "BillingSubscriptionOfferContext",
+    "BillingSubscriptionProrationBehavior",
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
     "BucketBalance",
@@ -219,6 +236,7 @@ __all__ = [
     "ListLedgerEntriesOptions",
     "ListQuotaEventsOptions",
     "ListUsageEntriesOptions",
+    "MigratePlanUsersResult",
     "make_cost_breakdown",
     "OperationNotAllowedError",
     "OperationPolicy",

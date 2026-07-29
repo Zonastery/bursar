@@ -52,12 +52,12 @@ def make_cost_breakdown(
     operation_credits: Decimal | None = None,
     breakdown: dict[str, Any] | None = None,
 ) -> CostBreakdown:
-    model_credits = quantize_money(model_credits or Decimal(0))
-    tool_credits = quantize_money(tool_credits or Decimal(0))
-    search_credits = quantize_money(search_credits or Decimal(0))
-    cache_savings = quantize_money(cache_savings or Decimal(0))
-    fixed_credits = quantize_money(fixed_credits or Decimal(0))
-    operation_credits = quantize_money(operation_credits or Decimal(0))
+    model_credits = quantize_money(model_credits if model_credits is not None else Decimal(0))
+    tool_credits = quantize_money(tool_credits if tool_credits is not None else Decimal(0))
+    search_credits = quantize_money(search_credits if search_credits is not None else Decimal(0))
+    cache_savings = quantize_money(cache_savings if cache_savings is not None else Decimal(0))
+    fixed_credits = quantize_money(fixed_credits if fixed_credits is not None else Decimal(0))
+    operation_credits = quantize_money(operation_credits if operation_credits is not None else Decimal(0))
 
     raw_total = model_credits + tool_credits + search_credits + fixed_credits + operation_credits + cache_savings
     total = quantize_money(max(Decimal(0), raw_total))
@@ -70,5 +70,5 @@ def make_cost_breakdown(
         fixed_credits=fixed_credits,
         operation_credits=operation_credits,
         total=total,
-        breakdown=breakdown or {},
+        breakdown=breakdown if breakdown is not None else {},
     )

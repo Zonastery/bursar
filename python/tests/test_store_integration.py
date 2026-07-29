@@ -204,6 +204,20 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
         {
             "allowed_operations": ["completion"],
             "features": {"tutor_chat": True},
+            "quotas": {
+                "completion_input": {
+                    "operation": "completion",
+                    "measure": "input_tokens",
+                    "limit": "5",
+                    "window": {
+                        "type": "calendar",
+                        "unit": "month",
+                        "count": 1,
+                        "timezone": "UTC",
+                    },
+                    "enforcement": "block",
+                }
+            },
         }
     )
     service = CreditsService(store=store)
@@ -271,6 +285,28 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
     assert refund.new_balance == Decimal("100")
     assert replay.refund_entry_id == refund.refund_entry_id
     assert service.get_balance(USER_ID).balance == Decimal("100")
+
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(sum(event.amount), 0),
+                COALESCE(max(quota_window.consumed), 0)
+            FROM bursar.credit_accounts AS account
+            LEFT JOIN bursar.quota_usage_events AS event
+              ON event.account_id = account.id
+             AND event.quota_key = 'completion_input'
+            LEFT JOIN bursar.quota_windows AS quota_window
+              ON quota_window.account_id = account.id
+             AND quota_window.quota_key = 'completion_input'
+            WHERE account.subject_id = %s
+            """,
+            [USER_ID],
+        )
+        usage_total, cached_consumed = cursor.fetchone()
+
+    assert usage_total == Decimal("0")
+    assert cached_consumed == Decimal("0")
 
 
 def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> None:
@@ -351,7 +387,7 @@ def test_account_created_grant_program_posts_every_award(
         assert cursor.fetchone() == (2,)
 
 
-def test_plan_policies_project_from_typed_references(
+def test_plan_policies_persist_as_typed_references(
     store: PostgresStore,
 ) -> None:
     config = deepcopy(CONFIG)
@@ -389,7 +425,7 @@ def test_plan_policies_project_from_typed_references(
     with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT spending, limits, quotas
+            SELECT credit_policy_key, admission_policy_key
             FROM bursar.catalog_plans
             WHERE plan_key = 'pro'
               AND catalog_revision_id = (
@@ -399,12 +435,28 @@ def test_plan_policies_project_from_typed_references(
               )
             """
         )
-        spending, limits, quotas = cursor.fetchone()
+        assert cursor.fetchone() == ("line", "pro")
 
-    assert spending["mode"] == "overdraft"
-    assert spending["overdraft_limit"] == "20"
-    assert spending["max_concurrent"] == "2"
-    assert spending["operations"]["completion"]["max_concurrent"] == 1
-    assert limits["completion_calls"]["max_calls"] == 5
-    assert limits["completion_calls"]["action"] == "deny"
-    assert quotas["completion_calls"]["measure"] == "calls"
+        cursor.execute(
+            """
+            SELECT operation_key, measure_key, quota_limit, window_policy, enforcement
+            FROM bursar.catalog_plan_quotas
+            WHERE plan_key = 'pro'
+              AND quota_key = 'completion_calls'
+              AND catalog_revision_id = (
+                SELECT id
+                FROM bursar.catalog_revisions
+                WHERE status = 'active'
+              )
+            """
+        )
+        operation, measure, quota_limit, window, enforcement = cursor.fetchone()
+
+    assert operation == "completion"
+    assert measure == "calls"
+    assert quota_limit == Decimal("5")
+    assert window == {
+        "type": "rolling",
+        "duration": {"unit": "hour", "count": 1},
+    }
+    assert enforcement == "block"

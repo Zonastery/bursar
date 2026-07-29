@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime
+
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_non_empty
 from bursar.credits.postgres.repositories.schemas import BillingPaymentRow
@@ -20,12 +22,15 @@ class BillingPaymentRepository:
         currency: str,
         purpose: str | None,
         metadata: str | None,
+        status: str = "succeeded",
+        provider_updated_at: str | None = None,
     ) -> str:
-        del provider_invoice_id, metadata
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_payment_id, "provider_payment_id")
         rows = self._execute(
-            ("SELECT bursar.upsert_billing_payment(%s::uuid,%s,%s,%s,%s,%s,%s,%s::bursar.billing_payment_status)"),
+            "SELECT bursar.upsert_billing_payment("
+            "%s::uuid,%s,%s,%s,%s,%s,%s,%s::bursar.billing_payment_status,%s,%s,%s::jsonb"
+            ")",
             [
                 user_id,
                 provider,
@@ -34,7 +39,10 @@ class BillingPaymentRepository:
                 tax_minor or 0,
                 currency,
                 purpose or "unknown",
-                "succeeded",
+                status,
+                provider_updated_at or datetime.datetime.now(datetime.UTC).isoformat(),
+                provider_invoice_id,
+                metadata or "{}",
             ],
         )
         if not rows or not isinstance(rows[0], dict):

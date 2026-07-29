@@ -1,195 +1,339 @@
-"""Provider-neutral auto-recharge orchestration.
-
-Applications invoke this service after a credit deduction.  It owns policy
-resolution, consent snapshots, idempotency claims, and payment-provider calls;
-applications do not access Bursar auto-recharge tables directly.
-"""
+"""Provider-neutral auto-recharge orchestration."""
 
 from __future__ import annotations
 
-import json
-from hashlib import sha256
-from typing import Any
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Literal
+from uuid import uuid4
 
-from bursar.billing.types import BillingAutoRechargeProfile
+from bursar.billing.policy_window import resolve_auto_recharge_window
+from bursar.billing.types import (
+    BillingAutoRechargeProfile,
+    BillingAutoRechargeStatus,
+    BillingTopupResult,
+)
 from bursar.config import (
-    AutoRechargeGuardrails,
     CustomObjectReference,
     DodoProductReference,
     StripePriceReference,
     TopupOffer,
     load_config_from_dict,
 )
-from bursar.providers.types import PaymentProvider, SavedPaymentChargeParams
+from bursar.providers.types import (
+    PaymentMethodInfo,
+    PaymentProvider,
+    SavedPaymentChargeParams,
+    SavedPaymentChargeQuote,
+    SavedPaymentChargeResult,
+)
+
+AutoRechargeOutcome = Literal[
+    "not_configured",
+    "disabled",
+    "above_threshold",
+    "already_processing",
+    "limit_reached",
+    "submitted",
+    "action_required",
+    "failed",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AutoRechargeProcessResult:
+    outcome: AutoRechargeOutcome
+    charge: SavedPaymentChargeResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAutoRechargePolicy:
+    threshold: Decimal
+    topup_key: str
+    topup_id: str
+    quantity: int
+    max_charges_per_window: int
+    window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"]
+    window_count: int
+    window_anchor: Literal["calendar", "rolling"]
+    window_timezone: str
+    window_start: str
+    window_end: str
+    window_days: float
+    product_id: str
 
 
 class AutoRechargeService:
     def __init__(self, billing: Any) -> None:
         self._billing = billing
 
-    def _policy(self) -> AutoRechargeGuardrails | None:
+    def _policy(self, provider: PaymentProvider) -> _ResolvedAutoRechargePolicy | None:
         raw = self._billing.get_active_bursar_config()
         if raw is None:
             return None
-        return load_config_from_dict(raw).commerce.auto_recharge
+        config = load_config_from_dict(raw)
+        policy = config.commerce.auto_recharge
+        if policy is None:
+            return None
 
-    @staticmethod
-    def _policy_snapshot(policy: AutoRechargeGuardrails) -> tuple[dict[str, Any], str]:
-        snapshot = policy.model_dump(mode="json", exclude_none=True)
-        encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
-        return snapshot, sha256(encoded.encode()).hexdigest()
-
-    def _topup_product(self, policy: AutoRechargeGuardrails, provider: PaymentProvider) -> str:
-        raw = self._billing.get_active_bursar_config()
-        if raw is None:
-            raise ValueError("auto-recharge configuration is not active")
-        commerce = load_config_from_dict(raw).commerce
-        topup = commerce.offers.get(policy.eligible_topups[0])
+        topup_key = policy.eligible_topups[0]
+        topup = config.commerce.offers.get(topup_key)
         if not isinstance(topup, TopupOffer):
-            raise ValueError("auto-recharge top-up is not configured")
-        provider_ref = topup.providers.get(provider.provider)
-        if isinstance(provider_ref, StripePriceReference):
-            return provider_ref.price_id
-        if isinstance(provider_ref, DodoProductReference):
-            return provider_ref.product_id
-        if isinstance(provider_ref, CustomObjectReference):
-            return provider_ref.external_id
-        raise ValueError("auto-recharge top-up is unavailable for provider")
-
-    @staticmethod
-    def _window_days(policy: AutoRechargeGuardrails) -> int:
-        window = policy.limits.window
-        if window.type == "rolling":
-            multiplier = {
-                "second": 1 / 86400,
-                "minute": 1 / 1440,
-                "hour": 1 / 24,
-                "day": 1,
-                "week": 7,
-            }[window.duration.unit]
-            return max(1, int(window.duration.count * multiplier))
-        if window.unit == "month":
-            return 0
-        multiplier = {"day": 1, "week": 7, "year": 365}[window.unit]
-        return window.count * multiplier
-
-    async def quote(self, user_id: str, provider: PaymentProvider) -> dict[str, Any] | None:
-        policy = self._policy()
-        profile = self._billing.get_auto_recharge_profile(user_id)
-        if policy is None or profile is None or not profile.enabled:
             return None
-        if not profile.provider_customer_id or not profile.payment_method_id:
+        reference = topup.providers.get(provider.provider)
+        if reference is None:
             return None
-        quote = await provider.preview_saved_payment_charge(
-            SavedPaymentChargeParams(
-                customer_id=profile.provider_customer_id,
-                payment_method_id=profile.payment_method_id,
-                product_id=self._topup_product(policy, provider),
-                quantity=policy.quantity.default,
-                idempotency_key=f"auto-recharge-quote:{user_id}",
-            )
+
+        resolved_topup: BillingTopupResult | None
+        if isinstance(reference, StripePriceReference):
+            product_id = reference.price_id
+            resolved_topup = self._billing.resolve_topup(provider.provider, None, product_id)
+        elif isinstance(reference, DodoProductReference):
+            product_id = reference.product_id
+            resolved_topup = self._billing.resolve_topup(provider.provider, product_id, None)
+        elif isinstance(reference, CustomObjectReference):
+            product_id = reference.external_id
+            resolved_topup = self._billing.resolve_topup_by_lookup(provider.provider, product_id)
+        else:
+            return None
+        if resolved_topup is None:
+            return None
+
+        period = resolve_auto_recharge_window(policy.limits.window)
+        return _ResolvedAutoRechargePolicy(
+            threshold=Decimal(policy.balance_below.default),
+            topup_key=topup_key,
+            topup_id=resolved_topup.topup_id,
+            quantity=policy.quantity.default,
+            max_charges_per_window=policy.limits.max_purchases,
+            window_unit=period.unit,
+            window_count=period.count,
+            window_anchor=period.anchor,
+            window_timezone=period.timezone,
+            window_start=period.start,
+            window_end=period.end,
+            window_days=period.duration_days,
+            product_id=product_id,
         )
-        return {"amount_minor": quote.amount_minor, "currency": quote.currency}
+
+    async def _payment_method(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+    ) -> tuple[str, PaymentMethodInfo] | None:
+        customer = self._billing.get_customer_by_user_id(user_id, provider.provider)
+        if customer is None:
+            return None
+        methods = await provider.list_payment_methods(customer.provider_customer_id)
+        method = await provider.get_default_payment_method(customer.provider_customer_id)
+        if method is None:
+            method = next((candidate for candidate in methods if candidate.is_default), None)
+        if method is None and len(methods) == 1:
+            method = methods[0]
+        return (customer.provider_customer_id, method) if method is not None else None
+
+    async def quote(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+    ) -> SavedPaymentChargeQuote | None:
+        policy = self._policy(provider)
+        if policy is None:
+            return None
+        payment = await self._payment_method(user_id, provider)
+        if payment is None:
+            return None
+        customer_id, method = payment
+        try:
+            return await provider.preview_saved_payment_charge(
+                SavedPaymentChargeParams(
+                    customer_id=customer_id,
+                    payment_method_id=method.id,
+                    product_id=policy.product_id,
+                    quantity=policy.quantity,
+                    metadata={},
+                    idempotency_key="auto-recharge-preview",
+                )
+            )
+        except NotImplementedError:
+            return None
+
+    async def get_status(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+    ) -> BillingAutoRechargeStatus | None:
+        policy = self._policy(provider)
+        if policy is None:
+            return None
+        profile = self._billing.get_auto_recharge_profile(user_id)
+        payment = await self._payment_method(user_id, provider) if profile is not None and profile.enabled else None
+        quote = await self.quote(user_id, provider)
+        method = payment[1] if payment is not None else None
+        return BillingAutoRechargeStatus(
+            enabled=bool(profile and profile.enabled),
+            state=profile.state if profile and profile.enabled else "disabled",
+            threshold_credits=policy.threshold,
+            topup_key=policy.topup_key,
+            quantity=policy.quantity,
+            max_recharges=policy.max_charges_per_window,
+            window_days=policy.window_days,
+            window_start=policy.window_start,
+            window_end=policy.window_end,
+            recharges_in_window=self._billing.count_auto_recharge_attempts(
+                user_id,
+                policy.window_start,
+            ),
+            payment_method_id=method.id if method is not None else None,
+            payment_method_last4=method.last4 if method is not None else None,
+            payment_method_brand=method.brand if method is not None else None,
+            suspended_reason=("auto_recharge_paused" if profile and profile.state == "paused" else None),
+            pending_attempt_id=None,
+            quote_amount_minor=quote.amount_minor if quote is not None else None,
+            quote_currency=quote.currency if quote is not None else None,
+        )
 
     async def enable(
         self,
         user_id: str,
         provider: PaymentProvider,
         *,
-        consent_reference: str,
-        consent_metadata: dict[str, Any] | None = None,
-    ) -> BillingAutoRechargeProfile:
-        policy = self._policy()
+        balance: Decimal | int,
+        return_url: str,
+        consent_reference: str | None = None,
+    ) -> BillingAutoRechargeStatus | None:
+        policy = self._policy(provider)
         if policy is None:
-            raise ValueError("auto-recharge is not configured")
-        customer = self._billing.get_customer_by_user_id(user_id, provider.provider)
-        if customer is None:
-            raise ValueError("a saved payment method is required")
-        method = await provider.get_default_payment_method(customer.provider_customer_id)
-        if method is None:
-            raise ValueError("select a saved payment method before enabling auto-recharge")
-        snapshot, policy_hash = self._policy_snapshot(policy)
-        quote = await provider.preview_saved_payment_charge(
-            SavedPaymentChargeParams(
-                customer_id=customer.provider_customer_id,
-                payment_method_id=method.id,
-                product_id=self._topup_product(policy, provider),
-                quantity=policy.quantity.default,
-                idempotency_key=f"auto-recharge-quote:{user_id}",
+            raise ValueError("auto_recharge_not_configured")
+        payment = await self._payment_method(user_id, provider)
+        if payment is None:
+            raise ValueError("payment_method_required")
+
+        self._billing.upsert_auto_recharge_profile(
+            BillingAutoRechargeProfile(
+                user_id=user_id,
+                enabled=True,
+                state="active",
+                armed=True,
+                provider=provider.provider,
+                topup_id=policy.topup_id,
+                quantity=policy.quantity,
+                threshold=policy.threshold,
+                max_charges_per_window=policy.max_charges_per_window,
+                window_unit=policy.window_unit,
+                window_count=policy.window_count,
+                window_anchor=policy.window_anchor,
+                window_timezone=policy.window_timezone,
             )
         )
-        profile = BillingAutoRechargeProfile(
-            user_id=user_id,
-            enabled=True,
-            state="active",
-            provider=provider.provider,
-            provider_customer_id=customer.provider_customer_id,
-            payment_method_id=method.id,
-            consent_reference=consent_reference,
-            consent_metadata=consent_metadata,
-            policy_snapshot=snapshot,
-            policy_hash=policy_hash,
-            quote_snapshot={"amount_minor": quote.amount_minor, "currency": quote.currency},
-            armed=True,
+        await self.process_if_needed(
+            user_id,
+            provider,
+            balance=balance,
+            return_url=return_url,
         )
-        self._billing.upsert_auto_recharge_profile(profile)
-        return profile
+        return await self.get_status(user_id, provider)
 
     def disable(self, user_id: str) -> None:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None:
             return
-        profile.enabled = False
-        profile.state = "disabled"
-        self._billing.upsert_auto_recharge_profile(profile)
+        self._billing.upsert_auto_recharge_profile(
+            profile.model_copy(
+                update={
+                    "enabled": False,
+                    "state": "disabled",
+                    "armed": True,
+                }
+            )
+        )
 
-    async def process_if_needed(self, user_id: str, balance: int, provider: PaymentProvider) -> str:
-        policy = self._policy()
+    async def retry(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+        *,
+        balance: Decimal | int,
+        return_url: str,
+    ) -> AutoRechargeProcessResult:
         profile = self._billing.get_auto_recharge_profile(user_id)
-        if policy is None or profile is None or not profile.enabled:
-            return "disabled"
-        if balance >= policy.balance_below.default:
+        if profile is None or not profile.enabled:
+            raise ValueError("auto_recharge_disabled")
+        self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "active", "armed": True}))
+        return await self.process_if_needed(
+            user_id,
+            provider,
+            balance=balance,
+            return_url=return_url,
+        )
+
+    async def process_if_needed(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+        *,
+        balance: Decimal | int,
+        return_url: str,
+    ) -> AutoRechargeProcessResult:
+        policy = self._policy(provider)
+        if policy is None:
+            return AutoRechargeProcessResult(outcome="not_configured")
+        profile = self._billing.get_auto_recharge_profile(user_id)
+        if profile is None or not profile.enabled or profile.state != "active":
+            return AutoRechargeProcessResult(outcome="disabled")
+        if Decimal(balance) >= policy.threshold:
             if not profile.armed:
-                profile.armed = True
-                self._billing.upsert_auto_recharge_profile(profile)
-            return "above_threshold"
-        if not profile.armed or not profile.provider_customer_id or not profile.payment_method_id:
-            return "not_armed"
-        window_days = self._window_days(policy)
+                self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"armed": True}))
+            return AutoRechargeProcessResult(outcome="above_threshold")
+
+        payment = await self._payment_method(user_id, provider)
+        if payment is None:
+            return AutoRechargeProcessResult(outcome="failed")
+        customer_id, method = payment
         attempt = self._billing.claim_auto_recharge_attempt(
             user_id,
-            provider.provider,
-            policy.eligible_topups[0],
-            policy.quantity.default,
-            policy.limits.max_purchases,
-            window_days,
+            f"auto-recharge:{user_id}:{uuid4()}",
         )
         if attempt is None:
-            return "limit_reached"
-        profile.armed = False
-        self._billing.upsert_auto_recharge_profile(profile)
-        try:
-            charge = await provider.charge_saved_payment_method(
-                SavedPaymentChargeParams(
-                    customer_id=profile.provider_customer_id,
-                    payment_method_id=profile.payment_method_id,
-                    product_id=self._topup_product(policy, provider),
-                    quantity=policy.quantity.default,
-                    idempotency_key=attempt.idempotency_key,
-                    metadata={"user_id": user_id, "auto_recharge_attempt_id": attempt.id},
-                )
+            return AutoRechargeProcessResult(outcome="limit_reached")
+
+        charge = await provider.charge_saved_payment_method(
+            SavedPaymentChargeParams(
+                customer_id=customer_id,
+                payment_method_id=method.id,
+                product_id=policy.product_id,
+                quantity=policy.quantity,
+                return_url=return_url,
+                idempotency_key=attempt.idempotency_key,
+                metadata={
+                    "auto_recharge_attempt_id": attempt.id,
+                    "purpose": "credit_topup",
+                    "userId": user_id,
+                },
             )
+        )
+        if charge.status == "requires_customer_action":
             self._billing.update_auto_recharge_attempt(
                 attempt.id,
-                charge.status,
+                "submitted",
                 charge.provider_payment_id,
-                getattr(charge, "failure_code", None),
-                charge.action_url,
             )
-            return charge.status
-        except Exception as error:
-            self._billing.update_auto_recharge_attempt(attempt.id, "failed", failure_code=str(error))
-            profile.state = "suspended"
-            profile.suspended_reason = "payment_failed"
-            self._billing.upsert_auto_recharge_profile(profile)
-            return "failed"
+            self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
+            return AutoRechargeProcessResult(outcome="action_required", charge=charge)
+
+        if charge.status in {"succeeded", "processing"}:
+            self._billing.update_auto_recharge_attempt(
+                attempt.id,
+                "processing",
+                charge.provider_payment_id,
+            )
+            return AutoRechargeProcessResult(outcome="submitted", charge=charge)
+
+        self._billing.update_auto_recharge_attempt(
+            attempt.id,
+            "failed",
+            charge.provider_payment_id,
+            "payment_failed",
+        )
+        self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
+        return AutoRechargeProcessResult(outcome="failed", charge=charge)

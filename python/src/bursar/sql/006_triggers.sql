@@ -176,6 +176,10 @@ CREATE TRIGGER usage_charges_append_only
 BEFORE UPDATE OR DELETE ON bursar.credit_usage_charges
 FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
 
+CREATE TRIGGER usage_charge_projection
+AFTER INSERT ON bursar.credit_usage_charges
+FOR EACH ROW EXECUTE FUNCTION bursar.project_usage_charge();
+
 CREATE TRIGGER quota_usage_events_append_only
 BEFORE UPDATE OR DELETE ON bursar.quota_usage_events
 FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
@@ -183,6 +187,14 @@ FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
 CREATE TRIGGER quota_usage_event_invariant
 BEFORE INSERT ON bursar.quota_usage_events
 FOR EACH ROW EXECUTE FUNCTION bursar.check_quota_usage_event();
+
+CREATE TRIGGER quota_usage_event_outbox
+AFTER INSERT ON bursar.quota_usage_events
+FOR EACH ROW EXECUTE FUNCTION bursar.enqueue_quota_measurement();
+
+CREATE TRIGGER quota_notification_outbox
+AFTER INSERT ON bursar.quota_events
+FOR EACH ROW EXECUTE FUNCTION bursar.enqueue_quota_notification();
 
 CREATE TRIGGER grant_events_append_only
 BEFORE UPDATE OR DELETE ON bursar.grant_program_events
@@ -238,6 +250,18 @@ FOR EACH ROW EXECUTE FUNCTION bursar.validate_billing_payment_transition();
 
 CREATE TRIGGER billing_event_updated_at
 BEFORE UPDATE ON bursar.billing_events
+FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();
+
+CREATE TRIGGER billing_event_completed_outbox
+AFTER UPDATE OF status ON bursar.billing_events
+FOR EACH ROW EXECUTE FUNCTION bursar.enqueue_completed_billing_event();
+
+CREATE TRIGGER storage_settings_updated_at
+BEFORE UPDATE ON bursar.storage_settings
+FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();
+
+CREATE TRIGGER event_outbox_updated_at
+BEFORE UPDATE ON bursar.event_outbox
 FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();
 
 CREATE TRIGGER billing_refund_updated_at

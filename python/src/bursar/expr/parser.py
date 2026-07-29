@@ -10,9 +10,8 @@ import ast
 import re
 from decimal import Decimal, InvalidOperation
 
+from bursar.errors import ExpressionError
 from bursar.expr.language import ALLOWED_FUNCTIONS, SAFE_NAMES
-
-ExpressionError = type("ExpressionError", (ValueError,), {})
 
 
 def _validate_ast(node: ast.AST) -> None:

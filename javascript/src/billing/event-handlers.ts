@@ -627,13 +627,21 @@ export class BillingEventHandlers {
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const existing = await this.getExistingSubscription(event);
-    if (!existing) {
-      return { handled: true, action: "subscription_canceled_unknown" };
+    const resolved = existing ? null : await this.resolveOfferAndKeys(event);
+    if (!existing && !resolved?.offerId) {
+      throw new Error(
+        `cannot persist cancellation for unknown subscription ${event.provider}/${event.subscription.providerSubscriptionId}: offer could not be resolved`,
+      );
     }
     await this.store.upsertBillingSubscription(
       this.buildSubscriptionState(event, uid, existing, {
         status: "canceled",
         cancelAtPeriodEnd: event.subscription.cancelAtPeriodEnd ?? true,
+        offerKey: resolved?.offerKey ?? existing?.offerKey ?? null,
+        offerId: resolved?.offerId ?? existing?.offerId ?? null,
+        plan: resolved?.plan ?? existing?.plan ?? null,
+        interval: resolved?.offer?.interval,
+        intervalCount: resolved?.offer?.intervalCount,
       }),
     );
     if (this.provisioning) {
@@ -718,7 +726,7 @@ export class BillingEventHandlers {
       );
       return;
     }
-    const plan = planKeyOverride ?? offer?.planId;
+    const plan = planKeyOverride ?? offer?.plan;
     if (!plan) {
       this.logger.debug("[BillingService] provisionSubscription skipped (no plan)", { uid });
       return;
@@ -731,7 +739,7 @@ export class BillingEventHandlers {
     const planAssignedAt = periodStart
       ? (() => {
           const d = new Date(periodStart);
-          return isNaN(d.getTime()) ? undefined : d;
+          return Number.isNaN(d.getTime()) ? undefined : d;
         })()
       : undefined;
     await this.provisioning.setUserPlan(uid, plan, planAssignedAt);
@@ -815,7 +823,7 @@ export class BillingEventHandlers {
           event.subscription.providerSubscriptionId,
         );
         if (existing?.plan) {
-          await this.provisionSubscription(uid, null, event, existing.planId ?? existing.plan);
+          await this.provisionSubscription(uid, null, event, existing.plan);
         }
       }
     } else if (status === "past_due") {
@@ -834,7 +842,7 @@ export class BillingEventHandlers {
         if (offer) {
           await this.provisionSubscription(uid, offer, event);
         } else if (existing?.plan) {
-          await this.provisionSubscription(uid, null, event, existing.planId ?? existing.plan);
+          await this.provisionSubscription(uid, null, event, existing.plan);
         }
       }
     } else if (

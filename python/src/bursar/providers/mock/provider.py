@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from bursar.bursar import BillingEventSink
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
@@ -91,7 +92,7 @@ class MockPaymentProvider(PaymentProvider):
             settlement_amount=0,
             currency="USD",
             line_items=None,
-            effective_at="",
+            effective_at=datetime.now(UTC).isoformat(),
         )
 
     async def handle_webhook(self, req: WebhookRequest) -> dict:

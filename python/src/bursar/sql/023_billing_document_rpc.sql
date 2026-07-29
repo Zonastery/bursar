@@ -61,9 +61,12 @@ BEGIN
     SET checkout_url = NULL
     WHERE subject_id = p_subject_id;
 
-    UPDATE bursar.billing_events
+    UPDATE bursar.billing_event_payloads AS payload
     SET envelope = jsonb_build_object('pseudonymized', true)
-    WHERE envelope->>'userId' = p_subject_id::text;
+    FROM bursar.billing_events AS event
+    WHERE event.id = payload.event_id
+      AND event.payload_received_at = payload.received_at
+      AND payload.envelope->>'userId' = p_subject_id::text;
 
     UPDATE bursar.subjects
     SET pseudonymized_at = COALESCE(pseudonymized_at, now())

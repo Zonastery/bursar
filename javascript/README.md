@@ -45,3 +45,75 @@ that active configuration; there is no separate billing configuration.
 The package keeps the `CreditStore` abstraction and `PostgresStore` for custom
 applications. Database installation is deliberately not a store or `Bursar`
 method.
+
+## Optional S3 and ClickHouse storage
+
+`createBursarRuntime` is the Node composition root when Bursar should manage
+optional storage projections. PostgreSQL remains authoritative for balances,
+leases, billing state, and the transactional outbox.
+
+With no extra infrastructure, it creates no background worker and analytics
+continue to query PostgreSQL:
+
+```ts
+import { createBursarRuntime } from "@zonastery/bursar/node";
+
+const runtime = await createBursarRuntime({
+  postgres: process.env.DATABASE_URL!,
+});
+await runtime.start();
+
+const bursar = runtime.bursar;
+```
+
+S3 and ClickHouse clients are injected structurally, so neither SDK is required
+by PostgreSQL-only applications:
+
+```ts
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { createClient } from "@clickhouse/client";
+import { createBursarRuntime } from "@zonastery/bursar/node";
+
+const s3Client = new S3Client({ region: "us-east-1" });
+const clickhouseClient = createClient({ url: process.env.CLICKHOUSE_URL! });
+
+const runtime = await createBursarRuntime({
+  postgres: process.env.DATABASE_URL!,
+  s3: {
+    bucket: process.env.BURSAR_ARCHIVE_BUCKET!,
+    putObject: async (object) => {
+      const result = await s3Client.send(
+        new PutObjectCommand({
+          Bucket: object.bucket,
+          Key: object.key,
+          Body: object.body,
+          ContentType: object.contentType,
+          Metadata: object.metadata,
+        }),
+      );
+      return { versionId: result.VersionId };
+    },
+  },
+  clickhouse: {
+    client: clickhouseClient,
+    // Optional; omit to keep the ClickHouse projection indefinitely.
+    retentionDays: 730,
+  },
+});
+
+await runtime.start();
+// Use runtime.bursar in the application.
+// On graceful shutdown:
+await runtime.close();
+```
+
+External writes happen through a leased PostgreSQL outbox, never in a customer
+request. S3 object keys are deterministic and the ClickHouse projection is
+replay-safe. ClickHouse analytics are therefore eventually consistent.
+PostgreSQL payload retention should be at least as long as the outbox retry
+horizon, which is enforced by the SQL storage configuration.
+
+Use `outbox: false` only when a separate process consumes the Bursar outbox.
+Database retention maintenance remains independent: schedule
+`bursar.maybe_run_storage_maintenance()` and partition maintenance with
+`pg_cron` as described in the SQL README.

@@ -178,6 +178,7 @@ class StripeProvider(PaymentProvider):
             self._sink,
             self._get_stripe(),
             self._logger,
+            getattr(event, "created", None),
         )
         return {"received": True}
 
@@ -224,7 +225,7 @@ class StripeProvider(PaymentProvider):
         if payment_status in ("paid", "no_payment_required"):
             return {"paymentStatus": "succeeded"}
         if payment_status == "unpaid":
-            return {"paymentStatus": "failed"}
+            return {"paymentStatus": "requires_payment_method"}
         return {"paymentStatus": None}
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
@@ -280,7 +281,7 @@ class StripeProvider(PaymentProvider):
             payment_method=params.payment_method_id,
             confirm=True,
             off_session=True,
-            metadata=params.metadata or {},
+            metadata={**(params.metadata or {}), "price_id": params.product_id},
             idempotency_key=params.idempotency_key,
         )
         raw_status = _stripe_val(intent, "status", "processing")

@@ -108,7 +108,7 @@ export class CreditsService {
     options?: CreditsServiceOptions | null,
   ) {
     this.store = store;
-    this.queries = new CreditQueries(store);
+    this.queries = new CreditQueries(store, options?.analytics ?? store);
     const policy = options?.policy ?? "strict_prepaid";
     if (!POLICY_PRESETS.has(policy)) {
       throw new ConfigError(

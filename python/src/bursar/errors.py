@@ -5,16 +5,34 @@ All error classes used across the SDK, consolidated in one place.
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class BursarError(Exception):
     """Base exception for all Bursar errors."""
 
 
-class ConfigError(ValueError):
+class ConfigError(BursarError):
     """Raised when a Bursar configuration is invalid."""
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        validation_error: Any | None = None,
+    ) -> None:
+        super().__init__(
+            str(validation_error) if validation_error is not None else message or "invalid Bursar configuration"
+        )
+        self.validation_error = validation_error
 
-class ExpressionError(ValueError):
+    def errors(self) -> list[dict[str, Any]]:
+        if self.validation_error is None:
+            return [{"type": "invalid_config", "loc": (), "msg": str(self), "input": None}]
+        return self.validation_error.errors(include_url=False)
+
+
+class ExpressionError(BursarError):
     """Raised on invalid or unsafe expressions."""
 
 
@@ -68,6 +86,10 @@ class RefundError(StoreError):
 
 class CapabilityNotSupportedError(StoreError):
     """Raised when a store does not implement an optional capability."""
+
+
+class BursarImportError(BursarError):
+    """Raised when an optional dependency is missing (mirrors JS ImportError)."""
 
 
 class CreditError(BursarError):

@@ -48,18 +48,36 @@ BEGIN
        OR NOT bursar.is_finite_numeric(p_allowance)
        OR NOT bursar.is_finite_numeric(p_allowance_requested)
        OR NOT bursar.is_nonempty_text(p_operation)
+       OR NOT bursar.is_bounded_text(p_operation, 255)
+       OR NOT bursar.is_bounded_text(p_idempotency_key, 255)
        OR p_event_at IS NULL
        OR (p_plan_id IS NOT NULL AND p_catalog_revision_id IS NULL)
        OR (p_plan_id IS NULL AND p_rate_card_key IS NOT NULL)
-       OR jsonb_typeof(COALESCE(p_metadata,'{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_measures,'{}'::jsonb)) <> 'object'
-       OR jsonb_typeof(COALESCE(p_dimensions,'{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_measures, '{}'::jsonb),
+           16384
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_dimensions, '{}'::jsonb),
+           65536
+       )
     THEN
         RETURN QUERY SELECT NULL::uuid,NULL::uuid,0::numeric,0::numeric,false,'invalid_request';
         RETURN;
     END IF;
 
     v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',p_metadata)::text,'UTF8'),'sha256');
+
+    -- Keep partition DDL ahead of account and ledger locks so first-of-month
+    -- concurrent writers cannot invert the lock order.
+    PERFORM bursar.ensure_storage_partition(
+        'usage_charge_payloads',
+        p_event_at
+    );
 
   PERFORM 1 FROM bursar.credit_accounts WHERE id=v_account FOR UPDATE;
 
@@ -165,18 +183,14 @@ BEGIN
     PERFORM set_config('bursar.mutation_context','internal',true);
 
     INSERT INTO bursar.credit_usage_charges(
-        account_id,operation,event_at,measures,dimensions,feature,model,region,requested,charged,
+        account_id,operation,event_at,measures,feature,model,region,requested,charged,
         allowance_requested,allowance_covered,catalog_revision_id,plan_id,
-        rate_card_key,pricing_snapshot,ledger_entry_id,metadata,idempotency_key,
+        rate_card_key,pricing_snapshot,ledger_entry_id,idempotency_key,
         request_digest
     )
     VALUES(
         v_account,p_operation,p_event_at,
         COALESCE(p_measures,'{}'::jsonb),
-        COALESCE(p_dimensions,'{}'::jsonb)
-            || jsonb_strip_nulls(
-                jsonb_build_object('model',p_model,'region',p_region)
-            ),
         p_feature,p_model,p_region,p_requested,p_requested-p_allowance,
         p_allowance_requested,p_allowance,v_revision,v_plan,v_rate_card,
         jsonb_build_object(
@@ -184,9 +198,25 @@ BEGIN
             'allowance_covered',bursar.digest_numeric_text(p_allowance),
             'charged',bursar.digest_numeric_text(p_requested-p_allowance)
         ),
-        v_ledger_entry,COALESCE(p_metadata,'{}'::jsonb),p_idempotency_key,v_digest
+        v_ledger_entry,p_idempotency_key,v_digest
     )
     RETURNING id INTO v_id;
+
+    INSERT INTO bursar.usage_charge_payloads(
+        charge_id,
+        event_at,
+        dimensions,
+        metadata
+    )
+    VALUES(
+        v_id,
+        p_event_at,
+        COALESCE(p_dimensions, '{}'::jsonb)
+            || jsonb_strip_nulls(
+                jsonb_build_object('model', p_model, 'region', p_region)
+            ),
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
 
     RETURN QUERY SELECT v_id,v_ledger_entry,p_requested-p_allowance,p_allowance,false,NULL::text;
 

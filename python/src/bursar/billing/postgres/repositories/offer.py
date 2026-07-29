@@ -49,8 +49,10 @@ class BillingOfferRepository:
                 "plan": row.get("plan_key"),
                 "interval": row.get("billing_unit"),
                 "interval_count": row.get("billing_count"),
-                "grant_bucket": row.get("grant_bucket_key"),
-                "grant_replace_prior": row.get("renewal_replacement") == "replace",
+                "grant_mode": "cycle_grant" if row.get("cycle_grant_amount") is not None else None,
+                "grant_credits": row.get("cycle_grant_amount"),
+                "grant_bucket": row.get("cycle_grant_bucket_key"),
+                "grant_replace_prior": row.get("cycle_grant_renewal") == "replace_previous",
                 "plan_id": plan[0].get("id") if plan and isinstance(plan[0], dict) else None,
             }
         )
@@ -69,14 +71,14 @@ class BillingOfferRepository:
         validate_non_empty(provider, "provider")
         row = unwrap_jsonb(
             self._execute(
-                "SELECT * FROM bursar.resolve_catalog_offer(%s, 'lookup_key', %s)",
+                "SELECT * FROM bursar.resolve_catalog_offer(%s, 'external_id', %s)",
                 [provider, lookup_key],
             )
         )
         if not row or row.get("offer_key") is None:
             return None
         plan = self._execute(
-            "SELECT * FROM bursar.resolve_catalog_plan(%s, 'lookup_key', %s)",
+            "SELECT * FROM bursar.resolve_catalog_plan(%s, 'external_id', %s)",
             [provider, lookup_key],
         )
         row.update(
@@ -84,8 +86,10 @@ class BillingOfferRepository:
                 "plan": row.get("plan_key"),
                 "interval": row.get("billing_unit"),
                 "interval_count": row.get("billing_count"),
-                "grant_bucket": row.get("grant_bucket_key"),
-                "grant_replace_prior": row.get("renewal_replacement") == "replace",
+                "grant_mode": "cycle_grant" if row.get("cycle_grant_amount") is not None else None,
+                "grant_credits": row.get("cycle_grant_amount"),
+                "grant_bucket": row.get("cycle_grant_bucket_key"),
+                "grant_replace_prior": row.get("cycle_grant_renewal") == "replace_previous",
                 "plan_id": plan[0].get("id") if plan and isinstance(plan[0], dict) else None,
             }
         )

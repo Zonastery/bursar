@@ -49,15 +49,20 @@ from bursar.credits.types import (
     DeductionResult,
     Entitlement,
     FeatureLimit,
+    FeatureLimitResult,
     GetUserPlanResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
     LedgerEntry,
     LedgerPage,
+    ListQuotaEventsOptions,
+    MigratePlanUsersResult,
     OperationPolicy,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
+    QuotaEvent,
+    QuotaState,
     RefundResult,
     ReleaseResult,
     SetUserPlanResult,
@@ -272,7 +277,7 @@ class PostgresStore(CreditStore):
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("SET LOCAL search_path TO bursar, public")
                 cur.execute(sql, params)
-                rows = cur.fetchall()
+                rows = cur.fetchall() if cur.description else []
             conn.commit()
             return [dict(row) for row in (rows or [])]
         except psycopg2.Error as e:
@@ -974,6 +979,60 @@ class PostgresStore(CreditStore):
             next_cursor=result.next_cursor,
         )
 
+    def migrate_plan_users(
+        self,
+        plan_key: str,
+        target_config_version: int | None = None,
+    ) -> MigratePlanUsersResult:
+        row = self._plan_repo.migrate_plan_users(plan_key, target_config_version)
+        return MigratePlanUsersResult(
+            plan_key=row.plan_key,
+            target_plan_id=row.target_plan_id,
+            target_config_version=row.target_config_version,
+            migrated_count=row.migrated_count,
+        )
+
+    def get_quota_state(
+        self,
+        user_id: str,
+        quota_key: str | None = None,
+    ) -> list[QuotaState]:
+        rows = self._plan_repo.get_quota_state(user_id, quota_key)
+        return [
+            QuotaState(
+                user_id=row.user_id,
+                quota_key=row.quota_key,
+                operation=row.operation_key,
+                measure=row.measure_key,
+                limit=_dec(row.quota_limit),
+                consumed=_dec(row.consumed),
+                reserved=_dec(row.reserved),
+                remaining=_dec(row.remaining),
+                overage=_dec(row.overage),
+                enforcement=row.enforcement,
+                window_start=row.window_start,
+                window_end=row.window_end,
+                emit_at_percent=row.emit_at_percent,
+            )
+            for row in rows
+        ]
+
+    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
+        quota = next(iter(self.get_quota_state(user_id, feature)), None)
+        if quota is None:
+            return FeatureLimitResult(user_id=user_id, feature=feature)
+        return FeatureLimitResult(
+            user_id=user_id,
+            feature=feature,
+            limited=quota.remaining <= 0,
+            limit=int(quota.limit),
+            used=int(quota.consumed + quota.reserved),
+            remaining=int(quota.remaining),
+            period_start=quota.window_start,
+            period_end=quota.window_end,
+            action="deny" if quota.enforcement == "block" else None,
+        )
+
     def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
         """Check the remaining plan allowance for a user.
 
@@ -996,6 +1055,36 @@ class PostgresStore(CreditStore):
             period_start=getattr(result, "period_start", None),
             period_end=getattr(result, "period_end", None),
         )
+
+    def list_quota_events(
+        self,
+        user_id: str,
+        options: ListQuotaEventsOptions | None = None,
+    ) -> list[QuotaEvent]:
+        options = options or ListQuotaEventsOptions()
+        limit = options.limit or 100
+        if limit < 1 or limit > 500:
+            raise ValueError("quota event limit must be between 1 and 500")
+        rows = self._plan_repo.list_quota_events(
+            user_id,
+            options.after.isoformat() if options.after else None,
+            limit,
+            options.idempotency_key,
+        )
+        return [
+            QuotaEvent(
+                event_id=row.event_id,
+                quota_key=row.quota_key,
+                operation=row.operation_key,
+                measure=row.measure_key,
+                event_type=row.event_type,
+                threshold_percent=row.threshold_percent,
+                idempotency_key=row.idempotency_key,
+                usage_charge_id=row.usage_charge_id,
+                created_at=(row.created_at.isoformat() if isinstance(row.created_at, datetime) else row.created_at),
+            )
+            for row in rows
+        ]
 
     # ── Refunds ─────────────────────────────────────────────────────────
 
@@ -1416,10 +1505,20 @@ class PostgresStore(CreditStore):
 
     # ── Credit expiry ───────────────────────────────────────────────────
 
-    def sweep_expired_credits(self, limit: int = 100) -> SweepResult:
+    def sweep_expired_credits(
+        self,
+        dry_run: bool = False,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> SweepResult:
         """Expire at most ``limit`` eligible credit lots."""
-        result = self._bucket_repo.sweep_expired_credits(limit)
-        return SweepResult(expired_count=result.expired_count)
+        result = self._bucket_repo.sweep_expired_credits(dry_run, user_id, limit)
+        return SweepResult(
+            expired_count=result.expired_count,
+            expired_amount=_dec(result.expired_amount),
+            dry_run=result.dry_run,
+            expired_by_bucket=_dec_map(result.expired_by_bucket),
+        )
 
     # ── Credit buckets ────────────────────────────────────────────────
 
