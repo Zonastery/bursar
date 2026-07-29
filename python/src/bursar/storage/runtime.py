@@ -1,0 +1,256 @@
+"""Node-style composition root for Python storage infrastructure."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol, TypeGuard, cast
+
+import psycopg2.pool
+
+from bursar.billing.postgres.store import PostgresBillingStore
+from bursar.bursar import Bursar
+from bursar.credits.events import CreditEventEmitter
+from bursar.credits.postgres.store import PostgresStore
+from bursar.credits.types import UsageAnalyticsStore
+from bursar.shared.postgres_client import PostgresClient
+from bursar.storage.adapters.clickhouse import (
+    ClickHouseUsageStore,
+    ClickHouseUsageStoreOptions,
+)
+from bursar.storage.adapters.s3 import S3BillingArchive, S3BillingArchiveOptions
+from bursar.storage.outbox_worker import (
+    OutboxRunResult,
+    OutboxWorker,
+    OutboxWorkerOptions,
+)
+from bursar.storage.ports import (
+    BillingPayloadArchive,
+    OutboxEvent,
+    UsageEventSink,
+)
+from bursar.storage.postgres_repository import PostgresStorageRepository
+
+
+class UsageAnalyticsSink(UsageEventSink, UsageAnalyticsStore, Protocol):
+    """Combined ClickHouse write and analytics read port."""
+
+
+class PostgresPool(Protocol):
+    def getconn(self) -> Any: ...
+
+    def putconn(self, conn: Any) -> None: ...
+
+    def closeall(self) -> None: ...
+
+
+def _is_usage_analytics_sink(value: object) -> TypeGuard[UsageAnalyticsSink]:
+    return all(
+        hasattr(value, method)
+        for method in (
+            "write_usage",
+            "spend_by_user",
+            "spend_by_model",
+            "top_users",
+            "daily_spend",
+            "aggregate_stats",
+        )
+    )
+
+
+def _is_billing_payload_archive(value: object) -> TypeGuard[BillingPayloadArchive]:
+    return hasattr(value, "archive") and hasattr(value, "purge_postgres_payload")
+
+
+@dataclass(frozen=True, slots=True)
+class BursarRuntimeBursarOptions:
+    credits_options: dict[str, Any] | None = None
+    billing_options: dict[str, Any] | None = None
+    emitter: CreditEventEmitter | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BursarRuntimeOptions:
+    postgres: str | PostgresPool
+    s3: BillingPayloadArchive | S3BillingArchiveOptions | None = None
+    clickhouse: UsageAnalyticsSink | ClickHouseUsageStoreOptions | None = None
+    outbox: OutboxWorkerOptions | Literal[False] | None = None
+    bursar: BursarRuntimeBursarOptions = field(default_factory=BursarRuntimeBursarOptions)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.outbox, bool) and self.outbox is not False:
+            msg = "outbox must be OutboxWorkerOptions, False, or None"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class _CallableOutboxHandler:
+    topics: Sequence[str]
+    callback: Callable[[OutboxEvent], None]
+
+    def handle(self, event: OutboxEvent) -> None:
+        self.callback(event)
+
+
+class BursarRuntime:
+    """Composition root for Postgres and optional external projections."""
+
+    def __init__(
+        self,
+        pool: PostgresPool,
+        owns_pool: bool,
+        options: BursarRuntimeOptions,
+    ) -> None:
+        self._pool = pool
+        self._owns_pool = owns_pool
+        self.clickhouse: UsageAnalyticsSink | None
+        if options.clickhouse is None:
+            self.clickhouse = None
+        elif isinstance(options.clickhouse, ClickHouseUsageStoreOptions):
+            self.clickhouse = ClickHouseUsageStore(options.clickhouse)
+        elif _is_usage_analytics_sink(options.clickhouse):
+            self.clickhouse = options.clickhouse
+        else:
+            msg = "clickhouse must implement both usage sink and analytics ports"
+            raise TypeError(msg)
+        self.s3: BillingPayloadArchive | None
+        if options.s3 is None:
+            self.s3 = None
+        elif isinstance(options.s3, S3BillingArchiveOptions):
+            self.s3 = S3BillingArchive(options.s3)
+        elif _is_billing_payload_archive(options.s3):
+            self.s3 = options.s3
+        else:
+            msg = "s3 must implement the billing payload archive port"
+            raise TypeError(msg)
+
+        psycopg_pool = cast(psycopg2.pool.ThreadedConnectionPool, pool)
+        self.credit_store = PostgresStore("", pool=psycopg_pool)
+        self.billing_store = PostgresBillingStore("", pool=psycopg_pool)
+        credits_options = dict(options.bursar.credits_options or {})
+        if self.clickhouse is not None:
+            credits_options["analytics"] = self.clickhouse
+        self.bursar = Bursar.create(
+            credit_store=self.credit_store,
+            billing_store=self.billing_store,
+            credits_options=credits_options,
+            billing_options=options.bursar.billing_options,
+            emitter=options.bursar.emitter,
+        )
+
+        repository = PostgresStorageRepository(PostgresClient.from_pool(psycopg_pool).query)
+        handlers = self._create_handlers(repository)
+        worker_options = options.outbox if isinstance(options.outbox, OutboxWorkerOptions) else None
+        self.worker = (
+            OutboxWorker(repository, handlers, worker_options) if handlers and options.outbox is not False else None
+        )
+        self._started = False
+        self._closed = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        if self._closed:
+            msg = "BursarRuntime has been closed"
+            raise RuntimeError(msg)
+        if self.clickhouse is not None:
+            initialize = getattr(self.clickhouse, "initialize", None)
+            if callable(initialize):
+                initialize()
+        if self.worker is not None:
+            self.worker.start()
+        self._started = True
+
+    def flush(self) -> OutboxRunResult:
+        if self._closed:
+            msg = "BursarRuntime has been closed"
+            raise RuntimeError(msg)
+        if self.worker is None:
+            return OutboxRunResult(claimed=0, delivered=0, failed=0)
+        return self.worker.run_once()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.worker is not None:
+            self.worker.stop()
+        self.credit_store.close()
+        self.billing_store.close()
+        if self._owns_pool:
+            self._pool.closeall()
+
+    def __enter__(self) -> BursarRuntime:
+        self.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def _create_handlers(
+        self,
+        repository: PostgresStorageRepository,
+    ) -> list[_CallableOutboxHandler]:
+        handlers: list[_CallableOutboxHandler] = []
+        if self.clickhouse is not None:
+
+            def handle_usage(outbox_event: OutboxEvent) -> None:
+                if outbox_event.payload_version != 1:
+                    msg = f"Unsupported usage outbox payload version {outbox_event.payload_version}"
+                    raise RuntimeError(msg)
+                usage = repository.get_usage_charge(outbox_event.aggregate_id)
+                if usage is None:
+                    msg = f"Usage charge {outbox_event.aggregate_id} is unavailable for export"
+                    raise RuntimeError(msg)
+                if self.clickhouse is not None:
+                    self.clickhouse.write_usage(usage, outbox_event.event_id)
+
+            handlers.append(
+                _CallableOutboxHandler(
+                    topics=("usage.charge_recorded",),
+                    callback=handle_usage,
+                )
+            )
+        if self.s3 is not None:
+
+            def handle_billing(outbox_event: OutboxEvent) -> None:
+                if outbox_event.payload_version != 1:
+                    msg = f"Unsupported billing outbox payload version {outbox_event.payload_version}"
+                    raise RuntimeError(msg)
+                event = repository.get_billing_event_payload(outbox_event.aggregate_id)
+                if event is None:
+                    msg = f"Billing event {outbox_event.aggregate_id} is unavailable for archive"
+                    raise RuntimeError(msg)
+                if event.object_key is not None:
+                    return
+                if self.s3 is None:
+                    msg = "S3 archive is not configured"
+                    raise RuntimeError(msg)
+                archived = self.s3.archive(event)
+                recorded = repository.archive_billing_event_payload(
+                    event.event_id,
+                    archived.key,
+                    archived.version_id,
+                    self.s3.purge_postgres_payload,
+                )
+                if not recorded:
+                    msg = f"Could not record archive pointer for billing event {event.event_id}"
+                    raise RuntimeError(msg)
+
+            handlers.append(
+                _CallableOutboxHandler(
+                    topics=("billing.webhook_completed",),
+                    callback=handle_billing,
+                )
+            )
+        return handlers
+
+
+def create_bursar_runtime(options: BursarRuntimeOptions) -> BursarRuntime:
+    if isinstance(options.postgres, str):
+        if not options.postgres.strip():
+            msg = "postgres connection string must not be empty"
+            raise ValueError(msg)
+        pool = psycopg2.pool.ThreadedConnectionPool(1, 10, options.postgres)
+        return BursarRuntime(pool, True, options)
+    return BursarRuntime(options.postgres, False, options)

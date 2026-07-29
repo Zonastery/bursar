@@ -636,6 +636,7 @@ class TestEventIdempotency:
                 return local.claim_billing_event(PROVIDER, "evt_concurrent_claim", "test.event")
             finally:
                 local.close()
+                pool.closeall()
 
         with ThreadPoolExecutor(max_workers=12) as executor:
             claims = list(executor.map(claim, range(12)))

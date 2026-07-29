@@ -83,10 +83,15 @@ class PostgresBillingStore(BillingStore):
     def __init__(self, database_url: str, pool: psycopg2.pool.ThreadedConnectionPool | None = None) -> None:
         self._database_url = database_url
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
+        self._owns_pool = pool is None
 
     def close(self) -> None:
         """Close all connections in the pool."""
-        self._pool.closeall()
+        if self._pool is None:
+            return
+        if self._owns_pool:
+            self._pool.closeall()
+        self._pool = None
 
     def __enter__(self) -> PostgresBillingStore:
         return self

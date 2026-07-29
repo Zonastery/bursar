@@ -122,6 +122,7 @@ from bursar.credits.types import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
+    UsageAnalyticsStore,
 )
 from bursar.engine import PricingEngine
 from bursar.expr import ExpressionError, evaluate_expression, quantize_money, validate_expression
@@ -275,6 +276,7 @@ __all__ = [
     "TeamDeductionResult",
     "TeamMember",
     "TopUserRow",
+    "UsageAnalyticsStore",
     "UpdatePaymentMethodParams",
     "UsageMetrics",
     "validate_expression",

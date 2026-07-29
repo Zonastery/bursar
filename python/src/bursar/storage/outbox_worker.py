@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
 from bursar.storage.ports import OutboxEvent, OutboxHandler, OutboxStore
@@ -68,6 +68,8 @@ class OutboxWorker:
         self._validate_options(self._options)
         self._stop_event = threading.Event()
         self._run_lock = threading.Lock()
+        self._active_future: Future[OutboxRunResult] | None = None
+        self._active_thread_id: int | None = None
         self._thread: threading.Thread | None = None
         self._started = False
         self._stopped = False
@@ -94,28 +96,57 @@ class OutboxWorker:
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join()
         self._thread = None
+        with self._run_lock:
+            active_future = self._active_future
+            active_thread_id = self._active_thread_id
+        if active_future is not None and active_thread_id != threading.get_ident():
+            active_future.result()
 
     def run_once(self) -> OutboxRunResult:
         if self._stopped:
             msg = "OutboxWorker has been stopped"
             raise RuntimeError(msg)
         with self._run_lock:
-            events = self._store.claim(
-                self._topics,
-                self._options.batch_size,
-                self._options.lease_seconds,
-            )
-            if not events:
-                return OutboxRunResult(claimed=0, delivered=0, failed=0)
-            worker_count = min(self._options.concurrency, len(events))
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                delivered = list(executor.map(self._dispatch_event, events))
-            delivered_count = sum(delivered)
-            return OutboxRunResult(
-                claimed=len(events),
-                delivered=delivered_count,
-                failed=len(events) - delivered_count,
-            )
+            future = self._active_future
+            owns_run = future is None
+            if future is None:
+                future = Future()
+                self._active_future = future
+            if not owns_run:
+                return future.result()
+            self._active_thread_id = threading.get_ident()
+
+        try:
+            result = self._dispatch_once()
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        else:
+            future.set_result(result)
+            return result
+        finally:
+            with self._run_lock:
+                if self._active_future is future:
+                    self._active_future = None
+                    self._active_thread_id = None
+
+    def _dispatch_once(self) -> OutboxRunResult:
+        events = self._store.claim(
+            self._topics,
+            self._options.batch_size,
+            self._options.lease_seconds,
+        )
+        if not events:
+            return OutboxRunResult(claimed=0, delivered=0, failed=0)
+        worker_count = min(self._options.concurrency, len(events))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            delivered = list(executor.map(self._dispatch_event, events))
+        delivered_count = sum(delivered)
+        return OutboxRunResult(
+            claimed=len(events),
+            delivered=delivered_count,
+            failed=len(events) - delivered_count,
+        )
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
