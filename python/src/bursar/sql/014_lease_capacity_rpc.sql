@@ -95,7 +95,7 @@ CREATE FUNCTION bursar.quota_policy_window(
     p_anchor_at timestamptz,
     p_policy jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     window_start timestamptz,
     window_end timestamptz,
     is_rolling boolean
@@ -156,7 +156,7 @@ CREATE FUNCTION bursar.check_operation_quotas(
     p_measures jsonb,
     p_idempotency_key text,
     p_enforce boolean DEFAULT true,
-    p_exclude_lease_id uuid DEFAULT NULL
+    p_exclude_lease_id uuid DEFAULT null
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -359,7 +359,12 @@ BEGIN
                 idempotency_key
             )
             VALUES(v_window_id, 'blocked', p_idempotency_key)
-            ON CONFLICT DO NOTHING;
+            ON CONFLICT (
+                quota_window_id,
+                idempotency_key,
+                event_type,
+                threshold_percent
+            ) DO NOTHING;
             RETURN 'quota_exceeded';
         END IF;
     END LOOP;
@@ -787,7 +792,12 @@ BEGIN
                     v_threshold,
                     p_idempotency_key
                 )
-                ON CONFLICT DO NOTHING;
+                ON CONFLICT (
+                    quota_window_id,
+                    idempotency_key,
+                    event_type,
+                    threshold_percent
+                ) DO NOTHING;
             END IF;
         END LOOP;
     END LOOP;
@@ -799,16 +809,16 @@ CREATE FUNCTION bursar.create_lease(
     p_operation text,
     p_estimate numeric,
     p_idempotency_key text,
-    p_minimum_balance numeric DEFAULT NULL,
+    p_minimum_balance numeric DEFAULT null,
     p_ttl interval DEFAULT interval '10 minutes',
     p_policy_snapshot jsonb DEFAULT '{}'::jsonb,
     p_metadata jsonb DEFAULT '{}'::jsonb,
-    p_feature text DEFAULT NULL,
+    p_feature text DEFAULT null,
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb,
-    p_max_concurrent integer DEFAULT NULL
+    p_max_concurrent integer DEFAULT null
 )
-RETURNS TABLE(
+RETURNS TABLE (
     lease_id uuid,
     status bursar.lease_status,
     reserved_amount numeric,
@@ -1333,14 +1343,14 @@ CREATE FUNCTION bursar.settle_lease(
     p_lease_id uuid,
     p_actual numeric,
     p_idempotency_key text,
-    p_feature text DEFAULT NULL,
-    p_model text DEFAULT NULL,
-    p_region text DEFAULT NULL,
+    p_feature text DEFAULT null,
+    p_model text DEFAULT null,
+    p_region text DEFAULT null,
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     ledger_entry_id uuid,
     settled_amount numeric,
     replayed boolean,
@@ -1669,7 +1679,7 @@ CREATE FUNCTION bursar.renew_lease(
     p_lease_id uuid,
     p_ttl interval
 )
-RETURNS TABLE(
+RETURNS TABLE (
     lease_id uuid,
     status bursar.lease_status,
     reserved_amount numeric,
@@ -1775,7 +1785,7 @@ $$;
 CREATE FUNCTION bursar.expire_leases(
     p_limit integer DEFAULT 100
 )
-RETURNS TABLE(expired integer)
+RETURNS TABLE (expired integer)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''

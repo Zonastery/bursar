@@ -121,6 +121,23 @@ describe("S3BillingArchive", () => {
     >;
     expect(saved.envelope).toEqual({ id: "evt_1", data: { amount: 1200 } });
 
+    await expect(
+      archive.archive({
+        eventId: "00000000-0000-0000-0000-000000000002",
+        provider: "stripe",
+        providerEnvironment: "live",
+        providerEventId: "evt_2",
+        eventType: "invoice.paid",
+        status: "completed",
+        receivedAt: "2026-07-29T12:30:00",
+        completedAt: null,
+        envelope: { id: "evt_2" },
+        objectKey: null,
+        objectVersion: null,
+        archivedAt: null,
+      }),
+    ).rejects.toThrow("invalid receivedAt timestamp");
+
     await archive.close();
     expect(s3Mock.destroy).toHaveBeenCalledOnce();
   });
@@ -189,6 +206,10 @@ describe("ClickHouseUsageStore", () => {
     expect(rows[0]?.userId).toBe(usage.subjectId);
     expect(rows[0]?.totalSpend.toString()).toBe("12.5");
     expect(rows[0]?.entryCount).toBe(2);
+
+    await expect(
+      store.writeUsage({ ...usage, eventAt: "2026-07-29T12:00:00" }, "100"),
+    ).rejects.toThrow("Invalid usage timestamp");
   });
 });
 

@@ -230,12 +230,14 @@ export class PlanRepository {
     after: string | null,
     limit: number,
     idempotencyKey: string | null,
+    afterId: string | null,
   ): Promise<QuotaEventRow[]> {
     const rows = await this.callproc("list_subject_quota_events", [
       userId,
       after,
       limit,
       idempotencyKey,
+      afterId,
     ]);
     return (rows ?? []).map((row) =>
       safeParse(QuotaEventRowSchema, row, "PlanRepository.listQuotaEvents"),

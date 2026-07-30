@@ -12,18 +12,82 @@ from bursar import (
     OperationNotAllowedError,
     QuotaExceededError,
 )
+from bursar.credits.postgres.repositories.analytics import AnalyticsRepository
 from bursar.credits.postgres.repositories.balance import BalanceRepository
 from bursar.credits.postgres.repositories.deduction import DeductionRepository
 from bursar.credits.postgres.repositories.lease import LeaseRepository
 from bursar.credits.postgres.repositories.plan import PlanRepository
 from bursar.credits.postgres.repositories.pricing import PricingRepository
-from bursar.credits.postgres.repositories.schemas import CreateLeaseParams, SettleLeaseParams
+from bursar.credits.postgres.repositories.schemas import (
+    CreateLeaseParams,
+    DeductParams,
+    SettleLeaseParams,
+)
 from bursar.credits.postgres.repositories.team import TeamRepository
+from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service import CreditsService
 
 USER_ID = "00000000-0000-0000-0000-000000000901"
 LEASE_ID = "00000000-0000-0000-0000-000000000902"
 ENTRY_ID = "00000000-0000-0000-0000-000000000903"
+
+
+def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        if name == "aggregate_usage_stats":
+            return [("12.5", 3, "4.1", "gpt-5", USER_ID)]
+        if name == "spend_by_user":
+            return [(USER_ID, "8.5", 2)]
+        if name == "list_ledger":
+            return [
+                (
+                    ENTRY_ID,
+                    USER_ID,
+                    None,
+                    "-8.5",
+                    "usage",
+                    None,
+                    "usage-1",
+                    {"operation": "completion"},
+                    "2030-01-01T00:00:00+00:00",
+                )
+            ]
+        raise AssertionError(f"unexpected RPC: {name}")
+
+    repository = AnalyticsRepository(callproc)
+    aggregate = repository.aggregate_stats("2029-01-01", "2030-01-01")
+    top = repository.top_users(1, "2029-01-01", "2030-01-01")
+    ledger = repository.list_ledger_entries(
+        USER_ID,
+        ["usage"],
+        "2029-01-01",
+        "2030-01-01",
+        25,
+        "2030-01-01T00:00:00+00:00",
+        ENTRY_ID,
+        usage_only=True,
+    )
+
+    assert aggregate.active_users == 3
+    assert top[0].user_id == USER_ID
+    assert top[0].total_spend == "8.5"
+    assert ledger[0].entry_id == ENTRY_ID
+    assert calls[-1] == (
+        "list_ledger",
+        [
+            USER_ID,
+            "2030-01-01T00:00:00+00:00",
+            ENTRY_ID,
+            25,
+            ["usage"],
+            "2029-01-01",
+            "2030-01-01",
+            True,
+        ],
+    )
 
 
 def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
@@ -262,15 +326,29 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
             }
         ]
 
-    plan = PlanRepository(callproc, lambda _query, _params: []).get_user_plan(USER_ID)
+    repository = PlanRepository(callproc, lambda _query, _params: [])
+    plan = repository.get_user_plan(USER_ID)
 
     assert calls == [("get_subject_plan", [USER_ID])]
     assert plan is not None
     assert plan.plan_key == "pro"
-    assert plan.catalog_version == 4
-    assert plan.billing_mode == "overdraft"
-    assert plan.overdraft_floor == "-20"
-    assert plan.per_operation == {"completion": {"max_concurrent": 1}}
+    assert plan.catalog_revision_no == 4
+    assert plan.credit_policy_type == "credit_line"
+    assert plan.credit_limit == "20"
+    assert plan.operation_admission == {"completion": {"max_in_flight": 1}}
+
+    store = object.__new__(PostgresStore)
+    store._plan_repo_cache = repository
+    public_plan = store.get_user_plan(USER_ID)
+
+    assert public_plan.catalog_version == 4
+    assert public_plan.billing_mode == "overdraft"
+    assert public_plan.overdraft_floor == Decimal("-20")
+    assert public_plan.credit_policy is not None
+    assert public_plan.credit_policy.credit_limit == Decimal("20")
+    assert public_plan.admission is not None
+    assert public_plan.admission.operations["completion"].max_in_flight == 1
+    assert public_plan.per_operation["completion"].max_concurrent == 1
 
 
 def test_refund_repository_uses_entry_scoped_idempotent_rpc() -> None:
@@ -312,6 +390,65 @@ def test_refund_repository_uses_entry_scoped_idempotent_rpc() -> None:
     assert result is not None
     assert result.user_id == USER_ID
     assert result.amount == "8"
+
+
+def test_deduction_repository_preserves_operation_usage_dimensions() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        if name == "charge_usage_for_operation":
+            return [
+                {
+                    "ledger_entry_id": ENTRY_ID,
+                    "charged": "8",
+                    "allowance_covered": "2",
+                    "replayed": False,
+                    "error_code": None,
+                }
+            ]
+        if name == "get_credit_operation_details":
+            return [
+                {
+                    "balance_after": "90",
+                    "bucket_breakdown": {"purchased": "8"},
+                }
+            ]
+        raise AssertionError(f"unexpected RPC: {name}")
+
+    result = DeductionRepository(callproc, callproc).deduct_with_allowance(
+        DeductParams(
+            user_id=USER_ID,
+            operation="completion",
+            amount="10",
+            idempotency_key="usage-1",
+            feature="chat",
+            model="gpt-5",
+            region="in-west",
+            measures='{"tokens":100}',
+            dimensions='{"model":"gpt-5","region":"in-west"}',
+            metadata='{"request":"one"}',
+        )
+    )
+
+    assert calls[0] == (
+        "charge_usage_for_operation",
+        [
+            USER_ID,
+            "completion",
+            "10",
+            "usage-1",
+            "chat",
+            "gpt-5",
+            "in-west",
+            '{"request":"one"}',
+            '{"tokens":100}',
+            '{"model":"gpt-5","region":"in-west"}',
+        ],
+    )
+    assert result is not None
+    assert result.balance_after == "90"
+    assert result.bucket_breakdown == {"purchased": "8"}
 
 
 @pytest.mark.parametrize(

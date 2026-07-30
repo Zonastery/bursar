@@ -139,7 +139,7 @@ class NotPrecedenceTransformer(ast.NodeTransformer):
         return node
 
 
-def parse(source: str) -> ast.Expression:
+def parse(source: str) -> tuple[ast.Expression, str]:
     """Parse and validate an expression string into an AST."""
     processed = _IF_RE.sub("_bursar_if(", source)
     try:

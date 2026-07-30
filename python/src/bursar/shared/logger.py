@@ -9,30 +9,55 @@ from typing import Any, Protocol
 class Logger(Protocol):
     """Logger interface matching the JS SDK's Logger type."""
 
-    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def info(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def error(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
-    def exception(self, msg: str, *args: Any, **kwargs: Any) -> None: ...
+    def debug(self, message: str, context: dict[str, Any] | None = None) -> None: ...
+
+    def info(self, message: str, context: dict[str, Any] | None = None) -> None: ...
+
+    def warn(self, message: str, context: dict[str, Any] | None = None) -> None: ...
+
+    def error(self, message: str, context: dict[str, Any] | None = None) -> None: ...
 
 
 class NormalizedLogger:
     """Wraps a standard library logger to match the JS Logger interface."""
 
-    def __init__(self, name: str) -> None:
-        self._logger = logging.getLogger(name)
+    def __init__(self, logger: Logger | logging.Logger | str | None = None) -> None:
+        self._logger = logging.getLogger(logger) if isinstance(logger, str) else logger
 
-    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._logger.debug(msg, *args, **kwargs)
+    def _call(
+        self,
+        method: str,
+        message: str,
+        context: dict[str, Any] | None,
+    ) -> None:
+        target = getattr(self._logger, method, None)
+        if callable(target):
+            if isinstance(self._logger, logging.Logger):
+                target(
+                    message,
+                    extra={"context": context} if context else None,
+                )
+            else:
+                target(message, context)
 
-    def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._logger.info(msg, *args, **kwargs)
+    def debug(self, message: str, context: dict[str, Any] | None = None) -> None:
+        self._call("debug", message, context)
 
-    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._logger.warning(msg, *args, **kwargs)
+    def info(self, message: str, context: dict[str, Any] | None = None) -> None:
+        self._call("info", message, context)
 
-    def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._logger.error(msg, *args, **kwargs)
+    def warn(self, message: str, context: dict[str, Any] | None = None) -> None:
+        method = "warning" if isinstance(self._logger, logging.Logger) else "warn"
+        self._call(method, message, context)
 
-    def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        self._logger.exception(msg, *args, **kwargs)
+    def error(self, message: str, context: dict[str, Any] | None = None) -> None:
+        self._call("error", message, context)
+
+
+noop_logger = NormalizedLogger()
+
+
+def normalize_logger(
+    logger: Logger | logging.Logger | None = None,
+) -> NormalizedLogger:
+    return NormalizedLogger(logger)

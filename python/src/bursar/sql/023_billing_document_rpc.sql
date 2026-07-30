@@ -83,7 +83,7 @@ CREATE FUNCTION bursar.upsert_billing_invoice(
     p_status text,
     p_amount_due_minor bigint,
     p_amount_paid_minor bigint,
-    p_currency char(3),
+    p_currency text,
     p_period_start timestamptz DEFAULT NULL,
     p_period_end timestamptz DEFAULT NULL,
     p_metadata jsonb DEFAULT '{}'::jsonb,
@@ -111,7 +111,9 @@ BEGIN
 
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE COALESCE(p_metadata, '{}'::jsonb)
@@ -319,7 +321,9 @@ BEGIN
             USING ERRCODE='22023';
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RAISE EXCEPTION 'pseudonymized subject cannot create checkout'

@@ -123,17 +123,23 @@ class UserPlanRow(BaseModel):
     plan_id: str | None = None
     plan_key: str | None = None
     plan_label: str | None = None
-    allowance_amount: str | Decimal | None = None
-    allowance_period: str = "calendar_month"
+    rate_card: str | None = None
+    credit_allowance_amount: str | Decimal | None = None
+    credit_allowance_reset_unit: str | None = None
+    credit_allowance_reset_count: int | None = None
+    credit_allowance_reset_anchor: str | None = None
+    credit_allowance_reset_timezone: str | None = None
     entitlements: dict[str, Any] | None = None
-    rate_overrides: dict[str, Any] | None = None
-    billing_mode: str = "strict"
-    per_operation: dict[str, Any] | None = None
-    max_concurrent: int | None = None
-    overdraft_floor: str | Decimal | None = None
+    credit_policy_type: str | None = None
+    credit_limit: str | Decimal | None = None
+    admission_max_in_flight: int | None = None
+    operation_admission: dict[str, Any] | None = None
+    allowed_operations: list[str] | None = None
+    assignment_source_type: str | None = None
+    assignment_source_id: str | None = None
+    revision_policy: str | None = None
     plan_assigned_at: str | datetime | None = None
-    config_version: int | None = None
-    catalog_version: int | None = None
+    catalog_revision_no: int | None = None
 
 
 class SetUserPlanRow(BaseModel):
@@ -419,19 +425,16 @@ class BursarConfigHistoryItemRow(BaseModel):
 
 class DeductParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    user_id: str = ""
-    amount: str = "0"
-    idempotency_key: str | None = None
-    min_balance: str = "0"
-    model: str | None = None
-    metadata: str = "{}"
-    skip_allowance: bool = False
-    period_start: str | None = None
-    feature: str | None = None
-    feature_max_calls: int | None = None
-    feature_action: str | None = None
-    feature_period_start: str | None = None
-    feature_period_end: str | None = None
+    user_id: str
+    operation: str
+    amount: str
+    idempotency_key: str
+    feature: str | None
+    model: str | None
+    region: str | None
+    measures: str
+    dimensions: str
+    metadata: str
 
 
 class CreateLeaseParams(BaseModel):

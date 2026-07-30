@@ -11,8 +11,12 @@ from bursar.providers.types import (
     ChangePlanLineItem,
     ChangePlanParams,
     ChangePlanPreview,
+    ChangePlanResult,
     CheckoutParams,
+    CheckoutSessionResult,
+    CheckoutSessionStatus,
     CreateCustomerParams,
+    CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
@@ -20,12 +24,14 @@ from bursar.providers.types import (
     PreviewChangePlanParams,
     ProviderLogger,
     ProviderResolveUserFn,
+    ProviderUrlResult,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
+    deduplicate_payment_methods,
     normalize_provider_logger,
 )
 
@@ -55,7 +61,7 @@ class DodoProvider(PaymentProvider):
         self._resolve_user = resolve_user
         self._logger = normalize_provider_logger(logger)
 
-    async def create_checkout_session(self, params: CheckoutParams) -> dict:
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         client = self._get_client()
         quantity = params.quantity if params.quantity is not None else 1
         session_kwargs: dict[str, Any] = {
@@ -78,19 +84,19 @@ class DodoProvider(PaymentProvider):
         if not url:
             raise ValueError("Checkout session returned no URL")
         session_id = getattr(session, "session_id", None) or session.get("session_id")
-        result: dict[str, Any] = {"url": url}
-        if session_id:
-            result["providerSessionId"] = session_id
-        return result
+        return CheckoutSessionResult(
+            url=str(url),
+            provider_session_id=str(session_id) if session_id else None,
+        )
 
-    async def create_customer_portal_session(self, params: PortalParams) -> dict:
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
         client = self._get_client()
         session = await client.customers.customer_portal.create(
             params.customer_id,
             return_url=params.return_url,
         )
         link = getattr(session, "link", None) or session.get("link")
-        return {"url": link}
+        return ProviderUrlResult(url=str(link))
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         client = self._get_client()
@@ -103,7 +109,13 @@ class DodoProvider(PaymentProvider):
             )
         except Exception as exc:
             self._logger.warning("Dodo webhook verification failed", {"error": str(exc)})
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
 
         event_type = getattr(event, "type", None) or event.get("type", "")
         event_data = getattr(event, "data", None) or event.get("data", {})
@@ -129,7 +141,7 @@ class DodoProvider(PaymentProvider):
 
         user_id: str | None = metadata.get("userId")
         if not user_id and self._resolve_user is not None and event_type not in ("payment.failed", "checkout.expired"):
-            user_id = await self._resolve_user(data_dict, metadata)
+            user_id = await self._resolve_user(data_dict, metadata, str(event_type))
 
         await handle_dodo_billing_event(
             event_type,
@@ -154,11 +166,11 @@ class DodoProvider(PaymentProvider):
             None,
         )
         return WebhookResult(
-            True,
-            False,
-            self.provider,
-            str(raw_event_id) if raw_event_id is not None else None,
-            str(event_type) or None,
+            received=True,
+            retryable=False,
+            provider=self.provider,
+            event_id=str(raw_event_id) if raw_event_id is not None else None,
+            event_type=str(event_type) or None,
         )
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
@@ -193,16 +205,16 @@ class DodoProvider(PaymentProvider):
             kwargs["idempotency_key"] = idempotency_key
         await client.subscriptions.cancel_change_plan(subscription_id, **kwargs)
 
-    async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
         client = self._get_client()
         try:
             session = await client.checkout_sessions.retrieve(provider_session_id)
         except Exception:
             return None
         status = getattr(session, "payment_status", None) or session.get("payment_status")
-        return {"paymentStatus": status}
+        return CheckoutSessionStatus.model_validate({"payment_status": status})
 
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
         product_id = params.product_id or self._config.get("setup_product_id")
         if not product_id:
             raise ValueError("productId is required for payment method update")
@@ -216,9 +228,9 @@ class DodoProvider(PaymentProvider):
         url = getattr(response, "checkout_url", None) or response.get("checkout_url")
         if not url:
             raise ValueError("Failed to create payment method update session")
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         product_id = params.product_id or self._config.get("setup_product_id")
         if not product_id:
             raise ValueError("setupProductId is required for payment method setup")
@@ -232,7 +244,7 @@ class DodoProvider(PaymentProvider):
         url = getattr(session, "checkout_url", None) or session.get("checkout_url")
         if not url:
             raise ValueError("Checkout session returned no URL")
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         client = self._get_client()
@@ -255,7 +267,7 @@ class DodoProvider(PaymentProvider):
                     expiry_year=int(card.get("expiry_year", 0)),
                 )
             )
-        return result
+        return deduplicate_payment_methods(result)
 
     async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
         methods = await self.list_payment_methods(customer_id)
@@ -295,14 +307,16 @@ class DodoProvider(PaymentProvider):
             "requires_customer_action": "requires_customer_action",
             "requires_payment_method": "requires_payment_method",
         }.get(raw_status, "failed")
-        return SavedPaymentChargeResult(
-            provider_payment_id=str(payment_id),
-            status=status,
-            amount_minor=_dodo_val(payment, "total_amount"),
-            currency=_dodo_val(payment, "currency"),
+        return SavedPaymentChargeResult.model_validate(
+            {
+                "provider_payment_id": str(payment_id),
+                "status": status,
+                "amount_minor": _dodo_val(payment, "total_amount"),
+                "currency": _dodo_val(payment, "currency"),
+            }
         )
 
-    async def create_customer(self, params: CreateCustomerParams) -> dict:
+    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         client = self._get_client()
         kwargs: dict[str, Any] = {
             "email": params.email,
@@ -312,17 +326,17 @@ class DodoProvider(PaymentProvider):
             kwargs["metadata"] = params.metadata
         customer = await client.customers.create(**kwargs)
         cid = getattr(customer, "customer_id", None) or customer.get("customer_id")
-        return {"customerId": cid}
+        return CreateCustomerResult(customer_id=str(cid))
 
-    async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         client = self._get_client()
         payment = await client.payments.retrieve(provider_payment_id)
         link = getattr(payment, "payment_link", None) or payment.get("payment_link")
         if link:
-            return {"url": link}
+            return ProviderUrlResult(url=str(link))
         return None
 
-    async def change_plan(self, params: ChangePlanParams) -> None:
+    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:
         client = self._get_client()
         kwargs: dict[str, Any] = {
             "product_id": params.product_id,
@@ -338,6 +352,7 @@ class DodoProvider(PaymentProvider):
         if params.idempotency_key:
             kwargs["idempotency_key"] = params.idempotency_key
         await client.subscriptions.change_plan(params.provider_subscription_id, **kwargs)
+        return ChangePlanResult(provider_operation_id=None)
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
         client = self._get_client()
@@ -349,33 +364,67 @@ class DodoProvider(PaymentProvider):
         if params.effective_at:
             kwargs["effective_at"] = params.effective_at
         response = await client.subscriptions.preview_change_plan(params.provider_subscription_id, **kwargs)
-        immediate_charge = getattr(response, "immediate_charge", None) or response.get("immediate_charge", {})
-        line_items_raw = getattr(immediate_charge, "line_items", None) or immediate_charge.get("line_items", [])
-        summary = getattr(immediate_charge, "summary", None) or immediate_charge.get("summary", {})
+        immediate_charge = _dodo_val(response, "immediate_charge", {}) or {}
+        line_items_raw = _dodo_val(immediate_charge, "line_items", []) or []
+        summary = _dodo_val(immediate_charge, "summary", {}) or {}
         line_items: list[ChangePlanLineItem] = []
         for item in line_items_raw:
-            i = item.model_dump() if hasattr(item, "model_dump") else item
-            if i.get("type") == "subscription":
+            if _dodo_val(item, "type") == "subscription":
+                product_id = _dodo_val(item, "product_id")
+                unit_price = _dodo_val(item, "unit_price")
+                quantity = _dodo_val(item, "quantity")
+                proration_factor = _dodo_val(item, "proration_factor")
+                currency = _dodo_val(item, "currency")
+                if not product_id or unit_price is None or quantity is None or proration_factor is None or not currency:
+                    raise ValueError("Dodo plan-change preview returned an incomplete subscription item")
                 line_items.append(
                     ChangePlanLineItem(
-                        product_id=str(i.get("product_id", "")),
-                        name=str(i.get("name", i.get("description", ""))),
-                        unit_price=int(i.get("unit_price", 0)),
-                        quantity=int(i.get("quantity", 0)),
-                        proration_factor=float(i.get("proration_factor", 0)),
-                        currency=str(i.get("currency", "")),
-                        tax=int(i.get("tax", 0)),
+                        product_id=str(product_id),
+                        name=str(_dodo_val(item, "name") or _dodo_val(item, "description", "")),
+                        unit_price=int(unit_price),
+                        quantity=int(quantity),
+                        proration_factor=float(proration_factor),
+                        currency=str(currency),
+                        tax=int(_dodo_val(item, "tax", 0) or 0),
                         subtotal=0,
                     )
                 )
-        total = int(getattr(summary, "total_amount", None) or summary.get("total_amount", 0))
-        settlement = int(getattr(summary, "settlement_amount", None) or summary.get("settlement_amount", 0))
-        currency = str(getattr(summary, "settlement_currency", None) or summary.get("settlement_currency", "USD"))
-        effective = str(getattr(immediate_charge, "effective_at", None) or immediate_charge.get("effective_at", ""))
+        total = int(_dodo_val(summary, "total_amount", 0) or 0)
+        settlement = int(_dodo_val(summary, "settlement_amount", 0) or 0)
+        currency = str(_dodo_val(summary, "settlement_currency", "USD"))
+        effective = str(_dodo_val(immediate_charge, "effective_at", ""))
+        new_plan = _dodo_val(response, "new_plan")
         return ChangePlanPreview(
             total_amount=total,
             settlement_amount=settlement,
             currency=currency,
-            line_items=line_items or None,
+            line_items=line_items,
             effective_at=effective,
+            recurring_amount=(
+                int(_dodo_val(new_plan, "recurring_pre_tax_amount"))
+                if new_plan is not None and _dodo_val(new_plan, "recurring_pre_tax_amount") is not None
+                else None
+            ),
+            recurring_currency=(
+                str(_dodo_val(new_plan, "currency"))
+                if new_plan is not None and _dodo_val(new_plan, "currency") is not None
+                else None
+            ),
+            next_billing_date=(
+                str(_dodo_val(new_plan, "next_billing_date"))
+                if new_plan is not None and _dodo_val(new_plan, "next_billing_date") is not None
+                else None
+            ),
+            tax_amount=(
+                int(_dodo_val(summary, "settlement_tax"))
+                if _dodo_val(summary, "settlement_tax") is not None
+                else int(_dodo_val(summary, "tax"))
+                if _dodo_val(summary, "tax") is not None
+                else None
+            ),
+            customer_credits=(
+                int(_dodo_val(summary, "customer_credits"))
+                if _dodo_val(summary, "customer_credits") is not None
+                else None
+            ),
         )

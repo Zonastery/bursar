@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any, Protocol
 
+from pydantic import BaseModel, ConfigDict
 
-@dataclass(frozen=True, slots=True)
-class OutboxEvent:
+
+class _StorageModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class OutboxEvent(_StorageModel):
     event_id: str
     topic: str
     aggregate_type: str
@@ -41,8 +45,7 @@ class OutboxHandler(Protocol):
     def handle(self, event: OutboxEvent) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class UsageChargeExport:
+class UsageChargeExport(_StorageModel):
     charge_id: str
     account_id: str
     subject_id: str
@@ -69,8 +72,7 @@ class UsageChargeExport:
     created_at: str
 
 
-@dataclass(frozen=True, slots=True)
-class BillingEventPayloadExport:
+class BillingEventPayloadExport(_StorageModel):
     event_id: str
     provider: str
     provider_environment: str
@@ -89,8 +91,7 @@ class UsageEventSink(Protocol):
     def write_usage(self, event: UsageChargeExport, outbox_event_id: str) -> None: ...
 
 
-@dataclass(frozen=True, slots=True)
-class BillingPayloadArchiveResult:
+class BillingPayloadArchiveResult(_StorageModel):
     key: str
     version_id: str | None
 

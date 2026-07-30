@@ -164,9 +164,9 @@ $$;
 CREATE FUNCTION bursar.claim_outbox_events(
     p_limit integer DEFAULT 100,
     p_lease_seconds integer DEFAULT 60,
-    p_topics text[] DEFAULT NULL
+    p_topics text [] DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     event_id bigint,
     topic text,
     aggregate_type text,
@@ -331,7 +331,7 @@ CREATE FUNCTION bursar.archive_billing_event_payload(
     p_event_id uuid,
     p_object_key text,
     p_object_version text DEFAULT NULL,
-    p_purge_postgres_payload boolean DEFAULT true
+    p_purge_postgres_payload boolean DEFAULT TRUE
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -427,7 +427,7 @@ CREATE FUNCTION bursar.drop_expired_storage_partitions(
     p_limit integer,
     p_lock_timeout_ms integer
 )
-RETURNS TABLE(partitions_dropped integer, lock_timeouts integer)
+RETURNS TABLE (partitions_dropped integer, lock_timeouts integer)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''
@@ -790,7 +790,8 @@ BEGIN
             rollup.account_id,
             rollup.operation,
             rollup.model_key,
-            rollup.region_key
+            rollup.region_key,
+            rollup.rollup_shard
         FROM bursar.usage_daily_rollups AS rollup
         WHERE rollup.usage_day
               < (
@@ -803,7 +804,8 @@ BEGIN
             rollup.account_id,
             rollup.operation,
             rollup.model_key,
-            rollup.region_key
+            rollup.region_key,
+            rollup.rollup_shard
         LIMIT v_settings.maintenance_batch_size
         FOR UPDATE SKIP LOCKED
     ),
@@ -815,6 +817,7 @@ BEGIN
           AND rollup.operation = candidates.operation
           AND rollup.model_key = candidates.model_key
           AND rollup.region_key = candidates.region_key
+          AND rollup.rollup_shard = candidates.rollup_shard
         RETURNING rollup.usage_day
     )
     SELECT count(*)::integer INTO v_rollups FROM deleted;
@@ -962,39 +965,39 @@ END
 $$;
 
 COMMENT ON FUNCTION bursar.get_storage_settings()
-    IS 'Return PostgreSQL hot-storage retention and maintenance settings.';
+IS 'Return PostgreSQL hot-storage retention and maintenance settings.';
 COMMENT ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer, integer, integer, integer, integer,
     integer, integer, integer
 )
-    IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
-COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
-    IS 'Claim a bounded batch of versioned events for an optional external sink.';
+IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
+COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text [])
+IS 'Claim a bounded batch of versioned events for an optional external sink.';
 COMMENT ON FUNCTION bursar.export_usage_charge(uuid)
-    IS 'Return one usage charge projection for an external analytics sink.';
+IS 'Return one usage charge projection for an external analytics sink.';
 COMMENT ON FUNCTION bursar.export_billing_event_payload(uuid)
-    IS 'Return one billing event envelope and its current archive pointer.';
+IS 'Return one billing event envelope and its current archive pointer.';
 COMMENT ON FUNCTION bursar.complete_outbox_event(bigint, uuid)
-    IS 'Acknowledge one claimed outbox event as delivered.';
+IS 'Acknowledge one claimed outbox event as delivered.';
 COMMENT ON FUNCTION bursar.archive_billing_event_payload(
     uuid, text, text, boolean
 )
-    IS 'Record an external webhook-envelope object and optionally purge its PostgreSQL payload.';
+IS 'Record an external webhook-envelope object and optionally purge its PostgreSQL payload.';
 COMMENT ON FUNCTION bursar.fail_outbox_event(bigint, uuid, text, integer, integer)
-    IS 'Release or dead-letter one claimed outbox event after delivery failure.';
+IS 'Release or dead-letter one claimed outbox event after delivery failure.';
 COMMENT ON FUNCTION bursar.drop_expired_storage_partitions(
     text, timestamptz, integer, integer
 )
-    IS 'Internal low-lock-timeout removal of fully expired managed payload partitions.';
+IS 'Internal low-lock-timeout removal of fully expired managed payload partitions.';
 COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(
     text, timestamptz
 )
-    IS 'Create near-term and drop fully expired partitions in a short DDL-only transaction.';
+IS 'Create near-term and drop fully expired partitions in a short DDL-only transaction.';
 COMMENT ON FUNCTION bursar.run_storage_maintenance(timestamptz)
-    IS 'Perform one bounded row-retention pass without partition DDL.';
+IS 'Perform one bounded row-retention pass without partition DDL.';
 COMMENT ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
-    IS 'Run one bounded retention pass only when the configured interval has elapsed.';
+IS 'Run one bounded retention pass only when the configured interval has elapsed.';
 
 REVOKE ALL ON FUNCTION bursar.get_storage_settings() FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.configure_storage(
@@ -1002,7 +1005,7 @@ REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer, integer
 ) FROM PUBLIC;
-REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_usage_charge(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_billing_event_payload(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.complete_outbox_event(bigint, uuid) FROM PUBLIC;
@@ -1020,7 +1023,7 @@ REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance(
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.run_storage_maintenance(timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
-    FROM PUBLIC;
+FROM PUBLIC;
 
 DO $$
 BEGIN

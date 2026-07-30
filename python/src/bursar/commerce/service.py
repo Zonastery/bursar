@@ -5,6 +5,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
+from bursar.billing.contracts import (
+    BillingSubscriptionChangeUpdate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
 from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
@@ -28,6 +33,7 @@ from bursar.commerce.errors import (
 from bursar.commerce.plan_change import classify_subscription_change
 from bursar.commerce.provider_registry import CommerceProviderRegistry
 from bursar.commerce.types import (
+    AccountAllowanceOverview,
     AccountCommerceOverview,
     AccountCreditOverview,
     AutoRechargeInput,
@@ -36,6 +42,7 @@ from bursar.commerce.types import (
     BillingDocumentRef,
     CheckoutStatusResult,
     CommerceOptions,
+    CommerceProviderFactoryContext,
     CommerceSectionAvailability,
     CommerceWebhookResult,
     ConfirmPlanChangeResult,
@@ -62,9 +69,11 @@ from bursar.providers.types import (
     PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
+    ProviderUrlResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
 )
+from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 _TERMINAL_CHECKOUT_STATUSES = {
     "failed",
@@ -214,6 +223,12 @@ class CommerceAutoRecharge:
 class CommerceService:
     """Framework-independent catalog, billing-state, and provider coordinator."""
 
+    billing: Any
+    credits: Any
+    providers: CommerceProviderRegistry
+    auto_recharge: CommerceAutoRecharge
+    logger: NormalizedLogger
+
     def __init__(
         self,
         billing: Any,
@@ -224,7 +239,14 @@ class CommerceService:
         self.billing = billing
         self.credits = credits
         self.options = options
-        self.providers = CommerceProviderRegistry(options, event_sink)
+        self.logger = normalize_logger(options.logger)
+        self.providers = CommerceProviderRegistry(
+            options,
+            CommerceProviderFactoryContext(
+                event_sink=event_sink,
+                identity_resolver=options.identity_resolver,
+            ),
+        )
         self.auto_recharge = CommerceAutoRecharge(self)
 
     async def get_provider(self, provider_name: str) -> PaymentProvider:
@@ -358,12 +380,16 @@ class CommerceService:
 
         def create_intent():
             return self.billing.create_or_get_checkout_intent(
-                input.subject_id,
-                provider.provider,
-                checkout_kind,
-                offer_key,
-                request_digest,
-                (datetime.now(UTC) + timedelta(seconds=self.options.checkout_intent_ttl_seconds)).isoformat(),
+                CheckoutIntentCreate(
+                    subject_id=input.subject_id,
+                    provider=provider.provider,
+                    checkout_kind=checkout_kind,
+                    product_key=offer_key,
+                    request_digest=request_digest,
+                    expires_at=(
+                        datetime.now(UTC) + timedelta(milliseconds=self.options.checkout_intent_ttl_ms)
+                    ).isoformat(),
+                )
             )
 
         intent = create_intent()
@@ -386,7 +412,7 @@ class CommerceService:
             if payment_status == "succeeded":
                 self.billing.update_checkout_intent(
                     intent.id,
-                    status="completed",
+                    CheckoutIntentUpdate(status="completed"),
                 )
                 raise CheckoutCompletedError()
             if not locally_expired and state is not None and payment_status not in _TERMINAL_CHECKOUT_STATUSES:
@@ -395,7 +421,7 @@ class CommerceService:
                 )
             self.billing.update_checkout_intent(
                 intent.id,
-                status="expired" if state is None else "failed",
+                CheckoutIntentUpdate(status="expired" if state is None else "failed"),
             )
             intent = create_intent()
 
@@ -416,8 +442,10 @@ class CommerceService:
             )
             self.billing.update_checkout_intent(
                 intent.id,
-                provider_session_id=session.get("providerSessionId"),
-                checkout_url=session["url"],
+                CheckoutIntentUpdate(
+                    provider_session_id=session.get("providerSessionId"),
+                    checkout_url=session["url"],
+                ),
             )
             customer_id = session.get("customerId")
             if (
@@ -438,7 +466,10 @@ class CommerceService:
                 offer_key=offer_key,
             )
         except Exception:
-            self.billing.update_checkout_intent(intent.id, status="failed")
+            self.billing.update_checkout_intent(
+                intent.id,
+                CheckoutIntentUpdate(status="failed"),
+            )
             raise
 
     def get_checkout_status(
@@ -478,7 +509,7 @@ class CommerceService:
             "trialing",
             "past_due",
         }:
-            return SubscriptionCommandResult()
+            return SubscriptionCommandResult(ok=True)
         provider = await self.providers.get(subscription.provider)
         if not _supports(provider, "cancel_subscription"):
             raise ProviderCapabilityNotSupportedError(
@@ -503,7 +534,7 @@ class CommerceService:
                 ),
             )
         )
-        return SubscriptionCommandResult(pending=True)
+        return SubscriptionCommandResult(ok=True, pending=True)
 
     async def reactivate_subscription(
         self,
@@ -517,7 +548,7 @@ class CommerceService:
         if (status == "active" and not subscription.cancel_at_period_end) or (
             not subscription.cancel_at_period_end and status != "canceled"
         ):
-            return SubscriptionCommandResult()
+            return SubscriptionCommandResult(ok=True)
         provider = await self.providers.get(subscription.provider)
         if not _supports(provider, "reactivate_subscription"):
             raise ProviderCapabilityNotSupportedError(
@@ -542,7 +573,7 @@ class CommerceService:
                 ),
             )
         )
-        return SubscriptionCommandResult(pending=True)
+        return SubscriptionCommandResult(ok=True, pending=True)
 
     async def _plan_context(
         self,
@@ -618,11 +649,13 @@ class CommerceService:
             )
         effective_at, proration = _plan_change_provider_args(context["policy"])
         return await provider.preview_change_plan(
-            PreviewChangePlanParams(
-                provider_subscription_id=context["subscription"].provider_subscription_id,
-                product_id=context["product_id"],
-                effective_at=effective_at,
-                proration_billing_mode=proration,
+            PreviewChangePlanParams.model_validate(
+                {
+                    "provider_subscription_id": context["subscription"].provider_subscription_id,
+                    "product_id": context["product_id"],
+                    "effective_at": effective_at,
+                    "proration_billing_mode": proration,
+                }
             )
         )
 
@@ -706,7 +739,7 @@ class CommerceService:
             )
             self.billing.update_billing_subscription_change(
                 existing.id,
-                state="canceled",
+                BillingSubscriptionChangeUpdate(state="canceled"),
             )
         elif existing is not None:
             raise CheckoutConflictError("A plan change is already awaiting payment")
@@ -738,30 +771,34 @@ class CommerceService:
                 )
             provider_effective, proration = _plan_change_provider_args(context["policy"])
             result = await provider.change_plan(
-                ChangePlanParams(
-                    provider_subscription_id=subscription.provider_subscription_id,
-                    product_id=context["product_id"],
-                    effective_at=provider_effective,
-                    proration_billing_mode=proration,
-                    on_payment_failure=context["policy"].payment_failure,
-                    metadata={
-                        "userId": account_id,
-                        "plan_slug": offer.plan,
-                        "billing_interval": context["target_interval"],
-                    },
-                    idempotency_key=operation_key,
+                ChangePlanParams.model_validate(
+                    {
+                        "provider_subscription_id": subscription.provider_subscription_id,
+                        "product_id": context["product_id"],
+                        "effective_at": provider_effective,
+                        "proration_billing_mode": proration,
+                        "on_payment_failure": context["policy"].payment_failure,
+                        "metadata": {
+                            "userId": account_id,
+                            "plan_slug": offer.plan,
+                            "billing_interval": context["target_interval"],
+                        },
+                        "idempotency_key": operation_key,
+                    }
                 )
             )
-            operation_id = result.get("providerOperationId") if isinstance(result, dict) else None
+            operation_id = result.provider_operation_id if result is not None else None
             self.billing.update_billing_subscription_change(
                 change.id,
-                provider_operation_id=operation_id,
+                BillingSubscriptionChangeUpdate(provider_operation_id=operation_id),
             )
         except Exception as exc:
             self.billing.update_billing_subscription_change(
                 change.id,
-                state="failed",
-                error_message=str(exc),
+                BillingSubscriptionChangeUpdate(
+                    state="failed",
+                    error_message=str(exc),
+                ),
             )
             raise
         return ConfirmPlanChangeResult(
@@ -800,7 +837,7 @@ class CommerceService:
         )
         self.billing.update_billing_subscription_change(
             change.id,
-            state="canceled",
+            BillingSubscriptionChangeUpdate(state="canceled"),
         )
         return {"success": True}
 
@@ -811,7 +848,7 @@ class CommerceService:
         *,
         purpose: Literal["billing", "payment-method"] = "billing",
         cancel_url: str | None = None,
-    ) -> dict:
+    ) -> ProviderUrlResult:
         subscription = self.billing.get_user_subscription(account_id)
         customer = self.billing.get_customer_by_user_id(
             account_id,
@@ -871,7 +908,7 @@ class CommerceService:
     ):
         values = {
             **_DEFAULT_PREFERENCES,
-            **self.options.preference_defaults,
+            **self.options.preference_defaults.model_dump(exclude_none=True),
         }
         if current is not None:
             values.update(current.model_dump(exclude={"user_id"}))
@@ -1009,11 +1046,19 @@ class CommerceService:
                         account_id,
                         provider,
                     )
-                except Exception:
+                except Exception as exc:
                     auto_recharge_available = False
-        except Exception:
+                    self.logger.warn(
+                        "[CommerceService] auto-recharge overview unavailable",
+                        {"account_id": account_id, "error": str(exc)},
+                    )
+        except Exception as exc:
             payment_methods_available = False
             auto_recharge_available = False
+            self.logger.warn(
+                "[CommerceService] provider overview unavailable",
+                {"account_id": account_id, "error": str(exc)},
+            )
 
         return AccountCommerceOverview(
             account_id=account_id,
@@ -1021,10 +1066,12 @@ class CommerceService:
                 ledger_balance=balance.balance,
                 effective_spendable_balance=available.available,
                 lifetime_purchases=balance.lifetime_purchased,
-                allowance_remaining=allowance.allowance_remaining,
-                allowance_limit=entitlement.allowance_amount,
-                allowance_period_start=allowance.period_start,
-                allowance_period_end=allowance.period_end,
+                allowance=AccountAllowanceOverview(
+                    remaining=allowance.allowance_remaining,
+                    limit=entitlement.allowance_amount,
+                    period_start=allowance.period_start or None,
+                    period_end=allowance.period_end or None,
+                ),
                 buckets=buckets.buckets,
             ),
             entitlement=entitlement,
@@ -1050,7 +1097,7 @@ class CommerceService:
         self,
         account_id: str,
         document: BillingDocumentRef,
-    ) -> dict[str, str]:
+    ) -> ProviderUrlResult:
         provider_name: str
         provider_document_id: str
         if document.kind == "provider_invoice":
@@ -1098,5 +1145,4 @@ class CommerceService:
         provider: str | None = None,
     ) -> CommerceWebhookResult:
         selected = await self.providers.select(requested=provider)
-        result = await selected.handle_webhook(WebhookRequest(raw_body=raw_body, headers=headers))
-        return CommerceWebhookResult.from_provider(result)
+        return await selected.handle_webhook(WebhookRequest(raw_body=raw_body, headers=headers))

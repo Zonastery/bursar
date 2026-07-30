@@ -15,6 +15,7 @@ from bursar.providers.stripe.provider import StripeProvider
 from bursar.providers.types import (
     ChangePlanParams,
     CheckoutParams,
+    CheckoutSessionResult,
     CreateCustomerParams,
     PaymentMethodSetupParams,
     PaymentProvider,
@@ -30,8 +31,8 @@ class MinimalProvider(PaymentProvider):
 
     provider = "minimal"
 
-    async def create_checkout_session(self, params: CheckoutParams) -> dict:
-        return {"url": params.return_url}
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
+        return CheckoutSessionResult(url=params.return_url)
 
     async def handle_webhook(self, req: WebhookRequest) -> dict:
         return {"received": True, "retryable": False}
@@ -112,10 +113,18 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
 
     checkout = run(
         provider.create_checkout_session(
-            CheckoutParams(product_id="prod_1", return_url="https://return", quantity=2, metadata={"plan": "pro"})
+            CheckoutParams(
+                product_id="prod_1",
+                type="subscription",
+                return_url="https://return",
+                cancel_url="",
+                quantity=2,
+                metadata={"plan": "pro"},
+            )
         )
     )
-    assert checkout == {"url": "https://checkout.test", "providerSessionId": "sess_1"}
+    assert checkout.url == "https://checkout.test"
+    assert checkout.provider_session_id == "sess_1"
     assert client.calls[0] == (
         "create",
         {
@@ -130,13 +139,29 @@ def test_dodo_adapter_maps_requests_and_responses() -> None:
             UpdatePaymentMethodParams(customer_id="cus_1", subscription_id="sub_1", return_url="https://return")
         )
     )
-    assert updated == {"url": "https://checkout.test"}
-    run(provider.change_plan(ChangePlanParams(provider_subscription_id="sub_1", product_id="prod_2")))
+    assert updated.url == "https://checkout.test"
+    run(
+        provider.change_plan(
+            ChangePlanParams(
+                provider_subscription_id="sub_1",
+                product_id="prod_2",
+                proration_billing_mode="prorated_immediately",
+            )
+        )
+    )
     preview = run(
-        provider.preview_change_plan(PreviewChangePlanParams(provider_subscription_id="sub_1", product_id="prod_2"))
+        provider.preview_change_plan(
+            PreviewChangePlanParams(
+                provider_subscription_id="sub_1",
+                product_id="prod_2",
+                proration_billing_mode="prorated_immediately",
+            )
+        )
     )
     assert preview.total_amount == 12
-    assert run(provider.get_invoice_url("pay_1")) == {"url": "https://invoice.test"}
+    invoice = run(provider.get_invoice_url("pay_1"))
+    assert invoice is not None
+    assert invoice.url == "https://invoice.test"
     assert [p.id for p in run(provider.list_payment_methods("cus_1"))] == ["pm_1"]
 
 
@@ -147,7 +172,11 @@ def test_dodo_webhook_failures_are_classified_without_network() -> None:
             async def unwrap(*_args: Any, **_kwargs: Any) -> None:
                 raise TimeoutError("timeout")
 
-    result = run(DodoProvider(lambda: Broken(), {"webhook_key": "k"}, Sink()).handle_webhook(WebhookRequest("{}", {})))
+    result = run(
+        DodoProvider(lambda: Broken(), {"webhook_key": "k"}, Sink()).handle_webhook(
+            WebhookRequest(raw_body="{}", headers={})
+        )
+    )
     assert result.received is False
     assert result.retryable is False
     assert result.provider == "dodo"
@@ -174,13 +203,21 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     provider = StripeProvider(Sink(), get_stripe=lambda: fake)
     result = run(
         provider.create_checkout_session(
-            CheckoutParams(user_id="u1", product_id="price_1", return_url="https://ok", cancel_url="https://cancel")
+            CheckoutParams(
+                user_id="u1",
+                product_id="price_1",
+                type="subscription",
+                return_url="https://ok",
+                cancel_url="https://cancel",
+                metadata={},
+            )
         )
     )
-    assert result == {"url": "https://checkout.test", "customerId": "cus_1"}
+    assert result.url == "https://checkout.test"
+    assert result.customer_id == "cus_1"
     assert calls[0][0] == "customer"
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
-    webhook = run(provider.handle_webhook(WebhookRequest("{}", {})))
+    webhook = run(provider.handle_webhook(WebhookRequest(raw_body="{}", headers={})))
     assert webhook.received is False
     assert webhook.retryable is False
     assert webhook.provider == "stripe"
@@ -188,14 +225,30 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
 
 def test_mock_provider_is_a_complete_deterministic_test_double() -> None:
     provider = MockPaymentProvider(Sink())
-    assert run(provider.create_customer(CreateCustomerParams()))["customerId"].startswith("mock_cus_")
-    assert run(provider.create_checkout_session(CheckoutParams(return_url="https://return"))) == {
-        "url": "https://return"
-    }
-    assert run(provider.create_customer_portal_session(PortalParams(return_url="https://portal"))) == {
-        "url": "https://portal"
-    }
-    assert run(provider.create_payment_method_setup_session(PaymentMethodSetupParams(return_url="https://setup"))) == {
-        "url": "https://setup"
-    }
-    assert run(provider.get_invoice_url("pay")) == {"url": "https://example.com/invoice"}
+    customer = run(provider.create_customer(CreateCustomerParams(email="", name="", metadata={})))
+    assert customer.customer_id.startswith("mock_cus_")
+    checkout = run(
+        provider.create_checkout_session(
+            CheckoutParams(
+                product_id="mock",
+                type="subscription",
+                return_url="https://return",
+                cancel_url="",
+                metadata={},
+            )
+        )
+    )
+    assert checkout.url == "https://return"
+    portal = run(
+        provider.create_customer_portal_session(PortalParams(customer_id="mock_customer", return_url="https://portal"))
+    )
+    assert portal.url == "https://portal"
+    setup = run(
+        provider.create_payment_method_setup_session(
+            PaymentMethodSetupParams(customer_id="mock_customer", return_url="https://setup")
+        )
+    )
+    assert setup.url == "https://setup"
+    invoice = run(provider.get_invoice_url("pay"))
+    assert invoice is not None
+    assert invoice.url == "https://example.com/invoice"

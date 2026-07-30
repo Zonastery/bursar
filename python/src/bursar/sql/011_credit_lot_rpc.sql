@@ -202,7 +202,7 @@ CREATE FUNCTION bursar.clawback_credit_source(
     p_idempotency_key text,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     balance_after numeric,
     replayed boolean,
@@ -447,9 +447,9 @@ $$;
 CREATE FUNCTION bursar.sweep_expired_lots(
     p_limit integer DEFAULT 100,
     p_subject_id uuid DEFAULT NULL,
-    p_dry_run boolean DEFAULT false
+    p_dry_run boolean DEFAULT FALSE
 )
-RETURNS TABLE(
+RETURNS TABLE (
     expired_count integer,
     expired_amount numeric,
     expired_by_bucket jsonb
@@ -590,7 +590,7 @@ CREATE FUNCTION bursar.revoke_lot(
     p_amount numeric,
     p_idempotency_key text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     error_code text
 )
@@ -624,7 +624,7 @@ CREATE FUNCTION bursar.refund_credit(
     p_idempotency_key text,
     p_original_entry_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     balance_after numeric,
     replayed boolean,
@@ -994,7 +994,7 @@ CREATE FUNCTION bursar.refund_credit_by_entry(
     p_reason text DEFAULT NULL,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     subject_id uuid,
     amount numeric,
@@ -1250,7 +1250,7 @@ CREATE FUNCTION bursar.revoke_subject_credits_by_operation(
     p_subject_id uuid,
     p_operation text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     revoked numeric,
     balance_after numeric,
     error_code text

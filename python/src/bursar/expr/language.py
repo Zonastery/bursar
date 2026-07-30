@@ -31,4 +31,4 @@ ALLOWED_FUNCTION_ARGS: dict[str, tuple[int, int | None]] = {
     "_bursar_if": (3, 3),
 }
 
-SAFE_NAMES: set[str] = ALLOWED_FUNCTIONS | {"str"}
+SAFE_NAMES: frozenset[str] = ALLOWED_FUNCTIONS | {"str"}

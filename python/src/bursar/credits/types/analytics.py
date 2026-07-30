@@ -4,42 +4,43 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
 
 class SpendByUserRow(BaseModel):
-    user_id: str = ""
-    total_spend: Decimal = Decimal(0)
-    entry_count: int = 0
+    user_id: str
+    total_spend: Decimal
+    entry_count: int
 
 
 class SpendByModelRow(BaseModel):
-    model: str = ""
-    total_spend: Decimal = Decimal(0)
-    entry_count: int = 0
+    model: str
+    total_spend: Decimal
+    entry_count: int
 
 
 class TopUserRow(BaseModel):
-    user_id: str = ""
-    total_spend: Decimal = Decimal(0)
+    user_id: str
+    total_spend: Decimal
 
 
 class DailySpendRow(BaseModel):
-    date: str = ""
-    total_spend: Decimal = Decimal(0)
-    entry_count: int = 0
+    date: str
+    total_spend: Decimal
+    entry_count: int
 
 
-class AggregateStatsRow(BaseModel):
-    total_credits_consumed: Decimal = Decimal(0)
-    active_users: int = 0
-    avg_daily_spend: Decimal = Decimal(0)
-    top_model: str = ""
-    top_user: str = ""
+class AggregateStats(BaseModel):
+    total_credits_consumed: Decimal
+    active_users: int
+    avg_daily_spend: Decimal
+    top_model: str
+    top_user: str
 
 
+@runtime_checkable
 class UsageAnalyticsStore(Protocol):
     """Read-only usage analytics backend.
 
@@ -55,4 +56,4 @@ class UsageAnalyticsStore(Protocol):
 
     def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]: ...
 
-    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow: ...
+    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats: ...

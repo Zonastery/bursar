@@ -5,13 +5,17 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+
+from pydantic import BaseModel, ConfigDict
 
 from bursar.storage.ports import OutboxEvent, OutboxHandler, OutboxStore
 
 
-@dataclass(frozen=True, slots=True)
-class OutboxWorkerOptions:
+class _OutboxModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class OutboxWorkerOptions(_OutboxModel):
     batch_size: int = 100
     concurrency: int = 4
     lease_seconds: int = 60
@@ -22,8 +26,7 @@ class OutboxWorkerOptions:
     on_error: Callable[[BaseException], None] | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class OutboxRunResult:
+class OutboxRunResult(_OutboxModel):
     claimed: int
     delivered: int
     failed: int

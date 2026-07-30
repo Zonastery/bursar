@@ -48,6 +48,7 @@ export class CreditLeaseWorkflow {
 
   private async expectedAdmissionPolicy(
     userId: string,
+    operationType: string,
     billingModeOverride?: BillingMode | null,
   ): Promise<{
     billingMode: BillingMode;
@@ -55,21 +56,29 @@ export class CreditLeaseWorkflow {
     maxConcurrent: number | null;
   }> {
     const plan = await this.store.getUserPlan(userId);
-    const defaultMode: BillingMode =
+    const planMode: BillingMode =
       plan.planId == null
         ? this.policy === "overdraft"
           ? "overdraft"
           : "strict"
         : plan.billingMode;
-    const billingMode = billingModeOverride ?? defaultMode;
+    const operationPolicy =
+      plan.planId == null ? null : (plan.perOperation?.[operationType] ?? null);
+    const billingMode = billingModeOverride ?? operationPolicy?.billingMode ?? planMode;
     const floor =
       billingMode === "overdraft"
-        ? (plan.overdraftFloor ?? this.overdraftFloor ?? new Decimal(0))
+        ? (operationPolicy?.overdraftFloor ??
+          plan.overdraftFloor ??
+          this.overdraftFloor ??
+          new Decimal(0))
         : new Decimal(0);
     return {
       billingMode,
       floor,
-      maxConcurrent: plan.planId == null ? this.defaultMaxConcurrent : (plan.maxConcurrent ?? null),
+      maxConcurrent:
+        plan.planId == null
+          ? this.defaultMaxConcurrent
+          : (operationPolicy?.maxConcurrent ?? plan.maxConcurrent ?? null),
     };
   }
 
@@ -112,8 +121,14 @@ export class CreditLeaseWorkflow {
     }
     const operationType =
       options?.operationType ?? (isAmount(metricsOrAmount) ? "usage" : metricsOrAmount.operation);
-    const expectedPolicy = await this.expectedAdmissionPolicy(userId, options?.billingMode);
-    const { amount, model } = await this.costOf(metricsOrAmount, userId);
+    const expectedPolicy = await this.expectedAdmissionPolicy(
+      userId,
+      operationType,
+      options?.billingMode,
+    );
+    const priced = await this.costOf(metricsOrAmount, userId);
+    const amount = priced.amount;
+    const model = priced.model ?? options?.model ?? null;
     const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
     const feature = options?.feature ?? options?.requiredFeature ?? null;
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
@@ -300,11 +315,30 @@ export class CreditLeaseWorkflow {
     const feature = options?.feature ?? options?.requiredFeature ?? null;
     const { amount: worstCase } = await this.costOf(metricsOrAmount, userId);
     const avail = await this.store.getAvailable(userId);
-    const expectedPolicy = await this.expectedAdmissionPolicy(userId, options?.billingMode);
-    const allowance = await this.store.checkAllowance(userId);
-    const spendable = avail.available
-      .plus(allowance.allowanceRemaining)
-      .minus(expectedPolicy.floor);
+    let expectedPolicy;
+    try {
+      expectedPolicy = await this.expectedAdmissionPolicy(
+        userId,
+        options?.operationType ?? "usage",
+        options?.billingMode,
+      );
+    } catch {
+      return {
+        affordable: false,
+        spendable: avail.available,
+        worstCase,
+        reason: "policy_unavailable",
+      };
+    }
+    let allowanceRemaining = new Decimal(0);
+    try {
+      allowanceRemaining = (await this.store.checkAllowance(userId)).allowanceRemaining;
+    } catch (error) {
+      this.logger.debug("[CreditsService] allowance fetch failed in canAfford", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const spendable = avail.available.plus(allowanceRemaining).minus(expectedPolicy.floor);
 
     let affordable = true;
     let reason: string | null = null;

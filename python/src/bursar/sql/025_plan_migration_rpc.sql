@@ -216,6 +216,8 @@ BEGIN
              AND account.account_kind = 'personal'
             WHERE account.id = assignment_row.account_id
               AND source.selected
+              AND source.provider_environment =
+                  bursar.current_provider_environment()
               AND subscription.status IN (
                   'trialing', 'active', 'past_due', 'paused'
               )
@@ -372,7 +374,7 @@ CREATE FUNCTION bursar.migrate_plan_batch(
     p_migration_id uuid,
     p_batch_size integer DEFAULT 100
 )
-RETURNS TABLE(
+RETURNS TABLE (
     migrated integer,
     done boolean,
     next_cursor uuid
@@ -474,7 +476,7 @@ CREATE FUNCTION bursar.migrate_plan_users(
     p_plan_key text,
     p_target_revision_no bigint DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     plan_key text,
     target_plan_id uuid,
     target_config_version bigint,
@@ -556,8 +558,8 @@ CREATE FUNCTION bursar.open_subscription_change(
     p_idempotency_key text,
     p_proration_behavior text DEFAULT 'provider_default'
 )
-RETURNS TABLE(
-    change_id uuid,
+RETURNS TABLE (
+    change_id bigint,
     state text,
     error_code text
 )
@@ -578,7 +580,7 @@ BEGIN
            'none'
        )
     THEN
-        RETURN QUERY SELECT NULL::uuid, NULL::text, 'invalid_request';
+        RETURN QUERY SELECT NULL::bigint, NULL::text, 'invalid_request';
         RETURN;
     END IF;
 
@@ -589,7 +591,7 @@ BEGIN
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN QUERY SELECT NULL::uuid, NULL::text, 'missing_subscription';
+        RETURN QUERY SELECT NULL::bigint, NULL::text, 'missing_subscription';
         RETURN;
     END IF;
 
@@ -602,7 +604,7 @@ BEGIN
     WHERE offer.id = p_to_offer_id;
 
     IF NOT FOUND OR subscription_row.offer_id = p_to_offer_id THEN
-        RETURN QUERY SELECT NULL::uuid, NULL::text, 'invalid_target_offer';
+        RETURN QUERY SELECT NULL::bigint, NULL::text, 'invalid_target_offer';
         RETURN;
     END IF;
 
@@ -621,7 +623,7 @@ BEGIN
               p_proration_behavior
         THEN
             RETURN QUERY
-            SELECT NULL::uuid, NULL::text, 'idempotency_conflict';
+            SELECT NULL::bigint, NULL::text, 'idempotency_conflict';
         ELSE
             RETURN QUERY
             SELECT change_row.id, change_row.state, NULL::text;
@@ -636,7 +638,7 @@ BEGIN
           AND billing_subscription_changes.state IN ('awaiting_payment', 'scheduled')
     )
     THEN
-        RETURN QUERY SELECT NULL::uuid, NULL::text, 'open_change_exists';
+        RETURN QUERY SELECT NULL::bigint, NULL::text, 'open_change_exists';
         RETURN;
     END IF;
 
@@ -669,7 +671,7 @@ END
 $$;
 
 CREATE FUNCTION bursar.advance_subscription_change(
-    p_change_id uuid,
+    p_change_id bigint,
     p_state text,
     p_provider_operation_id text DEFAULT NULL,
     p_error_message text DEFAULT NULL

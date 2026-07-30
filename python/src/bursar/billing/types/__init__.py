@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -9,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class BillingProvider(StrEnum):
     stripe = "stripe"
     dodo = "dodo"
+    mock = "mock"
 
 
 class BillingEventType(StrEnum):
@@ -165,6 +167,12 @@ class BillingEventResult(BaseModel):
     subscription_id: str | None = None
 
 
+BillingEventHandler = Callable[
+    [BillingEvent, str],
+    None | Awaitable[None],
+]
+
+
 class BillingOfferInterval(StrEnum):
     day = "day"
     week = "week"
@@ -188,6 +196,18 @@ class CycleGrant(BaseModel):
 
 
 Grant = Annotated[AllowanceGrant | CycleGrant, Field(discriminator="mode")]
+EntitlementMode = Literal["allowance", "cycle_grant"]
+
+
+class SubscriptionGrant(BaseModel):
+    """Provider-neutral grant descriptor matching the JavaScript SDK."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: EntitlementMode | None = None
+    credits: Decimal | None = None
+    bucket: str | None = None
+    replace_prior: bool | None = None
 
 
 class BillingOffer(BaseModel):
@@ -196,7 +216,7 @@ class BillingOffer(BaseModel):
     plan: str
     interval: BillingOfferInterval = BillingOfferInterval.month
     interval_count: int = Field(default=1, ge=1)
-    grant: Grant = Field(default_factory=lambda: AllowanceGrant())
+    grant: SubscriptionGrant = Field(default_factory=lambda: SubscriptionGrant(mode="allowance"))
     providers: dict[str, ProviderRef] = Field(default_factory=dict)
     valid_from: str | None = None
     valid_to: str | None = None
@@ -237,6 +257,14 @@ class BillingEventClaim(BaseModel):
     status: Literal["claimed", "duplicate", "retry"]
     claim_token: str | None = None
     billing_event_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_claim(self) -> "BillingEventClaim":
+        if self.status == "claimed" and (self.claim_token is None or self.billing_event_id is None):
+            raise ValueError("claimed billing event requires claim_token and billing_event_id")
+        if self.status != "claimed" and (self.claim_token is not None or self.billing_event_id is not None):
+            raise ValueError("duplicate/retry billing event cannot include claim identifiers")
+        return self
 
 
 class CheckoutIntentStatus(StrEnum):
@@ -386,29 +414,33 @@ class BillingPreferences(BaseModel):
     """Per-user billing preferences (auto-recharge, notification toggles, overage protection)."""
 
     user_id: str
-    auto_recharge: bool = False
-    overage_protection: bool = True
-    email_notifications: bool = True
-    usage_alerts: bool = True
-    invoice_reminders: bool = False
+    auto_recharge: bool
+    overage_protection: bool
+    email_notifications: bool
+    usage_alerts: bool
+    invoice_reminders: bool
+
+
+AUTO_RECHARGE_STATES = ("disabled", "active", "paused")
+BillingAutoRechargeState = Literal["disabled", "active", "paused"]
 
 
 class BillingAutoRechargeProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str
-    enabled: bool = False
-    state: Literal["disabled", "active", "paused"] = "disabled"
+    enabled: bool
+    state: BillingAutoRechargeState
     armed: bool = True
-    provider: str | None = None
-    topup_id: str | None = None
-    quantity: int = 1
-    threshold: Decimal = Decimal(0)
-    max_charges_per_window: int | None = None
-    window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"] = "month"
-    window_count: int = 1
-    window_anchor: Literal["calendar", "plan_assignment", "rolling"] = "calendar"
-    window_timezone: str = "UTC"
+    provider: str | None
+    topup_id: str | None
+    quantity: int
+    threshold: Decimal
+    max_charges_per_window: int | None
+    window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"]
+    window_count: int
+    window_anchor: Literal["calendar", "plan_assignment", "rolling"]
+    window_timezone: str
     updated_at: str | None = None
 
 
@@ -419,7 +451,7 @@ class BillingAutoRechargeAttempt(BaseModel):
     user_id: str
     provider: str
     idempotency_key: str
-    provider_attempt_id: str | None = None
+    provider_attempt_id: str | None
     topup_id: str
     quantity: int
     state: Literal[
@@ -433,11 +465,11 @@ class BillingAutoRechargeAttempt(BaseModel):
     ]
     window_start: str
     window_end: str
-    quoted_amount_minor: int | None = None
-    currency: str | None = None
-    failure_code: str | None = None
-    failure_message: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    quoted_amount_minor: int | None
+    currency: str | None
+    failure_code: str | None
+    failure_message: str | None
+    metadata: dict[str, Any]
     created_at: str
     updated_at: str
 
@@ -446,7 +478,7 @@ class BillingAutoRechargeStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
-    state: Literal["disabled", "active", "paused"]
+    state: BillingAutoRechargeState
     threshold_credits: Decimal
     topup_key: str
     quantity: int
@@ -455,13 +487,13 @@ class BillingAutoRechargeStatus(BaseModel):
     window_start: str
     window_end: str
     recharges_in_window: int
-    payment_method_id: str | None = None
-    payment_method_last4: str | None = None
-    payment_method_brand: str | None = None
-    suspended_reason: str | None = None
-    pending_attempt_id: str | None = None
-    quote_amount_minor: int | None = None
-    quote_currency: str | None = None
+    payment_method_id: str | None
+    payment_method_last4: str | None
+    payment_method_brand: str | None
+    suspended_reason: str | None
+    pending_attempt_id: str | None
+    quote_amount_minor: int | None
+    quote_currency: str | None
 
 
 class BillingCustomerRecord(BaseModel):

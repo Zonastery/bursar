@@ -171,7 +171,7 @@ CREATE FUNCTION bursar.upsert_billing_refund(
     p_reason text DEFAULT NULL,
     p_provider_updated_at timestamptz DEFAULT now(),
     p_expected_subject_id uuid DEFAULT NULL,
-    p_expected_currency char(3) DEFAULT NULL,
+    p_expected_currency text DEFAULT NULL,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
 RETURNS uuid
@@ -181,7 +181,7 @@ DECLARE
 
     v_provider text;
 
-    v_currency char(3);
+    v_currency text;
     v_subject_id uuid;
     v_environment text;
     v_existing bursar.billing_refunds;
@@ -212,7 +212,7 @@ BEGIN
     END IF;
 
     IF p_expected_currency IS NOT NULL
-       AND upper(p_expected_currency::text)::char(3) <> v_currency
+       AND upper(p_expected_currency) <> v_currency
     THEN
         RAISE EXCEPTION 'refund currency does not match payment'
             USING ERRCODE='23514';
@@ -351,7 +351,9 @@ BEGIN
 
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
 
     INSERT INTO bursar.billing_auto_recharge_profiles(
         subject_id,enabled,armed,state,provider,provider_environment,
@@ -407,7 +409,9 @@ CREATE FUNCTION bursar.upsert_billing_preferences(
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
 
     INSERT INTO bursar.billing_preferences(
         subject_id,auto_recharge,overage_protection,email_notifications,

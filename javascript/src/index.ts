@@ -17,9 +17,11 @@ export type {
 } from "./config.js";
 export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
 export {
+  BursarError,
   CapabilityNotSupportedError,
   CapReachedError,
   ConcurrencyLimitError,
+  CreditError,
   ConfigError,
   ExpressionError,
   FeatureLimitReachedError,

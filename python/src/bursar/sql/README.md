@@ -31,6 +31,27 @@ and stable error codes. `SECURITY DEFINER` functions must keep an empty
 `search_path` and schema-qualify every object reference. Internal mutation
 functions must use the `bursar.mutation_context` trigger contract.
 
+Externally meaningful, independently generated, and cross-system identifiers
+use RFC 9562 UUIDv7. This preserves the UUID API while giving primary and
+unique B-tree indexes time-local insert patterns. Internal-only append and
+history rows use `bigint GENERATED ALWAYS AS IDENTITY` for narrower primary
+and foreign-key indexes. Relationship, singleton, and aggregate tables use
+natural or composite keys when those keys are stable. Opaque claim tokens
+remain UUIDv4 because they are credentials, not row keys.
+
+Business and provider keys are stored as `text`, trimmed/non-empty where
+required, and bounded to 255 characters before they can reach an index.
+Currency codes use `text` plus an uppercase ISO-4217-shape check rather than
+blank-padded `char(3)`. Closed internal state machines use enums; provider
+states and workflows expected to evolve use `text` with a named allowlist
+check. Provider-owned records and uniqueness rules must include
+`provider_environment`; subject-scoped billing state uses
+`(subject_id, provider_environment)`.
+
+Every foreign key must have an index whose leading columns match the child key.
+Do not add an index already covered by the leading columns and predicate of
+another index. Catalog regression tests enforce both rules.
+
 ## Change policy
 
 This repository is still pre-production, so the numbered files may be
@@ -60,7 +81,9 @@ in bounded tables:
 - `billing_event_payloads` stores raw provider webhook envelopes.
 - `event_outbox` provides asynchronous delivery to optional external sinks.
 - `usage_daily_rollups` serves exact built-in analytics without extra
-  infrastructure.
+  infrastructure. Each logical aggregate is deterministically spread across
+  32 rows; readers sum those shards, avoiding a single hot row during
+  concurrent ingestion.
 
 `bursar.storage_settings` contains retention and quota-lateness policy.
 `bursar.run_storage_maintenance()` performs one bounded row-cleanup pass:

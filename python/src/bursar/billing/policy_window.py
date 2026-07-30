@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
+
+from pydantic import BaseModel, ConfigDict
 
 from bursar.config.types import CalendarWindow, RollingWindow
 
 WindowUnit = Literal["second", "minute", "hour", "day", "week", "month", "year"]
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedPolicyWindow:
+class ResolvedPolicyWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     unit: WindowUnit
     count: int
     anchor: Literal["calendar", "rolling"]

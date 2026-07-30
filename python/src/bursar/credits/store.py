@@ -8,17 +8,20 @@ stores for testing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from bursar.credits.types import (
     AddCreditsResult,
     AddTeamMemberResult,
-    AggregateStatsRow,
+    AggregateStats,
     AllowanceResult,
     AvailableResult,
     BalanceResult,
+    BillingMode,
     BucketBalancesResult,
     BursarConfigHistoryItem,
     BursarConfigResult,
@@ -28,7 +31,6 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     ExecuteGrantProgramRequest,
-    FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
     GrantProgramAwardResult,
@@ -54,6 +56,33 @@ from bursar.credits.types import (
     TeamMember,
     TopUserRow,
 )
+
+
+class _CreditStoreOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class OperationUsageOptions(_CreditStoreOptions):
+    feature: str | None = None
+    model: str | None = None
+    region: str | None = None
+    measures: dict[str, Any] | None = None
+    dimensions: dict[str, Any] | None = None
+
+
+class CreateLeaseOptions(OperationUsageOptions):
+    idempotency_key: str | None = None
+    billing_mode: BillingMode = "strict"
+    floor: Decimal = Decimal(0)
+    max_concurrent: int | None = None
+    overdraft_floor: Decimal | None = None
+    ttl_seconds: int = Field(default=600, ge=1)
+    metadata: CreditMetadata | None = None
+
+
+class SettleLeaseOptions(OperationUsageOptions):
+    idempotency_key: str | None = None
+    metadata: CreditMetadata | None = None
 
 
 class StoreError(Exception):
@@ -161,14 +190,13 @@ class CreditStore(ABC):
         amount: Decimal,
         *,
         idempotency_key: str | None = None,
-        min_balance: Decimal = Decimal(0),
-        model: str | None = None,
-        metadata: CreditMetadata | None = None,
-        skip_allowance: bool = False,
-        period_start: date | None = None,
+        operation: str = "usage",
         feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
+        model: str | None = None,
+        region: str | None = None,
+        measures: dict[str, Decimal | int | float] | None = None,
+        dimensions: dict[str, Any] | None = None,
+        metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
         """Atomically charge a gross cost in a single server-side transaction.
 
@@ -181,14 +209,11 @@ class CreditStore(ABC):
             ``balance_after`` is the balance at the time of the *original* call,
             not the current balance (Fix 8).
         3. Consumes free allowance first (``allowance_consumed`` on the result),
-            charging only the net remainder to the balance. Skipped entirely when
-            ``skip_allowance=True`` so that fixed-cost batch jobs (daily_report,
-            batch_train, …) do **not** eat the user's inference allowance (Fix 7).
+            charging only the net remainder to the balance.
         4. Enforces spend caps on the net: a ``deny`` cap aborts with
             ``error="cap_reached"`` (no allowance consumed); ``warn``/``notify``
             set ``cap_warning`` and continue.
-        5. Enforces the balance floor: ``balance - net < min_balance`` aborts
-            with ``error="insufficient_credits"`` (no allowance consumed).
+        5. Enforces the plan's balance floor server-side.
         6. Debits the balance and inserts one ``usage`` transaction.
 
         All-or-nothing: any failure rolls back allowance consumption and the
@@ -200,27 +225,13 @@ class CreditStore(ABC):
             user_id: The user to charge.
             amount: Gross cost (``Decimal``, ``>= 0``, fractional 6dp).
             idempotency_key: Optional user-scoped replay key.
-            min_balance: Minimum balance floor (default ``Decimal(0)``).
+            operation: Catalog operation key used for plan-aware policy.
+            feature: Optional feature key used for entitlement/limit checks.
             model: Optional model name recorded on the transaction.
+            region: Optional deployment region recorded on the transaction.
+            measures: Usage measures evaluated by quota rules.
+            dimensions: Usage dimensions evaluated by pricing/policy rules.
             metadata: Extra metadata merged onto the transaction.
-            skip_allowance: When ``True`` the free-allowance step is bypassed
-                entirely; the full ``amount`` is charged to the balance.
-                Use for fixed-cost batch jobs that should not consume inference
-                allowance (Fix 7).
-            period_start: Explicit allowance-window start date (WS9), used to key
-                allowance consumption for ``rolling_30d``/``anniversary`` plans.
-                ``None`` (the default) falls back to the current UTC calendar
-                month, matching the pre-WS9 behavior exactly.
-            feature: Optional feature name tagged onto the inserted entry's
-                ``metadata.feature`` and, when ``feature_limit`` is given, checked
-                against it. ``None`` skips feature-limit enforcement/tagging
-                entirely (the manager only passes this when the caller named a
-                feature via ``deduct(feature=...)``).
-            feature_limit: The resolved ``FeatureLimit`` for ``feature`` (looked
-                up from the user's plan by the manager). ``None`` means no limit
-                is configured for this feature — enforcement is skipped (the
-                transaction is still tagged with ``feature`` when given).
-            feature_period_start: The calendar-aligned window start for
                 ``feature_limit.period``, resolved by the manager via
                 :func:`bursar.allowance.resolve_calendar_window`.
 
@@ -229,7 +240,7 @@ class CreditStore(ABC):
         counter table. The store counts prior committed ``usage`` transactions
         with ``metadata.feature == feature`` in ``[feature_period_start,
         feature_period_start + period)``; if that count has already reached
-        ``feature_limit.max_calls`` and ``feature_limit.action == "deny"``,
+        ``feature_limit.max_calls`` and ``feature_limit.on_exceed == "deny"``,
         aborts with ``error="feature_limit_reached"`` (no allowance consumed,
         no transaction inserted); ``warn``/``notify`` instead set
         ``feature_limit_warning`` and continue. The ``usage`` transaction this
@@ -261,21 +272,7 @@ class CreditStore(ABC):
         user_id: str,
         amount: Decimal,
         operation_type: str,
-        *,
-        billing_mode: str = "strict",
-        floor: Decimal = Decimal(0),
-        max_concurrent: int | None = None,
-        ttl_seconds: int = 600,
-        model: str | None = None,
-        overdraft_floor: Decimal | None = None,
-        metadata: CreditMetadata | None = None,
-        period_start: date | None = None,
-        feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
-        idempotency_key: str | None = None,
-        measures: dict[str, Any] | None = None,
-        dimensions: dict[str, Any] | None = None,
+        options: CreateLeaseOptions | None = None,
     ) -> LeaseResult:
         """Atomically acquire a lease (hold) — the only admission control (D4).
 
@@ -315,18 +312,7 @@ class CreditStore(ABC):
         user_id: str,
         lease_id: str,
         amount: Decimal,
-        *,
-        idempotency_key: str | None = None,
-        min_balance: Decimal = Decimal(0),
-        model: str | None = None,
-        metadata: CreditMetadata | None = None,
-        skip_allowance: bool = False,
-        period_start: date | None = None,
-        feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
-        measures: dict[str, Any] | None = None,
-        dimensions: dict[str, Any] | None = None,
+        options: SettleLeaseOptions | None = None,
     ) -> DeductionResult:
         """Charge the **actual** cost against a lease, then mark it settled (D5).
 
@@ -567,13 +553,8 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
-        """Get remaining free allowance for current billing period.
-
-        ``period_start`` overrides the window key for ``rolling_30d``/``anniversary``
-        plans (resolved by the manager via :func:`bursar.allowance.resolve_allowance_window`);
-        ``None`` keeps the calendar-month default (WS9).
-        """
+    def check_allowance(self, user_id: str) -> AllowanceResult:
+        """Get the database-owned current allowance window."""
         ...
 
     @abstractmethod
@@ -692,7 +673,7 @@ class CreditStore(ABC):
         """
         raise CapabilityNotSupportedError("daily_spend is not supported by this store")
 
-    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
+    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
         """Aggregate statistics across all users in a time window.
 
         Args:
@@ -700,7 +681,7 @@ class CreditStore(ABC):
             end: End of time window (inclusive).
 
         Returns:
-            ``AggregateStatsRow`` with total credits consumed, active users,
+            ``AggregateStats`` with total credits consumed, active users,
             average daily spend, top model, and top user.
         """
         raise CapabilityNotSupportedError("aggregate_stats is not supported by this store")

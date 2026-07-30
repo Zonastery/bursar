@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict
 
 from bursar.storage.ports import (
     BillingEventPayloadExport,
@@ -14,15 +15,17 @@ from bursar.storage.ports import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class S3Credentials:
+class _S3Model(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class S3Credentials(_S3Model):
     access_key_id: str
     secret_access_key: str
     session_token: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class S3BillingArchiveOptions:
+class S3BillingArchiveOptions(_S3Model):
     bucket: str
     region: str
     credentials: S3Credentials

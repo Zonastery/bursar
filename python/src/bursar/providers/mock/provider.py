@@ -9,19 +9,24 @@ from bursar.providers.types import (
     ChangePlanParams,
     ChangePlanPreview,
     CheckoutParams,
+    CheckoutSessionResult,
     CreateCustomerParams,
+    CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
+    ProviderLogger,
     ProviderResolveUserFn,
+    ProviderUrlResult,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
+    normalize_provider_logger,
 )
 
 
@@ -32,21 +37,23 @@ class MockPaymentProvider(PaymentProvider):
         self,
         sink: BillingEventSink,
         resolve_user: ProviderResolveUserFn | None = None,
+        logger: ProviderLogger | None = None,
     ) -> None:
         self._sink = sink
         self._resolve_user = resolve_user
+        self._logger = normalize_provider_logger(logger)
 
-    async def create_checkout_session(self, params: CheckoutParams) -> dict:
-        return {"url": params.return_url}
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
+        return CheckoutSessionResult(url=params.return_url)
 
-    async def create_customer_portal_session(self, params: PortalParams) -> dict:
-        return {"url": params.return_url}
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
+        return ProviderUrlResult(url=params.return_url)
 
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
-        return {"url": params.return_url}
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
+        return ProviderUrlResult(url=params.return_url)
 
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
-        return {"url": params.return_url}
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
+        return ProviderUrlResult(url=params.return_url)
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
         pass
@@ -65,6 +72,13 @@ class MockPaymentProvider(PaymentProvider):
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         return []
 
+    async def get_default_payment_method(
+        self,
+        customer_id: str,
+    ) -> PaymentMethodInfo | None:
+        methods = await self.list_payment_methods(customer_id)
+        return methods[0] if methods else None
+
     async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
         return SavedPaymentChargeResult(
             provider_payment_id=f"mock_pay_{params.idempotency_key}",
@@ -76,13 +90,13 @@ class MockPaymentProvider(PaymentProvider):
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
         return SavedPaymentChargeQuote(amount_minor=0, currency="USD")
 
-    async def create_customer(self, params: CreateCustomerParams) -> dict:
+    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         import time
 
-        return {"customerId": f"mock_cus_{int(time.time() * 1000)}"}
+        return CreateCustomerResult(customer_id=f"mock_cus_{int(time.time() * 1000)}")
 
-    async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
-        return {"url": "https://example.com/invoice"}
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
+        return ProviderUrlResult(url="https://example.com/invoice")
 
     async def change_plan(self, params: ChangePlanParams) -> None:
         pass
@@ -92,7 +106,7 @@ class MockPaymentProvider(PaymentProvider):
             total_amount=0,
             settlement_amount=0,
             currency="USD",
-            line_items=None,
+            line_items=[],
             effective_at=datetime.now(UTC).isoformat(),
         )
 
@@ -100,10 +114,22 @@ class MockPaymentProvider(PaymentProvider):
         try:
             payload = json.loads(req.raw_body)
         except (json.JSONDecodeError, ValueError):
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
 
         if not isinstance(payload, dict):
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
 
         data = payload.get("data", {}) or {}
         metadata = data.get("metadata", {}) or {}
@@ -119,6 +145,7 @@ class MockPaymentProvider(PaymentProvider):
             user_id,
             metadata,
             self._sink,
+            self._logger,
         )
 
         event_type = str(payload.get("type", "")) or None
@@ -137,9 +164,9 @@ class MockPaymentProvider(PaymentProvider):
             None,
         )
         return WebhookResult(
-            True,
-            False,
-            self.provider,
-            str(raw_event_id) if raw_event_id is not None else None,
-            event_type,
+            received=True,
+            retryable=False,
+            provider=self.provider,
+            event_id=str(raw_event_id) if raw_event_id is not None else None,
+            event_type=event_type,
         )

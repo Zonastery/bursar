@@ -4,12 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from bursar.errors import StoreError
 
-def unwrap_jsonb(rows: list[dict]) -> dict | None:
-    """Extract first row from query result. Matches JS unwrapJsonb."""
-    if not rows:
+
+def unwrap_jsonb(rows: list[Any]) -> dict[str, Any] | None:
+    """Unwrap the single-row JSONB result shape used by PostgreSQL RPCs."""
+    if len(rows) != 1:
         return None
-    return rows[0]
+    row = rows[0]
+    if not isinstance(row, dict):
+        return None
+    if len(row) == 1:
+        value = next(iter(row.values()))
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+    return row
 
 
 def safe_parse(model_class: type, data: dict, context: str) -> Any:
@@ -18,7 +29,7 @@ def safe_parse(model_class: type, data: dict, context: str) -> Any:
     try:
         return model_class.model_validate(data)
     except Exception as exc:
-        raise ValueError(f"Invalid data in {context}: {exc}") from exc
+        raise StoreError(f"{context}: schema validation failed — {exc}") from exc
 
 
 def pg_bool(value: Any) -> bool:
@@ -26,10 +37,10 @@ def pg_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.lower() in ("true", "t", "yes", "y", "1")
-    if isinstance(value, int):
-        return value == 1
-    return bool(value)
+        return value in ("true", "t", "1")
+    if isinstance(value, (int, float)):
+        return value != 0
+    return False
 
 
 def validate_safe_identifier(name: str) -> str:

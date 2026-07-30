@@ -17,7 +17,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from bursar.expr import quantize_money
 
@@ -32,14 +32,14 @@ class CostBreakdown(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model_credits: Decimal = Decimal("0.000000")
-    tool_credits: Decimal = Decimal("0.000000")
-    search_credits: Decimal = Decimal("0.000000")
-    cache_savings: Decimal = Decimal("0.000000")
-    fixed_credits: Decimal = Decimal("0.000000")
-    operation_credits: Decimal = Decimal("0.000000")
-    total: Decimal = Decimal("0.000000")
-    breakdown: dict[str, Any] = Field(default_factory=dict)
+    model_credits: Decimal
+    tool_credits: Decimal
+    search_credits: Decimal
+    cache_savings: Decimal
+    fixed_credits: Decimal
+    operation_credits: Decimal
+    total: Decimal
+    breakdown: dict[str, Any]
 
 
 def make_cost_breakdown(

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Literal
 
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
+
+from bursar.billing.contracts import BillingEventSink
 from bursar.billing.types import (
     BillingAutoRechargeStatus,
     BillingInvoiceInfo,
@@ -21,8 +23,10 @@ from bursar.providers.types import (
     SavedPaymentChargeResult,
     WebhookResult,
 )
+from bursar.shared.logger import Logger
 
 CommerceCheckoutKind = Literal["subscription", "credit_pack"]
+CommerceCheckoutStatus = Literal["pending", "succeeded", "failed", "expired"]
 PlanChangeClassification = Literal[
     "unchanged",
     "upgrade",
@@ -32,9 +36,12 @@ PlanChangeClassification = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class CommerceProviderFactoryContext:
-    event_sink: Any
+class _CommerceModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+
+class CommerceProviderFactoryContext(_CommerceModel):
+    event_sink: SkipValidation[BillingEventSink]
     identity_resolver: ProviderResolveUserFn | None = None
 
 
@@ -44,18 +51,32 @@ CommerceProviderFactory = Callable[
 ]
 
 
-@dataclass(slots=True)
-class CommerceOptions:
+class CommercePreferenceDefaults(_CommerceModel):
+    auto_recharge: bool
+    overage_protection: bool
+    email_notifications: bool
+    usage_alerts: bool
+    invoice_reminders: bool
+
+
+class PreferencePatch(_CommerceModel):
+    auto_recharge: bool | None = None
+    overage_protection: bool | None = None
+    email_notifications: bool | None = None
+    usage_alerts: bool | None = None
+    invoice_reminders: bool | None = None
+
+
+class CommerceOptions(_CommerceModel):
     providers: dict[str, CommerceProviderFactory]
     default_provider: str | None = None
-    checkout_intent_ttl_seconds: int = 24 * 60 * 60
-    preference_defaults: dict[str, bool] = field(default_factory=dict)
+    checkout_intent_ttl_ms: int = 24 * 60 * 60 * 1_000
+    preference_defaults: PreferencePatch = Field(default_factory=PreferencePatch)
     identity_resolver: ProviderResolveUserFn | None = None
-    logger: Any = None
+    logger: SkipValidation[Logger] | None = None
 
 
-@dataclass(slots=True)
-class CreateCheckoutInput:
+class CreateCheckoutInput(_CommerceModel):
     subject_id: str
     offer_key: str
     return_url: str
@@ -66,31 +87,27 @@ class CreateCheckoutInput:
     provider: str | None = None
     type: CommerceCheckoutKind | None = None
     quantity: int | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
-@dataclass(frozen=True, slots=True)
-class CreateCheckoutResult:
+class CreateCheckoutResult(_CommerceModel):
     intent_id: str
     url: str
     provider: str
     offer_key: str
 
 
-@dataclass(frozen=True, slots=True)
-class CheckoutStatusResult:
+class CheckoutStatusResult(_CommerceModel):
     intent_id: str
-    status: Literal["pending", "succeeded", "failed", "expired"]
+    status: CommerceCheckoutStatus
 
 
-@dataclass(frozen=True, slots=True)
-class SubscriptionCommandResult:
-    ok: Literal[True] = True
+class SubscriptionCommandResult(_CommerceModel):
+    ok: Literal[True]
     pending: bool | None = None
 
 
-@dataclass(slots=True)
-class PlanChangePreviewResult:
+class PlanChangePreviewResult(_CommerceModel):
     unchanged: bool
     classification: PlanChangeClassification
     scheduled: bool
@@ -100,8 +117,17 @@ class PlanChangePreviewResult:
     quote_fingerprint: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ConfirmPlanChangeResult:
+class PreviewPlanChangeInput(_CommerceModel):
+    account_id: str
+    offer_key: str
+
+
+class ConfirmPlanChangeInput(PreviewPlanChangeInput):
+    quote_fingerprint: str
+    operation_key: str
+
+
+class ConfirmPlanChangeResult(_CommerceModel):
     success: Literal[True]
     plan_id: str
     interval: Literal["month", "year"]
@@ -111,8 +137,14 @@ class ConfirmPlanChangeResult:
     effective_at: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class BillingDocumentInvoiceRef:
+class PortalSessionInput(_CommerceModel):
+    account_id: str
+    purpose: Literal["billing", "payment-method"] = "billing"
+    return_url: str
+    cancel_url: str | None = None
+
+
+class BillingDocumentInvoiceRef(_CommerceModel):
     kind: Literal["provider_invoice"]
     provider: str
     provider_document_id: str
@@ -124,22 +156,40 @@ class BillingDocumentInvoiceRef:
     period_end: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class BillingDocumentLedgerRef:
+class BillingDocumentLedgerRef(_CommerceModel):
     kind: Literal["ledger_entry"]
     ledger_entry_id: str
     provider: str | None = None
     provider_document_id: str | None = None
-    created_at: str = ""
-    entry_type: str = ""
-    amount: Decimal = Decimal(0)
+    created_at: str
+    entry_type: str
+    amount: Decimal
 
 
-BillingDocumentRef = BillingDocumentInvoiceRef | BillingDocumentLedgerRef
+BillingDocumentRef = Annotated[
+    BillingDocumentInvoiceRef | BillingDocumentLedgerRef,
+    Field(discriminator="kind"),
+]
 
 
-@dataclass(frozen=True, slots=True)
-class CommerceSectionAvailability:
+class BillingDocumentInvoiceLocator(_CommerceModel):
+    kind: Literal["provider_invoice"]
+    provider: str
+    provider_document_id: str
+
+
+class BillingDocumentLedgerLocator(_CommerceModel):
+    kind: Literal["ledger_entry"]
+    ledger_entry_id: str
+
+
+BillingDocumentLocator = Annotated[
+    BillingDocumentInvoiceLocator | BillingDocumentLedgerLocator,
+    Field(discriminator="kind"),
+]
+
+
+class CommerceSectionAvailability(_CommerceModel):
     payment_methods: bool
     documents: bool
     transactions: bool
@@ -147,20 +197,22 @@ class CommerceSectionAvailability:
     auto_recharge: bool
 
 
-@dataclass(frozen=True, slots=True)
-class AccountCreditOverview:
+class AccountAllowanceOverview(_CommerceModel):
+    remaining: Decimal
+    limit: Decimal
+    period_start: str | None
+    period_end: str | None
+
+
+class AccountCreditOverview(_CommerceModel):
     ledger_balance: Decimal
     effective_spendable_balance: Decimal
     lifetime_purchases: Decimal
-    allowance_remaining: Decimal
-    allowance_limit: Decimal
-    allowance_period_start: str | None
-    allowance_period_end: str | None
+    allowance: AccountAllowanceOverview
     buckets: list[BucketBalance]
 
 
-@dataclass(frozen=True, slots=True)
-class AccountCommerceOverview:
+class AccountCommerceOverview(_CommerceModel):
     account_id: str
     credits: AccountCreditOverview
     entitlement: GetUserPlanResult
@@ -176,29 +228,25 @@ class AccountCommerceOverview:
     availability: CommerceSectionAvailability
 
 
-@dataclass(frozen=True, slots=True)
-class AutoRechargeInput:
+class GetInvoiceLinkInput(_CommerceModel):
+    account_id: str
+    document: BillingDocumentLocator
+
+
+class CommerceWebhookInput(_CommerceModel):
+    provider: str | None = None
+    raw_body: str
+    headers: dict[str, str]
+
+
+class AutoRechargeInput(_CommerceModel):
     account_id: str
     return_url: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class CommerceWebhookResult:
-    received: bool
-    retryable: bool
-    provider: str
-    event_id: str | None
-    event_type: str | None
-
-    @classmethod
-    def from_provider(cls, result: WebhookResult) -> CommerceWebhookResult:
-        return cls(
-            received=result.received,
-            retryable=result.retryable,
-            provider=result.provider,
-            event_id=result.event_id,
-            event_type=result.event_type,
-        )
+CommerceWebhookResult = WebhookResult
 
 
-AutoRechargeProcessResultLike = Any | SavedPaymentChargeResult
+class AutoRechargeProcessResultLike(_CommerceModel):
+    outcome: str
+    charge: SavedPaymentChargeResult | None = None

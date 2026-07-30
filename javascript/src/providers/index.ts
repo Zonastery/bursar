@@ -1,17 +1,24 @@
 export type {
   PaymentProvider,
+  ChangePlanResult,
+  CheckoutSessionResult,
+  CheckoutSessionStatus,
   CheckoutParams,
   PortalParams,
   UpdatePaymentMethodParams,
   PaymentMethodSetupParams,
   CreateCustomerParams,
+  CreateCustomerResult,
   PaymentMethodInfo,
   SavedPaymentChargeParams,
+  SavedPaymentChargeQuote,
   SavedPaymentChargeResult,
   SavedPaymentChargeStatus,
   WebhookRequest,
+  WebhookResult,
   ResolveUserCallback,
   ProviderLogger,
+  ProviderUrlResult,
 } from "./types.js";
 
 export { noopLogger } from "./types.js";

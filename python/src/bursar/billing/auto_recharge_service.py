@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Literal, Protocol
 from uuid import uuid4
 
+from pydantic import BaseModel, ConfigDict
+
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+)
 from bursar.billing.policy_window import resolve_auto_recharge_window
 from bursar.billing.types import (
+    BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
     BillingAutoRechargeStatus,
+    BillingCustomerRecord,
     BillingTopupResult,
 )
 from bursar.config import (
@@ -40,10 +49,62 @@ AutoRechargeOutcome = Literal[
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class AutoRechargeProcessResult:
+class AutoRechargeProcessResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     outcome: AutoRechargeOutcome
     charge: SavedPaymentChargeResult | None = None
+
+
+class AutoRechargeBillingPort(Protocol):
+    """Narrow billing capability required by ``AutoRechargeService``."""
+
+    def get_active_bursar_config(self) -> dict[str, object] | None: ...
+
+    def resolve_topup(
+        self,
+        provider: str,
+        product_id: str | None = None,
+        price_id: str | None = None,
+    ) -> BillingTopupResult | None: ...
+
+    def resolve_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> BillingTopupResult | None: ...
+
+    def get_customer_by_user_id(
+        self,
+        user_id: str,
+        provider: str | None = None,
+    ) -> BillingCustomerRecord | None: ...
+
+    def get_auto_recharge_profile(
+        self,
+        user_id: str,
+    ) -> BillingAutoRechargeProfile | None: ...
+
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+    ) -> None: ...
+
+    def claim_auto_recharge_attempt(
+        self,
+        input: AutoRechargeAttemptClaim,
+    ) -> BillingAutoRechargeAttempt | None: ...
+
+    def update_auto_recharge_attempt(
+        self,
+        input: AutoRechargeAttemptUpdate,
+    ) -> None: ...
+
+    def count_auto_recharge_attempts(
+        self,
+        user_id: str,
+        since: str | datetime | int | float,
+    ) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +125,7 @@ class _ResolvedAutoRechargePolicy:
 
 
 class AutoRechargeService:
-    def __init__(self, billing: Any) -> None:
+    def __init__(self, billing: AutoRechargeBillingPort) -> None:
         self._billing = billing
 
     def _policy(self, provider: PaymentProvider) -> _ResolvedAutoRechargePolicy | None:
@@ -291,8 +352,10 @@ class AutoRechargeService:
             return AutoRechargeProcessResult(outcome="failed")
         customer_id, method = payment
         attempt = self._billing.claim_auto_recharge_attempt(
-            user_id,
-            f"auto-recharge:{user_id}:{uuid4()}",
+            AutoRechargeAttemptClaim(
+                user_id=user_id,
+                idempotency_key=f"auto-recharge:{user_id}:{uuid4()}",
+            )
         )
         if attempt is None:
             return AutoRechargeProcessResult(outcome="limit_reached")
@@ -314,26 +377,32 @@ class AutoRechargeService:
         )
         if charge.status == "requires_customer_action":
             self._billing.update_auto_recharge_attempt(
-                attempt.id,
-                "submitted",
-                charge.provider_payment_id,
+                AutoRechargeAttemptUpdate(
+                    id=attempt.id,
+                    state="submitted",
+                    provider_attempt_id=charge.provider_payment_id,
+                )
             )
             self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
             return AutoRechargeProcessResult(outcome="action_required", charge=charge)
 
         if charge.status in {"succeeded", "processing"}:
             self._billing.update_auto_recharge_attempt(
-                attempt.id,
-                "processing",
-                charge.provider_payment_id,
+                AutoRechargeAttemptUpdate(
+                    id=attempt.id,
+                    state="processing",
+                    provider_attempt_id=charge.provider_payment_id,
+                )
             )
             return AutoRechargeProcessResult(outcome="submitted", charge=charge)
 
         self._billing.update_auto_recharge_attempt(
-            attempt.id,
-            "failed",
-            charge.provider_payment_id,
-            "payment_failed",
+            AutoRechargeAttemptUpdate(
+                id=attempt.id,
+                state="failed",
+                provider_attempt_id=charge.provider_payment_id,
+                failure_code="payment_failed",
+            )
         )
         self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
         return AutoRechargeProcessResult(outcome="failed", charge=charge)

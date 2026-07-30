@@ -22,7 +22,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT DO NOTHING;
+    ON CONFLICT (id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RAISE EXCEPTION 'subject is pseudonymized'
@@ -90,7 +90,7 @@ CREATE FUNCTION bursar.execute_grant_program(
     p_region text DEFAULT NULL,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     grant_event_id uuid,
     grant_award_id uuid,
     recipient_subject_id uuid,
@@ -214,12 +214,12 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT DO NOTHING;
+    ON CONFLICT (id) DO NOTHING;
 
     IF p_referrer_subject_id IS NOT NULL THEN
         INSERT INTO bursar.subjects(id)
         VALUES (p_referrer_subject_id)
-        ON CONFLICT DO NOTHING;
+        ON CONFLICT (id) DO NOTHING;
     END IF;
 
     -- Account locking serializes the award-limit check, event insertion, and
@@ -446,7 +446,11 @@ BEGIN
                 v_award.id,
                 v_post.entry_id
             )
-            ON CONFLICT DO NOTHING;
+            ON CONFLICT (
+                subject_id,
+                grant_program_id,
+                catalog_grant_award_id
+            ) DO NOTHING;
         END IF;
 
         RETURN QUERY
@@ -477,7 +481,7 @@ END
 $$;
 
 COMMENT ON FUNCTION bursar.provision_subject_account_on_insert() IS
-    'Host-table trigger hook that provisions a personal account and runs eligible account_created grant programs.';
+'Host-table trigger hook that provisions a personal account and runs eligible account_created grant programs.';
 
 CREATE FUNCTION bursar.post_credit(
     p_subject_id uuid,
@@ -491,7 +495,7 @@ CREATE FUNCTION bursar.post_credit(
     p_expires_at timestamptz DEFAULT NULL,
     p_minimum_balance numeric DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     balance_after numeric,
     replayed boolean,

@@ -9,7 +9,7 @@ CREATE FUNCTION bursar.deduct_team(
     p_operation text DEFAULT 'team_usage',
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     team_id uuid,
     subject_id uuid,
@@ -209,7 +209,7 @@ CREATE FUNCTION bursar.post_credit_account(
     p_idempotency_key text,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     balance_after numeric,
     replayed boolean,

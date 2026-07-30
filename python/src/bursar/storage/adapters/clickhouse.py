@@ -8,14 +8,15 @@ import re
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, cast
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, SkipValidation
+
 from bursar.credits.types import (
-    AggregateStatsRow,
+    AggregateStats,
     DailySpendRow,
     SpendByModelRow,
     SpendByUserRow,
@@ -51,9 +52,10 @@ class ClickHouseClient(Protocol):
     ) -> ClickHouseQueryResult: ...
 
 
-@dataclass(frozen=True, slots=True)
-class ClickHouseUsageStoreOptions:
-    client: ClickHouseClient
+class ClickHouseUsageStoreOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    client: SkipValidation[ClickHouseClient]
     table: str = "bursar_usage_events"
     create_table: bool = True
     retention_days: int | None = None
@@ -250,7 +252,7 @@ class ClickHouseUsageStore:
             for row in rows
         ]
 
-    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
+    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
         _validate_range(start, end)
         with ThreadPoolExecutor(max_workers=3) as executor:
             totals_future = executor.submit(
@@ -280,7 +282,7 @@ class ClickHouseUsageStore:
         total = Decimal(str(totals[0]["total_spend"])) if totals else Decimal(0)
         seconds = (end - start).total_seconds()
         days = max(math.ceil(seconds / 86_400), 1)
-        return AggregateStatsRow(
+        return AggregateStats(
             total_credits_consumed=total,
             active_users=int(totals[0]["active_users"]) if totals else 0,
             avg_daily_spend=total / Decimal(days),

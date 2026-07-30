@@ -218,7 +218,24 @@ def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
 # ── Command handlers ─────────────────────────────────────────────────────────
 
 
-def _cmd_migrate(_args: argparse.Namespace) -> None:
+def _read_post_migrate_sql(paths: list[str]) -> list[tuple[str, str]]:
+    """Read trusted host SQL before opening the migration transaction."""
+    statements: list[tuple[str, str]] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            sql = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Cannot read post-migration SQL file {path}: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        if not sql.strip():
+            print(f"Post-migration SQL file is empty: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        statements.append((str(path), sql))
+    return statements
+
+
+def _cmd_migrate(args: argparse.Namespace) -> None:
     _require_extra("postgres")
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -226,7 +243,8 @@ def _cmd_migrate(_args: argparse.Namespace) -> None:
         raise SystemExit(1)
     from bursar.credits.postgres.store import run_migrations
 
-    run_migrations(database_url)
+    post_migration_sql = _read_post_migrate_sql(args.post_migrate_sql)
+    run_migrations(database_url, post_migration_sql=post_migration_sql)
     print("Migrations applied successfully.")
 
 
@@ -363,6 +381,15 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate",
         help="Run database migrations (bursar[postgres])",
         description="Run bundled SQL migrations using DATABASE_URL.",
+    )
+    p_migrate.add_argument(
+        "--post-migrate-sql",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help=(
+            "Trusted host SQL file to run after bundled migrations in the same transaction; repeat for multiple files"
+        ),
     )
     p_migrate.set_defaults(func=_cmd_migrate)
 

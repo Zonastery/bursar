@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import inspect
 import json
-from dataclasses import fields
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pytest
 
+from bursar.billing.contracts import CheckoutIntentCreate, CheckoutIntentUpdate
 from bursar.billing.types import CheckoutIntent, CheckoutIntentStatus
 from bursar.commerce import (
     CommerceOptions,
@@ -17,6 +17,7 @@ from bursar.commerce import (
 )
 from bursar.providers.types import (
     CheckoutParams,
+    CheckoutSessionResult,
     PaymentProvider,
     WebhookRequest,
     WebhookResult,
@@ -31,15 +32,21 @@ class RecordingProvider(PaymentProvider):
     def __init__(self) -> None:
         self.checkout_params: list[CheckoutParams] = []
 
-    async def create_checkout_session(self, params: CheckoutParams) -> dict:
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         self.checkout_params.append(params)
-        return {
-            "url": f"https://checkout.example/{params.product_id}",
-            "providerSessionId": "session-1",
-        }
+        return CheckoutSessionResult(
+            url=f"https://checkout.example/{params.product_id}",
+            provider_session_id="session-1",
+        )
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
-        return WebhookResult(True, False, self.provider, "event-1", "payment.succeeded")
+        return WebhookResult(
+            received=True,
+            retryable=False,
+            provider=self.provider,
+            event_id="event-1",
+            event_type="payment.succeeded",
+        )
 
 
 class FakeBilling:
@@ -61,26 +68,30 @@ class FakeBilling:
 
     def create_or_get_checkout_intent(
         self,
-        subject_id: str,
-        provider: str,
-        checkout_kind: Literal["subscription", "credit_topup"],
-        product_key: str,
-        request_digest: str,
-        expires_at: str,
+        input: CheckoutIntentCreate,
     ) -> CheckoutIntent:
         return CheckoutIntent(
             id="intent-1",
-            subject_id=subject_id,
-            provider=provider,
-            checkout_kind=checkout_kind,
-            product_key=product_key,
-            request_digest=request_digest,
+            subject_id=input.subject_id,
+            provider=input.provider,
+            checkout_kind=input.checkout_kind,
+            product_key=input.product_key,
+            request_digest=input.request_digest,
             status=CheckoutIntentStatus.open,
-            expires_at=expires_at,
+            expires_at=input.expires_at,
         )
 
-    def update_checkout_intent(self, intent_id: str, **updates: Any) -> None:
-        self.updates.append((intent_id, updates))
+    def update_checkout_intent(
+        self,
+        intent_id: str,
+        update: CheckoutIntentUpdate,
+    ) -> None:
+        self.updates.append(
+            (
+                intent_id,
+                update.model_dump(exclude_none=True),
+            )
+        )
 
 
 def service(provider: RecordingProvider) -> CommerceService:
@@ -130,7 +141,7 @@ async def test_checkout_rejects_unknown_catalog_offer() -> None:
 
 
 def test_public_commerce_inputs_do_not_expose_provider_product_ids() -> None:
-    checkout_fields = {field.name for field in fields(CreateCheckoutInput)}
+    checkout_fields = set(CreateCheckoutInput.model_fields)
     assert "offer_key" in checkout_fields
     assert "product_id" not in checkout_fields
     assert "product_id" not in inspect.signature(CommerceService.preview_plan_change).parameters

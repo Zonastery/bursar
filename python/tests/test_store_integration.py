@@ -9,7 +9,8 @@ import pytest
 
 from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.service import CreditsService
-from bursar.credits.store import StoreError
+from bursar.credits.service_types import ReserveOptions, SettleOptions
+from bursar.credits.store import CreateLeaseOptions, StoreError
 from bursar.credits.types import ExecuteGrantProgramRequest
 from bursar.metrics import UsageMetrics
 
@@ -112,6 +113,42 @@ def test_migrations_are_idempotent_and_detect_checksum_mismatch(
             )
 
     run_migrations(pg_database_url)
+
+
+def test_post_migration_sql_is_ordered_and_transactional(
+    pg_database_url: str,
+) -> None:
+    table = "public.bursar_post_migration_sql_test"
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(f"DROP TABLE IF EXISTS {table}")
+
+    try:
+        run_migrations(
+            pg_database_url,
+            post_migration_sql=[
+                ("create.sql", f"CREATE TABLE {table} (value integer NOT NULL);"),
+                ("insert.sql", f"INSERT INTO {table} (value) VALUES (42);"),
+            ],
+        )
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(f"SELECT value FROM {table}")
+            assert cursor.fetchone() == (42,)
+
+        with pytest.raises(StoreError, match="post-migration SQL failed for broken.sql"):
+            run_migrations(
+                pg_database_url,
+                post_migration_sql=[
+                    ("update.sql", f"UPDATE {table} SET value = 99;"),
+                    ("broken.sql", "SELECT * FROM public.table_that_does_not_exist;"),
+                ],
+            )
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(f"SELECT value FROM {table}")
+            assert cursor.fetchone() == (42,)
+    finally:
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def test_removed_compatibility_objects_are_absent(pg_database_url: str) -> None:
@@ -246,9 +283,11 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
     lease = service.reserve(
         USER_ID,
         estimate,
-        operation_type="completion",
-        feature="tutor_chat",
-        idempotency_key="lease-contract-reserve",
+        ReserveOptions(
+            operation_type="completion",
+            feature="tutor_chat",
+            idempotency_key="lease-contract-reserve",
+        ),
     )
     renewed = service.renew(USER_ID, lease.lease_id, ttl=300)
 
@@ -265,8 +304,10 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
         USER_ID,
         lease.lease_id,
         actual,
-        feature="tutor_chat",
-        idempotency_key="lease-contract-settle",
+        SettleOptions(
+            feature="tutor_chat",
+            idempotency_key="lease-contract-settle",
+        ),
     )
     refund = service.refund_credits(
         deduction.entry_id,
@@ -435,8 +476,10 @@ def test_expire_leases_is_exposed_by_python_store(store: PostgresStore) -> None:
         USER_ID,
         Decimal("2"),
         "completion",
-        idempotency_key="lease-expiry-reserve",
-        ttl_seconds=1,
+        CreateLeaseOptions(
+            idempotency_key="lease-expiry-reserve",
+            ttl_seconds=1,
+        ),
     )
     time.sleep(1.1)
 

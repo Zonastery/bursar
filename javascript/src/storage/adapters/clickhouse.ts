@@ -79,7 +79,9 @@ function quoteTable(table: string): string {
 
 function clickHouseDate(value: string): string {
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid usage timestamp: ${value}`);
+  if (Number.isNaN(parsed.getTime()) || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) {
+    throw new Error(`Invalid usage timestamp: ${value}`);
+  }
   return parsed.toISOString().replace("T", " ").replace("Z", "");
 }
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from bursar.shared.postgres_types import QueryFn
@@ -27,7 +27,9 @@ def _required_string(row: dict[str, Any], key: str, context: str) -> str:
         msg = f"{context} is missing {key}"
         raise RuntimeError(msg)
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            return value.isoformat()
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
     return str(value)
 
 
@@ -36,7 +38,9 @@ def _optional_string(row: dict[str, Any], key: str) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.isoformat()
+        if value.tzinfo is None:
+            return value.isoformat()
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
     return str(value)
 
 

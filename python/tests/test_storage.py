@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock
@@ -284,7 +284,7 @@ def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
 
     with pytest.raises(ValueError, match="Invalid usage timestamp"):
         store.write_usage(
-            replace(_usage_export(), event_at="2026-07-29T12:00:00"),
+            _usage_export().model_copy(update={"event_at": "2026-07-29T12:00:00"}),
             "99",
         )
 

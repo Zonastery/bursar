@@ -27,15 +27,16 @@ def test_bursar_create_owns_catalog_and_delegates():
 
     assert bursar.credits is credits
     assert bursar.billing is None
-    assert bursar.catalog.active() == {"version": 1}
+    assert bursar.catalog.active == {"version": 1}
 
 
 def test_bursar_always_owns_billing_provisioning(monkeypatch):
     captured = {}
 
     class FakeBilling:
-        def __init__(self, store, **kwargs):
-            captured.update(kwargs)
+        def __init__(self, store, options):
+            captured["provisioning"] = options.provisioning
+            captured["cancel_prior_providers"] = options.cancel_prior_providers
 
     monkeypatch.setattr("bursar.bursar.BillingServiceImpl", FakeBilling)
     credits = FakeCredits()

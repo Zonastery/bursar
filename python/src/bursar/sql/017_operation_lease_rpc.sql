@@ -13,7 +13,7 @@ CREATE FUNCTION bursar.create_lease_for_operation(
     p_minimum_balance numeric DEFAULT NULL,
     p_max_concurrent integer DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     lease_id uuid,
     status bursar.lease_status,
     reserved_amount numeric,

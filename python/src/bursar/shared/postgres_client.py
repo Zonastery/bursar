@@ -20,6 +20,7 @@ class PostgresClient:
             min_connections, max_connections, dsn
         )
         self._owns_pool = True
+        self._closed = False
 
     @classmethod
     def from_pool(cls, pool: psycopg2.pool.ThreadedConnectionPool) -> PostgresClient:
@@ -27,10 +28,11 @@ class PostgresClient:
         instance = cls.__new__(cls)
         instance._pool = pool
         instance._owns_pool = False
+        instance._closed = False
         return instance
 
     def query(self, text: str, params: list | None = None) -> list[dict]:
-        if self._pool is None:
+        if self._closed or self._pool is None:
             raise RuntimeError("PostgreSQL client has been closed")
         conn = self._pool.getconn()
         try:
@@ -46,9 +48,13 @@ class PostgresClient:
             self._pool.putconn(conn)
 
     def close(self) -> None:
-        if self._owns_pool and self._pool is not None:
-            self._pool.closeall()
-            self._pool = None
+        if self._closed:
+            return
+        self._closed = True
+        pool = self._pool
+        self._pool = None
+        if self._owns_pool and pool is not None:
+            pool.closeall()
 
 
 def create_pool(dsn: str, min_connections: int = 1, max_connections: int = 10) -> Any:

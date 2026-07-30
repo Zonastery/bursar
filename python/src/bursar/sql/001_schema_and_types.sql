@@ -11,7 +11,43 @@ SET standard_conforming_strings = on;
 SET client_min_messages = warning;
 
 COMMENT ON SCHEMA bursar IS
-    'Backend-only Bursar accounting, catalog, and billing schema.';
+'Backend-only Bursar accounting, catalog, and billing schema.';
+
+CREATE FUNCTION bursar.uuid_v7()
+RETURNS uuid
+LANGUAGE plpgsql
+VOLATILE
+SET search_path TO ''
+AS $$
+DECLARE
+    v_unix_ms bigint := floor(
+        extract(epoch FROM clock_timestamp()) * 1000
+    );
+    v_bytes bytea := extensions.gen_random_bytes(16);
+BEGIN
+    -- RFC 9562 UUIDv7: 48-bit Unix millisecond timestamp, version 7,
+    -- RFC 4122 variant, and 74 random bits. Values remain ordinary UUIDs
+    -- while newly inserted B-tree keys have time locality.
+    v_bytes := set_byte(v_bytes, 0, ((v_unix_ms >> 40) & 255)::integer);
+    v_bytes := set_byte(v_bytes, 1, ((v_unix_ms >> 32) & 255)::integer);
+    v_bytes := set_byte(v_bytes, 2, ((v_unix_ms >> 24) & 255)::integer);
+    v_bytes := set_byte(v_bytes, 3, ((v_unix_ms >> 16) & 255)::integer);
+    v_bytes := set_byte(v_bytes, 4, ((v_unix_ms >> 8) & 255)::integer);
+    v_bytes := set_byte(v_bytes, 5, (v_unix_ms & 255)::integer);
+    v_bytes := set_byte(
+        v_bytes,
+        6,
+        (get_byte(v_bytes, 6) & 15) | 112
+    );
+    v_bytes := set_byte(
+        v_bytes,
+        8,
+        (get_byte(v_bytes, 8) & 63) | 128
+    );
+
+    RETURN encode(v_bytes, 'hex')::uuid;
+END
+$$;
 
 CREATE FUNCTION bursar.is_finite_numeric(
     p_value numeric
@@ -144,7 +180,9 @@ IMMUTABLE
 PARALLEL SAFE
 SET search_path TO ''
 AS $$
-    SELECT p_value IS NOT NULL AND length(btrim(p_value)) > 0
+    SELECT p_value IS NOT NULL
+       AND p_value = btrim(p_value)
+       AND length(btrim(p_value)) BETWEEN 1 AND 255
 $$;
 
 CREATE FUNCTION bursar.current_provider_environment()

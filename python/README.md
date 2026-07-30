@@ -7,6 +7,17 @@ pip install bursar[postgres]
 DATABASE_URL=postgresql://... bursar migrate
 ```
 
+To install trusted host-owned database objects after Bursar, pass one or more
+repeatable integration files:
+
+```bash
+DATABASE_URL=postgresql://... \
+  bursar migrate --post-migrate-sql ./host-integration.sql
+```
+
+The files run in order, after Bursar's pending migrations and in the same
+transaction. They run on every invocation, so they must be idempotent.
+
 Create the reusable facade after migrations have run:
 
 ```python

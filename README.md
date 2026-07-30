@@ -27,6 +27,15 @@ The migration runner records checksums and is safe to run again. Existing
 pre-release databases must drop and recreate the `bursar` schema before this
 greenfield baseline; no conversion migration is supplied.
 
+Hosts can install trusted, idempotent integration SQL in the same transaction:
+
+```bash
+bursar migrate --post-migrate-sql ./host-integration.sql
+```
+
+Repeat `--post-migrate-sql` to apply multiple files in order. Host files are
+executed on every run and are not recorded in Bursar's migration ledger.
+
 ```python
 from bursar import Bursar
 from bursar.stores.postgres import PostgresStore

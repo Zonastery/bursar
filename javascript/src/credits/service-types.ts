@@ -16,15 +16,7 @@ export type MetricsOrAmount = UsageMetrics | Decimal | number;
 export interface PostDeductionContext {
   userId: string;
   source: "deduct" | "settle" | "raw";
-  deduction:
-    | DeductionResult
-    | {
-        entryId: string;
-        userId: string;
-        amount: Decimal;
-        balanceAfter: Decimal;
-        idempotent: boolean;
-      };
+  deduction: DeductionResult;
 }
 
 export interface LowBalanceConfig {
@@ -81,6 +73,8 @@ export interface ReserveOptions {
   ttl?: number | null;
   metadata?: CreditMetadata | null;
   feature?: string | null;
+  /** Model tag used when reserving a raw amount instead of usage metrics. */
+  model?: string | null;
 }
 
 export interface SettleOptions {

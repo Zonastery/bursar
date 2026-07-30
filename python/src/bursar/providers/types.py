@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from collections.abc import Awaitable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict
 
 
+@runtime_checkable
 class ProviderLogger(Protocol):
     def debug(self, msg: str, ctx: dict | None = None) -> None: ...
     def info(self, msg: str, ctx: dict | None = None) -> None: ...
@@ -66,17 +68,54 @@ def normalize_provider_logger(logger: Any = None) -> ProviderLogger:
     return _NormalizedProviderLogger(logger)
 
 
-ProviderResolveUserFn = Callable[[dict[str, Any], dict[str, str]], Awaitable[str | None]]
+@runtime_checkable
+class ResolveUserCallback(Protocol):
+    def __call__(
+        self,
+        data: dict[str, Any],
+        metadata: dict[str, str],
+        event_type: str | None = None,
+    ) -> Awaitable[str | None]: ...
 
 
-@dataclass
-class WebhookRequest:
+# Backwards-compatible spelling; the canonical name mirrors JavaScript.
+ProviderResolveUserFn = ResolveUserCallback
+
+
+class _ProviderModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ProviderResultModel(_ProviderModel):
+    """Pydantic result with transitional mapping access for SDK internals."""
+
+    def _field_name(self, key: str) -> str:
+        if key in type(self).model_fields:
+            return key
+        for name, field in type(self).model_fields.items():
+            if field.alias == key:
+                return name
+            camel = name.split("_")[0] + "".join(part.title() for part in name.split("_")[1:])
+            if camel == key:
+                return name
+        raise KeyError(key)
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, self._field_name(key))
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+class WebhookRequest(_ProviderModel):
     raw_body: str
     headers: dict[str, str]
 
 
-@dataclass(frozen=True, slots=True)
-class WebhookResult:
+class WebhookResult(_ProviderResultModel):
     received: bool
     retryable: bool
     provider: str
@@ -84,127 +123,189 @@ class WebhookResult:
     event_type: str | None
 
 
-@dataclass
-class CheckoutParams:
+class CheckoutParams(_ProviderModel):
     user_id: str | None = None
     customer_id: str | None = None
     email: str | None = None
-    product_id: str = ""
-    type: Literal["subscription", "credit_pack"] = "subscription"
+    product_id: str
+    type: Literal["subscription", "credit_pack"]
     quantity: int | None = None
-    return_url: str = ""
-    cancel_url: str = ""
-    metadata: dict[str, str] | None = None
+    return_url: str
+    cancel_url: str
+    metadata: dict[str, str]
     idempotency_key: str | None = None
 
 
-@dataclass
-class PortalParams:
-    customer_id: str = ""
-    return_url: str = ""
+CheckoutPaymentStatus = Literal[
+    "succeeded",
+    "failed",
+    "cancelled",
+    "processing",
+    "requires_customer_action",
+    "requires_merchant_action",
+    "requires_payment_method",
+    "requires_confirmation",
+    "requires_capture",
+    "partially_captured",
+    "partially_captured_and_capturable",
+]
 
 
-@dataclass
-class UpdatePaymentMethodParams:
-    customer_id: str = ""
-    subscription_id: str = ""
-    return_url: str = ""
+class CheckoutSessionStatus(_ProviderResultModel):
+    payment_status: CheckoutPaymentStatus | None
+
+
+class CheckoutSessionResult(_ProviderResultModel):
+    url: str
+    customer_id: str | None = None
+    provider_session_id: str | None = None
+
+
+class ProviderUrlResult(_ProviderResultModel):
+    url: str
+
+
+class CreateCustomerResult(_ProviderResultModel):
+    customer_id: str
+
+
+class ChangePlanResult(_ProviderResultModel):
+    provider_operation_id: str | None = None
+
+
+class PortalParams(_ProviderModel):
+    customer_id: str
+    return_url: str
+
+
+class UpdatePaymentMethodParams(_ProviderModel):
+    customer_id: str
+    subscription_id: str
+    return_url: str
     product_id: str | None = None
 
 
-@dataclass
-class PaymentMethodSetupParams:
-    customer_id: str = ""
-    return_url: str = ""
+class PaymentMethodSetupParams(_ProviderModel):
+    customer_id: str
+    return_url: str
     cancel_url: str | None = None
     product_id: str | None = None
 
 
-@dataclass
-class CreateCustomerParams:
-    email: str = ""
-    name: str = ""
-    metadata: dict[str, str] | None = None
+class CreateCustomerParams(_ProviderModel):
+    email: str
+    name: str
+    metadata: dict[str, str]
 
 
-@dataclass
-class PaymentMethodInfo:
-    id: str = ""
-    last4: str = ""
-    brand: str = ""
-    expiry_month: int = 0
-    expiry_year: int = 0
+class PaymentMethodInfo(_ProviderModel):
+    id: str
+    last4: str
+    brand: str
+    expiry_month: int
+    expiry_year: int
     is_default: bool = False
 
 
-@dataclass
-class SavedPaymentChargeParams:
-    customer_id: str = ""
-    payment_method_id: str = ""
-    product_id: str = ""
-    quantity: int = 1
-    metadata: dict[str, str] | None = None
-    idempotency_key: str = ""
+def deduplicate_payment_methods(methods: list[PaymentMethodInfo]) -> list[PaymentMethodInfo]:
+    seen: set[str] = set()
+    result: list[PaymentMethodInfo] = []
+    for method in methods:
+        key = f"{method.brand.strip().lower()}:{method.last4}:{method.expiry_month}:{method.expiry_year}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(method)
+    return result
+
+
+class SavedPaymentChargeParams(_ProviderModel):
+    customer_id: str
+    payment_method_id: str
+    product_id: str
+    quantity: int
+    metadata: dict[str, str]
+    idempotency_key: str
     return_url: str | None = None
 
 
-@dataclass
-class SavedPaymentChargeResult:
+SavedPaymentChargeStatus = Literal[
+    "succeeded",
+    "processing",
+    "failed",
+    "requires_customer_action",
+    "requires_payment_method",
+]
+
+
+class SavedPaymentChargeResult(_ProviderResultModel):
+    """Validated provider charge result mirroring the JavaScript contract."""
+
     provider_payment_id: str | None = None
-    status: str = "processing"
+    status: SavedPaymentChargeStatus
     action_url: str | None = None
     amount_minor: int | None = None
     currency: str | None = None
 
 
-@dataclass
-class SavedPaymentChargeQuote:
+class SavedPaymentChargeQuote(_ProviderResultModel):
     amount_minor: int
     currency: str
     tax_minor: int | None = None
     expires_at: str | None = None
 
 
-@dataclass
-class ChangePlanParams:
-    provider_subscription_id: str = ""
-    product_id: str = ""
-    proration_billing_mode: str = "prorated_immediately"
-    effective_at: str | None = None
-    on_payment_failure: str | None = None
+class ChangePlanParams(_ProviderModel):
+    provider_subscription_id: str
+    product_id: str
+    proration_billing_mode: Literal[
+        "prorated_immediately",
+        "full_immediately",
+        "difference_immediately",
+        "do_not_bill",
+    ]
+    effective_at: Literal["immediately", "next_billing_date"] | None = None
+    on_payment_failure: Literal["prevent_change", "apply_change"] | None = None
     quantity: int = 1
     metadata: dict[str, str] | None = None
     idempotency_key: str | None = None
 
 
-@dataclass
-class PreviewChangePlanParams:
-    provider_subscription_id: str = ""
-    product_id: str = ""
-    proration_billing_mode: str = "prorated_immediately"
-    effective_at: str | None = None
+class PlanSelection(_ProviderModel):
+    plan_id: str
+    interval: Literal["month", "year"]
+
+
+class PreviewChangePlanParams(_ProviderModel):
+    provider_subscription_id: str
+    product_id: str
+    proration_billing_mode: Literal[
+        "prorated_immediately",
+        "full_immediately",
+        "difference_immediately",
+        "do_not_bill",
+    ]
+    effective_at: Literal["immediately", "next_billing_date"] | None = None
     quantity: int = 1
 
 
-@dataclass
-class ChangePlanLineItem:
-    product_id: str = ""
-    name: str = ""
-    unit_price: int = 0
-    quantity: int = 0
-    proration_factor: float = 0.0
-    currency: str = ""
-    tax: int = 0
-    subtotal: int = 0
+class ChangePlanLineItem(_ProviderResultModel):
+    product_id: str
+    name: str
+    unit_price: int
+    quantity: int
+    proration_factor: float
+    currency: str
+    tax: int
+    subtotal: int
 
 
-@dataclass
-class ChangePlanPreview:
-    total_amount: int = 0
-    settlement_amount: int = 0
-    currency: str = "USD"
-    line_items: list[ChangePlanLineItem] | None = None
-    effective_at: str = ""
+class ChangePlanPreview(_ProviderResultModel):
+    total_amount: int
+    settlement_amount: int
+    currency: str
+    line_items: list[ChangePlanLineItem]
+    effective_at: str
     recurring_amount: int | None = None
     recurring_currency: str | None = None
     next_billing_date: str | None = None
@@ -216,24 +317,24 @@ class PaymentProvider(ABC):
     provider: str
 
     @abstractmethod
-    async def create_checkout_session(self, params: CheckoutParams) -> dict: ...
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult: ...
 
-    async def create_customer_portal_session(self, params: PortalParams) -> dict:
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
         raise NotImplementedError("provider does not support create_customer_portal_session")
 
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
         raise NotImplementedError("provider does not support create_update_payment_method_session")
 
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         raise NotImplementedError("provider does not support create_payment_method_setup_session")
 
-    async def create_customer(self, params: CreateCustomerParams) -> dict:
+    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         raise NotImplementedError("provider does not support create_customer")
 
     @abstractmethod
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult: ...
 
-    async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
         return None
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
@@ -264,10 +365,10 @@ class PaymentProvider(ABC):
     async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
         raise NotImplementedError("provider does not support charge_saved_payment_method")
 
-    async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         raise NotImplementedError("provider does not support get_invoice_url")
 
-    async def change_plan(self, params: ChangePlanParams) -> None:
+    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult | None:
         raise NotImplementedError("provider does not support change_plan")
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:

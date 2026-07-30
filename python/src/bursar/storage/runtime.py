@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeGuard, cast
 
 import psycopg2.pool
+from pydantic import BaseModel, ConfigDict, SkipValidation, model_validator
 
 from bursar.billing.postgres.store import PostgresBillingStore
+from bursar.billing.service_types import BillingServiceOptions
 from bursar.bursar import Bursar
+from bursar.commerce.types import CommerceOptions
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.postgres.store import PostgresStore
+from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.types import UsageAnalyticsStore
 from bursar.shared.postgres_client import PostgresClient
 from bursar.storage.adapters.clickhouse import (
@@ -62,25 +66,30 @@ def _is_billing_payload_archive(value: object) -> TypeGuard[BillingPayloadArchiv
     return hasattr(value, "archive") and hasattr(value, "purge_postgres_payload")
 
 
-@dataclass(frozen=True, slots=True)
-class BursarRuntimeBursarOptions:
-    credits_options: dict[str, Any] | None = None
-    billing_options: dict[str, Any] | None = None
-    emitter: CreditEventEmitter | None = None
+class _RuntimeModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
 
-@dataclass(frozen=True, slots=True)
-class BursarRuntimeOptions:
-    postgres: str | PostgresPool
-    s3: BillingPayloadArchive | S3BillingArchiveOptions | None = None
-    clickhouse: UsageAnalyticsSink | ClickHouseUsageStoreOptions | None = None
+class BursarRuntimeBursarOptions(_RuntimeModel):
+    credits_options: CreditsServiceOptions | None = None
+    billing_options: BillingServiceOptions | None = None
+    commerce_options: CommerceOptions | None = None
+    emitter: SkipValidation[CreditEventEmitter] | None = None
+
+
+class BursarRuntimeOptions(_RuntimeModel):
+    postgres: str | SkipValidation[PostgresPool]
+    s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
+    clickhouse: SkipValidation[UsageAnalyticsSink] | ClickHouseUsageStoreOptions | None = None
     outbox: OutboxWorkerOptions | Literal[False] | None = None
-    bursar: BursarRuntimeBursarOptions = field(default_factory=BursarRuntimeBursarOptions)
+    bursar: BursarRuntimeBursarOptions = BursarRuntimeBursarOptions()
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def validate_outbox(self) -> BursarRuntimeOptions:
         if isinstance(self.outbox, bool) and self.outbox is not False:
             msg = "outbox must be OutboxWorkerOptions, False, or None"
             raise ValueError(msg)
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +103,13 @@ class _CallableOutboxHandler:
 
 class BursarRuntime:
     """Composition root for Postgres and optional external projections."""
+
+    bursar: Bursar
+    credit_store: PostgresStore
+    billing_store: PostgresBillingStore
+    worker: OutboxWorker | None
+    clickhouse: UsageAnalyticsSink | None
+    s3: BillingPayloadArchive | None
 
     def __init__(
         self,
@@ -127,14 +143,15 @@ class BursarRuntime:
         psycopg_pool = cast(psycopg2.pool.ThreadedConnectionPool, pool)
         self.credit_store = PostgresStore("", pool=psycopg_pool)
         self.billing_store = PostgresBillingStore("", pool=psycopg_pool)
-        credits_options = dict(options.bursar.credits_options or {})
-        if self.clickhouse is not None:
-            credits_options["analytics"] = self.clickhouse
+        credits_options = (options.bursar.credits_options or CreditsServiceOptions()).model_copy(
+            update={"analytics": self.clickhouse}
+        )
         self.bursar = Bursar.create(
             credit_store=self.credit_store,
             billing_store=self.billing_store,
             credits_options=credits_options,
             billing_options=options.bursar.billing_options,
+            commerce_options=options.bursar.commerce_options,
             emitter=options.bursar.emitter,
         )
 

@@ -17,7 +17,7 @@ CREATE FUNCTION bursar.charge_usage_with_window(
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb
 )
-RETURNS TABLE(
+RETURNS TABLE (
     charge_id uuid,
     ledger_entry_id uuid,
     charged numeric,

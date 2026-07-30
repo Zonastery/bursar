@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
-from typing import Any
 
 from bursar.commerce.errors import ProviderSelectionError
 from bursar.commerce.types import CommerceOptions, CommerceProviderFactoryContext
@@ -12,13 +12,21 @@ from bursar.providers.types import PaymentProvider
 class CommerceProviderRegistry:
     """Lazily constructs and selects application-registered providers."""
 
-    def __init__(self, options: CommerceOptions, event_sink: Any) -> None:
+    def __init__(
+        self,
+        options: CommerceOptions,
+        context: CommerceProviderFactoryContext,
+    ) -> None:
         self._options = options
-        self._context = CommerceProviderFactoryContext(
-            event_sink=event_sink,
-            identity_resolver=options.identity_resolver,
-        )
+        self._context = context
         self._instances: dict[str, PaymentProvider] = {}
+        self._loading: dict[str, asyncio.Task[PaymentProvider]] = {}
+        if options.default_provider is not None and options.default_provider not in options.providers:
+            raise ProviderSelectionError(f"Default payment provider {options.default_provider!r} is not registered")
+
+    @property
+    def configured_providers(self) -> list[str]:
+        return list(self._options.providers)
 
     async def get(self, name: str) -> PaymentProvider:
         if name in self._instances:
@@ -26,12 +34,24 @@ class CommerceProviderRegistry:
         factory = self._options.providers.get(name)
         if factory is None:
             raise ProviderSelectionError(f"Payment provider {name!r} is not registered")
-        value = factory(self._context)
-        provider = await value if inspect.isawaitable(value) else value
-        if provider.provider != name:
-            raise ProviderSelectionError(f"Provider factory {name!r} returned {provider.provider!r}")
-        self._instances[name] = provider
-        return provider
+        loading = self._loading.get(name)
+        if loading is None:
+
+            async def load() -> PaymentProvider:
+                value = factory(self._context)
+                provider = await value if inspect.isawaitable(value) else value
+                if provider.provider != name:
+                    raise ProviderSelectionError(f"Provider factory {name!r} returned {provider.provider!r}")
+                self._instances[name] = provider
+                return provider
+
+            loading = asyncio.create_task(load())
+            self._loading[name] = loading
+        try:
+            return await loading
+        finally:
+            if self._loading.get(name) is loading:
+                self._loading.pop(name, None)
 
     async def select(
         self,
@@ -59,9 +79,7 @@ class CommerceProviderRegistry:
             return await self.get(compatible[0])
 
         default = self._options.default_provider
-        if default is not None:
-            if default not in compatible:
-                raise ProviderSelectionError(f"Default provider {default!r} is incompatible with this operation")
+        if default is not None and default in compatible:
             return await self.get(default)
 
         if not compatible:
@@ -70,3 +88,4 @@ class CommerceProviderRegistry:
 
     def clear(self) -> None:
         self._instances.clear()
+        self._loading.clear()

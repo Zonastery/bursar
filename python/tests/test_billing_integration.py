@@ -497,6 +497,172 @@ class TestAutoRechargeProfile:
             )
             assert cursor.fetchone() == (True, PROVIDER, topup_id)
 
+    def test_attempt_claims_are_isolated_by_subject_and_environment(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT topup.id, topup.catalog_revision_id
+                FROM bursar.catalog_topups AS topup
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = topup.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE topup.topup_key = 'standard_topup'
+                """
+            )
+            topup_id, revision_id = cursor.fetchone()
+            cursor.execute(
+                """
+                INSERT INTO bursar.subjects(id)
+                VALUES (%s::uuid), (%s::uuid)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (USER_ID, USER_ID2),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.billing_auto_recharge_attempts(
+                    subject_id,
+                    provider,
+                    provider_environment,
+                    idempotency_key,
+                    topup_id,
+                    catalog_revision_id,
+                    quantity,
+                    window_start,
+                    window_end
+                )
+                VALUES
+                    (
+                        %s::uuid, %s, 'live', 'live-user-1',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    ),
+                    (
+                        %s::uuid, %s, 'live', 'live-user-2',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    ),
+                    (
+                        %s::uuid, %s, 'test', 'test-user-1',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                    USER_ID2,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                    USER_ID,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT provider_environment, count(*)
+                FROM bursar.billing_auto_recharge_attempts
+                GROUP BY provider_environment
+                ORDER BY provider_environment
+                """
+            )
+            assert cursor.fetchall() == [("live", 2), ("test", 1)]
+
+    def test_entitlement_selection_is_isolated_by_environment(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT offer.id, offer.catalog_revision_id
+                FROM bursar.catalog_offers AS offer
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = offer.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE offer.offer_key = 'pro_monthly'
+                """
+            )
+            offer_id, revision_id = cursor.fetchone()
+            cursor.execute(
+                """
+                INSERT INTO bursar.subjects(id)
+                VALUES (%s::uuid)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (USER_ID,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.billing_subscriptions(
+                    subject_id,
+                    provider,
+                    provider_environment,
+                    provider_subscription_id,
+                    offer_id,
+                    catalog_revision_id,
+                    status
+                )
+                VALUES
+                    (
+                        %s::uuid, %s, 'live', 'sub-live',
+                        %s::uuid, %s::uuid, 'active'
+                    ),
+                    (
+                        %s::uuid, %s, 'test', 'sub-test',
+                        %s::uuid, %s::uuid, 'active'
+                    )
+                RETURNING id, provider_environment
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    offer_id,
+                    revision_id,
+                    USER_ID,
+                    PROVIDER,
+                    offer_id,
+                    revision_id,
+                ),
+            )
+            subscription_ids = {environment: subscription_id for subscription_id, environment in cursor.fetchall()}
+
+            for environment in ("live", "test"):
+                cursor.execute(
+                    "SELECT set_config('bursar.provider_environment', %s, false)",
+                    (environment,),
+                )
+                cursor.execute(
+                    "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid)",
+                    (USER_ID, subscription_ids[environment]),
+                )
+                assert cursor.fetchone() == (True,)
+
+            cursor.execute(
+                """
+                SELECT provider_environment
+                FROM bursar.billing_entitlement_sources
+                WHERE subject_id = %s::uuid
+                  AND selected
+                ORDER BY provider_environment
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchall() == [("live",), ("test",)]
+
 
 # ── Customer CRUD ─────────────────────────────────────────────────────
 

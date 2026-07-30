@@ -12,12 +12,15 @@ from bursar.config.types import (
     BursarConfig,
     Charge,
     ChargeUnmatched,
+    CommerceConfig,
     ConfigError,
+    CreditsConfig,
     CustomObjectReference,
     DodoProductReference,
     EnumFeature,
     EqualMatcher,
     ExpressionCharge,
+    FeatureDefinition,
     FlatCharge,
     GraduatedCharge,
     InMatcher,
@@ -25,6 +28,7 @@ from bursar.config.types import (
     OperationPricing,
     PackageCharge,
     PerUnitCharge,
+    PlanDefinition,
     PrefixMatcher,
     PriceRule,
     PricingConfig,
@@ -37,8 +41,13 @@ from bursar.config.types import (
     SumCharge,
     TopupOffer,
     VolumeCharge,
+    Window,
     _validate_map_keys,
 )
+
+BursarConfigData = BursarConfig
+ParsedBursarConfig = BursarConfig
+PricingPlanDefinition = PlanDefinition
 
 
 def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
@@ -128,27 +137,39 @@ def load_config_from_dict(data: dict[str, Any]) -> BursarConfig:
         return config
     except ConfigError:
         raise
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
     except ValidationError as exc:
         raise ConfigError(validation_error=exc) from exc
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def canonical_bursar_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     return load_config_from_dict(data).model_dump(mode="json", exclude_none=True)
 
 
+def canonical_parsed_bursar_config_dict(
+    data: ParsedBursarConfig,
+) -> dict[str, Any]:
+    """Serialize an already parsed config without re-validating it."""
+    return data.model_dump(mode="json", exclude_none=True)
+
+
 __all__ = [
     "AutoRechargeGuardrails",
     "BursarConfig",
+    "BursarConfigData",
     "canonical_bursar_config_dict",
+    "canonical_parsed_bursar_config_dict",
     "Charge",
     "ChargeUnmatched",
+    "CommerceConfig",
     "ConfigError",
+    "CreditsConfig",
     "CustomObjectReference",
     "DodoProductReference",
     "EqualMatcher",
     "ExpressionCharge",
+    "FeatureDefinition",
     "FlatCharge",
     "GraduatedCharge",
     "InMatcher",
@@ -157,6 +178,8 @@ __all__ = [
     "OperationPricing",
     "PackageCharge",
     "PerUnitCharge",
+    "ParsedBursarConfig",
+    "PricingPlanDefinition",
     "PrefixMatcher",
     "PriceRule",
     "PricingConfig",
@@ -170,5 +193,6 @@ __all__ = [
     "TopupOffer",
     "validate_bursar_config",
     "VolumeCharge",
+    "Window",
     "_validate_map_keys",
 ]

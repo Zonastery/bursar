@@ -27,13 +27,7 @@ export interface BillingAutoRechargeAttempt {
   topupId: string;
   quantity: number;
   state:
-    | "claimed"
-    | "submitted"
-    | "processing"
-    | "unknown"
-    | "succeeded"
-    | "failed"
-    | "action_required";
+    "claimed" | "submitted" | "processing" | "unknown" | "succeeded" | "failed" | "action_required";
   windowStart: string;
   windowEnd: string;
   quotedAmountMinor: number | null;

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_amount, validate_non_empty
 from bursar.credits.postgres.repositories.schemas import DeductionRow, DeductParams, RefundRow, RevokeRow
@@ -20,13 +18,15 @@ class DeductionRepository:
                 "charge_usage_for_operation",
                 [
                     params.user_id,
-                    params.feature or "default",
+                    params.operation,
                     params.amount,
                     params.idempotency_key,
                     params.feature,
                     params.model,
-                    None,
+                    params.region,
                     params.metadata,
+                    params.measures,
+                    params.dimensions,
                 ],
             )
             or []
@@ -34,12 +34,26 @@ class DeductionRepository:
         if not rows:
             return None
         row = dict(rows[0])
+        details: dict[str, object] = {}
+        if row.get("error_code") is None:
+            detail_rows = self._callproc(
+                "get_credit_operation_details",
+                [
+                    params.user_id,
+                    row.get("ledger_entry_id"),
+                    params.idempotency_key,
+                ],
+            )
+            if detail_rows:
+                details = dict(detail_rows[0])
         row.update(
             {
                 "user_id": params.user_id,
                 "entry_id": row.get("ledger_entry_id"),
                 "amount": row.get("charged"),
                 "allowance_consumed": row.get("allowance_covered"),
+                "balance_after": details.get("balance_after", row.get("balance_after")),
+                "bucket_breakdown": details.get("bucket_breakdown", row.get("bucket_breakdown")),
                 "idempotent": row.get("replayed"),
                 "error": row.get("error_code"),
             }
@@ -77,40 +91,16 @@ class DeductionRepository:
         return RefundRow.model_validate(row)
 
     def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> RevokeRow | None:
-        lots = self._query(
-            """SELECT l.id, l.granted - l.consumed AS amount
-               FROM bursar.credit_lots l
-               JOIN bursar.credit_ledger_entries e ON e.id = l.source_entry_id
-               WHERE l.account_id = bursar.account_for_subject(%s::uuid)
-                 AND l.consumed < l.granted
-                 AND e.operation = %s
-               ORDER BY l.priority, l.expires_at NULLS LAST, l.created_at, l.id""",
+        rows = self._callproc(
+            "revoke_subject_credits_by_operation",
             [user_id, entry_type],
         )
-        amount = Decimal("0")
-        for lot in lots:
-            lot_amount = Decimal(str(lot.get("amount", 0)))
-            if lot_amount <= 0:
-                continue
-            result = self._callproc(
-                "revoke_lot",
-                [str(lot["id"]), str(lot["amount"]), f"revoke:{entry_type}:{lot['id']}"],
-            )
-            row = result[0] if result else {}
-            if isinstance(row, dict) and row.get("error_code"):
-                raise RuntimeError(str(row["error_code"]))
-            amount += lot_amount
-        balances = self._query(
-            """SELECT balance
-               FROM bursar.credit_accounts
-               WHERE id = bursar.account_for_subject(%s::uuid)""",
-            [user_id],
-        )
+        row = dict(rows[0]) if rows else {}
         return RevokeRow.model_validate(
             {
                 "user_id": user_id,
-                "amount": amount,
-                "new_balance": balances[0].get("balance") if balances else None,
+                "amount": row.get("revoked"),
+                "new_balance": row.get("balance_after"),
                 "bucket": None,
             }
         )

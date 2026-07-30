@@ -32,10 +32,10 @@ class ExecuteGrantProgramRequest(BaseModel):
 class GrantProgramAwardResult(BaseModel):
     """One award row produced by a grant-program execution."""
 
-    grant_event_id: str | None = None
-    grant_award_id: str | None = None
-    recipient_subject_id: str | None = None
-    ledger_entry_id: str | None = None
-    amount: Decimal = Decimal(0)
-    replayed: bool = False
+    grant_event_id: str | None
+    grant_award_id: str | None
+    recipient_subject_id: str | None
+    ledger_entry_id: str | None
+    amount: Decimal
+    replayed: bool
     error: str | None = None

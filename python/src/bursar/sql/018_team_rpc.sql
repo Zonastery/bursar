@@ -6,7 +6,7 @@ CREATE FUNCTION bursar.create_team(
     p_name text,
     p_initial_credits numeric DEFAULT 0
 )
-RETURNS TABLE(
+RETURNS TABLE (
     team_id uuid,
     team_subject_id uuid,
     account_id uuid,
@@ -16,7 +16,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
     v_team uuid;
 
-    v_team_subject uuid:=gen_random_uuid();
+    v_team_subject uuid:=bursar.uuid_v7();
 
     v_account uuid;
 
@@ -34,7 +34,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_owner_subject_id),(v_team_subject)
-    ON CONFLICT DO NOTHING;
+    ON CONFLICT (id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
         RETURN QUERY SELECT NULL::uuid,NULL::uuid,NULL::uuid,'subject_pseudonymized';
@@ -93,7 +93,9 @@ BEGIN
 
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RETURN false;
@@ -149,7 +151,7 @@ END $$;
 CREATE FUNCTION bursar.list_team_members(
     p_team_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     user_id uuid,
     role text,
     spend_cap numeric,
@@ -181,7 +183,7 @@ $$;
 CREATE FUNCTION bursar.get_team_balance(
     p_team_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     team_id uuid,
     name text,
     balance numeric,

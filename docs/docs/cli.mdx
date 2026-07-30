@@ -13,6 +13,25 @@ bursar migrate
 records checksums, and fails if an already-applied file changed. A second run
 is a no-op.
 
+## Host integration SQL
+
+Applications can add trusted, host-owned SQL after Bursar's bundled migrations:
+
+```bash
+bursar migrate \
+  --post-migrate-sql ./database/host-integration.sql \
+  --post-migrate-sql ./database/scheduled-maintenance.sql
+```
+
+The option is repeatable and files execute in command-line order, under the
+same advisory lock and transaction as pending Bursar migrations. A failure
+rolls back the entire transaction.
+
+Post-migration files are intentionally not added to Bursar's checksum ledger
+and execute on every invocation. Keep them idempotent and under the host
+application's source control. Only pass trusted files: they execute with the
+database privileges in `DATABASE_URL`.
+
 Deploy in this order:
 
 1. Run `bursar migrate`.

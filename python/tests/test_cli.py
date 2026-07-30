@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -56,6 +57,68 @@ def test_parser_requires_a_command_and_config_subcommand() -> None:
         cli.main([])
     with pytest.raises(SystemExit):
         cli.main(["config"])
+
+
+def test_migrate_accepts_ordered_post_migration_sql_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = tmp_path / "first.sql"
+    second = tmp_path / "second.sql"
+    first.write_text("SELECT 1;\n")
+    second.write_text("SELECT 2;\n")
+    calls: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def run_migrations(
+        database_url: str,
+        *,
+        post_migration_sql: list[tuple[str, str]],
+    ) -> None:
+        calls.append((database_url, post_migration_sql))
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.test/bursar")
+    monkeypatch.setattr(cli, "_require_extra", lambda _extra: None)
+    monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
+
+    args = SimpleNamespace(post_migrate_sql=[str(first), str(second)])
+    cli._cmd_migrate(args)
+
+    assert calls == [
+        (
+            "postgresql://example.test/bursar",
+            [(str(first), "SELECT 1;\n"), (str(second), "SELECT 2;\n")],
+        )
+    ]
+    assert capsys.readouterr().out == "Migrations applied successfully.\n"
+
+
+@pytest.mark.parametrize("contents", [None, " \n"])
+def test_migrate_rejects_unreadable_or_empty_post_migration_sql(
+    tmp_path: Path,
+    contents: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "host.sql"
+    if contents is not None:
+        path.write_text(contents)
+    called = False
+
+    def run_migrations(*_args: object, **_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.test/bursar")
+    monkeypatch.setattr(cli, "_require_extra", lambda _extra: None)
+    monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
+
+    with pytest.raises(SystemExit) as exc:
+        cli._cmd_migrate(SimpleNamespace(post_migrate_sql=[str(path)]))
+
+    assert exc.value.code == 1
+    assert not called
+    assert str(path) in capsys.readouterr().err
 
 
 def test_retry_transient_retries_only_transient_errors(monkeypatch: pytest.MonkeyPatch) -> None:

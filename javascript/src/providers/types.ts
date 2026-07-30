@@ -51,6 +51,23 @@ export interface CreateCustomerParams {
   metadata: Record<string, string>;
 }
 
+export interface ProviderUrlResult {
+  url: string;
+}
+
+export interface CreateCustomerResult {
+  customerId: string;
+}
+
+export interface CheckoutSessionResult extends ProviderUrlResult {
+  customerId?: string;
+  providerSessionId?: string;
+}
+
+export interface CheckoutSessionStatus {
+  paymentStatus: CheckoutPaymentStatus;
+}
+
 export interface PaymentMethodInfo {
   id: string;
   last4: string;
@@ -178,25 +195,25 @@ export interface ChangePlanPreview {
   customerCredits?: number;
 }
 
+export interface ChangePlanResult {
+  providerOperationId?: string;
+}
+
 export interface PaymentProvider {
   readonly provider: string;
 
   /** Retrieve the provider state for a checkout session, or null if it no longer exists. */
-  getCheckoutSessionStatus?(providerSessionId: string): Promise<{
-    paymentStatus: CheckoutPaymentStatus;
-  } | null>;
+  getCheckoutSessionStatus?(providerSessionId: string): Promise<CheckoutSessionStatus | null>;
 
-  createCheckoutSession(
-    params: CheckoutParams,
-  ): Promise<{ url: string; customerId?: string; providerSessionId?: string }>;
+  createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult>;
 
-  createCustomerPortalSession?(params: PortalParams): Promise<{ url: string }>;
+  createCustomerPortalSession?(params: PortalParams): Promise<ProviderUrlResult>;
 
-  createUpdatePaymentMethodSession?(params: UpdatePaymentMethodParams): Promise<{ url: string }>;
+  createUpdatePaymentMethodSession?(params: UpdatePaymentMethodParams): Promise<ProviderUrlResult>;
 
-  createPaymentMethodSetupSession?(params: PaymentMethodSetupParams): Promise<{ url: string }>;
+  createPaymentMethodSetupSession?(params: PaymentMethodSetupParams): Promise<ProviderUrlResult>;
 
-  createCustomer?(params: CreateCustomerParams): Promise<{ customerId: string }>;
+  createCustomer?(params: CreateCustomerParams): Promise<CreateCustomerResult>;
 
   handleWebhook(req: WebhookRequest): Promise<WebhookResult>;
 
@@ -219,9 +236,9 @@ export interface PaymentProvider {
 
   chargeSavedPaymentMethod?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
 
-  getInvoiceUrl?(providerPaymentId: string): Promise<{ url: string } | null>;
+  getInvoiceUrl?(providerPaymentId: string): Promise<ProviderUrlResult | null>;
 
-  changePlan?(params: ChangePlanParams): Promise<{ providerOperationId?: string } | void>;
+  changePlan?(params: ChangePlanParams): Promise<ChangePlanResult | void>;
 
   previewChangePlan?(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
 }

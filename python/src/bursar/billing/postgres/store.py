@@ -17,6 +17,20 @@ import psycopg2.extras
 import psycopg2.pool
 
 from bursar.billing.billing_store import BillingStore
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+    AutoRechargeProviderPaymentUpdate,
+    BillingCreditGrantCreate,
+    BillingDisputeUpsert,
+    BillingInvoiceUpsert,
+    BillingPaymentUpsert,
+    BillingRefundUpsert,
+    BillingSubscriptionChangeUpdate,
+    BillingSubscriptionConflictCreate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
 from bursar.billing.postgres.repositories.auto_recharge import BillingTopupRepository
 from bursar.billing.postgres.repositories.customer import BillingCustomerRepository
 from bursar.billing.postgres.repositories.dispute import BillingDisputeRepository
@@ -324,28 +338,30 @@ class PostgresBillingStore(BillingStore):
 
     def create_or_get_checkout_intent(
         self,
-        subject_id: str,
-        provider: str,
-        checkout_kind: str,
-        product_key: str,
-        request_digest: str,
-        expires_at: str,
+        input: CheckoutIntentCreate,
     ) -> CheckoutIntent:
         """Create or retrieve an open checkout intent for an actor key.
 
         Atomically expires any old open intents for the same actor,
         then inserts a new one (or returns the existing one via ON CONFLICT).
         """
-        if re.fullmatch(r"[0-9a-fA-F]{64}", request_digest) is None:
+        if re.fullmatch(r"[0-9a-fA-F]{64}", input.request_digest) is None:
             raise ValueError("request_digest must be a 32-byte hex string")
         rows = self._execute(
             "SELECT bursar.create_checkout_intent(%s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz) AS id",
-            [subject_id, provider, checkout_kind, product_key, request_digest, expires_at],
+            [
+                input.subject_id,
+                input.provider,
+                input.checkout_kind,
+                input.product_key,
+                input.request_digest,
+                input.expires_at,
+            ],
         )
         intent_id = rows[0].get("id") if rows else None
         if intent_id is None:
             raise RuntimeError("checkout intent creation returned no ID")
-        intent = self.get_checkout_intent(str(intent_id), subject_id)
+        intent = self.get_checkout_intent(str(intent_id), input.subject_id)
         if intent is None:
             raise RuntimeError("checkout intent could not be read after creation")
         return intent
@@ -353,9 +369,7 @@ class PostgresBillingStore(BillingStore):
     def update_checkout_intent(
         self,
         id: str,
-        status: str | None = None,
-        provider_session_id: str | None = None,
-        checkout_url: str | None = None,
+        update: CheckoutIntentUpdate,
     ) -> None:
         """Update a checkout intent's status and optional session/URL fields."""
         rows = self._execute(
@@ -365,7 +379,12 @@ class PostgresBillingStore(BillingStore):
                    %s,
                    %s
                ) AS advanced""",
-            [id, status, provider_session_id, checkout_url],
+            [
+                id,
+                update.status,
+                update.provider_session_id,
+                update.checkout_url,
+            ],
         )
         if not rows or not rows[0].get("advanced"):
             raise RuntimeError(f"checkout intent update rejected: {id}")
@@ -567,7 +586,7 @@ class PostgresBillingStore(BillingStore):
         if result.get("error_code"):
             raise RuntimeError(f"subscription change: {result['error_code']}")
         change_rows = self._execute(
-            "SELECT * FROM bursar.get_billing_subscription_change(%s::uuid)",
+            "SELECT * FROM bursar.get_billing_subscription_change(%s::bigint)",
             [result.get("change_id")],
         )
         parsed_change = self._row_to_subscription_change(change_rows[0] if change_rows else None)
@@ -587,21 +606,23 @@ class PostgresBillingStore(BillingStore):
     def update_billing_subscription_change(
         self,
         id: str,
-        *,
-        state: BillingSubscriptionChangeState | None = None,
-        provider_operation_id: str | None = None,
-        error_message: str | None = None,
+        update: BillingSubscriptionChangeUpdate,
     ) -> None:
-        if state is None:
+        if update.state is None:
             return
         rows = self._execute(
             """SELECT bursar.advance_subscription_change(
-                   %s::uuid,
+                   %s::bigint,
                    %s,
                    %s,
                    %s
                ) AS advanced""",
-            [id, state, provider_operation_id, error_message],
+            [
+                id,
+                update.state,
+                update.provider_operation_id,
+                update.error_message,
+            ],
         )
         if not rows or not rows[0].get("advanced"):
             raise RuntimeError(f"subscription change transition rejected: {id}")
@@ -661,18 +682,7 @@ class PostgresBillingStore(BillingStore):
 
     def upsert_billing_payment(
         self,
-        *,
-        provider: str,
-        provider_payment_id: str,
-        provider_invoice_id: str | None = None,
-        user_id: str | None = None,
-        amount_minor: int = 0,
-        tax_minor: int | None = None,
-        currency: str = "USD",
-        purpose: str = "unknown",
-        status: str = "succeeded",
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingPaymentUpsert,
     ) -> str:
         """Insert or update a billing payment record.
 
@@ -690,32 +700,22 @@ class PostgresBillingStore(BillingStore):
             metadata: Optional structured metadata dict.
         """
         return self._payment_repo.upsert(
-            provider,
-            provider_payment_id,
-            provider_invoice_id,
-            user_id,
-            amount_minor,
-            tax_minor,
-            currency,
-            purpose,
-            json.dumps(metadata) if metadata else None,
-            status,
-            provider_updated_at,
+            input.provider,
+            input.provider_payment_id,
+            input.provider_invoice_id,
+            input.user_id,
+            input.amount_minor,
+            input.tax_minor,
+            input.currency or "USD",
+            input.purpose,
+            json.dumps(input.metadata) if input.metadata else None,
+            input.status,
+            input.provider_updated_at,
         )
 
     def upsert_billing_refund(
         self,
-        *,
-        provider: str,
-        provider_refund_id: str,
-        provider_payment_id: str | None = None,
-        user_id: str | None = None,
-        amount_minor: int = 0,
-        currency: str = "USD",
-        reason: str | None = None,
-        status: str = "pending",
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingRefundUpsert,
     ) -> str:
         """Insert or update a billing refund record.
 
@@ -732,33 +732,21 @@ class PostgresBillingStore(BillingStore):
             metadata: Optional structured metadata dict.
         """
         return self._refund_repo.upsert(
-            provider,
-            provider_refund_id,
-            provider_payment_id,
-            user_id,
-            amount_minor,
-            currency,
-            reason,
-            json.dumps(metadata) if metadata else None,
-            status,
-            provider_updated_at,
+            input.provider,
+            input.provider_refund_id,
+            input.provider_payment_id,
+            input.user_id,
+            input.amount_minor,
+            input.currency or "USD",
+            input.reason,
+            json.dumps(input.metadata) if input.metadata else None,
+            input.status,
+            input.provider_updated_at,
         )
 
     def upsert_billing_invoice(
         self,
-        *,
-        provider: str,
-        provider_invoice_id: str,
-        provider_subscription_id: str | None = None,
-        user_id: str | None = None,
-        status: str | None = None,
-        amount_paid_minor: int | None = None,
-        amount_due_minor: int | None = None,
-        currency: str = "USD",
-        period_start: str | None = None,
-        period_end: str | None = None,
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingInvoiceUpsert,
     ) -> None:
         """Insert or update a billing invoice record.
 
@@ -776,24 +764,29 @@ class PostgresBillingStore(BillingStore):
             metadata: Optional structured metadata dict.
         """
         subscription = (
-            self._subscription_repo.get(provider, provider_subscription_id) if provider_subscription_id else None
+            self._subscription_repo.get(
+                input.provider,
+                input.provider_subscription_id,
+            )
+            if input.provider_subscription_id
+            else None
         )
-        subject_id = user_id or (str(subscription.user_id) if subscription and subscription.user_id else None)
+        subject_id = input.user_id or (str(subscription.user_id) if subscription and subscription.user_id else None)
         if not subject_id:
             raise ValueError("invoice subject is required")
         self._invoice_repo.upsert(
             subject_id,
-            provider,
-            provider_invoice_id,
+            input.provider,
+            input.provider_invoice_id,
             str(subscription.id) if subscription and subscription.id else None,
-            status,
-            amount_due_minor,
-            amount_paid_minor,
-            currency,
-            period_start,
-            period_end,
-            json.dumps(metadata or {}),
-            provider_updated_at or datetime.now(UTC).isoformat(),
+            input.status,
+            input.amount_due_minor,
+            input.amount_paid_minor,
+            input.currency or "USD",
+            input.period_start,
+            input.period_end,
+            json.dumps(input.metadata or {}),
+            input.provider_updated_at or datetime.now(UTC).isoformat(),
         )
 
     def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]:
@@ -801,15 +794,7 @@ class PostgresBillingStore(BillingStore):
 
     def upsert_billing_dispute(
         self,
-        *,
-        provider: str,
-        provider_dispute_id: str,
-        provider_payment_id: str | None = None,
-        user_id: str | None = None,
-        status: str = "needs_response",
-        reason: str | None = None,
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingDisputeUpsert,
     ) -> None:
         """Insert or update a billing dispute record.
 
@@ -822,33 +807,40 @@ class PostgresBillingStore(BillingStore):
             reason: The dispute reason, or None.
             metadata: Optional structured metadata dict.
         """
-        del user_id
-        payment = self._payment_repo.get_for_refund(provider, provider_payment_id) if provider_payment_id else None
+        payment = (
+            self._payment_repo.get_for_refund(
+                input.provider,
+                input.provider_payment_id,
+            )
+            if input.provider_payment_id
+            else None
+        )
         if not payment or not payment.id:
             raise ValueError("dispute payment is required")
         self._dispute_repo.upsert(
-            provider,
-            provider_dispute_id,
+            input.provider,
+            input.provider_dispute_id,
             str(payment.id),
-            status,
-            reason,
-            json.dumps(metadata or {}),
-            provider_updated_at or datetime.now(UTC).isoformat(),
+            input.status,
+            input.reason,
+            json.dumps(input.metadata or {}),
+            input.provider_updated_at or datetime.now(UTC).isoformat(),
         )
 
     def create_billing_credit_grant(
         self,
-        *,
-        payment_id: str | None = None,
-        subscription_id: str | None = None,
-        topup_id: str | None = None,
-        configured_credits: str,
-        quantity: int = 1,
-        billing_event_id: str | None = None,
+        input: BillingCreditGrantCreate,
     ) -> str:
         rows = self._execute(
             "SELECT bursar.create_billing_credit_grant(%s::uuid, %s::uuid, %s::uuid, %s, %s, %s::uuid)",
-            [payment_id, subscription_id, topup_id, configured_credits, quantity, billing_event_id],
+            [
+                input.payment_id,
+                input.subscription_id,
+                input.topup_id,
+                str(input.configured_credits),
+                input.quantity,
+                input.billing_event_id,
+            ],
         )
         return str(next(iter(rows[0].values())))
 
@@ -996,12 +988,11 @@ class PostgresBillingStore(BillingStore):
 
     def claim_auto_recharge_attempt(
         self,
-        user_id: str,
-        idempotency_key: str,
+        input: AutoRechargeAttemptClaim,
     ) -> BillingAutoRechargeAttempt | None:
         rows = self._execute(
             "SELECT * FROM bursar.claim_auto_recharge_attempt(%s::uuid, %s)",
-            [user_id, idempotency_key],
+            [input.user_id, input.idempotency_key],
         )
         if not rows:
             return None
@@ -1117,20 +1108,15 @@ class PostgresBillingStore(BillingStore):
 
     def update_auto_recharge_attempt(
         self,
-        attempt_id: str,
-        state: str,
-        provider_attempt_id: str | None = None,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: AutoRechargeAttemptUpdate,
     ) -> None:
         self._advance_auto_recharge_attempt(
-            attempt_id,
-            state,
-            provider_attempt_id,
-            failure_code,
-            failure_message,
-            metadata,
+            input.id,
+            input.state,
+            input.provider_attempt_id,
+            input.failure_code,
+            input.failure_message,
+            input.metadata,
         )
 
     def get_billing_customer_by_user_id(
@@ -1223,22 +1209,17 @@ class PostgresBillingStore(BillingStore):
 
     def record_subscription_conflict(
         self,
-        user_id: str | None,
-        provider: str,
-        duplicate_subscription_id: str,
-        existing_subscription_id: str | None = None,
-        event_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: BillingSubscriptionConflictCreate,
     ) -> None:
         rows = self._execute(
             "SELECT bursar.record_subscription_conflict(%s::uuid, %s, %s, %s, %s, %s::jsonb) AS id",
             [
-                user_id,
-                provider,
-                duplicate_subscription_id,
-                existing_subscription_id,
-                event_id,
-                json.dumps(metadata or {}),
+                input.user_id,
+                input.provider,
+                input.duplicate_subscription_id,
+                input.existing_subscription_id,
+                input.event_id,
+                json.dumps(input.metadata or {}),
             ],
         )
         conflict_id = rows[0].get("id") if rows and isinstance(rows[0], dict) else None
@@ -1268,15 +1249,11 @@ class PostgresBillingStore(BillingStore):
 
     def update_auto_recharge_attempt_by_provider_payment(
         self,
-        provider: str,
-        provider_payment_id: str,
-        state: str,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
+        input: AutoRechargeProviderPaymentUpdate,
     ) -> None:
         attempts = self._execute(
             "SELECT * FROM bursar.get_auto_recharge_attempt_by_provider(%s, %s)",
-            [provider, provider_payment_id],
+            [input.provider, input.provider_payment_id],
         )
         for attempt in attempts:
             attempt_id = attempt.get("id")
@@ -1284,10 +1261,10 @@ class PostgresBillingStore(BillingStore):
                 continue
             self._advance_auto_recharge_attempt(
                 str(attempt_id),
-                state,
-                provider_payment_id,
-                failure_code,
-                failure_message,
+                input.state,
+                input.provider_payment_id,
+                input.failure_code,
+                input.failure_message,
             )
 
     def count_auto_recharge_attempts(

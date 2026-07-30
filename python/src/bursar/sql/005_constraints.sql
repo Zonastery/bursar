@@ -25,6 +25,8 @@ DECLARE
     v_from timestamptz;
     v_to timestamptz;
     v_partition text;
+    v_child_oid regclass;
+    v_parent_oid regclass;
 BEGIN
     IF p_parent_table NOT IN (
         'usage_charge_payloads',
@@ -44,16 +46,79 @@ BEGIN
         to_char(v_from, 'YYYYMM')
     );
 
-    -- This function is on the ingestion path. Avoid catalog DDL and its locks
-    -- after the month's partition has been registered.
-    IF EXISTS (
-        SELECT 1
-        FROM bursar.storage_partitions AS partition
-        WHERE partition.parent_table = p_parent_table
-          AND partition.range_start = v_from
-    ) THEN
+    v_parent_oid := format('bursar.%I', p_parent_table)::regclass;
+    v_child_oid := to_regclass(format('bursar.%I', v_partition));
+
+    -- The registry is only a cache. Trust it after proving that the physical
+    -- child exists, inherits from the expected parent, and has matching bounds.
+    IF v_child_oid IS NOT NULL
+       AND EXISTS (
+           SELECT 1
+           FROM pg_inherits
+           JOIN pg_class AS child ON child.oid = inhrelid
+           WHERE inhrelid = v_child_oid
+             AND inhparent = v_parent_oid
+             AND child.relrowsecurity
+             AND pg_get_expr(child.relpartbound, child.oid) = format(
+                 'FOR VALUES FROM (%L) TO (%L)',
+                 v_from,
+                 v_to
+             )
+       )
+       AND EXISTS (
+           SELECT 1
+           FROM bursar.storage_partitions AS partition
+           WHERE partition.parent_table = p_parent_table
+             AND partition.partition_table = v_partition
+             AND partition.range_start = v_from
+             AND partition.range_end = v_to
+       )
+    THEN
         RETURN v_partition;
     END IF;
+
+    IF v_child_oid IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_inherits
+            JOIN pg_class AS child ON child.oid = inhrelid
+            WHERE inhrelid = v_child_oid
+              AND inhparent = v_parent_oid
+              AND pg_get_expr(child.relpartbound, child.oid) = format(
+                  'FOR VALUES FROM (%L) TO (%L)',
+                  v_from,
+                  v_to
+              )
+        ) THEN
+            RAISE EXCEPTION
+                'storage partition drift: bursar.% is not the expected partition of bursar.%',
+                v_partition,
+                p_parent_table
+                USING ERRCODE = '55000';
+        END IF;
+
+        EXECUTE format(
+            'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
+            v_partition
+        );
+
+        INSERT INTO bursar.storage_partitions(
+            parent_table,
+            partition_table,
+            range_start,
+            range_end
+        )
+        VALUES (p_parent_table, v_partition, v_from, v_to)
+        ON CONFLICT (parent_table, range_start) DO UPDATE
+        SET partition_table = EXCLUDED.partition_table,
+            range_end = EXCLUDED.range_end;
+
+        RETURN v_partition;
+    END IF;
+
+    DELETE FROM bursar.storage_partitions AS partition
+    WHERE partition.parent_table = p_parent_table
+      AND partition.range_start = v_from;
 
     IF p_wait_for_lock THEN
         PERFORM pg_advisory_xact_lock(
@@ -66,23 +131,54 @@ BEGIN
             USING ERRCODE = '55P03';
     END IF;
 
-    -- Recheck after the lock because another writer may have created it.
-    IF EXISTS (
-        SELECT 1
-        FROM bursar.storage_partitions AS partition
-        WHERE partition.parent_table = p_parent_table
-          AND partition.range_start = v_from
-    ) THEN
+    -- Recheck the catalog after the lock because another writer may have
+    -- created the child and committed before this transaction acquired it.
+    v_child_oid := to_regclass(format('bursar.%I', v_partition));
+    IF v_child_oid IS NOT NULL
+       AND EXISTS (
+           SELECT 1
+           FROM pg_inherits
+           JOIN pg_class AS child ON child.oid = inhrelid
+           WHERE inhrelid = v_child_oid
+             AND inhparent = v_parent_oid
+             AND pg_get_expr(child.relpartbound, child.oid) = format(
+                 'FOR VALUES FROM (%L) TO (%L)',
+                 v_from,
+                 v_to
+             )
+       )
+    THEN
+        EXECUTE format(
+            'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
+            v_partition
+        );
+
+        INSERT INTO bursar.storage_partitions(
+            parent_table,
+            partition_table,
+            range_start,
+            range_end
+        )
+        VALUES (p_parent_table, v_partition, v_from, v_to)
+        ON CONFLICT (parent_table, range_start) DO UPDATE
+        SET partition_table = EXCLUDED.partition_table,
+            range_end = EXCLUDED.range_end;
+
         RETURN v_partition;
     END IF;
 
     EXECUTE format(
-        'CREATE TABLE IF NOT EXISTS bursar.%I '
+        'CREATE TABLE bursar.%I '
         'PARTITION OF bursar.%I FOR VALUES FROM (%L) TO (%L)',
         v_partition,
         p_parent_table,
         v_from,
         v_to
+    );
+
+    EXECUTE format(
+        'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
+        v_partition
     );
 
     EXECUTE format(
@@ -123,16 +219,18 @@ BEGIN
         operation,
         model_key,
         region_key,
+        rollup_shard,
         charged,
         allowance_covered,
         charge_count
     )
     VALUES(
-        (NEW.created_at AT TIME ZONE 'UTC')::date,
+        (NEW.event_at AT TIME ZONE 'UTC')::date,
         NEW.account_id,
         NEW.operation,
         COALESCE(NEW.model, ''),
         COALESCE(NEW.region, ''),
+        (get_byte(uuid_send(NEW.id), 15) & 31)::smallint,
         NEW.charged,
         NEW.allowance_covered,
         1
@@ -142,7 +240,8 @@ BEGIN
         account_id,
         operation,
         model_key,
-        region_key
+        region_key,
+        rollup_shard
     )
     DO UPDATE
     SET charged = bursar.usage_daily_rollups.charged + EXCLUDED.charged,
@@ -907,7 +1006,7 @@ BEGIN
        IS DISTINCT FROM
        (OLD.plan_id, OLD.catalog_revision_id, OLD.starts_at)
     THEN
-        NEW.assignment_id := gen_random_uuid();
+        NEW.assignment_id := bursar.uuid_v7();
         NEW.created_at := now();
     END IF;
 
@@ -1292,7 +1391,7 @@ DECLARE
     v_refunded bigint;
     v_payment_provider text;
     v_payment_environment text;
-    v_payment_currency char(3);
+    v_payment_currency text;
     v_grant_credits numeric;
     v_total_credits numeric;
     v_clawed_back numeric;

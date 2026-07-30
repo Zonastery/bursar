@@ -31,8 +31,17 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime, timedelta
+from typing import Literal
 
-__all__ = ["resolve_allowance_window", "resolve_calendar_window"]
+AllowancePeriod = Literal["calendar_month", "rolling_30d", "anniversary"]
+FeatureLimitPeriod = Literal["daily", "weekly", "monthly", "yearly"]
+
+__all__ = [
+    "AllowancePeriod",
+    "FeatureLimitPeriod",
+    "resolve_allowance_window",
+    "resolve_calendar_window",
+]
 
 
 def _month_start(d: date) -> date:
@@ -94,7 +103,11 @@ def _anniversary_window(now: date, anchor_date: date) -> tuple[date, date]:
     return start, end
 
 
-def resolve_allowance_window(now: datetime, period: str, anchor: datetime | None) -> tuple[date, date]:
+def resolve_allowance_window(
+    now: datetime,
+    period: AllowancePeriod,
+    anchor: datetime | None,
+) -> tuple[date, date]:
     """Resolve the ``[period_start, period_end)`` allowance window (UTC, date-only).
 
     Args:
@@ -146,7 +159,10 @@ def _year_window(now: date) -> tuple[date, date]:
     return start, date(now.year + 1, 1, 1)
 
 
-def resolve_calendar_window(now: datetime, period: str) -> tuple[date, date]:
+def resolve_calendar_window(
+    now: datetime,
+    period: FeatureLimitPeriod,
+) -> tuple[date, date]:
     """Resolve the calendar-aligned ``[period_start, period_end)`` window for a cadence.
 
     Used by per-feature invocation-count limits (``PlanDefinition.feature_limits``).

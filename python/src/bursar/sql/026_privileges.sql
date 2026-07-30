@@ -85,12 +85,12 @@ DECLARE
         'bursar.advance_auto_recharge_attempt(uuid,bursar.recharge_attempt_status,text,text,text,jsonb)',
         'bursar.upsert_billing_customer(uuid,text,text,text)',
         'bursar.upsert_billing_subscription(uuid,text,text,text,uuid,bursar.billing_subscription_status,timestamptz,timestamptz,boolean,jsonb,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz)',
-        'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,character,text,bursar.billing_payment_status,timestamptz,text,jsonb)',
+        'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,text,text,bursar.billing_payment_status,timestamptz,text,jsonb)',
         'bursar.create_billing_credit_grant(uuid,uuid,uuid,numeric,integer,uuid)',
-        'bursar.upsert_billing_refund(uuid,text,bigint,text,text,timestamptz,uuid,character,jsonb)',
+        'bursar.upsert_billing_refund(uuid,text,bigint,text,text,timestamptz,uuid,text,jsonb)',
         'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text)',
         'bursar.upsert_billing_preferences(uuid,boolean,boolean,boolean,boolean,boolean)',
-        'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,character,timestamptz,timestamptz,jsonb,timestamptz)',
+        'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz,jsonb,timestamptz)',
         'bursar.upsert_billing_dispute(text,text,uuid,text,text,jsonb,timestamptz)',
         'bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)',
         'bursar.advance_checkout_intent(uuid,text,text,text)',
@@ -100,7 +100,7 @@ DECLARE
         'bursar.migrate_plan_batch(uuid,integer)',
         'bursar.migrate_plan_users(text,bigint)',
         'bursar.open_subscription_change(uuid,uuid,timestamptz,text,text)',
-        'bursar.advance_subscription_change(uuid,text,text,text)',
+        'bursar.advance_subscription_change(bigint,text,text,text)',
         'bursar.apply_due_plan_assignment_changes(integer)',
  'bursar.get_credit_bucket_balances(uuid)',
  'bursar.get_credit_state(uuid)',
@@ -113,7 +113,7 @@ DECLARE
  'bursar.get_subject_allowance(uuid,timestamptz)',
  'bursar.get_subject_entitlements(uuid,timestamptz)',
  'bursar.get_subject_quota_state(uuid,text)',
- 'bursar.list_subject_quota_events(uuid,timestamptz,integer,text)',
+ 'bursar.list_subject_quota_events(uuid,timestamptz,integer,text,uuid)',
  'bursar.get_billing_customer(uuid,text)',
  'bursar.get_billing_customer_by_provider(text,text)',
  'bursar.get_billing_subscription_by_provider(text,text)',
@@ -131,9 +131,9 @@ DECLARE
  'bursar.resolve_catalog_topup(text,text,text)',
  'bursar.get_checkout_intent(uuid,uuid)',
  'bursar.get_open_billing_subscription_change(text,text)',
- 'bursar.get_billing_subscription_change(uuid)',
+ 'bursar.get_billing_subscription_change(bigint)',
  'bursar.get_billing_credit_grant_by_payment(uuid)',
- 'bursar.list_billing_invoices(uuid)',
+ 'bursar.list_billing_invoices(uuid,timestamptz,uuid,integer)',
         'bursar.list_ledger(uuid,timestamptz,uuid,integer,text[],timestamptz,timestamptz,boolean)',
         'bursar.get_ledger_entry(uuid,uuid)',
         'bursar.spend_by_user(timestamptz,timestamptz)',
@@ -163,10 +163,10 @@ BEGIN
 END $$;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
-    REVOKE ALL ON TABLES FROM PUBLIC;
+REVOKE ALL ON TABLES FROM PUBLIC;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
-    REVOKE ALL ON SEQUENCES FROM PUBLIC;
+REVOKE ALL ON SEQUENCES FROM PUBLIC;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA bursar
-    REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+REVOKE ALL ON FUNCTIONS FROM PUBLIC;

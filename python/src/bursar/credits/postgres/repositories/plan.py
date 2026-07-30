@@ -22,9 +22,9 @@ class PlanRepository:
     Returns typed Pydantic models for successful results.
     """
 
-    def __init__(self, callproc: DbQuery, query: DbQuery) -> None:
+    def __init__(self, callproc: DbQuery, query: DbQuery | None = None) -> None:
         self._callproc = callproc
-        self._query = query
+        del query
 
     def get_user_plan(self, user_id: str) -> UserPlanRow | None:
         """Get the current plan for a user.
@@ -39,45 +39,18 @@ class PlanRepository:
         rows = self._callproc("get_subject_plan", [user_id])
         if not rows:
             return None
-        row = dict(rows[0]) if isinstance(rows[0], dict) else None
-        if row is None:
+        if not isinstance(rows[0], dict):
             return None
+        return UserPlanRow.model_validate(rows[0])
 
-        credit_policy_type = row.get("credit_policy_type")
-        credit_limit = row.get("credit_limit")
-        operation_admission = row.get("operation_admission")
-        per_operation = {}
-        if isinstance(operation_admission, dict):
-            per_operation = {
-                str(operation): {"max_concurrent": policy.get("max_in_flight")}
-                for operation, policy in operation_admission.items()
-                if isinstance(policy, dict) and policy.get("max_in_flight") is not None
-            }
-
-        reset_unit = row.get("credit_allowance_reset_unit")
-        reset_count = row.get("credit_allowance_reset_count")
-        reset_anchor = row.get("credit_allowance_reset_anchor")
-        allowance_period = "calendar_month"
-        if reset_anchor == "rolling" and reset_unit == "day" and reset_count == 30:
-            allowance_period = "rolling_30d"
-        elif reset_anchor == "plan_assignment":
-            allowance_period = "anniversary"
-
-        row.update(
-            {
-                "allowance_amount": row.get("credit_allowance_amount"),
-                "allowance_period": allowance_period,
-                "billing_mode": "overdraft" if credit_policy_type == "credit_line" else "strict",
-                "overdraft_floor": f"-{credit_limit}"
-                if credit_policy_type == "credit_line" and credit_limit is not None
-                else None,
-                "max_concurrent": row.get("admission_max_in_flight"),
-                "per_operation": per_operation,
-                "config_version": row.get("catalog_revision_no"),
-                "catalog_version": row.get("catalog_revision_no"),
-            }
+    def get_entitlement(self, user_id: str, feature: str) -> dict[str, object] | None:
+        validate_non_empty(user_id, "user_id")
+        validate_non_empty(feature, "feature")
+        rows = self._callproc("get_subject_entitlements", [user_id])
+        return next(
+            (row for row in rows if isinstance(row, dict) and row.get("feature_key") == feature),
+            None,
         )
-        return UserPlanRow.model_validate(row)
 
     def set_user_plan(
         self,
@@ -97,16 +70,7 @@ class PlanRepository:
         """
         validate_non_empty(user_id, "user_id")
         validate_non_empty(plan_key, "plan_key")
-        plan_rows = self._query(
-            """SELECT p.id
-               FROM bursar.catalog_plans AS p
-               JOIN bursar.catalog_revisions AS cr ON cr.id = p.catalog_revision_id
-               WHERE cr.status = 'active'
-                 AND (p.id::text = %s OR p.plan_key = %s)
-               ORDER BY cr.revision_no DESC
-               LIMIT 1""",
-            [plan_key, plan_key],
-        )
+        plan_rows = self._callproc("resolve_active_plan", [plan_key])
         if not plan_rows or not isinstance(plan_rows[0], dict) or plan_rows[0].get("id") is None:
             raise ValueError(f"unknown active plan {plan_key!r}")
         plan_id = str(plan_rows[0]["id"])
@@ -132,11 +96,9 @@ class PlanRepository:
             UnsetUserPlanRow if successful, None if the user had no plan.
         """
         validate_non_empty(user_id, "user_id")
-        self._query(
-            """DELETE FROM bursar.account_plan_assignments
-               WHERE account_id = bursar.account_for_subject(%s::uuid)""",
-            [user_id],
-        )
+        rows = self._callproc("unassign_plan", [user_id, "sdk_unassignment"])
+        if not rows or rows[0] is not True:
+            return None
         return UnsetUserPlanRow(user_id=user_id)
 
     def start_plan_migration(
@@ -197,34 +159,16 @@ class PlanRepository:
         )
         return [QuotaStateRow.model_validate(row) for row in rows if isinstance(row, dict)]
 
-    def check_allowance(self, user_id: str, period_start: str | None) -> AllowanceRow | None:
+    def check_allowance(self, user_id: str) -> AllowanceRow | None:
         """Check the remaining plan allowance for a user.
 
         Args:
             user_id: The user ID.
-            period_start: ISO date string for the period start, or None.
-
         Returns:
             AllowanceRow if found, None if no plan or allowance configured.
         """
         validate_non_empty(user_id, "user_id")
-        rows = self._query(
-            """SELECT
-                 apa.plan_id,
-                 aw.allowance - aw.consumed - aw.reserved AS allowance_remaining,
-                 aw.window_start AS period_start,
-                 aw.window_end AS period_end
-               FROM bursar.allowance_windows AS aw
-               JOIN bursar.credit_accounts AS ca ON ca.id = aw.account_id
-               JOIN bursar.account_plan_assignments AS apa ON apa.account_id = ca.id
-               WHERE ca.subject_id = %s::uuid
-                 AND ca.account_kind = 'personal'
-                 AND aw.feature = '__included_credits__'
-                 AND (%s::timestamptz IS NULL OR aw.window_start = %s::timestamptz)
-               ORDER BY aw.window_end DESC
-               LIMIT 1""",
-            [user_id, period_start, period_start],
-        )
+        rows = self._callproc("get_subject_allowance", [user_id])
         if not rows:
             return None
         return AllowanceRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
@@ -235,10 +179,11 @@ class PlanRepository:
         after: str | None,
         limit: int,
         idempotency_key: str | None,
+        after_id: str | None,
     ) -> list[QuotaEventRow]:
         validate_non_empty(user_id, "user_id")
         rows = self._callproc(
             "list_subject_quota_events",
-            [user_id, after, limit, idempotency_key],
+            [user_id, after, limit, idempotency_key, after_id],
         )
         return [QuotaEventRow.model_validate(row) for row in rows if isinstance(row, dict)]

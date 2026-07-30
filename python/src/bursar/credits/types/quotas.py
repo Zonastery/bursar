@@ -8,10 +8,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from bursar.credits.types.catalog import (
+    PlanAdmissionPolicy,
+    PlanAllowancePolicy,
+    PlanCreditPolicy,
+)
+
 
 class OperationPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    billing_mode: str = "strict"
+    billing_mode: Literal["strict", "overdraft"]
     max_concurrent: int | None = Field(default=None, gt=0)
     overdraft_floor: Decimal | None = None
 
@@ -24,22 +30,23 @@ class OperationPolicy(BaseModel):
 
 class FeatureLimit(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    max_calls: int
-    period: Literal["daily", "weekly", "monthly", "yearly"] = "monthly"
-    action: Literal["deny", "warn", "notify"] = "deny"
+    value: Any = None
+    max_calls: int | None
+    period: Literal["daily", "weekly", "monthly", "yearly"]
+    on_exceed: Literal["deny", "warn", "notify"]
 
 
 class CheckFeatureResult(BaseModel):
     user_id: str
     feature: str
-    value: Any = None
-    has_feature: bool = False
+    value: Any
+    has_feature: bool
 
 
 class SweepResult(BaseModel):
-    expired_count: int = 0
-    expired_amount: Decimal = Decimal(0)
-    dry_run: bool = False
+    expired_count: int
+    expired_amount: Decimal
+    dry_run: bool
     expired_by_bucket: dict[str, Decimal] | None = None
 
 
@@ -65,14 +72,15 @@ class QuotaEvent(BaseModel):
     operation: str
     measure: str
     event_type: Literal["threshold", "blocked"]
-    threshold_percent: float | None = None
+    threshold_percent: float | None
     idempotency_key: str
-    usage_charge_id: str | None = None
+    usage_charge_id: str | None
     created_at: str
 
 
 class ListQuotaEventsOptions(BaseModel):
     after: datetime | None = None
+    after_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=500)
     idempotency_key: str | None = None
 
@@ -80,13 +88,13 @@ class ListQuotaEventsOptions(BaseModel):
 class FeatureLimitResult(BaseModel):
     user_id: str
     feature: str
-    limited: bool = False
-    limit: int = 0
-    used: int = 0
-    remaining: int = 0
-    period_start: str = ""
-    period_end: str = ""
-    action: Literal["deny", "warn", "notify"] | None = None
+    limited: bool
+    limit: int
+    used: int
+    remaining: int
+    period_start: str
+    period_end: str
+    action: Literal["deny", "warn", "notify"] | None
 
 
 class Entitlement(BaseModel):
@@ -119,8 +127,8 @@ class Entitlement(BaseModel):
 
 class Allowance(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    amount: Decimal = Field(default=Decimal(0), ge=0)
-    period: str = "calendar_month"
+    amount: Decimal = Field(ge=0)
+    period: Literal["calendar_month", "rolling_30d", "anniversary"]
 
     @model_validator(mode="after")
     def validate_amount(self) -> Allowance:
@@ -131,7 +139,7 @@ class Allowance(BaseModel):
 
 class PlanSafety(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    billing_mode: str = "strict"
+    billing_mode: Literal["strict", "overdraft"]
     max_concurrent: int | None = Field(default=None, gt=0)
     overdraft_floor: Decimal | None = None
     per_operation: dict[str, OperationPolicy] | None = None
@@ -147,25 +155,32 @@ class PlanDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str
     tier: int | None = Field(default=None, ge=0)
-    allowance: Allowance | None = None
-    rate_overrides: dict[str, str] | None = None
-    safety: PlanSafety | None = None
+    allowance: Allowance
+    rate_card: str | None = None
+    safety: PlanSafety
     entitlements: dict[str, Entitlement] | None = None
 
 
 class GetUserPlanResult(BaseModel):
     user_id: str
-    plan_id: str | None = None
-    plan_key: str | None = None
-    plan_label: str | None = None
-    allowance_amount: Decimal = Decimal(0)
-    allowance_period: str = "calendar_month"
-    entitlements: dict[str, Entitlement] = Field(default_factory=dict)
-    rate_overrides: dict[str, str] = Field(default_factory=dict)
-    billing_mode: str = "strict"
+    plan_id: str | None
+    plan_key: str | None
+    plan_label: str | None
+    allowance_amount: Decimal
+    allowance: PlanAllowancePolicy | None
+    allowance_period: Literal["calendar_month", "rolling_30d", "anniversary"] | None
+    entitlements: dict[str, Entitlement]
+    rate_card: str | None = None
+    billing_mode: Literal["strict", "overdraft"]
+    credit_policy: PlanCreditPolicy | None
+    admission: PlanAdmissionPolicy | None
+    allowed_operations: list[str]
     per_operation: dict[str, OperationPolicy] = Field(default_factory=dict)
     max_concurrent: int | None = None
     overdraft_floor: Decimal | None = None
     plan_assigned_at: datetime | None = None
+    assignment_source_type: str | None = None
+    assignment_source_id: str | None = None
+    revision_policy: str | None = None
     config_version: int | None = None
     catalog_version: int | None = None

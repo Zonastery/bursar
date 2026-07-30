@@ -9,7 +9,7 @@ CREATE FUNCTION bursar.claim_billing_event(
     p_lease_seconds integer DEFAULT 300,
     p_attempt_limit integer DEFAULT 3
 )
-RETURNS TABLE(
+RETURNS TABLE (
     result text,
     event_id uuid,
     claim_token uuid
@@ -63,7 +63,11 @@ BEGIN
         p_provider,v_environment,p_event_id,p_event_type,v_digest,v_received_at,
         'processing',v_token,now()+make_interval(secs=>p_lease_seconds)
     )
-    ON CONFLICT DO NOTHING
+    ON CONFLICT (
+        provider,
+        provider_environment,
+        provider_event_id
+    ) DO NOTHING
     RETURNING * INTO v_event;
 
     IF FOUND THEN
@@ -180,10 +184,10 @@ CREATE FUNCTION bursar.record_subscription_conflict(
     p_provider_event_id text DEFAULT NULL,
     p_metadata jsonb DEFAULT '{}'::jsonb
 )
-RETURNS uuid
+RETURNS bigint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE
-    v_id uuid;
+    v_id bigint;
     v_existing_subscription_id uuid;
     v_billing_event_id uuid;
     v_environment text := bursar.current_provider_environment();
@@ -290,25 +294,39 @@ CREATE FUNCTION bursar.select_entitlement_source(
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_environment text := bursar.current_provider_environment();
 BEGIN
     PERFORM 1
     FROM bursar.billing_subscriptions
-    WHERE id=p_subscription_id AND subject_id=p_subject_id
+    WHERE id = p_subscription_id
+      AND subject_id = p_subject_id
+      AND provider_environment = v_environment
     FOR UPDATE;
 
     IF NOT FOUND THEN RETURN false;
  END IF;
 
     UPDATE bursar.billing_entitlement_sources
-    SET selected=false,deselected_at=now()
-    WHERE subject_id=p_subject_id;
+    SET selected = false,
+        deselected_at = now()
+    WHERE subject_id = p_subject_id
+      AND provider_environment = v_environment
+      AND selected;
 
     INSERT INTO bursar.billing_entitlement_sources(
-        subject_id,subscription_id,selected,selected_at
+        subject_id,
+        provider_environment,
+        subscription_id,
+        selected,
+        selected_at
     )
-    VALUES (p_subject_id,p_subscription_id,true,now())
-    ON CONFLICT (subject_id,subscription_id)
-    DO UPDATE SET selected=true,selected_at=now(),deselected_at=NULL;
+    VALUES (p_subject_id, v_environment, p_subscription_id, true, now())
+    ON CONFLICT (subject_id, provider_environment, subscription_id)
+    DO UPDATE
+    SET selected = true,
+        selected_at = now(),
+        deselected_at = NULL;
 
     RETURN true;
 
@@ -318,7 +336,7 @@ CREATE FUNCTION bursar.grant_billing_credit(
     p_grant_id uuid,
     p_idempotency_key text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     ledger_entry_id uuid,
     balance_after numeric,
     replayed boolean,
@@ -545,7 +563,7 @@ CREATE FUNCTION bursar.post_billing_refund(
     p_amount_minor bigint,
     p_idempotency_key text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     ledger_entry_id uuid,
     balance_after numeric,
     replayed boolean,

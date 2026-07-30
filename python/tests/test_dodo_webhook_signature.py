@@ -192,7 +192,8 @@ async def test_get_checkout_session_status_with_requires_customer_action(sink: F
         logger=logger,
     )
     result = await provider.get_checkout_session_status("cks_1")
-    assert result == {"paymentStatus": "requires_customer_action"}
+    assert result is not None
+    assert result.payment_status == "requires_customer_action"
 
 
 @pytest.mark.asyncio

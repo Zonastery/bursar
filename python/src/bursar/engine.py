@@ -108,6 +108,11 @@ class PricingEngine:
             raise ConfigError(f"price charge for '{operation_name}' produced a negative or non-finite credit cost")
         total = _q(value)
         return CostBreakdown(
+            model_credits=Decimal(0),
+            tool_credits=Decimal(0),
+            search_credits=Decimal(0),
+            cache_savings=Decimal(0),
+            fixed_credits=Decimal(0),
             operation_credits=total,
             total=total,
             breakdown={

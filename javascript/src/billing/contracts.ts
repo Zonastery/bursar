@@ -163,6 +163,7 @@ export interface BillingCapability extends BillingEventSink {
     id: string,
     update: BillingSubscriptionChangeUpdate,
   ): Promise<void>;
+  recordSubscriptionConflict(input: BillingSubscriptionConflictCreate): Promise<void>;
   upsertBillingSubscription(state: BillingSubscriptionState): Promise<void>;
   updateUserPreferences(preferences: BillingPreferences): Promise<void>;
   getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
@@ -175,6 +176,8 @@ export interface BillingCapability extends BillingEventSink {
     input: AutoRechargeProviderPaymentUpdate,
   ): Promise<void>;
   countAutoRechargeAttempts(userId: string, since: string | Date | number): Promise<number>;
+  expirePastDueGracePeriods(now?: Date): Promise<number>;
+  invalidateOfferCache(): void;
   getCustomerByUserId(
     userId: string,
     provider?: string | null,
@@ -197,6 +200,7 @@ export interface BillingCapability extends BillingEventSink {
     userId: string,
     email?: string | null,
   ): Promise<void>;
+  pseudonymizeFinancialSubject(userId: string): Promise<void>;
 }
 
 // Keep document-record types reachable from the contract module for store

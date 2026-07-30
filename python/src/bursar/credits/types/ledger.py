@@ -6,19 +6,19 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class LedgerEntry(BaseModel):
-    entry_id: str = ""
-    account_id: str = ""
-    actor_user_id: str | None = None
-    amount: Decimal = Decimal(0)
-    entry_type: str = ""
-    reference_entry_id: str | None = None
-    idempotency_key: str | None = None
-    metadata: dict[str, Any] | None = None
-    created_at: str = ""
+    entry_id: str
+    account_id: str
+    actor_user_id: str | None
+    amount: Decimal
+    entry_type: str
+    reference_entry_id: str | None
+    idempotency_key: str | None
+    metadata: dict[str, Any] | None
+    created_at: str
 
 
 class LedgerCursor(BaseModel):
@@ -27,8 +27,8 @@ class LedgerCursor(BaseModel):
 
 
 class LedgerPage(BaseModel):
-    items: list[LedgerEntry] = Field(default_factory=list)
-    next_cursor: LedgerCursor | None = None
+    items: list[LedgerEntry]
+    next_cursor: LedgerCursor | None
 
 
 class ListLedgerEntriesOptions(BaseModel):

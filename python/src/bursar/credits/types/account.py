@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -21,8 +21,8 @@ class CreditMetadata(BaseModel, extra="allow"):
 
 class BalanceResult(BaseModel):
     user_id: str
-    balance: Decimal = Decimal(0)
-    lifetime_purchased: Decimal = Decimal(0)
+    balance: Decimal
+    lifetime_purchased: Decimal
 
 
 class AddCreditsResult(BaseModel):
@@ -30,15 +30,16 @@ class AddCreditsResult(BaseModel):
     user_id: str
     amount: Decimal
     new_balance: Decimal
-    lifetime_purchased: Decimal = Decimal(0)
-    bucket: str = "default"
+    lifetime_purchased: Decimal
+    bucket: str
+    idempotent: bool = False
 
 
 class AvailableResult(BaseModel):
     user_id: str
-    balance: Decimal = Decimal(0)
-    reserved: Decimal = Decimal(0)
-    available: Decimal = Decimal(0)
+    balance: Decimal
+    reserved: Decimal
+    available: Decimal
 
 
 class DeductionResult(BaseModel):
@@ -46,9 +47,9 @@ class DeductionResult(BaseModel):
     user_id: str
     amount: Decimal
     balance_after: Decimal
-    allowance_consumed: Decimal = Decimal(0)
-    idempotent: bool = False
-    cap_warning: str | None = None
+    allowance_consumed: Decimal
+    idempotent: bool
+    cap_warning: str | None
     feature_limit_warning: str | None = None
     error: str | None = None
     bucket_breakdown: dict[str, Decimal] | None = None
@@ -58,32 +59,32 @@ class RefundResult(BaseModel):
     refund_entry_id: str
     original_entry_id: str
     user_id: str
-    amount: Decimal = Decimal(0)
-    new_balance: Decimal = Decimal(0)
+    amount: Decimal
+    new_balance: Decimal
     error: str | None = None
     bucket_breakdown: dict[str, Decimal] | None = None
 
 
 class CanAffordResult(BaseModel):
-    affordable: bool = False
-    spendable: Decimal = Decimal(0)
-    worst_case: Decimal = Decimal(0)
+    affordable: bool
+    spendable: Decimal
+    worst_case: Decimal
     reason: str | None = None
 
 
 class AllowanceResult(BaseModel):
     plan_id: str
     allowance_remaining: Decimal
-    period_start: date | None = None
-    period_end: date | None = None
+    period_start: str
+    period_end: str
 
 
 class BucketBalance(BaseModel):
     bucket_key: str
-    label: str = ""
-    priority: int = 0
-    expires: bool = False
-    balance: Decimal = Decimal(0)
+    label: str
+    priority: int
+    expires: bool
+    balance: Decimal
 
 
 class BucketBalancesResult(BaseModel):
@@ -92,14 +93,14 @@ class BucketBalancesResult(BaseModel):
     total_balance: Decimal
 
 
-BillingMode = str
+BillingMode = Literal["strict", "overdraft"]
 
 
 class BucketDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    label: str = ""
-    priority: int = 0
-    expires: bool = False
+    label: str
+    priority: int
+    expires: bool
     ttl_days: int | None = None
     default: bool = False
     allow_overdraft: bool = False
@@ -141,12 +142,12 @@ class MigratePlanUsersResult(BaseModel):
 
 
 class SpendCap(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-    user_id: str = ""
-    cap_type: str = Field(default="daily", alias="type")
+    model_config = ConfigDict(extra="forbid")
+    user_id: str
+    type: Literal["daily", "monthly"]
     model: str | None = None
-    limit: Decimal = Field(default=Decimal(0), ge=0)
-    action: str = "deny"
+    limit: Decimal = Field(ge=0)
+    on_exceed: Literal["deny", "warn", "notify"]
 
 
 class DeductWithAllowanceOptions(BaseModel):

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal, cast
+
+from pydantic import BaseModel, ConfigDict
 
 from bursar.commerce.errors import (
     CommerceResourceNotFoundError,
@@ -12,8 +13,9 @@ from bursar.config import SubscriptionOffer
 from bursar.config.types import BursarConfig, SubscriptionChangePolicy
 
 
-@dataclass(frozen=True, slots=True)
-class ClassifiedSubscriptionChange:
+class ClassifiedSubscriptionChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     classification: PlanChangeClassification
     target_interval: Literal["month", "year"]
     policy: SubscriptionChangePolicy | None = None

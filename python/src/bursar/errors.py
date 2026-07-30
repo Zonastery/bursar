@@ -36,7 +36,11 @@ class ExpressionError(BursarError):
     """Raised on invalid or unsafe expressions."""
 
 
-class PricingNotLoadedError(BursarError):
+class CreditError(BursarError):
+    """Base for credit-domain admission and settlement failures."""
+
+
+class PricingNotLoadedError(CreditError):
     """Raised when ``deduct()`` is called before pricing is loaded."""
 
 
@@ -44,7 +48,7 @@ class StoreError(BursarError):
     """Base exception for store-level errors (connection, timeout, etc.)."""
 
 
-class InsufficientCreditsError(BursarError):
+class InsufficientCreditsError(CreditError):
     """Raised when a user does not have enough credits for an operation."""
 
 
@@ -56,27 +60,27 @@ class FeatureLimitReachedError(StoreError):
     """Raised when a call would exceed a configured ``deny`` feature-limit."""
 
 
-class FeatureNotEntitledError(BursarError):
+class FeatureNotEntitledError(CreditError):
     """Raised when an operation requires a plan feature the user does not have."""
 
 
-class OperationNotAllowedError(BursarError):
+class OperationNotAllowedError(CreditError):
     """Raised when a user's plan does not allow the requested operation."""
 
 
-class QuotaExceededError(BursarError):
+class QuotaExceededError(CreditError):
     """Raised when an operation would exceed a blocking usage quota."""
 
 
-class ConcurrencyLimitError(BursarError):
+class ConcurrencyLimitError(CreditError):
     """Raised when a ``reserve`` would exceed an operation's ``max_concurrent`` leases."""
 
 
-class LeaseExpiredError(BursarError):
+class LeaseExpiredError(CreditError):
     """Raised when settling/renewing a lease whose TTL has already elapsed."""
 
 
-class LeaseNotFoundError(BursarError):
+class LeaseNotFoundError(CreditError):
     """Raised when a lease id does not exist, belongs to another user, or was released."""
 
 
@@ -90,7 +94,3 @@ class CapabilityNotSupportedError(StoreError):
 
 class BursarImportError(BursarError):
     """Raised when an optional dependency is missing (mirrors JS ImportError)."""
-
-
-class CreditError(BursarError):
-    """Coherent base for bursar credit-domain errors."""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -12,12 +11,12 @@ from pydantic import BaseModel
 class LeaseResult(BaseModel):
     lease_id: str
     user_id: str
-    amount: Decimal = Decimal(0)
-    available: Decimal = Decimal(0)
-    reserved_total: Decimal = Decimal(0)
-    minimum_balance: Decimal = Decimal(0)
-    billing_mode: str = "strict"
-    expires_at: datetime | None = None
+    amount: Decimal
+    available: Decimal
+    reserved_total: Decimal
+    minimum_balance: Decimal
+    billing_mode: Literal["strict", "overdraft"]
+    expires_at: str
     error: str | None = None
 
 
@@ -25,21 +24,21 @@ class LeasePricingContext(BaseModel):
     """Immutable pricing references captured when an operation lease is admitted."""
 
     catalog_version: int
-    plan_id: str | None = None
-    plan_key: str | None = None
-    rate_card: str | None = None
+    plan_id: str | None
+    plan_key: str | None
+    rate_card: str | None
 
 
 class ReleaseResult(BaseModel):
     lease_id: str
     user_id: str
-    released: bool = False
+    released: bool
     reason: str | None = None
 
 
 class CapCheckResult(BaseModel):
-    capped: bool = False
-    current_spend: Decimal = Decimal(0)
-    cap_limit: Decimal = Decimal(0)
-    action: Literal["deny", "warn", "notify"] | None = None
+    capped: bool
+    current_spend: Decimal
+    limit: Decimal
+    action: Literal["deny", "warn", "notify"] | None
     model: str | None = None

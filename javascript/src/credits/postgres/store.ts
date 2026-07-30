@@ -711,11 +711,15 @@ export class PostgresStore extends CreditStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new RangeError("quota event limit must be an integer between 1 and 500");
     }
+    if (options?.afterId != null && options.after == null) {
+      throw new TypeError("afterId requires after");
+    }
     const rows = await this.planRepo.listQuotaEvents(
       userId,
       options?.after?.toISOString() ?? null,
       limit,
       options?.idempotencyKey ?? null,
+      options?.afterId ?? null,
     );
     return rows.map((row) => ({
       eventId: row.event_id,

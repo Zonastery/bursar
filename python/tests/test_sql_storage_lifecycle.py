@@ -74,7 +74,9 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
 
         cursor.execute(
             """
-            SELECT sum(charge_count)
+            SELECT
+                array_agg(DISTINCT usage_day ORDER BY usage_day),
+                sum(charge_count)
             FROM bursar.usage_daily_rollups
             WHERE account_id = %s::uuid
               AND operation = 'completion'
@@ -82,7 +84,7 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
             """,
             (account_id,),
         )
-        assert cursor.fetchone() == (4,)
+        assert cursor.fetchone() == ([expired_at.date(), recent_at.date()], 4)
 
         cursor.execute(
             "SELECT bursar.run_storage_maintenance(%s)",
@@ -202,6 +204,61 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
             (charge_id,),
         )
         assert cursor.fetchone() == (1,)
+
+
+def test_partition_registry_is_repaired_and_physical_drift_fails_loudly(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT parent_table, partition_table, range_start
+            FROM bursar.storage_partitions
+            WHERE parent_table = 'usage_charge_payloads'
+            ORDER BY range_start
+            LIMIT 1
+            """
+        )
+        parent_table, partition_table, range_start = cursor.fetchone()
+        cursor.execute(
+            """
+            UPDATE bursar.storage_partitions
+            SET partition_table = 'stale_registry_entry'
+            WHERE parent_table = %s
+              AND range_start = %s
+            """,
+            (parent_table, range_start),
+        )
+        cursor.execute(
+            "SELECT bursar.ensure_storage_partition(%s, %s)",
+            (parent_table, range_start),
+        )
+        assert cursor.fetchone() == (partition_table,)
+        cursor.execute(
+            """
+            SELECT partition_table
+            FROM bursar.storage_partitions
+            WHERE parent_table = %s
+              AND range_start = %s
+            """,
+            (parent_table, range_start),
+        )
+        assert cursor.fetchone() == (partition_table,)
+
+        cursor.execute("CREATE TABLE bursar.usage_charge_payloads_209901(id integer)")
+        cursor.execute("SAVEPOINT partition_drift")
+        with pytest.raises(psycopg2.Error) as error:
+            cursor.execute(
+                """
+                SELECT bursar.ensure_storage_partition(
+                    'usage_charge_payloads',
+                    '2099-01-15T00:00:00Z'::timestamptz
+                )
+                """
+            )
+        assert error.value.pgcode == "55000"
+        cursor.execute("ROLLBACK TO SAVEPOINT partition_drift")
+        cursor.execute("DROP TABLE bursar.usage_charge_payloads_209901")
 
 
 def test_maybe_run_storage_maintenance_respects_interval(

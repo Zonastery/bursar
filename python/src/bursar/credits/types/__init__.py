@@ -27,7 +27,7 @@ from bursar.credits.types.admission import (
     ReleaseResult,
 )
 from bursar.credits.types.analytics import (
-    AggregateStatsRow,
+    AggregateStats,
     DailySpendRow,
     SpendByModelRow,
     SpendByUserRow,
@@ -37,6 +37,9 @@ from bursar.credits.types.analytics import (
 from bursar.credits.types.catalog import (
     BursarConfigHistoryItem,
     BursarConfigResult,
+    PlanAdmissionPolicy,
+    PlanAllowancePolicy,
+    PlanCreditPolicy,
     PricingConfig,
 )
 from bursar.credits.types.grants import (
@@ -76,7 +79,7 @@ from bursar.credits.types.teams import (
 __all__ = [
     "AddCreditsResult",
     "AddTeamMemberResult",
-    "AggregateStatsRow",
+    "AggregateStats",
     "AllowanceResult",
     "AvailableResult",
     "BalanceResult",
@@ -112,6 +115,9 @@ __all__ = [
     "MigratePlanUsersResult",
     "OperationPolicy",
     "PlanDefinition",
+    "PlanAdmissionPolicy",
+    "PlanAllowancePolicy",
+    "PlanCreditPolicy",
     "PlanMigrationBatchResult",
     "PlanMigrationStartResult",
     "PricingConfig",

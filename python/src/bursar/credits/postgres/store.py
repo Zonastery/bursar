@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
@@ -31,11 +32,16 @@ from bursar.credits.postgres.repositories.schemas import (
     SettleLeaseParams,
 )
 from bursar.credits.postgres.repositories.team import TeamRepository
-from bursar.credits.store import CreditStore, StoreError
+from bursar.credits.store import (
+    CreateLeaseOptions,
+    CreditStore,
+    SettleLeaseOptions,
+    StoreError,
+)
 from bursar.credits.types import (
     AddCreditsResult,
     AddTeamMemberResult,
-    AggregateStatsRow,
+    AggregateStats,
     AllowanceResult,
     AvailableResult,
     BalanceResult,
@@ -43,6 +49,7 @@ from bursar.credits.types import (
     BucketBalancesResult,
     BursarConfigHistoryItem,
     BursarConfigResult,
+    CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
     DailySpendRow,
@@ -61,6 +68,9 @@ from bursar.credits.types import (
     ListQuotaEventsOptions,
     MigratePlanUsersResult,
     OperationPolicy,
+    PlanAdmissionPolicy,
+    PlanAllowancePolicy,
+    PlanCreditPolicy,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
     QuotaEvent,
@@ -98,6 +108,14 @@ def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
         return Decimal(value)
     except (InvalidOperation, ArithmeticError, ValueError) as e:
         raise StoreError(f"Failed to parse Decimal value: {value!r}") from e
+
+
+def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
 
 
 def _feature_period_end(feature_limit: FeatureLimit | None, feature_period_start: date | None) -> date | None:
@@ -145,6 +163,19 @@ AllowancePeriod = Literal["calendar_month", "rolling_30d", "anniversary"]
 def _safe_allowance_period(v: Any, default: AllowancePeriod = "calendar_month") -> AllowancePeriod:
     s = str(v) if v is not None else default
     return cast(AllowancePeriod, s) if s in ("calendar_month", "rolling_30d", "anniversary") else default
+
+
+def _compatibility_allowance_period(row: Any) -> AllowancePeriod | None:
+    unit = row.credit_allowance_reset_unit
+    count = row.credit_allowance_reset_count
+    anchor = row.credit_allowance_reset_anchor
+    if anchor == "calendar" and unit == "month" and count == 1:
+        return "calendar_month"
+    if anchor == "rolling" and unit == "day" and count == 30:
+        return "rolling_30d"
+    if anchor == "plan_assignment" and unit == "month" and count == 1:
+        return "anniversary"
+    return None
 
 
 class DecimalEncoder(json.JSONEncoder):
@@ -209,7 +240,7 @@ class PostgresStore(CreditStore):
     @property
     def _plan_repo(self) -> PlanRepository:
         if not hasattr(self, "_plan_repo_cache"):
-            self._plan_repo_cache = PlanRepository(self._callproc, self._query)
+            self._plan_repo_cache = PlanRepository(self._callproc)
         return self._plan_repo_cache
 
     @property
@@ -308,14 +339,20 @@ class PostgresStore(CreditStore):
 
     # ── Schema management ──────────────────────────────────────────────
 
-    def _migrate(self) -> None:
+    def _migrate(
+        self,
+        *,
+        post_migration_sql: Sequence[tuple[str, str]] = (),
+    ) -> None:
         """Apply bundled migrations exactly once, transactionally.
 
         The old implementation replayed every SQL file and accumulated errors,
         which could leave a partially upgraded database looking successful to
         callers.  A small ledger records the filename and SHA-256 checksum;
         an advisory transaction lock serializes concurrent deploys and any
-        failed migration aborts the whole setup transaction.
+        failed migration aborts the whole setup transaction. Trusted host SQL
+        runs after the bundled files, in the supplied order and in the same
+        transaction, but is not recorded in Bursar's migration ledger.
         """
         conn = self._conn()
         try:
@@ -360,6 +397,12 @@ class PostgresStore(CreditStore):
                         "INSERT INTO bursar.schema_migrations(version, checksum) VALUES (%s, %s)",
                         (sql_file.name, checksum),
                     )
+
+                for source, sql in post_migration_sql:
+                    try:
+                        cur.execute(sql)
+                    except psycopg2.Error as exc:
+                        raise StoreError(f"post-migration SQL failed for {source}: {exc}") from exc
             conn.commit()
         except StoreError:
             conn.rollback()
@@ -382,7 +425,7 @@ class PostgresStore(CreditStore):
         """
         result_dict = self._balance_repo.get_balance(user_id)
         if result_dict is None:
-            return BalanceResult(user_id=user_id, balance=Decimal(0))
+            return BalanceResult(user_id=user_id, balance=Decimal(0), lifetime_purchased=Decimal(0))
 
         return BalanceResult(
             user_id=str(getattr(result_dict, "user_id", user_id)),
@@ -441,6 +484,7 @@ class PostgresStore(CreditStore):
             new_balance=_dec(result.new_balance),
             lifetime_purchased=_dec(result.lifetime_purchased),
             bucket=str(getattr(result, "bucket", "default")),
+            idempotent=bool(getattr(result, "idempotent", False)),
         )
 
     def deduct_with_allowance(
@@ -449,53 +493,30 @@ class PostgresStore(CreditStore):
         amount: Decimal,
         *,
         idempotency_key: str | None = None,
-        min_balance: Decimal = Decimal(0),
-        model: str | None = None,
-        metadata: CreditMetadata | None = None,
-        skip_allowance: bool = False,
-        period_start: date | None = None,
+        operation: str = "usage",
         feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
+        model: str | None = None,
+        region: str | None = None,
+        measures: dict[str, Decimal | int | float] | None = None,
+        dimensions: dict[str, Any] | None = None,
+        metadata: CreditMetadata | None = None,
     ) -> DeductionResult:
-        """Call the atomic ``deduct_with_allowance`` RPC (contract §2).
-
-        The whole calculate-then-charge pipeline runs in one server-side
-        transaction; this wrapper only marshals params and maps the JSON envelope
-        (success or business-error code) onto ``DeductionResult``.
-
-        ``period_start`` (WS9) is passed as ``p_period_start`` (ISO date string,
-        matching the ``expires_at``/date marshalling convention elsewhere in this
-        file); ``None`` lets the RPC fall back to the current UTC calendar month.
-
-        ``feature``/``feature_limit``/``feature_period_start`` are threaded into
-        the RPC's trailing ``p_feature*`` params; the RPC derives the window end
-        itself from ``feature_limit.period`` is NOT possible server-side (the
-        cadence lives in Python), so the exclusive window end is computed here
-        via :func:`bursar.allowance.resolve_calendar_window` and passed as
-        ``p_feature_period_end``. ``feature_limit=None`` skips enforcement
-        entirely (the RPC still tags ``metadata.feature`` when ``feature`` is
-        given).
-        """
+        """Call the plan-aware atomic usage-charge RPC."""
         amount = _dec(amount)
-        min_balance = _dec(min_balance)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        feature_period_end = _feature_period_end(feature_limit, feature_period_start)
+        effective_idempotency_key = idempotency_key or f"usage:{uuid4()}"
 
         params = DeductParams(
             user_id=user_id,
+            operation=operation,
             amount=str(amount),
-            idempotency_key=idempotency_key,
-            min_balance=str(min_balance),
-            model=model,
-            metadata=json.dumps(meta),
-            skip_allowance=skip_allowance,
-            period_start=period_start.isoformat() if period_start is not None else None,
+            idempotency_key=effective_idempotency_key,
             feature=feature,
-            feature_max_calls=feature_limit.max_calls if feature_limit is not None else None,
-            feature_action=feature_limit.action if feature_limit is not None else None,
-            feature_period_start=feature_period_start.isoformat() if feature_period_start is not None else None,
-            feature_period_end=feature_period_end.isoformat() if feature_period_end is not None else None,
+            model=model,
+            region=region,
+            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            dimensions=json.dumps(dimensions or {}, cls=DecimalEncoder),
+            metadata=json.dumps(meta, cls=DecimalEncoder),
         )
         result = self._deduction_repo.deduct_with_allowance(params)
 
@@ -504,7 +525,10 @@ class PostgresStore(CreditStore):
                 entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
+                allowance_consumed=Decimal(0),
                 balance_after=Decimal(0),
+                idempotent=False,
+                cap_warning=None,
                 error="no result",
             )
         if result.error is not None:
@@ -512,7 +536,10 @@ class PostgresStore(CreditStore):
                 entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
+                allowance_consumed=Decimal(0),
                 balance_after=_dec(result.balance_after),
+                idempotent=False,
+                cap_warning=None,
                 error=str(result.error),
             )
 
@@ -535,21 +562,7 @@ class PostgresStore(CreditStore):
         user_id: str,
         amount: Decimal,
         operation_type: str,
-        *,
-        billing_mode: str = "strict",
-        floor: Decimal = Decimal(0),
-        max_concurrent: int | None = None,
-        ttl_seconds: int = 600,
-        model: str | None = None,
-        overdraft_floor: Decimal | None = None,
-        metadata: CreditMetadata | None = None,
-        period_start: date | None = None,
-        feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
-        idempotency_key: str | None = None,
-        measures: dict[str, Any] | None = None,
-        dimensions: dict[str, Any] | None = None,
+        options: CreateLeaseOptions | None = None,
     ) -> LeaseResult:
         """Create a credit lease (reservation) for admission control.
 
@@ -575,42 +588,57 @@ class PostgresStore(CreditStore):
         Raises:
             StoreError: If the RPC returns no result (admission denied).
         """
+        options = options or CreateLeaseOptions()
         amount = _dec(amount)
-        floor = _dec(floor)
-        del overdraft_floor, period_start, feature_limit, feature_period_start
-        effective_idempotency_key = idempotency_key or f"lease:{uuid4()}"
-        effective_dimensions = dict(dimensions or {})
-        if model is not None:
-            effective_dimensions.setdefault("model", model)
+        floor = _dec(options.floor)
+        effective_idempotency_key = options.idempotency_key or f"lease:{uuid4()}"
+        effective_dimensions = dict(options.dimensions or {})
+        if options.model is not None:
+            effective_dimensions.setdefault("model", options.model)
+        if options.region is not None:
+            effective_dimensions.setdefault("region", options.region)
 
         params = CreateLeaseParams(
             user_id=user_id,
             amount=str(amount),
             operation_type=operation_type,
             idempotency_key=effective_idempotency_key,
-            ttl_seconds=ttl_seconds,
+            ttl_seconds=options.ttl_seconds,
             metadata=json.dumps(
-                metadata.model_dump(mode="json", exclude_none=True) if metadata else {},
+                options.metadata.model_dump(mode="json", exclude_none=True) if options.metadata else {},
                 cls=DecimalEncoder,
             ),
-            feature=feature,
-            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            feature=options.feature,
+            measures=json.dumps(options.measures or {}, cls=DecimalEncoder),
             dimensions=json.dumps(effective_dimensions, cls=DecimalEncoder),
             minimum_balance=str(floor),
-            max_concurrent=max_concurrent,
+            max_concurrent=options.max_concurrent,
         )
         result = self._lease_repo.create_lease(params)
         availability = self.get_available(user_id)
 
         if result is None:
-            return LeaseResult(lease_id="", user_id=user_id, error="no result")
+            return LeaseResult(
+                lease_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                available=Decimal(0),
+                reserved_total=Decimal(0),
+                minimum_balance=Decimal(0),
+                billing_mode=options.billing_mode,
+                expires_at="",
+                error="no result",
+            )
         if result.error is not None:
             return LeaseResult(
                 lease_id="",
                 user_id=user_id,
+                amount=Decimal(0),
                 available=availability.available,
                 reserved_total=availability.reserved,
-                billing_mode=_safe_billing_mode(billing_mode),
+                minimum_balance=Decimal(0),
+                billing_mode=options.billing_mode,
+                expires_at="",
                 error=str(result.error),
             )
         minimum_balance = _dec(result.minimum_balance, floor)
@@ -622,7 +650,7 @@ class PostgresStore(CreditStore):
             reserved_total=availability.reserved,
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
-            expires_at=getattr(result, "expires_at", None),
+            expires_at=_text(getattr(result, "expires_at", None)),
         )
 
     def settle_lease(
@@ -630,18 +658,7 @@ class PostgresStore(CreditStore):
         user_id: str,
         lease_id: str,
         amount: Decimal,
-        *,
-        idempotency_key: str | None = None,
-        min_balance: Decimal = Decimal(0),
-        model: str | None = None,
-        metadata: CreditMetadata | None = None,
-        skip_allowance: bool = False,
-        period_start: date | None = None,
-        feature: str | None = None,
-        feature_limit: FeatureLimit | None = None,
-        feature_period_start: date | None = None,
-        measures: dict[str, Any] | None = None,
-        dimensions: dict[str, Any] | None = None,
+        options: SettleLeaseOptions | None = None,
     ) -> DeductionResult:
         """Settle a lease by deducting the actual amount used.
 
@@ -662,23 +679,25 @@ class PostgresStore(CreditStore):
         Returns:
             DeductionResult with ledger entry details.
         """
+        options = options or SettleLeaseOptions()
         amount = _dec(amount)
-        del min_balance, skip_allowance, period_start, feature_limit, feature_period_start
-        meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        effective_idempotency_key = idempotency_key or f"lease:{lease_id}:settle"
-        effective_dimensions = dimensions or {}
-        region_value = effective_dimensions.get("region")
-        region = str(region_value) if region_value is not None else None
+        meta = options.metadata.model_dump(mode="json", exclude_none=True) if options.metadata else {}
+        effective_idempotency_key = options.idempotency_key or f"lease:{lease_id}:settle"
+        effective_dimensions = dict(options.dimensions or {})
+        if options.model is not None:
+            effective_dimensions.setdefault("model", options.model)
+        if options.region is not None:
+            effective_dimensions.setdefault("region", options.region)
 
         params = SettleLeaseParams(
             user_id=user_id,
             lease_id=lease_id,
             amount=str(amount),
             idempotency_key=effective_idempotency_key,
-            model=model,
-            feature=feature,
-            region=region,
-            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            model=options.model,
+            feature=options.feature,
+            region=options.region,
+            measures=json.dumps(options.measures or {}, cls=DecimalEncoder),
             dimensions=json.dumps(effective_dimensions, cls=DecimalEncoder),
             metadata=json.dumps(meta, cls=DecimalEncoder),
         )
@@ -686,14 +705,24 @@ class PostgresStore(CreditStore):
 
         if result is None:
             return DeductionResult(
-                entry_id="", user_id=user_id, amount=Decimal(0), balance_after=Decimal(0), error="no result"
+                entry_id="",
+                user_id=user_id,
+                amount=Decimal(0),
+                allowance_consumed=Decimal(0),
+                balance_after=Decimal(0),
+                idempotent=False,
+                cap_warning=None,
+                error="no result",
             )
         if result.error is not None:
             return DeductionResult(
                 entry_id="",
                 user_id=user_id,
                 amount=Decimal(0),
+                allowance_consumed=Decimal(0),
                 balance_after=_dec(result.balance_after),
+                idempotent=False,
+                cap_warning=None,
                 error=str(result.error),
             )
         return DeductionResult(
@@ -748,8 +777,12 @@ class PostgresStore(CreditStore):
             return LeaseResult(
                 lease_id=lease_id,
                 user_id=user_id,
+                amount=Decimal(0),
                 available=availability.available,
                 reserved_total=availability.reserved,
+                minimum_balance=Decimal(0),
+                billing_mode="strict",
+                expires_at="",
                 error="no result",
             )
         minimum_balance = _dec(result.minimum_balance)
@@ -761,7 +794,7 @@ class PostgresStore(CreditStore):
             reserved_total=availability.reserved,
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
-            expires_at=result.expires_at,
+            expires_at=_text(result.expires_at),
             error=result.error,
         )
 
@@ -904,25 +937,102 @@ class PostgresStore(CreditStore):
         """
         result = self._plan_repo.get_user_plan(user_id)
         if result is None:
-            return GetUserPlanResult(user_id=user_id)
+            return GetUserPlanResult(
+                user_id=user_id,
+                plan_id=None,
+                plan_key=None,
+                plan_label=None,
+                allowance_amount=Decimal(0),
+                allowance=None,
+                allowance_period=None,
+                entitlements={},
+                billing_mode="strict",
+                credit_policy=None,
+                admission=None,
+                allowed_operations=[],
+            )
+        allowance_amount = _dec(result.credit_allowance_amount)
+        admission_operations = {
+            str(operation): {"max_in_flight": policy.get("max_in_flight") if isinstance(policy, dict) else None}
+            for operation, policy in (result.operation_admission or {}).items()
+        }
+        billing_mode: BillingMode = "overdraft" if result.credit_policy_type == "credit_line" else "strict"
+        overdraft_floor = (
+            -_dec(result.credit_limit)
+            if result.credit_policy_type == "credit_line" and result.credit_limit is not None
+            else None
+        )
+        plan_assigned_at = result.plan_assigned_at
+        if plan_assigned_at is not None and not isinstance(plan_assigned_at, datetime):
+            plan_assigned_at = datetime.fromisoformat(str(plan_assigned_at))
         return GetUserPlanResult(
             user_id=str(getattr(result, "user_id", user_id)),
             plan_id=result.plan_id or None,
             plan_key=result.plan_key or None,
             plan_label=result.plan_label or None,
-            allowance_amount=_dec(result.allowance_amount) if result.allowance_amount is not None else _dec(0),
-            allowance_period=_safe_allowance_period(str(result.allowance_period or "calendar_month")),
-            entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
-            rate_overrides={str(k): str(v) for k, v in (result.rate_overrides or {}).items()},
-            billing_mode=_safe_billing_mode(str(result.billing_mode or "strict")),
-            per_operation={k: OperationPolicy.model_validate(v) for k, v in (result.per_operation or {}).items()},
-            max_concurrent=result.max_concurrent,
-            overdraft_floor=_dec(result.overdraft_floor) if result.overdraft_floor is not None else None,
-            plan_assigned_at=(
-                datetime.fromisoformat(str(result.plan_assigned_at)) if result.plan_assigned_at else None
+            allowance_amount=allowance_amount,
+            allowance=(
+                PlanAllowancePolicy(
+                    amount=allowance_amount,
+                    reset_unit=result.credit_allowance_reset_unit,
+                    reset_count=result.credit_allowance_reset_count,
+                    reset_anchor=result.credit_allowance_reset_anchor,
+                    reset_timezone=result.credit_allowance_reset_timezone,
+                )
+                if result.credit_allowance_amount is not None
+                else None
             ),
-            config_version=result.config_version or None,
-            catalog_version=result.catalog_version or result.config_version or None,
+            allowance_period=_compatibility_allowance_period(result),
+            entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
+            rate_card=result.rate_card,
+            billing_mode=billing_mode,
+            credit_policy=(
+                PlanCreditPolicy.model_validate(
+                    {
+                        "type": result.credit_policy_type,
+                        "credit_limit": _dec(result.credit_limit) if result.credit_limit is not None else None,
+                    }
+                )
+                if result.credit_policy_type is not None
+                else None
+            ),
+            admission=(
+                PlanAdmissionPolicy.model_validate(
+                    {
+                        "max_in_flight": result.admission_max_in_flight,
+                        "operations": admission_operations,
+                    }
+                )
+                if result.admission_max_in_flight is not None or admission_operations
+                else None
+            ),
+            allowed_operations=list(result.allowed_operations or []),
+            per_operation={
+                operation: OperationPolicy(
+                    billing_mode=billing_mode,
+                    max_concurrent=policy["max_in_flight"],
+                    overdraft_floor=overdraft_floor,
+                )
+                for operation, policy in admission_operations.items()
+            },
+            max_concurrent=result.admission_max_in_flight,
+            overdraft_floor=overdraft_floor,
+            plan_assigned_at=plan_assigned_at,
+            assignment_source_type=result.assignment_source_type,
+            assignment_source_id=result.assignment_source_id,
+            revision_policy=result.revision_policy,
+            config_version=result.catalog_revision_no,
+            catalog_version=result.catalog_revision_no,
+        )
+
+    def check_feature(self, user_id: str, feature: str) -> CheckFeatureResult:
+        entitlement = self._plan_repo.get_entitlement(user_id, feature)
+        value = entitlement.get("feature_value") if entitlement is not None else None
+        return CheckFeatureResult(
+            user_id=user_id,
+            feature=feature,
+            value=value,
+            has_feature=entitlement is not None and value is not None and value is not False,
         )
 
     def set_user_plan(
@@ -1036,40 +1146,45 @@ class PostgresStore(CreditStore):
     def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
         quota = next(iter(self.get_quota_state(user_id, feature)), None)
         if quota is None:
-            return FeatureLimitResult(user_id=user_id, feature=feature)
+            return FeatureLimitResult(
+                user_id=user_id,
+                feature=feature,
+                limited=False,
+                limit=0,
+                used=0,
+                remaining=0,
+                period_start="",
+                period_end="",
+                action=None,
+            )
         return FeatureLimitResult(
             user_id=user_id,
             feature=feature,
-            limited=quota.remaining <= 0,
+            limited=True,
             limit=int(quota.limit),
             used=int(quota.consumed + quota.reserved),
             remaining=int(quota.remaining),
             period_start=quota.window_start,
             period_end=quota.window_end,
-            action="deny" if quota.enforcement == "block" else None,
+            action="deny" if quota.enforcement == "block" else "notify",
         )
 
-    def check_allowance(self, user_id: str, period_start: date | None = None) -> AllowanceResult:
+    def check_allowance(self, user_id: str) -> AllowanceResult:
         """Check the remaining plan allowance for a user.
 
         Args:
             user_id: The user ID.
-            period_start: The period start date, or None for current period.
-
         Returns:
             AllowanceResult with remaining allowance or zero defaults.
         """
-        result = self._plan_repo.check_allowance(
-            user_id,
-            period_start.isoformat() if period_start is not None else None,
-        )
+        result = self._plan_repo.check_allowance(user_id)
         if result is None:
-            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start=None, period_end=None)
+            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
         return AllowanceResult(
             plan_id=str(getattr(result, "plan_id", "")),
             allowance_remaining=_dec(result.allowance_remaining),
-            period_start=getattr(result, "period_start", None),
-            period_end=getattr(result, "period_end", None),
+            period_start=_text(getattr(result, "period_start", None)),
+            period_end=_text(getattr(result, "period_end", None)),
         )
 
     def list_quota_events(
@@ -1081,11 +1196,14 @@ class PostgresStore(CreditStore):
         limit = options.limit or 100
         if limit < 1 or limit > 500:
             raise ValueError("quota event limit must be between 1 and 500")
+        if options.after_id is not None and options.after is None:
+            raise ValueError("after_id requires after")
         rows = self._plan_repo.list_quota_events(
             user_id,
             options.after.isoformat() if options.after else None,
             limit,
             options.idempotency_key,
+            options.after_id,
         )
         return [
             QuotaEvent(
@@ -1262,7 +1380,7 @@ class PostgresStore(CreditStore):
             for r in rows
         ]
 
-    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStatsRow:
+    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
         """Get aggregate usage statistics for a date range.
 
         Args:
@@ -1270,12 +1388,10 @@ class PostgresStore(CreditStore):
             end: The range end datetime.
 
         Returns:
-            AggregateStatsRow with summary statistics.
+            AggregateStats with summary statistics.
         """
         result = self._analytics_repo.aggregate_stats(start.isoformat(), end.isoformat())
-        if result is None:
-            return AggregateStatsRow()
-        return AggregateStatsRow(
+        return AggregateStats(
             total_credits_consumed=_dec(result.total_credits_consumed),
             active_users=int(result.active_users),
             avg_daily_spend=_dec(result.avg_daily_spend),
@@ -1353,16 +1469,7 @@ class PostgresStore(CreditStore):
         return self._list_ledger_page(user_id, ["usage"], from_date, to_date, limit, cursor, usage_only=True)
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
-        rows = self._analytics_repo.list_ledger_entries(
-            user_id,
-            None,
-            None,
-            None,
-            200,
-            None,
-            None,
-        )
-        row = next((candidate for candidate in rows if candidate.entry_id == entry_id), None)
+        row = self._analytics_repo.get_ledger_entry(user_id, entry_id)
         return self._ledger_entry(row) if row is not None else None
 
     def create_team(
@@ -1405,7 +1512,7 @@ class PostgresStore(CreditStore):
         """
         result = self._team_repo.get_team_balance(team_id)
         if result is None:
-            return TeamBalanceResult(team_id=team_id)
+            return TeamBalanceResult(team_id=team_id, name="", balance=Decimal(0), member_count=0)
         if result.error is not None:
             raise StoreError(f"get_team_balance failed: {result.error}")
         return TeamBalanceResult(
@@ -1599,10 +1706,19 @@ class PostgresStore(CreditStore):
         ]
 
 
-def run_migrations(database_url: str) -> None:
+def run_migrations(
+    database_url: str,
+    *,
+    post_migration_sql: Sequence[tuple[str, str]] = (),
+) -> None:
     """Run bundled SQL migrations against *database_url*.
 
-    Standalone entry point for the CLI ``migrate`` command.
+    ``post_migration_sql`` contains trusted ``(source, SQL)`` pairs that run
+    after Bursar's migrations, in order and in the same transaction. This is
+    the host-integration hook used by the CLI's ``--post-migrate-sql`` option.
     """
     store = PostgresStore(database_url)
-    store._migrate()
+    try:
+        store._migrate(post_migration_sql=post_migration_sql)
+    finally:
+        store.close()

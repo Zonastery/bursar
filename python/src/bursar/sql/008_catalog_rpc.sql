@@ -4,9 +4,9 @@ CREATE FUNCTION bursar.publish_and_activate_catalog(
     p_yaml_schema_version integer,
     p_source_document jsonb,
     p_label text DEFAULT NULL,
-    p_activate boolean DEFAULT true
+    p_activate boolean DEFAULT TRUE
 )
-RETURNS TABLE(
+RETURNS TABLE (
     revision_id uuid,
     revision_no bigint,
     status bursar.catalog_revision_status

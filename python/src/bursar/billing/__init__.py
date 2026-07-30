@@ -4,12 +4,33 @@ from bursar.billing.auto_recharge_service import (
     AutoRechargeProcessResult,
     AutoRechargeService,
 )
-from bursar.billing.billing_service import BillingProvisioningPort
+from bursar.billing.billing_service import BillingService, BillingServiceImpl
 from bursar.billing.billing_store import BillingStore
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+    AutoRechargeProviderPaymentUpdate,
+    BillingCreditGrantCreate,
+    BillingDisputeUpsert,
+    BillingEventSink,
+    BillingInvoiceUpsert,
+    BillingPaymentUpsert,
+    BillingRefundUpsert,
+    BillingSubscriptionChangeUpdate,
+    BillingSubscriptionConflictCreate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
+from bursar.billing.service_types import (
+    BillingProvisioningPort,
+    BillingServiceOptions,
+)
 from bursar.billing.types import (
+    AUTO_RECHARGE_STATES,
     AllowanceGrant,
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
+    BillingAutoRechargeState,
     BillingAutoRechargeStatus,
     BillingCreditTopup,
     BillingCustomerInfo,
@@ -17,6 +38,7 @@ from bursar.billing.types import (
     BillingDisputeInfo,
     BillingEvent,
     BillingEventClaim,
+    BillingEventHandler,
     BillingEventResult,
     BillingEventType,
     BillingInvoiceInfo,
@@ -37,7 +59,9 @@ from bursar.billing.types import (
     CheckoutIntent,
     CheckoutIntentStatus,
     CycleGrant,
+    EntitlementMode,
     ProviderRef,
+    SubscriptionGrant,
 )
 
 if TYPE_CHECKING:
@@ -55,18 +79,34 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "AutoRechargeAttemptClaim",
+    "AutoRechargeAttemptUpdate",
+    "AutoRechargeProviderPaymentUpdate",
+    "BillingCreditGrantCreate",
+    "BillingDisputeUpsert",
+    "BillingEventSink",
+    "BillingInvoiceUpsert",
+    "BillingPaymentUpsert",
+    "BillingRefundUpsert",
+    "BillingSubscriptionChangeUpdate",
+    "BillingSubscriptionConflictCreate",
+    "CheckoutIntentCreate",
+    "CheckoutIntentUpdate",
     "AutoRechargeService",
     "AutoRechargeProcessResult",
+    "AUTO_RECHARGE_STATES",
     "AllowanceGrant",
     "BillingAutoRechargeAttempt",
     "BillingAutoRechargeProfile",
     "BillingAutoRechargeStatus",
+    "BillingAutoRechargeState",
     "BillingCreditTopup",
     "BillingCustomerInfo",
     "BillingCustomerRecord",
     "BillingDisputeInfo",
     "BillingEvent",
     "BillingEventClaim",
+    "BillingEventHandler",
     "BillingEventResult",
     "BillingEventType",
     "BillingInvoiceInfo",
@@ -75,7 +115,10 @@ __all__ = [
     "BillingPaymentInfo",
     "BillingPreferences",
     "BillingProvisioningPort",
+    "BillingServiceOptions",
     "BillingProvider",
+    "BillingService",
+    "BillingServiceImpl",
     "CheckoutIntent",
     "CheckoutIntentStatus",
     "ProviderRef",
@@ -90,5 +133,7 @@ __all__ = [
     "BillingSubscriptionState",
     "BillingSubscriptionStatus",
     "CycleGrant",
+    "EntitlementMode",
     "PostgresBillingStore",
+    "SubscriptionGrant",
 ]

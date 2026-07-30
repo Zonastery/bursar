@@ -313,7 +313,7 @@ export class PostgresBillingStore extends BillingStore {
     const result = (rows[0] as Record<string, unknown> | undefined) ?? {};
     if (result.error_code) throw new Error(`subscription change: ${String(result.error_code)}`);
     const changeRows = await this.queryFn(
-      `SELECT * FROM bursar.get_billing_subscription_change($1::uuid)`,
+      `SELECT * FROM bursar.get_billing_subscription_change($1::bigint)`,
       [result.change_id],
     );
     if ((changeRows[0] as Record<string, unknown> | undefined)?.id == null) {
@@ -360,7 +360,7 @@ export class PostgresBillingStore extends BillingStore {
   ): Promise<void> {
     if (!update.state) return;
     const rows = await this.queryFn(
-      `SELECT bursar.advance_subscription_change($1::uuid, $2, $3, $4) AS advanced`,
+      `SELECT bursar.advance_subscription_change($1::bigint, $2, $3, $4) AS advanced`,
       [id, update.state, update.providerOperationId ?? null, update.errorMessage ?? null],
     );
     if (!(rows[0] as Record<string, unknown> | undefined)?.advanced) {

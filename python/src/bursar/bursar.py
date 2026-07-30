@@ -1,12 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
+
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from bursar.billing.auto_recharge_service import AutoRechargeService
 from bursar.billing.billing_service import BillingServiceImpl
 from bursar.billing.billing_store import BillingStore
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+    AutoRechargeProviderPaymentUpdate,
+    BillingEventSink,
+    BillingSubscriptionChangeUpdate,
+    BillingSubscriptionConflictCreate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
+from bursar.billing.service_types import BillingServiceOptions
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
@@ -18,7 +30,6 @@ from bursar.billing.types import (
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
-    BillingSubscriptionChangeState,
     BillingSubscriptionState,
     BillingTopupResult,
     CheckoutIntent,
@@ -27,16 +38,11 @@ from bursar.commerce.service import CommerceService
 from bursar.commerce.types import AutoRechargeInput, CommerceOptions
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.service import CreditsService as CreditsServiceImpl
+from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.store import CreditStore
 
 
-class BillingEventSink(Protocol):
-    """Facade boundary consumed by payment providers."""
-
-    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult: ...
-
-
-class BillingService(BillingEventSink, Protocol):
+class BillingCapability(BillingEventSink, Protocol):
     """Public billing capability exposed by the Bursar facade."""
 
     auto_recharge: AutoRechargeService
@@ -46,20 +52,13 @@ class BillingService(BillingEventSink, Protocol):
 
     def create_or_get_checkout_intent(
         self,
-        subject_id: str,
-        provider: str,
-        checkout_kind: str,
-        product_key: str,
-        request_digest: str,
-        expires_at: str,
+        input: CheckoutIntentCreate,
     ) -> CheckoutIntent: ...
 
     def update_checkout_intent(
         self,
         id: str,
-        status: str | None = None,
-        provider_session_id: str | None = None,
-        checkout_url: str | None = None,
+        update: CheckoutIntentUpdate,
     ) -> None: ...
 
     def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None: ...
@@ -94,21 +93,12 @@ class BillingService(BillingEventSink, Protocol):
     def update_billing_subscription_change(
         self,
         id: str,
-        *,
-        state: BillingSubscriptionChangeState | None = None,
-        provider_operation_id: str | None = None,
-        error_message: str | None = None,
+        update: BillingSubscriptionChangeUpdate,
     ) -> None: ...
 
     def record_subscription_conflict(
         self,
-        *,
-        user_id: str | None,
-        provider: str,
-        duplicate_subscription_id: str,
-        existing_subscription_id: str | None = None,
-        event_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: BillingSubscriptionConflictCreate,
     ) -> None: ...
 
     def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None: ...
@@ -121,27 +111,17 @@ class BillingService(BillingEventSink, Protocol):
 
     def claim_auto_recharge_attempt(
         self,
-        user_id: str,
-        idempotency_key: str,
+        input: AutoRechargeAttemptClaim,
     ) -> BillingAutoRechargeAttempt | None: ...
 
     def update_auto_recharge_attempt(
         self,
-        attempt_id: str,
-        state: str,
-        provider_attempt_id: str | None = None,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: AutoRechargeAttemptUpdate,
     ) -> None: ...
 
     def update_auto_recharge_attempt_by_provider_payment(
         self,
-        provider: str,
-        provider_payment_id: str,
-        state: str,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
+        input: AutoRechargeProviderPaymentUpdate,
     ) -> None: ...
 
     def count_auto_recharge_attempts(
@@ -178,30 +158,52 @@ class BillingService(BillingEventSink, Protocol):
 
     def pseudonymize_financial_subject(self, user_id: str) -> None: ...
 
+    def expire_past_due_grace_periods(
+        self,
+        now: datetime | None = None,
+    ) -> int: ...
 
+    def invalidate_offer_cache(self) -> None: ...
+
+
+BillingService = BillingCapability
 CreditsService = CreditsServiceImpl
 
 
-@dataclass(slots=True)
 class CatalogService:
     """Catalog operations; billing never owns configuration writes."""
 
-    credits: CreditsService
+    def __init__(self, credits: CreditsService) -> None:
+        self._credits = credits
 
+    @property
     def active(self):
-        return self.credits.get_active_pricing()
+        return self._credits.get_active_pricing()
 
     def publish_draft(self, config: dict, label: str | None = None) -> str:
-        return self.credits.publish_pricing_draft(config, label)
+        return self._credits.publish_pricing_draft(config, label)
 
     def activate(self, version: int) -> str:
-        return self.credits.activate_pricing(version)
+        return self._credits.activate_pricing(version)
 
     def publish_and_activate(self, config: dict, label: str | None = None) -> None:
-        self.credits.publish_pricing(config, label)
+        self._credits.publish_pricing(config, label)
 
 
-@dataclass(slots=True)
+class BursarOptions(BaseModel):
+    """Typed construction options mirroring the JavaScript ``BursarOptions``."""
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    credit_store: SkipValidation[CreditStore]
+    billing_store: SkipValidation[BillingStore] | None = None
+    credits: SkipValidation[CreditsService] | None = None
+    credits_options: CreditsServiceOptions | None = None
+    billing_options: BillingServiceOptions | None = None
+    commerce_options: CommerceOptions | None = None
+    emitter: SkipValidation[CreditEventEmitter] | None = None
+
+
 class Bursar:
     """Single application-facing boundary for credit and billing operations.
 
@@ -213,8 +215,57 @@ class Bursar:
 
     credits: CreditsService
     catalog: CatalogService
-    billing: BillingService | None = None
-    commerce: CommerceService | None = None
+    billing: BillingService | None
+    commerce: CommerceService | None
+
+    def __init__(
+        self,
+        options: BursarOptions | None = None,
+        *,
+        credits: CreditsService | None = None,
+        catalog: CatalogService | None = None,
+        billing: BillingService | None = None,
+        commerce: CommerceService | None = None,
+    ) -> None:
+        if options is None:
+            if credits is None:
+                raise TypeError("Bursar requires BursarOptions or a credits service")
+            self.credits = credits
+            self.catalog = catalog or CatalogService(credits)
+            self.billing = billing
+            self.commerce = commerce
+            return
+
+        self.credits = options.credits or CreditsServiceImpl(
+            store=options.credit_store,
+            emitter=options.emitter,
+            options=options.credits_options,
+        )
+        self.catalog = CatalogService(self.credits)
+        self.billing = (
+            BillingServiceImpl(
+                options.billing_store,
+                (options.billing_options or BillingServiceOptions()).model_copy(update={"provisioning": self.credits}),
+            )
+            if options.billing_store is not None
+            else None
+        )
+        self.commerce = (
+            CommerceService(
+                self.billing,
+                self.credits,
+                self,
+                options.commerce_options,
+            )
+            if self.billing is not None and options.commerce_options is not None
+            else None
+        )
+        if self.commerce is not None:
+
+            async def process_auto_recharge(context) -> None:
+                await self.commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
+
+            self.credits.add_post_deduction_hook(process_auto_recharge)
 
     @classmethod
     def create(
@@ -223,47 +274,30 @@ class Bursar:
         credit_store: CreditStore,
         billing_store: BillingStore | None = None,
         credits: CreditsService | None = None,
-        credits_options: dict | None = None,
-        billing_options: dict | None = None,
+        credits_options: CreditsServiceOptions | dict[str, Any] | None = None,
+        billing_options: BillingServiceOptions | dict[str, Any] | None = None,
         commerce_options: CommerceOptions | None = None,
         emitter: CreditEventEmitter | None = None,
     ) -> Bursar:
-        credits = credits or CreditsServiceImpl(
-            store=credit_store,
-            emitter=emitter,
-            **(credits_options or {}),
-        )
-        billing = (
-            BillingServiceImpl(
-                billing_store,
-                **{
-                    **(billing_options or {}),
-                    # The facade owns this dependency; callers cannot replace
-                    # it through the generic manager options dictionary.
-                    "provisioning": credits,
-                },
+        return cls(
+            BursarOptions(
+                credit_store=credit_store,
+                billing_store=billing_store,
+                credits=credits,
+                credits_options=(
+                    CreditsServiceOptions.model_validate(credits_options)
+                    if isinstance(credits_options, dict)
+                    else credits_options
+                ),
+                billing_options=(
+                    BillingServiceOptions.model_validate(billing_options)
+                    if isinstance(billing_options, dict)
+                    else billing_options
+                ),
+                commerce_options=commerce_options,
+                emitter=emitter,
             )
-            if billing_store is not None
-            else None
         )
-        bursar = cls(
-            credits=credits,
-            billing=billing,
-            catalog=CatalogService(credits),
-        )
-        if billing is not None and commerce_options is not None:
-            bursar.commerce = CommerceService(
-                billing,
-                credits,
-                bursar,
-                commerce_options,
-            )
-
-            async def process_auto_recharge(context) -> None:
-                await bursar.commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
-
-            credits.add_post_deduction_hook(process_auto_recharge)
-        return bursar
 
     def load_catalog(self) -> None:
         """Load the active catalog into the pricing engine."""

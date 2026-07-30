@@ -66,7 +66,7 @@ export class S3BillingArchive implements BillingPayloadArchive {
       throw new Error(`Billing event ${event.eventId} has no PostgreSQL payload to archive`);
     }
     const receivedAt = new Date(event.receivedAt);
-    if (Number.isNaN(receivedAt.getTime())) {
+    if (Number.isNaN(receivedAt.getTime()) || !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(event.receivedAt)) {
       throw new Error(`Billing event ${event.eventId} has an invalid receivedAt timestamp`);
     }
 

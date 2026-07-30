@@ -493,8 +493,10 @@ export class CreditsService {
       entryId: result.entryId,
       userId,
       amount: result.amount.abs(),
+      allowanceConsumed: new Decimal(0),
       balanceAfter: result.newBalance,
       idempotent: result.idempotent ?? false,
+      capWarning: null,
     });
     return result;
   }
@@ -680,6 +682,26 @@ export class CreditsService {
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const cost = breakdown.total;
 
+    // 2) Short-circuit a zero (or non-positive) cost: nothing to charge.
+    if (cost.lte(0)) {
+      const balance = await this.store.getBalance(userId);
+      const result: DeductionResult = {
+        entryId: "",
+        userId,
+        amount: new Decimal(0),
+        allowanceConsumed: new Decimal(0),
+        balanceAfter: balance.balance,
+        idempotent: false,
+        capWarning: null,
+      };
+      this.emit("credits.deducted", userId, {
+        amount: new Decimal(0),
+        balanceAfter: balance.balance,
+        planCovered: true,
+      });
+      return result;
+    }
+
     // Build ledger metadata: caller fields FIRST, system fields LAST so the
     // system fields win (contract §5 / M7).
     const meta: Record<string, unknown> = {};
@@ -832,8 +854,9 @@ export class CreditsService {
     // Lazy expiry is scoped to the individual member's credits, not the team's
     // shared pool — there's no per-team expiry concept.
     const engine = await this.pricing.engineForUser(userId);
+    const plan = await this.store.getUserPlan(userId);
 
-    const breakdown = engine.calculate(metrics);
+    const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const cost = breakdown.total;
 
     if (cost.lte(0)) {

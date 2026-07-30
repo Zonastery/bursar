@@ -37,6 +37,7 @@ export interface QuotaEvent {
 
 export interface ListQuotaEventsOptions {
   after?: Date | null;
+  afterId?: string | null;
   limit?: number;
   idempotencyKey?: string | null;
 }

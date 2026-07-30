@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -8,6 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from bursar.billing.billing_service import BillingServiceImpl
+from bursar.billing.contracts import (
+    AutoRechargeAttemptUpdate,
+    BillingSubscriptionChangeUpdate,
+    CheckoutIntentUpdate,
+)
 from bursar.billing.postgres.repositories.subscription import BillingSubscriptionRepository
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
@@ -66,6 +72,67 @@ def test_list_cancellable_subscriptions_matches_javascript_statuses() -> None:
     assert service.list_cancellable_provider_subscription_ids("00000000-0000-0000-0000-000000000001") == [
         subscription.provider_subscription_id for subscription in result
     ]
+
+
+def test_expire_past_due_grace_periods_matches_javascript_cas_flow() -> None:
+    user_id = "00000000-0000-0000-0000-000000000001"
+    subscription_id = "00000000-0000-0000-0000-000000000002"
+    store = MagicMock()
+    provisioning = MagicMock()
+    store.list_expired_grace_subscriptions.return_value = [
+        {
+            "subscription_id": subscription_id,
+            "user_id": user_id,
+            "provider": "stripe",
+            "provider_subscription_id": "sub_grace",
+            "grace_ends_at": "2026-07-29T00:00:00+00:00",
+        }
+    ]
+    store.get_billing_subscription.return_value = BillingSubscriptionState(
+        subscription_id=subscription_id,
+        user_id=user_id,
+        provider="stripe",
+        provider_subscription_id="sub_grace",
+        status=BillingSubscriptionStatus.past_due,
+        grace_ends_at="2026-07-29T00:00:00+00:00",
+    )
+    store.get_user_subscription.return_value = store.get_billing_subscription.return_value
+    store.mark_subscription_grace_expired.return_value = True
+    service = BillingServiceImpl(store, provisioning=provisioning)
+
+    assert service.expire_past_due_grace_periods(datetime(2026, 7, 30, tzinfo=UTC)) == 1
+    provisioning.unset_user_plan.assert_called_once_with(user_id)
+    store.mark_subscription_grace_expired.assert_called_once_with(
+        subscription_id,
+        "2026-07-29T00:00:00+00:00",
+        "2026-07-30T00:00:00+00:00",
+    )
+
+
+def test_async_billing_event_handler_is_awaited() -> None:
+    called: list[str] = []
+
+    async def handler(event: BillingEvent, user_id: str) -> None:
+        await asyncio.sleep(0)
+        called.append(f"{event.event_id}:{user_id}")
+
+    service = BillingServiceImpl(
+        MagicMock(),
+        event_handlers={BillingEventType.customer_created: handler},
+    )
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_async",
+        event_type=BillingEventType.customer_created,
+        occurred_at="2026-07-29T00:00:00Z",
+    )
+
+    service._fire_event_handlers(
+        event,
+        "00000000-0000-0000-0000-000000000001",
+    )
+
+    assert called == ["evt_async:00000000-0000-0000-0000-000000000001"]
 
 
 def test_unknown_cancellation_with_offer_refs_persists_tombstone() -> None:
@@ -234,7 +301,7 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
     subscription_repo = MagicMock()
     subscription_repo.get.return_value = SimpleNamespace(id="00000000-0000-0000-0000-000000000011")
     store._subscription_repo_cache = subscription_repo
-    change_id = "00000000-0000-0000-0000-000000000012"
+    change_id = "12"
     from_offer_id = "00000000-0000-0000-0000-000000000013"
     to_offer_id = "00000000-0000-0000-0000-000000000014"
     from_revision_id = "00000000-0000-0000-0000-000000000015"
@@ -297,8 +364,24 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
     sql_calls = [call.args[0] for call in store._execute.call_args_list]
     assert "bursar.open_subscription_change" in sql_calls[0]
     assert "bursar.get_billing_subscription_change" in sql_calls[1]
+    assert "::bigint" in sql_calls[1]
     assert "bursar.get_catalog_offer_context" in sql_calls[2]
     assert all("INSERT INTO bursar.billing_subscription_changes" not in sql for sql in sql_calls)
+
+
+def test_subscription_change_transition_uses_bigint_identifier() -> None:
+    store = object.__new__(PostgresBillingStore)
+    store._execute = MagicMock(return_value=[{"advanced": True}])
+
+    store.update_billing_subscription_change(
+        "12",
+        BillingSubscriptionChangeUpdate(state="applied"),
+    )
+
+    sql, params = store._execute.call_args.args
+    assert "bursar.advance_subscription_change" in sql
+    assert "%s::bigint" in sql
+    assert params[0] == "12"
 
 
 def test_checkout_intent_updates_only_through_transition_rpc() -> None:
@@ -307,8 +390,10 @@ def test_checkout_intent_updates_only_through_transition_rpc() -> None:
 
     store.update_checkout_intent(
         "00000000-0000-0000-0000-000000000011",
-        status="completed",
-        provider_session_id="session_1",
+        CheckoutIntentUpdate(
+            status="completed",
+            provider_session_id="session_1",
+        ),
     )
 
     sql = store._execute.call_args.args[0]
@@ -319,7 +404,7 @@ def test_checkout_intent_updates_only_through_transition_rpc() -> None:
     with pytest.raises(RuntimeError, match="checkout intent update rejected"):
         store.update_checkout_intent(
             "00000000-0000-0000-0000-000000000011",
-            status="failed",
+            CheckoutIntentUpdate(status="failed"),
         )
 
 
@@ -352,9 +437,11 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
         ]
     )
     store.update_auto_recharge_attempt(
-        "00000000-0000-0000-0000-000000000003",
-        "processing",
-        "pay_1",
+        AutoRechargeAttemptUpdate(
+            id="00000000-0000-0000-0000-000000000003",
+            state="processing",
+            provider_attempt_id="pay_1",
+        )
     )
     assert "bursar.get_auto_recharge_attempt" in store._execute.call_args_list[0].args[0]
     assert all("bursar.advance_auto_recharge_attempt" in call.args[0] for call in store._execute.call_args_list[1:])

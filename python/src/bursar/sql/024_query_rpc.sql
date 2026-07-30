@@ -4,7 +4,7 @@
 CREATE FUNCTION bursar.get_credit_bucket_balances(
     p_subject_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     bucket_key text,
     label text,
     priority integer,
@@ -87,7 +87,7 @@ CREATE FUNCTION bursar.get_subject_entitlements(
     p_subject_id uuid,
     p_at timestamptz DEFAULT now()
 )
-RETURNS TABLE(
+RETURNS TABLE (
     feature_key text,
     feature_type text,
     feature_value jsonb,
@@ -157,7 +157,7 @@ CREATE FUNCTION bursar.usage_analytics_slice(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE(
+RETURNS TABLE (
     usage_day date,
     account_id uuid,
     operation text,
@@ -200,9 +200,9 @@ AS $$
             rollup.operation,
             NULLIF(rollup.model_key, '') AS model,
             NULLIF(rollup.region_key, '') AS region,
-            rollup.charged,
-            rollup.allowance_covered,
-            rollup.charge_count
+            sum(rollup.charged) AS charged,
+            sum(rollup.allowance_covered) AS allowance_covered,
+            sum(rollup.charge_count)::bigint AS charge_count
         FROM bursar.usage_daily_rollups AS rollup
         CROSS JOIN bounds
         WHERE bounds.full_start < bounds.full_end
@@ -210,10 +210,16 @@ AS $$
                 >= (bounds.full_start AT TIME ZONE 'UTC')::date
           AND rollup.usage_day
                 < (bounds.full_end AT TIME ZONE 'UTC')::date
+        GROUP BY
+            rollup.usage_day,
+            rollup.account_id,
+            rollup.operation,
+            rollup.model_key,
+            rollup.region_key
     ),
     edge_rows AS (
         SELECT
-            (charge.created_at AT TIME ZONE 'UTC')::date AS usage_day,
+            (charge.event_at AT TIME ZONE 'UTC')::date AS usage_day,
             charge.account_id,
             charge.operation,
             charge.model,
@@ -223,15 +229,15 @@ AS $$
             count(*) AS charge_count
         FROM bursar.credit_usage_charges AS charge
         CROSS JOIN bounds
-        WHERE charge.created_at >= p_start
-          AND charge.created_at < p_end
+        WHERE charge.event_at >= p_start
+          AND charge.event_at < p_end
           AND (
               bounds.full_start >= bounds.full_end
-              OR charge.created_at < bounds.full_start
-              OR charge.created_at >= bounds.full_end
+              OR charge.event_at < bounds.full_start
+              OR charge.event_at >= bounds.full_end
           )
         GROUP BY
-            (charge.created_at AT TIME ZONE 'UTC')::date,
+            (charge.event_at AT TIME ZONE 'UTC')::date,
             charge.account_id,
             charge.operation,
             charge.model,
@@ -247,12 +253,12 @@ CREATE FUNCTION bursar.list_ledger(
     p_after_created_at timestamptz DEFAULT NULL,
     p_after_id uuid DEFAULT NULL,
     p_page_size integer DEFAULT 50,
-    p_entry_types text[] DEFAULT NULL,
+    p_entry_types text [] DEFAULT NULL,
     p_from_at timestamptz DEFAULT NULL,
     p_to_at timestamptz DEFAULT NULL,
-    p_usage_only boolean DEFAULT false
+    p_usage_only boolean DEFAULT FALSE
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     account_id uuid,
     actor_user_id uuid,
@@ -309,7 +315,7 @@ CREATE FUNCTION bursar.get_ledger_entry(
     p_subject_id uuid,
     p_entry_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     entry_id uuid,
     account_id uuid,
     actor_user_id uuid,
@@ -346,7 +352,7 @@ CREATE FUNCTION bursar.spend_by_user(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE(
+RETURNS TABLE (
     subject_id uuid,
     total_spend numeric,
     charge_count bigint
@@ -366,7 +372,7 @@ CREATE FUNCTION bursar.spend_by_model(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE(
+RETURNS TABLE (
     model text,
     total_spend numeric,
     charge_count bigint
@@ -385,7 +391,7 @@ CREATE FUNCTION bursar.daily_spend(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE(
+RETURNS TABLE (
     day date,
     total_spend numeric,
     charge_count bigint
@@ -401,7 +407,7 @@ CREATE FUNCTION bursar.aggregate_usage_stats(
     p_start timestamptz,
     p_end timestamptz
 )
-RETURNS TABLE(
+RETURNS TABLE (
     total_credits_consumed numeric,
     active_users bigint,
     avg_daily_spend numeric,
@@ -606,7 +612,7 @@ $$;
 CREATE FUNCTION bursar.get_credit_state(
     p_subject_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     balance numeric,
     reserved numeric,
     available numeric,
@@ -663,7 +669,7 @@ CREATE FUNCTION bursar.get_credit_operation_details(
     p_ledger_entry_id uuid DEFAULT NULL,
     p_idempotency_key text DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     balance_after numeric,
     allowance_covered numeric,
     bucket_breakdown jsonb
@@ -732,7 +738,7 @@ CREATE FUNCTION bursar.get_credit_grant_details(
     p_subject_id uuid,
     p_ledger_entry_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     bucket_key text
 )
 LANGUAGE sql
@@ -771,7 +777,7 @@ CREATE FUNCTION bursar.get_credit_lease_pricing_context(
     p_subject_id uuid,
     p_lease_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     catalog_revision_no bigint,
     plan_id uuid,
     plan_key text,
@@ -823,7 +829,7 @@ $$;
 CREATE FUNCTION bursar.get_subject_plan(
     p_subject_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     user_id uuid,
     plan_assigned_at timestamptz,
     plan_assignment_ends_at timestamptz,
@@ -834,7 +840,7 @@ RETURNS TABLE(
     plan_key text,
     plan_label text,
     rate_card text,
-    allowed_operations text[],
+    allowed_operations text [],
     credit_allowance_amount numeric,
     credit_allowance_reset_unit text,
     credit_allowance_reset_count integer,
@@ -927,7 +933,7 @@ CREATE FUNCTION bursar.get_subject_allowance(
     p_subject_id uuid,
     p_window_start timestamptz DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     plan_id uuid,
     allowance_remaining numeric,
     period_start timestamptz,
@@ -1042,7 +1048,7 @@ CREATE FUNCTION bursar.get_subject_quota_state(
     p_subject_id uuid,
     p_quota_key text DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     user_id uuid,
     quota_key text,
     operation_key text,
@@ -1055,7 +1061,7 @@ RETURNS TABLE(
     enforcement text,
     window_start timestamptz,
     window_end timestamptz,
-    emit_at_percent integer[]
+    emit_at_percent integer []
 )
 LANGUAGE sql
 STABLE
@@ -1178,9 +1184,10 @@ CREATE FUNCTION bursar.list_subject_quota_events(
     p_subject_id uuid,
     p_after timestamptz DEFAULT NULL,
     p_limit integer DEFAULT 100,
-    p_idempotency_key text DEFAULT NULL
+    p_idempotency_key text DEFAULT NULL,
+    p_after_id uuid DEFAULT NULL
 )
-RETURNS TABLE(
+RETURNS TABLE (
     event_id uuid,
     quota_key text,
     operation_key text,
@@ -1214,7 +1221,14 @@ AS $$
     WHERE account.subject_id = p_subject_id
       AND account.account_kind = 'personal'
       AND p_limit BETWEEN 1 AND 500
-      AND (p_after IS NULL OR event.created_at > p_after)
+      AND (
+          p_after IS NULL
+          OR (
+              p_after_id IS NULL
+              AND event.created_at > p_after
+          )
+          OR (event.created_at, event.id) > (p_after, p_after_id)
+      )
       AND (
           p_idempotency_key IS NULL
           OR event.idempotency_key = p_idempotency_key
@@ -1263,7 +1277,7 @@ CREATE FUNCTION bursar.get_catalog_offer_context(
     p_offer_id uuid,
     p_catalog_revision_id uuid
 )
-RETURNS TABLE(
+RETURNS TABLE (
     offer_key text,
     plan_id uuid,
     plan_key text,
@@ -1314,7 +1328,7 @@ AS $$
 $$;
 
 CREATE FUNCTION bursar.get_billing_subscription_change(
-    p_change_id uuid
+    p_change_id bigint
 )
 RETURNS bursar.billing_subscription_changes
 LANGUAGE sql
@@ -1344,19 +1358,71 @@ AS $$
 $$;
 
 CREATE FUNCTION bursar.list_billing_invoices(
-    p_subject_id uuid
+    p_subject_id uuid,
+    p_before_sort_at timestamptz DEFAULT NULL,
+    p_before_id uuid DEFAULT NULL,
+    p_page_size integer DEFAULT 100
 )
-RETURNS SETOF bursar.billing_invoices
+RETURNS TABLE (
+    id uuid,
+    subject_id uuid,
+    provider text,
+    provider_environment text,
+    provider_invoice_id text,
+    subscription_id uuid,
+    status text,
+    amount_due_minor bigint,
+    amount_paid_minor bigint,
+    currency text,
+    period_start timestamptz,
+    period_end timestamptz,
+    provider_updated_at timestamptz,
+    metadata jsonb,
+    created_at timestamptz,
+    updated_at timestamptz
+)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
-    SELECT *
-    FROM bursar.billing_invoices
-    WHERE subject_id = p_subject_id
-      AND provider_environment = bursar.current_provider_environment()
-    ORDER BY COALESCE(period_end, created_at) DESC, id
+    SELECT
+        invoice.id,
+        invoice.subject_id,
+        invoice.provider,
+        invoice.provider_environment,
+        invoice.provider_invoice_id,
+        invoice.subscription_id,
+        invoice.status,
+        invoice.amount_due_minor,
+        invoice.amount_paid_minor,
+        invoice.currency,
+        invoice.period_start,
+        invoice.period_end,
+        invoice.provider_updated_at,
+        invoice.metadata,
+        invoice.created_at,
+        invoice.updated_at
+    FROM bursar.billing_invoices AS invoice
+    WHERE invoice.subject_id = p_subject_id
+      AND invoice.provider_environment =
+          bursar.current_provider_environment()
+      AND p_page_size BETWEEN 1 AND 500
+      AND (
+          (p_before_sort_at IS NULL AND p_before_id IS NULL)
+          OR (
+              p_before_sort_at IS NOT NULL
+              AND p_before_id IS NOT NULL
+              AND (
+                  COALESCE(invoice.period_end, invoice.created_at),
+                  invoice.id
+              ) < (p_before_sort_at, p_before_id)
+          )
+      )
+    ORDER BY
+        COALESCE(invoice.period_end, invoice.created_at) DESC,
+        invoice.id DESC
+    LIMIT p_page_size
 $$;
 
 CREATE FUNCTION bursar.get_auto_recharge_attempt_by_provider(

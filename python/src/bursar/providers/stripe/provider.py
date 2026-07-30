@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import stripe as stripe_mod
@@ -11,20 +12,26 @@ from bursar.providers.types import (
     ChangePlanLineItem,
     ChangePlanParams,
     ChangePlanPreview,
+    ChangePlanResult,
     CheckoutParams,
+    CheckoutSessionResult,
+    CheckoutSessionStatus,
     CreateCustomerParams,
+    CreateCustomerResult,
     PaymentMethodInfo,
     PaymentMethodSetupParams,
     PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
     ProviderLogger,
+    ProviderUrlResult,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
+    deduplicate_payment_methods,
 )
 
 
@@ -61,7 +68,7 @@ class StripeProvider(PaymentProvider):
         self._get_stripe = get_stripe or (lambda: stripe_mod)
         self._logger = logger
 
-    async def create_checkout_session(self, params: CheckoutParams) -> dict:
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         if not params.user_id:
             raise ValueError("Authentication required for checkout")
         stripe = self._get_stripe()
@@ -106,9 +113,9 @@ class StripeProvider(PaymentProvider):
         url = _stripe_val(session, "url")
         if not url:
             raise ValueError("Stripe checkout session returned no URL")
-        return {"url": url, "customerId": customer_id}
+        return CheckoutSessionResult(url=str(url), customer_id=str(customer_id))
 
-    async def create_customer_portal_session(self, params: PortalParams) -> dict:
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
         session = await stripe.billing_portal.Session.create_async(
             customer=params.customer_id,
@@ -117,9 +124,9 @@ class StripeProvider(PaymentProvider):
         url = _stripe_val(session, "url")
         if not url:
             raise ValueError("Stripe portal session returned no URL")
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
-    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> dict:
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
         session = await stripe.billing_portal.Session.create_async(
             customer=params.customer_id,
@@ -129,9 +136,9 @@ class StripeProvider(PaymentProvider):
         url = _stripe_val(session, "url")
         if not url:
             raise ValueError("Stripe portal session returned no URL")
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
-    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> dict:
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
         stripe = self._get_stripe()
         session = await stripe.checkout.Session.create_async(
             customer=params.customer_id,
@@ -143,13 +150,19 @@ class StripeProvider(PaymentProvider):
         url = _stripe_val(session, "url")
         if not url:
             raise ValueError("Stripe setup session returned no URL")
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
         stripe = self._get_stripe()
         signature = req.headers.get("stripe-signature")
         if not signature:
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
 
         try:
             event = stripe.Webhook.construct_event(
@@ -158,13 +171,31 @@ class StripeProvider(PaymentProvider):
                 self._webhook_secret,
             )
         except stripe_mod.error.SignatureVerificationError:  # type: ignore[attr-defined]
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
         except stripe_mod.error.APIError as e:  # type: ignore[attr-defined]
             self._logger.error("Stripe webhook temporarily unavailable", {"error": str(e)})
-            return WebhookResult(False, True, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=True,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
         except Exception as e:
             self._logger.warning("Stripe webhook verification failed", {"error": str(e)})
-            return WebhookResult(False, False, self.provider, None, None)
+            return WebhookResult(
+                received=False,
+                retryable=False,
+                provider=self.provider,
+                event_id=None,
+                event_type=None,
+            )
 
         data = event.data.object
         data_dict = _stripe_dict(data)
@@ -184,11 +215,11 @@ class StripeProvider(PaymentProvider):
             getattr(event, "created", None),
         )
         return WebhookResult(
-            True,
-            False,
-            self.provider,
-            str(event.id) if event.id is not None else None,
-            str(event.type) if event.type is not None else None,
+            received=True,
+            retryable=False,
+            provider=self.provider,
+            event_id=str(event.id) if event.id is not None else None,
+            event_type=str(event.type) if event.type is not None else None,
         )
 
     async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
@@ -225,17 +256,17 @@ class StripeProvider(PaymentProvider):
             kwargs["options"] = {"idempotency_key": idempotency_key}
         await stripe.SubscriptionSchedule.release_async(provider_operation_id, **kwargs)
 
-    async def get_checkout_session_status(self, provider_session_id: str) -> dict | None:
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
         stripe = self._get_stripe()
         session = await stripe.checkout.Session.retrieve_async(provider_session_id)
         if _stripe_val(session, "status") == "expired":
-            return {"paymentStatus": "cancelled"}
+            return CheckoutSessionStatus(payment_status="cancelled")
         payment_status = _stripe_val(session, "payment_status")
         if payment_status in ("paid", "no_payment_required"):
-            return {"paymentStatus": "succeeded"}
+            return CheckoutSessionStatus(payment_status="succeeded")
         if payment_status == "unpaid":
-            return {"paymentStatus": "requires_payment_method"}
-        return {"paymentStatus": None}
+            return CheckoutSessionStatus(payment_status="requires_payment_method")
+        return CheckoutSessionStatus(payment_status=None)
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         stripe = self._get_stripe()
@@ -255,7 +286,7 @@ class StripeProvider(PaymentProvider):
                     expiry_year=_stripe_val(card, "exp_year", 0),
                 )
             )
-        return result
+        return deduplicate_payment_methods(result)
 
     async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
         customer = await self._get_stripe().Customer.retrieve_async(customer_id)
@@ -300,31 +331,33 @@ class StripeProvider(PaymentProvider):
             "requires_action": "requires_customer_action",
             "requires_payment_method": "requires_payment_method",
         }.get(raw_status, "failed")
-        return SavedPaymentChargeResult(
-            provider_payment_id=_stripe_val(intent, "id"),
-            status=status,
-            amount_minor=_stripe_val(intent, "amount"),
-            currency=_stripe_val(intent, "currency"),
+        return SavedPaymentChargeResult.model_validate(
+            {
+                "provider_payment_id": _stripe_val(intent, "id"),
+                "status": status,
+                "amount_minor": _stripe_val(intent, "amount"),
+                "currency": _stripe_val(intent, "currency"),
+            }
         )
 
-    async def create_customer(self, params: CreateCustomerParams) -> dict:
+    async def create_customer(self, params: CreateCustomerParams) -> CreateCustomerResult:
         stripe = self._get_stripe()
         customer = await stripe.Customer.create_async(
             email=params.email,
             name=params.name,
             metadata=params.metadata or {},
         )
-        return {"customerId": customer["id"]}
+        return CreateCustomerResult(customer_id=str(customer["id"]))
 
-    async def get_invoice_url(self, provider_payment_id: str) -> dict | None:
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult | None:
         stripe = self._get_stripe()
         invoice = await stripe.Invoice.retrieve_async(provider_payment_id)
         url = _stripe_val(invoice, "hosted_invoice_url")
         if not url:
             return None
-        return {"url": url}
+        return ProviderUrlResult(url=str(url))
 
-    async def change_plan(self, params: ChangePlanParams) -> None:
+    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:
         stripe = self._get_stripe()
         subscription = await stripe.Subscription.retrieve_async(params.provider_subscription_id)
         items = _stripe_val(_stripe_val(subscription, "items", {}), "data", [])
@@ -348,7 +381,7 @@ class StripeProvider(PaymentProvider):
                 phases=phases,
                 options=options,
             )
-            return
+            return ChangePlanResult(provider_operation_id=str(_stripe_val(schedule, "id")))
         kwargs: dict[str, Any] = {
             "items": [{"id": item_id, "price": params.product_id, "quantity": params.quantity}],
             "proration_behavior": "always_invoice",
@@ -356,7 +389,9 @@ class StripeProvider(PaymentProvider):
         }
         if options:
             kwargs["options"] = options
-        await stripe.Subscription.modify_async(params.provider_subscription_id, **kwargs)
+        updated = await stripe.Subscription.modify_async(params.provider_subscription_id, **kwargs)
+        latest_invoice = _stripe_val(updated, "latest_invoice")
+        return ChangePlanResult(provider_operation_id=str(latest_invoice) if latest_invoice else None)
 
     async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
         stripe = self._get_stripe()
@@ -375,25 +410,33 @@ class StripeProvider(PaymentProvider):
             },
         )
         total = int(_stripe_val(invoice, "total", 0) or 0)
-        subtotal = int(_stripe_val(invoice, "subtotal", total) or 0)
-        tax = (
-            int(_stripe_val(invoice, "total_taxes", [{}])[0].get("amount", 0))
-            if _stripe_val(invoice, "total_taxes", [])
-            else 0
-        )
+        amount_due = int(_stripe_val(invoice, "amount_due", 0) or 0)
+        currency = str(_stripe_val(invoice, "currency", "USD"))
+        invoice_lines = _stripe_val(_stripe_val(invoice, "lines", {}), "data", []) or []
+        price = await stripe.Price.retrieve_async(params.product_id)
+        current_period_end = int(_stripe_val(item, "current_period_end", 0) or 0)
+        next_billing_date = datetime.fromtimestamp(current_period_end, tz=UTC).isoformat()
         return ChangePlanPreview(
             total_amount=total,
-            settlement_amount=total,
-            currency=str(_stripe_val(invoice, "currency", "USD")).upper(),
+            settlement_amount=amount_due,
+            currency=currency,
             line_items=[
                 ChangePlanLineItem(
                     product_id=params.product_id,
-                    quantity=params.quantity,
-                    subtotal=subtotal,
-                    tax=tax,
-                    currency=str(_stripe_val(invoice, "currency", "USD")).upper(),
+                    name=str(_stripe_val(line, "description", "Subscription change")),
+                    unit_price=int(_stripe_val(line, "amount", 0) or 0),
+                    quantity=int(_stripe_val(line, "quantity", 1) or 1),
+                    proration_factor=1,
+                    currency=str(_stripe_val(line, "currency", currency)),
+                    tax=0,
+                    subtotal=int(_stripe_val(line, "amount", 0) or 0),
                 )
+                for line in invoice_lines
             ],
-            effective_at=params.effective_at or "immediately",
-            tax_amount=tax,
+            effective_at=(
+                next_billing_date if params.effective_at == "next_billing_date" else datetime.now(UTC).isoformat()
+            ),
+            recurring_amount=int(_stripe_val(price, "unit_amount", 0) or 0),
+            recurring_currency=str(_stripe_val(price, "currency", currency)),
+            next_billing_date=next_billing_date,
         )

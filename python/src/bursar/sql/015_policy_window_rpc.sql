@@ -5,7 +5,7 @@ CREATE FUNCTION bursar.effective_subject_policy(
     p_subject_id uuid,
     p_operation text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     catalog_revision_id uuid,
     plan_id uuid,
     minimum_balance numeric,
@@ -63,7 +63,7 @@ CREATE FUNCTION bursar.policy_period_window(
     p_anchor text,
     p_timezone text
 )
-RETURNS TABLE(
+RETURNS TABLE (
     window_start timestamptz,
     window_end timestamptz
 )

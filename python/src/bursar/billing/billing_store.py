@@ -3,6 +3,20 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+    AutoRechargeProviderPaymentUpdate,
+    BillingCreditGrantCreate,
+    BillingDisputeUpsert,
+    BillingInvoiceUpsert,
+    BillingPaymentUpsert,
+    BillingRefundUpsert,
+    BillingSubscriptionChangeUpdate,
+    BillingSubscriptionConflictCreate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
@@ -13,7 +27,6 @@ from bursar.billing.types import (
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
-    BillingSubscriptionChangeState,
     BillingSubscriptionState,
     BillingTopupResult,
     CheckoutIntent,
@@ -26,33 +39,20 @@ class BillingStore(ABC):
     @abstractmethod
     def create_or_get_checkout_intent(
         self,
-        subject_id: str,
-        provider: str,
-        checkout_kind: str,
-        product_key: str,
-        request_digest: str,
-        expires_at: str,
+        input: CheckoutIntentCreate,
     ) -> CheckoutIntent: ...
 
     @abstractmethod
     def update_checkout_intent(
         self,
         id: str,
-        status: str | None = None,
-        provider_session_id: str | None = None,
-        checkout_url: str | None = None,
+        update: CheckoutIntentUpdate,
     ) -> None: ...
 
     @abstractmethod
     def create_billing_credit_grant(
         self,
-        *,
-        payment_id: str | None = None,
-        subscription_id: str | None = None,
-        topup_id: str | None = None,
-        configured_credits: str,
-        quantity: int = 1,
-        billing_event_id: str | None = None,
+        input: BillingCreditGrantCreate,
     ) -> str: ...
 
     @abstractmethod
@@ -140,10 +140,7 @@ class BillingStore(ABC):
     def update_billing_subscription_change(
         self,
         id: str,
-        *,
-        state: BillingSubscriptionChangeState | None = None,
-        provider_operation_id: str | None = None,
-        error_message: str | None = None,
+        update: BillingSubscriptionChangeUpdate,
     ) -> None: ...
 
     @abstractmethod
@@ -171,52 +168,19 @@ class BillingStore(ABC):
     @abstractmethod
     def upsert_billing_payment(
         self,
-        *,
-        provider: str,
-        provider_payment_id: str,
-        provider_invoice_id: str | None = None,
-        user_id: str | None = None,
-        amount_minor: int = 0,
-        tax_minor: int | None = None,
-        currency: str = "USD",
-        purpose: str = "unknown",
-        status: str = "succeeded",
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingPaymentUpsert,
     ) -> str: ...
 
     @abstractmethod
     def upsert_billing_refund(
         self,
-        *,
-        provider: str,
-        provider_refund_id: str,
-        provider_payment_id: str | None = None,
-        user_id: str | None = None,
-        amount_minor: int = 0,
-        currency: str = "USD",
-        reason: str | None = None,
-        status: str = "pending",
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingRefundUpsert,
     ) -> str: ...
 
     @abstractmethod
     def upsert_billing_invoice(
         self,
-        *,
-        provider: str,
-        provider_invoice_id: str,
-        provider_subscription_id: str | None = None,
-        user_id: str | None = None,
-        status: str | None = None,
-        amount_paid_minor: int | None = None,
-        amount_due_minor: int | None = None,
-        currency: str = "USD",
-        period_start: str | None = None,
-        period_end: str | None = None,
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingInvoiceUpsert,
     ) -> None: ...
 
     @abstractmethod
@@ -225,15 +189,7 @@ class BillingStore(ABC):
     @abstractmethod
     def upsert_billing_dispute(
         self,
-        *,
-        provider: str,
-        provider_dispute_id: str,
-        provider_payment_id: str | None = None,
-        user_id: str | None = None,
-        status: str = "needs_response",
-        reason: str | None = None,
-        provider_updated_at: str | None = None,
-        metadata: dict | None = None,
+        input: BillingDisputeUpsert,
     ) -> None: ...
 
     @abstractmethod
@@ -261,19 +217,13 @@ class BillingStore(ABC):
     @abstractmethod
     def claim_auto_recharge_attempt(
         self,
-        user_id: str,
-        idempotency_key: str,
+        input: AutoRechargeAttemptClaim,
     ) -> BillingAutoRechargeAttempt | None: ...
 
     @abstractmethod
     def update_auto_recharge_attempt(
         self,
-        attempt_id: str,
-        state: str,
-        provider_attempt_id: str | None = None,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: AutoRechargeAttemptUpdate,
     ) -> None: ...
 
     @abstractmethod
@@ -300,12 +250,7 @@ class BillingStore(ABC):
     @abstractmethod
     def record_subscription_conflict(
         self,
-        user_id: str | None,
-        provider: str,
-        duplicate_subscription_id: str,
-        existing_subscription_id: str | None = None,
-        event_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
+        input: BillingSubscriptionConflictCreate,
     ) -> None: ...
 
     @abstractmethod
@@ -317,11 +262,7 @@ class BillingStore(ABC):
     @abstractmethod
     def update_auto_recharge_attempt_by_provider_payment(
         self,
-        provider: str,
-        provider_payment_id: str,
-        state: str,
-        failure_code: str | None = None,
-        failure_message: str | None = None,
+        input: AutoRechargeProviderPaymentUpdate,
     ) -> None: ...
 
     @abstractmethod

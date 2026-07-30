@@ -18,7 +18,9 @@ BEGIN
 
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
 
     INSERT INTO bursar.billing_customers(
         subject_id,provider,provider_environment,provider_customer_id,email
@@ -47,7 +49,7 @@ CREATE FUNCTION bursar.upsert_billing_subscription(
     p_status bursar.billing_subscription_status,
     p_current_period_start timestamptz DEFAULT NULL,
     p_current_period_end timestamptz DEFAULT NULL,
-    p_cancel_at_period_end boolean DEFAULT false,
+    p_cancel_at_period_end boolean DEFAULT FALSE,
     p_metadata jsonb DEFAULT '{}'::jsonb,
     p_trial_end timestamptz DEFAULT NULL,
     p_cancel_at timestamptz DEFAULT NULL,
@@ -93,7 +95,9 @@ BEGIN
         END
     );
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE COALESCE(p_metadata, '{}'::jsonb)
@@ -304,7 +308,7 @@ CREATE FUNCTION bursar.upsert_billing_payment(
     p_provider_payment_id text,
     p_amount_minor bigint,
     p_tax_minor bigint,
-    p_currency char(3),
+    p_currency text,
     p_purpose text,
     p_status bursar.billing_payment_status,
     p_provider_updated_at timestamptz DEFAULT now(),
@@ -328,7 +332,9 @@ BEGIN
         RAISE EXCEPTION 'invalid billing payment' USING ERRCODE='22023';
     END IF;
 
-    INSERT INTO bursar.subjects(id) VALUES (p_subject_id) ON CONFLICT DO NOTHING;
+    INSERT INTO bursar.subjects(id)
+    VALUES (p_subject_id)
+    ON CONFLICT (id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE p_metadata

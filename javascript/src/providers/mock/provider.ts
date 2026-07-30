@@ -58,6 +58,12 @@ export class MockPaymentProvider implements PaymentProvider {
 
   async reactivateSubscription(_subscriptionId: string): Promise<void> {}
 
+  async cancelScheduledPlanChange(
+    _subscriptionId: string,
+    _providerOperationId?: string | null,
+    _idempotencyKey?: string,
+  ): Promise<void> {}
+
   async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
     return [];
   }
