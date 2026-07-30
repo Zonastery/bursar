@@ -39,8 +39,18 @@ const ReleaseRowSchema = z
   })
   .passthrough();
 
+const LeasePricingContextRowSchema = z
+  .object({
+    catalog_revision_no: z.coerce.number(),
+    plan_id: z.string().nullable().optional(),
+    plan_key: z.string().nullable().optional(),
+    rate_card: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 export type LeaseRow = z.infer<typeof LeaseRowSchema>;
 export type ReleaseRow = z.infer<typeof ReleaseRowSchema>;
+export type LeasePricingContextRow = z.infer<typeof LeasePricingContextRowSchema>;
 
 /** Repository for lease lifecycle operations (admission control). */
 export class LeaseRepository {
@@ -78,8 +88,7 @@ export class LeaseRepository {
       row.lease_id == null
         ? null
         : ((await this.callproc("get_credit_lease", [params.userId, row.lease_id]))[0] as
-            | Record<string, unknown>
-            | undefined);
+            Record<string, unknown> | undefined);
     return safeParse(
       LeaseRowSchema,
       {
@@ -142,6 +151,13 @@ export class LeaseRepository {
     );
   }
 
+  /** Return the immutable pricing context captured at lease admission. */
+  async getPricingContext(userId: string, leaseId: string): Promise<LeasePricingContextRow | null> {
+    const rows = await this.callproc("get_credit_lease_pricing_context", [userId, leaseId]);
+    if (!rows?.length) return null;
+    return safeParse(LeasePricingContextRowSchema, rows[0], "LeaseRepository.getPricingContext");
+  }
+
   /** Release a lease without charging — idempotent. */
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseRow> {
     const rows = await this.callproc("release_lease", [userId, leaseId]);
@@ -165,8 +181,7 @@ export class LeaseRepository {
     const lease =
       row.error_code == null && row.lease_id != null
         ? ((await this.callproc("get_credit_lease", [userId, row.lease_id]))[0] as
-            | Record<string, unknown>
-            | undefined)
+            Record<string, unknown> | undefined)
         : undefined;
     return safeParse(
       LeaseRowSchema,
@@ -179,5 +194,12 @@ export class LeaseRepository {
       },
       "LeaseRepository.renewLease",
     );
+  }
+
+  /** Expire a bounded batch of leases and release their reservations. */
+  async expireLeases(limit: number): Promise<number> {
+    const rows = await this.callproc("expire_leases", [limit]);
+    const row = rows?.[0] as Record<string, unknown> | undefined;
+    return Number(row?.expired ?? 0);
   }
 }

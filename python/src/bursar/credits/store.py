@@ -27,9 +27,11 @@ from bursar.credits.types import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    ExecuteGrantProgramRequest,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
+    GrantProgramAwardResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
@@ -385,6 +387,10 @@ class CreditStore(ABC):
         """Extend an active lease without changing its captured policy."""
         ...
 
+    def expire_leases(self, limit: int = 100) -> int:
+        """Expire a bounded batch of abandoned leases and release reservations."""
+        raise CapabilityNotSupportedError("expire_leases is not supported by this store")
+
     @abstractmethod
     def get_available(self, user_id: str) -> AvailableResult:
         """Advisory, non-locking read of ``available = balance − Σ active holds``.
@@ -403,6 +409,13 @@ class CreditStore(ABC):
         configured.
         """
         ...
+
+    def execute_grant_program(
+        self,
+        request: ExecuteGrantProgramRequest,
+    ) -> list[GrantProgramAwardResult]:
+        """Execute one configured grant-program event."""
+        raise CapabilityNotSupportedError("execute_grant_program is not supported by this store")
 
     # ── Pricing configuration ──────────────────────────────────────────
 
@@ -782,6 +795,10 @@ class CreditStore(ABC):
             List of ``TeamMember``.
         """
         raise CapabilityNotSupportedError("get_team_members is not supported by this store")
+
+    def remove_team_member(self, team_id: str, user_id: str) -> bool:
+        """Remove a team member unless they are the final owner."""
+        raise CapabilityNotSupportedError("remove_team_member is not supported by this store")
 
     def deduct_team(
         self,

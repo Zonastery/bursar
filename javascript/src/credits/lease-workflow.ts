@@ -82,8 +82,9 @@ export class CreditLeaseWorkflow {
   private async costOf(
     metricsOrAmount: MetricsOrAmount,
     userId?: string | null,
+    leaseId?: string | null,
   ): Promise<{ amount: Decimal; model: string | null }> {
-    return this.pricing.costOf(metricsOrAmount, userId);
+    return this.pricing.costOf(metricsOrAmount, userId, leaseId);
   }
 
   /**
@@ -183,7 +184,7 @@ export class CreditLeaseWorkflow {
     this.logger.debug("[CreditsService] settle", { leaseId });
     const idempotencyKey = options?.idempotencyKey ?? `lease:${leaseId}:settle`;
     const feature = options?.feature ?? null;
-    const { amount, model } = await this.costOf(metricsOrAmount, userId);
+    const { amount, model } = await this.costOf(metricsOrAmount, userId, leaseId);
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
     const region = typeof dimensions.region === "string" ? dimensions.region : null;

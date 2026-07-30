@@ -60,4 +60,18 @@ describe("shared commerce parity fixture", () => {
       provider_product_ids: "provider_internal",
     });
   });
+
+  it("keeps application names and provider identifiers out of public Commerce inputs", () => {
+    const serviceSource = readFileSync(
+      new URL("../src/commerce/service.ts", import.meta.url),
+      "utf8",
+    );
+    const typesSource = readFileSync(new URL("../src/commerce/types.ts", import.meta.url), "utf8");
+
+    expect(serviceSource).not.toMatch(
+      /\b(Zonastery|seeker|monk|sage|gifted|purchased)\b|from ["']next|https?:\/\//,
+    );
+    expect(serviceSource).not.toMatch(/defaultProvider\s*(?:\?\?|=)\s*["']dodo["']/);
+    expect(typesSource).not.toMatch(/\b(productId|quoteHash)\b/);
+  });
 });

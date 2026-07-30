@@ -143,3 +143,8 @@ class LeaseRepository:
             }
         )
         return LeaseRow.model_validate(row)
+
+    def expire_leases(self, limit: int) -> int:
+        """Expire a bounded lease batch and release its reservations."""
+        rows = self._callproc("expire_leases", [limit]) or []
+        return int(rows[0]) if rows else 0

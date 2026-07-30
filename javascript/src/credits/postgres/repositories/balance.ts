@@ -51,9 +51,25 @@ const AvailableRowSchema = z
   })
   .passthrough();
 
+const GrantProgramAwardRowSchema = z
+  .object({
+    grant_event_id: z.string().nullable().optional(),
+    grant_award_id: z.string().nullable().optional(),
+    recipient_subject_id: z.string().nullable().optional(),
+    ledger_entry_id: z.string().nullable().optional(),
+    amount: z
+      .union([z.string(), z.number()] as const)
+      .nullable()
+      .optional(),
+    replayed: pgBoolean.nullable().optional(),
+    error_code: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 export type BalanceRow = z.infer<typeof BalanceRowSchema>;
 export type AddCreditsRow = z.infer<typeof AddCreditsRowSchema>;
 export type AvailableRow = z.infer<typeof AvailableRowSchema>;
+export type GrantProgramAwardRow = z.infer<typeof GrantProgramAwardRowSchema>;
 
 /** Repository for user credit balance operations.
  *
@@ -108,14 +124,12 @@ export class BalanceRepository {
     const state =
       row.error_code == null
         ? ((await this.callproc("get_credit_state", [userId]))[0] as
-            | Record<string, unknown>
-            | undefined)
+            Record<string, unknown> | undefined)
         : undefined;
     const grant =
       row.error_code == null && decimalAmount.isPositive() && row.entry_id != null
         ? ((await this.callproc("get_credit_grant_details", [userId, row.entry_id]))[0] as
-            | Record<string, unknown>
-            | undefined)
+            Record<string, unknown> | undefined)
         : undefined;
     return safeParse(
       AddCreditsRowSchema,
@@ -137,5 +151,29 @@ export class BalanceRepository {
   async getAvailable(userId: string): Promise<AvailableRow> {
     const rows = await this.callproc("get_credit_state", [userId]);
     return safeParse(AvailableRowSchema, rows?.[0] ?? {}, "BalanceRepository.getAvailable");
+  }
+
+  /** Execute a configured grant-program event and return every award row. */
+  async executeGrantProgram(params: {
+    trigger: string;
+    programKey: string;
+    subjectId: string;
+    eventKey: string;
+    referrerSubjectId: string | null;
+    region: string | null;
+    metadata: string;
+  }): Promise<GrantProgramAwardRow[]> {
+    const rows = await this.callproc("execute_grant_program", [
+      params.trigger,
+      params.programKey,
+      params.subjectId,
+      params.eventKey,
+      params.referrerSubjectId,
+      params.region,
+      params.metadata,
+    ]);
+    return (rows ?? []).map((row) =>
+      safeParse(GrantProgramAwardRowSchema, row, "BalanceRepository.executeGrantProgram"),
+    );
   }
 }

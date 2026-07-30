@@ -39,6 +39,11 @@ from bursar.credits.types.catalog import (
     BursarConfigResult,
     PricingConfig,
 )
+from bursar.credits.types.grants import (
+    ExecuteGrantProgramRequest,
+    GrantProgramAwardResult,
+    GrantProgramTrigger,
+)
 from bursar.credits.types.ledger import (
     LedgerCursor,
     LedgerEntry,
@@ -90,9 +95,12 @@ __all__ = [
     "DeductWithAllowanceOptions",
     "DeductionResult",
     "Entitlement",
+    "ExecuteGrantProgramRequest",
     "FeatureLimit",
     "FeatureLimitResult",
     "GetUserPlanResult",
+    "GrantProgramAwardResult",
+    "GrantProgramTrigger",
     "LeasePricingContext",
     "LeaseResult",
     "LedgerCursor",

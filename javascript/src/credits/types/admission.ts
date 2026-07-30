@@ -13,6 +13,14 @@ export interface LeaseResult {
   error?: string | null;
 }
 
+/** Immutable pricing references captured when an operation lease is admitted. */
+export interface LeasePricingContext {
+  catalogVersion: number;
+  planId: string | null;
+  planKey: string | null;
+  rateCard: string | null;
+}
+
 export interface ReleaseResult {
   leaseId: string;
   userId: string;

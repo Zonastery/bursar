@@ -105,6 +105,13 @@ class TeamRepository:
             members.append(TeamMemberRow.model_validate(data))
         return members
 
+    def remove_team_member(self, team_id: str, user_id: str) -> bool:
+        """Remove a member unless they are the team's final owner."""
+        validate_non_empty(team_id, "team_id")
+        validate_non_empty(user_id, "user_id")
+        rows = self._callproc("remove_team_member", [team_id, user_id]) or []
+        return bool(rows and rows[0] is True)
+
     def deduct_team(
         self,
         team_id: str,

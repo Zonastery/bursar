@@ -122,6 +122,12 @@ export class TeamRepository {
     );
   }
 
+  /** Remove a team member, returning false when absent or the final owner. */
+  async removeTeamMember(teamId: string, userId: string): Promise<boolean> {
+    const rows = await this.callproc("remove_team_member", [teamId, userId]);
+    return rows?.[0] === true;
+  }
+
   /** Deduct credits from a team's balance on behalf of a user. */
   async deductTeam(
     teamId: string,

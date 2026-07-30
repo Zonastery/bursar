@@ -16,8 +16,10 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  ExecuteGrantProgramRequest,
   FeatureLimitResult,
   GetUserPlanResult,
+  GrantProgramAwardResult,
   LedgerEntry,
   LedgerPage,
   LeaseResult,
@@ -231,6 +233,13 @@ export class CreditsService {
     entryType: string,
   ): Promise<Record<string, unknown>> {
     return this.queries.revokeCreditsByEntryType(userId, entryType);
+  }
+
+  /** Execute an application-driven catalog grant program. */
+  async executeGrantProgram(
+    request: ExecuteGrantProgramRequest,
+  ): Promise<GrantProgramAwardResult[]> {
+    return this.store.executeGrantProgram(request);
   }
 
   async getLedgerEntry(userId: string, entryId: string): Promise<LedgerEntry | null> {

@@ -3,7 +3,7 @@ import { LRUCache } from "lru-cache";
 import { canonicalBursarConfigDict } from "../config.js";
 import type { PricingEngine } from "../engine.js";
 import { PricingEngine as PricingEngineClass } from "../engine.js";
-import { PricingNotLoadedError } from "../errors.js";
+import { LeaseNotFoundError, PricingNotLoadedError } from "../errors.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditStore } from "./store.js";
 import type { MetricsOrAmount } from "./service-types.js";
@@ -90,14 +90,26 @@ export class PricingRuntime {
   async costOf(
     metricsOrAmount: MetricsOrAmount,
     userId?: string | null,
+    leaseId?: string | null,
   ): Promise<{ amount: Decimal; model: string | null }> {
     if (isAmount(metricsOrAmount)) {
       return { amount: toDecimal(metricsOrAmount), model: null };
     }
-    const engine = await this.engineForUser(userId ?? null);
-    const plan = userId == null ? null : await this.store.getUserPlan(userId);
+    let engine: PricingEngine;
+    let rateCard: string | undefined;
+    if (leaseId != null) {
+      if (userId == null) throw new TypeError("userId is required when pricing a lease");
+      const context = await this.store.getLeasePricingContext(userId, leaseId);
+      if (!context) throw new LeaseNotFoundError(`Lease not found. User=${userId}`);
+      engine = await this.engineForCatalogVersion(context.catalogVersion);
+      rateCard = context.rateCard ?? engine.getRateCardForPlan(context.planKey);
+    } else {
+      engine = await this.engineForUser(userId ?? null);
+      const plan = userId == null ? null : await this.store.getUserPlan(userId);
+      rateCard = plan?.rateCard ?? undefined;
+    }
     const breakdown = engine.calculate(metricsOrAmount, {
-      rateCard: plan?.rateCard ?? undefined,
+      rateCard,
     });
     return {
       amount: breakdown.total,
@@ -124,6 +136,10 @@ export class PricingRuntime {
       return this.requireEngine();
     }
 
+    return this.engineForCatalogVersion(catalogVersion);
+  }
+
+  private async engineForCatalogVersion(catalogVersion: number): Promise<PricingEngine> {
     const cached = this.versionEngines.get(catalogVersion);
     if (cached) return cached;
 

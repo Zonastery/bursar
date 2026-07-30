@@ -242,22 +242,6 @@ AS $$
     SELECT * FROM edge_rows
 $$;
 
-CREATE FUNCTION bursar.spend_by_operation(
-    p_start timestamptz,
-    p_end timestamptz
-)
-RETURNS TABLE(
-    operation text,
-    total_spend numeric,
-    charge_count bigint
-)
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-    SELECT operation, sum(charged), sum(charge_count)::bigint
-    FROM bursar.usage_analytics_slice(p_start, p_end)
-    GROUP BY operation
-    ORDER BY sum(charged) DESC
-$$;
-
 CREATE FUNCTION bursar.list_ledger(
     p_subject_id uuid,
     p_after_created_at timestamptz DEFAULT NULL,
@@ -538,19 +522,6 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  WHERE provider=p_provider
  AND provider_environment=bursar.current_provider_environment()
  AND provider_payment_id=p_provider_payment_id
-$$;
-
-CREATE FUNCTION bursar.get_billing_refund_by_provider(
-    p_provider text,
-    p_provider_refund_id text
-)
-RETURNS bursar.billing_refunds
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
- SELECT *
- FROM bursar.billing_refunds
- WHERE provider=p_provider
- AND provider_environment=bursar.current_provider_environment()
- AND provider_refund_id=p_provider_refund_id
 $$;
 
 CREATE FUNCTION bursar.get_billing_preferences(

@@ -21,9 +21,12 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  ExecuteGrantProgramRequest,
   FeatureLimitResult,
+  GrantProgramAwardResult,
   GetUserPlanResult,
   LeaseResult,
+  LeasePricingContext,
   ListLedgerEntriesOptions,
   ListQuotaEventsOptions,
   ListUsageEntriesOptions,
@@ -172,8 +175,8 @@ export class PostgresStore extends CreditStore {
   private static readonly RPC_NAME_RE = /^[a-z_][a-z0-9_]*$/;
   private static readonly SCALAR_RPC_NAMES = new Set([
     "assign_plan",
-    "expire_lots",
     "release_lease",
+    "remove_team_member",
     "set_team_member",
     "start_plan_migration",
     "unassign_plan",
@@ -416,6 +419,20 @@ export class PostgresStore extends CreditStore {
     };
   }
 
+  async getLeasePricingContext(
+    userId: string,
+    leaseId: string,
+  ): Promise<LeasePricingContext | null> {
+    const row = await this.leaseRepo.getPricingContext(userId, leaseId);
+    if (!row) return null;
+    return {
+      catalogVersion: row.catalog_revision_no,
+      planId: row.plan_id ?? null,
+      planKey: row.plan_key ?? null,
+      rateCard: row.rate_card ?? null,
+    };
+  }
+
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseResult> {
     const row = await this.leaseRepo.releaseLease(userId, leaseId);
     return {
@@ -444,6 +461,13 @@ export class PostgresStore extends CreditStore {
       expiresAt: String(row.expires_at ?? ""),
       error: row.error != null ? String(row.error) : null,
     };
+  }
+
+  async expireLeases(limit = 100): Promise<number> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new RangeError("lease expiry limit must be an integer between 1 and 1000");
+    }
+    return this.leaseRepo.expireLeases(limit);
   }
 
   async getAvailable(userId: string): Promise<AvailableResult> {
@@ -941,6 +965,10 @@ export class PostgresStore extends CreditStore {
     }));
   }
 
+  async removeTeamMember(teamId: string, userId: string): Promise<boolean> {
+    return this.teamRepo.removeTeamMember(teamId, userId);
+  }
+
   async deductTeam(
     teamId: string,
     userId: string,
@@ -1003,5 +1031,28 @@ export class PostgresStore extends CreditStore {
       balance: dec(row.balance),
     }));
     return { userId, buckets, totalBalance: dec(envelope.total_balance) };
+  }
+
+  async executeGrantProgram(
+    request: ExecuteGrantProgramRequest,
+  ): Promise<GrantProgramAwardResult[]> {
+    const rows = await this.balanceRepo.executeGrantProgram({
+      trigger: request.trigger,
+      programKey: request.programKey,
+      subjectId: request.subjectId,
+      eventKey: request.eventKey,
+      referrerSubjectId: request.referrerSubjectId ?? null,
+      region: request.region ?? null,
+      metadata: JSON.stringify(request.metadata ?? {}),
+    });
+    return rows.map((row) => ({
+      grantEventId: row.grant_event_id ?? null,
+      grantAwardId: row.grant_award_id ?? null,
+      recipientSubjectId: row.recipient_subject_id ?? null,
+      ledgerEntryId: row.ledger_entry_id ?? null,
+      amount: dec(row.amount),
+      replayed: Boolean(row.replayed),
+      error: row.error_code ?? null,
+    }));
   }
 }

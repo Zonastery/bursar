@@ -35,6 +35,17 @@ class AvailableRow(BaseModel):
     available: str | Decimal | None = None
 
 
+class GrantProgramAwardRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    grant_event_id: str | None = None
+    grant_award_id: str | None = None
+    recipient_subject_id: str | None = None
+    ledger_entry_id: str | None = None
+    amount: str | Decimal | None = None
+    replayed: bool = False
+    error_code: str | None = None
+
+
 class DeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     entry_id: str = ""

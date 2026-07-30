@@ -1,5 +1,6 @@
 """PostgreSQL integration coverage for the public v1 Bursar configuration."""
 
+import time
 from copy import deepcopy
 from decimal import Decimal
 
@@ -9,6 +10,7 @@ import pytest
 from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.service import CreditsService
 from bursar.credits.store import StoreError
+from bursar.credits.types import ExecuteGrantProgramRequest
 from bursar.metrics import UsageMetrics
 
 pytestmark = [pytest.mark.integration]
@@ -385,6 +387,72 @@ def test_account_created_grant_program_posts_every_award(
             [REPLAY_USER_ID],
         )
         assert cursor.fetchone() == (2,)
+
+
+def test_manual_grant_program_is_exposed_by_python_sdk(store: PostgresStore) -> None:
+    config = deepcopy(CONFIG)
+    config["credits"]["grant_programs"] = {
+        "manual_bonus": {
+            "trigger": "manual",
+            "awards": [
+                {
+                    "recipient": "subject",
+                    "amount": "4",
+                    "bucket": "purchased",
+                }
+            ],
+            "max_awards_per_subject": 1,
+            "idempotency_scope": "event",
+        }
+    }
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(config)
+    request = ExecuteGrantProgramRequest(
+        trigger="manual",
+        program_key="manual_bonus",
+        subject_id=USER_ID,
+        event_key="manual-event-1",
+        metadata={"campaign": "summer"},
+    )
+
+    awards = service.execute_grant_program(request)
+    replay = service.execute_grant_program(request)
+
+    assert len(awards) == 1
+    assert awards[0].amount == Decimal("4")
+    assert awards[0].recipient_subject_id == USER_ID
+    assert awards[0].replayed is False
+    assert len(replay) == 1
+    assert replay[0].replayed is True
+    assert service.get_balance(USER_ID).balance == Decimal("4")
+
+
+def test_expire_leases_is_exposed_by_python_store(store: PostgresStore) -> None:
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(CONFIG)
+    service.add_credits(USER_ID, Decimal("10"), idempotency_key="lease-expiry-credit")
+    lease = store.create_lease(
+        USER_ID,
+        Decimal("2"),
+        "completion",
+        idempotency_key="lease-expiry-reserve",
+        ttl_seconds=1,
+    )
+    time.sleep(1.1)
+
+    assert store.expire_leases(25) == 1
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT status FROM bursar.credit_leases WHERE id = %s", [lease.lease_id])
+        assert cursor.fetchone() == ("expired",)
+
+
+def test_remove_team_member_is_exposed_by_python_store(store: PostgresStore) -> None:
+    team = store.create_team(USER_ID, "SDK team")
+    store.add_team_member(team.team_id, REPLAY_USER_ID)
+
+    assert store.remove_team_member(team.team_id, REPLAY_USER_ID) is True
+    assert store.remove_team_member(team.team_id, REPLAY_USER_ID) is False
+    assert store.remove_team_member(team.team_id, USER_ID) is False
 
 
 def test_plan_policies_persist_as_typed_references(

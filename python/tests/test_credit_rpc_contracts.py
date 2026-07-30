@@ -12,11 +12,13 @@ from bursar import (
     OperationNotAllowedError,
     QuotaExceededError,
 )
+from bursar.credits.postgres.repositories.balance import BalanceRepository
 from bursar.credits.postgres.repositories.deduction import DeductionRepository
 from bursar.credits.postgres.repositories.lease import LeaseRepository
 from bursar.credits.postgres.repositories.plan import PlanRepository
 from bursar.credits.postgres.repositories.pricing import PricingRepository
 from bursar.credits.postgres.repositories.schemas import CreateLeaseParams, SettleLeaseParams
+from bursar.credits.postgres.repositories.team import TeamRepository
 from bursar.credits.service import CreditsService
 
 USER_ID = "00000000-0000-0000-0000-000000000901"
@@ -126,6 +128,70 @@ def test_lease_repository_renews_through_official_rpc() -> None:
     assert calls[0] == ("renew_lease", [USER_ID, LEASE_ID, "300 seconds"])
     assert renewed is not None
     assert renewed.expires_at == expires_at
+
+
+def test_lease_repository_expires_a_bounded_batch() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        return [3]
+
+    expired = LeaseRepository(callproc).expire_leases(25)
+
+    assert expired == 3
+    assert calls == [("expire_leases", [25])]
+
+
+def test_balance_repository_executes_every_grant_program_award() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        return [
+            {
+                "grant_event_id": "00000000-0000-0000-0000-000000000910",
+                "grant_award_id": "00000000-0000-0000-0000-000000000911",
+                "recipient_subject_id": USER_ID,
+                "ledger_entry_id": ENTRY_ID,
+                "amount": "12.5",
+                "replayed": False,
+                "error_code": None,
+            }
+        ]
+
+    awards = BalanceRepository(callproc).execute_grant_program(
+        "manual",
+        "welcome_bonus",
+        USER_ID,
+        "event-42",
+        None,
+        "US",
+        '{"campaign":"summer"}',
+    )
+
+    assert calls == [
+        (
+            "execute_grant_program",
+            ["manual", "welcome_bonus", USER_ID, "event-42", None, "US", '{"campaign":"summer"}'],
+        )
+    ]
+    assert len(awards) == 1
+    assert awards[0].amount == "12.5"
+    assert awards[0].recipient_subject_id == USER_ID
+
+
+def test_team_repository_removes_member_through_official_rpc() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        return [True]
+
+    removed = TeamRepository(callproc).remove_team_member("team-1", USER_ID)
+
+    assert removed is True
+    assert calls == [("remove_team_member", ["team-1", USER_ID])]
 
 
 def test_lease_repository_reads_pinned_pricing_context_through_official_rpc() -> None:

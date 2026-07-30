@@ -48,9 +48,11 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     Entitlement,
+    ExecuteGrantProgramRequest,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
+    GrantProgramAwardResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
@@ -763,6 +765,12 @@ class PostgresStore(CreditStore):
             error=result.error,
         )
 
+    def expire_leases(self, limit: int = 100) -> int:
+        """Expire a bounded batch of abandoned leases and release reservations."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("lease expiry limit must be an integer between 1 and 1000")
+        return self._lease_repo.expire_leases(limit)
+
     def get_available(self, user_id: str) -> AvailableResult:
         """Get the available (unreserved) credit balance for a user.
 
@@ -1462,6 +1470,10 @@ class PostgresStore(CreditStore):
             for r in rows
         ]
 
+    def remove_team_member(self, team_id: str, user_id: str) -> bool:
+        """Remove a team member unless they are the final owner."""
+        return self._team_repo.remove_team_member(team_id, user_id)
+
     def deduct_team(
         self,
         team_id: str,
@@ -1557,6 +1569,34 @@ class PostgresStore(CreditStore):
             buckets=buckets,
             total_balance=_dec(result.total_balance),
         )
+
+    def execute_grant_program(
+        self,
+        request: ExecuteGrantProgramRequest,
+    ) -> list[GrantProgramAwardResult]:
+        """Execute an application-driven catalog grant program."""
+        metadata = request.metadata.model_dump(mode="json", exclude_none=True) if request.metadata else {}
+        rows = self._balance_repo.execute_grant_program(
+            request.trigger,
+            request.program_key,
+            request.subject_id,
+            request.event_key,
+            request.referrer_subject_id,
+            request.region,
+            json.dumps(metadata, cls=DecimalEncoder),
+        )
+        return [
+            GrantProgramAwardResult(
+                grant_event_id=row.grant_event_id,
+                grant_award_id=row.grant_award_id,
+                recipient_subject_id=row.recipient_subject_id,
+                ledger_entry_id=row.ledger_entry_id,
+                amount=_dec(row.amount),
+                replayed=row.replayed,
+                error=row.error_code,
+            )
+            for row in rows
+        ]
 
 
 def run_migrations(database_url: str) -> None:

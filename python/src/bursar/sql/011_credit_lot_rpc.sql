@@ -585,64 +585,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION bursar.expire_lots(
-    p_limit integer DEFAULT 100
-)
-RETURNS integer
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_count integer := 0;
-    lot_row record;
-    v_expiry_amount numeric;
-BEGIN
-    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000 THEN
-        RAISE EXCEPTION 'invalid_batch_limit' USING ERRCODE = '22023';
-    END IF;
-
-    FOR lot_row IN
-        SELECT id, account_id
-        FROM bursar.credit_lots
-        WHERE expires_at <= now()
-          AND consumed < granted
-        ORDER BY expires_at, id
-        LIMIT p_limit
-    LOOP
-        PERFORM 1
-        FROM bursar.credit_accounts
-        WHERE id = lot_row.account_id
-        FOR UPDATE SKIP LOCKED;
-
-        IF NOT FOUND THEN
-            CONTINUE;
-        END IF;
-
-        SELECT granted - consumed AS amount
-        INTO v_expiry_amount
-        FROM bursar.credit_lots
-        WHERE id = lot_row.id
-          AND expires_at <= now()
-          AND consumed < granted;
-
-        IF NOT FOUND THEN
-            CONTINUE;
-        END IF;
-
-        PERFORM bursar.targeted_lot_debit(
-            lot_row.id,
-            'expiry',
-            v_expiry_amount,
-            'expiry:' || lot_row.id::text
-        );
-        v_count := v_count + 1;
-    END LOOP;
-
-    RETURN v_count;
-END
-$$;
-
 CREATE FUNCTION bursar.revoke_lot(
     p_lot_id uuid,
     p_amount numeric,

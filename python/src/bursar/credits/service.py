@@ -64,9 +64,11 @@ from bursar.credits.types import (
     CreditMetadata,
     DailySpendRow,
     DeductionResult,
+    ExecuteGrantProgramRequest,
     FeatureLimit,
     FeatureLimitResult,
     GetUserPlanResult,
+    GrantProgramAwardResult,
     LeasePricingContext,
     LeaseResult,
     LedgerCursor,
@@ -874,6 +876,13 @@ class CreditsService:
                 },
             )
         return result
+
+    def execute_grant_program(
+        self,
+        request: ExecuteGrantProgramRequest,
+    ) -> list[GrantProgramAwardResult]:
+        """Execute an application-driven catalog grant program."""
+        return self._store.execute_grant_program(request)
 
     # ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
 

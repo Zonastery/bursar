@@ -82,6 +82,100 @@ describe("PostgresStore", () => {
     expect(calls[0].params[2]).toBe("100.5");
   });
 
+  it("executes application-driven grant programs and maps every award", async () => {
+    const { ctor, calls } = makeRecordingPool([
+      {
+        grant_event_id: "event-1",
+        grant_award_id: "award-1",
+        recipient_subject_id: "user-1",
+        ledger_entry_id: "entry-1",
+        amount: "12.5",
+        replayed: false,
+        error_code: null,
+      },
+      {
+        grant_event_id: "event-1",
+        grant_award_id: "award-2",
+        recipient_subject_id: "user-2",
+        ledger_entry_id: "entry-2",
+        amount: "2.5",
+        replayed: false,
+        error_code: null,
+      },
+    ]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+    const result = await store.executeGrantProgram({
+      trigger: "referral_completed",
+      programKey: "referral_bonus",
+      subjectId: "user-1",
+      eventKey: "referral-42",
+      referrerSubjectId: "user-2",
+      region: "US",
+      metadata: { campaign: "summer" },
+    });
+
+    expect(calls[0].text).toContain("execute_grant_program");
+    expect(calls[0].params).toEqual([
+      "referral_completed",
+      "referral_bonus",
+      "user-1",
+      "referral-42",
+      "user-2",
+      "US",
+      JSON.stringify({ campaign: "summer" }),
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      grantEventId: "event-1",
+      recipientSubjectId: "user-1",
+      replayed: false,
+    });
+    expect(result[0]?.amount.toString()).toBe("12.5");
+  });
+
+  it("reads the immutable lease pricing context", async () => {
+    const { ctor, calls } = makeRecordingPool([
+      {
+        catalog_revision_no: "7",
+        plan_id: "plan-id",
+        plan_key: "pro",
+        rate_card: "premium",
+      },
+    ]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+    await expect(store.getLeasePricingContext("user-1", "lease-1")).resolves.toEqual({
+      catalogVersion: 7,
+      planId: "plan-id",
+      planKey: "pro",
+      rateCard: "premium",
+    });
+    expect(calls[0].text).toContain("get_credit_lease_pricing_context");
+    expect(calls[0].params).toEqual(["user-1", "lease-1"]);
+  });
+
+  it("expires a bounded lease batch", async () => {
+    const { ctor, calls } = makeRecordingPool([{ expired: 3 }]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+    await expect(store.expireLeases(25)).resolves.toBe(3);
+    expect(calls[0].text).toContain("expire_leases");
+    expect(calls[0].params).toEqual([25]);
+    await expect(store.expireLeases(0)).rejects.toThrow(
+      "lease expiry limit must be an integer between 1 and 1000",
+    );
+  });
+
+  it("removes a team member through the scalar RPC", async () => {
+    const { ctor, calls } = makeRecordingPool([{ remove_team_member: true }]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+    await expect(store.removeTeamMember("team-1", "user-1")).resolves.toBe(true);
+    expect(calls[0].text).toContain("remove_team_member");
+    expect(calls[0].params).toEqual(["team-1", "user-1"]);
+  });
+
   // ── Credit tiers ─────────────────────────────────────────────────────
   describe("credit tiers", () => {
     it("addCredits sends the bucket to post_credit", async () => {

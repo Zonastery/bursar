@@ -15,7 +15,9 @@ import type {
   DailySpendRow,
   DeductionResult,
   DeductWithAllowanceOptions,
+  ExecuteGrantProgramRequest,
   FeatureLimitResult,
+  GrantProgramAwardResult,
   GetUserPlanResult,
   ListQuotaEventsOptions,
   MigratePlanUsersResult,
@@ -24,6 +26,7 @@ import type {
   QuotaEvent,
   QuotaState,
   LeaseResult,
+  LeasePricingContext,
   ListLedgerEntriesOptions,
   ListUsageEntriesOptions,
   LedgerPage,
@@ -157,6 +160,12 @@ export abstract class CreditStore {
     options?: SettleLeaseOptions,
   ): Promise<DeductionResult>;
 
+  /** Read the immutable catalog and rate card captured at lease admission. */
+  abstract getLeasePricingContext(
+    userId: string,
+    leaseId: string,
+  ): Promise<LeasePricingContext | null>;
+
   /**
    * Release a lease without charging (work failed/aborted) — idempotent (H1).
    *
@@ -172,6 +181,11 @@ export abstract class CreditStore {
    * ``error="lease_not_found"`` if missing/other-user/finalized.
    */
   abstract renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseResult>;
+
+  /** Expire a bounded batch of abandoned leases and release their reservations. */
+  async expireLeases(_limit?: number): Promise<number> {
+    throw new CapabilityNotSupportedError("expireLeases is not supported by this store");
+  }
 
   /**
    * Advisory, non-locking read of ``available = balance − Σ active holds``.
@@ -260,6 +274,13 @@ export abstract class CreditStore {
    */
   abstract getBucketBalances(userId: string): Promise<BucketBalancesResult>;
 
+  /** Execute one configured grant-program event. */
+  async executeGrantProgram(
+    _request: ExecuteGrantProgramRequest,
+  ): Promise<GrantProgramAwardResult[]> {
+    throw new CapabilityNotSupportedError("executeGrantProgram is not supported by this store");
+  }
+
   // ── Usage analytics (optional capability — WS8) ──────────────────────
   async spendByUser(_start: Date, _end: Date): Promise<SpendByUserRow[]> {
     throw new CapabilityNotSupportedError("spendByUser is not supported by this store");
@@ -316,6 +337,9 @@ export abstract class CreditStore {
   }
   async getTeamMembers(_teamId: string): Promise<TeamMember[]> {
     throw new CapabilityNotSupportedError("getTeamMembers is not supported by this store");
+  }
+  async removeTeamMember(_teamId: string, _userId: string): Promise<boolean> {
+    throw new CapabilityNotSupportedError("removeTeamMember is not supported by this store");
   }
   async deductTeam(
     _teamId: string,

@@ -5,3 +5,4 @@ export type * from "./quotas.js";
 export type * from "./ledger.js";
 export type * from "./analytics.js";
 export type * from "./teams.js";
+export type * from "./grants.js";

@@ -41,3 +41,9 @@ def test_shared_error_codes_and_provider_agnostic_public_contract() -> None:
         "quote_field": "quoteFingerprint",
         "provider_product_ids": "provider_internal",
     }
+
+
+def test_public_commerce_types_hide_provider_product_and_quote_aliases() -> None:
+    source = (Path(__file__).parents[1] / "src" / "bursar" / "commerce" / "types.py").read_text()
+    assert "product_id" not in source
+    assert "quote_hash" not in source
