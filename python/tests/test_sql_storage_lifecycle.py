@@ -17,7 +17,7 @@ def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
         (TEST_TENANT_ID,),
     )
     cursor.execute("INSERT INTO bursar.subjects DEFAULT VALUES RETURNING id")
-    subject_id = str(cursor.fetchone()[0])
+    subject_id = str(cursor.fetchone()[0])  # type: ignore[reportOptionalSubscript]
     cursor.execute(
         """
         INSERT INTO bursar.credit_accounts(subject_id, account_kind)
@@ -26,7 +26,7 @@ def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
         """,
         (subject_id,),
     )
-    return subject_id, str(cursor.fetchone()[0])
+    return subject_id, str(cursor.fetchone()[0])  # type: ignore[reportOptionalSubscript]
 
 
 def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
@@ -76,7 +76,7 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
                     Json({"trace_id": f"trace-{index}"}),
                 ),
             )
-            charge_ids.append(str(cursor.fetchone()[0]))
+            charge_ids.append(str(cursor.fetchone()[0]))  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
@@ -96,7 +96,7 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
             "SELECT bursar.run_storage_maintenance(%s)",
             (maintenance_now,),
         )
-        first_pass = cursor.fetchone()[0]
+        first_pass = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert first_pass["batch_size"] == 2
         assert first_pass["usage_payloads_purged"] == 2
         assert first_pass["has_more"] is True
@@ -115,7 +115,7 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
             "SELECT bursar.run_storage_maintenance(%s)",
             (maintenance_now,),
         )
-        second_pass = cursor.fetchone()[0]
+        second_pass = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert second_pass["usage_payloads_purged"] == 1
         assert second_pass["has_more"] is False
 
@@ -161,7 +161,7 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
             """,
             (subject_id, expired_at),
         )
-        charge_id = str(cursor.fetchone()[0])
+        charge_id = str(cursor.fetchone()[0])  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
@@ -171,7 +171,7 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
               AND range_start = '2025-01-01 00:00:00+00'::timestamptz
             """
         )
-        partition_table = cursor.fetchone()[0]
+        partition_table = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
@@ -190,7 +190,7 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
             """,
             (maintenance_now,),
         )
-        result = cursor.fetchone()[0]
+        result = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
 
         assert result["partitions_dropped"] >= 1
         assert result["partition_lock_timeouts"] == 0
@@ -229,7 +229,7 @@ def test_partition_registry_is_repaired_and_physical_drift_fails_loudly(
             LIMIT 1
             """
         )
-        parent_table, partition_table, range_start = cursor.fetchone()
+        parent_table, partition_table, range_start = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         cursor.execute(
             """
             UPDATE bursar.storage_partitions
@@ -288,20 +288,20 @@ def test_maybe_run_storage_maintenance_respects_interval(
             "SELECT bursar.maybe_run_storage_maintenance(%s)",
             (maintenance_now,),
         )
-        assert cursor.fetchone()[0]["status"] == "completed"
+        assert cursor.fetchone()[0]["status"] == "completed"  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             "SELECT bursar.maybe_run_storage_maintenance(%s)",
             (maintenance_now + timedelta(seconds=60),),
         )
-        skipped = cursor.fetchone()[0]
+        skipped = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert skipped["status"] == "not_due"
 
         cursor.execute(
             "SELECT bursar.maybe_run_storage_maintenance(%s)",
             (maintenance_now + timedelta(seconds=301),),
         )
-        assert cursor.fetchone()[0]["status"] == "completed"
+        assert cursor.fetchone()[0]["status"] == "completed"  # type: ignore[reportOptionalSubscript]
 
 
 def test_partition_maintenance_does_not_wait_behind_ingestion(
@@ -375,7 +375,7 @@ def test_partition_maintenance_does_not_wait_behind_ingestion(
                 """,
                 (maintenance_now,),
             )
-            result = cursor.fetchone()[0]
+            result = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             assert result["partitions_dropped"] == 0
             assert result["partition_lock_timeouts"] == 1
             assert result["has_more"] is True
@@ -435,7 +435,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             """,
             (Json(envelope),),
         )
-        result, event_id, claim_token = cursor.fetchone()
+        result, event_id, claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         assert result == "claimed"
 
         cursor.execute(
@@ -449,7 +449,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             """,
             (event_id,),
         )
-        assert cursor.fetchone()[0] == envelope
+        assert cursor.fetchone()[0] == envelope  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
@@ -477,7 +477,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             "SELECT bursar.export_billing_event_payload(%s::uuid)",
             (event_id,),
         )
-        exported = cursor.fetchone()[0]
+        exported = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert exported["event_id"] == str(event_id)
         assert exported["provider"] == "stripe"
         assert exported["envelope"] == envelope
@@ -503,7 +503,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             """,
             (event_id,),
         )
-        object_key, object_version = cursor.fetchone()
+        object_key, object_version = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         assert object_key == "billing/stripe/evt-bounded-1.json"
         assert object_version == "version-1"
         cursor.execute(
@@ -519,7 +519,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             "SELECT bursar.export_billing_event_payload(%s::uuid)",
             (event_id,),
         )
-        exported = cursor.fetchone()[0]
+        exported = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert exported["envelope"] is None
         assert exported["object_key"] == "billing/stripe/evt-bounded-1.json"
 
@@ -558,7 +558,7 @@ def test_outbox_claim_acknowledgement_and_payload_bounds(
             )
             """
         )
-        _, _, billing_claim_token = cursor.fetchone()
+        _, _, billing_claim_token = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         cursor.execute(
             """
             SELECT bursar.complete_billing_event(
@@ -582,7 +582,7 @@ def test_outbox_claim_acknowledgement_and_payload_bounds(
             assert cursor.fetchone() == (True,)
 
         cursor.execute("SELECT count(*) FROM bursar.event_outbox WHERE status = 'delivered'")
-        assert cursor.fetchone()[0] == len(claimed)
+        assert cursor.fetchone()[0] == len(claimed)  # type: ignore[reportOptionalSubscript]
 
 
 def test_usage_export_and_topic_filtered_outbox_claim(
@@ -607,11 +607,11 @@ def test_usage_export_and_topic_filtered_outbox_claim(
             """,
             (subject_id,),
         )
-        charge_id, error_code = cursor.fetchone()
+        charge_id, error_code = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         assert error_code is None
 
         cursor.execute("SELECT bursar.export_usage_charge(%s::uuid)", (charge_id,))
-        exported = cursor.fetchone()[0]
+        exported = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         assert exported["charge_id"] == str(charge_id)
         assert exported["subject_id"] == subject_id
         assert exported["charged"] == "0.000000"
@@ -682,7 +682,7 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
                 RETURNING id
                 """
             )
-            revision_id = cursor.fetchone()[0]
+            revision_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             cursor.execute(
                 """
                 INSERT INTO bursar.catalog_operations(

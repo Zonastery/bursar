@@ -467,14 +467,14 @@ def test_service_role_and_jwt_context_preserve_tenant_isolation(
                 ),
             )
             cursor.execute("SELECT bursar.current_tenant_id()")
-            assert str(cursor.fetchone()[0]) == TEST_TENANT_ID
+            assert str(cursor.fetchone()[0]) == TEST_TENANT_ID  # type: ignore[reportOptionalSubscript]
 
             cursor.execute("SET ROLE service_role")
             cursor.execute(
                 "SELECT balance FROM bursar.get_credit_state(%s)",
                 (SHARED_SUBJECT_ID,),
             )
-            assert cursor.fetchone()[0] == Decimal("10")
+            assert cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript] == Decimal("10")
 
             cursor.execute(
                 "SELECT set_config('request.jwt.claims', %s, true)",
@@ -484,7 +484,7 @@ def test_service_role_and_jwt_context_preserve_tenant_isolation(
                 "SELECT balance FROM bursar.get_credit_state(%s)",
                 (SHARED_SUBJECT_ID,),
             )
-            assert cursor.fetchone()[0] == Decimal("20")
+            assert cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript] == Decimal("20")
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT set_config('bursar.tenant_id', '', true)")
@@ -682,7 +682,7 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
               AND revision.status = 'active'
             """
         )
-        first_target = first_cursor.fetchone()[0]
+        first_target = first_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         second_cursor.execute(
             """
             SELECT plan.id
@@ -693,18 +693,18 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
               AND revision.status = 'active'
             """
         )
-        second_target = second_cursor.fetchone()[0]
+        second_target = second_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
 
         first_cursor.execute(
             "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
             (first_target,),
         )
-        first_migration = first_cursor.fetchone()[0]
+        first_migration = first_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
         second_cursor.execute(
             "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
             (second_target,),
         )
-        second_migration = second_cursor.fetchone()[0]
+        second_migration = second_cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
 
         first_cursor.execute(
             "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",

@@ -7,16 +7,16 @@ from typing import Any
 
 import pytest
 
-from bursar.billing.types import BillingEventResult
+from bursar.billing.types import BillingEvent, BillingEventResult
 from bursar.providers.dodo.provider import DodoProvider
-from bursar.providers.types import WebhookRequest
+from bursar.providers.types import ResolveIdentityInput, WebhookRequest
 
 
 class FakeSink:
     def __init__(self) -> None:
         self.called = False
 
-    def ingest_billing_event(self, _event: Any) -> BillingEventResult:
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         self.called = True
         return BillingEventResult(handled=True, action="ok")
 
@@ -40,6 +40,7 @@ class FakeClient:
         self._unwrap_result = unwrap_result
         self._unwrap_error = unwrap_error
         self.webhooks = self
+        self.checkout_sessions: Any = None
 
     async def unwrap(self, raw_body: str, headers: dict[str, str], key: str | None = None) -> Any:
         if self._unwrap_error:
@@ -51,7 +52,8 @@ class FakeResolveUser:
     def __init__(self) -> None:
         self.called = False
 
-    async def __call__(self, data: dict[str, Any], metadata: dict[str, str]) -> str | None:
+    async def __call__(self, identity: ResolveIdentityInput) -> str | None:
+        del identity
         self.called = True
         return "00000000-0000-0000-0000-000000000001"
 

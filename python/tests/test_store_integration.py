@@ -11,7 +11,7 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 from bursar.credits.service import CreditsService
 from bursar.credits.service_types import ReserveOptions, SettleOptions
 from bursar.credits.store import CreateLeaseOptions, StoreError
-from bursar.credits.types import ExecuteGrantProgramRequest
+from bursar.credits.types import CreditMetadata, ExecuteGrantProgramRequest
 from bursar.metrics import UsageMetrics
 from tests.conftest import TEST_TENANT_ID
 
@@ -108,7 +108,7 @@ def test_catalog_shape_validator_rejects_removed_nested_fields(
             FROM schema
             """
         )
-        assert cursor.fetchone()[0] == "$.catalog.activation is not allowed"
+        assert cursor.fetchone()[0] == "$.catalog.activation is not allowed"  # type: ignore[reportOptionalSubscript]
 
         cursor.execute(
             """
@@ -124,7 +124,7 @@ def test_catalog_shape_validator_rejects_removed_nested_fields(
             FROM schema
             """
         )
-        assert cursor.fetchone()[0] == "$.commerce.auto_recharge.limits.max_failures is not allowed"
+        assert cursor.fetchone()[0] == "$.commerce.auto_recharge.limits.max_failures is not allowed"  # type: ignore[reportOptionalSubscript]
 
 
 def test_migrations_are_idempotent_and_detect_checksum_mismatch(
@@ -133,7 +133,7 @@ def test_migrations_are_idempotent_and_detect_checksum_mismatch(
     run_migrations(pg_database_url)
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT version, checksum FROM bursar.schema_migrations ORDER BY version LIMIT 1")
-        version, checksum = cursor.fetchone()
+        version, checksum = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
         cursor.execute(
             "UPDATE bursar.schema_migrations SET checksum = 'tampered' WHERE version = %s",
             [version],
@@ -263,7 +263,9 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     deduction = service.deduct(
         USER_ID,
         UsageMetrics(
-            operation="completion", measures={"input_tokens": 2, "output_tokens": 4}, dimensions={"model": "premium-x"}
+            operation="completion",
+            measures={"input_tokens": Decimal("2"), "output_tokens": Decimal("4")},
+            dimensions={"model": "premium-x"},
         ),
         idempotency_key="new-schema-charge-1",
     )
@@ -271,7 +273,7 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     assert deduction.amount == Decimal("16")
     free = service.deduct(
         USER_ID,
-        UsageMetrics(operation="free_export", measures={"calls": 1}, dimensions={}),
+        UsageMetrics(operation="free_export", measures={"calls": Decimal("1")}, dimensions={}),
         idempotency_key="new-schema-free-usage",
     )
     assert free.amount == Decimal("0")
@@ -327,12 +329,12 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
     )
     estimate = UsageMetrics(
         operation="completion",
-        measures={"input_tokens": 5, "output_tokens": 2},
+        measures={"input_tokens": Decimal("5"), "output_tokens": Decimal("2")},
         dimensions={"model": "standard"},
     )
     actual = UsageMetrics(
         operation="completion",
-        measures={"input_tokens": 3, "output_tokens": 1},
+        measures={"input_tokens": Decimal("3"), "output_tokens": Decimal("1")},
         dimensions={"model": "standard"},
     )
 
@@ -402,7 +404,7 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
             """,
             [USER_ID],
         )
-        usage_total, cached_consumed = cursor.fetchone()
+        usage_total, cached_consumed = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
 
     assert usage_total == Decimal("0")
     assert cached_consumed == Decimal("0")
@@ -430,7 +432,7 @@ def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> N
         USER_ID,
         UsageMetrics(
             operation="completion",
-            measures={"input_tokens": 5, "output_tokens": 0},
+            measures={"input_tokens": Decimal("5"), "output_tokens": Decimal("0")},
             dimensions={"model": "standard"},
         ),
         idempotency_key="new-schema-charge-2",
@@ -511,7 +513,7 @@ def test_manual_grant_program_is_exposed_by_python_sdk(store: PostgresStore) -> 
         program_key="manual_bonus",
         subject_id=USER_ID,
         event_key="manual-event-1",
-        metadata={"campaign": "summer"},
+        metadata=CreditMetadata.model_validate({"campaign": "summer"}),
     )
 
     awards = service.execute_grant_program(request)
@@ -619,7 +621,7 @@ def test_plan_policies_persist_as_typed_references(
               )
             """
         )
-        operation, measure, quota_limit, window, enforcement = cursor.fetchone()
+        operation, measure, quota_limit, window, enforcement = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
 
     assert operation == "completion"
     assert measure == "calls"

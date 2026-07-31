@@ -66,7 +66,7 @@ def test_typed_match_rule_wins() -> None:
     result = engine.calculate(
         UsageMetrics(
             operation="completion",
-            measures={"input_tokens": 2},
+            measures={"input_tokens": Decimal("2")},
             dimensions={"model": "gpt-fast"},
         )
     )
@@ -78,7 +78,7 @@ def test_unmatched_charge_is_explicit() -> None:
     result = engine.calculate(
         UsageMetrics(
             operation="completion",
-            measures={"input_tokens": 2, "output_tokens": 1},
+            measures={"input_tokens": Decimal("2"), "output_tokens": Decimal("1")},
             dimensions={"model": "other"},
         )
     )
@@ -93,7 +93,7 @@ def test_unmatched_rejects_when_configured() -> None:
         engine.calculate(
             UsageMetrics(
                 operation="completion",
-                measures={"input_tokens": 1},
+                measures={"input_tokens": Decimal("1")},
                 dimensions={"model": "other"},
             )
         )

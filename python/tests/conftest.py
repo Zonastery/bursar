@@ -42,6 +42,7 @@ import os
 import time
 import warnings
 from collections.abc import Generator, Iterator
+from typing import Any
 
 import psycopg2
 import pytest
@@ -52,7 +53,7 @@ TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
 
 
-def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
+def _pg2_conn(dsn: str) -> Generator[Any, None, None]:
     """Context manager yielding a fresh psycopg2 connection — auto-closes."""
     conn = psycopg2.connect(dsn)
     try:
@@ -61,7 +62,7 @@ def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
         conn.close()
 
 
-def _insert_deny_cap(conn: psycopg2.connection, user_id: str, limit: int) -> None:
+def _insert_deny_cap(conn: Any, user_id: str, limit: int) -> None:
     """Insert a daily deny spend cap at ``limit`` for ``user_id``."""
     with conn.cursor() as cur:
         cur.execute(

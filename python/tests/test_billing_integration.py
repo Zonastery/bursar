@@ -337,7 +337,7 @@ class TestCheckoutIntentIdempotency:
                     "https://example.test/original",
                 ),
             )
-            intent_id = cursor.fetchone()[0]
+            intent_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             cursor.execute(
                 "SELECT bursar.advance_checkout_intent(%s::uuid, 'failed', NULL, NULL)",
                 (intent_id,),
@@ -409,7 +409,7 @@ class TestCheckoutIntentIdempotency:
                     "https://example.test/stale",
                 ),
             )
-            intent_id = cursor.fetchone()[0]
+            intent_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             cursor.execute(
                 """
                 UPDATE bursar.billing_checkout_intents
@@ -490,7 +490,7 @@ class TestAutoRechargeProfile:
                 WHERE topup.topup_key = 'standard_topup'
                 """
             )
-            topup_id = cursor.fetchone()[0]
+            topup_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             cursor.execute(
                 """
                 SELECT bursar.upsert_auto_recharge_profile(
@@ -531,7 +531,7 @@ class TestAutoRechargeProfile:
                 WHERE topup.topup_key = 'standard_topup'
                 """
             )
-            topup_id, revision_id = cursor.fetchone()
+            topup_id, revision_id = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
             cursor.execute(
                 """
                 INSERT INTO bursar.subjects(id)
@@ -612,7 +612,7 @@ class TestAutoRechargeProfile:
                 WHERE offer.offer_key = 'pro_monthly'
                 """
             )
-            offer_id, revision_id = cursor.fetchone()
+            offer_id, revision_id = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
             cursor.execute(
                 """
                 INSERT INTO bursar.subjects(id)
@@ -727,7 +727,7 @@ class TestSubscriptionCrud:
             provider_customer_id=CUSTOMER_ID,
             offer_key="pro_monthly",
             plan="pro",
-            status="active",
+            status=BillingSubscriptionStatus.active,
             current_period_start="2025-01-01T00:00:00Z",
             current_period_end="2025-02-01T00:00:00Z",
         )
@@ -752,7 +752,7 @@ class TestSubscriptionCrud:
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
                 offer_key="pro_monthly",
-                status="active",
+                status=BillingSubscriptionStatus.active,
             )
         )
         bs.upsert_billing_subscription(
@@ -760,7 +760,7 @@ class TestSubscriptionCrud:
                 user_id=USER_ID,
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
-                status="canceled",
+                status=BillingSubscriptionStatus.canceled,
             )
         )
         sub = bs.get_billing_subscription(PROVIDER, SUB_ID)
@@ -778,7 +778,7 @@ class TestEventIdempotency:
         event = BillingEvent(
             provider=PROVIDER,
             event_id=EVENT_ID,
-            event_type="customer.created",
+            event_type=BillingEventType.customer_created,
             occurred_at=_now(),
             user_id=USER_ID,
         )
@@ -898,7 +898,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_1",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
@@ -908,13 +908,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_create_1",
-                event_type="subscription.created",
+                event_type=BillingEventType.subscription_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
@@ -941,13 +941,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cancel_1",
-                event_type="subscription.canceled",
+                event_type=BillingEventType.subscription_canceled,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID,
-                    status="canceled",
+                    status=BillingSubscriptionStatus.canceled,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -966,7 +966,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_2",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -976,7 +976,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_payment_2",
-                event_type="payment.succeeded",
+                event_type=BillingEventType.payment_succeeded,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1003,7 +1003,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_refund",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -1013,7 +1013,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_pay_refund",
-                event_type="payment.succeeded",
+                event_type=BillingEventType.payment_succeeded,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -1033,7 +1033,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_refund_1",
-                event_type="refund.created",
+                event_type=BillingEventType.refund_created,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -1058,7 +1058,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_pause",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1068,13 +1068,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_1",
-                event_type="subscription.renewed",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID2,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -1085,7 +1085,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_2",
-                event_type="subscription.paused",
+                event_type=BillingEventType.subscription_paused,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1100,13 +1100,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_3",
-                event_type="subscription.resumed",
+                event_type=BillingEventType.subscription_resumed,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID2,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -1136,7 +1136,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dup_test"),
@@ -1148,7 +1148,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dup_test"),
@@ -1196,7 +1196,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg1",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID3,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -1206,13 +1206,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg1",
-                event_type="subscription.renewed",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID3,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_test",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(
@@ -1235,7 +1235,7 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg2",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
@@ -1245,13 +1245,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2a",
-                event_type="subscription.renewed",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_replace",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(
@@ -1271,13 +1271,13 @@ class TestBillingServiceLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2b",
-                event_type="subscription.renewed",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_replace",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-07-01T00:00:00Z",
                     period_end="2025-08-01T00:00:00Z",
                     refs=ProviderRef(
@@ -1303,7 +1303,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_lifecycle",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_lifecycle"),
@@ -1355,7 +1355,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_dup"),
@@ -1392,7 +1392,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_multi",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_multi"),
@@ -1437,7 +1437,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_date",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_date"),

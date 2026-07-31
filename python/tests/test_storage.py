@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock
+from uuid import UUID
 
 import pytest
 
@@ -271,7 +272,7 @@ def test_clickhouse_writes_projection_and_serves_analytics() -> None:
     store = ClickHouseUsageStore(
         ClickHouseUsageStoreOptions(
             client=client,
-            tenant_id=TENANT_ID,
+            tenant_id=UUID(TENANT_ID),
             create_table=False,
         )
     )
@@ -300,7 +301,7 @@ def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
     store = ClickHouseUsageStore(
         ClickHouseUsageStoreOptions(
             client=client,
-            tenant_id=TENANT_ID,
+            tenant_id=UUID(TENANT_ID),
             create_table=False,
         )
     )
@@ -317,7 +318,7 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
-            tenant_id="00000000-0000-0000-0000-000000000001",
+            tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
         )
     )
 
@@ -335,7 +336,7 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
-            tenant_id=TENANT_ID,
+            tenant_id=UUID(TENANT_ID),
         )
     )
     load_catalog = Mock(side_effect=[PricingNotLoadedError("catalog pending"), None])
@@ -367,10 +368,10 @@ def test_runtime_routes_analytics_through_clickhouse_without_changing_store() ->
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
-            tenant_id="00000000-0000-0000-0000-000000000001",
+            tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
             clickhouse=ClickHouseUsageStoreOptions(
                 client=client,
-                tenant_id=TENANT_ID,
+                tenant_id=UUID(TENANT_ID),
                 create_table=False,
             ),
             outbox=False,

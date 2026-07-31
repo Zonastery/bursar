@@ -132,7 +132,7 @@ def test_typed_rate_card_is_used_by_the_pricing_engine() -> None:
     result = engine.calculate(
         UsageMetrics(
             operation="completion",
-            measures={"tokens": 8},
+            measures={"tokens": Decimal("8")},
             dimensions={"model": "test"},
         ),
         rate_card=engine.get_rate_card_for_plan("pro"),

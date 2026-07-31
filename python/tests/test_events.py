@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
-from bursar.credits.events import CreditEvent, CreditEventEmitter
+from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 
 
 def _event(event_type: str = "credits.deducted") -> CreditEvent:
-    return CreditEvent(type=event_type, timestamp=datetime.now(UTC), user_id="u1", data={"amount": "1"})
+    return CreditEvent(
+        type=cast(CreditEventType, event_type),
+        timestamp=datetime.now(UTC),
+        user_id="u1",
+        data={"amount": "1"},
+    )
 
 
 def test_handlers_are_snapshot_copied_and_failures_are_isolated() -> None:

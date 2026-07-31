@@ -4,7 +4,12 @@ from typing import Any, cast
 import pytest
 
 from bursar import CommerceNotConfiguredError, ConfigError, PricingNotLoadedError
+from bursar.billing.billing_service import BillingService
+from bursar.billing.billing_store import BillingStore
+from bursar.billing.types import BillingEvent
 from bursar.bursar import Bursar
+from bursar.credits.service import CreditsService
+from bursar.credits.store import CreditStore
 
 
 @dataclass
@@ -27,7 +32,10 @@ class FakeCredits:
 
 def test_bursar_create_owns_catalog_and_delegates():
     credits = FakeCredits()
-    bursar = Bursar.create(credit_store=object(), credits=credits)
+    bursar = Bursar.create(
+        credit_store=cast(CreditStore, object()),
+        credits=cast(CreditsService, credits),
+    )
 
     assert bursar.credits is credits
     assert bursar.billing is None
@@ -45,9 +53,9 @@ def test_bursar_always_owns_billing_provisioning(monkeypatch):
     monkeypatch.setattr("bursar.bursar.BillingEventService", FakeBilling)
     credits = FakeCredits()
     Bursar.create(
-        credit_store=object(),
-        billing_store=object(),
-        credits=credits,
+        credit_store=cast(CreditStore, object()),
+        billing_store=cast(BillingStore, object()),
+        credits=cast(CreditsService, credits),
         billing_options={"auto_select_entitlement_source": False},
     )
 
@@ -60,10 +68,14 @@ def test_bursar_routes_provider_events_through_billing_service():
         def ingest_billing_event(self, event):
             return {"handled": True, "action": event["event_type"]}
 
-    bursar = Bursar(credits=FakeCredits(), catalog=None, billing=FakeBilling())
+    bursar = Bursar(
+        credits=cast(CreditsService, FakeCredits()),
+        catalog=None,
+        billing=cast(BillingService, FakeBilling()),
+    )
     event = {"event_type": "subscription.created"}
 
-    assert bursar.ingest_billing_event(event) == {"handled": True, "action": "subscription.created"}
+    assert bursar.ingest_billing_event(cast(BillingEvent, event)) == {"handled": True, "action": "subscription.created"}
 
 
 def test_bursar_public_facade_emits_typed_errors():

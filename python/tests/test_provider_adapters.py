@@ -23,6 +23,7 @@ from bursar.providers.types import (
     PreviewChangePlanParams,
     UpdatePaymentMethodParams,
     WebhookRequest,
+    WebhookResult,
 )
 
 
@@ -34,8 +35,15 @@ class MinimalProvider(PaymentProvider):
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         return CheckoutSessionResult(url=params.return_url)
 
-    async def handle_webhook(self, req: WebhookRequest) -> dict:
-        return {"received": True, "retryable": False}
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
+        del req
+        return WebhookResult(
+            received=True,
+            retryable=False,
+            provider="minimal",
+            event_id=None,
+            event_type=None,
+        )
 
 
 class Sink:
