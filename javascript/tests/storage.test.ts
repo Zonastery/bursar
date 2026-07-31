@@ -305,4 +305,136 @@ describe("BursarRuntime", () => {
     expect(pool.query).not.toHaveBeenCalled();
     await runtime.close();
   });
+
+  it("rejects a ClickHouse tenant mismatch at construction", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const clickhouseClient: ClickHouseClient = {
+      command: vi.fn().mockResolvedValue(undefined),
+      insert: vi.fn().mockResolvedValue(undefined),
+      query: vi.fn().mockResolvedValue({ json: async () => [] }),
+    };
+    await expect(
+      createBursarRuntime({
+        postgres: pool,
+        tenantId: TEST_TENANT_ID,
+        clickhouse: {
+          client: clickhouseClient,
+          tenantId: "00000000-0000-0000-0000-000000000002",
+          createTable: false,
+        },
+      }),
+    ).rejects.toThrow("ClickHouse tenantId must match runtime tenantId");
+  });
+
+  it("rejects an empty postgres connection string", async () => {
+    await expect(
+      createBursarRuntime({ postgres: "   ", tenantId: TEST_TENANT_ID }),
+    ).rejects.toThrow(TypeError);
+  });
+
+  it("guards against reuse after close and double start", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    await runtime.start();
+    await runtime.start();
+    expect(runtime.health()).toMatchObject({ started: true });
+
+    await runtime.close();
+    await runtime.close();
+    expect(runtime.health()).toMatchObject({ closed: true, ready: false });
+    await expect(runtime.flush()).rejects.toThrow("BursarRuntime has been closed");
+    await expect(runtime.start()).resolves.toBeUndefined();
+  });
+
+  it("rejects start after close before a first start", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    await runtime.close();
+    await expect(runtime.start()).rejects.toThrow("BursarRuntime has been closed");
+  });
+
+  it("validates catalog retry attempts", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    await expect(runtime.start({ loadCatalog: true, maxAttempts: 0 })).rejects.toThrow(RangeError);
+    await runtime.close();
+  });
+
+  it("surfaces a permanent catalog failure without retrying", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    const loadCatalog = vi
+      .spyOn(runtime.bursar, "loadCatalog")
+      .mockRejectedValue(new Error("catalog corrupt"));
+    await expect(runtime.start({ loadCatalog: true, maxAttempts: 3 })).rejects.toThrow(
+      "catalog corrupt",
+    );
+    expect(loadCatalog).toHaveBeenCalledOnce();
+    await runtime.close();
+  });
+
+  it("accepts in-memory sink objects and starts the outbox worker", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const clickhouse = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      writeUsage: vi.fn().mockResolvedValue(undefined),
+      spendByUser: vi.fn().mockResolvedValue([]),
+    };
+    const s3 = {
+      archive: vi.fn().mockResolvedValue({ key: "k", versionId: "v1" }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+      clickhouse,
+      s3,
+      outbox: {},
+      bursar: { commerceOptions: { providers: {} } },
+    });
+
+    expect(runtime.clickhouse).toBe(clickhouse);
+    expect(runtime.s3).toBe(s3);
+    expect(runtime.worker).not.toBeNull();
+    await runtime.start();
+    expect(runtime.health()).toMatchObject({ started: true });
+    await runtime.close();
+    expect(clickhouse.initialize).toHaveBeenCalled();
+  });
 });
