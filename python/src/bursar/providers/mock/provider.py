@@ -20,6 +20,7 @@ from bursar.providers.types import (
     ProviderLogger,
     ProviderResolveUserFn,
     ProviderUrlResult,
+    ResolveIdentityInput,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -137,7 +138,29 @@ class MockPaymentProvider(PaymentProvider):
         user_id: str | None = metadata.get("userId")
 
         if not user_id and self._resolve_user:
-            user_id = await self._resolve_user(data, metadata)
+            event_type = str(payload.get("type", ""))
+            customer = data.get("customer")
+            customer_dict = customer if isinstance(customer, dict) else {}
+            customer_id = str(data.get("customer_id") or customer_dict.get("customer_id") or "").strip() or None
+            email_value = customer_dict.get("email")
+            user_id = await self._resolve_user(
+                ResolveIdentityInput(
+                    provider=self.provider,
+                    provider_event_type=event_type,
+                    normalized_event_type=event_type or None,
+                    customer_id=customer_id,
+                    email=str(email_value).strip().lower() if email_value else None,
+                    metadata=metadata,
+                    successful=event_type in {"payment.succeeded", "subscription.active", "subscription.renewed"},
+                    checkout_kind=(
+                        "subscription"
+                        if event_type.startswith("subscription.")
+                        else "credit_topup"
+                        if metadata.get("credits")
+                        else None
+                    ),
+                )
+            )
 
         await handle_dodo_billing_event(
             str(payload.get("type", "")),

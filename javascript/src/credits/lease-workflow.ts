@@ -1,6 +1,7 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
 import { ConfigError } from "../errors.js";
+import { retryBursarOperation } from "../retry.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEventType } from "./events.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
@@ -8,6 +9,8 @@ import { isAmount, PricingRuntime } from "./pricing-runtime.js";
 import { raiseLeaseError } from "./service-errors.js";
 import type {
   CanAffordOptions,
+  BeginBilledOperationOptions,
+  BilledOperation,
   MetricsOrAmount,
   PolicyPreset,
   ReserveOptions,
@@ -390,12 +393,16 @@ export class CreditLeaseWorkflow {
     userId: string,
     options: RunBilledOptions<T>,
   ): Promise<{ result: T; deduction: DeductionResult }> {
-    const lease = await this.reserve(userId, options.estimate, {
+    const operationKey = options.operationKey ?? options.idempotencyKey ?? `billed:${randomUUID()}`;
+    const operation = await this.beginBilledOperation(userId, {
+      estimate: options.estimate,
+      operationKey,
       operationType: options.operationType,
       billingMode: options.billingMode,
       requiredFeature: options.requiredFeature,
       ttl: options.ttl,
       feature: options.feature,
+      metadata: options.metadata,
     });
 
     let workResult: T;
@@ -403,14 +410,55 @@ export class CreditLeaseWorkflow {
     try {
       ({ result: workResult, actual } = await options.doWork());
     } catch (err) {
-      await this.release(userId, lease.leaseId);
+      await operation.release();
       throw err;
     }
 
-    const deduction = await this.settle(userId, lease.leaseId, actual, {
-      idempotencyKey: options.idempotencyKey,
-      feature: options.feature,
+    // Never release after work succeeds. A settlement failure may be a
+    // transient/unknown-commit outcome and is safe to replay with operationKey.
+    const deduction = await retryBursarOperation(() => operation.settle(actual), {
+      maxAttempts: options.settlementAttempts,
     });
     return { result: workResult, deduction };
+  }
+
+  /**
+   * Begin a replay-safe billable operation that can span framework callbacks.
+   *
+   * The operation key is namespaced into distinct reserve and settle keys, so
+   * replaying the whole lifecycle cannot acquire a second hold.
+   */
+  async beginBilledOperation(
+    userId: string,
+    options: BeginBilledOperationOptions,
+  ): Promise<BilledOperation> {
+    if (!options.operationKey.trim()) {
+      throw new ConfigError("operationKey must not be empty");
+    }
+    const lease = await this.reserve(userId, options.estimate, {
+      operationType: options.operationType,
+      billingMode: options.billingMode,
+      requiredFeature: options.requiredFeature,
+      ttl: options.ttl,
+      feature: options.feature,
+      metadata: options.metadata,
+      idempotencyKey: `${options.operationKey}:reserve`,
+    });
+    return {
+      leaseId: lease.leaseId,
+      operationKey: options.operationKey,
+      settle: async (actual, metadata) =>
+        this.settle(userId, lease.leaseId, actual, {
+          idempotencyKey: `${options.operationKey}:settle`,
+          feature: options.feature,
+          metadata: metadata ?? options.metadata,
+        }),
+      renew: async (ttl) => {
+        await this.renew(userId, lease.leaseId, ttl);
+      },
+      release: async () => {
+        await this.release(userId, lease.leaseId);
+      },
+    };
   }
 }

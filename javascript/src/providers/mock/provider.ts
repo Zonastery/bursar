@@ -19,6 +19,37 @@ import type {
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
 
+function mockIdentityInput(
+  providerEventType: string,
+  data: Record<string, unknown>,
+  metadata: Record<string, string>,
+) {
+  const customer =
+    typeof data.customer === "object" && data.customer !== null
+      ? (data.customer as Record<string, unknown>)
+      : {};
+  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
+  const emailValue = customer.email;
+  return {
+    provider: "mock",
+    providerEventType,
+    normalizedEventType: providerEventType,
+    customerId,
+    email:
+      typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null,
+    metadata,
+    successful:
+      providerEventType === "payment.succeeded" ||
+      providerEventType === "subscription.active" ||
+      providerEventType === "subscription.renewed",
+    checkoutKind: providerEventType.startsWith("subscription.")
+      ? ("subscription" as const)
+      : metadata.credits
+        ? ("credit_topup" as const)
+        : null,
+  };
+}
+
 export class MockPaymentProvider implements PaymentProvider {
   readonly provider = "mock" as const;
 
@@ -125,7 +156,9 @@ export class MockPaymentProvider implements PaymentProvider {
     let userId: string | null = metadata.userId ?? null;
 
     if (!userId && this.resolveUser) {
-      userId = await this.resolveUser(data, metadata);
+      userId = await this.resolveUser(
+        mockIdentityInput(String(payload.type ?? ""), data, metadata),
+      );
     }
 
     await handleDodoBillingEvent(

@@ -1,4 +1,5 @@
 import { Bursar, type BursarOptions } from "../bursar.js";
+import { isRetryableBursarError, PricingNotLoadedError } from "../errors.js";
 import { PostgresBillingStore } from "../billing/postgres/store.js";
 import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
@@ -20,6 +21,7 @@ type RuntimeBursarOptions = Omit<
 
 export interface BursarRuntimeOptions {
   postgres: string | PostgresPool;
+  tenantId: string;
   s3?: BillingPayloadArchive | S3BillingArchiveOptions | null;
   clickhouse?: (UsageEventSink & UsageAnalyticsStore) | ClickHouseUsageStoreOptions | null;
   /**
@@ -28,6 +30,23 @@ export interface BursarRuntimeOptions {
    */
   outbox?: OutboxWorkerOptions | false;
   bursar?: RuntimeBursarOptions;
+}
+
+export interface BursarRuntimeStartOptions {
+  /** Load the active catalog before starting background workers. */
+  loadCatalog?: boolean;
+  /** Total catalog-load attempts, including the first. Defaults to 1. */
+  maxAttempts?: number;
+  /** Initial retry delay. Each retry doubles up to 5 seconds. */
+  retryDelayMs?: number;
+  shouldRetry?: (error: unknown) => boolean;
+}
+
+export interface BursarRuntimeHealth {
+  ready: boolean;
+  started: boolean;
+  closed: boolean;
+  catalogLoaded: boolean;
 }
 
 /**
@@ -56,6 +75,13 @@ export class BursarRuntime {
   ) {
     this.pool = pool;
     this.ownsPool = ownsPool;
+    if (
+      options.clickhouse &&
+      !("writeUsage" in options.clickhouse) &&
+      options.clickhouse.tenantId !== options.tenantId
+    ) {
+      throw new Error("ClickHouse tenantId must match runtime tenantId");
+    }
     this.clickhouse = options.clickhouse
       ? "writeUsage" in options.clickhouse
         ? options.clickhouse
@@ -67,11 +93,18 @@ export class BursarRuntime {
         : new S3BillingArchive(options.s3)
       : null;
 
-    this.creditStore = new PostgresStore("", pool);
-    this.billingStore = new PostgresBillingStore(pool as import("pg").Pool);
+    this.creditStore = new PostgresStore("", options.tenantId, pool);
+    this.billingStore = new PostgresBillingStore(pool as import("pg").Pool, options.tenantId);
     const bursarOptions = options.bursar ?? {};
+    const commerceOptions = bursarOptions.commerceOptions
+      ? {
+          ...bursarOptions.commerceOptions,
+          tenantId: options.tenantId,
+        }
+      : undefined;
     this.bursar = new Bursar({
       ...bursarOptions,
+      commerceOptions,
       creditStore: this.creditStore,
       billingStore: this.billingStore,
       creditsOptions: {
@@ -81,7 +114,7 @@ export class BursarRuntime {
     });
 
     const query: QueryFn = async (text, params) => (await pool.query(text, params)).rows;
-    const repository = new PostgresStorageRepository(query);
+    const repository = new PostgresStorageRepository(query, options.tenantId);
     const handlers = this.createHandlers(repository);
     this.worker =
       handlers.length > 0 && options.outbox !== false
@@ -89,12 +122,44 @@ export class BursarRuntime {
         : null;
   }
 
-  async start(): Promise<void> {
+  async start(options: BursarRuntimeStartOptions = {}): Promise<void> {
     if (this.started) return;
     if (this.closed) throw new Error("BursarRuntime has been closed");
+    if (options.loadCatalog) {
+      const maxAttempts = options.maxAttempts ?? 1;
+      if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+        throw new RangeError("maxAttempts must be a positive integer");
+      }
+      const shouldRetry =
+        options.shouldRetry ??
+        ((error: unknown) =>
+          error instanceof PricingNotLoadedError || isRetryableBursarError(error));
+      let attempt = 0;
+      for (;;) {
+        attempt += 1;
+        try {
+          await this.bursar.loadCatalog();
+          break;
+        } catch (error) {
+          if (attempt >= maxAttempts || !shouldRetry(error)) throw error;
+          const delay = Math.min((options.retryDelayMs ?? 250) * 2 ** (attempt - 1), 5_000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      }
+    }
     await this.clickhouse?.initialize?.();
     await this.worker?.start();
     this.started = true;
+  }
+
+  health(): BursarRuntimeHealth {
+    const catalogLoaded = this.bursar.credits.pricingEngine != null;
+    return {
+      ready: this.started && !this.closed && catalogLoaded,
+      started: this.started,
+      closed: this.closed,
+      catalogLoaded,
+    };
   }
 
   async flush(): Promise<OutboxRunResult> {
@@ -126,6 +191,9 @@ export class BursarRuntime {
           if (!usage) {
             throw new Error(`Usage charge ${outboxEvent.aggregateId} is unavailable for export`);
           }
+          if (usage.tenantId !== outboxEvent.tenantId) {
+            throw new Error("Usage export tenant does not match its outbox event");
+          }
           await this.clickhouse?.writeUsage(usage, outboxEvent.eventId);
         },
       });
@@ -142,6 +210,9 @@ export class BursarRuntime {
           const event = await repository.getBillingEventPayload(outboxEvent.aggregateId);
           if (!event) {
             throw new Error(`Billing event ${outboxEvent.aggregateId} is unavailable for archive`);
+          }
+          if (event.tenantId !== outboxEvent.tenantId) {
+            throw new Error("Billing export tenant does not match its outbox event");
           }
           if (event.objectKey) return;
           const archived = await this.s3?.archive(event);

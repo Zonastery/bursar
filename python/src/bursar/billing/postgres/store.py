@@ -11,6 +11,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
+from uuid import UUID
 
 import psycopg2
 import psycopg2.extras
@@ -94,8 +95,15 @@ class PostgresBillingStore(BillingStore):
         pool: Optional existing connection pool; created if not provided.
     """
 
-    def __init__(self, database_url: str, pool: psycopg2.pool.ThreadedConnectionPool | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        tenant_id: str | UUID,
+        pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+    ) -> None:
         self._database_url = database_url
+        self._tenant_id = str(UUID(str(tenant_id)))
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
         self._owns_pool = pool is None
 
@@ -118,6 +126,10 @@ class PostgresBillingStore(BillingStore):
         conn = self._pool.getconn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT set_config('bursar.tenant_id', %s, true)",
+                    (self._tenant_id,),
+                )
                 cur.execute(sql, params or [])
                 try:
                     rows = cur.fetchall()

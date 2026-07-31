@@ -25,6 +25,7 @@ from bursar.providers.types import (
     ProviderLogger,
     ProviderResolveUserFn,
     ProviderUrlResult,
+    ResolveIdentityInput,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -36,6 +37,23 @@ from bursar.providers.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+_NORMALIZED_EVENT_TYPES = {
+    "checkout.expired": "checkout.expired",
+    "subscription.active": "subscription.created",
+    "subscription.renewed": "subscription.renewed",
+    "subscription.cancelled": "subscription.canceled",
+    "subscription.expired": "subscription.expired",
+    "subscription.failed": "subscription.updated",
+    "subscription.on_hold": "subscription.updated",
+    "subscription.updated": "subscription.updated",
+    "subscription.cancellation_scheduled": "subscription.cancellation_scheduled",
+    "subscription.cancellation_unscheduled": "subscription.cancellation_unscheduled",
+    "subscription.plan_changed": "subscription.plan_changed",
+    "payment.succeeded": "payment.succeeded",
+    "payment.failed": "payment.failed",
+    "refund.succeeded": "refund.created",
+}
 
 
 def _dodo_val(obj: Any, key: str, default: Any = None) -> Any:
@@ -141,7 +159,31 @@ class DodoProvider(PaymentProvider):
 
         user_id: str | None = metadata.get("userId")
         if not user_id and self._resolve_user is not None and event_type not in ("payment.failed", "checkout.expired"):
-            user_id = await self._resolve_user(data_dict, metadata, str(event_type))
+            customer = data_dict.get("customer")
+            customer_dict = customer if isinstance(customer, dict) else {}
+            customer_id = str(data_dict.get("customer_id") or customer_dict.get("customer_id") or "").strip() or None
+            email_value = customer_dict.get("email")
+            email = str(email_value).strip().lower() if email_value else None
+            provider_event_type = str(event_type)
+            user_id = await self._resolve_user(
+                ResolveIdentityInput(
+                    provider=self.provider,
+                    provider_event_type=provider_event_type,
+                    normalized_event_type=_NORMALIZED_EVENT_TYPES.get(provider_event_type),
+                    customer_id=customer_id,
+                    email=email,
+                    metadata=metadata,
+                    successful=provider_event_type
+                    in {"payment.succeeded", "subscription.active", "subscription.renewed"},
+                    checkout_kind=(
+                        "subscription"
+                        if provider_event_type.startswith("subscription.")
+                        else "credit_topup"
+                        if metadata.get("credits")
+                        else None
+                    ),
+                )
+            )
 
         await handle_dodo_billing_event(
             event_type,

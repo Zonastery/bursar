@@ -125,6 +125,10 @@ export interface CreditsConfig {
   defaultBucket?: string;
   policies: Record<string, CreditPolicy>;
   grantPrograms: Record<string, GrantProgram>;
+  display?: {
+    currency: string;
+    unitsPerMajor: Decimal;
+  };
 }
 
 export type FeatureDefinition =
@@ -251,7 +255,7 @@ export interface SubscriptionChangePolicy {
 
 export interface ParsedBursarConfig {
   version: 1;
-  catalog: { activation: { mode: "on_publish" } };
+  catalog: { activation: { mode: "on_publish" }; defaultPlan?: string };
   pricing?: PricingConfig;
   credits: CreditsConfig;
   entitlements: EntitlementsConfig;

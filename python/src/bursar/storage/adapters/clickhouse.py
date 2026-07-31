@@ -56,6 +56,7 @@ class ClickHouseUsageStoreOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     client: SkipValidation[ClickHouseClient]
+    tenant_id: UUID
     table: str = "bursar_usage_events"
     create_table: bool = True
     retention_days: int | None = None
@@ -102,6 +103,7 @@ class ClickHouseUsageStore:
     """Idempotent ClickHouse projection and usage analytics read port."""
 
     _INSERT_COLUMNS = (
+        "tenant_id",
         "outbox_event_id",
         "charge_id",
         "account_id",
@@ -131,6 +133,7 @@ class ClickHouseUsageStore:
 
     def __init__(self, options: ClickHouseUsageStoreOptions) -> None:
         self._client = options.client
+        self._tenant_id = options.tenant_id
         self._table = _validate_table_name(options.table)
         self._quoted_table = _quote_table(self._table)
         self._create_table = options.create_table
@@ -156,7 +159,11 @@ class ClickHouseUsageStore:
 
     def write_usage(self, event: UsageChargeExport, outbox_event_id: str) -> None:
         self.initialize()
+        if UUID(event.tenant_id) != self._tenant_id:
+            msg = "Usage event tenant_id does not match ClickHouse store tenant_id"
+            raise ValueError(msg)
         row = (
+            UUID(event.tenant_id),
             int(outbox_event_id),
             UUID(event.charge_id),
             UUID(event.account_id),
@@ -235,7 +242,8 @@ class ClickHouseUsageStore:
                 toString(sum(charged)) AS total_spend,
                 toString(count()) AS entry_count
             FROM {self._quoted_table} FINAL
-            WHERE event_at >= parseDateTime64BestEffort({{start:String}})
+            WHERE tenant_id = {{tenant_id:UUID}}
+              AND event_at >= parseDateTime64BestEffort({{start:String}})
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key
             ORDER BY key
@@ -262,7 +270,8 @@ class ClickHouseUsageStore:
                     toString(sum(charged)) AS total_spend,
                     toString(uniqExact(subject_id)) AS active_users
                 FROM {self._quoted_table} FINAL
-                WHERE event_at >= parseDateTime64BestEffort({{start:String}})
+                WHERE tenant_id = {{tenant_id:UUID}}
+                  AND event_at >= parseDateTime64BestEffort({{start:String}})
                   AND event_at < parseDateTime64BestEffort({{end:String}})
                 """,
                 start,
@@ -295,6 +304,7 @@ class ClickHouseUsageStore:
         self._client.command(
             f"""
             CREATE TABLE IF NOT EXISTS {self._quoted_table} (
+                tenant_id UUID,
                 outbox_event_id UInt64,
                 charge_id UUID,
                 account_id UUID,
@@ -324,7 +334,7 @@ class ClickHouseUsageStore:
             )
             ENGINE = ReplacingMergeTree(outbox_event_id)
             PARTITION BY toYYYYMM(event_at)
-            ORDER BY (event_at, charge_id){ttl}
+            ORDER BY (tenant_id, event_at, charge_id){ttl}
             """
         )
 
@@ -344,7 +354,8 @@ class ClickHouseUsageStore:
                 toString(sum(charged)) AS total_spend,
                 toString(count()) AS entry_count
             FROM {self._quoted_table} FINAL
-            WHERE event_at >= parseDateTime64BestEffort({{start:String}})
+            WHERE tenant_id = {{tenant_id:UUID}}
+              AND event_at >= parseDateTime64BestEffort({{start:String}})
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key
             ORDER BY sum(charged) DESC, key{limit_sql}
@@ -362,7 +373,11 @@ class ClickHouseUsageStore:
         self.initialize()
         result = self._client.query(
             query,
-            parameters={"start": start.isoformat(), "end": end.isoformat()},
+            parameters={
+                "tenant_id": str(self._tenant_id),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            },
         )
         named_results = getattr(result, "named_results", None)
         if callable(named_results):

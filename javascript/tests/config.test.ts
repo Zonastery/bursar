@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { canonicalBursarConfigDict, loadConfigFromDict } from "../src/config.js";
+import { projectPublicCatalog } from "../src/catalog.js";
 import { ConfigError } from "../src/errors.js";
 
 export const baseConfig = () => ({
@@ -132,6 +133,43 @@ describe("typed v1 config", () => {
     expect(
       ((canonical.credits as Record<string, unknown>).policies as Record<string, unknown>).invoice,
     ).toEqual({ type: "credit_line", limit: "500.000000" });
+  });
+
+  it("projects public plans and prices without provider identifiers", () => {
+    const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
+    config.catalog = {
+      default_plan: "pro",
+      activation: { mode: "on_publish" },
+    };
+    config.credits = {
+      ...config.credits,
+      display: { currency: "USD", units_per_major: "1000" },
+    } as typeof config.credits;
+    config.commerce = {
+      providers: { stripe: { type: "stripe" } },
+      offers: {
+        pro_monthly: {
+          type: "subscription",
+          display_name: "Pro monthly",
+          plan: "pro",
+          billing_interval: { unit: "month", count: 1 },
+          price: { amount_minor: 1900, currency: "USD" },
+          providers: {
+            stripe: { type: "stripe_price", price_id: "price_secret" },
+          },
+        },
+      },
+    };
+
+    const projected = projectPublicCatalog(loadConfigFromDict(config));
+
+    expect(projected.defaultPlan).toBe("pro");
+    expect(projected.creditDisplay).toEqual({ currency: "USD", unitsPerMajor: "1000" });
+    expect(projected.plans[0]?.offers[0]).toMatchObject({
+      key: "pro_monthly",
+      price: { amountMinor: 1900, currency: "USD" },
+    });
+    expect(JSON.stringify(projected)).not.toContain("price_secret");
   });
 
   it("allows partial rate cards for unused operations", () => {

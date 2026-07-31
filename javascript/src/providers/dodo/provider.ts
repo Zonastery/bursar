@@ -27,6 +27,56 @@ import type { BillingEventSink } from "../../bursar.js";
 import type { DodoClient } from "./client-contract.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
 
+const NORMALIZED_DODO_EVENT_TYPES: Record<string, string> = {
+  "checkout.expired": "checkout.expired",
+  "subscription.active": "subscription.created",
+  "subscription.renewed": "subscription.renewed",
+  "subscription.cancelled": "subscription.canceled",
+  "subscription.expired": "subscription.expired",
+  "subscription.failed": "subscription.updated",
+  "subscription.on_hold": "subscription.updated",
+  "subscription.updated": "subscription.updated",
+  "subscription.cancellation_scheduled": "subscription.cancellation_scheduled",
+  "subscription.cancellation_unscheduled": "subscription.cancellation_unscheduled",
+  "subscription.plan_changed": "subscription.plan_changed",
+  "payment.succeeded": "payment.succeeded",
+  "payment.failed": "payment.failed",
+  "refund.succeeded": "refund.created",
+};
+
+function identityInput(
+  provider: string,
+  providerEventType: string,
+  data: Record<string, unknown>,
+  metadata: Record<string, string>,
+) {
+  const customer =
+    typeof data.customer === "object" && data.customer !== null
+      ? (data.customer as Record<string, unknown>)
+      : {};
+  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
+  const emailValue = customer.email;
+  const email =
+    typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null;
+  return {
+    provider,
+    providerEventType,
+    normalizedEventType: NORMALIZED_DODO_EVENT_TYPES[providerEventType] ?? null,
+    customerId,
+    email,
+    metadata,
+    successful:
+      providerEventType === "payment.succeeded" ||
+      providerEventType === "subscription.active" ||
+      providerEventType === "subscription.renewed",
+    checkoutKind: providerEventType.startsWith("subscription.")
+      ? ("subscription" as const)
+      : metadata.credits
+        ? ("credit_topup" as const)
+        : null,
+  };
+}
+
 export class DodoProvider implements PaymentProvider {
   readonly provider = "dodo" as const;
 
@@ -144,7 +194,7 @@ export class DodoProvider implements PaymentProvider {
 
     const resolvesUserWithoutMetadata = type !== "payment.failed" && type !== "checkout.expired";
     if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
-      userId = await this.resolveUser(data, metadata, type);
+      userId = await this.resolveUser(identityInput(this.provider, type, data, metadata));
     }
 
     await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);

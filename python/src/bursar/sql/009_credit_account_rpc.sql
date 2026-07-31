@@ -22,7 +22,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RAISE EXCEPTION 'subject is pseudonymized'
@@ -31,7 +31,7 @@ BEGIN
 
     INSERT INTO bursar.credit_accounts(subject_id, account_kind)
     VALUES (p_subject_id, p_kind)
-    ON CONFLICT (subject_id, account_kind) DO NOTHING
+    ON CONFLICT (tenant_id, subject_id, account_kind) DO NOTHING
     RETURNING id INTO v_id;
 
     v_created := FOUND;
@@ -214,12 +214,12 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF p_referrer_subject_id IS NOT NULL THEN
         INSERT INTO bursar.subjects(id)
         VALUES (p_referrer_subject_id)
-        ON CONFLICT (id) DO NOTHING;
+        ON CONFLICT (tenant_id, id) DO NOTHING;
     END IF;
 
     -- Account locking serializes the award-limit check, event insertion, and
@@ -447,6 +447,7 @@ BEGIN
                 v_post.entry_id
             )
             ON CONFLICT (
+                tenant_id,
                 subject_id,
                 grant_program_id,
                 catalog_grant_award_id

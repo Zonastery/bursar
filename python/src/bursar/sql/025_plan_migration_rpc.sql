@@ -496,7 +496,13 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(
-        hashtextextended('bursar.plan-migration:' || p_plan_key, 0)
+        hashtextextended(
+            'bursar.tenant:'
+            || bursar.require_tenant_id()::text
+            || ':plan-migration:'
+            || p_plan_key,
+            0
+        )
     );
 
     SELECT plan.*

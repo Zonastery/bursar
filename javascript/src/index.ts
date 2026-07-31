@@ -16,6 +16,13 @@ export type {
   FeatureDefinition,
 } from "./config.js";
 export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
+export { projectPublicCatalog } from "./catalog.js";
+export type {
+  PublicCatalog,
+  PublicCatalogOffer,
+  PublicCatalogPlan,
+  PublicCatalogWindow,
+} from "./catalog.js";
 export {
   BursarError,
   CapabilityNotSupportedError,
@@ -35,12 +42,20 @@ export {
   RefundError,
   QuotaExceededError,
   StoreError,
+  bursarErrorHttpStatus,
+  bursarErrorPublicMessage,
+  isRetryableBursarError,
 } from "./errors.js";
+export type { BursarErrorCategory } from "./errors.js";
+export { retryBursarOperation } from "./retry.js";
+export type { BursarRetryOptions } from "./retry.js";
 export { validateExpression, evaluateExpression } from "./expr.js";
 
 // Application facade. Credit/billing orchestration is internal to Bursar.
-export { Bursar, CatalogService } from "./bursar.js";
+export { AccountService, Bursar, CatalogService } from "./bursar.js";
 export type {
+  AccountCreatedInput,
+  AccountCreatedResult,
   BursarOptions,
   BillingEventSink,
   BillingService,

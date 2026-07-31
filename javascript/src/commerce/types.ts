@@ -6,6 +6,7 @@ import type {
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionState,
+  BillingSubscriptionStatus,
 } from "../billing/types/index.js";
 import type { BucketBalance, GetUserPlanResult, LedgerEntry } from "../credits/types/index.js";
 import type {
@@ -20,6 +21,7 @@ import type { BillingEventSink } from "../billing/contracts.js";
 import type { Logger } from "../shared/logger.js";
 
 export interface CommerceProviderFactoryContext {
+  tenantId?: string;
   eventSink: BillingEventSink;
   identityResolver?: ResolveUserCallback;
 }
@@ -37,6 +39,7 @@ export interface CommercePreferenceDefaults {
 }
 
 export interface CommerceOptions {
+  tenantId?: string;
   providers: Record<string, CommerceProviderFactory>;
   defaultProvider?: string;
   checkoutIntentTtlMs?: number;
@@ -86,6 +89,44 @@ export interface PreferencePatch {
 export interface SubscriptionCommandResult {
   ok: true;
   pending?: boolean;
+}
+
+export type SubscriptionAccessState = "entitled" | "grace" | "blocked" | "none";
+
+export interface NormalizedPendingPlanChange {
+  planKey: string;
+  interval: "month" | "year";
+  effectiveAt: string;
+  scheduled: boolean;
+  providerOperationId: string | null;
+}
+
+export interface AccountSubscriptionSummary {
+  accountId: string;
+  planKey: string | null;
+  status: BillingSubscriptionStatus | null;
+  lifecycleState: BillingSubscriptionStatus | "none";
+  accessState: SubscriptionAccessState;
+  isCurrent: boolean;
+  isEntitled: boolean;
+  isBlockingCheckout: boolean;
+  isCancellable: boolean;
+  isTerminal: boolean;
+  subscription: BillingSubscriptionState | null;
+  pendingChange: NormalizedPendingPlanChange | null;
+}
+
+export interface CancelSubscriptionResult {
+  provider: string;
+  providerSubscriptionId: string;
+  canceled: boolean;
+  error: string | null;
+}
+
+export interface CancelAllSubscriptionsResult {
+  accountId: string;
+  canceledCount: number;
+  subscriptions: CancelSubscriptionResult[];
 }
 
 export type PlanChangeClassification =
@@ -159,6 +200,7 @@ export type BillingDocumentLocator =
 export interface CommerceSectionAvailability {
   paymentMethods: boolean;
   documents: boolean;
+  providerInvoices: boolean;
   transactions: boolean;
   usage: boolean;
   autoRecharge: boolean;
@@ -177,8 +219,14 @@ export interface AccountCommerceOverview {
       periodEnd: string | null;
     };
     buckets: BucketBalance[];
+    bucketsByKey: Record<string, Decimal>;
+    display: {
+      currency: string;
+      unitsPerMajor: Decimal;
+    } | null;
   };
   entitlement: GetUserPlanResult;
+  subscriptionSummary: AccountSubscriptionSummary;
   subscription: BillingSubscriptionState | null;
   pendingChange: BillingSubscriptionChange | null;
   preferences: BillingPreferences;

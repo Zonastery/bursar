@@ -15,7 +15,11 @@ export { loadPricingFile } from "./load-pricing-file.js";
 // Optional high-volume storage infrastructure. These adapters are Node-only;
 // the main package remains the PostgreSQL-first application API.
 export { BursarRuntime, createBursarRuntime } from "./storage/runtime.js";
-export type { BursarRuntimeOptions } from "./storage/runtime.js";
+export type {
+  BursarRuntimeHealth,
+  BursarRuntimeOptions,
+  BursarRuntimeStartOptions,
+} from "./storage/runtime.js";
 export { OutboxWorker } from "./storage/outbox-worker.js";
 export type { OutboxRunResult, OutboxWorkerOptions } from "./storage/outbox-worker.js";
 export { ClickHouseUsageStore } from "./storage/adapters/clickhouse.js";

@@ -11,9 +11,11 @@ from unittest.mock import Mock
 
 import pytest
 
+from bursar import PricingNotLoadedError
 from bursar.storage import (
     BillingEventPayloadExport,
     BursarRuntimeOptions,
+    BursarRuntimeStartOptions,
     ClickHouseUsageStore,
     ClickHouseUsageStoreOptions,
     OutboxEvent,
@@ -27,8 +29,11 @@ from bursar.storage import (
     create_bursar_runtime,
 )
 
+TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
 OUTBOX_EVENT = OutboxEvent(
     event_id="42",
+    tenant_id=TENANT_ID,
     topic="usage.charge_recorded",
     aggregate_type="credit_usage_charge",
     aggregate_id="00000000-0000-0000-0000-000000000042",
@@ -136,6 +141,7 @@ class FakePool:
 
 def _usage_export() -> UsageChargeExport:
     return UsageChargeExport(
+        tenant_id=TENANT_ID,
         charge_id="00000000-0000-0000-0000-000000000042",
         account_id="00000000-0000-0000-0000-000000000006",
         subject_id="00000000-0000-0000-0000-000000000007",
@@ -227,6 +233,7 @@ def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
     )
     result = archive.archive(
         BillingEventPayloadExport(
+            tenant_id=TENANT_ID,
             event_id="00000000-0000-0000-0000-000000000001",
             provider="stripe",
             provider_environment="live",
@@ -242,7 +249,10 @@ def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
         )
     )
 
-    assert result.key == ("tenant-a/billing-events/2026/07/29/00000000-0000-0000-0000-000000000001.json")
+    assert result.key == (
+        "tenant-a/tenants/00000000-0000-0000-0000-000000000001/"
+        "billing-events/2026/07/29/00000000-0000-0000-0000-000000000001.json"
+    )
     assert result.version_id == "v1"
     boto3_client.assert_called_once()
     request = client.put_object.call_args.kwargs
@@ -258,13 +268,20 @@ def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
 
 def test_clickhouse_writes_projection_and_serves_analytics() -> None:
     client = FakeClickHouseClient()
-    store = ClickHouseUsageStore(ClickHouseUsageStoreOptions(client=client, create_table=False))
+    store = ClickHouseUsageStore(
+        ClickHouseUsageStoreOptions(
+            client=client,
+            tenant_id=TENANT_ID,
+            create_table=False,
+        )
+    )
     usage = _usage_export()
 
     store.write_usage(usage, "99")
     table, rows, columns = client.inserts[0]
     projected = dict(zip(columns, rows[0], strict=True))
     assert table == "bursar_usage_events"
+    assert str(projected["tenant_id"]) == TENANT_ID
     assert projected["outbox_event_id"] == 99
     assert str(projected["charge_id"]) == usage.charge_id
     assert str(projected["charged"]) == usage.charged
@@ -280,7 +297,13 @@ def test_clickhouse_writes_projection_and_serves_analytics() -> None:
 
 def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
     client = FakeClickHouseClient()
-    store = ClickHouseUsageStore(ClickHouseUsageStoreOptions(client=client, create_table=False))
+    store = ClickHouseUsageStore(
+        ClickHouseUsageStoreOptions(
+            client=client,
+            tenant_id=TENANT_ID,
+            create_table=False,
+        )
+    )
 
     with pytest.raises(ValueError, match="Invalid usage timestamp"):
         store.write_usage(
@@ -291,7 +314,12 @@ def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
 
 def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     pool = FakePool()
-    runtime = create_bursar_runtime(BursarRuntimeOptions(postgres=pool))
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pool,
+            tenant_id="00000000-0000-0000-0000-000000000001",
+        )
+    )
 
     assert runtime.worker is None
     assert runtime.clickhouse is None
@@ -300,6 +328,30 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
     runtime.close()
     pool.closeall.assert_not_called()
+
+
+def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
+    pool = FakePool()
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pool,
+            tenant_id=TENANT_ID,
+        )
+    )
+    load_catalog = Mock(side_effect=[PricingNotLoadedError("catalog pending"), None])
+    runtime.bursar.load_catalog = load_catalog
+
+    runtime.start(
+        BursarRuntimeStartOptions(
+            load_catalog=True,
+            max_attempts=2,
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert load_catalog.call_count == 2
+    assert runtime.health().started is True
+    runtime.close()
 
 
 def test_runtime_routes_analytics_through_clickhouse_without_changing_store() -> None:
@@ -315,8 +367,10 @@ def test_runtime_routes_analytics_through_clickhouse_without_changing_store() ->
     runtime = create_bursar_runtime(
         BursarRuntimeOptions(
             postgres=pool,
+            tenant_id="00000000-0000-0000-0000-000000000001",
             clickhouse=ClickHouseUsageStoreOptions(
                 client=client,
+                tenant_id=TENANT_ID,
                 create_table=False,
             ),
             outbox=False,

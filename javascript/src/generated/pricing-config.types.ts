@@ -7,6 +7,7 @@
 
 export type Version = 1;
 export type Mode = "on_publish";
+export type DefaultPlan = string | null;
 export type Unit = string;
 export type Type = "string" | "number" | "boolean";
 export type Required = boolean;
@@ -150,6 +151,8 @@ export type Plans = string[];
 export type Regions1 = string[];
 export type MaxAwardsPerSubject = number;
 export type IdempotencyScope = "subject" | "event";
+export type Currency = string;
+export type UnitsPerMajor = string;
 export type Type17 = "boolean";
 export type Default = boolean;
 export type Type18 = "enum";
@@ -194,7 +197,7 @@ export type DisplayName1 = string;
 export type Description1 = string | null;
 export type SortOrder = number;
 export type AmountMinor = number;
-export type Currency = string;
+export type Currency1 = string;
 export type TaxBehavior = "inclusive" | "exclusive" | "unspecified";
 export type Type25 = "stripe_price";
 export type PriceId = string;
@@ -254,6 +257,7 @@ export interface BursarConfig {
 }
 export interface CatalogConfig {
   activation?: OnPublishActivation;
+  default_plan?: DefaultPlan;
 }
 export interface OnPublishActivation {
   mode: Mode;
@@ -378,6 +382,7 @@ export interface CreditsConfig {
   default_bucket?: DefaultBucket;
   policies?: Policies;
   grant_programs?: GrantPrograms;
+  display?: CreditDisplay | null;
 }
 export interface CreditAccounting {
   unit: Unit1;
@@ -460,6 +465,10 @@ export interface Availability {
 export interface GrantEligibility {
   plans?: Plans;
   regions?: Regions1;
+}
+export interface CreditDisplay {
+  currency: Currency;
+  units_per_major: UnitsPerMajor;
 }
 export interface EntitlementsConfig {
   features?: Features;
@@ -582,7 +591,7 @@ export interface SubscriptionOffer {
 }
 export interface OfferPrice {
   amount_minor: AmountMinor;
-  currency: Currency;
+  currency: Currency1;
   tax_behavior?: TaxBehavior;
 }
 export interface Providers1 {

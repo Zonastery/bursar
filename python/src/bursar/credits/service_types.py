@@ -97,13 +97,42 @@ class RunBilledOptions(_CreditsServiceModel):
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
     required_feature: str | None = None
+    operation_key: str | None = None
     idempotency_key: str | None = None
     ttl: int | None = Field(default=None, ge=1)
     feature: str | None = None
+    metadata: CreditMetadata | None = None
+    settlement_attempts: int = Field(default=3, ge=1)
+
+
+class RunBilledAsyncOptions(_CreditsServiceModel):
+    estimate: MetricsOrAmount
+    do_work: Callable[[], Awaitable[tuple[Any, MetricsOrAmount]]]
+    operation_type: str = "usage"
+    billing_mode: BillingMode | None = None
+    required_feature: str | None = None
+    operation_key: str | None = None
+    idempotency_key: str | None = None
+    ttl: int | None = Field(default=None, ge=1)
+    feature: str | None = None
+    metadata: CreditMetadata | None = None
+    settlement_attempts: int = Field(default=3, ge=1)
+
+
+class BeginBilledOperationOptions(_CreditsServiceModel):
+    estimate: MetricsOrAmount
+    operation_key: str = Field(min_length=1)
+    operation_type: str = "usage"
+    billing_mode: BillingMode | None = None
+    required_feature: str | None = None
+    ttl: int | None = Field(default=None, ge=1)
+    feature: str | None = None
+    metadata: CreditMetadata | None = None
 
 
 __all__ = [
     "CanAffordOptions",
+    "BeginBilledOperationOptions",
     "CreditsServiceOptions",
     "GrantSubscriptionCycleOptions",
     "LowBalanceConfig",
@@ -113,5 +142,6 @@ __all__ = [
     "PostDeductionSource",
     "ReserveOptions",
     "RunBilledOptions",
+    "RunBilledAsyncOptions",
     "SettleOptions",
 ]

@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -134,9 +135,13 @@ def _store_from_env(store_type: str | None = None) -> CreditStore:
     if not database_url:
         print("DATABASE_URL required", file=sys.stderr)
         raise SystemExit(1)
+    tenant_id = os.environ.get("BURSAR_TENANT_ID")
+    if not tenant_id:
+        print("BURSAR_TENANT_ID required", file=sys.stderr)
+        raise SystemExit(1)
     from bursar.credits.postgres.store import PostgresStore
 
-    return PostgresStore(database_url=database_url)
+    return PostgresStore(database_url=database_url, tenant_id=tenant_id)
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
@@ -246,6 +251,67 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
     post_migration_sql = _read_post_migrate_sql(args.post_migrate_sql)
     run_migrations(database_url, post_migration_sql=post_migration_sql)
     print("Migrations applied successfully.")
+
+
+def _cmd_tenant_create(args: argparse.Namespace) -> None:
+    _require_extra("postgres")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        print("DATABASE_URL is required", file=sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        tenant_id = UUID(args.id) if args.id else uuid4()
+    except ValueError:
+        print("Tenant ID must be a UUID", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    import psycopg2
+
+    try:
+        with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
+                (str(tenant_id), args.slug, args.display_name),
+            )
+            created_id = cursor.fetchone()[0]
+    except psycopg2.Error as exc:
+        print(f"Failed to create tenant: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    print(str(created_id))
+
+
+def _cmd_tenant_status(args: argparse.Namespace) -> None:
+    _require_extra("postgres")
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        print("DATABASE_URL is required", file=sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        tenant_id = UUID(args.id)
+    except ValueError:
+        print("Tenant ID must be a UUID", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    import psycopg2
+
+    try:
+        with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT bursar.set_tenant_status(%s::uuid, %s::text)",
+                (str(tenant_id), args.status),
+            )
+            updated = cursor.fetchone()[0]
+    except psycopg2.Error as exc:
+        print(f"Failed to update tenant: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    if not updated:
+        print("Tenant not found", file=sys.stderr)
+        raise SystemExit(1)
+    print(str(tenant_id))
 
 
 def _cmd_config_validate(args: argparse.Namespace) -> None:
@@ -392,6 +458,43 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_migrate.set_defaults(func=_cmd_migrate)
+
+    # tenant
+    p_tenant = sub.add_parser(
+        "tenant",
+        help="Manage SaaS tenants",
+        description="Provision and inspect Bursar tenants.",
+    )
+    tenant_sub = p_tenant.add_subparsers(
+        dest="subcommand",
+        metavar="<subcommand>",
+    )
+    p_tenant_create = tenant_sub.add_parser(
+        "create",
+        help="Provision an idempotent tenant",
+    )
+    p_tenant_create.add_argument("slug", help="Unique tenant slug")
+    p_tenant_create.add_argument(
+        "--id",
+        default=None,
+        help="Tenant UUID (generated when omitted)",
+    )
+    p_tenant_create.add_argument(
+        "--display-name",
+        default=None,
+        help="Optional display name",
+    )
+    p_tenant_create.set_defaults(func=_cmd_tenant_create)
+    p_tenant_status = tenant_sub.add_parser(
+        "status",
+        help="Activate, suspend, or close a tenant",
+    )
+    p_tenant_status.add_argument("id", help="Tenant UUID")
+    p_tenant_status.add_argument(
+        "status",
+        choices=["active", "suspended", "closed"],
+    )
+    p_tenant_status.set_defaults(func=_cmd_tenant_status)
 
     # pricing
     p_config = sub.add_parser(

@@ -8,8 +8,14 @@ import psycopg2
 import pytest
 from psycopg2.extras import Json
 
+from tests.conftest import TEST_TENANT_ID
+
 
 def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
+    cursor.execute(
+        "SELECT set_config('bursar.tenant_id', %s, true)",
+        (TEST_TENANT_ID,),
+    )
     cursor.execute("INSERT INTO bursar.subjects DEFAULT VALUES RETURNING id")
     subject_id = str(cursor.fetchone()[0])
     cursor.execute(
@@ -211,6 +217,10 @@ def test_partition_registry_is_repaired_and_physical_drift_fails_loudly(
 ) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (TEST_TENANT_ID,),
+        )
+        cursor.execute(
             """
             SELECT parent_table, partition_table, range_start
             FROM bursar.storage_partitions
@@ -410,6 +420,10 @@ def test_billing_claim_stores_bounded_payload_separately(
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (TEST_TENANT_ID,),
+        )
+        cursor.execute(
             """
             SELECT *
             FROM bursar.claim_billing_event(
@@ -563,7 +577,7 @@ def test_outbox_claim_acknowledgement_and_payload_bounds(
         for row in claimed:
             cursor.execute(
                 "SELECT bursar.complete_outbox_event(%s, %s::uuid)",
-                (row[0], row[6]),
+                (row[0], row[7]),
             )
             assert cursor.fetchone() == (True,)
 
@@ -629,8 +643,8 @@ def test_usage_export_and_topic_filtered_outbox_claim(
         )
         claimed = cursor.fetchall()
         assert len(claimed) == 1
-        assert claimed[0][1] == "usage.charge_recorded"
-        assert str(claimed[0][3]) == str(charge_id)
+        assert claimed[0][2] == "usage.charge_recorded"
+        assert str(claimed[0][4]) == str(charge_id)
 
 
 def test_catalog_rejects_rolling_quota_beyond_retention(
@@ -639,6 +653,10 @@ def test_catalog_rejects_rolling_quota_beyond_retention(
     connection = psycopg2.connect(pg_database_url)
     try:
         with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT set_config('bursar.tenant_id', %s, true)",
+                (TEST_TENANT_ID,),
+            )
             cursor.execute(
                 """
                 SELECT bursar.configure_storage(

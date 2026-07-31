@@ -110,7 +110,34 @@ export interface RunBilledOptions<T> {
   billingMode?: BillingMode | null;
   /** @deprecated Use `feature`. */
   requiredFeature?: string | null;
+  /** Stable key for the complete reserve/work/settle operation. */
+  operationKey?: string | null;
+  /** @deprecated Use `operationKey`. */
   idempotencyKey?: string | null;
   ttl?: number | null;
   feature?: string | null;
+  metadata?: CreditMetadata | null;
+  /** Settlement attempts for SDK-classified transient failures. Defaults to 3. */
+  settlementAttempts?: number;
+}
+
+export interface BeginBilledOperationOptions {
+  estimate: MetricsOrAmount;
+  /** Stable key for the complete reserve/settle operation. */
+  operationKey: string;
+  operationType?: string;
+  billingMode?: BillingMode | null;
+  /** @deprecated Use `feature`. */
+  requiredFeature?: string | null;
+  ttl?: number | null;
+  feature?: string | null;
+  metadata?: CreditMetadata | null;
+}
+
+export interface BilledOperation {
+  readonly leaseId: string;
+  readonly operationKey: string;
+  settle(actual: MetricsOrAmount, metadata?: CreditMetadata | null): Promise<DeductionResult>;
+  renew(ttl?: number | null): Promise<void>;
+  release(): Promise<void>;
 }

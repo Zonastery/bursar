@@ -66,9 +66,9 @@ export class PostgresBillingStore extends BillingStore {
   private _dispute: BillingDisputeRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
-  constructor(poolOrUrl: import("pg").Pool | string) {
+  constructor(poolOrUrl: import("pg").Pool | string, tenantId: string) {
     super();
-    this.postgres = new PostgresClient(poolOrUrl);
+    this.postgres = new PostgresClient(poolOrUrl, { tenantId });
   }
 
   async close(): Promise<void> {

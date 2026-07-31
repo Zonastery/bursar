@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg2
 import psycopg2.extras
@@ -199,11 +199,13 @@ class PostgresStore(CreditStore):
         self,
         database_url: str,
         *,
+        tenant_id: str | UUID | None,
         max_pool_size: int = 20,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
     ) -> None:
         super().__init__()
         self._database_url = database_url
+        self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, max_pool_size, database_url)
         self._owns_pool = pool is None
 
@@ -211,6 +213,21 @@ class PostgresStore(CreditStore):
     def database_url(self) -> str:
         """Postgres connection string for this store (read-only)."""
         return self._database_url
+
+    @property
+    def tenant_id(self) -> str:
+        """Tenant UUID bound to every store transaction."""
+        if self._tenant_id is None:
+            raise RuntimeError("this PostgresStore is only configured for migrations")
+        return self._tenant_id
+
+    def _bind_tenant(self, cursor: Any) -> None:
+        if self._tenant_id is None:
+            raise RuntimeError("tenant_id is required for Bursar store operations")
+        cursor.execute(
+            "SELECT set_config('bursar.tenant_id', %s, true)",
+            (self._tenant_id,),
+        )
 
     # ── Repository getters ─────────────────────────────────────────────
     @property
@@ -288,6 +305,7 @@ class PostgresStore(CreditStore):
         conn = pool.getconn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                self._bind_tenant(cur)
                 # Bursar is deliberately isolated from Supabase's API schema.
                 # Keep public as a trailing compatibility namespace for the
                 # small number of host-owned auth objects it references.
@@ -316,6 +334,7 @@ class PostgresStore(CreditStore):
         conn = pool.getconn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                self._bind_tenant(cur)
                 cur.execute("SET LOCAL search_path TO bursar, public")
                 cur.execute(sql, params)
                 rows = cur.fetchall() if cur.description else []
@@ -1717,7 +1736,7 @@ def run_migrations(
     after Bursar's migrations, in order and in the same transaction. This is
     the host-integration hook used by the CLI's ``--post-migrate-sql`` option.
     """
-    store = PostgresStore(database_url)
+    store = PostgresStore(database_url, tenant_id=None)
     try:
         store._migrate(post_migration_sql=post_migration_sql)
     finally:

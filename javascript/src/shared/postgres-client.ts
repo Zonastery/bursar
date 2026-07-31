@@ -2,7 +2,13 @@ import type { QueryFn } from "./postgres-types.js";
 
 export interface PostgresPool {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  connect(): Promise<PostgresPoolClient>;
   end(): Promise<void>;
+}
+
+export interface PostgresPoolClient {
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  release(): void;
 }
 
 export interface PostgresPoolConstructor {
@@ -12,6 +18,7 @@ export interface PostgresPoolConstructor {
 export interface PostgresClientOptions {
   poolConstructor?: PostgresPoolConstructor;
   closedError?: () => Error;
+  tenantId?: string;
 }
 
 /**
@@ -27,6 +34,7 @@ export class PostgresClient {
   private readonly databaseUrl: string | null;
   private readonly ownsPool: boolean;
   private readonly closedError: () => Error;
+  private readonly tenantId: string | null;
   private closed = false;
 
   constructor(poolOrUrl: PostgresPool | string, options: PostgresClientOptions = {}) {
@@ -36,11 +44,28 @@ export class PostgresClient {
     this.ownsPool = typeof poolOrUrl === "string";
     this.closedError =
       options.closedError ?? (() => new Error("PostgreSQL client has been closed"));
+    this.tenantId = options.tenantId ? normalizeTenantId(options.tenantId) : null;
   }
 
   readonly query: QueryFn = async (text: string, params?: unknown[]) => {
-    const result = await (await this.getPool()).query(text, params);
-    return result.rows;
+    const pool = await this.getPool();
+    if (!this.tenantId) {
+      return (await pool.query(text, params)).rows;
+    }
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [this.tenantId]);
+      const result = await client.query(text, params);
+      await client.query("COMMIT");
+      return result.rows;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   };
 
   async close(): Promise<void> {
@@ -78,4 +103,12 @@ export class PostgresClient {
     this.poolConstructor = pg.Pool as unknown as PostgresPoolConstructor;
     return this.poolConstructor;
   }
+}
+
+function normalizeTenantId(tenantId: string): string {
+  const normalized = tenantId.trim().toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)) {
+    throw new TypeError("tenantId must be a UUID");
+  }
+  return normalized;
 }

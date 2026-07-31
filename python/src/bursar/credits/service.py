@@ -52,6 +52,7 @@ from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 from bursar.config import ConfigError
 from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.credits.service_types import (
+    BeginBilledOperationOptions,
     CanAffordOptions,
     CreditsServiceOptions,
     GrantSubscriptionCycleOptions,
@@ -60,6 +61,7 @@ from bursar.credits.service_types import (
     PostDeductionContext,
     PostDeductionSource,
     ReserveOptions,
+    RunBilledAsyncOptions,
     RunBilledOptions,
     SettleOptions,
 )
@@ -68,6 +70,7 @@ from bursar.credits.store import (
     CreateLeaseOptions,
     CreditStore,
     FeatureLimitReachedError,
+    RefundError,
     SettleLeaseOptions,
 )
 from bursar.credits.types import (
@@ -124,6 +127,7 @@ from bursar.errors import (
     QuotaExceededError,
 )
 from bursar.metrics import UsageMetrics
+from bursar.retry import BursarRetryOptions, retry_bursar_operation
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 #: Default ``low_balance`` threshold = this multiple of the engine's
@@ -157,6 +161,40 @@ class RunBilledResult(BaseModel):
 
     result: Any
     deduction: DeductionResult
+
+
+@dataclass(frozen=True, slots=True)
+class BilledOperation:
+    """A replay-safe reserve/settle handle for work spanning callbacks."""
+
+    _service: CreditsService
+    user_id: str
+    lease_id: str
+    operation_key: str
+    feature: str | None = None
+    metadata: CreditMetadata | None = None
+
+    def settle(
+        self,
+        actual: MetricsOrAmount,
+        metadata: CreditMetadata | None = None,
+    ) -> DeductionResult:
+        return self._service.settle(
+            self.user_id,
+            self.lease_id,
+            actual,
+            SettleOptions(
+                idempotency_key=f"{self.operation_key}:settle",
+                feature=self.feature,
+                metadata=metadata or self.metadata,
+            ),
+        )
+
+    def renew(self, ttl: int | None = None) -> None:
+        self._service.renew(self.user_id, self.lease_id, ttl)
+
+    def release(self) -> None:
+        self._service.release(self.user_id, self.lease_id)
 
 
 class CreditsService:
@@ -1394,6 +1432,75 @@ class CreditsService:
         :meth:`settle` (advisory recount + tagging) — the same feature name is
         used at both ends since no feature name is persisted on the lease.
         """
+        operation_key = options.operation_key or options.idempotency_key or f"billed:{uuid4()}"
+        operation = self.begin_billed_operation(
+            user_id,
+            BeginBilledOperationOptions(
+                estimate=options.estimate,
+                operation_key=operation_key,
+                operation_type=options.operation_type,
+                billing_mode=options.billing_mode,
+                required_feature=options.required_feature,
+                ttl=options.ttl,
+                feature=options.feature,
+                metadata=options.metadata,
+            ),
+        )
+        try:
+            work_result, actual = options.do_work()
+        except Exception:
+            operation.release()
+            raise
+
+        # Never release after successful work: a failed settle may have an
+        # unknown commit outcome and is replay-safe through operation_key.
+        deduction = retry_bursar_operation(
+            operation.settle,
+            actual,
+            retry_options=BursarRetryOptions(max_attempts=options.settlement_attempts),
+        )
+        return RunBilledResult(result=work_result, deduction=deduction)
+
+    async def run_billed_async(
+        self,
+        user_id: str,
+        options: RunBilledAsyncOptions,
+    ) -> RunBilledResult:
+        """Async counterpart to :meth:`run_billed`."""
+
+        operation_key = options.operation_key or options.idempotency_key or f"billed:{uuid4()}"
+        operation = self.begin_billed_operation(
+            user_id,
+            BeginBilledOperationOptions(
+                estimate=options.estimate,
+                operation_key=operation_key,
+                operation_type=options.operation_type,
+                billing_mode=options.billing_mode,
+                required_feature=options.required_feature,
+                ttl=options.ttl,
+                feature=options.feature,
+                metadata=options.metadata,
+            ),
+        )
+        try:
+            work_result, actual = await options.do_work()
+        except Exception:
+            operation.release()
+            raise
+        deduction = retry_bursar_operation(
+            operation.settle,
+            actual,
+            retry_options=BursarRetryOptions(max_attempts=options.settlement_attempts),
+        )
+        return RunBilledResult(result=work_result, deduction=deduction)
+
+    def begin_billed_operation(
+        self,
+        user_id: str,
+        options: BeginBilledOperationOptions,
+    ) -> BilledOperation:
+        """Acquire a replay-safe lease for a complete billable operation."""
+
         lease = self.reserve(
             user_id,
             options.estimate,
@@ -1403,24 +1510,40 @@ class CreditsService:
                 required_feature=options.required_feature,
                 ttl=options.ttl,
                 feature=options.feature,
+                metadata=options.metadata,
+                idempotency_key=f"{options.operation_key}:reserve",
             ),
         )
-        try:
-            work_result, actual = options.do_work()
-        except Exception:
-            self.release(user_id, lease.lease_id)
-            raise
+        return BilledOperation(
+            _service=self,
+            user_id=user_id,
+            lease_id=lease.lease_id,
+            operation_key=options.operation_key,
+            feature=options.feature,
+            metadata=options.metadata,
+        )
 
-        deduction = self.settle(
-            user_id,
-            lease.lease_id,
-            actual,
-            SettleOptions(
-                idempotency_key=options.idempotency_key,
-                feature=options.feature,
-            ),
+    def resume_billed_operation(
+        self,
+        user_id: str,
+        lease_id: str,
+        operation_key: str,
+        *,
+        feature: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> BilledOperation:
+        """Recreate a handle from durable callback/job state."""
+
+        if not operation_key:
+            raise ValueError("operation_key must not be empty")
+        return BilledOperation(
+            _service=self,
+            user_id=user_id,
+            lease_id=lease_id,
+            operation_key=operation_key,
+            feature=feature,
+            metadata=metadata,
         )
-        return RunBilledResult(result=work_result, deduction=deduction)
 
     # ── Low-balance / overdraft signals (interface plan §6) ─────────────
 
@@ -1705,12 +1828,12 @@ class CreditsService:
                 deterministic key derived from the original entry.
 
         Returns:
-            ``RefundResult`` with the refund ledger entry details. On a business
-            failure (over-refund, duplicate, wrong type, not found) ``error`` is
-            set, ``credits.refund_failed`` is emitted, and **no**
-            ``credits.refunded`` event fires (contract §4, H3). Inspect
-            ``result.error`` (codes: ``over_refund``, ``already_refunded``,
-            ``not_found``) to handle the failure.
+            ``RefundResult`` with the refund ledger entry details.
+
+        Raises:
+            RefundError: On over-refund, duplicate, wrong-type, or missing-entry
+                failures. ``credits.refund_failed`` is emitted and no success
+                event fires.
         """
         refund_amount = self._to_decimal(amount) if amount is not None else None
         result = self._store.refund_credits(
@@ -1733,7 +1856,7 @@ class CreditsService:
                     "reason": reason,
                 },
             )
-            return result
+            raise RefundError(f"Refund rejected: {result.error}")
 
         self._emit(
             "credits.refunded",

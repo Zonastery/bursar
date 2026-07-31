@@ -34,6 +34,7 @@ from bursar.billing.types import (
 )
 from bursar.credits.service import CreditsService
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
+from tests.conftest import TEST_TENANT_ID
 
 pytestmark = [pytest.mark.integration]
 
@@ -242,11 +243,21 @@ def _bootstrap_auth_users(pg_database_url: str) -> None:
         conn.close()
 
 
+def _bind_tenant(cursor: psycopg2.extensions.cursor) -> None:
+    cursor.execute(
+        "SELECT set_config('bursar.tenant_id', %s, true)",
+        (TEST_TENANT_ID,),
+    )
+
+
 def _make_components(
     pg_database_url: str,
     pg_store: object,
 ) -> tuple[PostgresBillingStore, CreditsService, BillingServiceImpl]:
-    bs = PostgresBillingStore(pg_database_url)
+    bs = PostgresBillingStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+    )
     cm = CreditsService(pg_store)  # type: ignore[arg-type]
     cm.publish_pricing_from_dict(PRICING_DICT)
     sink = BillingServiceImpl(bs, provisioning=cm)
@@ -307,6 +318,7 @@ class TestCheckoutIntentIdempotency:
         digest = "11" * 32
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
@@ -378,6 +390,7 @@ class TestCheckoutIntentIdempotency:
         retry_expiry = datetime.now(UTC) + timedelta(hours=2)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT bursar.create_checkout_intent(
@@ -466,6 +479,7 @@ class TestAutoRechargeProfile:
         CreditsService(pg_store).publish_pricing_from_dict(config)  # type: ignore[arg-type]
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT topup.id
@@ -506,6 +520,7 @@ class TestAutoRechargeProfile:
         _make_components(pg_database_url, pg_store)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT topup.id, topup.catalog_revision_id
@@ -521,7 +536,7 @@ class TestAutoRechargeProfile:
                 """
                 INSERT INTO bursar.subjects(id)
                 VALUES (%s::uuid), (%s::uuid)
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (tenant_id, id) DO NOTHING
                 """,
                 (USER_ID, USER_ID2),
             )
@@ -586,6 +601,7 @@ class TestAutoRechargeProfile:
         _make_components(pg_database_url, pg_store)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
             cursor.execute(
                 """
                 SELECT offer.id, offer.catalog_revision_id
@@ -601,7 +617,7 @@ class TestAutoRechargeProfile:
                 """
                 INSERT INTO bursar.subjects(id)
                 VALUES (%s::uuid)
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (tenant_id, id) DO NOTHING
                 """,
                 (USER_ID,),
             )
@@ -799,7 +815,11 @@ class TestEventIdempotency:
 
         def claim(_: int):
             pool = psycopg2.pool.ThreadedConnectionPool(1, 1, pg_database_url)
-            local = PostgresBillingStore(pg_database_url, pool=pool)
+            local = PostgresBillingStore(
+                pg_database_url,
+                tenant_id=TEST_TENANT_ID,
+                pool=pool,
+            )
             try:
                 barrier.wait(timeout=30)
                 return local.claim_billing_event(PROVIDER, "evt_concurrent_claim", "test.event")

@@ -1,5 +1,9 @@
 from dataclasses import dataclass
+from typing import Any, cast
 
+import pytest
+
+from bursar import CommerceNotConfiguredError, ConfigError, PricingNotLoadedError
 from bursar.bursar import Bursar
 
 
@@ -60,3 +64,38 @@ def test_bursar_routes_provider_events_through_billing_service():
     event = {"event_type": "subscription.created"}
 
     assert bursar.ingest_billing_event(event) == {"handled": True, "action": "subscription.created"}
+
+
+def test_bursar_public_facade_emits_typed_errors():
+    class EmptyCredits:
+        def load_pricing_from_store(self):
+            return None
+
+        def get_active_pricing(self):
+            return None
+
+        def get_user_plan(self, _account_id):
+            raise AssertionError("must not be called without a valid catalog")
+
+    bursar = Bursar(credits=cast(Any, EmptyCredits()))
+
+    with pytest.raises(PricingNotLoadedError):
+        bursar.catalog.get_config()
+    with pytest.raises(CommerceNotConfiguredError):
+        bursar.ingest_billing_event(cast(Any, {}))
+
+    class EmptyCatalog:
+        def get_config(self):
+            return type(
+                "Config",
+                (),
+                {
+                    "catalog": type("Catalog", (), {"default_plan": None})(),
+                    "plans": {},
+                    "credits": type("Credits", (), {"grant_programs": {}})(),
+                },
+            )()
+
+    bursar.accounts._catalog = cast(Any, EmptyCatalog())
+    with pytest.raises(ConfigError):
+        bursar.accounts.on_account_created("user-1", "signup:user-1")

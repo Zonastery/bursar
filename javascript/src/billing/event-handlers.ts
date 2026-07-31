@@ -382,6 +382,14 @@ export class BillingEventHandlers {
       hasUserId: Boolean(uid),
     });
     if (!uid) return { handled: false, error: "user_not_found" };
+    if (event.customer?.providerCustomerId) {
+      await this.store.upsertBillingCustomer(
+        event.provider,
+        event.customer.providerCustomerId,
+        uid,
+        event.customer.email ?? null,
+      );
+    }
     if (!event.subscription?.providerSubscriptionId)
       return { handled: false, error: "no_subscription_data" };
     const subscriptionId = event.subscription.providerSubscriptionId;

@@ -1,4 +1,6 @@
 CREATE TABLE bursar.billing_customers (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -12,11 +14,23 @@ CREATE TABLE bursar.billing_customers (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_customer_id),
-    UNIQUE (subject_id, provider, provider_environment)
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_customer_id
+    ),
+    UNIQUE (
+        tenant_id,
+        subject_id,
+        provider,
+        provider_environment
+    )
 );
 
 CREATE TABLE bursar.billing_subscriptions (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -43,7 +57,12 @@ CREATE TABLE bursar.billing_subscriptions (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_subscription_id),
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_subscription_id
+    ),
     UNIQUE (id, subject_id),
     UNIQUE (id, subject_id, provider_environment),
     FOREIGN KEY (offer_id, catalog_revision_id)
@@ -69,6 +88,8 @@ CREATE TABLE bursar.billing_subscriptions (
 );
 
 CREATE TABLE bursar.billing_entitlement_sources (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider_environment text NOT NULL
@@ -79,7 +100,12 @@ CREATE TABLE bursar.billing_entitlement_sources (
     selected_at timestamptz,
     deselected_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (subject_id, provider_environment, subscription_id),
+    UNIQUE (
+        tenant_id,
+        subject_id,
+        provider_environment,
+        subscription_id
+    ),
     FOREIGN KEY (subscription_id, subject_id, provider_environment)
     REFERENCES bursar.billing_subscriptions (
         id,
@@ -97,6 +123,8 @@ CREATE TABLE bursar.billing_entitlement_sources (
 );
 
 CREATE TABLE bursar.billing_payments (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -118,11 +146,18 @@ CREATE TABLE bursar.billing_payments (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_payment_id),
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_payment_id
+    ),
     UNIQUE (id, subject_id)
 );
 
 CREATE TABLE bursar.billing_events (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     provider text NOT NULL
     CHECK (
@@ -163,7 +198,12 @@ CREATE TABLE bursar.billing_events (
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_event_id),
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_event_id
+    ),
     CHECK (
         (
             status = 'processing'
@@ -194,6 +234,8 @@ CREATE TABLE bursar.billing_events (
 );
 
 CREATE TABLE bursar.billing_event_payloads (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     event_id uuid NOT NULL
     REFERENCES bursar.billing_events (id) ON DELETE CASCADE,
     received_at timestamptz NOT NULL,
@@ -204,6 +246,8 @@ CREATE TABLE bursar.billing_event_payloads (
 ) PARTITION BY RANGE (received_at);
 
 CREATE TABLE bursar.billing_subscription_conflicts (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     subject_id uuid REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -218,6 +262,7 @@ CREATE TABLE bursar.billing_subscription_conflicts (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (
+        tenant_id,
         provider,
         provider_environment,
         duplicate_provider_subscription_id
@@ -225,6 +270,8 @@ CREATE TABLE bursar.billing_subscription_conflicts (
 );
 
 CREATE TABLE bursar.billing_credit_grants (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     payment_id uuid,
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
@@ -258,6 +305,8 @@ CREATE TABLE bursar.billing_credit_grants (
 );
 
 CREATE TABLE bursar.billing_refunds (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     payment_id uuid NOT NULL REFERENCES bursar.billing_payments (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -276,10 +325,17 @@ CREATE TABLE bursar.billing_refunds (
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_refund_id)
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_refund_id
+    )
 );
 
 CREATE TABLE bursar.billing_refund_grants (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     refund_id uuid NOT NULL
     REFERENCES bursar.billing_refunds (id) ON DELETE CASCADE,
     grant_id uuid NOT NULL REFERENCES bursar.billing_credit_grants (id),
@@ -291,6 +347,8 @@ CREATE TABLE bursar.billing_refund_grants (
 );
 
 CREATE TABLE bursar.billing_subscription_changes (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     subscription_id uuid NOT NULL REFERENCES bursar.billing_subscriptions (id),
     state text NOT NULL
@@ -321,6 +379,8 @@ CREATE TABLE bursar.billing_subscription_changes (
 );
 
 CREATE TABLE bursar.billing_auto_recharge_profiles (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     enabled boolean NOT NULL DEFAULT false,
     armed boolean NOT NULL DEFAULT true,
@@ -353,7 +413,7 @@ CREATE TABLE bursar.billing_auto_recharge_profiles (
     window_timezone text NOT NULL DEFAULT 'UTC',
     last_attempt_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (subject_id, provider_environment),
+    PRIMARY KEY (tenant_id, subject_id, provider_environment),
     FOREIGN KEY (topup_id, catalog_revision_id)
     REFERENCES bursar.catalog_topups (id, catalog_revision_id),
     CHECK (NOT enabled OR (provider IS NOT null AND topup_id IS NOT null)),
@@ -361,6 +421,8 @@ CREATE TABLE bursar.billing_auto_recharge_profiles (
 );
 
 CREATE TABLE bursar.billing_auto_recharge_attempts (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -395,7 +457,12 @@ CREATE TABLE bursar.billing_auto_recharge_attempts (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (subject_id, provider_environment, idempotency_key),
+    UNIQUE (
+        tenant_id,
+        subject_id,
+        provider_environment,
+        idempotency_key
+    ),
     FOREIGN KEY (topup_id, catalog_revision_id)
     REFERENCES bursar.catalog_topups (id, catalog_revision_id),
     CHECK (window_end > window_start),
@@ -404,6 +471,8 @@ CREATE TABLE bursar.billing_auto_recharge_attempts (
 );
 
 CREATE TABLE bursar.catalog_auto_recharge_policies (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     catalog_revision_id uuid PRIMARY KEY
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
     eligible_topup_keys text [] NOT NULL CHECK (cardinality(eligible_topup_keys) > 0),
@@ -433,6 +502,8 @@ CREATE TABLE bursar.catalog_auto_recharge_policies (
 );
 
 CREATE TABLE bursar.billing_checkout_intents (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -453,6 +524,7 @@ CREATE TABLE bursar.billing_checkout_intents (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (
+        tenant_id,
         subject_id,
         provider,
         provider_environment,
@@ -465,6 +537,8 @@ CREATE TABLE bursar.billing_checkout_intents (
 );
 
 CREATE TABLE bursar.billing_invoices (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -486,7 +560,12 @@ CREATE TABLE bursar.billing_invoices (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_invoice_id),
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_invoice_id
+    ),
     CHECK (
         period_end IS null
         OR period_start IS null
@@ -495,6 +574,8 @@ CREATE TABLE bursar.billing_invoices (
 );
 
 CREATE TABLE bursar.billing_disputes (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid REFERENCES bursar.subjects (id),
     provider text NOT NULL CHECK (bursar.is_nonempty_text(provider)),
@@ -514,27 +595,40 @@ CREATE TABLE bursar.billing_disputes (
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, provider_dispute_id)
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_dispute_id
+    )
 );
 
 CREATE TABLE bursar.billing_preferences (
-    subject_id uuid PRIMARY KEY REFERENCES bursar.subjects (id),
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
+    subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     auto_recharge boolean NOT NULL DEFAULT false,
     overage_protection boolean NOT NULL DEFAULT true,
     email_notifications boolean NOT NULL DEFAULT true,
     usage_alerts boolean NOT NULL DEFAULT true,
     invoice_reminders boolean NOT NULL DEFAULT false,
-    updated_at timestamptz NOT NULL DEFAULT now()
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, subject_id)
 );
 
 CREATE UNIQUE INDEX billing_auto_recharge_one_active
-ON bursar.billing_auto_recharge_attempts (subject_id, provider_environment)
+ON bursar.billing_auto_recharge_attempts (
+    tenant_id,
+    subject_id,
+    provider_environment
+)
 WHERE state IN (
     'claimed', 'submitted', 'processing', 'unknown', 'action_required'
 );
 
 CREATE UNIQUE INDEX billing_auto_recharge_provider_attempt_unique
 ON bursar.billing_auto_recharge_attempts (
+    tenant_id,
     provider,
     provider_environment,
     provider_attempt_id

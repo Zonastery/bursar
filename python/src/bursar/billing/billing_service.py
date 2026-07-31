@@ -827,6 +827,13 @@ class BillingService:
         uid = self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
+        if event.customer and event.customer.provider_customer_id:
+            self._store.upsert_billing_customer(
+                event.provider,
+                event.customer.provider_customer_id,
+                uid,
+                event.customer.email,
+            )
         if not event.subscription or not event.subscription.provider_subscription_id:
             return BillingEventResult(handled=False, error="no_subscription_data")
 

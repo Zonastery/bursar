@@ -20,7 +20,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     INSERT INTO bursar.billing_customers(
         subject_id,provider,provider_environment,provider_customer_id,email
@@ -32,7 +32,12 @@ BEGIN
             ELSE p_email
         END
     )
-    ON CONFLICT (subject_id,provider,provider_environment) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        subject_id,
+        provider,
+        provider_environment
+    ) DO UPDATE
     SET provider_customer_id=EXCLUDED.provider_customer_id,email=EXCLUDED.email
     RETURNING id INTO v_id;
 
@@ -97,7 +102,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE COALESCE(p_metadata, '{}'::jsonb)
@@ -124,7 +129,12 @@ BEGIN
         p_grace_ends_at,p_provider_updated_at,p_provider_updated_at,
         v_metadata
     )
-    ON CONFLICT (provider,provider_environment,provider_subscription_id) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_subscription_id
+    ) DO UPDATE
     SET provider_customer_id=EXCLUDED.provider_customer_id,
         offer_id=EXCLUDED.offer_id,
         catalog_revision_id=EXCLUDED.catalog_revision_id,
@@ -334,7 +344,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE p_metadata
@@ -350,7 +360,12 @@ BEGIN
         p_amount_minor,p_tax_minor,p_currency,p_purpose,p_status,p_provider_updated_at,
         p_provider_updated_at,v_metadata
     )
-    ON CONFLICT (provider,provider_environment,provider_payment_id) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_payment_id
+    ) DO UPDATE
     SET status=EXCLUDED.status,
         tax_minor=EXCLUDED.tax_minor,
         provider_invoice_id=COALESCE(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from bursar.shared.postgres_types import QueryFn
 from bursar.storage.ports import (
@@ -56,8 +57,9 @@ def _scalar_boolean(rows: list[Any]) -> bool:
 
 
 class PostgresStorageRepository:
-    def __init__(self, query: QueryFn) -> None:
+    def __init__(self, query: QueryFn, tenant_id: str | UUID) -> None:
         self._query = query
+        self._tenant_id = str(UUID(str(tenant_id)))
 
     def claim(
         self,
@@ -66,8 +68,15 @@ class PostgresStorageRepository:
         lease_seconds: int,
     ) -> list[OutboxEvent]:
         rows = self._query(
-            "SELECT * FROM bursar.claim_outbox_events(%s::integer, %s::integer, %s::text[])",
-            [limit, lease_seconds, list(topics)],
+            """
+            SELECT * FROM bursar.claim_outbox_events(
+                %s::uuid,
+                %s::integer,
+                %s::integer,
+                %s::text[]
+            )
+            """,
+            [self._tenant_id, limit, lease_seconds, list(topics)],
         )
         events: list[OutboxEvent] = []
         for raw in rows:
@@ -75,6 +84,7 @@ class PostgresStorageRepository:
             events.append(
                 OutboxEvent(
                     event_id=_required_string(row, "event_id", "outbox event"),
+                    tenant_id=_required_string(row, "tenant_id", "outbox event"),
                     topic=_required_string(row, "topic", "outbox event"),
                     aggregate_type=_required_string(row, "aggregate_type", "outbox event"),
                     aggregate_id=_required_string(row, "aggregate_id", "outbox event"),
@@ -136,6 +146,7 @@ class PostgresStorageRepository:
             msg = f"Usage charge {charge_id} payload expired before export"
             raise RuntimeError(msg)
         return UsageChargeExport(
+            tenant_id=_required_string(row, "tenant_id", "usage charge export"),
             charge_id=_required_string(row, "charge_id", "usage charge export"),
             account_id=_required_string(row, "account_id", "usage charge export"),
             subject_id=_required_string(row, "subject_id", "usage charge export"),
@@ -181,6 +192,7 @@ class PostgresStorageRepository:
         row = _as_row(value, "export_billing_event_payload payload")
         envelope = row.get("envelope")
         return BillingEventPayloadExport(
+            tenant_id=_required_string(row, "tenant_id", "billing payload export"),
             event_id=_required_string(row, "event_id", "billing payload export"),
             provider=_required_string(row, "provider", "billing payload export"),
             provider_environment=_required_string(

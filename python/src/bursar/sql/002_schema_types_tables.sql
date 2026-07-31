@@ -135,12 +135,16 @@ CREATE TABLE bursar.storage_partitions (
 );
 
 CREATE TABLE bursar.subjects (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     pseudonymized_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE bursar.external_identities (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL
     REFERENCES bursar.subjects (id) ON DELETE CASCADE,
@@ -150,12 +154,57 @@ CREATE TABLE bursar.external_identities (
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     external_subject text NOT NULL CHECK (bursar.is_nonempty_text(external_subject)),
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (provider, provider_environment, external_subject)
+    UNIQUE (
+        tenant_id,
+        provider,
+        provider_environment,
+        external_subject
+    )
 );
 
+CREATE TABLE bursar.tenant_catalog_counters (
+    tenant_id uuid PRIMARY KEY DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE CASCADE,
+    next_revision_no bigint NOT NULL DEFAULT 1
+    CHECK (next_revision_no > 0)
+);
+
+COMMENT ON TABLE bursar.tenant_catalog_counters IS
+'Per-tenant catalog revision allocator.';
+
+CREATE FUNCTION bursar.next_catalog_revision_no()
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SET search_path TO ''
+AS $$
+DECLARE
+    v_tenant uuid := bursar.require_tenant_id();
+    v_revision bigint;
+BEGIN
+    INSERT INTO bursar.tenant_catalog_counters(
+        tenant_id,
+        next_revision_no
+    )
+    VALUES (v_tenant, 2)
+    ON CONFLICT (tenant_id) DO UPDATE
+    SET next_revision_no
+        = bursar.tenant_catalog_counters.next_revision_no + 1
+    RETURNING next_revision_no - 1 INTO v_revision;
+
+    RETURN v_revision;
+END
+$$;
+
+REVOKE ALL
+ON FUNCTION bursar.next_catalog_revision_no()
+FROM PUBLIC;
+
 CREATE TABLE bursar.catalog_revisions (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
-    revision_no bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+    revision_no bigint NOT NULL DEFAULT bursar.next_catalog_revision_no(),
     yaml_schema_version integer NOT NULL CHECK (yaml_schema_version > 0),
     source_document jsonb NOT NULL
     CHECK (bursar.is_bounded_json_object(source_document, 4194304)),
@@ -166,13 +215,16 @@ CREATE TABLE bursar.catalog_revisions (
     published_at timestamptz,
     activated_at timestamptz,
     retired_at timestamptz,
-    UNIQUE (yaml_schema_version, digest),
+    UNIQUE (tenant_id, revision_no),
+    UNIQUE (tenant_id, yaml_schema_version, digest),
     CHECK (published_at IS null OR published_at >= created_at),
     CHECK (activated_at IS null OR published_at IS NOT null),
     CHECK (retired_at IS null OR activated_at IS NOT null)
 );
 
 CREATE TABLE bursar.catalog_activation_history (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id),
@@ -183,6 +235,8 @@ CREATE TABLE bursar.catalog_activation_history (
 );
 
 CREATE TABLE bursar.catalog_buckets (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -242,6 +296,8 @@ CREATE TABLE bursar.catalog_buckets (
 );
 
 CREATE TABLE bursar.catalog_operations (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -256,6 +312,8 @@ CREATE TABLE bursar.catalog_operations (
 );
 
 CREATE TABLE bursar.catalog_rate_cards (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -270,6 +328,8 @@ CREATE TABLE bursar.catalog_rate_cards (
 );
 
 CREATE TABLE bursar.catalog_credit_policies (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -291,6 +351,8 @@ CREATE TABLE bursar.catalog_credit_policies (
 );
 
 CREATE TABLE bursar.catalog_admission_policies (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -302,6 +364,8 @@ CREATE TABLE bursar.catalog_admission_policies (
 );
 
 CREATE TABLE bursar.catalog_admission_operation_policies (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     catalog_revision_id uuid NOT NULL,
     admission_policy_key text NOT NULL,
     operation_key text NOT NULL,
@@ -324,6 +388,8 @@ CREATE TABLE bursar.catalog_admission_operation_policies (
 );
 
 CREATE TABLE bursar.catalog_entitlement_features (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -337,6 +403,8 @@ CREATE TABLE bursar.catalog_entitlement_features (
 );
 
 CREATE TABLE bursar.catalog_plans (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -416,6 +484,8 @@ CREATE TABLE bursar.catalog_plans (
 );
 
 CREATE TABLE bursar.catalog_plan_features (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
     feature_key text NOT NULL,
@@ -433,6 +503,8 @@ CREATE TABLE bursar.catalog_plan_features (
 );
 
 CREATE TABLE bursar.catalog_plan_quotas (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
@@ -459,6 +531,8 @@ CREATE TABLE bursar.catalog_plan_quotas (
 );
 
 CREATE TABLE bursar.catalog_grant_programs (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -486,6 +560,8 @@ CREATE TABLE bursar.catalog_grant_programs (
 );
 
 CREATE TABLE bursar.catalog_grant_awards (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL,
     grant_program_id uuid NOT NULL,
@@ -513,6 +589,8 @@ CREATE TABLE bursar.catalog_grant_awards (
 );
 
 CREATE TABLE bursar.catalog_offers (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -575,6 +653,8 @@ CREATE TABLE bursar.catalog_offers (
 );
 
 CREATE TABLE bursar.catalog_topups (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -617,6 +697,8 @@ CREATE TABLE bursar.catalog_topups (
 );
 
 CREATE TABLE bursar.catalog_provider_refs (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     catalog_revision_id uuid NOT NULL
     REFERENCES bursar.catalog_revisions (id) ON DELETE CASCADE,
@@ -638,6 +720,8 @@ CREATE TABLE bursar.catalog_provider_refs (
 );
 
 CREATE TABLE bursar.credit_accounts (
+    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
+    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
     account_kind text NOT NULL CHECK (account_kind IN ('personal', 'team')),
@@ -646,5 +730,5 @@ CREATE TABLE bursar.credit_accounts (
     version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
     updated_at timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (subject_id, account_kind)
+    UNIQUE (tenant_id, subject_id, account_kind)
 );

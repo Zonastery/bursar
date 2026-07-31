@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
-import { CapReachedError, ConfigError, InsufficientCreditsError } from "../errors.js";
+import { CapReachedError, ConfigError, InsufficientCreditsError, RefundError } from "../errors.js";
 import type { PricingEngine } from "../engine.js";
 import type {
   AddCreditsResult,
@@ -57,6 +57,8 @@ import type {
   ReserveOptions,
   RunBilledOptions,
   SettleOptions,
+  BeginBilledOperationOptions,
+  BilledOperation,
 } from "./service-types.js";
 export type {
   CanAffordOptions,
@@ -68,6 +70,8 @@ export type {
   RunBilledOptions,
   SettleOptions,
   PostDeductionContext,
+  BeginBilledOperationOptions,
+  BilledOperation,
 } from "./service-types.js";
 /**
  * Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
@@ -651,6 +655,13 @@ export class CreditsService {
     return this.leases.runBilled(userId, options);
   }
 
+  async beginBilledOperation(
+    userId: string,
+    options: BeginBilledOperationOptions,
+  ): Promise<BilledOperation> {
+    return this.leases.beginBilledOperation(userId, options);
+  }
+
   /**
    * Full deduction flow as one atomic store call (contract §2).
    *
@@ -774,7 +785,7 @@ export class CreditsService {
   /**
    * Refund a previous credit deduction.
    *
-   * Returns the RefundResult (with .error set on failure). A successful refund
+   * Returns the RefundResult. A successful refund
    * emits ``credits.refunded``; a failed/duplicate/over-refund emits
    * ``credits.refund_failed`` (no success event is ever emitted for a failed
    * refund).
@@ -823,7 +834,7 @@ export class CreditsService {
         error: result.error,
         reason: reason ?? null,
       });
-      return result;
+      throw new RefundError(`Refund rejected: ${result.error}`);
     }
 
     this.emit("credits.refunded", result.userId, {

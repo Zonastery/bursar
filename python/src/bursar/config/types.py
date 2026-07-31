@@ -422,12 +422,18 @@ class GrantProgram(StrictModel):
         return self
 
 
+class CreditDisplay(StrictModel):
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    units_per_major: DecimalValue = Field(gt=0)
+
+
 class CreditsConfig(StrictModel):
     accounting: CreditAccounting
     buckets: dict[str, BucketDefinition] = Field(default_factory=dict)
     default_bucket: str | None = None
     policies: dict[str, CreditPolicy] = Field(default_factory=dict)
     grant_programs: dict[str, GrantProgram] = Field(default_factory=dict)
+    display: CreditDisplay | None = None
 
 
 class BooleanFeature(StrictModel):
@@ -728,6 +734,7 @@ class OnPublishActivation(StrictModel):
 
 class CatalogConfig(StrictModel):
     activation: OnPublishActivation = Field(default_factory=lambda: OnPublishActivation(mode="on_publish"))
+    default_plan: str | None = None
 
 
 SumCharge.model_rebuild()

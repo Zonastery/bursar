@@ -6,6 +6,7 @@ Manages a connection pool and provides a query function.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import psycopg2
 import psycopg2.extras
@@ -15,20 +16,34 @@ import psycopg2.pool
 class PostgresClient:
     """Thin wrapper around psycopg2 connection pool matching JS PostgresClient API."""
 
-    def __init__(self, dsn: str, min_connections: int = 1, max_connections: int = 10):
+    def __init__(
+        self,
+        dsn: str,
+        min_connections: int = 1,
+        max_connections: int = 10,
+        *,
+        tenant_id: str | UUID | None = None,
+    ):
         self._pool: psycopg2.pool.ThreadedConnectionPool | None = psycopg2.pool.ThreadedConnectionPool(
             min_connections, max_connections, dsn
         )
         self._owns_pool = True
         self._closed = False
+        self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
 
     @classmethod
-    def from_pool(cls, pool: psycopg2.pool.ThreadedConnectionPool) -> PostgresClient:
+    def from_pool(
+        cls,
+        pool: psycopg2.pool.ThreadedConnectionPool,
+        *,
+        tenant_id: str | UUID | None = None,
+    ) -> PostgresClient:
         """Create client from existing pool (borrowed mode)."""
         instance = cls.__new__(cls)
         instance._pool = pool
         instance._owns_pool = False
         instance._closed = False
+        instance._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
         return instance
 
     def query(self, text: str, params: list | None = None) -> list[dict]:
@@ -40,6 +55,11 @@ class PostgresClient:
             # transaction. The connection context commits successful writes and
             # rolls back exceptions before putconn makes it available again.
             with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if self._tenant_id is not None:
+                    cur.execute(
+                        "SELECT set_config('bursar.tenant_id', %s, true)",
+                        (self._tenant_id,),
+                    )
                 cur.execute(text, params or [])
                 if cur.description:
                     return [dict(row) for row in cur.fetchall()]

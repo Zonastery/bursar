@@ -33,6 +33,7 @@ export interface ClickHouseClient {
 
 export interface ClickHouseUsageStoreOptions {
   client: ClickHouseClient;
+  tenantId: string;
   table?: string;
   /** Create the usage projection table on first use. Defaults to true. */
   createTable?: boolean;
@@ -92,6 +93,7 @@ function clickHouseDate(value: string): string {
  */
 export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore {
   private readonly client: ClickHouseClient;
+  private readonly tenantId: string;
   private readonly table: string;
   private readonly quotedTable: string;
   private readonly createTable: boolean;
@@ -100,6 +102,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
 
   constructor(options: ClickHouseUsageStoreOptions) {
     this.client = options.client;
+    this.tenantId = options.tenantId;
     this.table = validateTableName(options.table ?? "bursar_usage_events");
     this.quotedTable = quoteTable(this.table);
     this.createTable = options.createTable ?? true;
@@ -122,11 +125,15 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
 
   async writeUsage(event: UsageChargeExport, outboxEventId: string): Promise<void> {
     await this.initialize();
+    if (event.tenantId !== this.tenantId) {
+      throw new Error("Usage event tenantId does not match ClickHouse store tenantId");
+    }
     await this.client.insert({
       table: this.table,
       format: "JSONEachRow",
       values: [
         {
+          tenant_id: event.tenantId,
           outbox_event_id: outboxEventId,
           charge_id: event.chargeId,
           account_id: event.accountId,
@@ -194,7 +201,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          toString(sum(charged)) AS total_spend,
          toString(count()) AS entry_count
        FROM ${this.quotedTable} FINAL
-       WHERE event_at >= parseDateTime64BestEffort({start:String})
+       WHERE tenant_id = {tenantId:UUID}
+         AND event_at >= parseDateTime64BestEffort({start:String})
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
        ORDER BY key`,
@@ -216,7 +224,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
            toString(sum(charged)) AS total_spend,
            toString(uniqExact(subject_id)) AS active_users
          FROM ${this.quotedTable} FINAL
-         WHERE event_at >= parseDateTime64BestEffort({start:String})
+         WHERE tenant_id = {tenantId:UUID}
+           AND event_at >= parseDateTime64BestEffort({start:String})
            AND event_at < parseDateTime64BestEffort({end:String})`,
         start,
         end,
@@ -242,6 +251,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
         : `\nTTL event_at + toIntervalDay(${this.retentionDays}) DELETE`;
     await this.client.command({
       query: `CREATE TABLE IF NOT EXISTS ${this.quotedTable} (
+        tenant_id UUID,
         outbox_event_id UInt64,
         charge_id UUID,
         account_id UUID,
@@ -271,7 +281,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       )
       ENGINE = ReplacingMergeTree(outbox_event_id)
       PARTITION BY toYYYYMM(event_at)
-      ORDER BY (event_at, charge_id)${ttl}`,
+      ORDER BY (tenant_id, event_at, charge_id)${ttl}`,
     });
   }
 
@@ -289,7 +299,8 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          toString(sum(charged)) AS total_spend,
          toString(count()) AS entry_count
        FROM ${this.quotedTable} FINAL
-       WHERE event_at >= parseDateTime64BestEffort({start:String})
+       WHERE tenant_id = {tenantId:UUID}
+         AND event_at >= parseDateTime64BestEffort({start:String})
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
        ORDER BY sum(charged) DESC, key${limitSql}`,
@@ -302,7 +313,11 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     await this.initialize();
     const result = await this.client.query({
       query,
-      query_params: { start: start.toISOString(), end: end.toISOString() },
+      query_params: {
+        tenantId: this.tenantId,
+        start: start.toISOString(),
+        end: end.toISOString(),
+      },
       format: "JSONEachRow",
     });
     return result.json<T[]>();

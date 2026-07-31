@@ -12,7 +12,8 @@ DATABASE_URL=postgresql://... bursar migrate
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!);
+const tenantId = process.env.BURSAR_TENANT_ID!;
+const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
 const bursar = new Bursar({ creditStore: store });
 
 const grant = await bursar.credits.addCredits(userId, 500, {
@@ -59,6 +60,7 @@ import { createBursarRuntime } from "@zonastery/bursar/node";
 
 const runtime = await createBursarRuntime({
   postgres: process.env.DATABASE_URL!,
+  tenantId: process.env.BURSAR_TENANT_ID!,
 });
 await runtime.start();
 
@@ -76,6 +78,7 @@ const clickhouseClient = createClient({ url: process.env.CLICKHOUSE_URL! });
 
 const runtime = await createBursarRuntime({
   postgres: process.env.DATABASE_URL!,
+  tenantId: process.env.BURSAR_TENANT_ID!,
   s3: {
     bucket: process.env.BURSAR_S3_BUCKET!,
     region: process.env.BURSAR_S3_REGION!,
@@ -88,6 +91,7 @@ const runtime = await createBursarRuntime({
   },
   clickhouse: {
     client: clickhouseClient,
+    tenantId: process.env.BURSAR_TENANT_ID!,
     // Optional; omit to keep the ClickHouse projection indefinitely.
     retentionDays: 730,
   },

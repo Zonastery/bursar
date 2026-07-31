@@ -1,17 +1,41 @@
 import { describe, it, expect, vi } from "vitest";
 import Decimal from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
-import { PostgresStore } from "../src/credits/postgres/store.js";
-import { PostgresBillingStore } from "../src/billing/postgres/store.js";
+import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/store.js";
+import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";
 
 const D = (n: number | string) => new Decimal(n);
+const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
+
+class PostgresStore extends BasePostgresStore {
+  constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
+    super(databaseUrl, TEST_TENANT_ID, poolOrCtor);
+  }
+}
+
+class PostgresBillingStore extends BasePostgresBillingStore {
+  constructor(poolOrUrl: import("pg").Pool | string) {
+    super(poolOrUrl, TEST_TENANT_ID);
+  }
+}
+
+function mockTransactionClient(query: ReturnType<typeof vi.fn>) {
+  return {
+    query,
+    release: vi.fn(),
+  };
+}
 
 /** Mock pool that returns a fixed set of rows for every query. */
 function makeMockPool(rows: unknown[]): PgPoolConstructor {
-  return vi.fn(() => ({
-    query: vi.fn().mockResolvedValue({ rows }),
-    end: vi.fn().mockResolvedValue(undefined),
-  })) as unknown as PgPoolConstructor;
+  return vi.fn(() => {
+    const query = vi.fn().mockResolvedValue({ rows });
+    return {
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+  }) as unknown as PgPoolConstructor;
 }
 
 /**
@@ -24,11 +48,24 @@ function makeRecordingPool(rows: unknown[]): {
 } {
   const calls: Array<{ text: string; params: unknown[] }> = [];
   const query = vi.fn((text: string, params?: unknown[]) => {
+    if (
+      text === "BEGIN" ||
+      text === "COMMIT" ||
+      text === "ROLLBACK" ||
+      text.startsWith("SELECT set_config(")
+    ) {
+      return Promise.resolve({ rows: [] });
+    }
     calls.push({ text, params: params ?? [] });
     return Promise.resolve({ rows });
   });
   const ctor = vi.fn(
-    () => ({ query, end: vi.fn().mockResolvedValue(undefined) }) as unknown as PgPool,
+    () =>
+      ({
+        query,
+        connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+        end: vi.fn().mockResolvedValue(undefined),
+      }) as unknown as PgPool,
   ) as unknown as PgPoolConstructor;
   return { ctor, calls };
 }
@@ -472,18 +509,20 @@ describe("PostgresStore", () => {
   });
 
   it("keeps persisted payment metadata in its canonical snake_case shape", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          id: "pay_1",
+          purpose: "credit_topup",
+          amount_minor: 1000,
+          currency: "USD",
+          metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
+        },
+      ],
+    });
     const pool = {
-      query: vi.fn().mockResolvedValue({
-        rows: [
-          {
-            id: "pay_1",
-            purpose: "credit_topup",
-            amount_minor: 1000,
-            currency: "USD",
-            metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
-          },
-        ],
-      }),
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
     } as unknown as import("pg").Pool;
     const store = new PostgresBillingStore(pool);
@@ -494,32 +533,34 @@ describe("PostgresStore", () => {
   });
 
   it("orders subscription Date values without losing millisecond precision", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          subject_id: "user-1",
+          provider: "stripe",
+          provider_subscription_id: "sub-invalid-date",
+          status: "active",
+          provider_updated_at: new Date(Number.NaN),
+        },
+        {
+          subject_id: "user-1",
+          provider: "stripe",
+          provider_subscription_id: "sub-older",
+          status: "active",
+          provider_updated_at: new Date("2026-07-18T05:15:24.100Z"),
+        },
+        {
+          subject_id: "user-1",
+          provider: "stripe",
+          provider_subscription_id: "sub-newer",
+          status: "active",
+          provider_updated_at: new Date("2026-07-18T05:15:24.900Z"),
+        },
+      ],
+    });
     const pool = {
-      query: vi.fn().mockResolvedValue({
-        rows: [
-          {
-            subject_id: "user-1",
-            provider: "stripe",
-            provider_subscription_id: "sub-invalid-date",
-            status: "active",
-            provider_updated_at: new Date(Number.NaN),
-          },
-          {
-            subject_id: "user-1",
-            provider: "stripe",
-            provider_subscription_id: "sub-older",
-            status: "active",
-            provider_updated_at: new Date("2026-07-18T05:15:24.100Z"),
-          },
-          {
-            subject_id: "user-1",
-            provider: "stripe",
-            provider_subscription_id: "sub-newer",
-            status: "active",
-            provider_updated_at: new Date("2026-07-18T05:15:24.900Z"),
-          },
-        ],
-      }),
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
     } as unknown as import("pg").Pool;
     const store = new PostgresBillingStore(pool);
@@ -530,52 +571,54 @@ describe("PostgresStore", () => {
   });
 
   it("hydrates subscription changes with revision-pinned offer context", async () => {
+    const query = vi.fn((text: string, params?: unknown[]) => {
+      if (text.includes("get_open_billing_subscription_change")) {
+        return Promise.resolve({
+          rows: [
+            {
+              id: "change-1",
+              subscription_id: "subscription-1",
+              from_offer_id: "offer-old",
+              from_catalog_revision_id: "revision-old",
+              to_offer_id: "offer-new",
+              to_catalog_revision_id: "revision-new",
+              effective_at: new Date("2027-01-01T00:00:00.000Z"),
+              state: "scheduled",
+              proration_behavior: "none",
+              idempotency_key: "change-key",
+            },
+          ],
+        });
+      }
+      if (text.includes("get_catalog_offer_context")) {
+        return Promise.resolve({
+          rows: [
+            {
+              side: "from",
+              offer_id: params?.[0],
+              offer_key: "monk_monthly",
+              plan_id: "plan-old",
+              plan_key: "monk",
+              billing_unit: "month",
+              billing_count: 1,
+            },
+            {
+              side: "to",
+              offer_id: params?.[2],
+              offer_key: "sage_yearly",
+              plan_id: "plan-new",
+              plan_key: "sage",
+              billing_unit: "year",
+              billing_count: 1,
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
+    });
     const pool = {
-      query: vi.fn((text: string, params?: unknown[]) => {
-        if (text.includes("get_open_billing_subscription_change")) {
-          return Promise.resolve({
-            rows: [
-              {
-                id: "change-1",
-                subscription_id: "subscription-1",
-                from_offer_id: "offer-old",
-                from_catalog_revision_id: "revision-old",
-                to_offer_id: "offer-new",
-                to_catalog_revision_id: "revision-new",
-                effective_at: new Date("2027-01-01T00:00:00.000Z"),
-                state: "scheduled",
-                proration_behavior: "none",
-                idempotency_key: "change-key",
-              },
-            ],
-          });
-        }
-        if (text.includes("get_catalog_offer_context")) {
-          return Promise.resolve({
-            rows: [
-              {
-                side: "from",
-                offer_id: params?.[0],
-                offer_key: "monk_monthly",
-                plan_id: "plan-old",
-                plan_key: "monk",
-                billing_unit: "month",
-                billing_count: 1,
-              },
-              {
-                side: "to",
-                offer_id: params?.[2],
-                offer_key: "sage_yearly",
-                plan_id: "plan-new",
-                plan_key: "sage",
-                billing_unit: "year",
-                billing_count: 1,
-              },
-            ],
-          });
-        }
-        return Promise.resolve({ rows: [] });
-      }),
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
       end: vi.fn().mockResolvedValue(undefined),
     } as unknown as import("pg").Pool;
 
@@ -721,6 +764,7 @@ describe("PostgresStore", () => {
       () =>
         ({
           query,
+          connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
           end: vi.fn().mockResolvedValue(undefined),
         }) as unknown as import("../src/credits/postgres/store.js").PgPool,
     ) as unknown as import("../src/credits/postgres/store.js").PgPoolConstructor;

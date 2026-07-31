@@ -64,6 +64,7 @@ BEGIN
         'processing',v_token,now()+make_interval(secs=>p_lease_seconds)
     )
     ON CONFLICT (
+        tenant_id,
         provider,
         provider_environment,
         provider_event_id
@@ -254,6 +255,7 @@ BEGIN
         p_metadata
     )
     ON CONFLICT (
+        tenant_id,
         provider,
         provider_environment,
         duplicate_provider_subscription_id
@@ -322,7 +324,12 @@ BEGIN
         selected_at
     )
     VALUES (p_subject_id, v_environment, p_subscription_id, true, now())
-    ON CONFLICT (subject_id, provider_environment, subscription_id)
+    ON CONFLICT (
+        tenant_id,
+        subject_id,
+        provider_environment,
+        subscription_id
+    )
     DO UPDATE
     SET selected = true,
         selected_at = now(),

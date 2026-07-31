@@ -326,6 +326,18 @@
       "properties": {
         "activation": {
           "$ref": "#/$defs/OnPublishActivation"
+        },
+        "default_plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Plan"
         }
       },
       "title": "CatalogConfig",
@@ -528,6 +540,30 @@
       "title": "CreditAllowance",
       "type": "object"
     },
+    "CreditDisplay": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        },
+        "units_per_major": {
+          "examples": [
+            "10.500000"
+          ],
+          "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$",
+          "title": "Units Per Major",
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "units_per_major"
+      ],
+      "title": "CreditDisplay",
+      "type": "object"
+    },
     "CreditLinePolicy": {
       "additionalProperties": false,
       "properties": {
@@ -604,6 +640,17 @@
           },
           "title": "Grant Programs",
           "type": "object"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CreditDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

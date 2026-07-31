@@ -59,6 +59,7 @@ from bursar.billing import (
 from bursar.billing.billing_service import BillingProvisioningPort
 from bursar.breakdown import CostBreakdown, make_cost_breakdown
 from bursar.bursar import (
+    AccountService,
     BillingEventSink,
     BillingService,
     Bursar,
@@ -66,10 +67,12 @@ from bursar.bursar import (
     CatalogService,
     CreditsService,
 )
+from bursar.catalog import project_public_catalog
 from bursar.commerce import (
     AccountAllowanceOverview,
     AccountCommerceOverview,
     AccountCreditOverview,
+    AccountSubscriptionSummary,
     ActiveSubscriptionError,
     AutoRechargeInput,
     AutoRechargeProcessResultLike,
@@ -79,6 +82,8 @@ from bursar.commerce import (
     BillingDocumentLedgerRef,
     BillingDocumentLocator,
     BillingDocumentRef,
+    CancelAllSubscriptionsResult,
+    CancelSubscriptionResult,
     CheckoutCompletedError,
     CheckoutConflictError,
     CheckoutStatusResult,
@@ -106,6 +111,7 @@ from bursar.commerce import (
     InvalidOfferQuantityError,
     MissingPaymentMethodError,
     MissingPlanChangePolicyError,
+    NormalizedPendingPlanChange,
     PlanChangeClassification,
     PlanChangePreviewResult,
     PortalSessionInput,
@@ -217,7 +223,14 @@ from bursar.credits.types import (
     UsageAnalyticsStore,
 )
 from bursar.engine import PricingEngine
-from bursar.errors import BursarError, BursarImportError
+from bursar.errors import (
+    BursarError,
+    BursarErrorCategory,
+    BursarImportError,
+    bursar_error_http_status,
+    bursar_error_public_message,
+    is_retryable_bursar_error,
+)
 from bursar.expr import ExpressionError, evaluate_expression, quantize_money, validate_expression
 from bursar.metrics import UsageMetrics
 from bursar.providers.types import (
@@ -230,6 +243,11 @@ from bursar.providers.types import (
     ProviderLogger,
     UpdatePaymentMethodParams,
     WebhookRequest,
+)
+from bursar.retry import (
+    BursarRetryOptions,
+    retry_bursar_operation,
+    retry_bursar_operation_async,
 )
 
 
@@ -261,6 +279,7 @@ __all__ = [
     "AllowancePeriod",
     "AccountAllowanceOverview",
     "AccountCreditOverview",
+    "AccountSubscriptionSummary",
     "AllowanceGrant",
     "AllowanceResult",
     "AvailableResult",
@@ -286,7 +305,14 @@ __all__ = [
     "Bursar",
     "BursarOptions",
     "BursarError",
+    "BursarErrorCategory",
     "BursarImportError",
+    "bursar_error_http_status",
+    "bursar_error_public_message",
+    "is_retryable_bursar_error",
+    "BursarRetryOptions",
+    "retry_bursar_operation",
+    "retry_bursar_operation_async",
     "BillingEventSink",
     "BillingService",
     "CatalogService",
@@ -314,6 +340,7 @@ __all__ = [
     "MissingPlanChangePolicyError",
     "CoreBillingDataUnavailableError",
     "AccountCommerceOverview",
+    "AccountService",
     "AutoRechargeInput",
     "AutoRechargeProcessResultLike",
     "BillingDocumentInvoiceLocator",
@@ -323,6 +350,8 @@ __all__ = [
     "BillingDocumentLocator",
     "BillingDocumentRef",
     "CheckoutStatusResult",
+    "CancelAllSubscriptionsResult",
+    "CancelSubscriptionResult",
     "CommerceSectionAvailability",
     "CommerceWebhookInput",
     "CommerceWebhookResult",
@@ -333,6 +362,7 @@ __all__ = [
     "GetInvoiceLinkInput",
     "PlanChangeClassification",
     "PlanChangePreviewResult",
+    "NormalizedPendingPlanChange",
     "PortalSessionInput",
     "PreferencePatch",
     "PreviewPlanChangeInput",
@@ -454,4 +484,5 @@ __all__ = [
     "Window",
     "canonical_bursar_config_dict",
     "load_config_from_dict",
+    "project_public_catalog",
 ]

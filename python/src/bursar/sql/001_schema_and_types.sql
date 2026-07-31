@@ -185,6 +185,105 @@ AS $$
        AND length(btrim(p_value)) BETWEEN 1 AND 255
 $$;
 
+-- Tenancy is part of the baseline data model. Trusted application code binds
+-- one tenant to each transaction with:
+--
+--   SELECT set_config('bursar.tenant_id', '<uuid>', true)
+--
+-- Supabase/PostgREST requests may instead supply the tenant in trusted JWT
+-- app_metadata. User-controlled metadata is deliberately ignored.
+CREATE TABLE bursar.tenants (
+    id uuid PRIMARY KEY DEFAULT bursar.uuid_v7(),
+    slug text NOT NULL UNIQUE CHECK (
+        bursar.is_bounded_text(slug, 100)
+        AND slug ~ '^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$'
+    ),
+    display_name text,
+    status text NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'suspended', 'closed')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (
+        display_name IS NULL
+        OR bursar.is_bounded_text(display_name, 255)
+    )
+);
+
+CREATE FUNCTION bursar.current_tenant_id()
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SET search_path TO ''
+AS $$
+DECLARE
+    v_explicit text;
+    v_claims_text text;
+    v_claims jsonb;
+    v_tenant text;
+BEGIN
+    v_explicit := NULLIF(
+        current_setting('bursar.tenant_id', true),
+        ''
+    );
+    IF v_explicit IS NOT NULL THEN
+        RETURN v_explicit::uuid;
+    END IF;
+
+    v_claims_text := NULLIF(
+        current_setting('request.jwt.claims', true),
+        ''
+    );
+    IF v_claims_text IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    v_claims := v_claims_text::jsonb;
+    v_tenant := COALESCE(
+        v_claims #>> '{app_metadata,tenant_id}',
+        v_claims #>> '{app_metadata,tenantId}'
+    );
+    RETURN NULLIF(v_tenant, '')::uuid;
+EXCEPTION
+    WHEN invalid_text_representation THEN
+        RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION bursar.require_tenant_id()
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SET search_path TO ''
+AS $$
+DECLARE
+    v_tenant uuid := bursar.current_tenant_id();
+BEGIN
+    IF v_tenant IS NULL THEN
+        RAISE EXCEPTION 'bursar tenant context is required'
+            USING ERRCODE = '28000';
+    END IF;
+    RETURN v_tenant;
+END
+$$;
+
+CREATE FUNCTION bursar.current_tenant_is_active()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path TO ''
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM bursar.tenants
+        WHERE id = bursar.current_tenant_id()
+          AND status = 'active'
+    )
+$$;
+
+REVOKE ALL ON FUNCTION bursar.current_tenant_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.require_tenant_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.current_tenant_is_active() FROM PUBLIC;
+
 CREATE FUNCTION bursar.current_provider_environment()
 RETURNS text
 LANGUAGE sql

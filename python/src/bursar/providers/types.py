@@ -72,9 +72,7 @@ def normalize_provider_logger(logger: Any = None) -> ProviderLogger:
 class ResolveUserCallback(Protocol):
     def __call__(
         self,
-        data: dict[str, Any],
-        metadata: dict[str, str],
-        event_type: str | None = None,
+        identity: ResolveIdentityInput,
     ) -> Awaitable[str | None]: ...
 
 
@@ -84,6 +82,17 @@ ProviderResolveUserFn = ResolveUserCallback
 
 class _ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ResolveIdentityInput(_ProviderModel):
+    provider: str
+    provider_event_type: str
+    normalized_event_type: str | None = None
+    customer_id: str | None = None
+    email: str | None = None
+    metadata: dict[str, str]
+    successful: bool
+    checkout_kind: Literal["subscription", "credit_topup"] | None = None
 
 
 class _ProviderResultModel(_ProviderModel):

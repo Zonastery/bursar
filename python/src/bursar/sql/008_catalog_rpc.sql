@@ -213,7 +213,12 @@ BEGIN
     END IF;
 
     PERFORM pg_advisory_xact_lock(
-        hashtextextended('bursar.catalog.active', 0)
+        hashtextextended(
+            'bursar.tenant:'
+            || bursar.require_tenant_id()::text
+            || ':catalog.active',
+            0
+        )
     );
 
     v_digest := extensions.digest(
@@ -1139,7 +1144,12 @@ DECLARE
     v_revision bursar.catalog_revisions;
 BEGIN
     PERFORM pg_advisory_xact_lock(
-        hashtextextended('bursar.catalog.active', 0)
+        hashtextextended(
+            'bursar.tenant:'
+            || bursar.require_tenant_id()::text
+            || ':catalog.active',
+            0
+        )
     );
 
     SELECT *

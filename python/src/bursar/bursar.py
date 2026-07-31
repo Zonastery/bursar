@@ -34,12 +34,15 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
 )
+from bursar.commerce.errors import CommerceNotConfiguredError
 from bursar.commerce.service import CommerceService
 from bursar.commerce.types import AutoRechargeInput, CommerceOptions
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.service import CreditsService as CreditsServiceImpl
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.store import CreditStore
+from bursar.errors import ConfigError, PricingNotLoadedError
+from bursar.retry import retry_bursar_operation
 
 
 class BillingCapability(BillingEventSink, Protocol):
@@ -180,6 +183,19 @@ class CatalogService:
     def active(self):
         return self._credits.get_active_pricing()
 
+    def get_config(self):
+        from bursar.config import load_config_from_dict
+
+        active = self.active
+        if active is None:
+            raise PricingNotLoadedError("No active Bursar catalog is available")
+        return load_config_from_dict(active.config)
+
+    def public_view(self) -> dict[str, Any]:
+        from bursar.catalog import project_public_catalog
+
+        return project_public_catalog(self.get_config())
+
     def publish_draft(self, config: dict, label: str | None = None) -> str:
         return self._credits.publish_pricing_draft(config, label)
 
@@ -188,6 +204,59 @@ class CatalogService:
 
     def publish_and_activate(self, config: dict, label: str | None = None) -> None:
         self._credits.publish_pricing(config, label)
+
+
+class AccountService:
+    """Generic financial lifecycle operations for SaaS accounts."""
+
+    def __init__(self, credits: CreditsService, catalog: CatalogService) -> None:
+        self._credits = credits
+        self._catalog = catalog
+
+    def on_account_created(
+        self,
+        account_id: str,
+        event_key: str,
+        *,
+        region: str | None = None,
+        metadata=None,
+    ) -> dict[str, Any]:
+        from bursar.credits.types import ExecuteGrantProgramRequest
+
+        if not event_key.strip():
+            raise ConfigError("event_key must not be empty")
+        config = retry_bursar_operation(self._catalog.get_config)
+        fallback = min(config.plans, key=lambda key: (config.plans[key].rank, key), default=None)
+        plan_key = config.catalog.default_plan or fallback
+        if plan_key is None:
+            raise ConfigError("The active catalog has no default account plan")
+        current = retry_bursar_operation(self._credits.get_user_plan, account_id)
+        plan_assigned = current.plan_key is None
+        if plan_assigned:
+            retry_bursar_operation(self._credits.set_user_plan, account_id, plan_key)
+        grants = []
+        for program_key, program in sorted(config.credits.grant_programs.items()):
+            if program.trigger != "account_created":
+                continue
+            grants.extend(
+                retry_bursar_operation(
+                    self._credits.execute_grant_program,
+                    ExecuteGrantProgramRequest(
+                        trigger="account_created",
+                        program_key=program_key,
+                        subject_id=account_id,
+                        event_key=event_key,
+                        region=region,
+                        metadata=metadata,
+                    ),
+                )
+            )
+        return {
+            "account_id": account_id,
+            "plan_key": current.plan_key or plan_key,
+            "plan_assigned": plan_assigned,
+            "grants": grants,
+        }
 
 
 class BursarOptions(BaseModel):
@@ -215,6 +284,7 @@ class Bursar:
 
     credits: CreditsService
     catalog: CatalogService
+    accounts: AccountService
     billing: BillingService | None
     commerce: CommerceService | None
 
@@ -232,6 +302,7 @@ class Bursar:
                 raise TypeError("Bursar requires BursarOptions or a credits service")
             self.credits = credits
             self.catalog = catalog or CatalogService(credits)
+            self.accounts = AccountService(self.credits, self.catalog)
             self.billing = billing
             self.commerce = commerce
             return
@@ -242,6 +313,7 @@ class Bursar:
             options=options.credits_options,
         )
         self.catalog = CatalogService(self.credits)
+        self.accounts = AccountService(self.credits, self.catalog)
         self.billing = (
             BillingServiceImpl(
                 options.billing_store,
@@ -306,5 +378,5 @@ class Bursar:
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         """Submit a normalized provider event through the facade."""
         if self.billing is None:
-            raise RuntimeError("Bursar billing capability is not configured")
+            raise CommerceNotConfiguredError("Bursar billing capability is not configured")
         return self.billing.ingest_billing_event(event)

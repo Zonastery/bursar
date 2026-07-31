@@ -48,6 +48,9 @@ import pytest
 
 from bursar.credits.postgres.store import PostgresStore, run_migrations
 
+TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+TEST_TENANT_SLUG = "bursar-tests"
+
 
 def _pg2_conn(dsn: str) -> Generator[psycopg2.connection, None, None]:
     """Context manager yielding a fresh psycopg2 connection — auto-closes."""
@@ -227,10 +230,14 @@ def _truncate_bursar_tables(dsn: str) -> None:
             cur.execute(
                 """
                 DO $$
-                DECLARE t text;
+                DECLARE v_tables text;
                 BEGIN
-                    FOR t IN
-                        SELECT tablename FROM pg_tables
+                    SELECT string_agg(
+                        format('bursar.%I', tablename),
+                        ', ' ORDER BY tablename
+                    )
+                    INTO v_tables
+                    FROM pg_tables
                         WHERE schemaname = 'bursar'
                       AND (tablename LIKE 'credit_%' OR tablename LIKE 'account_%'
                            OR tablename IN (
@@ -244,12 +251,17 @@ def _truncate_bursar_tables(dsn: str) -> None:
                            )
                            OR tablename LIKE 'billing_%'
                            OR tablename LIKE 'catalog_%'
-                           OR tablename = 'account_creation_grants')
-                    LOOP
-                        EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
-                    END LOOP;
+                           OR tablename = 'account_creation_grants');
 
-                    TRUNCATE TABLE bursar.storage_settings;
+                    IF v_tables IS NOT NULL THEN
+                        EXECUTE 'TRUNCATE TABLE '
+                            || v_tables
+                            || ' CASCADE';
+                    END IF;
+
+                    TRUNCATE TABLE
+                        bursar.storage_settings,
+                        bursar.tenant_catalog_counters;
                     INSERT INTO bursar.storage_settings(singleton)
                     VALUES (true);
                 EXCEPTION WHEN undefined_table THEN NULL;
@@ -359,13 +371,22 @@ def pg_database_url() -> Iterator[str]:
     run_migrations(dsn)
     # Clean slate per test so cross-test state never bleeds.
     _truncate_bursar_tables(dsn)
+    with psycopg2.connect(dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT bursar.create_tenant(%s, %s, %s)",
+            (TEST_TENANT_ID, TEST_TENANT_SLUG, "Bursar tests"),
+        )
     yield dsn
 
 
 @pytest.fixture(scope="function")
 def pg_store(pg_database_url: str) -> Iterator[PostgresStore]:
     """Yield a ``PostgresStore`` against a migrated real Postgres."""
-    store = PostgresStore(pg_database_url, max_pool_size=2)
+    store = PostgresStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        max_pool_size=2,
+    )
     try:
         yield store
     finally:

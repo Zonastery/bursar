@@ -32,7 +32,9 @@ from bursar.storage.ports import (
 from bursar.storage.runtime import (
     BursarRuntime,
     BursarRuntimeBursarOptions,
+    BursarRuntimeHealth,
     BursarRuntimeOptions,
+    BursarRuntimeStartOptions,
     UsageAnalyticsSink,
     create_bursar_runtime,
 )
@@ -42,8 +44,10 @@ __all__ = [
     "BillingPayloadArchive",
     "BillingPayloadArchiveResult",
     "BursarRuntime",
+    "BursarRuntimeHealth",
     "BursarRuntimeBursarOptions",
     "BursarRuntimeOptions",
+    "BursarRuntimeStartOptions",
     "ClickHouseClient",
     "ClickHouseQueryResult",
     "ClickHouseUsageStore",

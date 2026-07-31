@@ -1,0 +1,81 @@
+---
+title: Multi-tenancy
+---
+
+# Multi-tenancy
+
+Bursar uses one PostgreSQL schema with shared tables. Every catalog, credit,
+usage, quota, team, and billing row carries a mandatory `tenant_id`.
+Tenant-prefixed unique constraints allow different tenants to reuse subject,
+provider, and idempotency identifiers. Composite foreign keys prevent a row
+from referencing another tenant even if privileged code has a bug.
+
+## Provision and bind a tenant
+
+Run migrations, then provision the tenant with an operator connection:
+
+```bash
+export DATABASE_URL=postgresql://...
+bursar tenant create acme \
+  --id 018f7f5f-7b4a-7000-8000-000000000001 \
+  --display-name "Acme"
+```
+
+Pass that UUID when constructing a store or runtime:
+
+```python
+store = PostgresStore(database_url, tenant_id=tenant_id)
+
+runtime = create_bursar_runtime(
+    BursarRuntimeOptions(
+        postgres=database_url,
+        tenant_id=tenant_id,
+    )
+)
+```
+
+```ts
+const store = new PostgresStore(databaseUrl, tenantId);
+
+const runtime = await createBursarRuntime({
+  postgres: databaseUrl,
+  tenantId,
+});
+```
+
+Each SDK checks out one pooled connection, starts a transaction, sets
+`bursar.tenant_id` with transaction-local scope, performs the RPC, then commits
+or rolls back before releasing the connection. Never set a session-scoped
+tenant value on a pooled connection.
+
+## Database enforcement
+
+Tenant RPCs are `SECURITY DEFINER` functions owned by the `bursar_runtime`
+role. That role is `NOLOGIN` and `NOBYPASSRLS`. Business tables use forced row
+level security, so isolation remains active even when the application connects
+as PostgreSQL `service_role`, which normally bypasses RLS.
+
+The tenant can also come from `request.jwt.claims.app_metadata.tenant_id` for a
+trusted PostgREST integration. Bursar never reads `user_metadata`, because an
+end user can change it. Server SDKs should prefer explicit transaction-local
+binding.
+
+Missing tenant context fails closed on writes. Suspended and closed tenants
+cannot read or mutate business rows. Operators can change lifecycle state:
+
+```bash
+bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
+bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
+```
+
+## Host triggers and external storage
+
+A trigger on an application-owned principal table must set the tenant locally
+before it calls a Bursar provisioning RPC. Use a host-owned wrapper trigger;
+do not attach the generic provisioning hook without tenant context.
+
+The operator API can claim the global outbox, while SDK runtimes use the
+tenant-filtered claim overload so one runtime cannot take another tenant's
+work. Claimed events and exported payloads include `tenant_id`. S3 keys use
+`tenants/<tenant-id>/...`, and ClickHouse rows and analytics queries include a
+tenant filter. Keep this field in any custom outbox handler or projection.

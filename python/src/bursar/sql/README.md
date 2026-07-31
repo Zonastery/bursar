@@ -22,7 +22,24 @@ than creating one migration per function.
 
 `bursar.provision_subject_account_on_insert()` is an optional host-table
 trigger hook. Bursar never guesses or mutates an application-owned principal
-table; each integration attaches the hook explicitly from its own migration.
+table; each integration attaches a host-owned wrapper explicitly from its own
+migration. The wrapper must bind `bursar.tenant_id` transaction-locally before
+it calls a Bursar provisioning RPC.
+
+## Tenant boundary
+
+Shared-table multi-tenancy is defined directly by the baseline table,
+constraint, index, and storage migrations. Business tables have a mandatory
+`tenant_id` plus tenant-prefixed relationship and uniqueness constraints.
+`031_multitenancy_security.sql` installs forced RLS and assigns tenant RPCs to
+the `NOLOGIN NOBYPASSRLS` `bursar_runtime` role, so a Supabase `service_role`
+caller cannot bypass isolation through a security-definer RPC.
+
+Server adapters bind `bursar.tenant_id` with transaction-local `set_config` on
+the same checked-out connection as the RPC. Trusted PostgREST callers may use
+`app_metadata.tenant_id`; `user_metadata` is never accepted. Storage
+maintenance and outbox claiming remain operator-level cross-tenant operations,
+and their exports carry the owning tenant UUID.
 
 ## Function conventions
 

@@ -17,6 +17,7 @@ export type {
   WebhookRequest,
   WebhookResult,
   ResolveUserCallback,
+  ResolveIdentityInput,
   ProviderLogger,
   ProviderUrlResult,
 } from "./types.js";

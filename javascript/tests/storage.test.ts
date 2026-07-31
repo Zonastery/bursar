@@ -5,6 +5,9 @@ import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
+import { PricingNotLoadedError } from "../src/errors.js";
+
+const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 const s3Mock = vi.hoisted(() => ({
   send: vi.fn(),
@@ -23,6 +26,7 @@ vi.mock("@aws-sdk/client-s3", () => ({
 
 const outboxEvent: OutboxEvent = {
   eventId: "42",
+  tenantId: TEST_TENANT_ID,
   topic: "usage.charge_recorded",
   aggregateType: "credit_usage_charge",
   aggregateId: "00000000-0000-0000-0000-000000000042",
@@ -92,6 +96,7 @@ describe("S3BillingArchive", () => {
 
     await expect(
       archive.archive({
+        tenantId: TEST_TENANT_ID,
         eventId: "00000000-0000-0000-0000-000000000001",
         provider: "stripe",
         providerEnvironment: "live",
@@ -106,7 +111,9 @@ describe("S3BillingArchive", () => {
         archivedAt: null,
       }),
     ).resolves.toEqual({
-      key: "tenant-a/billing-events/2026/07/29/00000000-0000-0000-0000-000000000001.json",
+      key:
+        "tenant-a/tenants/00000000-0000-0000-0000-000000000001/" +
+        "billing-events/2026/07/29/00000000-0000-0000-0000-000000000001.json",
       versionId: "v1",
     });
 
@@ -123,6 +130,7 @@ describe("S3BillingArchive", () => {
 
     await expect(
       archive.archive({
+        tenantId: TEST_TENANT_ID,
         eventId: "00000000-0000-0000-0000-000000000002",
         provider: "stripe",
         providerEnvironment: "live",
@@ -157,8 +165,13 @@ describe("ClickHouseUsageStore", () => {
       insert,
       query,
     };
-    const store = new ClickHouseUsageStore({ client, createTable: false });
+    const store = new ClickHouseUsageStore({
+      client,
+      tenantId: TEST_TENANT_ID,
+      createTable: false,
+    });
     const usage: UsageChargeExport = {
+      tenantId: TEST_TENANT_ID,
       chargeId: "00000000-0000-0000-0000-000000000042",
       accountId: "00000000-0000-0000-0000-000000000006",
       subjectId: "00000000-0000-0000-0000-000000000007",
@@ -191,6 +204,7 @@ describe("ClickHouseUsageStore", () => {
         table: "bursar_usage_events",
         values: [
           expect.objectContaining({
+            tenant_id: TEST_TENANT_ID,
             outbox_event_id: "99",
             charge_id: usage.chargeId,
             charged: "12.500000",
@@ -214,12 +228,38 @@ describe("ClickHouseUsageStore", () => {
 });
 
 describe("BursarRuntime", () => {
+  it("retries a catalog that has not been published yet", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
+    const loadCatalog = vi
+      .spyOn(runtime.bursar, "loadCatalog")
+      .mockRejectedValueOnce(new PricingNotLoadedError("catalog pending"))
+      .mockResolvedValue(undefined);
+
+    await runtime.start({ loadCatalog: true, maxAttempts: 2, retryDelayMs: 0 });
+
+    expect(loadCatalog).toHaveBeenCalledTimes(2);
+    expect(runtime.health()).toMatchObject({ started: true, closed: false });
+    await runtime.close();
+  });
+
   it("has no background worker or external dependency in PostgreSQL-only mode", async () => {
     const pool: PostgresPool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
       end: vi.fn().mockResolvedValue(undefined),
     };
-    const runtime = await createBursarRuntime({ postgres: pool });
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+    });
 
     expect(runtime.worker).toBeNull();
     expect(runtime.clickhouse).toBeNull();
@@ -233,6 +273,7 @@ describe("BursarRuntime", () => {
   it("routes analytics through ClickHouse without changing PostgresStore", async () => {
     const pool: PostgresPool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
       end: vi.fn().mockResolvedValue(undefined),
     };
     const clickhouseClient: ClickHouseClient = {
@@ -247,7 +288,12 @@ describe("BursarRuntime", () => {
     };
     const runtime = await createBursarRuntime({
       postgres: pool,
-      clickhouse: { client: clickhouseClient, createTable: false },
+      tenantId: TEST_TENANT_ID,
+      clickhouse: {
+        client: clickhouseClient,
+        tenantId: TEST_TENANT_ID,
+        createTable: false,
+      },
       outbox: false,
     });
 

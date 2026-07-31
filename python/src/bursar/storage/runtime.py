@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeGuard, cast
+from uuid import UUID
 
 import psycopg2.pool
 from pydantic import BaseModel, ConfigDict, SkipValidation, model_validator
@@ -17,6 +19,7 @@ from bursar.credits.events import CreditEventEmitter
 from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.types import UsageAnalyticsStore
+from bursar.errors import PricingNotLoadedError, is_retryable_bursar_error
 from bursar.shared.postgres_client import PostgresClient
 from bursar.storage.adapters.clickhouse import (
     ClickHouseUsageStore,
@@ -79,6 +82,7 @@ class BursarRuntimeBursarOptions(_RuntimeModel):
 
 class BursarRuntimeOptions(_RuntimeModel):
     postgres: str | SkipValidation[PostgresPool]
+    tenant_id: UUID
     s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
     clickhouse: SkipValidation[UsageAnalyticsSink] | ClickHouseUsageStoreOptions | None = None
     outbox: OutboxWorkerOptions | Literal[False] | None = None
@@ -90,6 +94,28 @@ class BursarRuntimeOptions(_RuntimeModel):
             msg = "outbox must be OutboxWorkerOptions, False, or None"
             raise ValueError(msg)
         return self
+
+
+class BursarRuntimeStartOptions(_RuntimeModel):
+    load_catalog: bool = False
+    max_attempts: int = 1
+    retry_delay_seconds: float = 0.25
+    should_retry: SkipValidation[Callable[[BaseException], bool]] | None = None
+
+    @model_validator(mode="after")
+    def validate_retry(self) -> BursarRuntimeStartOptions:
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be a positive integer")
+        if self.retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must not be negative")
+        return self
+
+
+class BursarRuntimeHealth(_RuntimeModel):
+    ready: bool
+    started: bool
+    closed: bool
+    catalog_loaded: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +149,9 @@ class BursarRuntime:
         if options.clickhouse is None:
             self.clickhouse = None
         elif isinstance(options.clickhouse, ClickHouseUsageStoreOptions):
+            if options.clickhouse.tenant_id != options.tenant_id:
+                msg = "ClickHouse tenant_id must match runtime tenant_id"
+                raise ValueError(msg)
             self.clickhouse = ClickHouseUsageStore(options.clickhouse)
         elif _is_usage_analytics_sink(options.clickhouse):
             self.clickhouse = options.clickhouse
@@ -141,21 +170,35 @@ class BursarRuntime:
             raise TypeError(msg)
 
         psycopg_pool = cast(psycopg2.pool.ThreadedConnectionPool, pool)
-        self.credit_store = PostgresStore("", pool=psycopg_pool)
-        self.billing_store = PostgresBillingStore("", pool=psycopg_pool)
+        self.credit_store = PostgresStore(
+            "",
+            tenant_id=options.tenant_id,
+            pool=psycopg_pool,
+        )
+        self.billing_store = PostgresBillingStore(
+            "",
+            tenant_id=options.tenant_id,
+            pool=psycopg_pool,
+        )
         credits_options = (options.bursar.credits_options or CreditsServiceOptions()).model_copy(
             update={"analytics": self.clickhouse}
         )
+        commerce_options = options.bursar.commerce_options
+        if commerce_options is not None:
+            commerce_options = commerce_options.model_copy(update={"tenant_id": str(options.tenant_id)})
         self.bursar = Bursar.create(
             credit_store=self.credit_store,
             billing_store=self.billing_store,
             credits_options=credits_options,
             billing_options=options.bursar.billing_options,
-            commerce_options=options.bursar.commerce_options,
+            commerce_options=commerce_options,
             emitter=options.bursar.emitter,
         )
 
-        repository = PostgresStorageRepository(PostgresClient.from_pool(psycopg_pool).query)
+        repository = PostgresStorageRepository(
+            PostgresClient.from_pool(psycopg_pool).query,
+            options.tenant_id,
+        )
         handlers = self._create_handlers(repository)
         worker_options = options.outbox if isinstance(options.outbox, OutboxWorkerOptions) else None
         self.worker = (
@@ -164,12 +207,28 @@ class BursarRuntime:
         self._started = False
         self._closed = False
 
-    def start(self) -> None:
+    def start(self, options: BursarRuntimeStartOptions | None = None) -> None:
         if self._started:
             return
         if self._closed:
             msg = "BursarRuntime has been closed"
             raise RuntimeError(msg)
+        start_options = options or BursarRuntimeStartOptions()
+        if start_options.load_catalog:
+            for attempt in range(1, start_options.max_attempts + 1):
+                try:
+                    self.bursar.load_catalog()
+                    break
+                except Exception as exc:
+                    retryable = (
+                        start_options.should_retry(exc)
+                        if start_options.should_retry is not None
+                        else isinstance(exc, PricingNotLoadedError) or is_retryable_bursar_error(exc)
+                    )
+                    if attempt >= start_options.max_attempts or not retryable:
+                        raise
+                    delay = min(start_options.retry_delay_seconds * (2 ** (attempt - 1)), 5.0)
+                    time.sleep(delay)
         if self.clickhouse is not None:
             initialize = getattr(self.clickhouse, "initialize", None)
             if callable(initialize):
@@ -177,6 +236,15 @@ class BursarRuntime:
         if self.worker is not None:
             self.worker.start()
         self._started = True
+
+    def health(self) -> BursarRuntimeHealth:
+        catalog_loaded = self.bursar.credits.pricing_engine is not None
+        return BursarRuntimeHealth(
+            ready=self._started and not self._closed and catalog_loaded,
+            started=self._started,
+            closed=self._closed,
+            catalog_loaded=catalog_loaded,
+        )
 
     def flush(self) -> OutboxRunResult:
         if self._closed:
@@ -223,6 +291,9 @@ class BursarRuntime:
                 if usage is None:
                     msg = f"Usage charge {outbox_event.aggregate_id} is unavailable for export"
                     raise RuntimeError(msg)
+                if usage.tenant_id != outbox_event.tenant_id:
+                    msg = "Usage export tenant does not match its outbox event"
+                    raise RuntimeError(msg)
                 if self.clickhouse is not None:
                     self.clickhouse.write_usage(usage, outbox_event.event_id)
 
@@ -241,6 +312,9 @@ class BursarRuntime:
                 event = repository.get_billing_event_payload(outbox_event.aggregate_id)
                 if event is None:
                     msg = f"Billing event {outbox_event.aggregate_id} is unavailable for archive"
+                    raise RuntimeError(msg)
+                if event.tenant_id != outbox_event.tenant_id:
+                    msg = "Billing export tenant does not match its outbox event"
                     raise RuntimeError(msg)
                 if event.object_key is not None:
                     return

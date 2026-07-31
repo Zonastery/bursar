@@ -87,6 +87,8 @@ class S3BillingArchive:
             part
             for part in (
                 self._prefix,
+                "tenants",
+                event.tenant_id,
                 "billing-events",
                 day,
                 f"{event.event_id}.json",
@@ -95,6 +97,7 @@ class S3BillingArchive:
         )
         document = {
             "schema": "bursar.billing-event-envelope.v1",
+            "tenantId": event.tenant_id,
             "eventId": event.event_id,
             "provider": event.provider,
             "providerEnvironment": event.provider_environment,
@@ -110,6 +113,7 @@ class S3BillingArchive:
             Body=json.dumps(document, separators=(",", ":")).encode(),
             ContentType="application/json",
             Metadata={
+                "bursar-tenant-id": event.tenant_id,
                 "bursar-event-id": event.event_id,
                 "bursar-provider": event.provider,
                 "bursar-environment": event.provider_environment,

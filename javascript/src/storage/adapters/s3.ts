@@ -71,7 +71,14 @@ export class S3BillingArchive implements BillingPayloadArchive {
     }
 
     const day = receivedAt.toISOString().slice(0, 10).replaceAll("-", "/");
-    const key = [this.prefix, "billing-events", day, `${event.eventId}.json`]
+    const key = [
+      this.prefix,
+      "tenants",
+      event.tenantId,
+      "billing-events",
+      day,
+      `${event.eventId}.json`,
+    ]
       .filter(Boolean)
       .join("/");
     const { PutObjectCommand } = await import("@aws-sdk/client-s3");
@@ -83,6 +90,7 @@ export class S3BillingArchive implements BillingPayloadArchive {
         Body: new TextEncoder().encode(
           JSON.stringify({
             schema: "bursar.billing-event-envelope.v1",
+            tenantId: event.tenantId,
             eventId: event.eventId,
             provider: event.provider,
             providerEnvironment: event.providerEnvironment,
@@ -95,6 +103,7 @@ export class S3BillingArchive implements BillingPayloadArchive {
         ),
         ContentType: "application/json",
         Metadata: {
+          "bursar-tenant-id": event.tenantId,
           "bursar-event-id": event.eventId,
           "bursar-provider": event.provider,
           "bursar-environment": event.providerEnvironment,

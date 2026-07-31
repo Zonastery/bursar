@@ -11,6 +11,10 @@ BEGIN
 END
 $$;
 
+CREATE TRIGGER tenant_updated_at
+BEFORE UPDATE ON bursar.tenants
+FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();
+
 CREATE FUNCTION bursar.ensure_storage_partition(
     p_parent_table text,
     p_at timestamptz,
@@ -101,6 +105,13 @@ BEGIN
             'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
             v_partition
         );
+        IF to_regprocedure(
+            'bursar.secure_tenant_partition(regclass)'
+        ) IS NOT NULL THEN
+            EXECUTE
+                'SELECT bursar.secure_tenant_partition($1)'
+                USING v_child_oid;
+        END IF;
 
         INSERT INTO bursar.storage_partitions(
             parent_table,
@@ -152,6 +163,13 @@ BEGIN
             'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
             v_partition
         );
+        IF to_regprocedure(
+            'bursar.secure_tenant_partition(regclass)'
+        ) IS NOT NULL THEN
+            EXECUTE
+                'SELECT bursar.secure_tenant_partition($1)'
+                USING v_child_oid;
+        END IF;
 
         INSERT INTO bursar.storage_partitions(
             parent_table,
@@ -180,6 +198,14 @@ BEGIN
         'ALTER TABLE bursar.%I ENABLE ROW LEVEL SECURITY',
         v_partition
     );
+    v_child_oid := format('bursar.%I', v_partition)::regclass;
+    IF to_regprocedure(
+        'bursar.secure_tenant_partition(regclass)'
+    ) IS NOT NULL THEN
+        EXECUTE
+            'SELECT bursar.secure_tenant_partition($1)'
+            USING v_child_oid;
+    END IF;
 
     EXECUTE format(
         'COMMENT ON TABLE bursar.%I IS %L',
@@ -264,13 +290,14 @@ BEGIN
         NEW.id,
         'usage-charge:' || NEW.id::text,
         jsonb_build_object(
+            'tenant_id', NEW.tenant_id,
             'charge_id', NEW.id,
             'account_id', NEW.account_id,
             'event_at', NEW.event_at,
             'created_at', NEW.created_at
         )
     )
-    ON CONFLICT (idempotency_key) DO NOTHING;
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
 
     RETURN NEW;
 END
@@ -299,6 +326,7 @@ BEGIN
         'quota-event:' || NEW.id::text,
         jsonb_strip_nulls(
             jsonb_build_object(
+                'tenant_id', NEW.tenant_id,
                 'quota_event_id', NEW.id,
                 'quota_window_id', NEW.quota_window_id,
                 'usage_charge_id', NEW.usage_charge_id,
@@ -308,7 +336,7 @@ BEGIN
             )
         )
     )
-    ON CONFLICT (idempotency_key) DO NOTHING;
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
 
     RETURN NEW;
 END
@@ -334,6 +362,7 @@ BEGIN
         'quota-usage-event:' || NEW.id::text,
         jsonb_strip_nulls(
             jsonb_build_object(
+                'tenant_id', NEW.tenant_id,
                 'quota_usage_event_id', NEW.id,
                 'account_id', NEW.account_id,
                 'catalog_quota_id', NEW.catalog_quota_id,
@@ -347,7 +376,7 @@ BEGIN
             )
         )
     )
-    ON CONFLICT (idempotency_key) DO NOTHING;
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
 
     RETURN NEW;
 END
@@ -375,6 +404,7 @@ BEGIN
             NEW.id,
             'billing-event-completed:' || NEW.id::text,
             jsonb_build_object(
+                'tenant_id', NEW.tenant_id,
                 'billing_event_id', NEW.id,
                 'provider', NEW.provider,
                 'provider_environment', NEW.provider_environment,
@@ -384,7 +414,7 @@ BEGIN
                 'completed_at', NEW.completed_at
             )
         )
-        ON CONFLICT (idempotency_key) DO NOTHING;
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
     END IF;
 
     RETURN NEW;
@@ -1334,7 +1364,12 @@ BEGIN
 
     IF NEW.status = 'active' THEN
         PERFORM pg_advisory_xact_lock(
-            hashtextextended('bursar.catalog.active', 0)
+            hashtextextended(
+                'bursar.tenant:'
+                || bursar.require_tenant_id()::text
+                || ':catalog.active',
+                0
+            )
         );
 
         UPDATE bursar.catalog_revisions
@@ -1514,3 +1549,168 @@ BEGIN
     RETURN NEW;
 END
 $$;
+
+-- Snapshot the original relationship graph, then replace every relationship
+-- between tenant-owned tables with a tenant-prefixed composite foreign key.
+-- The original single-tenant foreign keys are removed after the composite
+-- constraints have been installed.
+CREATE TEMPORARY TABLE bursar_multitenant_foreign_keys
+ON COMMIT DROP
+AS
+SELECT
+    constraint_info.oid,
+    constraint_info.conname,
+    constraint_info.conrelid,
+    constraint_info.confrelid,
+    constraint_info.conkey,
+    constraint_info.confkey,
+    constraint_info.confupdtype,
+    constraint_info.confdeltype,
+    constraint_info.condeferrable,
+    constraint_info.condeferred
+FROM pg_constraint AS constraint_info
+INNER JOIN pg_class AS child_table
+    ON constraint_info.conrelid = child_table.oid
+INNER JOIN pg_class AS parent_table
+    ON constraint_info.confrelid = parent_table.oid
+WHERE
+    constraint_info.contype = 'f'
+    AND constraint_info.connamespace = 'bursar'::regnamespace
+    AND constraint_info.conparentid = 0
+    AND NOT child_table.relispartition
+    AND NOT parent_table.relispartition
+    AND EXISTS (
+        SELECT 1
+        FROM pg_attribute AS child_tenant
+        WHERE
+            child_tenant.attrelid = constraint_info.conrelid
+            AND child_tenant.attname = 'tenant_id'
+            AND NOT child_tenant.attisdropped
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM pg_attribute AS parent_tenant
+        WHERE
+            parent_tenant.attrelid = constraint_info.confrelid
+            AND parent_tenant.attname = 'tenant_id'
+            AND NOT parent_tenant.attisdropped
+    );
+
+DO $$
+DECLARE
+    v_fk record;
+    v_child_columns text;
+    v_parent_columns text;
+    v_parent_index_name text;
+    v_child_index_name text;
+    v_constraint_name text;
+    v_update_action text;
+    v_delete_action text;
+    v_deferrability text;
+BEGIN
+    FOR v_fk IN
+        SELECT * FROM bursar_multitenant_foreign_keys ORDER BY oid
+    LOOP
+        SELECT string_agg(
+            format('%I', attribute_info.attname),
+            ', ' ORDER BY key_info.ordinality
+        )
+        INTO v_child_columns
+        FROM unnest(v_fk.conkey) WITH ORDINALITY AS key_info(attnum, ordinality)
+        JOIN pg_attribute AS attribute_info
+          ON attribute_info.attrelid = v_fk.conrelid
+         AND attribute_info.attnum = key_info.attnum;
+
+        SELECT string_agg(
+            format('%I', attribute_info.attname),
+            ', ' ORDER BY key_info.ordinality
+        )
+        INTO v_parent_columns
+        FROM unnest(v_fk.confkey) WITH ORDINALITY AS key_info(attnum, ordinality)
+        JOIN pg_attribute AS attribute_info
+          ON attribute_info.attrelid = v_fk.confrelid
+         AND attribute_info.attnum = key_info.attnum;
+
+        v_parent_index_name := 'mtuq_' || substr(
+            md5(v_fk.confrelid::text || ':' || v_fk.confkey::text),
+            1,
+            24
+        );
+        v_child_index_name := 'mtfk_idx_' || substr(
+            md5(v_fk.conrelid::text || ':' || v_fk.conkey::text),
+            1,
+            20
+        );
+        v_constraint_name := 'mtfk_' || substr(
+            md5(v_fk.conrelid::text || ':' || v_fk.conname),
+            1,
+            24
+        );
+
+        EXECUTE format(
+            'CREATE UNIQUE INDEX IF NOT EXISTS %I ON %s (tenant_id, %s)',
+            v_parent_index_name,
+            v_fk.confrelid::regclass,
+            v_parent_columns
+        );
+        EXECUTE format(
+            'CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id, %s)',
+            v_child_index_name,
+            v_fk.conrelid::regclass,
+            v_child_columns
+        );
+
+        v_update_action := CASE v_fk.confupdtype
+            WHEN 'r' THEN ' ON UPDATE RESTRICT'
+            WHEN 'c' THEN ' ON UPDATE CASCADE'
+            WHEN 'n' THEN ' ON UPDATE SET NULL'
+            WHEN 'd' THEN ' ON UPDATE SET DEFAULT'
+            ELSE ''
+        END;
+        v_delete_action := CASE v_fk.confdeltype
+            WHEN 'r' THEN ' ON DELETE RESTRICT'
+            WHEN 'c' THEN ' ON DELETE CASCADE'
+            WHEN 'n' THEN ' ON DELETE SET NULL'
+            WHEN 'd' THEN ' ON DELETE SET DEFAULT'
+            ELSE ''
+        END;
+        v_deferrability := CASE
+            WHEN v_fk.condeferrable AND v_fk.condeferred
+            THEN ' DEFERRABLE INITIALLY DEFERRED'
+            WHEN v_fk.condeferrable
+            THEN ' DEFERRABLE INITIALLY IMMEDIATE'
+            ELSE ''
+        END;
+
+        EXECUTE format(
+            'ALTER TABLE %s ADD CONSTRAINT %I '
+            'FOREIGN KEY (tenant_id, %s) '
+            'REFERENCES %s (tenant_id, %s)%s%s%s',
+            v_fk.conrelid::regclass,
+            v_constraint_name,
+            v_child_columns,
+            v_fk.confrelid::regclass,
+            v_parent_columns,
+            v_update_action,
+            v_delete_action,
+            v_deferrability
+        );
+    END LOOP;
+
+    FOR v_fk IN
+        SELECT * FROM bursar_multitenant_foreign_keys ORDER BY oid
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %s DROP CONSTRAINT %I',
+            v_fk.conrelid::regclass,
+            v_fk.conname
+        );
+    END LOOP;
+END
+$$;
+
+-- Subject IDs are supplied by host applications and may legitimately be the
+-- same UUID in two tenants. Their primary key must therefore include tenancy.
+ALTER TABLE bursar.subjects DROP CONSTRAINT subjects_pkey;
+ALTER TABLE bursar.subjects
+ADD CONSTRAINT subjects_pkey PRIMARY KEY (tenant_id, id);

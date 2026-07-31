@@ -56,6 +56,21 @@ from bursar.credits.types import (
     TeamMember,
     TopUserRow,
 )
+from bursar.errors import (
+    CapabilityNotSupportedError,
+)
+from bursar.errors import (
+    CapReachedError as CapReachedError,
+)
+from bursar.errors import (
+    FeatureLimitReachedError as FeatureLimitReachedError,
+)
+from bursar.errors import (
+    RefundError as RefundError,
+)
+from bursar.errors import (
+    StoreError as StoreError,
+)
 
 
 class _CreditStoreOptions(BaseModel):
@@ -83,47 +98,6 @@ class CreateLeaseOptions(OperationUsageOptions):
 class SettleLeaseOptions(OperationUsageOptions):
     idempotency_key: str | None = None
     metadata: CreditMetadata | None = None
-
-
-class StoreError(Exception):
-    """Base exception for store-level errors (connection, timeout, etc.)."""
-
-
-class CapReachedError(StoreError):
-    """Raised when a deduction would exceed a configured ``deny`` spend cap.
-
-    Stores return ``error="cap_reached"`` on the result model rather than
-    raising; the manager maps that code to this exception (contract §4).
-    """
-
-
-class RefundError(StoreError):
-    """Raised when a refund is invalid (over-refund, duplicate, wrong type).
-
-    Stores return a business code (``already_refunded``/``over_refund``/
-    ``not_found``) on ``RefundResult.error``; the manager maps it to this
-    exception (contract §4).
-    """
-
-
-class FeatureLimitReachedError(StoreError):
-    """Raised when a call would exceed a configured ``deny`` feature-limit.
-
-    Stores return ``error="feature_limit_reached"`` on the result model rather
-    than raising; the manager maps that code to this exception — mirrors
-    ``CapReachedError``.
-    """
-
-
-class CapabilityNotSupportedError(StoreError):
-    """Raised when a store does not implement an optional capability (WS8).
-
-    The ``CreditStore`` ABC only requires core credit ops, lease lifecycle,
-    pricing config versioning, plan management, spend caps, refunds, and
-    expiry. Analytics, transaction-listing, and teams are optional
-    capabilities with a default implementation that raises this error, so a
-    minimal custom store subclass does not need to implement ~35 methods.
-    """
 
 
 class CreditStore(ABC):

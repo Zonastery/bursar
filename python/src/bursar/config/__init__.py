@@ -54,6 +54,8 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
     if config.pricing is not None:
         _validate_pricing(config.pricing)
     _validate_map_keys(config.plans, "plans")
+    if config.catalog.default_plan is not None and config.catalog.default_plan not in config.plans:
+        raise ValueError(f"catalog.default_plan references unknown plan '{config.catalog.default_plan}'")
     subscription_plans = {
         offer.plan for offer in config.commerce.offers.values() if isinstance(offer, SubscriptionOffer)
     }

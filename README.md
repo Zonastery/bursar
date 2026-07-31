@@ -21,6 +21,7 @@ There are no projected transaction or bucket-balance tables.
 pip install bursar[postgres]
 export DATABASE_URL=postgresql://...
 bursar migrate
+bursar tenant create acme --id 018f7f5f-7b4a-7000-8000-000000000001
 ```
 
 The migration runner records checksums and is safe to run again. Existing
@@ -40,7 +41,7 @@ executed on every run and are not recorded in Bursar's migration ledger.
 from bursar import Bursar
 from bursar.stores.postgres import PostgresStore
 
-store = PostgresStore(database_url)
+store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
 
 added = bursar.credits.add_credits(user_id, 1_000, entry_type="purchase")
@@ -55,7 +56,7 @@ next_page = bursar.credits.list_ledger_entries(
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!);
+const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
 const bursar = new Bursar({ creditStore: store });
 
 const added = await bursar.credits.addCredits(userId, 1_000, {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.credits.service import CreditsService
 from bursar.credits.service_types import (
+    BeginBilledOperationOptions,
     CanAffordOptions,
     CreditsServiceOptions,
     GrantSubscriptionCycleOptions,
@@ -13,6 +14,7 @@ from bursar.credits.service_types import (
     PolicyPreset,
     PostDeductionContext,
     ReserveOptions,
+    RunBilledAsyncOptions,
     RunBilledOptions,
     SettleOptions,
 )
@@ -20,6 +22,7 @@ from bursar.credits.store import CreditStore
 
 __all__ = [
     "CanAffordOptions",
+    "BeginBilledOperationOptions",
     "CreditsService",
     "CreditsServiceOptions",
     "CreditStore",
@@ -33,5 +36,6 @@ __all__ = [
     "PostDeductionContext",
     "ReserveOptions",
     "RunBilledOptions",
+    "RunBilledAsyncOptions",
     "SettleOptions",
 ]

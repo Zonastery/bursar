@@ -24,7 +24,7 @@ Create the reusable facade after migrations have run:
 from bursar import Bursar
 from bursar.stores.postgres import PostgresStore
 
-store = PostgresStore(database_url)
+store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
 ```
 
@@ -87,7 +87,10 @@ import os
 from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
 runtime = create_bursar_runtime(
-    BursarRuntimeOptions(postgres=os.environ["DATABASE_URL"])
+    BursarRuntimeOptions(
+        postgres=os.environ["DATABASE_URL"],
+        tenant_id=os.environ["BURSAR_TENANT_ID"],
+    )
 )
 runtime.start()
 

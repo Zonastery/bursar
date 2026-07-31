@@ -16,6 +16,7 @@ export function parseCredits(value: unknown): CreditsConfig {
   const bucketsRaw = asObject(raw.buckets ?? {});
   const policiesRaw = asObject(raw.policies ?? {});
   const programsRaw = asObject(raw.grant_programs ?? {});
+  const displayRaw = raw.display == null ? null : asObject(raw.display);
   validateIdentifiers(bucketsRaw, "credits.buckets");
   validateIdentifiers(policiesRaw, "credits.policies");
   validateIdentifiers(programsRaw, "credits.grant_programs");
@@ -100,5 +101,13 @@ export function parseCredits(value: unknown): CreditsConfig {
     ...(defaultBucket == null ? {} : { defaultBucket }),
     policies,
     grantPrograms,
+    ...(displayRaw
+      ? {
+          display: {
+            currency: asString(displayRaw.currency).toUpperCase(),
+            unitsPerMajor: asDecimal(displayRaw.units_per_major),
+          },
+        }
+      : {}),
   };
 }

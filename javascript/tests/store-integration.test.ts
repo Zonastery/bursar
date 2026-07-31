@@ -4,7 +4,7 @@ import pg from "pg";
 import { CreditsService } from "../src/credits/service.js";
 import { FeatureNotEntitledError, QuotaExceededError } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
-import { BOOTSTRAP_SQL, applyMigrations } from "./helpers/bootstrap.js";
+import { BOOTSTRAP_SQL, TEST_TENANT_ID, applyMigrations } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
@@ -104,7 +104,7 @@ const CONFIG = {
 
 describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration", () => {
   const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
-  const store = new PostgresStore(DATABASE_URL!, pool);
+  const store = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool);
 
   beforeAll(async () => {
     await pool.query(BOOTSTRAP_SQL);

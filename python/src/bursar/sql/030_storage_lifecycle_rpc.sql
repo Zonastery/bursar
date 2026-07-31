@@ -168,6 +168,7 @@ CREATE FUNCTION bursar.claim_outbox_events(
 )
 RETURNS TABLE (
     event_id bigint,
+    tenant_id uuid,
     topic text,
     aggregate_type text,
     aggregate_id uuid,
@@ -232,6 +233,97 @@ BEGIN
     WHERE outbox.id = claimed.id
     RETURNING
         outbox.id,
+        outbox.tenant_id,
+        outbox.topic,
+        outbox.aggregate_type,
+        outbox.aggregate_id,
+        outbox.payload_version,
+        outbox.payload,
+        outbox.claim_token,
+        outbox.attempt_count,
+        outbox.created_at;
+END
+$$;
+
+CREATE FUNCTION bursar.claim_outbox_events(
+    p_tenant_id uuid,
+    p_limit integer DEFAULT 100,
+    p_lease_seconds integer DEFAULT 60,
+    p_topics text [] DEFAULT NULL
+)
+RETURNS TABLE (
+    event_id bigint,
+    tenant_id uuid,
+    topic text,
+    aggregate_type text,
+    aggregate_id uuid,
+    payload_version smallint,
+    payload jsonb,
+    claim_token uuid,
+    attempt_count integer,
+    created_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_token uuid := gen_random_uuid();
+BEGIN
+    IF p_tenant_id IS NULL
+       OR p_limit NOT BETWEEN 1 AND 1000
+       OR p_lease_seconds NOT BETWEEN 1 AND 3600
+       OR (
+           p_topics IS NOT NULL
+           AND (
+               cardinality(p_topics) NOT BETWEEN 1 AND 64
+               OR EXISTS (
+                   SELECT 1
+                   FROM unnest(p_topics) AS requested(topic)
+                   WHERE requested.topic IS NULL
+                      OR NOT bursar.is_nonempty_text(requested.topic)
+                      OR NOT bursar.is_bounded_text(requested.topic, 255)
+               )
+           )
+       )
+    THEN
+        RAISE EXCEPTION 'invalid tenant outbox claim request'
+            USING ERRCODE = '22023';
+    END IF;
+
+    RETURN QUERY
+    WITH claimed AS (
+        SELECT outbox.id
+        FROM bursar.event_outbox AS outbox
+        JOIN bursar.tenants AS tenant
+          ON tenant.id = outbox.tenant_id
+         AND tenant.status = 'active'
+        WHERE outbox.tenant_id = p_tenant_id
+          AND (
+            (
+                outbox.status = 'pending'
+                AND outbox.available_at <= now()
+            ) OR (
+                outbox.status = 'processing'
+                AND outbox.claim_expires_at <= now()
+            )
+        )
+          AND (p_topics IS NULL OR outbox.topic = ANY(p_topics))
+        ORDER BY outbox.available_at, outbox.created_at, outbox.id
+        FOR UPDATE OF outbox SKIP LOCKED
+        LIMIT p_limit
+    )
+    UPDATE bursar.event_outbox AS outbox
+    SET status = 'processing',
+        claim_token = v_token,
+        claim_expires_at = now() + make_interval(secs => p_lease_seconds),
+        attempt_count = outbox.attempt_count + 1,
+        last_error = NULL
+    FROM claimed
+    WHERE outbox.id = claimed.id
+    RETURNING
+        outbox.id,
+        outbox.tenant_id,
         outbox.topic,
         outbox.aggregate_type,
         outbox.aggregate_id,
@@ -259,6 +351,7 @@ AS $$
             - 'allowance_covered'
         )
         || jsonb_build_object(
+            'tenant_id', charge.tenant_id,
             'charge_id', charge.id,
             'subject_id', account.subject_id,
             'requested', charge.requested::text,
@@ -272,9 +365,11 @@ AS $$
     FROM bursar.credit_usage_charges AS charge
     JOIN bursar.credit_accounts AS account
       ON account.id = charge.account_id
+     AND account.tenant_id = charge.tenant_id
     LEFT JOIN bursar.usage_charge_payloads AS payload
       ON payload.charge_id = charge.id
      AND payload.event_at = charge.event_at
+     AND payload.tenant_id = charge.tenant_id
     WHERE charge.id = p_charge_id
 $$;
 
@@ -286,6 +381,7 @@ SECURITY DEFINER
 SET search_path TO ''
 AS $$
     SELECT jsonb_build_object(
+        'tenant_id', event.tenant_id,
         'event_id', event.id,
         'provider', event.provider,
         'provider_environment', event.provider_environment,
@@ -303,6 +399,7 @@ AS $$
     LEFT JOIN bursar.billing_event_payloads AS payload
       ON payload.event_id = event.id
      AND payload.received_at = event.payload_received_at
+     AND payload.tenant_id = event.tenant_id
     WHERE event.id = p_event_id
 $$;
 
@@ -973,7 +1070,11 @@ COMMENT ON FUNCTION bursar.configure_storage(
 )
 IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
 COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text [])
-IS 'Claim a bounded batch of versioned events for an optional external sink.';
+IS 'Claim a bounded cross-tenant batch and return each event tenant UUID.';
+COMMENT ON FUNCTION bursar.claim_outbox_events(
+    uuid, integer, integer, text []
+)
+IS 'Claim a bounded outbox batch for one active tenant.';
 COMMENT ON FUNCTION bursar.export_usage_charge(uuid)
 IS 'Return one usage charge projection for an external analytics sink.';
 COMMENT ON FUNCTION bursar.export_billing_event_payload(uuid)
@@ -1006,6 +1107,9 @@ REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bursar.claim_outbox_events(
+    uuid, integer, integer, text []
+) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_usage_charge(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_billing_event_payload(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.complete_outbox_event(bigint, uuid) FROM PUBLIC;
@@ -1037,6 +1141,9 @@ BEGIN
         ) TO service_role;
         GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
             TO service_role;
+        GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
+            uuid, integer, integer, text[]
+        ) TO service_role;
         GRANT EXECUTE ON FUNCTION bursar.export_usage_charge(uuid)
             TO service_role;
         GRANT EXECUTE ON FUNCTION bursar.export_billing_event_payload(uuid)

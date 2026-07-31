@@ -2,11 +2,11 @@
 -- time-series reporting. Partial indexes deliberately exclude terminal rows.
 
 CREATE UNIQUE INDEX catalog_one_active_idx
-ON bursar.catalog_revisions ((status))
+ON bursar.catalog_revisions (tenant_id)
 WHERE status = 'active';
 
 CREATE UNIQUE INDEX catalog_one_open_activation_idx
-ON bursar.catalog_activation_history ((true))
+ON bursar.catalog_activation_history (tenant_id)
 WHERE deactivated_at IS null;
 
 CREATE UNIQUE INDEX catalog_one_default_bucket_idx
@@ -355,7 +355,11 @@ AND grace_ends_at IS NOT null
 AND grace_expired_at IS null;
 
 CREATE UNIQUE INDEX one_selected_entitlement_idx
-ON bursar.billing_entitlement_sources (subject_id, provider_environment)
+ON bursar.billing_entitlement_sources (
+    tenant_id,
+    subject_id,
+    provider_environment
+)
 WHERE selected;
 
 CREATE INDEX billing_entitlement_sources_subscription_idx
@@ -562,3 +566,99 @@ ON bursar.quota_usage_events (catalog_quota_id);
 
 CREATE INDEX quota_usage_events_plan_revision_fk_idx
 ON bursar.quota_usage_events (plan_id, catalog_revision_id);
+
+-- Add one tenant-leading index wherever a composite relationship or unique
+-- key did not already create one. This keeps RLS from degrading into scans.
+DO $$
+DECLARE
+    v_table record;
+    v_tenant_attnum smallint;
+BEGIN
+    FOR v_table IN
+        SELECT table_info.oid, table_info.relname
+        FROM pg_class AS table_info
+        JOIN pg_namespace AS namespace_info
+          ON namespace_info.oid = table_info.relnamespace
+        WHERE namespace_info.nspname = 'bursar'
+          AND table_info.relkind IN ('r', 'p')
+          AND NOT table_info.relispartition
+          AND EXISTS (
+              SELECT 1
+              FROM pg_attribute AS attribute_info
+              WHERE attribute_info.attrelid = table_info.oid
+                AND attribute_info.attname = 'tenant_id'
+                AND NOT attribute_info.attisdropped
+          )
+        ORDER BY table_info.relname
+    LOOP
+        SELECT attribute_info.attnum
+        INTO v_tenant_attnum
+        FROM pg_attribute AS attribute_info
+        WHERE attribute_info.attrelid = v_table.oid
+          AND attribute_info.attname = 'tenant_id'
+          AND NOT attribute_info.attisdropped;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_index AS index_info
+            WHERE index_info.indrelid = v_table.oid
+              AND index_info.indisvalid
+              AND index_info.indkey[0] = v_tenant_attnum
+        ) THEN
+            EXECUTE format(
+                'CREATE INDEX %I ON bursar.%I (tenant_id)',
+                left(v_table.relname || '_tenant_id_idx', 63),
+                v_table.relname
+            );
+        END IF;
+    END LOOP;
+END
+$$;
+
+-- Composite foreign-key indexes are created before the business uniqueness
+-- changes above. Remove any non-unique index whose key and predicate are now
+-- fully covered by another valid index.
+DO $$
+DECLARE
+    v_index record;
+BEGIN
+    FOR v_index IN
+        SELECT DISTINCT smaller_class.relname AS index_name
+        FROM pg_index AS smaller
+        JOIN pg_class AS smaller_class
+          ON smaller_class.oid = smaller.indexrelid
+        JOIN pg_index AS covering
+          ON covering.indrelid = smaller.indrelid
+         AND covering.indexrelid <> smaller.indexrelid
+        JOIN pg_class AS covering_class
+          ON covering_class.oid = covering.indexrelid
+        WHERE smaller_class.relnamespace = 'bursar'::regnamespace
+          AND NOT smaller.indisunique
+          AND smaller.indisvalid
+          AND covering.indisvalid
+          AND smaller_class.relam = covering_class.relam
+          AND smaller.indnkeyatts <= covering.indnkeyatts
+          AND (
+              regexp_split_to_array(trim(smaller.indkey::text), ' +')
+          )[1:smaller.indnkeyatts]
+              = (
+                  regexp_split_to_array(
+                      trim(covering.indkey::text),
+                      ' +'
+                  )
+              )[1:smaller.indnkeyatts]
+          AND pg_get_expr(smaller.indpred, smaller.indrelid)
+              IS NOT DISTINCT FROM
+              pg_get_expr(covering.indpred, covering.indrelid)
+          AND pg_get_expr(smaller.indexprs, smaller.indrelid)
+              IS NOT DISTINCT FROM
+              pg_get_expr(covering.indexprs, covering.indrelid)
+        ORDER BY smaller_class.relname
+    LOOP
+        EXECUTE format(
+            'DROP INDEX bursar.%I',
+            v_index.index_name
+        );
+    END LOOP;
+END
+$$;

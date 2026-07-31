@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { BillingCapability, BillingEventSink } from "../billing/contracts.js";
 import type { BillingPreferences, BillingSubscriptionState } from "../billing/types/index.js";
+import Decimal from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
 import type {
   CommerceOffer,
@@ -12,6 +13,7 @@ import type {
 } from "../config/types.js";
 import type { CreditsService as CreditsServiceImpl } from "../credits/service.js";
 import type { LedgerEntry } from "../credits/types/index.js";
+import { ConfigError } from "../errors.js";
 import type {
   ChangePlanPreview,
   PaymentMethodInfo,
@@ -35,6 +37,7 @@ import { CommerceProviderRegistry } from "./provider-registry.js";
 import { classifySubscriptionChange } from "./plan-change.js";
 import type {
   AccountCommerceOverview,
+  AccountSubscriptionSummary,
   AutoRechargeInput,
   BillingDocumentRef,
   CommerceAutoRecharge,
@@ -53,6 +56,7 @@ import type {
   PreferencePatch,
   PreviewPlanChangeInput,
   SubscriptionCommandResult,
+  CancelAllSubscriptionsResult,
 } from "./types.js";
 
 const DEFAULT_CHECKOUT_INTENT_TTL_MS = 24 * 60 * 60 * 1_000;
@@ -66,6 +70,15 @@ const DEFAULT_PREFERENCES = {
 } as const;
 
 const TERMINAL_CHECKOUT_STATUSES = new Set(["failed", "cancelled", "requires_payment_method"]);
+const CURRENT_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due", "incomplete"]);
+const BLOCKING_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due", "incomplete"]);
+const TERMINAL_SUBSCRIPTION_STATUSES = new Set([
+  "canceled",
+  "unpaid",
+  "paused",
+  "incomplete_expired",
+  "expired",
+]);
 
 function externalId(reference: ProviderReference): string {
   switch (reference.type) {
@@ -226,9 +239,24 @@ export class CommerceService {
     readonly options: CommerceOptions,
   ) {
     this.logger = normalizeLogger(options.logger);
+    const identityResolver = options.identityResolver
+      ? async (input: Parameters<NonNullable<CommerceOptions["identityResolver"]>>[0]) => {
+          const accountId = await options.identityResolver!(input);
+          if (accountId && input.customerId) {
+            await this.billing.upsertCustomer(
+              input.provider,
+              input.customerId,
+              accountId,
+              input.email,
+            );
+          }
+          return accountId;
+        }
+      : undefined;
     this.providers = new CommerceProviderRegistry(options, {
+      tenantId: options.tenantId,
       eventSink,
-      identityResolver: options.identityResolver,
+      identityResolver,
     });
     this.autoRecharge = new CommerceAutoRechargeService(this);
   }
@@ -521,6 +549,138 @@ export class CommerceService {
       },
     });
     return { ok: true, pending: true };
+  }
+
+  async cancelAllSubscriptions(input: {
+    accountId: string;
+    operationKey: string;
+  }): Promise<CancelAllSubscriptionsResult> {
+    if (!input.operationKey.trim()) {
+      throw new ConfigError("operationKey must not be empty");
+    }
+    const subscriptions = await this.billing.listCancellableSubscriptions(input.accountId);
+    const results = await Promise.all(
+      subscriptions.map(async (subscription) => {
+        try {
+          const provider = await this.providers.get(subscription.provider);
+          if (!provider.cancelSubscription) {
+            throw new ProviderCapabilityNotSupportedError(provider.provider, "cancelSubscription");
+          }
+          const operationKey = `${input.operationKey}:${subscription.provider}:${subscription.providerSubscriptionId}`;
+          await provider.cancelSubscription(subscription.providerSubscriptionId, operationKey);
+          await this.billing.ingestBillingEvent({
+            provider: subscription.provider,
+            eventId: `cancel_all_${input.accountId}_${operationKey}`,
+            eventType: "subscription.cancellation_scheduled",
+            occurredAt: new Date().toISOString(),
+            userId: input.accountId,
+            customer: { providerCustomerId: subscription.providerCustomerId },
+            subscription: {
+              providerSubscriptionId: subscription.providerSubscriptionId,
+              cancelAtPeriodEnd: true,
+            },
+          });
+          return {
+            provider: subscription.provider,
+            providerSubscriptionId: subscription.providerSubscriptionId,
+            canceled: true,
+            error: null,
+          };
+        } catch (error) {
+          return {
+            provider: subscription.provider,
+            providerSubscriptionId: subscription.providerSubscriptionId,
+            canceled: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }),
+    );
+    const failures = results.filter((result) => !result.canceled);
+    if (failures.length) {
+      throw new AggregateError(
+        failures.map((failure) => new Error(failure.error ?? "Subscription cancellation failed")),
+        "One or more subscriptions could not be cancelled",
+      );
+    }
+    return {
+      accountId: input.accountId,
+      canceledCount: results.length,
+      subscriptions: results,
+    };
+  }
+
+  private accountSubscriptionSummary(
+    accountId: string,
+    subscription: Awaited<ReturnType<BillingCapability["getUserSubscription"]>>,
+    entitlement: Awaited<ReturnType<CreditsServiceImpl["getUserPlan"]>>,
+    config: ParsedBursarConfig,
+    pending: Awaited<ReturnType<BillingCapability["getOpenBillingSubscriptionChange"]>>,
+  ): AccountSubscriptionSummary {
+    let pendingChange: AccountSubscriptionSummary["pendingChange"] = null;
+    if (pending) {
+      const planKey = pending.toOffer.plan;
+      const interval = pending.toOffer.interval;
+      if (
+        !planKey ||
+        !config.plans[planKey] ||
+        (interval !== "month" && interval !== "year") ||
+        !pending.effectiveAt
+      ) {
+        throw new CoreBillingDataUnavailableError(
+          "Pending subscription change has incomplete catalog context",
+        );
+      }
+      pendingChange = {
+        planKey,
+        interval,
+        effectiveAt: pending.effectiveAt,
+        scheduled: pending.prorationBehavior === "none",
+        providerOperationId: pending.providerOperationId ?? null,
+      };
+    }
+    const status = subscription?.status ?? null;
+    const isCurrent = status != null && CURRENT_SUBSCRIPTION_STATUSES.has(status);
+    const isEntitled = entitlement.planKey != null;
+    if (entitlement.planKey && !config.plans[entitlement.planKey]) {
+      throw new CoreBillingDataUnavailableError("The account plan is not present in the catalog");
+    }
+    const inGrace =
+      status === "past_due" &&
+      subscription?.graceEndsAt != null &&
+      Date.parse(subscription.graceEndsAt) > Date.now();
+    return {
+      accountId,
+      planKey: entitlement.planKey ?? (isCurrent ? (subscription?.plan ?? null) : null),
+      status,
+      lifecycleState: status ?? "none",
+      accessState: isEntitled ? (inGrace ? "grace" : "entitled") : status ? "blocked" : "none",
+      isCurrent,
+      isEntitled,
+      isBlockingCheckout: status != null && BLOCKING_SUBSCRIPTION_STATUSES.has(status),
+      isCancellable:
+        status != null &&
+        ["active", "trialing", "past_due"].includes(status) &&
+        !subscription?.cancelAtPeriodEnd,
+      isTerminal: status != null && TERMINAL_SUBSCRIPTION_STATUSES.has(status),
+      subscription,
+      pendingChange,
+    };
+  }
+
+  async getAccountSubscriptionSummary(accountId: string): Promise<AccountSubscriptionSummary> {
+    const [subscription, entitlement, config] = await Promise.all([
+      this.billing.getUserSubscription(accountId),
+      this.credits.getUserPlan(accountId),
+      this.activeConfig(),
+    ]);
+    const pending = subscription
+      ? await this.billing.getOpenBillingSubscriptionChange(
+          subscription.provider,
+          subscription.providerSubscriptionId,
+        )
+      : null;
+    return this.accountSubscriptionSummary(accountId, subscription, entitlement, config, pending);
   }
 
   private async planChangeContext(input: PreviewPlanChangeInput): Promise<PlanChangeContext> {
@@ -849,16 +1009,25 @@ export class CommerceService {
   async getAccountOverview(accountId: string): Promise<AccountCommerceOverview> {
     let core;
     try {
-      const [balance, available, bucketBalances, entitlement, allowance, subscription, prefs] =
-        await Promise.all([
-          this.credits.getBalance(accountId),
-          this.credits.getAvailable(accountId),
-          this.credits.getBucketBalances(accountId),
-          this.credits.getUserPlan(accountId),
-          this.credits.checkAllowance(accountId),
-          this.billing.getUserSubscription(accountId),
-          this.billing.getUserPreferences(accountId),
-        ]);
+      const [
+        balance,
+        available,
+        bucketBalances,
+        entitlement,
+        allowance,
+        subscription,
+        prefs,
+        config,
+      ] = await Promise.all([
+        this.credits.getBalance(accountId),
+        this.credits.getAvailable(accountId),
+        this.credits.getBucketBalances(accountId),
+        this.credits.getUserPlan(accountId),
+        this.credits.checkAllowance(accountId),
+        this.billing.getUserSubscription(accountId),
+        this.billing.getUserPreferences(accountId),
+        this.activeConfig(),
+      ]);
       core = {
         balance,
         available,
@@ -867,6 +1036,7 @@ export class CommerceService {
         allowance,
         subscription,
         preferences: this.preferences(accountId, prefs),
+        config,
       };
     } catch (error) {
       throw new CoreBillingDataUnavailableError(undefined, error);
@@ -878,6 +1048,13 @@ export class CommerceService {
           core.subscription.providerSubscriptionId,
         )
       : null;
+    const subscriptionSummary = this.accountSubscriptionSummary(
+      accountId,
+      core.subscription,
+      core.entitlement,
+      core.config,
+      pendingChange,
+    );
     const [transactionsResult, usageResult, invoicesResult] = await Promise.allSettled([
       this.credits.listLedgerEntries(accountId, { limit: 50 }),
       this.credits.listUsageEntries(accountId, { limit: 100 }),
@@ -952,11 +1129,17 @@ export class CommerceService {
       });
     }
 
+    const floor =
+      core.entitlement.creditPolicy?.type === "credit_line"
+        ? (core.entitlement.creditPolicy.creditLimit ?? new Decimal(0)).negated()
+        : new Decimal(0);
     return {
       accountId,
       credits: {
         ledgerBalance: core.balance.balance,
-        effectiveSpendableBalance: core.available.available,
+        effectiveSpendableBalance: core.available.available
+          .plus(core.allowance.allowanceRemaining)
+          .minus(floor),
         lifetimePurchases: core.balance.lifetimePurchased,
         allowance: {
           remaining: core.allowance.allowanceRemaining,
@@ -965,8 +1148,13 @@ export class CommerceService {
           periodEnd: core.allowance.periodEnd ?? null,
         },
         buckets: core.bucketBalances.buckets,
+        bucketsByKey: Object.fromEntries(
+          core.bucketBalances.buckets.map((bucket) => [bucket.bucketKey, bucket.balance]),
+        ),
+        display: core.config.credits.display ?? null,
       },
       entitlement: core.entitlement,
+      subscriptionSummary,
       subscription: core.subscription,
       pendingChange,
       preferences: core.preferences,
@@ -980,6 +1168,7 @@ export class CommerceService {
         paymentMethods: paymentMethodsAvailable,
         documents:
           invoicesResult.status === "fulfilled" && transactionsResult.status === "fulfilled",
+        providerInvoices: invoicesResult.status === "fulfilled",
         transactions: transactionsResult.status === "fulfilled",
         usage: usageResult.status === "fulfilled",
         autoRecharge: autoRechargeAvailable,

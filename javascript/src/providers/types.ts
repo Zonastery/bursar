@@ -121,11 +121,18 @@ export function deduplicatePaymentMethods(methods: PaymentMethodInfo[]): Payment
   });
 }
 
-export type ResolveUserCallback = (
-  data: Record<string, unknown>,
-  metadata: Record<string, string>,
-  eventType?: string,
-) => Promise<string | null>;
+export interface ResolveIdentityInput {
+  provider: string;
+  providerEventType: string;
+  normalizedEventType: string | null;
+  customerId: string | null;
+  email: string | null;
+  metadata: Record<string, string>;
+  successful: boolean;
+  checkoutKind: "subscription" | "credit_topup" | null;
+}
+
+export type ResolveUserCallback = (input: ResolveIdentityInput) => Promise<string | null>;
 
 export { noopLogger, normalizeLogger as normalizeProviderLogger } from "../shared/logger.js";
 export type {

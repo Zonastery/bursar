@@ -422,6 +422,29 @@ describe("CommerceService", () => {
     expect(alphaFactory).not.toHaveBeenCalled();
   });
 
+  it("schedules cancellation for a past-due subscription through its provider", async () => {
+    const { service, billing, alpha } = harness();
+    billing.getUserSubscription.mockResolvedValue(
+      activeSubscription({ status: "past_due", cancelAtPeriodEnd: false }),
+    );
+
+    await expect(
+      service.cancelSubscription({ accountId: "user-1", operationKey: "cancel-past-due" }),
+    ).resolves.toEqual({ ok: true, pending: true });
+
+    expect(alpha.cancelSubscription).toHaveBeenCalledWith("subscription-1", "cancel-past-due");
+    expect(billing.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "subscription.cancellation_scheduled",
+        userId: "user-1",
+        subscription: expect.objectContaining({
+          providerSubscriptionId: "subscription-1",
+          cancelAtPeriodEnd: true,
+        }),
+      }),
+    );
+  });
+
   it.each([
     ["pro_month", "upgrade", "immediately", "prorated_immediately"],
     ["peer_month", "lateral", "immediately", "prorated_immediately"],
@@ -594,7 +617,7 @@ describe("CommerceService", () => {
 
     const overview = await service.getAccountOverview("user-1");
 
-    expect(overview.credits.effectiveSpendableBalance.toString()).toBe("30");
+    expect(overview.credits.effectiveSpendableBalance.toString()).toBe("35");
     expect(overview.documents).toContainEqual(
       expect.objectContaining({
         kind: "provider_invoice",
@@ -604,6 +627,7 @@ describe("CommerceService", () => {
     );
     expect(overview.availability).toMatchObject({
       documents: false,
+      providerInvoices: true,
       transactions: false,
       usage: false,
     });

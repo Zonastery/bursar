@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 
+from bursar import project_public_catalog
 from bursar.config import ConfigError, canonical_bursar_config_dict, load_config_from_dict
 
 
@@ -216,6 +217,41 @@ def test_subscription_defaults_to_next_renewal_and_uses_typed_provider_ref() -> 
     }
     config = load_config_from_dict(data)
     assert config.plans["pro"].revision_policy == "next_renewal"
+
+
+def test_public_catalog_preserves_prices_without_provider_identifiers() -> None:
+    data = base_config()
+    data["catalog"] = {"default_plan": "pro"}
+    data["credits"]["display"] = {"currency": "USD", "units_per_major": "1000"}
+    data["commerce"] = {
+        "providers": {"stripe": {"type": "stripe"}},
+        "offers": {
+            "pro_monthly": {
+                "type": "subscription",
+                "display_name": "Pro monthly",
+                "price": {
+                    "amount_minor": 1200,
+                    "currency": "USD",
+                    "tax_behavior": "exclusive",
+                },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_secret_pro_monthly",
+                    }
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month"},
+            }
+        },
+    }
+
+    public = project_public_catalog(load_config_from_dict(data))
+
+    assert public["default_plan"] == "pro"
+    assert public["credit_display"] == {"currency": "USD", "units_per_major": "1000"}
+    assert public["plans"][0]["offers"][0]["price"]["amount_minor"] == 1200
+    assert "price_secret_pro_monthly" not in str(public)
 
 
 def test_missing_version_is_rejected() -> None:

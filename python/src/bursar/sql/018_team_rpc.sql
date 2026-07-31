@@ -34,7 +34,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_owner_subject_id),(v_team_subject)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_owner_subject_id) THEN
         RETURN QUERY SELECT NULL::uuid,NULL::uuid,NULL::uuid,'subject_pseudonymized';
@@ -95,7 +95,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RETURN false;

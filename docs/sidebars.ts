@@ -37,6 +37,7 @@ const sidebars: SidebarsConfig = {
     },
     'expressions',
     'configuration',
+    'multitenancy',
     'financial-safety',
     'subscription-integration',
     'storage-backends',

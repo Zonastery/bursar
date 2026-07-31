@@ -14,6 +14,7 @@ class _StorageModel(BaseModel):
 
 class OutboxEvent(_StorageModel):
     event_id: str
+    tenant_id: str
     topic: str
     aggregate_type: str
     aggregate_id: str
@@ -46,6 +47,7 @@ class OutboxHandler(Protocol):
 
 
 class UsageChargeExport(_StorageModel):
+    tenant_id: str
     charge_id: str
     account_id: str
     subject_id: str
@@ -73,6 +75,7 @@ class UsageChargeExport(_StorageModel):
 
 
 class BillingEventPayloadExport(_StorageModel):
+    tenant_id: str
     event_id: str
     provider: str
     provider_environment: str

@@ -79,9 +79,16 @@ export function loadConfigFromDict(
 
   const catalogRaw = asObject(raw.catalog ?? {});
   asObject(catalogRaw.activation ?? { mode: "on_publish" });
+  const defaultPlan = catalogRaw.default_plan == null ? undefined : String(catalogRaw.default_plan);
+  if (defaultPlan != null && !plans[defaultPlan]) {
+    semanticError(`catalog.default_plan references unknown plan '${defaultPlan}'`);
+  }
   return {
     version: 1,
-    catalog: { activation: { mode: "on_publish" } },
+    catalog: {
+      activation: { mode: "on_publish" },
+      ...(defaultPlan == null ? {} : { defaultPlan }),
+    },
     ...(pricing == null ? {} : { pricing }),
     credits,
     entitlements,

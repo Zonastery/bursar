@@ -150,14 +150,16 @@ export class PostgresStore extends CreditStore {
     return this._bucketRepo;
   }
 
-  constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
+  constructor(databaseUrl: string, tenantId: string, poolOrCtor?: PgPool | PgPoolConstructor) {
     super();
     if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
       this.postgres = new PostgresClient(poolOrCtor as PgPool, {
+        tenantId,
         closedError: () => new StoreError("Store has been closed"),
       });
     } else {
       this.postgres = new PostgresClient(databaseUrl, {
+        tenantId,
         poolConstructor: poolOrCtor as PgPoolConstructor | undefined,
         closedError: () => new StoreError("Store has been closed"),
       });

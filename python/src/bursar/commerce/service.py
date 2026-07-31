@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal, cast
 
 from bursar.billing.contracts import (
@@ -14,6 +15,7 @@ from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
+    BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
@@ -36,10 +38,13 @@ from bursar.commerce.types import (
     AccountAllowanceOverview,
     AccountCommerceOverview,
     AccountCreditOverview,
+    AccountSubscriptionSummary,
     AutoRechargeInput,
     BillingDocumentInvoiceRef,
     BillingDocumentLedgerRef,
     BillingDocumentRef,
+    CancelAllSubscriptionsResult,
+    CancelSubscriptionResult,
     CheckoutStatusResult,
     CommerceOptions,
     CommerceProviderFactoryContext,
@@ -48,6 +53,7 @@ from bursar.commerce.types import (
     ConfirmPlanChangeResult,
     CreateCheckoutInput,
     CreateCheckoutResult,
+    NormalizedPendingPlanChange,
     PlanChangePreviewResult,
     SubscriptionCommandResult,
 )
@@ -60,6 +66,7 @@ from bursar.config import (
     load_config_from_dict,
 )
 from bursar.config.types import BursarConfig, CommerceOffer, SubscriptionChangePolicy
+from bursar.credits.types import GetUserPlanResult
 from bursar.providers.types import (
     ChangePlanLineItem,
     ChangePlanParams,
@@ -80,6 +87,9 @@ _TERMINAL_CHECKOUT_STATUSES = {
     "cancelled",
     "requires_payment_method",
 }
+_CURRENT_SUBSCRIPTION_STATUSES = {"active", "trialing", "past_due", "incomplete"}
+_BLOCKING_SUBSCRIPTION_STATUSES = {"active", "trialing", "past_due", "incomplete"}
+_TERMINAL_SUBSCRIPTION_STATUSES = {"canceled", "unpaid", "paused", "incomplete_expired", "expired"}
 _DEFAULT_PREFERENCES = {
     "auto_recharge": False,
     "overage_protection": True,
@@ -240,11 +250,28 @@ class CommerceService:
         self.credits = credits
         self.options = options
         self.logger = normalize_logger(options.logger)
+        identity_resolver = None
+        configured_identity_resolver = options.identity_resolver
+        if configured_identity_resolver is not None:
+
+            async def resolve_identity(identity):
+                account_id = await configured_identity_resolver(identity)
+                if account_id and identity.customer_id:
+                    self.billing.upsert_customer(
+                        identity.provider,
+                        identity.customer_id,
+                        account_id,
+                        identity.email,
+                    )
+                return account_id
+
+            identity_resolver = resolve_identity
         self.providers = CommerceProviderRegistry(
             options,
             CommerceProviderFactoryContext(
+                tenant_id=options.tenant_id,
                 event_sink=event_sink,
-                identity_resolver=options.identity_resolver,
+                identity_resolver=identity_resolver,
             ),
         )
         self.auto_recharge = CommerceAutoRecharge(self)
@@ -574,6 +601,143 @@ class CommerceService:
             )
         )
         return SubscriptionCommandResult(ok=True, pending=True)
+
+    async def cancel_all_subscriptions(
+        self,
+        account_id: str,
+        operation_key: str,
+    ) -> CancelAllSubscriptionsResult:
+        if not operation_key.strip():
+            raise ValueError("operation_key must not be empty")
+        subscriptions = self.billing.list_cancellable_subscriptions(account_id)
+        results: list[CancelSubscriptionResult] = []
+        failures: list[Exception] = []
+        for subscription in subscriptions:
+            try:
+                provider = await self.providers.get(subscription.provider)
+                if not _supports(provider, "cancel_subscription"):
+                    raise ProviderCapabilityNotSupportedError(
+                        provider.provider,
+                        "cancel_subscription",
+                    )
+                key = f"{operation_key}:{subscription.provider}:{subscription.provider_subscription_id}"
+                await provider.cancel_subscription(subscription.provider_subscription_id, key)
+                self.billing.ingest_billing_event(
+                    BillingEvent(
+                        provider=subscription.provider,
+                        event_id=f"cancel_all_{account_id}_{key}",
+                        event_type=BillingEventType.subscription_cancellation_scheduled,
+                        occurred_at=datetime.now(UTC).isoformat(),
+                        user_id=account_id,
+                        customer=BillingCustomerInfo(provider_customer_id=subscription.provider_customer_id),
+                        subscription=BillingSubscriptionInfo(
+                            provider_subscription_id=subscription.provider_subscription_id,
+                            cancel_at_period_end=True,
+                        ),
+                    )
+                )
+                results.append(
+                    CancelSubscriptionResult(
+                        provider=subscription.provider,
+                        provider_subscription_id=subscription.provider_subscription_id,
+                        canceled=True,
+                    )
+                )
+            except Exception as exc:
+                failures.append(exc)
+                results.append(
+                    CancelSubscriptionResult(
+                        provider=subscription.provider,
+                        provider_subscription_id=subscription.provider_subscription_id,
+                        canceled=False,
+                        error=str(exc),
+                    )
+                )
+        if failures:
+            raise ExceptionGroup("One or more subscriptions could not be cancelled", failures)
+        return CancelAllSubscriptionsResult(
+            account_id=account_id,
+            canceled_count=len(results),
+            subscriptions=results,
+        )
+
+    def _account_subscription_summary(
+        self,
+        account_id: str,
+        subscription: BillingSubscriptionState | None,
+        entitlement: GetUserPlanResult,
+        config: BursarConfig,
+        pending: BillingSubscriptionChange | None,
+    ) -> AccountSubscriptionSummary:
+        if entitlement.plan_key and entitlement.plan_key not in config.plans:
+            raise CoreBillingDataUnavailableError("The account plan is not present in the catalog")
+        pending_change = None
+        if pending is not None:
+            plan_key = pending.to_offer.plan
+            interval = pending.to_offer.interval
+            if (
+                not plan_key
+                or plan_key not in config.plans
+                or interval not in {"month", "year"}
+                or not pending.effective_at
+            ):
+                raise CoreBillingDataUnavailableError("Pending subscription change has incomplete catalog context")
+            pending_change = NormalizedPendingPlanChange(
+                plan_key=plan_key,
+                interval=cast(Literal["month", "year"], interval),
+                effective_at=pending.effective_at,
+                scheduled=pending.proration_behavior == "none",
+                provider_operation_id=pending.provider_operation_id,
+            )
+        status = _status_value(subscription.status) if subscription and subscription.status else None
+        is_current = status in _CURRENT_SUBSCRIPTION_STATUSES
+        is_entitled = entitlement.plan_key is not None
+        grace_ends_at = subscription.grace_ends_at if subscription else None
+        in_grace = (
+            status == "past_due"
+            and grace_ends_at is not None
+            and datetime.fromisoformat(grace_ends_at) > datetime.now(UTC)
+        )
+        access_state = (
+            "grace" if is_entitled and in_grace else "entitled" if is_entitled else "blocked" if status else "none"
+        )
+        return AccountSubscriptionSummary(
+            account_id=account_id,
+            plan_key=entitlement.plan_key or (subscription.plan if is_current and subscription else None),
+            status=status,
+            lifecycle_state=status or "none",
+            access_state=access_state,
+            is_current=is_current,
+            is_entitled=is_entitled,
+            is_blocking_checkout=status in _BLOCKING_SUBSCRIPTION_STATUSES,
+            is_cancellable=(
+                status in {"active", "trialing", "past_due"}
+                and not bool(subscription and subscription.cancel_at_period_end)
+            ),
+            is_terminal=status in _TERMINAL_SUBSCRIPTION_STATUSES,
+            subscription=subscription,
+            pending_change=pending_change,
+        )
+
+    def get_account_subscription_summary(self, account_id: str) -> AccountSubscriptionSummary:
+        subscription = self.billing.get_user_subscription(account_id)
+        entitlement = self.credits.get_user_plan(account_id)
+        config = self._active_config()
+        pending = (
+            self.billing.get_open_billing_subscription_change(
+                subscription.provider,
+                subscription.provider_subscription_id,
+            )
+            if subscription
+            else None
+        )
+        return self._account_subscription_summary(
+            account_id,
+            subscription,
+            entitlement,
+            config,
+            pending,
+        )
 
     async def _plan_context(
         self,
@@ -982,6 +1146,14 @@ class CommerceService:
             if subscription
             else None
         )
+        config = self._active_config()
+        subscription_summary = self._account_subscription_summary(
+            account_id,
+            subscription,
+            entitlement,
+            config,
+            pending_change,
+        )
         transactions_available = usage_available = documents_available = True
         try:
             transactions = [
@@ -1060,11 +1232,17 @@ class CommerceService:
                 {"account_id": account_id, "error": str(exc)},
             )
 
+        credit_policy = entitlement.credit_policy
+        floor = (
+            -(credit_policy.credit_limit or Decimal(0))
+            if credit_policy is not None and credit_policy.type == "credit_line"
+            else Decimal(0)
+        )
         return AccountCommerceOverview(
             account_id=account_id,
             credits=AccountCreditOverview(
                 ledger_balance=balance.balance,
-                effective_spendable_balance=available.available,
+                effective_spendable_balance=(available.available + allowance.allowance_remaining - floor),
                 lifetime_purchases=balance.lifetime_purchased,
                 allowance=AccountAllowanceOverview(
                     remaining=allowance.allowance_remaining,
@@ -1073,8 +1251,18 @@ class CommerceService:
                     period_end=allowance.period_end or None,
                 ),
                 buckets=buckets.buckets,
+                buckets_by_key={bucket.bucket_key: bucket.balance for bucket in buckets.buckets},
+                display=(
+                    {
+                        "currency": config.credits.display.currency,
+                        "units_per_major": str(config.credits.display.units_per_major),
+                    }
+                    if config.credits.display
+                    else None
+                ),
             ),
             entitlement=entitlement,
+            subscription_summary=subscription_summary,
             subscription=subscription,
             pending_change=pending_change,
             preferences=preferences,
@@ -1087,6 +1275,7 @@ class CommerceService:
             availability=CommerceSectionAvailability(
                 payment_methods=payment_methods_available,
                 documents=documents_available and transactions_available,
+                provider_invoices=documents_available,
                 transactions=transactions_available,
                 usage=usage_available,
                 auto_recharge=auto_recharge_available,

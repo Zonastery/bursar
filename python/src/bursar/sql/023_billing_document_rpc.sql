@@ -113,7 +113,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
     v_metadata := CASE
         WHEN bursar.is_subject_pseudonymized(p_subject_id) THEN '{}'::jsonb
         ELSE COALESCE(p_metadata, '{}'::jsonb)
@@ -131,7 +131,12 @@ BEGIN
         p_amount_due_minor,p_amount_paid_minor,p_currency,p_period_start,p_period_end,
         p_provider_updated_at,v_metadata
     )
-    ON CONFLICT (provider,provider_environment,provider_invoice_id) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_invoice_id
+    ) DO UPDATE
     SET status=EXCLUDED.status,
         amount_due_minor=EXCLUDED.amount_due_minor,
         amount_paid_minor=EXCLUDED.amount_paid_minor,
@@ -242,7 +247,12 @@ BEGIN
         p_payment_id,p_status,p_reason,p_provider_updated_at,
         v_metadata
     )
-    ON CONFLICT (provider,provider_environment,provider_dispute_id) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_dispute_id
+    ) DO UPDATE
     SET status=EXCLUDED.status,
         reason=EXCLUDED.reason,
         provider_updated_at=EXCLUDED.provider_updated_at,
@@ -323,7 +333,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     IF bursar.is_subject_pseudonymized(p_subject_id) THEN
         RAISE EXCEPTION 'pseudonymized subject cannot create checkout'
@@ -403,7 +413,7 @@ BEGIN
         p_checkout_url
     )
     ON CONFLICT (
-        subject_id,provider,provider_environment,checkout_kind,product_key,
+        tenant_id,subject_id,provider,provider_environment,checkout_kind,product_key,
         catalog_revision_id,request_digest
     )
     DO UPDATE SET

@@ -42,7 +42,10 @@ function scalarBoolean(rows: unknown[]): boolean {
 }
 
 export class PostgresStorageRepository implements OutboxStore {
-  constructor(private readonly query: QueryFn) {}
+  constructor(
+    private readonly query: QueryFn,
+    private readonly tenantId: string,
+  ) {}
 
   async claim(
     topics: readonly string[],
@@ -50,13 +53,14 @@ export class PostgresStorageRepository implements OutboxStore {
     leaseSeconds: number,
   ): Promise<OutboxEvent[]> {
     const rows = await this.query(
-      "SELECT * FROM bursar.claim_outbox_events($1::integer, $2::integer, $3::text[])",
-      [limit, leaseSeconds, [...topics]],
+      "SELECT * FROM bursar.claim_outbox_events($1::uuid, $2::integer, $3::integer, $4::text[])",
+      [this.tenantId, limit, leaseSeconds, [...topics]],
     );
     return rows.map((raw) => {
       const row = asRow(raw, "claim_outbox_events");
       return {
         eventId: requiredString(row, "event_id", "outbox event"),
+        tenantId: requiredString(row, "tenant_id", "outbox event"),
         topic: requiredString(row, "topic", "outbox event"),
         aggregateType: requiredString(row, "aggregate_type", "outbox event"),
         aggregateId: requiredString(row, "aggregate_id", "outbox event"),
@@ -103,6 +107,7 @@ export class PostgresStorageRepository implements OutboxStore {
       throw new Error(`Usage charge ${chargeId} payload expired before export`);
     }
     return {
+      tenantId: requiredString(row, "tenant_id", "usage charge export"),
       chargeId: requiredString(row, "charge_id", "usage charge export"),
       accountId: requiredString(row, "account_id", "usage charge export"),
       subjectId: requiredString(row, "subject_id", "usage charge export"),
@@ -139,6 +144,7 @@ export class PostgresStorageRepository implements OutboxStore {
     if (value === null || value === undefined) return null;
     const row = asRow(value, "export_billing_event_payload payload");
     return {
+      tenantId: requiredString(row, "tenant_id", "billing payload export"),
       eventId: requiredString(row, "event_id", "billing payload export"),
       provider: requiredString(row, "provider", "billing payload export"),
       providerEnvironment: requiredString(row, "provider_environment", "billing payload export"),

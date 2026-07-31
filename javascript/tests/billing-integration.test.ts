@@ -10,7 +10,12 @@ import { PostgresStore } from "../src/credits/postgres/store.js";
 import { CreditsService } from "../src/credits/service.js";
 import { PostgresBillingStore, BillingService, BillingEventType } from "../src/billing/index.js";
 import type { BillingPreferences, BillingSubscriptionState } from "../src/billing/index.js";
-import { BOOTSTRAP_SQL, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
+import {
+  BOOTSTRAP_SQL,
+  TEST_TENANT_ID,
+  applyMigrations,
+  truncateBursarTables,
+} from "./helpers/bootstrap.js";
 import { handleDodoBillingEvent } from "../src/providers/dodo/event-mapper.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
@@ -185,10 +190,10 @@ const PRICING_DICT = {
 };
 
 async function makePgComponents(pool: pg.Pool) {
-  const cs = new PostgresStore(DATABASE_URL!, pool);
+  const cs = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool);
   const cm = new CreditsService(cs);
   await cm.publishPricingFromDict(PRICING_DICT);
-  const bs = new PostgresBillingStore(pool);
+  const bs = new PostgresBillingStore(pool, TEST_TENANT_ID);
   const bm = new BillingService(bs, { provisioning: cm });
   return { cs, cm, bs, bm };
 }
@@ -379,7 +384,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     try {
       const claims = await Promise.all(
         workers.map(async (worker, i) => {
-          const local = new PostgresBillingStore(worker);
+          const local = new PostgresBillingStore(worker, TEST_TENANT_ID);
           ready.add(i);
           if (ready.size === workers.length) release();
           await start;
@@ -695,6 +700,28 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect(balance.balance.toString()).toBe("2000");
   });
 
+  it("derives topup credits from the settled amount and ignores metadata credit claims", async () => {
+    const { cm, bm } = await makePgComponents(pool);
+    await bm.ingestBillingEvent({
+      provider: PROVIDER,
+      eventId: "evt_payment_metadata_credits",
+      eventType: "payment.succeeded",
+      occurredAt: new Date().toISOString(),
+      userId: USER_ID2,
+      metadata: { credits: "999999" },
+      payment: {
+        providerPaymentId: "py_metadata_credits",
+        amountMinor: 2000,
+        currency: "USD",
+        refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
+        purpose: "credit_topup",
+      },
+    });
+
+    const balance = await cm.getBalance(USER_ID2);
+    expect(balance.balance.toString()).toBe("2000");
+  });
+
   it("subscription pause resume", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
@@ -841,6 +868,30 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     const plan = await cm.getUserPlan(USER_ID5);
     expect(plan.planId).not.toBeNull();
     expect(plan.planAssignedAt).not.toBeNull();
+  });
+
+  it("dodo: subscription.active provisions a plan while the provider is trialing", async () => {
+    const { cm, bm, bs } = await makePgComponents(pool);
+
+    await handleDodoBillingEvent(
+      "subscription.active",
+      {
+        subscription_id: "sub_dodo_trialing",
+        customer_id: "cus_dodo_trialing",
+        status: "trialing",
+        product_id: dodoProductId,
+        payment_frequency_interval: "Month",
+        payment_frequency_count: 1,
+        next_billing_date: new Date(Date.now() + 86400000 * 30).toString(),
+      },
+      USER_ID5,
+      {},
+      { ingestBillingEvent: (event: any) => bm.ingestBillingEvent(event) } as any,
+    );
+
+    const subscription = await bs.getBillingSubscription("dodo", "sub_dodo_trialing");
+    expect(subscription?.status).toBe("trialing");
+    expect((await cm.getUserPlan(USER_ID5)).planId).not.toBeNull();
   });
 
   it("dodo: duplicate event ID returns duplicate via event mapper (regression: no rawId collision)", async () => {
@@ -1523,12 +1574,23 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       purpose: "subscription",
       metadata: { email: "pii@example.com" },
     });
-    await pool.query(
-      `INSERT INTO bursar.external_identities(
-         subject_id, provider, external_subject
-       ) VALUES ($1, 'host', 'external-user-4')`,
-      [USER_ID4],
-    );
+    const tenantClient = await pool.connect();
+    try {
+      await tenantClient.query("BEGIN");
+      await tenantClient.query("SELECT set_config('bursar.tenant_id', $1, true)", [TEST_TENANT_ID]);
+      await tenantClient.query(
+        `INSERT INTO bursar.external_identities(
+           subject_id, provider, external_subject
+         ) VALUES ($1, 'host', 'external-user-4')`,
+        [USER_ID4],
+      );
+      await tenantClient.query("COMMIT");
+    } catch (error) {
+      await tenantClient.query("ROLLBACK");
+      throw error;
+    } finally {
+      tenantClient.release();
+    }
 
     await expect(bm.pseudonymizeFinancialSubject(USER_ID4)).resolves.toBeUndefined();
     await bs.upsertBillingCustomer(
@@ -1675,11 +1737,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("subscription trial will end callback", async () => {
     let called = false;
     const pool2 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    const cs2 = new PostgresStore(DATABASE_URL!);
+    const cs2 = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID);
     try {
       const cm2 = new CreditsService(cs2);
       await cm2.publishPricingFromDict(PRICING_DICT);
-      const bs2 = new PostgresBillingStore(pool2);
+      const bs2 = new PostgresBillingStore(pool2, TEST_TENANT_ID);
       const bm2 = new BillingService(bs2, {
         provisioning: cm2,
         eventHandlers: {
@@ -1829,9 +1891,9 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("subscription created without credit manager", async () => {
     const pool3 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     try {
-      const bs3 = new PostgresBillingStore(pool3);
+      const bs3 = new PostgresBillingStore(pool3, TEST_TENANT_ID);
       const bm3 = new BillingService(bs3);
-      const cs3 = new PostgresStore(DATABASE_URL!, pool3);
+      const cs3 = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool3);
       const cm3 = new CreditsService(cs3);
       await cm3.publishPricingFromDict(PRICING_DICT);
       const result = await bm3.ingestBillingEvent({

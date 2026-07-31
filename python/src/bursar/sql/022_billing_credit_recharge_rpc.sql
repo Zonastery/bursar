@@ -231,7 +231,12 @@ BEGIN
         p_payment_id,v_provider,v_environment,p_provider_refund_id,
         p_amount_minor,v_currency,p_status,p_reason,v_metadata,p_provider_updated_at
     )
-    ON CONFLICT (provider,provider_environment,provider_refund_id) DO UPDATE
+    ON CONFLICT (
+        tenant_id,
+        provider,
+        provider_environment,
+        provider_refund_id
+    ) DO UPDATE
     SET status=EXCLUDED.status,
         reason=EXCLUDED.reason,
         metadata=EXCLUDED.metadata,
@@ -353,7 +358,7 @@ BEGIN
 
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     INSERT INTO bursar.billing_auto_recharge_profiles(
         subject_id,enabled,armed,state,provider,provider_environment,
@@ -373,7 +378,7 @@ BEGIN
         CASE WHEN p_enabled THEN v_policy.max_consecutive_failures ELSE 3 END,
         p_window_unit,p_window_count,p_window_anchor,p_window_timezone
     )
-    ON CONFLICT (subject_id,provider_environment) DO UPDATE
+    ON CONFLICT (tenant_id, subject_id, provider_environment) DO UPDATE
     SET enabled=EXCLUDED.enabled,
         armed=CASE WHEN NOT billing_auto_recharge_profiles.enabled AND EXCLUDED.enabled
                    THEN true ELSE billing_auto_recharge_profiles.armed END,
@@ -411,7 +416,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 BEGIN
     INSERT INTO bursar.subjects(id)
     VALUES (p_subject_id)
-    ON CONFLICT (id) DO NOTHING;
+    ON CONFLICT (tenant_id, id) DO NOTHING;
 
     INSERT INTO bursar.billing_preferences(
         subject_id,auto_recharge,overage_protection,email_notifications,
@@ -421,7 +426,7 @@ BEGIN
         p_subject_id,p_auto_recharge,p_overage_protection,p_email_notifications,
         p_usage_alerts,p_invoice_reminders
     )
-    ON CONFLICT (subject_id) DO UPDATE
+    ON CONFLICT (tenant_id, subject_id) DO UPDATE
     SET auto_recharge=EXCLUDED.auto_recharge,
         overage_protection=EXCLUDED.overage_protection,
         email_notifications=EXCLUDED.email_notifications,

@@ -41,6 +41,7 @@ class _CommerceModel(BaseModel):
 
 
 class CommerceProviderFactoryContext(_CommerceModel):
+    tenant_id: str | None = None
     event_sink: SkipValidation[BillingEventSink]
     identity_resolver: ProviderResolveUserFn | None = None
 
@@ -68,6 +69,7 @@ class PreferencePatch(_CommerceModel):
 
 
 class CommerceOptions(_CommerceModel):
+    tenant_id: str | None = None
     providers: dict[str, CommerceProviderFactory]
     default_provider: str | None = None
     checkout_intent_ttl_ms: int = 24 * 60 * 60 * 1_000
@@ -105,6 +107,42 @@ class CheckoutStatusResult(_CommerceModel):
 class SubscriptionCommandResult(_CommerceModel):
     ok: Literal[True]
     pending: bool | None = None
+
+
+class NormalizedPendingPlanChange(_CommerceModel):
+    plan_key: str
+    interval: Literal["month", "year"]
+    effective_at: str
+    scheduled: bool
+    provider_operation_id: str | None = None
+
+
+class AccountSubscriptionSummary(_CommerceModel):
+    account_id: str
+    plan_key: str | None
+    status: str | None
+    lifecycle_state: str
+    access_state: Literal["entitled", "grace", "blocked", "none"]
+    is_current: bool
+    is_entitled: bool
+    is_blocking_checkout: bool
+    is_cancellable: bool
+    is_terminal: bool
+    subscription: BillingSubscriptionState | None
+    pending_change: NormalizedPendingPlanChange | None
+
+
+class CancelSubscriptionResult(_CommerceModel):
+    provider: str
+    provider_subscription_id: str
+    canceled: bool
+    error: str | None = None
+
+
+class CancelAllSubscriptionsResult(_CommerceModel):
+    account_id: str
+    canceled_count: int
+    subscriptions: list[CancelSubscriptionResult]
 
 
 class PlanChangePreviewResult(_CommerceModel):
@@ -192,6 +230,7 @@ BillingDocumentLocator = Annotated[
 class CommerceSectionAvailability(_CommerceModel):
     payment_methods: bool
     documents: bool
+    provider_invoices: bool
     transactions: bool
     usage: bool
     auto_recharge: bool
@@ -210,12 +249,15 @@ class AccountCreditOverview(_CommerceModel):
     lifetime_purchases: Decimal
     allowance: AccountAllowanceOverview
     buckets: list[BucketBalance]
+    buckets_by_key: dict[str, Decimal]
+    display: dict[str, str] | None = None
 
 
 class AccountCommerceOverview(_CommerceModel):
     account_id: str
     credits: AccountCreditOverview
     entitlement: GetUserPlanResult
+    subscription_summary: AccountSubscriptionSummary
     subscription: BillingSubscriptionState | None
     pending_change: BillingSubscriptionChange | None
     preferences: BillingPreferences

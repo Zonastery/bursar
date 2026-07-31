@@ -13,6 +13,7 @@ from bursar.credits.service_types import ReserveOptions, SettleOptions
 from bursar.credits.store import CreateLeaseOptions, StoreError
 from bursar.credits.types import ExecuteGrantProgramRequest
 from bursar.metrics import UsageMetrics
+from tests.conftest import TEST_TENANT_ID
 
 pytestmark = [pytest.mark.integration]
 USER_ID = "00000000-0000-0000-0000-000000000901"
@@ -81,7 +82,7 @@ CONFIG = {
 
 @pytest.fixture
 def store(pg_database_url: str) -> PostgresStore:
-    return PostgresStore(pg_database_url)
+    return PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
 
 
 def _ensure_user(store: PostgresStore) -> None:

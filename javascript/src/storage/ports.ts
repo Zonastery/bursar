@@ -1,5 +1,6 @@
 export interface OutboxEvent {
   eventId: string;
+  tenantId: string;
   topic: string;
   aggregateType: string;
   aggregateId: string;
@@ -27,6 +28,7 @@ export interface OutboxHandler {
 }
 
 export interface UsageChargeExport {
+  tenantId: string;
   chargeId: string;
   accountId: string;
   subjectId: string;
@@ -54,6 +56,7 @@ export interface UsageChargeExport {
 }
 
 export interface BillingEventPayloadExport {
+  tenantId: string;
   eventId: string;
   provider: string;
   providerEnvironment: string;
