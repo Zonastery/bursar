@@ -82,7 +82,18 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
 
     dsn = f"host=localhost port={port} dbname=bursar_demo user={user}"
     run_migrations(dsn)
-    store = PostgresStore(dsn)
+    tenant_id = os.environ.get(
+        "BURSAR_TENANT_ID",
+        "00000000-0000-0000-0000-000000000001",
+    )
+    import psycopg2
+
+    with psycopg2.connect(dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT bursar.create_tenant(%s, %s, %s)",
+            (tenant_id, "notebook-demo", "Notebook demo"),
+        )
+    store = PostgresStore(dsn, tenant_id=tenant_id)
     return store, pgdata
 
 

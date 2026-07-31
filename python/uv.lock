@@ -82,6 +82,34 @@ css = [
 ]
 
 [[package]]
+name = "boto3"
+version = "1.43.58"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/18/95/bd6276870084c9c1a94e17d1dc73b2de275e59bd7a0ad8bfff0a1598cec4/boto3-1.43.58.tar.gz", hash = "sha256:12871fb50c383f1b9aa4ed6dd386ba689062baef730552e79d5a9cd782b53058", size = 112685, upload-time = "2026-07-28T19:35:09.336Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/85/b0709066efb4ce7b86aba4092c739ad0e458be9d62cf32550fc4c130c93f/boto3-1.43.58-py3-none-any.whl", hash = "sha256:ce1a20cbcfaa1d0b3c8f568e2b6c7fbd34b842ea00e729d49a4b4de522828db9", size = 140026, upload-time = "2026-07-28T19:35:06.993Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.43.58"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5e/64/5cd46a7e72b0647e6d78fc8da016259ad66b9ae0818f4c5d629c75e7ca49/botocore-1.43.58.tar.gz", hash = "sha256:e110ca53f65c128fe98df4d6d36a459b1db17c6114671c8a18becf151bf20909", size = 15742412, upload-time = "2026-07-28T19:34:57.468Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/82/6f8fbbea47b773734ba0199643d2d851e5c2f75bc3699fe99db8af344d96/botocore-1.43.58-py3-none-any.whl", hash = "sha256:f516159f0732da8249206163ccea3bd1f82ad2a9d184fe6ed447e1abdba4330e", size = 15426503, upload-time = "2026-07-28T19:34:53.508Z" },
+]
+
+[[package]]
 name = "bursar"
 version = "0.0.2"
 source = { editable = "." }
@@ -99,7 +127,11 @@ providers = [
     { name = "dodopayments" },
     { name = "stripe" },
 ]
+s3 = [
+    { name = "boto3" },
+]
 test = [
+    { name = "boto3" },
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "psycopg2-binary" },
@@ -117,6 +149,7 @@ test = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "boto3" },
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "ipykernel" },
@@ -137,6 +170,7 @@ dev = [
     { name = "testcontainers" },
 ]
 test-deps = [
+    { name = "boto3" },
     { name = "httpx" },
     { name = "hypothesis" },
     { name = "psycopg2-binary" },
@@ -154,6 +188,8 @@ test-deps = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.35,<2" },
+    { name = "boto3", marker = "extra == 'test'", specifier = ">=1.35,<2" },
     { name = "dodopayments", marker = "extra == 'providers'", specifier = ">=1.0.0" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.28.1" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.112" },
@@ -174,10 +210,11 @@ requires-dist = [
     { name = "stripe", marker = "extra == 'test'", specifier = ">=10.0.0" },
     { name = "testcontainers", extras = ["postgres"], marker = "extra == 'test'", specifier = ">=4.8" },
 ]
-provides-extras = ["providers", "postgres", "test"]
+provides-extras = ["providers", "postgres", "s3", "test"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boto3", specifier = ">=1.35,<2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.112" },
     { name = "ipykernel", specifier = ">=7.3.0" },
@@ -198,6 +235,7 @@ dev = [
     { name = "testcontainers", extras = ["postgres"], specifier = ">=4.8" },
 ]
 test-deps = [
+    { name = "boto3", specifier = ">=1.35,<2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "hypothesis", specifier = ">=6.112" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
@@ -607,6 +645,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz", hash = "sha256:0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d", size = 245115, upload-time = "2025-03-05T20:05:02.478Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl", hash = "sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67", size = 134899, upload-time = "2025-03-05T20:05:00.369Z" },
+]
+
+[[package]]
+name = "jmespath"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
 ]
 
 [[package]]
@@ -1328,6 +1375,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/1a/0725a7cfdc32ff769efb96ee782bec882e16448c5d9e3be947ec4c04ce27/ruff-0.15.18-py3-none-win32.whl", hash = "sha256:02299e6e9fa5b297a3f6d5d10d7bcd655c925b028bb8b9d4588214549c6b9ec4", size = 10901903, upload-time = "2026-06-18T18:25:24.755Z" },
     { url = "https://files.pythonhosted.org/packages/f3/51/805d9f6fb7970505c3504794a5ec350f605361b807fef4dcf214ebd35e72/ruff-0.15.18-py3-none-win_amd64.whl", hash = "sha256:dac80dc8d26b2257dbefabed62f5d255c3937b4ccb122da1fc634794fa3578b3", size = 12041189, upload-time = "2026-06-18T18:25:17.915Z" },
     { url = "https://files.pythonhosted.org/packages/29/4c/67bb45e41609eb4726f1bfeb59e083cf91d14c696d4bd14c234a980be93d/ruff-0.15.18-py3-none-win_arm64.whl", hash = "sha256:b2c9257fcbd4a3e5b977a1904e6facca016bafe2edc17df24db67cfaee03b4e4", size = 11329958, upload-time = "2026-06-18T18:25:43.686Z" },
+]
+
+[[package]]
+name = "s3transfer"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/43/35e4d8aa320bffe8287fe8f65f578fa2d2db0a64212f0e710dce58267854/s3transfer-0.19.2.tar.gz", hash = "sha256:ba0309fd86be3c27dbf78cdd813c13c5e1df16e5874b99d2535ebbdfb9892993", size = 165592, upload-time = "2026-07-22T19:30:44.432Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/e7/5c595c75e9f41a44f30e526eda465ea0b4eec93470e074e4a111b253f13a/s3transfer-0.19.2-py3-none-any.whl", hash = "sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25", size = 90216, upload-time = "2026-07-22T19:30:43.251Z" },
 ]
 
 [[package]]

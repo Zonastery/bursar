@@ -13,6 +13,7 @@ import pg from "pg";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = join(__dirname, "../../../python/src/bursar/sql");
+export const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 const BOOTSTRAP_SQL = `
 DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -22,12 +23,8 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object TH
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
 
--- Mirror of conftest.py::_preseed_supabase_objects: migration 018 moved the
--- signup-bonus trigger from auth.users to better-auth's public."user" table.
--- The migration's "IF to_regclass('public.user') IS NOT NULL" branch only
--- installs the on_signup_credit_bonus constraint trigger WHEN this table
--- exists at bootstrap time. Without it the trigger creation path silently
--- no-ops in JS, so the two SDKs would test different DB topologies.
+-- Mirror the host application's Better Auth user table so integration
+-- fixtures exercise the same database topology as the application.
 CREATE TABLE IF NOT EXISTS public."user" (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT,
@@ -105,6 +102,11 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
         checksum,
       ]);
     }
+    await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+      TEST_TENANT_ID,
+      "bursar-tests",
+      "Bursar tests",
+    ]);
     return;
   }
 
@@ -127,22 +129,42 @@ export async function applyMigrations(pool: pg.Pool): Promise<void> {
       checksum,
     ]);
   }
+  await pool.query("SELECT bursar.create_tenant($1::uuid, $2::text, $3::text)", [
+    TEST_TENANT_ID,
+    "bursar-tests",
+    "Bursar tests",
+  ]);
 }
 
-/** Truncate all bursar credit + billing tables (dynamic TRUNCATE CASCADE loop). */
+/** Truncate all tenant-owned Bursar tables in one dependency-safe statement. */
 export async function truncateBursarTables(pool: pg.Pool): Promise<void> {
   await pool.query(`
     DO $$
-    DECLARE t text;
+    DECLARE
+      tenant_tables text;
     BEGIN
-      FOR t IN
-        SELECT tablename FROM pg_tables
-        WHERE schemaname = 'bursar'
-          AND (tablename LIKE 'credit_%' OR tablename = 'user_credits'
-               OR tablename LIKE 'billing_%')
-      LOOP
-        EXECUTE format('TRUNCATE TABLE bursar.%I CASCADE', t);
-      END LOOP;
+      SELECT string_agg(
+        format('bursar.%I', table_info.relname),
+        ', ' ORDER BY table_info.relname
+      )
+      INTO tenant_tables
+      FROM pg_class AS table_info
+      JOIN pg_namespace AS namespace_info
+        ON namespace_info.oid = table_info.relnamespace
+      WHERE namespace_info.nspname = 'bursar'
+        AND table_info.relkind IN ('r', 'p')
+        AND NOT table_info.relispartition
+        AND EXISTS (
+          SELECT 1
+          FROM pg_attribute AS attribute_info
+          WHERE attribute_info.attrelid = table_info.oid
+            AND attribute_info.attname = 'tenant_id'
+            AND NOT attribute_info.attisdropped
+        );
+
+      IF tenant_tables IS NOT NULL THEN
+        EXECUTE 'TRUNCATE TABLE ' || tenant_tables || ' CASCADE';
+      END IF;
     EXCEPTION WHEN undefined_table THEN NULL;
     END $$;
   `);

@@ -46,6 +46,9 @@ providers = [
 postgres = [
     "psycopg2-binary>=2.9.12",
 ]
+s3 = [
+    "boto3>=1.35,<2",
+]
 # Single source of truth for dev/test dependencies (M13). The duplicate
 # `[dependency-groups].dev` block was removed to end the version skew.
 test = [
@@ -62,6 +65,7 @@ test = [
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
     "stripe>=10.0.0",
+    "boto3>=1.35,<2",
 ]
 
 [tool.setuptools.package-data]
@@ -153,4 +157,5 @@ test-deps = [
     "psycopg2-binary>=2.9.12",
     "pyyaml>=6.0.3",
     "stripe>=10.0.0",
+    "boto3>=1.35,<2",
 ]

@@ -1,0 +1,20 @@
+[sqlfluff]
+dialect = postgres
+templater = raw
+large_file_skip_byte_limit = 0
+max_line_length = 120
+# Baseline indexes are created transactionally against an empty database, so
+# CREATE INDEX CONCURRENTLY is both unnecessary and illegal in this runner.
+# RF04/CP02 flag stable domain columns (for example role/status) and PostgreSQL
+# role keywords in GRANT/REVOKE statements rather than ambiguous references.
+exclude_rules = PG01,RF04,CP02
+
+[sqlfluff:indentation]
+indent_unit = space
+tab_space_size = 4
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = upper
+
+[sqlfluff:rules:layout.long_lines]
+max_line_length = 120

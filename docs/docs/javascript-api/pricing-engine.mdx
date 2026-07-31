@@ -1,91 +1,116 @@
 # PricingEngine — JavaScript
 
-The `PricingEngine` is the pure calculation core. No database dependency.
+`PricingEngine` is Bursar's database-free operation-pricing core. It validates
+the same canonical configuration as the Python SDK.
 
-## Creating an Engine
+## Creating an engine
 
 ```typescript
 import { PricingEngine } from "@zonastery/bursar";
 
-// From a dict (testing, stateless)
 const engine = PricingEngine.fromDict({
   version: 1,
-  models: {
-    "gpt-4": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
-    "_default": "input_tokens * (0.001 / 1000) + output_tokens * (0.003 / 1000)",
+  pricing: {
+    operations: {
+      completion: {
+        measures: {
+          input_tokens: { unit: "token" },
+          output_tokens: { unit: "token" },
+        },
+        dimensions: {
+          model: { type: "string" },
+        },
+      },
+    },
+    rate_cards: {
+      standard: {
+        operations: {
+          completion: {
+            rules: [
+              {
+                when: { model: { op: "prefix", value: "gpt-" } },
+                charge: {
+                  type: "per_unit",
+                  measure: "input_tokens",
+                  rate: "0.05",
+                },
+              },
+            ],
+            unmatched: {
+              action: "charge",
+              charge: {
+                type: "per_unit",
+                measure: "output_tokens",
+                rate: "0.10",
+              },
+            },
+          },
+        },
+      },
+    },
   },
+  credits: {},
 });
 ```
 
-## Methods
+Fixed credit accounting and plan rank have authoring defaults. Unknown fields,
+undeclared measures or dimensions, invalid matcher types, and unsafe
+cross-references are rejected when the engine is created.
 
-### `calculate(metrics: UsageMetrics): CostBreakdown`
+## Calculating cost
 
 ```typescript
 const cost = engine.calculate({
-  model: "gpt-4",
-  inputTokens: 500,
-  outputTokens: 200,
+  operation: "completion",
+  measures: {
+    input_tokens: 500,
+    output_tokens: 200,
+  },
+  dimensions: {
+    model: "gpt-4.1",
+  },
 });
-// cost.total is a decimal.js Decimal (quantized to 4dp), e.g. "0.0110"
-console.log(`Total: ${cost.total.toString()}`);
-console.log(`Model credits: ${cost.modelCredits.toString()}`);
-console.log(`Tool credits: ${cost.toolCredits.toString()}`);
+
+console.log(cost.total.toString());
 ```
 
-### `calculateBatch(metrics: UsageMetrics[]): CostBreakdown[]`
+`calculate(metrics, { rateCard })` accepts an optional rate-card key. It is
+required when the configuration contains more than one rate card and the
+caller has not otherwise selected one.
 
-Evaluate multiple metrics at once.
+`calculateBatch(metrics, { rateCard })` evaluates multiple operations with the
+same rate-card selection.
 
-### `resolveModel(modelVersion: string): string | null`
+`getRateCardForPlan(planKey)` returns the rate card referenced by a configured
+plan.
 
-Resolve a model version string against configured model names.
-
-### `hasModel(modelName: string): boolean`
-
-Check if a specific model is configured.
-
-### `getFixedCost(jobName: string): Decimal | null`
-
-Get the fixed cost for a named job. Returns `null` for an unknown/unconfigured job.
-
-### `pricingSchema(): BursarConfigData`
-
-Get the canonical snake_case pricing config dict. Dynamic identifier keys and
-opaque values are returned unchanged.
-
-### `minBalance: number`
-
-The configured minimum balance floor.
-
-## CostBreakdown
-
-**All monetary fields are `Decimal`** (from `decimal.js`), quantized to 4 dp `ROUND_HALF_UP`. `total` is the single source of truth: recomputed from the components, clamped at `0`, quantized — never truncated to an integer:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `total` | `Decimal` | Total credits |
-| `modelCredits` | `Decimal` | Credits from model expression |
-| `toolCredits` | `Decimal` | Credits from tool expressions |
-| `searchCredits` | `Decimal` | Credits from search expressions |
-| `cacheSavings` | `Decimal` | Cache result (negative = savings) |
-| `fixedCredits` | `Decimal` | Fixed job cost (`0` when not applicable) |
-| `breakdown` | `Record<string, unknown>` | Debug info |
+`pricingSchema` returns the validated canonical snake_case configuration.
 
 ## UsageMetrics
 
-Input to `calculate()` (exported as `UsageMetrics` from `@zonastery/bursar`):
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `operation` | `string` | A key declared in `pricing.operations` |
+| `measures` | `Record<string, number \| string>` | Non-negative billable quantities declared by the operation |
+| `dimensions` | `Record<string, string \| number \| boolean>` | Typed values used to select the first matching rate rule |
+| `metadata` | `Record<string, unknown>` | Caller metadata; it does not participate in pricing |
 
-| Field | Type | Default |
-|-------|------|---------|
-| `model` | `string` | `"_default"` |
-| `inputTokens` | `number` | `0` |
-| `outputTokens` | `number` | `0` |
-| `cacheReadTokens` | `number` | `0` |
-| `cacheWriteTokens` | `number` | `0` |
-| `toolCalls` | `ToolCall[]` (`{ name: string }[]`) | `[]` |
-| `searchQueries` | `number` | `0` |
-| `searchResults` | `number` | `0` |
-| `webSearchCalls` | `number` | `0` |
-| `codeExecCalls` | `number` | `0` |
-| `fixedJob` | `string` `|` `null` | `null` |
+Declared measures omitted by the caller are treated as zero. Required
+dimensions must be present. Undeclared measures or dimensions are rejected.
+
+## CostBreakdown
+
+All monetary fields are `Decimal` values quantized to six decimal places with
+half-up rounding. Operation pricing is reported in `operationCredits`; `total`
+is the complete quantized result.
+
+| Field | Type |
+| --- | --- |
+| `operationCredits` | `Decimal` |
+| `modelCredits` | `Decimal` |
+| `toolCredits` | `Decimal` |
+| `searchCredits` | `Decimal` |
+| `cacheSavings` | `Decimal` |
+| `fixedCredits` | `Decimal` |
+| `total` | `Decimal` |
+| `breakdown` | `Record<string, unknown>` |

@@ -1,0 +1,268 @@
+"""Static and database-level checks for the bundled SQL contract."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import psycopg2
+
+from bursar.sql import _get_sql_files
+
+SQL_DIR = Path(__file__).parents[1] / "src" / "bursar" / "sql"
+
+
+def test_migration_files_are_contiguous_and_self_contained() -> None:
+    files = _get_sql_files()
+    prefixes = [int(path.stem.split("_", 1)[0]) for path in files]
+
+    assert prefixes == list(range(1, len(files) + 1))
+    assert len({path.name for path in files}) == len(files)
+    for path in files:
+        content = path.read_text(encoding="utf-8")
+        assert content.strip(), path
+        assert content.endswith("\n"), path
+
+
+def test_service_role_allowlist_is_granted_and_public_execution_is_revoked(
+    pg_database_url: str,
+) -> None:
+    privilege_sql = (SQL_DIR / "026_privileges.sql").read_text(encoding="utf-8")
+    signatures = sorted(set(re.findall(r"'(bursar\.[^']+\([^']*\))'", privilege_sql)))
+    assert signatures
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        for signature in signatures:
+            cursor.execute(
+                "SELECT has_function_privilege('service_role', %s, 'EXECUTE')",
+                (signature,),
+            )
+            assert cursor.fetchone() == (True,), signature
+
+        cursor.execute(
+            """
+            SELECT p.oid::regprocedure::text
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'bursar'
+              AND has_function_privilege('public', p.oid, 'EXECUTE')
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT c.relname, r.rolname, privilege_type
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            CROSS JOIN pg_roles AS r
+            CROSS JOIN LATERAL (
+                SELECT unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS privilege_type
+            ) AS privileges
+            WHERE n.nspname = 'bursar'
+              AND c.relkind IN ('r', 'p')
+              AND r.rolname IN ('anon', 'authenticated')
+              AND has_table_privilege(r.rolname, c.oid, privileges.privilege_type)
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT table_info.relname
+            FROM pg_class AS table_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = table_info.relnamespace
+            WHERE namespace_info.nspname = 'bursar'
+              AND table_info.relkind IN ('r', 'p')
+              AND NOT table_info.relrowsecurity
+            ORDER BY table_info.relname
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT function_info.oid::regprocedure::text
+            FROM pg_proc AS function_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = function_info.pronamespace
+            WHERE namespace_info.nspname = 'bursar'
+              AND function_info.prosecdef
+              AND NOT coalesce(
+                  function_info.proconfig,
+                  ARRAY[]::text[]
+              ) @> ARRAY['search_path=""']
+            ORDER BY 1
+            """
+        )
+        assert cursor.fetchall() == []
+
+
+def test_schema_and_public_rpc_comments_are_present(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT c.relname
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'bursar'
+              AND c.relkind IN ('r', 'p')
+              AND c.relname <> 'schema_migrations'
+              AND obj_description(c.oid, 'pg_class') IS NULL
+            """
+        )
+        assert cursor.fetchall() == []
+
+        cursor.execute(
+            """
+            SELECT obj_description(p.oid, 'pg_proc')
+            FROM pg_proc AS p
+            JOIN pg_namespace AS n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'bursar'
+              AND p.proname IN (
+                  'publish_and_activate_catalog',
+                  'provision_subject_account_on_insert',
+                  'post_credit',
+                  'charge_usage_for_operation',
+                  'create_lease_for_operation',
+                  'settle_lease',
+                  'upsert_auto_recharge_profile',
+                  'list_subject_quota_events'
+              )
+            """
+        )
+        comments = cursor.fetchall()
+        assert comments
+        assert all(comment[0] for comment in comments)
+
+
+def test_foreign_keys_have_leading_column_indexes(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                constraint_info.conrelid::regclass::text,
+                constraint_info.conname
+            FROM pg_constraint AS constraint_info
+            WHERE constraint_info.contype = 'f'
+              AND constraint_info.connamespace = 'bursar'::regnamespace
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_index AS index_info
+                  WHERE index_info.indrelid = constraint_info.conrelid
+                    AND index_info.indisvalid
+                    AND (
+                        regexp_split_to_array(
+                            trim(index_info.indkey::text),
+                            ' +'
+                        )
+                    )[1:cardinality(constraint_info.conkey)]::smallint[]
+                        = constraint_info.conkey
+              )
+            ORDER BY 1, 2
+            """
+        )
+        assert cursor.fetchall() == []
+
+
+def test_nonunique_indexes_are_not_covered_by_another_index(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                smaller.indexrelid::regclass::text,
+                covering.indexrelid::regclass::text
+            FROM pg_index AS smaller
+            JOIN pg_class AS smaller_class
+              ON smaller_class.oid = smaller.indexrelid
+            JOIN pg_index AS covering
+              ON covering.indrelid = smaller.indrelid
+             AND covering.indexrelid <> smaller.indexrelid
+            JOIN pg_class AS covering_class
+              ON covering_class.oid = covering.indexrelid
+            WHERE smaller_class.relnamespace = 'bursar'::regnamespace
+              AND NOT smaller.indisunique
+              AND smaller.indisvalid
+              AND covering.indisvalid
+              AND smaller_class.relam = covering_class.relam
+              AND smaller.indnkeyatts <= covering.indnkeyatts
+              AND (
+                  regexp_split_to_array(trim(smaller.indkey::text), ' +')
+              )[1:smaller.indnkeyatts]
+                  = (
+                      regexp_split_to_array(
+                          trim(covering.indkey::text),
+                          ' +'
+                      )
+                  )[1:smaller.indnkeyatts]
+              AND pg_get_expr(smaller.indpred, smaller.indrelid)
+                  IS NOT DISTINCT FROM
+                  pg_get_expr(covering.indpred, covering.indrelid)
+              AND pg_get_expr(smaller.indexprs, smaller.indrelid)
+                  IS NOT DISTINCT FROM
+                  pg_get_expr(covering.indexprs, covering.indrelid)
+            ORDER BY 1, 2
+            """
+        )
+        assert cursor.fetchall() == []
+
+
+def test_database_generated_ids_are_uuid_v7(pg_database_url: str) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                substring(generated.id::text, 15, 1),
+                get_byte(uuid_send(generated.id), 8) >> 6
+            FROM (SELECT bursar.uuid_v7() AS id) AS generated
+            """
+        )
+        assert cursor.fetchone() == ("7", 2)
+
+        cursor.execute(
+            """
+            SELECT table_info.relname, attribute_info.attname
+            FROM pg_class AS table_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = table_info.relnamespace
+            JOIN pg_attribute AS attribute_info
+              ON attribute_info.attrelid = table_info.oid
+            JOIN pg_attrdef AS default_info
+              ON default_info.adrelid = table_info.oid
+             AND default_info.adnum = attribute_info.attnum
+            WHERE namespace_info.nspname = 'bursar'
+              AND attribute_info.atttypid = 'uuid'::regtype
+              AND pg_get_expr(default_info.adbin, default_info.adrelid)
+                  = 'gen_random_uuid()'::text
+            ORDER BY 1, 2
+            """
+        )
+        assert cursor.fetchall() == []
+
+
+def test_internal_history_ids_use_bigint_identity(pg_database_url: str) -> None:
+    table_names = [
+        "account_plan_assignment_history",
+        "billing_subscription_changes",
+        "billing_subscription_conflicts",
+        "plan_assignment_changes",
+    ]
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                table_name,
+                data_type,
+                is_identity,
+                identity_generation
+            FROM information_schema.columns
+            WHERE table_schema = 'bursar'
+              AND column_name = 'id'
+              AND table_name = ANY(%s)
+            ORDER BY table_name
+            """,
+            (table_names,),
+        )
+        assert cursor.fetchall() == [(table_name, "bigint", "YES", "ALWAYS") for table_name in table_names]

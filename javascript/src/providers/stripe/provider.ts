@@ -19,6 +19,7 @@ import type {
   SavedPaymentChargeParams,
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
+  WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleStripeWebhook } from "./event-mapper.js";
@@ -56,9 +57,7 @@ export class StripeProvider implements PaymentProvider {
       customerId = customer.id;
     }
 
-    const sessionOpts: Stripe.Checkout.SessionCreateParams & {
-      idempotencyKey?: string;
-    } = {
+    const sessionOpts: Stripe.Checkout.SessionCreateParams = {
       customer: customerId,
       mode: params.type === "subscription" ? "subscription" : "payment",
       line_items: [{ price: params.productId, quantity: params.quantity ?? 1 }],
@@ -71,10 +70,10 @@ export class StripeProvider implements PaymentProvider {
         ? { subscription_data: { metadata: { userId: params.userId, ...params.metadata } } }
         : { payment_intent_data: { metadata: { userId: params.userId, ...params.metadata } } }),
     };
-    if (params.idempotencyKey) {
-      sessionOpts.idempotencyKey = params.idempotencyKey;
-    }
-    const session = await stripe.checkout.sessions.create(sessionOpts);
+    const session = await stripe.checkout.sessions.create(
+      sessionOpts,
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+    );
 
     if (!session.url) throw new Error("Stripe checkout session returned no URL");
     return { url: session.url, customerId };
@@ -130,22 +129,43 @@ export class StripeProvider implements PaymentProvider {
     return { url: session.url };
   }
 
-  async handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }> {
+  async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
     const stripe = this.getStripe();
     const signature = req.headers["stripe-signature"];
-    if (!signature) return { received: false, retryable: false };
+    if (!signature) {
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
+    }
 
     let event: Stripe.Event;
     try {
       event = stripe.webhooks.constructEvent(req.rawBody, signature, this.webhookSecret);
     } catch (err) {
       if (err instanceof Stripe.errors.StripeSignatureVerificationError) {
-        return { received: false, retryable: false };
+        return {
+          received: false,
+          retryable: false,
+          provider: this.provider,
+          eventId: null,
+          eventType: null,
+        };
       }
       throw err;
     }
 
-    return handleStripeWebhook(event, this.sink, stripe, this.logger);
+    const result = await handleStripeWebhook(event, this.sink, stripe, this.logger);
+    return {
+      received: result.received,
+      retryable: false,
+      provider: this.provider,
+      eventId: event.id,
+      eventType: event.type,
+    };
   }
 
   async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {

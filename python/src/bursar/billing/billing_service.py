@@ -1,64 +1,106 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
-import logging
-from collections.abc import Callable
+import math
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Literal
 
-from bursar.billing.auto_recharge import AutoRechargeService
-from bursar.billing.models import (
+from bursar.billing.auto_recharge_service import AutoRechargeService
+from bursar.billing.billing_store import BillingStore
+from bursar.billing.contracts import (
+    AutoRechargeAttemptClaim,
+    AutoRechargeAttemptUpdate,
+    AutoRechargeProviderPaymentUpdate,
+    BillingCreditGrantCreate,
+    BillingDisputeUpsert,
+    BillingInvoiceUpsert,
+    BillingPaymentUpsert,
+    BillingRefundUpsert,
+    BillingSubscriptionChangeUpdate,
+    BillingSubscriptionConflictCreate,
+    CheckoutIntentCreate,
+    CheckoutIntentUpdate,
+)
+from bursar.billing.service_types import (
+    BillingProvisioningPort,
+    BillingServiceOptions,
+    ResolveUser,
+)
+from bursar.billing.types import (
+    BillingAutoRechargeAttempt,
+    BillingAutoRechargeProfile,
     BillingCustomerRecord,
     BillingEvent,
+    BillingEventHandler,
     BillingEventResult,
     BillingEventType,
+    BillingInvoiceInfo,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
+    BillingSubscriptionChangeInput,
     BillingSubscriptionInfo,
     BillingSubscriptionState,
     BillingSubscriptionStatus,
     BillingTopupResult,
     CheckoutIntent,
 )
-from bursar.billing.store import BillingStore
-
-logger = logging.getLogger(__name__)
-
-ResolveUserFn = Callable[[str, str | None, str | None], str | None]
+from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 
-class BillingProvisioningPort(Protocol):
-    """Credit operations required by billing provisioning only."""
+def _wait_for_handler(awaitable: Any) -> None:
+    async def wait() -> None:
+        await awaitable
 
-    def set_user_plan(self, user_id: str, plan_key: str, plan_assigned_at: datetime | None = None) -> Any: ...
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(wait())
+        return
 
-    def unset_user_plan(self, user_id: str) -> None: ...
+    errors: list[BaseException] = []
 
-    def add_credits(
-        self,
-        user_id: str,
-        amount: Decimal | int,
-        entry_type: str = "adjustment",
-        metadata: Any = None,
-        expires_at: datetime | None = None,
-        bucket: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> Any: ...
+    def runner() -> None:
+        try:
+            asyncio.run(wait())
+        except BaseException as exc:  # pragma: no cover - re-raised below
+            errors.append(exc)
 
-    def deduct_credits(
-        self,
-        user_id: str,
-        amount: Decimal | int,
-        *,
-        entry_type: str = "adjustment",
-        bucket: str | None = None,
-        metadata: Any = None,
-    ) -> Any: ...
+    worker = threading.Thread(target=runner, daemon=True)
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
 
-    def revoke_credits_by_entry_type(self, user_id: str, entry_type: str) -> Any: ...
+
+def _camelize_model_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key.split("_", 1)[0] + "".join(part.capitalize() for part in key.split("_")[1:])
+            if "_" in key
+            else key: _camelize_model_keys(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_camelize_model_keys(item) for item in value]
+    return value
+
+
+def _billing_event_claim_envelope(event: BillingEvent) -> dict[str, Any]:
+    envelope = _camelize_model_keys(
+        event.model_dump(
+            mode="json",
+            exclude={"occurred_at", "raw", "billing_event_id", "metadata"},
+            exclude_none=True,
+        )
+    )
+    if event.metadata is not None:
+        envelope["metadata"] = event.metadata
+    return envelope
 
 
 IGNORED_EVENT_TYPES: frozenset[BillingEventType] = frozenset(
@@ -87,22 +129,44 @@ class SubscriptionStateMerge:
         return default
 
 
-class BillingServiceImpl:
+class BillingService:
+    auto_recharge: AutoRechargeService
+
     def __init__(
         self,
         billing_store: BillingStore,
-        resolve_user: ResolveUserFn | None = None,
-        event_handlers: dict[BillingEventType, Callable[[BillingEvent, str], None]] | None = None,
-        cancel_prior_providers: bool = True,
+        options: BillingServiceOptions | None = None,
+        *,
+        resolve_user: ResolveUser | None = None,
+        event_handlers: dict[BillingEventType, BillingEventHandler] | None = None,
+        auto_select_entitlement_source: bool | None = None,
         provisioning: BillingProvisioningPort | None = None,
-        fallback_plan_key: str | None = None,
+        terminal_plan_key: str | None = None,
+        past_due_grace_period_ms: float | None = None,
     ) -> None:
+        options = options or BillingServiceOptions()
+        resolve_user = resolve_user if resolve_user is not None else options.resolve_user
+        event_handlers = event_handlers if event_handlers is not None else options.event_handlers
+        auto_select_entitlement_source = (
+            auto_select_entitlement_source
+            if auto_select_entitlement_source is not None
+            else options.auto_select_entitlement_source
+        )
+        provisioning = provisioning if provisioning is not None else options.provisioning
+        terminal_plan_key = terminal_plan_key if terminal_plan_key is not None else options.terminal_plan_key
+        past_due_grace_period_ms = (
+            past_due_grace_period_ms if past_due_grace_period_ms is not None else options.past_due_grace_period_ms
+        )
+        if not math.isfinite(past_due_grace_period_ms) or past_due_grace_period_ms < 0:
+            raise ValueError("past_due_grace_period_ms must be a finite non-negative number")
         self._store = billing_store
+        self._logger: NormalizedLogger = normalize_logger(options.logger)
         self._provisioning = provisioning
         self._resolve_user = resolve_user
         self._event_handlers = event_handlers or {}
-        self._cancel_prior_providers = cancel_prior_providers
-        self._fallback_plan_key = fallback_plan_key
+        self._auto_select_entitlement_source = auto_select_entitlement_source
+        self._terminal_plan_key = terminal_plan_key
+        self._past_due_grace_period_ms = past_due_grace_period_ms
         self.auto_recharge = AutoRechargeService(self)
         self._handlers = {
             BillingEventType.customer_created: self._handle_customer_upserted,
@@ -125,6 +189,8 @@ class BillingServiceImpl:
             BillingEventType.payment_succeeded: self._handle_payment_succeeded,
             BillingEventType.payment_failed: self._handle_payment_failed,
             BillingEventType.refund_created: self._handle_refund_created,
+            BillingEventType.refund_updated: self._handle_refund_created,
+            BillingEventType.refund_failed: self._handle_refund_created,
             BillingEventType.dispute_created: self._handle_dispute_created,
             BillingEventType.dispute_closed: self._handle_dispute_closed,
         }
@@ -153,6 +219,24 @@ class BillingServiceImpl:
             statuses=["active", "trialing"],
         )
 
+    def list_cancellable_provider_subscription_ids(self, user_id: str) -> list[str]:
+        return [subscription.provider_subscription_id for subscription in self.list_cancellable_subscriptions(user_id)]
+
+    def list_cancellable_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]:
+        cancellable_statuses = {
+            BillingSubscriptionStatus.active,
+            BillingSubscriptionStatus.trialing,
+            BillingSubscriptionStatus.past_due,
+            BillingSubscriptionStatus.incomplete,
+            BillingSubscriptionStatus.unpaid,
+            BillingSubscriptionStatus.paused,
+        }
+        return [
+            subscription
+            for subscription in self._store.get_user_subscriptions(user_id)
+            if subscription.status in cancellable_statuses and subscription.provider_subscription_id
+        ]
+
     def get_blocking_subscription(
         self,
         user_id: str,
@@ -164,22 +248,32 @@ class BillingServiceImpl:
             )
         )
 
-    def create_billing_subscription_change(self, change: BillingSubscriptionChange) -> BillingSubscriptionChange:
-        return self._store.create_billing_subscription_change(change)
+    def create_billing_subscription_change(
+        self,
+        input: BillingSubscriptionChangeInput,
+    ) -> BillingSubscriptionChange:
+        return self._store.create_billing_subscription_change(input)
 
     def get_open_billing_subscription_change(
         self, provider: str, provider_subscription_id: str
     ) -> BillingSubscriptionChange | None:
         return self._store.get_open_billing_subscription_change(provider, provider_subscription_id)
 
-    def update_billing_subscription_change(self, id: str, **updates: Any) -> None:
-        self._store.update_billing_subscription_change(id, **updates)
+    def update_billing_subscription_change(
+        self,
+        id: str,
+        update: BillingSubscriptionChangeUpdate,
+    ) -> None:
+        self._store.update_billing_subscription_change(id, update)
 
     def _expire_grace_if_needed(self, subscription: BillingSubscriptionState | None) -> BillingSubscriptionState | None:
         if (
             not subscription
+            or self._provisioning is None
             or subscription.status != BillingSubscriptionStatus.past_due
+            or subscription.grace_expired_at
             or not subscription.grace_ends_at
+            or not subscription.subscription_id
         ):
             return subscription
         try:
@@ -188,56 +282,89 @@ class BillingServiceImpl:
             expired = False
         if not expired:
             return subscription
-        self._store.upsert_billing_subscription(
-            subscription.model_copy(update={"status": BillingSubscriptionStatus.expired})
+        self._revoke_if_current_subscription(
+            subscription.user_id,
+            subscription.provider_subscription_id,
         )
-        self._revoke_if_current_subscription(subscription.user_id, subscription.provider_subscription_id)
-        return subscription.model_copy(update={"status": BillingSubscriptionStatus.expired})
+        expired_at = datetime.now(UTC).isoformat()
+        marked = self._store.mark_subscription_grace_expired(
+            subscription.subscription_id,
+            subscription.grace_ends_at,
+            expired_at,
+        )
+        return subscription.model_copy(update={"grace_expired_at": expired_at}) if marked else subscription
+
+    def expire_past_due_grace_periods(
+        self,
+        now: datetime | None = None,
+    ) -> int:
+        """Revoke and mark every still-current past-due grace period."""
+        if self._provisioning is None:
+            return 0
+        effective_now = now or datetime.now(UTC)
+        as_of = effective_now.isoformat()
+        expired_count = 0
+        for candidate in self._store.list_expired_grace_subscriptions(effective_now):
+            subscription_id = candidate.get("subscription_id")
+            provider = candidate.get("provider")
+            provider_subscription_id = candidate.get("provider_subscription_id")
+            grace_ends_at = candidate.get("grace_ends_at")
+            user_id = candidate.get("user_id")
+            if not all(
+                (
+                    subscription_id,
+                    provider,
+                    provider_subscription_id,
+                    grace_ends_at,
+                    user_id,
+                )
+            ):
+                continue
+            current = self._store.get_billing_subscription(
+                str(provider),
+                str(provider_subscription_id),
+            )
+            if (
+                current is None
+                or current.status != BillingSubscriptionStatus.past_due
+                or current.grace_ends_at != str(grace_ends_at)
+                or current.grace_expired_at
+            ):
+                continue
+            self._revoke_if_current_subscription(
+                str(user_id),
+                str(provider_subscription_id),
+            )
+            if self._store.mark_subscription_grace_expired(
+                str(subscription_id),
+                str(grace_ends_at),
+                as_of,
+            ):
+                expired_count += 1
+        return expired_count
+
+    def invalidate_offer_cache(self) -> None:
+        """Invalidate offer resolution state.
+
+        The Python store performs uncached lookups, so there is no local cache
+        to clear. The method is retained to mirror the JavaScript capability.
+        """
 
     def create_or_get_checkout_intent(
         self,
-        actor_key: str,
-        provider: str,
-        type: str,
-        product_id: str,
-        request_fingerprint: str,
-        expires_at: str,
+        input: CheckoutIntentCreate,
     ) -> CheckoutIntent:
-        return self._store.create_or_get_checkout_intent(
-            actor_key,
-            provider,
-            type,
-            product_id,
-            request_fingerprint,
-            expires_at,
-        )
+        return self._store.create_or_get_checkout_intent(input)
 
     def update_checkout_intent(
         self,
         id: str,
-        status: str | None = None,
-        provider_session_id: str | None = None,
-        checkout_url: str | None = None,
+        update: CheckoutIntentUpdate,
     ) -> None:
-        self._store.update_checkout_intent(id, status, provider_session_id, checkout_url)
+        self._store.update_checkout_intent(id, update)
 
-    def record_subscription_conflict(
-        self,
-        user_id: str | None = None,
-        provider: str = "",
-        duplicate_subscription_id: str = "",
-        existing_subscription_id: str | None = None,
-        event_id: str | None = None,
-        metadata: dict | None = None,
-    ) -> None:
-        self._store.record_subscription_conflict(
-            user_id=user_id,
-            provider=provider,
-            duplicate_subscription_id=duplicate_subscription_id,
-            existing_subscription_id=existing_subscription_id,
-            event_id=event_id,
-            metadata=metadata,
-        )
+    def get_checkout_intent(self, id: str, subject_id: str) -> CheckoutIntent | None:
+        return self._store.get_checkout_intent(id, subject_id)
 
     def get_user_preferences(self, user_id: str) -> BillingPreferences | None:
         """Get billing preferences for a user.
@@ -249,6 +376,12 @@ class BillingServiceImpl:
     def update_user_preferences(self, prefs: BillingPreferences) -> None:
         """Insert or update billing preferences for a user."""
         self._store.upsert_billing_preferences(prefs)
+
+    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]:
+        return self._store.list_billing_invoices(user_id)
+
+    def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
+        self._store.upsert_billing_subscription(state)
 
     def get_customer_by_user_id(
         self,
@@ -279,6 +412,13 @@ class BillingServiceImpl:
         """
         return self._store.resolve_billing_offer(provider, product_id, price_id)
 
+    def resolve_offer_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> BillingOfferResult | None:
+        return self._resolve_offer_by_lookup(provider, lookup_key)
+
     def resolve_topup(
         self,
         provider: str,
@@ -291,6 +431,13 @@ class BillingServiceImpl:
         so callers don't need to access the store directly.
         """
         return self._store.resolve_credit_topup(provider, product_id, price_id)
+
+    def resolve_topup_by_lookup(
+        self,
+        provider: str,
+        lookup_key: str,
+    ) -> BillingTopupResult | None:
+        return self._store.resolve_credit_topup_by_lookup(provider, lookup_key)
 
     def upsert_customer(
         self,
@@ -306,72 +453,88 @@ class BillingServiceImpl:
         """
         self._store.upsert_billing_customer(provider, provider_customer_id, user_id, email)
 
-    def get_auto_recharge_profile(self, user_id: str):
+    def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None:
         return self._store.get_auto_recharge_profile(user_id)
 
     def get_active_bursar_config(self) -> dict[str, Any] | None:
         """Return the active canonical public Bursar configuration."""
         return self._store.get_active_bursar_config()
 
-    def upsert_auto_recharge_profile(self, profile) -> None:
+    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
         self._store.upsert_auto_recharge_profile(profile)
 
     def claim_auto_recharge_attempt(
         self,
-        user_id: str,
-        provider: str,
-        topup_key: str,
-        quantity: int,
-        max_recharges: int,
-        window_days: int,
-    ):
-        return self._store.claim_auto_recharge_attempt(
-            user_id,
-            provider,
-            topup_key,
-            quantity,
-            max_recharges,
-            window_days,
-        )
+        input: AutoRechargeAttemptClaim,
+    ) -> BillingAutoRechargeAttempt | None:
+        return self._store.claim_auto_recharge_attempt(input)
 
     def update_auto_recharge_attempt(
         self,
-        attempt_id: str,
-        state: str,
-        provider_payment_id: str | None = None,
-        failure_code: str | None = None,
-        action_url: str | None = None,
+        input: AutoRechargeAttemptUpdate,
     ) -> None:
-        self._store.update_auto_recharge_attempt(
-            attempt_id,
-            state,
-            provider_payment_id,
-            failure_code,
-            action_url,
-        )
+        self._store.update_auto_recharge_attempt(input)
+
+    def update_auto_recharge_attempt_by_provider_payment(
+        self,
+        input: AutoRechargeProviderPaymentUpdate,
+    ) -> None:
+        self._store.update_auto_recharge_attempt_by_provider_payment(input)
+
+    def count_auto_recharge_attempts(
+        self,
+        user_id: str,
+        since: str | datetime,
+    ) -> int:
+        return self._store.count_auto_recharge_attempts(user_id, since)
+
+    def pseudonymize_financial_subject(self, user_id: str) -> None:
+        self._store.pseudonymize_financial_subject(user_id)
+
+    def record_subscription_conflict(
+        self,
+        input: BillingSubscriptionConflictCreate,
+    ) -> None:
+        self._store.record_subscription_conflict(input)
 
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+        claim_envelope = _billing_event_claim_envelope(event)
         claim = self._store.claim_billing_event(
             event.provider,
             event.event_id,
             event.event_type,
+            claim_envelope,
         )
         if claim.status == "duplicate":
-            logger.debug("duplicate billing event %s/%s", event.provider, event.event_id)
+            self._logger.debug(
+                "duplicate billing event",
+                {"provider": event.provider, "event_id": event.event_id},
+            )
             return BillingEventResult(handled=True, action="duplicate")
 
         if claim.status == "retry":
-            logger.warning("billing event %s/%s retry — skipping", event.provider, event.event_id)
+            self._logger.warn(
+                "billing event retry — skipping",
+                {"provider": event.provider, "event_id": event.event_id},
+            )
             return BillingEventResult(handled=False, error="claim_failed_retry")
         if not claim.claim_token:
             return BillingEventResult(handled=False, error="claim_token_missing")
 
         try:
+            event.billing_event_id = claim.billing_event_id
             result = self._route_event(event)
             self._store.complete_billing_event(event.provider, event.event_id, claim.claim_token)
             return result
         except Exception as exc:
-            logger.exception("failed to handle billing event %s/%s", event.provider, event.event_id)
+            self._logger.error(
+                "failed to handle billing event",
+                {
+                    "provider": event.provider,
+                    "event_id": event.event_id,
+                    "error": str(exc),
+                },
+            )
             self._store.fail_billing_event(event.provider, event.event_id, claim.claim_token, str(exc))
             return BillingEventResult(handled=False, error=str(exc))
 
@@ -379,13 +542,33 @@ class BillingServiceImpl:
         handler = self._handlers.get(event.event_type)
         if handler is None:
             if event.event_type in IGNORED_EVENT_TYPES:
+                if event.event_type == BillingEventType.checkout_expired:
+                    self._update_checkout_intent_from_event(event, "expired")
                 return BillingEventResult(handled=True, action="ignored")
-            logger.warning("unhandled billing event type %s (marking as failed)", event.event_type)
+            event_type_name = (
+                event.event_type.value if isinstance(event.event_type, BillingEventType) else str(event.event_type)
+            )
+            self._logger.warn(
+                "unhandled billing event type (marking as failed)",
+                {"event_type": event_type_name},
+            )
             return BillingEventResult(handled=False, error="unhandled_event_type")
         result = handler(event)
         if result.handled:
             self._fire_event_handlers(event, event.user_id)
         return result
+
+    def _update_checkout_intent_from_event(
+        self,
+        event: BillingEvent,
+        status: Literal["completed", "failed", "expired"],
+    ) -> None:
+        intent_id = event.metadata.get("checkout_intent_id") if event.metadata else None
+        if isinstance(intent_id, str) and intent_id:
+            self._store.update_checkout_intent(
+                intent_id,
+                CheckoutIntentUpdate(status=status),
+            )
 
     def _fire_event_handlers(self, event: BillingEvent, user_id: str | None) -> None:
         if not user_id:
@@ -393,24 +576,19 @@ class BillingServiceImpl:
         handler = self._event_handlers.get(event.event_type)
         if handler is None:
             return
-        if inspect.iscoroutinefunction(handler):
-            logger.error(
-                "event handler for %s is async — BillingServiceImpl is synchronous, handler will not be called",
-                event.event_type,
-            )
-            return
         try:
-            handler(event, user_id)
-        except Exception:
-            logger.exception(
-                "event handler failed for %s/%s",
-                event.provider,
-                event.event_id,
+            result = handler(event, user_id)
+            if inspect.isawaitable(result):
+                _wait_for_handler(result)
+        except Exception as exc:
+            self._logger.error(
+                "event handler failed",
+                {
+                    "provider": event.provider,
+                    "event_id": event.event_id,
+                    "error": str(exc),
+                },
             )
-
-    @staticmethod
-    def _compute_topup_credits(amount_minor: int, credits_per_unit: Decimal | int) -> Decimal:
-        return (Decimal(amount_minor) * Decimal(credits_per_unit)) // Decimal(100)
 
     def _resolve_user_id(self, event: BillingEvent) -> str | None:
         if event.user_id:
@@ -442,12 +620,14 @@ class BillingServiceImpl:
                 return uid
         return None
 
-    def _offer_for_event(self, event: BillingEvent) -> tuple[BillingOfferResult | None, str | None, str | None]:
+    def _offer_for_event(
+        self, event: BillingEvent
+    ) -> tuple[BillingOfferResult | None, str | None, str | None, str | None]:
         if not event.subscription:
-            return None, None, None
+            return None, None, None, None
         refs = event.subscription.refs
         if not refs:
-            return None, None, None
+            return None, None, None, None
         offer = self._store.resolve_billing_offer(
             event.provider,
             product_id=refs.product_id,
@@ -456,8 +636,8 @@ class BillingServiceImpl:
         if not offer and refs.lookup_key:
             offer = self._resolve_offer_by_lookup(event.provider, refs.lookup_key)
         if not offer:
-            return None, None, None
-        return offer, offer.offer_key, offer.plan
+            return None, None, None, None
+        return offer, offer.offer_key, offer.plan, offer.offer_id
 
     def _resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> BillingOfferResult | None:
         result = self._store.resolve_billing_offer_by_lookup(provider, lookup_key)
@@ -475,6 +655,12 @@ class BillingServiceImpl:
         cancel_at_period_end: bool | None = None,
         offer_key: str | None = None,
         plan_key: str | None = None,
+        offer_id: str | None = None,
+        interval: str | None = None,
+        interval_count: int | None = None,
+        metadata: dict[str, Any] | None = None,
+        grace_ends_at: str | None = None,
+        grace_expired_at: str | None = None,
     ) -> BillingSubscriptionState:
         if not event.subscription:
             raise ValueError("no_subscription_data")
@@ -496,16 +682,40 @@ class BillingServiceImpl:
             provider_customer_id=(event.customer.provider_customer_id if event.customer else None)
             or (existing.provider_customer_id if existing else None),
             offer_key=merger.resolve(offer_key, "offer_key"),
+            offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
             plan=merger.resolve(plan_key, "plan"),
             status=BillingSubscriptionStatus(_status),
             current_period_start=sub.period_start or (existing.current_period_start if existing else None),
             current_period_end=sub.period_end or (existing.current_period_end if existing else None),
+            trial_end=sub.trial_end or (existing.trial_end if existing else None),
+            cancel_at=sub.cancel_at or (existing.cancel_at if existing else None),
+            ended_at=sub.ended_at or (existing.ended_at if existing else None),
+            grace_ends_at=(
+                grace_ends_at or (existing.grace_ends_at if existing else None)
+                if _status == BillingSubscriptionStatus.past_due.value
+                else None
+            ),
+            grace_expired_at=(
+                grace_expired_at or (existing.grace_expired_at if existing else None)
+                if _status == BillingSubscriptionStatus.past_due.value
+                else None
+            ),
+            provider_updated_at=event.occurred_at,
             cancel_at_period_end=merger.resolve(cancel_at_period_end, "cancel_at_period_end", False),
-            interval=merger.resolve(None, "interval"),
-            interval_count=merger.resolve(None, "interval_count"),
-            metadata=event.metadata or (existing.metadata if existing else None),
-            catalog_version=(existing.catalog_version if existing and existing.catalog_version is not None else None),
-            plan_version_id=(existing.plan_version_id if existing and existing.plan_version_id is not None else None),
+            interval=merger.resolve(interval, "interval"),
+            interval_count=merger.resolve(interval_count, "interval_count"),
+            metadata=(
+                metadata
+                if metadata is not None
+                else (
+                    {
+                        **(existing.metadata or {} if existing else {}),
+                        **(event.metadata or {}),
+                    }
+                    if event.metadata or (existing and existing.metadata)
+                    else None
+                )
+            ),
         )
 
     def _apply_subscription_event(
@@ -533,9 +743,29 @@ class BillingServiceImpl:
         offer = None
         offer_key = None
         plan_key = None
+        offer_id = None
         if resolve_offers:
-            offer, offer_key, plan_key = self._offer_for_event(event)
+            offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
 
+        pending = None
+        if action == "plan_changed":
+            pending = self._store.get_open_billing_subscription_change(
+                event.provider,
+                event.subscription.provider_subscription_id,
+            )
+            if pending:
+                self._store.update_billing_subscription_change(
+                    pending.id,
+                    BillingSubscriptionChangeUpdate(state="applied"),
+                )
+
+        state_metadata = None
+        if action == "plan_changed":
+            state_metadata = {
+                **(existing.metadata or {} if existing else {}),
+                **(event.metadata or {}),
+                "pendingPlanChange": None,
+            }
         self._store.upsert_billing_subscription(
             self._subscription_state(
                 event,
@@ -545,26 +775,20 @@ class BillingServiceImpl:
                 cancel_at_period_end=cancel_at_period_end,
                 offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
                 plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
+                offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
+                interval=offer.interval if offer else None,
+                interval_count=offer.interval_count if offer else None,
+                metadata=state_metadata,
             )
         )
 
-        if action == "plan_changed":
-            pending = self._store.get_open_billing_subscription_change(
-                event.provider,
-                event.subscription.provider_subscription_id,
-            )
-            if pending:
-                self._store.update_billing_subscription_change(
-                    pending.id,
-                    state="completed",
-                    effective_date=event.occurred_at,
-                )
         if self._provisioning and provision_on_positive:
             self._provision_subscription(
                 uid,
                 offer,
                 event,
-                _plan_key=existing.plan if existing and existing.plan else None,
+                plan_key_override=plan_key if plan_key is not None else (existing.plan if existing else None),
+                preserve_allowance_anchor=action == "plan_changed",
             )
 
         return BillingEventResult(handled=True, action=action)
@@ -601,12 +825,20 @@ class BillingServiceImpl:
                 )
         if event.subscription:
             return self._handle_subscription_created(event)
-        return BillingEventResult(handled=True, action="checkout_recorded")
+        self._update_checkout_intent_from_event(event, "completed")
+        return BillingEventResult(handled=True, action="checkout_completed")
 
     def _handle_subscription_created(self, event: BillingEvent) -> BillingEventResult:
         uid = self._resolve_user_id(event)
         if not uid:
             return BillingEventResult(handled=False, error="user_not_found")
+        if event.customer and event.customer.provider_customer_id:
+            self._store.upsert_billing_customer(
+                event.provider,
+                event.customer.provider_customer_id,
+                uid,
+                event.customer.email,
+            )
         if not event.subscription or not event.subscription.provider_subscription_id:
             return BillingEventResult(handled=False, error="no_subscription_data")
 
@@ -627,22 +859,18 @@ class BillingServiceImpl:
         )
         if existing_for_provider is not None:
             self._store.record_subscription_conflict(
-                user_id=uid,
-                provider=event.provider,
-                duplicate_subscription_id=sub_id,
-                existing_subscription_id=existing_for_provider.provider_subscription_id,
-                event_id=event.event_id,
-                metadata=event.metadata,
+                BillingSubscriptionConflictCreate(
+                    user_id=uid,
+                    provider=event.provider,
+                    duplicate_subscription_id=sub_id,
+                    existing_subscription_id=(existing_for_provider.provider_subscription_id),
+                    event_id=event.event_id,
+                    metadata=event.metadata or {},
+                )
             )
-            logger.warning(
-                "subscription conflict for user %s: existing %s, duplicate %s",
-                uid,
-                existing_for_provider.provider_subscription_id,
-                sub_id,
-            )
-            return BillingEventResult(handled=True, action="subscription_conflict")
+            return BillingEventResult(handled=False, error="subscription_conflict")
 
-        offer, offer_key, plan_key = self._offer_for_event(event)
+        offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
         st = event.subscription.status.value if event.subscription.status else None
         subscription_state = self._subscription_state(
             event,
@@ -651,6 +879,7 @@ class BillingServiceImpl:
             status=st,
             cancel_at_period_end=event.subscription.cancel_at_period_end,
             offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+            offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
             plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
         )
         try:
@@ -672,22 +901,25 @@ class BillingServiceImpl:
             if concurrent is None:
                 raise
             self._store.record_subscription_conflict(
-                user_id=uid,
-                provider=event.provider,
-                duplicate_subscription_id=sub_id,
-                existing_subscription_id=concurrent.provider_subscription_id,
-                event_id=event.event_id,
-                metadata=event.metadata,
+                BillingSubscriptionConflictCreate(
+                    user_id=uid,
+                    provider=event.provider,
+                    duplicate_subscription_id=sub_id,
+                    existing_subscription_id=(concurrent.provider_subscription_id),
+                    event_id=event.event_id,
+                    metadata=event.metadata or {},
+                )
             )
-            return BillingEventResult(handled=True, action="subscription_conflict")
+            return BillingEventResult(handled=False, error="subscription_conflict")
 
         if self._provisioning and st and st in ("active", "trialing"):
             self._provision_subscription(
                 uid,
                 offer,
                 event,
-                _plan_key=existing.plan if existing and existing.plan else None,
             )
+        if st in ("active", "trialing"):
+            self._update_checkout_intent_from_event(event, "completed")
 
         return BillingEventResult(
             handled=True,
@@ -718,12 +950,16 @@ class BillingServiceImpl:
         )
 
     def _handle_subscription_renewed(self, event: BillingEvent) -> BillingEventResult:
-        return self._apply_subscription_event(
+        result = self._apply_subscription_event(
             event,
             status="active",
             action="subscription_renewed",
             provision_on_positive=True,
         )
+        if result.handled:
+            offer, _, _, _ = self._offer_for_event(event)
+            self._grant_subscription_cycle(event, offer)
+        return result
 
     def _handle_subscription_plan_changed(self, event: BillingEvent) -> BillingEventResult:
         st = event.subscription.status.value if event.subscription and event.subscription.status else "active"
@@ -753,25 +989,47 @@ class BillingServiceImpl:
         )
 
     def _handle_subscription_canceled(self, event: BillingEvent) -> BillingEventResult:
-        if event.subscription:
-            cot = (
-                event.subscription.cancel_at_period_end if event.subscription.cancel_at_period_end is not None else True
+        uid = self._resolve_user_id(event)
+        if not uid:
+            return BillingEventResult(handled=False, error="user_not_found")
+        if not event.subscription or not event.subscription.provider_subscription_id:
+            return BillingEventResult(handled=False, error="no_subscription_data")
+
+        sub_id = event.subscription.provider_subscription_id
+        existing = self._store.get_billing_subscription(event.provider, sub_id)
+        offer = None
+        offer_key = None
+        plan_key = None
+        offer_id = None
+        if existing is None:
+            offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
+            if not offer_id:
+                raise RuntimeError(
+                    "cannot persist cancellation for unknown subscription "
+                    f"{event.provider}/{sub_id}: offer could not be resolved"
+                )
+
+        self._store.upsert_billing_subscription(
+            self._subscription_state(
+                event,
+                uid,
+                existing,
+                status="canceled",
+                cancel_at_period_end=(
+                    event.subscription.cancel_at_period_end
+                    if event.subscription.cancel_at_period_end is not None
+                    else True
+                ),
+                offer_key=offer_key if offer_key is not None else (existing.offer_key if existing else None),
+                offer_id=offer_id if offer_id is not None else (existing.offer_id if existing else None),
+                plan_key=plan_key if plan_key is not None else (existing.plan if existing else None),
+                interval=offer.interval if offer is not None else None,
+                interval_count=offer.interval_count if offer is not None else None,
             )
-        else:
-            cot = None
-        result = self._apply_subscription_event(
-            event,
-            status="canceled",
-            cancel_at_period_end=cot,
-            resolve_offers=False,
-            action="subscription_canceled",
-            provision_on_positive=False,
         )
-        if result.handled:
-            uid = self._resolve_user_id(event)
-            if uid and self._provisioning and event.subscription:
-                self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
-        return result
+        if self._provisioning:
+            self._revoke_if_current_subscription(uid, sub_id)
+        return BillingEventResult(handled=True, action="subscription_canceled")
 
     def _handle_subscription_expired(self, event: BillingEvent) -> BillingEventResult:
         if event.subscription:
@@ -822,23 +1080,34 @@ class BillingServiceImpl:
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
     def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
+        renewal_result = (
+            self._handle_subscription_renewed(event)
+            if event.subscription
+            else BillingEventResult(handled=True, action="invoice_paid")
+        )
+        if not renewal_result.handled:
+            return renewal_result
         uid = self._resolve_user_id(event)
         if uid and event.invoice:
             self._store.upsert_billing_invoice(
-                provider=event.provider,
-                provider_invoice_id=event.invoice.provider_invoice_id,
-                provider_subscription_id=event.subscription.provider_subscription_id if event.subscription else None,
-                user_id=uid,
-                status=event.invoice.status or "paid",
-                amount_paid_minor=event.invoice.amount_paid_minor,
-                amount_due_minor=event.invoice.amount_due_minor,
-                currency=event.invoice.currency or "USD",
-                period_start=event.invoice.period_start,
-                period_end=event.invoice.period_end,
+                BillingInvoiceUpsert(
+                    provider=event.provider,
+                    provider_invoice_id=event.invoice.provider_invoice_id,
+                    provider_subscription_id=(
+                        event.subscription.provider_subscription_id if event.subscription else None
+                    ),
+                    user_id=uid,
+                    status=event.invoice.status or "paid",
+                    amount_paid_minor=event.invoice.amount_paid_minor,
+                    amount_due_minor=event.invoice.amount_due_minor,
+                    currency=event.invoice.currency or "USD",
+                    period_start=event.invoice.period_start,
+                    period_end=event.invoice.period_end,
+                    provider_updated_at=event.occurred_at,
+                    metadata=event.metadata,
+                )
             )
-        if event.subscription:
-            return self._handle_subscription_renewed(event)
-        return BillingEventResult(handled=True, action="invoice_paid")
+        return renewal_result
 
     def _handle_payment_succeeded(self, event: BillingEvent) -> BillingEventResult:
         if not event.payment:
@@ -854,49 +1123,99 @@ class BillingServiceImpl:
                 price_id=event.payment.refs.price_id,
             )
 
+        payment_id: str | None = None
         if uid:
             payment_metadata: dict | None = None
-            if topup_config:
+            if topup_config and event.payment.purpose == "credit_topup":
                 payment_metadata = {
                     "credits_per_unit": str(topup_config.credits_per_unit or 1000),
                 }
-            self._store.upsert_billing_payment(
-                provider=event.provider,
-                provider_payment_id=event.payment.provider_payment_id,
-                provider_invoice_id=None,
-                user_id=uid,
-                amount_minor=event.payment.amount_minor,
-                tax_minor=event.payment.tax_minor,
-                currency=event.payment.currency,
-                purpose=event.payment.purpose,
-                metadata=payment_metadata,
+            payment_id = self._store.upsert_billing_payment(
+                BillingPaymentUpsert(
+                    provider=event.provider,
+                    provider_payment_id=event.payment.provider_payment_id,
+                    provider_invoice_id=None,
+                    user_id=uid,
+                    amount_minor=event.payment.amount_minor,
+                    tax_minor=event.payment.tax_minor,
+                    currency=event.payment.currency,
+                    purpose=event.payment.purpose,
+                    status=event.payment.status or "succeeded",
+                    provider_updated_at=event.occurred_at,
+                    metadata=payment_metadata,
+                )
             )
 
-        if topup_config and self._provisioning and event.payment.purpose == "credit_topup" and uid:
+        if topup_config and event.payment.purpose == "credit_topup" and uid:
             amt = event.payment.amount_minor
-            if amt < topup_config.min_amount_minor or amt > topup_config.max_amount_minor:
-                logger.warning(
-                    "topup amount %d outside bounds [%d, %d]",
-                    amt,
-                    topup_config.min_amount_minor,
-                    topup_config.max_amount_minor,
+            below_minimum = topup_config.min_amount_minor is not None and amt < topup_config.min_amount_minor
+            above_maximum = topup_config.max_amount_minor is not None and amt > topup_config.max_amount_minor
+            if below_minimum or above_maximum:
+                self._logger.warn(
+                    "topup amount outside configured bounds",
+                    {
+                        "amount_minor": amt,
+                        "min_amount_minor": topup_config.min_amount_minor,
+                        "max_amount_minor": topup_config.max_amount_minor,
+                    },
                 )
-                return BillingEventResult(handled=True, action="payment_succeeded")
-            cps = topup_config.credits_per_unit or Decimal("1000")
-            credits = self._compute_topup_credits(amt, cps)
-            if credits > 0:
-                self._provisioning.add_credits(
-                    uid,
-                    Decimal(credits),
-                    entry_type="purchase",
-                    bucket=topup_config.deposit_to,
+                return BillingEventResult(handled=True, action="payment_succeeded_out_of_bounds")
+            credits = self._store.compute_topup_credits(amt, topup_config)
+            unit_amount = topup_config.amount_minor or 0
+            quantity = amt // unit_amount if unit_amount and amt % unit_amount == 0 else 0
+            if credits > 0 and payment_id and quantity > 0 and topup_config.credits_per_unit:
+                grant_id = self._store.create_billing_credit_grant(
+                    BillingCreditGrantCreate(
+                        payment_id=payment_id,
+                        topup_id=topup_config.topup_id,
+                        configured_credits=Decimal(str(topup_config.credits_per_unit)),
+                        quantity=quantity,
+                    )
                 )
-                logger.info(
-                    "granted %s topup credits to user %s (payment %s)",
-                    credits,
-                    uid,
-                    event.payment.provider_payment_id,
+                self._store.grant_billing_credit(grant_id, f"billing:{event.event_id}:topup")
+                self._logger.info(
+                    "granted topup credits",
+                    {
+                        "credits": credits,
+                        "user_id": uid,
+                        "provider_payment_id": event.payment.provider_payment_id,
+                    },
                 )
+            self._store.update_auto_recharge_attempt_by_provider_payment(
+                AutoRechargeProviderPaymentUpdate(
+                    provider=event.provider,
+                    provider_payment_id=event.payment.provider_payment_id,
+                    state="succeeded",
+                )
+            )
+
+        if event.payment.purpose == "subscription" and event.subscription and uid:
+            renewal_result = self._handle_subscription_renewed(event)
+            if not renewal_result.handled:
+                return renewal_result
+            self._store.upsert_billing_invoice(
+                BillingInvoiceUpsert(
+                    provider=event.provider,
+                    provider_invoice_id=event.payment.provider_payment_id,
+                    provider_subscription_id=(event.subscription.provider_subscription_id),
+                    user_id=uid,
+                    status="paid",
+                    amount_paid_minor=event.payment.amount_minor,
+                    amount_due_minor=event.payment.amount_minor,
+                    currency=event.payment.currency,
+                    period_start=event.subscription.period_start,
+                    period_end=event.subscription.period_end,
+                    provider_updated_at=event.occurred_at,
+                    metadata=event.metadata,
+                )
+            )
+
+        intent_id = event.metadata.get("checkout_intent_id") if event.metadata else None
+        if intent_id:
+            self._store.update_checkout_intent(
+                intent_id,
+                CheckoutIntentUpdate(status="completed"),
+            )
 
         return BillingEventResult(handled=True, action="payment_succeeded")
 
@@ -904,18 +1223,44 @@ class BillingServiceImpl:
         uid = self._resolve_user_id(event)
         if uid and event.payment:
             self._store.upsert_billing_payment(
-                provider=event.provider,
-                provider_payment_id=event.payment.provider_payment_id,
-                user_id=uid,
-                amount_minor=event.payment.amount_minor,
-                currency=event.payment.currency,
-                purpose=event.payment.purpose,
+                BillingPaymentUpsert(
+                    provider=event.provider,
+                    provider_payment_id=event.payment.provider_payment_id,
+                    user_id=uid,
+                    amount_minor=event.payment.amount_minor,
+                    currency=event.payment.currency,
+                    purpose=event.payment.purpose,
+                    status=event.payment.status or "failed",
+                    provider_updated_at=event.occurred_at,
+                )
             )
-        if uid and event.subscription and self._provisioning:
+        if event.payment:
+            self._store.update_auto_recharge_attempt_by_provider_payment(
+                AutoRechargeProviderPaymentUpdate(
+                    provider=event.provider,
+                    provider_payment_id=event.payment.provider_payment_id,
+                    state="failed",
+                    failure_code="provider_payment_failed",
+                )
+            )
+        if uid and event.subscription:
             existing = self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
-            past_due = self._subscription_state(event, uid, existing, status="past_due")
+            grace_base = datetime.fromisoformat(event.occurred_at)
+            grace_ends_at = (grace_base + timedelta(milliseconds=self._past_due_grace_period_ms)).isoformat()
             self._store.upsert_billing_subscription(
-                past_due.model_copy(update={"grace_ends_at": (datetime.now(UTC) + timedelta(days=7)).isoformat()})
+                self._subscription_state(
+                    event,
+                    uid,
+                    existing,
+                    status="past_due",
+                    grace_ends_at=grace_ends_at,
+                ).model_copy(update={"grace_expired_at": None})
+            )
+        intent_id = event.metadata.get("checkout_intent_id") if event.metadata else None
+        if intent_id:
+            self._store.update_checkout_intent(
+                intent_id,
+                CheckoutIntentUpdate(status="failed"),
             )
         return BillingEventResult(handled=True, action="payment_failed_recorded")
 
@@ -923,53 +1268,48 @@ class BillingServiceImpl:
         uid = self._resolve_user_id(event)
         if uid and event.refund:
             refund = event.refund
-            self._store.upsert_billing_refund(
-                provider=event.provider,
-                provider_refund_id=refund.provider_refund_id,
-                provider_payment_id=refund.provider_payment_id,
-                user_id=uid,
-                amount_minor=refund.amount_minor,
-                currency=refund.currency,
-                reason=refund.reason,
+            refund_id = self._store.upsert_billing_refund(
+                BillingRefundUpsert(
+                    provider=event.provider,
+                    provider_refund_id=refund.provider_refund_id,
+                    provider_payment_id=refund.provider_payment_id,
+                    user_id=uid,
+                    amount_minor=refund.amount_minor,
+                    currency=refund.currency,
+                    reason=refund.reason,
+                    status=refund.status or "pending",
+                    provider_updated_at=event.occurred_at,
+                )
             )
-            if refund.provider_payment_id and self._provisioning:
+            if refund.status == "succeeded" and refund.provider_payment_id:
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
-                if payment and payment.get("purpose") == "credit_topup":
-                    pay_meta = payment.get("metadata") or {}
-                    credits_per_unit = pay_meta.get("credits_per_unit")
-                    if credits_per_unit is None:
-                        logger.warning(
-                            "cannot claw back credits for refund %s: no credits_per_unit in payment metadata",
-                            refund.provider_refund_id,
+                if payment and payment.get("purpose") == "credit_topup" and payment.get("id"):
+                    grant_id = self._store.get_billing_credit_grant_by_payment(str(payment["id"]))
+                    if grant_id:
+                        result = self._store.post_billing_refund(
+                            refund_id,
+                            grant_id,
+                            refund.amount_minor,
+                            f"billing:{event.event_id}:refund",
                         )
-                        return BillingEventResult(handled=True, action="refund_recorded_no_clawback")
-                    credits_per_unit = Decimal(str(credits_per_unit))
-                    credits = self._compute_topup_credits(refund.amount_minor, credits_per_unit)
-                    if credits > 0:
-                        self._provisioning.deduct_credits(
-                            uid,
-                            Decimal(str(credits)),
-                            entry_type="refund",
-                            bucket="purchased",
-                        )
-                        logger.info(
-                            "clawed back %s credits from user %s for refund %s",
-                            credits,
-                            uid,
-                            refund.provider_refund_id,
-                        )
+                        if not result.get("error_code"):
+                            return BillingEventResult(handled=True, action="refund_clawback")
         return BillingEventResult(handled=True, action="refund_recorded")
 
     def _handle_dispute_created(self, event: BillingEvent) -> BillingEventResult:
         uid = self._resolve_user_id(event)
         if uid and event.dispute:
             self._store.upsert_billing_dispute(
-                provider=event.provider,
-                provider_dispute_id=event.dispute.provider_dispute_id,
-                provider_payment_id=event.dispute.provider_payment_id,
-                user_id=uid,
-                status="needs_response",
-                reason=event.dispute.reason,
+                BillingDisputeUpsert(
+                    provider=event.provider,
+                    provider_dispute_id=event.dispute.provider_dispute_id,
+                    provider_payment_id=event.dispute.provider_payment_id,
+                    user_id=uid,
+                    status="needs_response",
+                    reason=event.dispute.reason,
+                    provider_updated_at=event.occurred_at,
+                    metadata=event.metadata,
+                )
             )
         return BillingEventResult(handled=True, action="dispute_recorded")
 
@@ -977,12 +1317,16 @@ class BillingServiceImpl:
         uid = self._resolve_user_id(event)
         if uid and event.dispute:
             self._store.upsert_billing_dispute(
-                provider=event.provider,
-                provider_dispute_id=event.dispute.provider_dispute_id,
-                provider_payment_id=event.dispute.provider_payment_id,
-                user_id=uid,
-                status="closed",
-                reason=event.dispute.reason,
+                BillingDisputeUpsert(
+                    provider=event.provider,
+                    provider_dispute_id=event.dispute.provider_dispute_id,
+                    provider_payment_id=event.dispute.provider_payment_id,
+                    user_id=uid,
+                    status="closed",
+                    reason=event.dispute.reason,
+                    provider_updated_at=event.occurred_at,
+                    metadata=event.metadata,
+                )
             )
         return BillingEventResult(handled=True, action="dispute_closed")
 
@@ -992,59 +1336,103 @@ class BillingServiceImpl:
         offer: BillingOfferResult | None,
         event: BillingEvent,
         *,
-        _plan_key: str | None = None,
+        plan_key_override: str | None = None,
+        preserve_allowance_anchor: bool = False,
     ) -> None:
         if not self._provisioning:
             return
 
-        plan_key = _plan_key or (offer.plan if offer else None)
+        plan_key = plan_key_override or (offer.plan if offer else None)
         if not plan_key:
             return
 
         period_start = None
-        if event.subscription:
+        if preserve_allowance_anchor:
+            get_user_plan = getattr(
+                self._provisioning,
+                "get_user_plan",
+                None,
+            )
+            current_plan = get_user_plan(uid) if callable(get_user_plan) else None
+            period_start = getattr(current_plan, "plan_assigned_at", None) if current_plan is not None else None
+        elif event.subscription:
             ps = event.subscription.period_start
             if ps:
                 try:
                     period_start = datetime.fromisoformat(ps)
                 except (ValueError, TypeError):
-                    logger.warning("invalid period_start timestamp %r for user %s, using now()", ps, uid)
+                    self._logger.warn(
+                        "invalid period_start timestamp; using now()",
+                        {"period_start": ps, "user_id": uid},
+                    )
                     period_start = None
 
         self._provisioning.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
 
-        if self._cancel_prior_providers and event.provider:
-            result = self._store.deactivate_other_provider_subscriptions(uid, event.provider)
-            count = result.get("deactivated_count", 0) or 0
-            if count:
-                logger.info("deactivated %d prior provider subscription(s) for user %s", count, uid)
-
-        g = offer.grant if offer else None
-        if g and g.mode == "cycle_grant" and self._provisioning:
-            cycle_credits = g.credits
-            if cycle_credits:
-                cycle_tier = g.bucket or "purchased"
-                replace_prior = g.replace_prior
-                if replace_prior:
-                    self._provisioning.revoke_credits_by_entry_type(uid, "cycle_grant")
-                self._provisioning.add_credits(
-                    uid,
-                    Decimal(str(cycle_credits)),
-                    entry_type="cycle_grant",
-                    bucket=cycle_tier,
+        if self._auto_select_entitlement_source and event.provider:
+            selected = self._store.select_subscription_entitlement_source(
+                uid,
+                event.provider,
+                event.subscription.provider_subscription_id if event.subscription else None,
+            )
+            if selected:
+                self._logger.info(
+                    "selected subscription as entitlement source",
+                    {
+                        "provider": event.provider,
+                        "provider_subscription_id": (
+                            event.subscription.provider_subscription_id if event.subscription else None
+                        ),
+                        "user_id": uid,
+                    },
                 )
-                logger.info("granted %d cycle credits to user %s (tier=%s)", cycle_credits, uid, cycle_tier)
 
-        logger.info("provisioned plan %s for user %s", plan_key, uid)
+        self._logger.info(
+            "provisioned plan",
+            {"plan_key": plan_key, "user_id": uid},
+        )
+
+    def _grant_subscription_cycle(self, event: BillingEvent, offer: BillingOfferResult | None) -> None:
+        grant = offer.grant if offer else None
+        credits = grant.credits if grant and grant.mode == "cycle_grant" else None
+        if not credits or Decimal(str(credits)) <= 0 or not event.billing_event_id or not event.subscription:
+            return
+
+        subscription = self._store.get_billing_subscription(
+            event.provider,
+            event.subscription.provider_subscription_id,
+        )
+        if not subscription or not subscription.subscription_id:
+            raise RuntimeError("subscription cycle grant requires a persisted subscription")
+
+        payment = (
+            self._store.get_billing_payment(event.provider, event.payment.provider_payment_id)
+            if event.payment
+            else None
+        )
+        payment_id = str(payment["id"]) if payment and payment.get("id") else None
+        grant_id = self._store.create_billing_credit_grant(
+            BillingCreditGrantCreate(
+                payment_id=payment_id,
+                subscription_id=subscription.subscription_id,
+                configured_credits=Decimal(str(credits)),
+                quantity=1,
+                billing_event_id=event.billing_event_id,
+            )
+        )
+        self._store.grant_billing_credit(
+            grant_id,
+            f"billing:{event.event_id}:subscription-cycle",
+        )
 
     def _revoke_subscription(self, uid: str) -> None:
         if not self._provisioning:
             return
-        if self._fallback_plan_key:
-            self._provisioning.set_user_plan(uid, self._fallback_plan_key)
+        if self._terminal_plan_key:
+            self._provisioning.set_user_plan(uid, self._terminal_plan_key)
         else:
             self._provisioning.unset_user_plan(uid)
-        logger.info("revoked plan for user %s", uid)
+        self._logger.info("revoked plan", {"user_id": uid})
 
     def _revoke_if_current_subscription(self, uid: str, subscription_id: str) -> None:
         current = self._store.get_user_subscription(uid, statuses=["active", "trialing"])
@@ -1058,7 +1446,7 @@ class BillingServiceImpl:
         status = event.subscription.status
         status_value = status.value if status else None
         if status_value in ("active", "trialing"):
-            offer, _, _ = self._offer_for_event(event)
+            offer, _, _, _ = self._offer_for_event(event)
             if offer:
                 self._provision_subscription(uid, offer, event)
             else:
@@ -1067,6 +1455,11 @@ class BillingServiceImpl:
                     event.subscription.provider_subscription_id,
                 )
                 if existing and existing.plan:
-                    self._provision_subscription(uid, None, event, _plan_key=existing.plan)
+                    self._provision_subscription(
+                        uid,
+                        None,
+                        event,
+                        plan_key_override=existing.plan,
+                    )
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
             self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)

@@ -6,9 +6,9 @@ import Decimal from "decimal.js";
 import { evaluateExpression, validateExpression, quantizeMoney } from "../src/expr.js";
 import { ExpressionError } from "../src/errors.js";
 
-// Helper: evaluate then quantize to a 4dp string, like the engine cost boundary.
+// Helper: evaluate then quantize to a 6dp string, like the engine cost boundary.
 function evalStr(expr: string, vars: Record<string, number>): string {
-  return quantizeMoney(evaluateExpression(expr, vars)).toFixed(4);
+  return quantizeMoney(evaluateExpression(expr, vars)).toFixed(6);
 }
 
 describe("validateExpression", () => {
@@ -357,17 +357,17 @@ describe("Decimal precision & money safety", () => {
       input_tokens: 1,
       output_tokens: 1,
     });
-    expect(quantizeMoney(r).toFixed(4)).toBe("0.3000");
+    expect(quantizeMoney(r).toFixed(6)).toBe("0.300000");
   });
 
   it("does NOT truncate sub-1-credit costs", () => {
     // A 0.4-credit op must charge 0.4000, not 0 (the old Math.trunc revenue leak).
-    expect(evalStr("input_tokens * 0.0004", { input_tokens: 1000 })).toBe("0.4000");
+    expect(evalStr("input_tokens * 0.0004", { input_tokens: 1000 })).toBe("0.400000");
   });
 
-  it("quantizes to 4dp ROUND_HALF_UP", () => {
+  it("quantizes to 6dp ROUND_HALF_UP", () => {
     // 12345 * 0.00001 = 0.12345 -> 0.1235 (5 rounds up half-up).
-    expect(evalStr("input_tokens * 0.00001", { input_tokens: 12345 })).toBe("0.1235");
+    expect(evalStr("input_tokens * 0.00001", { input_tokens: 12345 })).toBe("0.123450");
   });
 
   it("parses numeric literals exactly from string form", () => {
@@ -475,12 +475,16 @@ describe("tier() exact boundary", () => {
   // tier uses val.lessThan(threshold): value equal to threshold does NOT hit that tier.
   it("tier(input_tokens, 100, 1, 500, 2, 3) with input_tokens=100 falls through to second tier (not < 100)", () => {
     // 100 is NOT < 100, check 100 < 500 → true → result = 2
-    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 100 })).toBe("2.0000");
+    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 100 })).toBe(
+      "2.000000",
+    );
   });
 
   it("tier(input_tokens, 100, 1, 500, 2, 3) with input_tokens=500 returns default (not < 500)", () => {
     // 500 is NOT < 100, NOT < 500 → falls through to default = 3
-    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 500 })).toBe("3.0000");
+    expect(evalStr("tier(input_tokens, 100, 1, 500, 2, 3)", { input_tokens: 500 })).toBe(
+      "3.000000",
+    );
   });
 });
 
@@ -488,14 +492,14 @@ describe("tier() exact boundary", () => {
 describe("percentile() edge cases", () => {
   it("single value returns that value", () => {
     // n=1, returns sorted[0] directly
-    expect(evalStr("percentile(50, input_tokens)", { input_tokens: 7 })).toBe("7.0000");
+    expect(evalStr("percentile(50, input_tokens)", { input_tokens: 7 })).toBe("7.000000");
   });
 
   it("two values p=50 returns midpoint", () => {
     // sorted=[3,7], rank=0.5, lower=0, frac=0.5 → 3*0.5 + 7*0.5 = 5
     expect(
       evalStr("percentile(50, input_tokens, output_tokens)", { input_tokens: 3, output_tokens: 7 }),
-    ).toBe("5.0000");
+    ).toBe("5.000000");
   });
 
   it("all same values returns that value", () => {
@@ -505,7 +509,7 @@ describe("percentile() edge cases", () => {
         output_tokens: 5,
         tool_calls: 5,
       }),
-    ).toBe("5.0000");
+    ).toBe("5.000000");
   });
 
   it("p=0 returns the minimum", () => {
@@ -515,7 +519,7 @@ describe("percentile() edge cases", () => {
         output_tokens: 30,
         tool_calls: 20,
       }),
-    ).toBe("10.0000");
+    ).toBe("10.000000");
   });
 
   it("p=100 returns the maximum", () => {
@@ -525,7 +529,7 @@ describe("percentile() edge cases", () => {
         output_tokens: 30,
         tool_calls: 20,
       }),
-    ).toBe("30.0000");
+    ).toBe("30.000000");
   });
 });
 
@@ -533,26 +537,26 @@ describe("percentile() edge cases", () => {
 describe("clamp() with min > max", () => {
   it("clamp(5, 10, 3) returns min (10) when min > max", () => {
     // Decimal.max(min=10, Decimal.min(x=5, max=3)) = Decimal.max(10, 3) = 10
-    expect(evalStr("clamp(input_tokens, 10, 3)", { input_tokens: 5 })).toBe("10.0000");
+    expect(evalStr("clamp(input_tokens, 10, 3)", { input_tokens: 5 })).toBe("10.000000");
   });
 });
 
 // ── E4: Negative operands in complex expressions ──
 describe("negative operands in complex expressions", () => {
   it("(-input_tokens) * 0.001 with input_tokens=1000 produces -1.0000", () => {
-    expect(evalStr("-input_tokens * 0.001", { input_tokens: 1000 })).toBe("-1.0000");
+    expect(evalStr("-input_tokens * 0.001", { input_tokens: 1000 })).toBe("-1.000000");
   });
 
   it("max(-5, 0) via variables returns 0.0000", () => {
     expect(
       evalStr("max(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: 0 }),
-    ).toBe("0.0000");
+    ).toBe("0.000000");
   });
 
   it("min(-5, -3) returns -5.0000", () => {
     expect(
       evalStr("min(input_tokens, output_tokens)", { input_tokens: -5, output_tokens: -3 }),
-    ).toBe("-5.0000");
+    ).toBe("-5.000000");
   });
 });
 
@@ -569,7 +573,7 @@ describe("floor division by zero", () => {
 describe("large numeric literal precision", () => {
   it("999999999999.9999 * 1 preserves all digits", () => {
     expect(evalStr("input_tokens * 999999999999.9999", { input_tokens: 1 })).toBe(
-      "999999999999.9999",
+      "999999999999.999900",
     );
   });
 });
@@ -580,13 +584,13 @@ describe("round(x, n) with ndigits argument", () => {
     // round is supported with 2 args: toDecimalPlaces(2, ROUND_HALF_UP)
     expect(
       evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.23456, output_tokens: 2 }),
-    ).toBe("1.2300");
+    ).toBe("1.230000");
   });
 
   it("round(1.235, 2) rounds half-up to 1.24", () => {
     expect(
       evalStr("round(input_tokens, output_tokens)", { input_tokens: 1.235, output_tokens: 2 }),
-    ).toBe("1.2400");
+    ).toBe("1.240000");
   });
 });
 
@@ -594,13 +598,13 @@ describe("round(x, n) with ndigits argument", () => {
 describe("nested function calls (M13)", () => {
   it("max(ceil(input_tokens * 0.001), 1) with input_tokens=500 → 1.0000", () => {
     // ceil(500 * 0.001) = ceil(0.5) = 1; max(1, 1) = 1
-    expect(evalStr("max(ceil(input_tokens * 0.001), 1)", { input_tokens: 500 })).toBe("1.0000");
+    expect(evalStr("max(ceil(input_tokens * 0.001), 1)", { input_tokens: 500 })).toBe("1.000000");
   });
 
   it("clamp(round(input_tokens * 0.0025), 0, 5) with input_tokens=1000 → 3.0000", () => {
     // round(1000 * 0.0025) = round(2.5) = 3 (ROUND_HALF_UP); clamp(3, 0, 5) = 3
     expect(evalStr("clamp(round(input_tokens * 0.0025), 0, 5)", { input_tokens: 1000 })).toBe(
-      "3.0000",
+      "3.000000",
     );
   });
 
@@ -608,25 +612,25 @@ describe("nested function calls (M13)", () => {
     // 200 > 100 is true; ceil(200 * 0.001) = ceil(0.2) = 1
     expect(
       evalStr("if(input_tokens > 100, ceil(input_tokens * 0.001), 0)", { input_tokens: 200 }),
-    ).toBe("1.0000");
+    ).toBe("1.000000");
   });
 });
 
 // ── Decimal precision edge cases (sub-cent quantization) ──
 describe("decimal precision edge cases", () => {
   it("a * 0.00001 with a=1 quantizes to 0.0000 (below half-up threshold)", () => {
-    // 1 * 0.00001 = 0.00001; quantized to 4dp ROUND_HALF_UP → 0.0000 (< 0.00005)
-    expect(evalStr("input_tokens * 0.00001", { input_tokens: 1 })).toBe("0.0000");
+    // 1 * 0.00001 = 0.00001; quantized to 6dp ROUND_HALF_UP → 0.0000 (< 0.00005)
+    expect(evalStr("input_tokens * 0.00001", { input_tokens: 1 })).toBe("0.000010");
   });
 
   it("a * 0.000050 with a=1 quantizes to 0.0001 (exactly at half-up boundary)", () => {
     // 1 * 0.000050 = 0.00005; ROUND_HALF_UP rounds 0.00005 → 0.0001
-    expect(evalStr("input_tokens * 0.000050", { input_tokens: 1 })).toBe("0.0001");
+    expect(evalStr("input_tokens * 0.000050", { input_tokens: 1 })).toBe("0.000050");
   });
 
   it("a * 0.000049 with a=1 quantizes to 0.0000 (just below half-up boundary)", () => {
     // 1 * 0.000049 = 0.000049; ROUND_HALF_UP rounds 0.000049 → 0.0000 (< 0.00005)
-    expect(evalStr("input_tokens * 0.000049", { input_tokens: 1 })).toBe("0.0000");
+    expect(evalStr("input_tokens * 0.000049", { input_tokens: 1 })).toBe("0.000049");
   });
 });
 
@@ -644,7 +648,7 @@ describe("malformed number literals (H11)", () => {
     // Source check: /^[0-9]*\.?[0-9]*$/.test("1.") is true and /[0-9]/.test("1.") is true
     // so "1." is accepted as the number 1. We document that here.
     const result = quantizeMoney(evaluateExpression("input_tokens * 1.", { input_tokens: 5 }));
-    expect(result.toFixed(4)).toBe("5.0000");
+    expect(result.toFixed(6)).toBe("5.000000");
   });
 
   it("leading dot '.2' is rejected or accepted — documents actual behavior", () => {
@@ -653,7 +657,7 @@ describe("malformed number literals (H11)", () => {
     // Check: num === "." → false. /^[0-9]*\.?[0-9]*$/.test(".2") → true.
     // /[0-9]/.test(".2") → true. So ".2" IS accepted as 0.2.
     const result = quantizeMoney(evaluateExpression("input_tokens * .2", { input_tokens: 5 }));
-    expect(result.toFixed(4)).toBe("1.0000");
+    expect(result.toFixed(6)).toBe("1.000000");
   });
 
   it("incomplete scientific notation '1e' is rejected at tokenizer (unknown char 'e' after number)", () => {
@@ -668,7 +672,7 @@ describe("malformed number literals (H11)", () => {
 
 // ── Cross-SDK parity fixture (contract §7) ──
 // Loaded from the repo-root canonical fixture; Python and JS MUST produce
-// byte-identical 4dp decimal strings or both raise for expect_error.
+// byte-identical 6dp decimal strings or both raise for expect_error.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(__dirname, "../../tests/parity/expression_cases.json");
 interface ExprCase {
@@ -688,7 +692,7 @@ describe("parity fixture — expression_cases", () => {
       if (c.expect_error) {
         expect(() => evaluateExpression(c.expr, c.vars)).toThrow(ExpressionError);
       } else {
-        const result = quantizeMoney(evaluateExpression(c.expr, c.vars)).toFixed(4);
+        const result = quantizeMoney(evaluateExpression(c.expr, c.vars)).toFixed(6);
         expect(result).toBe(c.expected);
       }
     });

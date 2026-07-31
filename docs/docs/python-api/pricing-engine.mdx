@@ -1,104 +1,130 @@
-# PricingEngine
+# PricingEngine — Python
 
-The `PricingEngine` is the pure calculation core. It evaluates pricing expressions against usage metrics. No database dependency — can be used standalone.
+`PricingEngine` is Bursar's database-free operation-pricing core. It validates
+the same canonical configuration as the JavaScript SDK.
 
-## Creating an Engine
+## Creating an engine
 
 ```python
 from bursar import PricingEngine
 
-# From a dict (testing, stateless)
-engine = PricingEngine.from_dict({
-    "version": 1,
-    "models": {"_default": "input_tokens * 0.001 + output_tokens * 0.003"},
-})
-
-# From a config file — load it yourself, then pass the dict in
-import yaml
-with open("pricing.yaml") as f:
-    engine = PricingEngine.from_dict(yaml.safe_load(f))
+engine = PricingEngine.from_dict(
+    {
+        "version": 1,
+        "pricing": {
+            "operations": {
+                "completion": {
+                    "measures": {
+                        "input_tokens": {"unit": "token"},
+                        "output_tokens": {"unit": "token"},
+                    },
+                    "dimensions": {
+                        "model": {"type": "string"},
+                    },
+                }
+            },
+            "rate_cards": {
+                "standard": {
+                    "operations": {
+                        "completion": {
+                            "rules": [
+                                {
+                                    "when": {
+                                        "model": {
+                                            "op": "prefix",
+                                            "value": "gpt-",
+                                        }
+                                    },
+                                    "charge": {
+                                        "type": "per_unit",
+                                        "measure": "input_tokens",
+                                        "rate": "0.05",
+                                    },
+                                }
+                            ],
+                            "unmatched": {
+                                "action": "charge",
+                                "charge": {
+                                    "type": "per_unit",
+                                    "measure": "output_tokens",
+                                    "rate": "0.10",
+                                },
+                            },
+                        }
+                    }
+                }
+            },
+        },
+        "credits": {},
+    }
+)
 ```
 
-## Methods
+Fixed credit accounting and plan rank have authoring defaults. Unknown fields,
+undeclared measures or dimensions, invalid matcher types, and unsafe
+cross-references are rejected when the engine is created.
 
-### `calculate(metrics: UsageMetrics) -> CostBreakdown`
-
-Evaluate pricing expressions against usage metrics.
+## Calculating cost
 
 ```python
-result = engine.calculate(
-    UsageMetrics(model="gpt-4", input_tokens=500, output_tokens=200)
+from bursar import UsageMetrics
+
+cost = engine.calculate(
+    UsageMetrics(
+        operation="completion",
+        measures={
+            "input_tokens": 500,
+            "output_tokens": 200,
+        },
+        dimensions={
+            "model": "gpt-4.1",
+        },
+    )
 )
-print(f"Total: {result.total}")
-print(f"Model credits: {result.model_credits}")
+
+print(cost.total)
 ```
 
-### `calculate_batch(metrics: list[UsageMetrics]) -> list[CostBreakdown]`
+`calculate(metrics, rate_card=...)` accepts an optional rate-card key. It is
+required when the configuration contains more than one rate card and the
+caller has not otherwise selected one.
 
-Evaluate multiple metrics at once.
+`calculate_batch(metrics, rate_card=...)` evaluates multiple operations with
+the same rate-card selection.
 
-### `resolve_model(model_version: str) -> str | None`
+`get_rate_card_for_plan(plan_key)` returns the rate card referenced by a
+configured plan.
 
-Resolve a model version string against configured model names.
-
-### `has_model(model_name: str) -> bool`
-
-Check if a specific model is configured.
-
-### `get_fixed_cost(job_name: str) -> Decimal | None`
-
-Get the fixed cost for a named job. Returns `None` for an unknown/unconfigured job (so callers can reject it rather than charge 0).
-
-### `pricing_schema() -> BursarConfigData`
-
-Get the raw pricing config dict that the engine was initialized with.
-
-### `min_balance: Decimal`
-
-Property — the configured minimum balance floor.
-
-## CostBreakdown
-
-Returned by `calculate()`. **All monetary fields are `Decimal`**, quantized to 4 dp `ROUND_HALF_UP`; `total` is computed once by the engine, clamped to `>= 0`, and never re-derived (and never truncated to an integer):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `total` | `Decimal` | Total credits |
-| `model_credits` | `Decimal` | Credits from model expression |
-| `tool_credits` | `Decimal` | Credits from tool expressions |
-| `search_credits` | `Decimal` | Credits from search expressions |
-| `cache_savings` | `Decimal` | Cache expression result (negative = savings) |
-| `fixed_credits` | `Decimal` | Fixed job cost (`0` when not applicable) |
-| `breakdown` | `dict` | Debug info: model, token counts, tool count |
+`pricing_schema` returns the validated canonical snake_case configuration.
 
 ## UsageMetrics
 
-Input to `calculate()`:
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `operation` | `str` | A key declared in `pricing.operations` |
+| `measures` | `dict[str, Decimal]` | Non-negative billable quantities declared by the operation |
+| `dimensions` | `dict[str, str \| Decimal \| bool]` | Typed values used to select the first matching rate rule |
+| `metadata` | `dict[str, Any]` | Caller metadata; it does not participate in pricing |
 
-| Field | Type | Default |
-|-------|------|---------|
-| `model` | `str` | `"_default"` |
-| `input_tokens` | `int` | `0` |
-| `output_tokens` | `int` | `0` |
-| `cache_read_tokens` | `int` | `0` |
-| `cache_write_tokens` | `int` | `0` |
-| `tool_calls` | `list[ToolCall]` | `[]` |
-| `search_queries` | `int` | `0` |
-| `search_results` | `int` | `0` |
-| `web_search_calls` | `int` | `0` |
-| `code_exec_calls` | `int` | `0` |
-| `fixed_job` | `str` `|` `None` | `None` |
+Declared measures omitted by the caller are treated as zero. Required
+dimensions must be present. Undeclared measures or dimensions are rejected.
 
-## Expression Safety
+## CostBreakdown
 
-The engine uses Python's `ast` module with a strict allowlist:
+All monetary fields are `Decimal` values quantized to six decimal places with
+half-up rounding. Operation pricing is reported in `operation_credits`; `total`
+is the complete quantized result.
 
-1. Parses `ast.parse(expr, mode="eval")`
-2. Walks the AST against a strict node allowlist; `**` (`ast.Pow`) is excluded, so exponentiation is rejected
-3. Function calls whitelisted: `ceil`, `floor`, `min`, `max`, `round`, `if`, `tier`, `clamp`, `percentile`
-4. Rejects: attributes (`x.__class__`), subscripts (`x[0]`), lambdas, comprehensions, f-strings, imports
-5. All math is exact `Decimal`; division/modulo by zero raise `ExpressionError`; the result is asserted finite
-6. Evaluation namespace has `__builtins__` emptied
-7. All expressions (and variable names) validated at config-load time
+| Field | Type |
+| --- | --- |
+| `operation_credits` | `Decimal` |
+| `model_credits` | `Decimal` |
+| `tool_credits` | `Decimal` |
+| `search_credits` | `Decimal` |
+| `cache_savings` | `Decimal` |
+| `fixed_credits` | `Decimal` |
+| `total` | `Decimal` |
+| `breakdown` | `dict[str, Any]` |
 
-See the [Expression Reference](/docs/expressions) for the full operator/function table.
+See the [Expression Reference](/docs/expressions) for the supported expression
+operators and functions.

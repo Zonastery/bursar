@@ -2,7 +2,7 @@
 
 bursar uses a safe expression language for pricing formulas. Same syntax works identically in Python and JavaScript.
 
-All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 4 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
+All arithmetic is performed in **exact decimal** (Python `decimal.Decimal`, JavaScript `decimal.js`) — never binary floating point. So `input_tokens * 0.1 + output_tokens * 0.2` with both equal to `1` evaluates to exactly `0.3`, not `0.30000000000000004`, and the result is byte-identical across both SDKs. The engine quantizes the final cost to 6 decimal places with `ROUND_HALF_UP`; it never truncates a sub-credit cost to zero.
 
 ## Arithmetic
 
@@ -68,7 +68,7 @@ output_tokens * 0.5 if output_tokens > 1000 else output_tokens * 0.3
 
 Every function validates its argument count (and `percentile`'s range) at config-load time. A wrong arity raises `ExpressionError` so a typo'd config fails fast rather than silently mispricing.
 
-`round()` uses `ROUND_HALF_UP` in both SDKs (it deliberately diverges from Python's built-in banker's rounding) so the two engines agree to the last digit. Note that these are *expression-level* helpers a config author can call — the engine itself never implicitly truncates or rounds the total beyond the final 4dp quantization.
+`round()` uses `ROUND_HALF_UP` in both SDKs (it deliberately diverges from Python's built-in banker's rounding) so the two engines agree to the last digit. Note that these are *expression-level* helpers a config author can call — the engine itself never implicitly truncates or rounds the total beyond the final 6dp quantization.
 
 ### `tier()` details
 
@@ -95,32 +95,30 @@ percentile(100, a, b, c)                                  # max
 
 ## Available Variables
 
-| Variable | Source (Python) | Source (JS) |
-|----------|----------------|-------------|
-| `input_tokens` | `UsageMetrics.input_tokens` | `inputTokens` |
-| `output_tokens` | `UsageMetrics.output_tokens` | `outputTokens` |
-| `cache_read_tokens` | `UsageMetrics.cache_read_tokens` | `cacheReadTokens` |
-| `cache_write_tokens` | `UsageMetrics.cache_write_tokens` | `cacheWriteTokens` |
-| `tool_calls` | `len(UsageMetrics.tool_calls)` | `toolCalls.length` |
-| `this_tool_calls` | count of calls matching the current tool key | count of calls matching the current tool key |
-| `search_queries` | `UsageMetrics.search_queries` | `searchQueries` |
-| `search_results` | `UsageMetrics.search_results` | `searchResults` |
-| `web_search_calls` | `UsageMetrics.web_search_calls` | `webSearchCalls` |
-| `code_exec_calls` | `UsageMetrics.code_exec_calls` | `codeExecCalls` |
-
-`tool_calls` is always the **global total** — the count of every tool call across all tools, everywhere it appears (`models`, `search`, `cache`, and every `tools.*` expression, including `tools._default`).
-
-`this_tool_calls` is scoped **only** to `tools.*` expressions and is bound to the count of calls matching that specific tool. Referencing `this_tool_calls` in `models`, `search`, or `cache` is rejected with `ExpressionError` at config-load time — it is not a general-purpose variable.
-
-Inside `tools._default`, `this_tool_calls` is bound to the count of calls that did **not** match any other, more specific `tools.*` key (the "everything else" bucket). This replaces the old behavior where `_default` (and every other `tools.*` key) received `tool_calls` rebound to a per-key count — that override is gone; `tool_calls` inside `tools.*` now behaves exactly like everywhere else (the global total), and `this_tool_calls` is the new, unambiguous way to get the per-key count.
+An expression charge may reference the measures declared by its operation. For
+example:
 
 ```yaml
-tools:
-  code_exec: "this_tool_calls * 10 / 1000"   # priced per call to code_exec specifically
-  _default: "this_tool_calls * 5 / 1000"     # priced per call to any OTHER tool
+pricing:
+  operations:
+    completion:
+      measures:
+        input_tokens: { unit: token }
+        output_tokens: { unit: token }
+  rate_cards:
+    standard:
+      operations:
+        completion:
+          unmatched:
+            action: charge
+            charge:
+              type: expression
+              formula: input_tokens * 0.01 + output_tokens * 0.03
 ```
 
-With 2 `code_exec` calls and 3 calls to other tools: `code_exec` costs `2 * 10 / 1000`, and `_default` costs `3 * 5 / 1000`. (In the old, buggy behavior, `code_exec`'s expression would have seen `tool_calls == 5`, the total across all tools, and mispriced accordingly.)
+Dimensions such as `model` are selected through rate-card rules and are not
+expression variables. An undeclared or misspelled measure name is rejected
+when the configuration is loaded.
 
 ## Safety
 

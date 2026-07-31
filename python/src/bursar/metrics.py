@@ -21,7 +21,7 @@ class UsageMetrics(BaseModel):
 
     operation: str
     measures: dict[str, Decimal] = Field(default_factory=dict)
-    dimensions: dict[str, str] = Field(default_factory=dict)
+    dimensions: dict[str, str | Decimal | bool] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("operation")
@@ -41,10 +41,14 @@ class UsageMetrics(BaseModel):
 
     @field_validator("dimensions")
     @classmethod
-    def validate_dimensions(cls, values: dict[str, str]) -> dict[str, str]:
+    def validate_dimensions(cls, values: dict[str, str | Decimal | bool]) -> dict[str, str | Decimal | bool]:
         for key, value in values.items():
-            if not key or not value:
-                raise ValueError("usage dimensions must have non-empty names and values")
+            if not key:
+                raise ValueError("usage dimensions must have non-empty names")
+            if isinstance(value, str) and not value:
+                raise ValueError("string usage dimensions must be non-empty")
+            if isinstance(value, Decimal) and not value.is_finite():
+                raise ValueError("numeric usage dimensions must be finite")
         return values
 
 

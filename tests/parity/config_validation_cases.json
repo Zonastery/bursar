@@ -1,56 +1,649 @@
 {
   "cases": [
     {
-      "name": "generic_usage_accepted",
+      "name": "typed_catalog_accepted",
       "expect": "accept",
       "config": {
         "version": 1,
-        "usage": {
-          "operations": {"completion": {"measures": ["tokens"], "dimensions": ["model"]}},
-          "rate_cards": {"standard": {"prices": {"completion": [{"default": true, "formula": "tokens * 2"}]}}}
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "input_tokens": {
+                  "unit": "token"
+                },
+                "output_tokens": {
+                  "unit": "token"
+                }
+              },
+              "dimensions": {
+                "model": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "rate_cards": {
+            "standard": {
+              "operations": {
+                "completion": {
+                  "rules": [
+                    {
+                      "when": {
+                        "model": {
+                          "op": "prefix",
+                          "value": "gpt-"
+                        }
+                      },
+                      "charge": {
+                        "type": "per_unit",
+                        "measure": "input_tokens",
+                        "rate": "0.002500"
+                      }
+                    }
+                  ],
+                  "unmatched": {
+                    "action": "charge",
+                    "charge": {
+                      "type": "sum",
+                      "components": [
+                        {
+                          "type": "per_unit",
+                          "measure": "input_tokens",
+                          "rate": "0.001000"
+                        },
+                        {
+                          "type": "per_unit",
+                          "measure": "output_tokens",
+                          "rate": "0.003000"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          },
+          "buckets": {
+            "gifted": {
+              "priority": 10,
+              "expiry": {
+                "type": "after_grant",
+                "interval": {
+                  "unit": "day",
+                  "count": 7
+                },
+                "timezone": "UTC"
+              }
+            },
+            "purchased": {
+              "priority": 20,
+              "expiry": {
+                "type": "never"
+              }
+            }
+          },
+          "default_bucket": "purchased",
+          "policies": {
+            "prepaid": {
+              "type": "prepaid"
+            }
+          }
+        },
+        "entitlements": {
+          "features": {
+            "tutor_chat": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "plans": {
+          "free": {
+            "display_name": "Free",
+            "rank": 0,
+            "rate_card": "standard",
+            "allowed_operations": [
+              "completion"
+            ],
+            "features": {
+              "tutor_chat": true
+            },
+            "credit_policy": "prepaid"
+          }
         }
       }
     },
-    {"name": "version_two_rejected", "expect": "reject", "config": {"version": 2}},
-    {"name": "legacy_metering_rejected", "expect": "reject", "config": {"metering": {"models": {"*": "1"}}}},
     {
-      "name": "unknown_formula_measure_rejected",
-      "expect": "reject",
-      "config": {
-        "usage": {
-          "operations": {"completion": {"measures": ["tokens"], "dimensions": []}},
-          "rate_cards": {"standard": {"prices": {"completion": [{"default": true, "formula": "unknown * 2"}]}}}
-        }
-      }
-    },
-    {
-      "name": "missing_default_rule_rejected",
-      "expect": "reject",
-      "config": {
-        "usage": {
-          "operations": {"completion": {"measures": ["tokens"], "dimensions": ["model"]}},
-          "rate_cards": {"standard": {"prices": {"completion": [{"match": {"model": {"exact": "x"}}, "formula": "tokens"}]}}}
-        }
-      }
-    },
-    {
-      "name": "bucket_order_rejected",
+      "name": "missing_version_rejected",
       "expect": "reject",
       "config": {
         "credits": {
-          "buckets": {"gifted": {}, "purchased": {}},
-          "spend_order": ["purchased"],
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          }
+        }
+      }
+    },
+    {
+      "name": "legacy_usage_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "usage": {},
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          }
+        }
+      }
+    },
+    {
+      "name": "duplicate_bucket_priority_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          },
+          "buckets": {
+            "gifted": {
+              "priority": 10
+            },
+            "purchased": {
+              "priority": 10
+            }
+          },
           "default_bucket": "purchased"
         }
       }
     },
     {
-      "name": "provider_lookup_rejected_when_empty",
+      "name": "unknown_plan_feature_rejected",
       "expect": "reject",
       "config": {
-        "credits": {"buckets": {"purchased": {}}, "spend_order": ["purchased"], "default_bucket": "purchased"},
-        "plans": {"pro": {"display_name": "Pro"}},
-        "payments": {"subscriptions": {"pro_monthly": {"plan": "pro", "billing_period": {"unit": "month"}, "providers": {}}}}
+        "version": 1,
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          }
+        },
+        "plans": {
+          "pro": {
+            "display_name": "Pro",
+            "rank": 0,
+            "features": {
+              "typo_feature": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_timezone_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          },
+          "buckets": {
+            "gifted": {
+              "priority": 10,
+              "expiry": {
+                "type": "after_grant",
+                "interval": {
+                  "unit": "day"
+                },
+                "timezone": "Mars/Olympus"
+              }
+            }
+          },
+          "default_bucket": "gifted"
+        }
+      }
+    },
+    {
+      "name": "numeric_decimal_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "tokens": {
+                  "unit": "token"
+                }
+              },
+              "dimensions": {}
+            }
+          },
+          "rate_cards": {
+            "standard": {
+              "operations": {
+                "completion": {
+                  "rules": [],
+                  "unmatched": {
+                    "action": "charge",
+                    "charge": {
+                      "type": "per_unit",
+                      "measure": "tokens",
+                      "rate": 0.1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "credits": {
+          "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up"
+          }
+        }
+      }
+    },
+    {
+      "name": "authoring_defaults_accepted",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "credits": {},
+        "plans": {
+          "free": {
+            "display_name": "Free"
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_default_bucket_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "buckets": {
+            "purchased": {
+              "priority": 10
+            }
+          },
+          "default_bucket": "typo"
+        }
+      }
+    },
+    {
+      "name": "unknown_plan_policy_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {},
+        "plans": {
+          "pro": {
+            "display_name": "Pro",
+            "credit_policy": "typo"
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_boolean_feature_value_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {},
+        "entitlements": {
+          "features": {
+            "api_access": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "plans": {
+          "pro": {
+            "display_name": "Pro",
+            "features": {
+              "api_access": "yes"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dimension_matcher_type_mismatch_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "tokens": {
+                  "unit": "token"
+                }
+              },
+              "dimensions": {
+                "model": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "rate_cards": {
+            "standard": {
+              "operations": {
+                "completion": {
+                  "rules": [
+                    {
+                      "when": {
+                        "model": {
+                          "op": "range",
+                          "gte": "1"
+                        }
+                      },
+                      "charge": {
+                        "type": "flat",
+                        "amount": "1"
+                      }
+                    }
+                  ],
+                  "unmatched": {
+                    "action": "reject"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "credits": {}
+      }
+    },
+    {
+      "name": "numeric_dimension_decimal_matcher_accepted",
+      "expect": "accept",
+      "config": {
+        "version": 1,
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "tokens": {
+                  "unit": "token"
+                }
+              },
+              "dimensions": {
+                "temperature": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "rate_cards": {
+            "standard": {
+              "operations": {
+                "completion": {
+                  "rules": [
+                    {
+                      "when": {
+                        "temperature": {
+                          "op": "eq",
+                          "value": "0.5"
+                        }
+                      },
+                      "charge": {
+                        "type": "flat",
+                        "amount": "1"
+                      }
+                    }
+                  ],
+                  "unmatched": {
+                    "action": "reject"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "credits": {}
+      }
+    },
+    {
+      "name": "incompatible_provider_reference_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {},
+        "plans": {
+          "pro": {
+            "display_name": "Pro"
+          }
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            }
+          },
+          "offers": {
+            "pro_monthly": {
+              "type": "subscription",
+              "display_name": "Pro monthly",
+              "price": {
+                "amount_minor": 1200,
+                "currency": "USD"
+              },
+              "providers": {
+                "stripe": {
+                  "type": "dodo_product",
+                  "product_id": "wrong_provider"
+                }
+              },
+              "plan": "pro",
+              "billing_interval": {
+                "unit": "month"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_feature_definition_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {},
+        "entitlements": {
+          "features": {
+            "agent_limit": {
+              "type": "integer",
+              "default": 0,
+              "minimum": 1,
+              "maximum": 10
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_graduated_tiers_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "tokens": {
+                  "unit": "token"
+                }
+              }
+            }
+          },
+          "rate_cards": {
+            "standard": {
+              "operations": {
+                "completion": {
+                  "unmatched": {
+                    "action": "charge",
+                    "charge": {
+                      "type": "graduated",
+                      "measure": "tokens",
+                      "tiers": [
+                        {
+                          "up_to": "10",
+                          "rate": "1"
+                        },
+                        {
+                          "up_to": "5",
+                          "rate": "2"
+                        },
+                        {
+                          "rate": "3"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "credits": {}
+      }
+    },
+    {
+      "name": "invalid_quota_thresholds_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "pricing": {
+          "operations": {
+            "completion": {
+              "measures": {
+                "tokens": {
+                  "unit": "token"
+                }
+              }
+            }
+          },
+          "rate_cards": {
+            "standard": {}
+          }
+        },
+        "credits": {},
+        "plans": {
+          "pro": {
+            "display_name": "Pro",
+            "quotas": {
+              "token_budget": {
+                "operation": "completion",
+                "measure": "tokens",
+                "limit": "1000",
+                "window": {
+                  "type": "rolling",
+                  "duration": {
+                    "unit": "day",
+                    "count": 30
+                  }
+                },
+                "enforcement": "block",
+                "emit_at_percent": [
+                  100,
+                  80
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_offer_currency_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "buckets": {
+            "purchased": {
+              "priority": 10
+            }
+          },
+          "default_bucket": "purchased"
+        },
+        "commerce": {
+          "providers": {
+            "stripe": {
+              "type": "stripe"
+            }
+          },
+          "offers": {
+            "pack": {
+              "type": "topup",
+              "display_name": "Pack",
+              "price": {
+                "amount_minor": 500,
+                "currency": "usd"
+              },
+              "providers": {
+                "stripe": {
+                  "type": "stripe_price",
+                  "price_id": "price_pack"
+                }
+              },
+              "credits_per_unit": "1000",
+              "bucket": "purchased"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "invalid_grant_recipient_rejected",
+      "expect": "reject",
+      "config": {
+        "version": 1,
+        "credits": {
+          "buckets": {
+            "promotional": {
+              "priority": 10
+            }
+          },
+          "grant_programs": {
+            "signup": {
+              "trigger": "account_created",
+              "awards": [
+                {
+                  "recipient": "referrer",
+                  "amount": "100",
+                  "bucket": "promotional"
+                }
+              ]
+            }
+          }
+        }
       }
     }
   ]

@@ -1,4 +1,4 @@
-import DodoPayments from "dodopayments";
+import { NotFoundError } from "dodopayments";
 import type { CheckoutSessionCreateParams } from "dodopayments/resources/checkout-sessions";
 import type { CheckoutPaymentStatus, PaymentProvider, ResolveUserCallback } from "../types.js";
 import {
@@ -21,24 +21,67 @@ import type {
   SavedPaymentChargeParams,
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
+  WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
+import type { DodoClient } from "./client-contract.js";
 import { handleDodoBillingEvent } from "./event-mapper.js";
 
-/** Dodo SDK versions expose HTTP status under different transport keys. */
-function dodoErrorStatus(error: unknown): number | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  const details = error as { status?: unknown; statusCode?: unknown; status_code?: unknown };
-  const raw = details.status ?? details.statusCode ?? details.status_code;
-  const status = Number(raw);
-  return Number.isFinite(status) ? status : undefined;
+const NORMALIZED_DODO_EVENT_TYPES: Record<string, string> = {
+  "checkout.expired": "checkout.expired",
+  "subscription.active": "subscription.created",
+  "subscription.renewed": "subscription.renewed",
+  "subscription.cancelled": "subscription.canceled",
+  "subscription.expired": "subscription.expired",
+  "subscription.failed": "subscription.updated",
+  "subscription.on_hold": "subscription.updated",
+  "subscription.updated": "subscription.updated",
+  "subscription.cancellation_scheduled": "subscription.cancellation_scheduled",
+  "subscription.cancellation_unscheduled": "subscription.cancellation_unscheduled",
+  "subscription.plan_changed": "subscription.plan_changed",
+  "payment.succeeded": "payment.succeeded",
+  "payment.failed": "payment.failed",
+  "refund.succeeded": "refund.created",
+};
+
+function identityInput(
+  provider: string,
+  providerEventType: string,
+  data: Record<string, unknown>,
+  metadata: Record<string, string>,
+) {
+  const customer =
+    typeof data.customer === "object" && data.customer !== null
+      ? (data.customer as Record<string, unknown>)
+      : {};
+  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
+  const emailValue = customer.email;
+  const email =
+    typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null;
+  return {
+    provider,
+    providerEventType,
+    normalizedEventType: NORMALIZED_DODO_EVENT_TYPES[providerEventType] ?? null,
+    customerId,
+    email,
+    metadata,
+    successful:
+      providerEventType === "payment.succeeded" ||
+      providerEventType === "subscription.active" ||
+      providerEventType === "subscription.renewed",
+    checkoutKind: providerEventType.startsWith("subscription.")
+      ? ("subscription" as const)
+      : metadata.credits
+        ? ("credit_topup" as const)
+        : null,
+  };
 }
 
 export class DodoProvider implements PaymentProvider {
   readonly provider = "dodo" as const;
 
   constructor(
-    private getClient: () => DodoPayments,
+    private getClient: () => DodoClient,
     private config: { webhookKey: string; setupProductId?: string },
     private sink: BillingEventSink,
     private resolveUser?: ResolveUserCallback,
@@ -85,8 +128,7 @@ export class DodoProvider implements PaymentProvider {
       const session = await client.checkoutSessions.retrieve(providerSessionId);
       return { paymentStatus: session.payment_status ?? null };
     } catch (error) {
-      const status = dodoErrorStatus(error);
-      if (status === 404) return null;
+      if (error instanceof NotFoundError) return null;
       throw error;
     }
   }
@@ -99,7 +141,7 @@ export class DodoProvider implements PaymentProvider {
     return { url: session.link };
   }
 
-  async handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }> {
+  async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
     const { verifyWebhookPayload } = await import("@dodopayments/core/webhook");
 
     let payload: { type: string; data?: unknown };
@@ -113,7 +155,13 @@ export class DodoProvider implements PaymentProvider {
       this.logger.warn("[DodoProvider] webhook verification failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
 
     // The Dodo SDK verifier validates and returns the event, but some SDK
@@ -131,7 +179,7 @@ export class DodoProvider implements PaymentProvider {
     const cartProductId = Array.isArray(productCart)
       ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
       : undefined;
-    const data = {
+    const data: Record<string, unknown> = {
       ...verifiedData,
       ...(verifiedData.metadata == null && signedData.metadata != null
         ? { metadata: signedData.metadata }
@@ -146,11 +194,19 @@ export class DodoProvider implements PaymentProvider {
 
     const resolvesUserWithoutMetadata = type !== "payment.failed" && type !== "checkout.expired";
     if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
-      userId = await this.resolveUser(data, metadata, type);
+      userId = await this.resolveUser(identityInput(this.provider, type, data, metadata));
     }
 
     await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);
-    return { received: true };
+    const rawEventId =
+      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
+    return {
+      received: true,
+      retryable: false,
+      provider: this.provider,
+      eventId: rawEventId == null ? null : String(rawEventId),
+      eventType: type,
+    };
   }
 
   async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
@@ -340,6 +396,15 @@ export class DodoProvider implements PaymentProvider {
     const lineItems: ChangePlanLineItem[] = [];
     for (const item of response.immediate_charge.line_items) {
       if (item.type === "subscription") {
+        if (
+          !item.product_id ||
+          item.unit_price == null ||
+          item.quantity == null ||
+          item.proration_factor == null ||
+          !item.currency
+        ) {
+          throw new Error("Dodo plan-change preview returned an incomplete subscription item");
+        }
         lineItems.push({
           productId: item.product_id,
           name: item.name ?? item.description ?? "",

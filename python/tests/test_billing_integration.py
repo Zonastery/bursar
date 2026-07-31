@@ -1,4 +1,4 @@
-"""Integration tests for PostgresBillingStore + BillingServiceImpl — mirrors
+"""Integration tests for PostgresBillingStore + BillingService — mirrors
 JavaScript tests/billing-integration.test.ts.
 
 Tests sync/resolve round-trips, customer/subscription CRUD, event
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Barrier
 
@@ -19,8 +19,9 @@ import psycopg2
 import psycopg2.pool
 import pytest
 
-from bursar.billing.billing_service import BillingServiceImpl
-from bursar.billing.models import (
+from bursar.billing.billing_service import BillingService
+from bursar.billing.postgres.store import PostgresBillingStore
+from bursar.billing.types import (
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
@@ -31,9 +32,9 @@ from bursar.billing.models import (
     BillingSubscriptionStatus,
     ProviderRef,
 )
-from bursar.billing.postgres import PostgresBillingStore
-from bursar.credits_service import CreditsService
+from bursar.credits.service import CreditsService
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
+from tests.conftest import TEST_TENANT_ID
 
 pytestmark = [pytest.mark.integration]
 
@@ -55,71 +56,169 @@ DODO_PRODUCT_ID = "prod_dodo_monthly"
 
 PRICING_DICT = {
     "version": 1,
-    "usage": {
-        "operations": {"inference": {"measures": ["tokens"]}},
-        "rate_cards": {"standard": {"prices": {"inference": [{"default": True, "formula": "tokens"}]}}},
+    "pricing": {
+        "operations": {
+            "inference": {
+                "measures": {"tokens": {"unit": "token"}},
+                "dimensions": {},
+            }
+        },
+        "rate_cards": {
+            "standard": {
+                "operations": {
+                    "inference": {
+                        "rules": [],
+                        "unmatched": {
+                            "action": "charge",
+                            "charge": {
+                                "type": "per_unit",
+                                "measure": "tokens",
+                                "rate": "1",
+                            },
+                        },
+                    }
+                }
+            }
+        },
     },
     "credits": {
-        "buckets": {"purchased": {}},
-        "spend_order": ["purchased"],
+        "accounting": {
+            "unit": "credit",
+            "scale": 6,
+            "rounding": "half_up",
+        },
+        "buckets": {
+            "purchased": {
+                "priority": 10,
+                "expiry": {"type": "never"},
+            }
+        },
         "default_bucket": "purchased",
     },
     "plans": {
         "free": {
             "display_name": "Free",
+            "rank": 0,
             "rate_card": "standard",
-            "included_credits": {"amount": 1000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "1000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
         "pro": {
             "display_name": "Pro",
+            "rank": 1,
             "rate_card": "standard",
-            "included_credits": {"amount": 100000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "100000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
         "enterprise": {
             "display_name": "Enterprise",
+            "rank": 2,
             "rate_card": "standard",
-            "included_credits": {"amount": 1000000, "reset": {"unit": "month", "count": 1}},
+            "credit_allowance": {
+                "amount": "1000000",
+                "window": {
+                    "type": "calendar",
+                    "unit": "month",
+                    "count": 1,
+                    "timezone": "UTC",
+                },
+            },
         },
     },
-    "payments": {
-        "subscriptions": {
+    "commerce": {
+        "providers": {
+            "stripe": {"type": "stripe"},
+            "dodo": {"type": "dodo"},
+        },
+        "offers": {
             "pro_monthly": {
-                "plan": "pro",
-                "billing_period": {"unit": "month", "count": 1},
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_monthly_1000"}},
-                    "dodo": {"lookup": {"type": "product_id", "value": DODO_PRODUCT_ID}},
+                "type": "subscription",
+                "display_name": "Pro Monthly",
+                "price": {
+                    "amount_minor": 1000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_monthly_1000",
+                    },
+                    "dodo": {
+                        "type": "dodo_product",
+                        "product_id": "prod_dodo_monthly",
+                    },
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month", "count": 1},
             },
             "enterprise_yearly": {
-                "plan": "enterprise",
-                "billing_period": {"unit": "year", "count": 1},
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_yearly_10000"}},
+                "type": "subscription",
+                "display_name": "Enterprise Yearly",
+                "price": {
+                    "amount_minor": 10000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_yearly_10000",
+                    }
+                },
+                "plan": "enterprise",
+                "billing_interval": {"unit": "year", "count": 1},
             },
             "cycle_grant_monthly": {
-                "plan": "pro",
-                "billing_period": {"unit": "month", "count": 1},
-                "stack_credits": True,
-                "renewal_credits": {
-                    "amount": 5000,
-                    "bucket": "purchased",
-                    "behavior": "replace",
-                    "on_subscription_end": "expire",
+                "type": "subscription",
+                "display_name": "Cycle Grant Monthly",
+                "price": {
+                    "amount_minor": 5000,
+                    "currency": "USD",
                 },
                 "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_cycle_grant_5000"}},
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_cycle_grant_5000",
+                    }
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month", "count": 1},
+                "cycle_grant": {
+                    "amount": "5000",
+                    "bucket": "purchased",
+                    "renewal": "replace_previous",
+                    "expiry": {"type": "subscription_end"},
                 },
             },
-        },
-        "topups": {
             "standard_topup": {
-                "credits": 1000,
-                "bucket": "purchased",
-                "providers": {
-                    "stripe": {"lookup": {"type": "price_id", "value": "price_topup_credits"}},
+                "type": "topup",
+                "display_name": "Standard Top-up",
+                "price": {
+                    "amount_minor": 1000,
+                    "currency": "USD",
                 },
+                "providers": {
+                    "stripe": {
+                        "type": "stripe_price",
+                        "price_id": "price_topup_credits",
+                    }
+                },
+                "credits_per_unit": "1000",
+                "bucket": "purchased",
+                "quantity": {"minimum": 1, "maximum": 100, "default": 1},
             },
         },
     },
@@ -144,14 +243,24 @@ def _bootstrap_auth_users(pg_database_url: str) -> None:
         conn.close()
 
 
+def _bind_tenant(cursor: psycopg2.extensions.cursor) -> None:
+    cursor.execute(
+        "SELECT set_config('bursar.tenant_id', %s, true)",
+        (TEST_TENANT_ID,),
+    )
+
+
 def _make_components(
     pg_database_url: str,
     pg_store: object,
-) -> tuple[PostgresBillingStore, CreditsService, BillingServiceImpl]:
-    bs = PostgresBillingStore(pg_database_url)
+) -> tuple[PostgresBillingStore, CreditsService, BillingService]:
+    bs = PostgresBillingStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+    )
     cm = CreditsService(pg_store)  # type: ignore[arg-type]
     cm.publish_pricing_from_dict(PRICING_DICT)
-    sink = BillingServiceImpl(bs, provisioning=cm)
+    sink = BillingService(bs, provisioning=cm)
     return bs, cm, sink
 
 
@@ -193,7 +302,385 @@ class TestBillingSync:
         assert bs.resolve_billing_offer("nonexistent_provider", product_id=None, price_id=PRICE_ID) is None
 
 
-# ── Customer CRUD ──────────────────────────────────────────────────────
+# ── Checkout intent idempotency ───────────────────────────────────────
+
+
+class TestCheckoutIntentIdempotency:
+    def test_terminal_checkout_replay_does_not_reopen_provider_attempt(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+        first_expiry = datetime.now(UTC) + timedelta(hours=1)
+        retry_expiry = first_expiry + timedelta(hours=1)
+        digest = "11" * 32
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::timestamptz, %s, %s
+                )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    first_expiry,
+                    "session-original",
+                    "https://example.test/original",
+                ),
+            )
+            intent_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+            cursor.execute(
+                "SELECT bursar.advance_checkout_intent(%s::uuid, 'failed', NULL, NULL)",
+                (intent_id,),
+            )
+            assert cursor.fetchone() == (True,)
+
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'),
+                    %s::timestamptz, %s, %s
+                )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    retry_expiry,
+                    "session-retry",
+                    "https://example.test/retry",
+                ),
+            )
+            assert cursor.fetchone() == (intent_id,)
+
+            cursor.execute(
+                """
+                SELECT status, provider_session_id, checkout_url, expires_at
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s
+                """,
+                (intent_id,),
+            )
+            assert cursor.fetchone() == (
+                "failed",
+                "session-original",
+                "https://example.test/original",
+                first_expiry,
+            )
+
+    def test_checkout_replay_reopens_stale_intent_without_reusing_provider_session(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+        digest = "22" * 32
+        retry_expiry = datetime.now(UTC) + timedelta(hours=2)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz,
+                    %s, %s
+                )
+                """,
+                (
+                    USER_ID2,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    datetime.now(UTC) + timedelta(hours=1),
+                    "session-stale",
+                    "https://example.test/stale",
+                ),
+            )
+            intent_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+            cursor.execute(
+                """
+                UPDATE bursar.billing_checkout_intents
+                SET created_at = now() - interval '2 hours',
+                    expires_at = now() - interval '1 hour'
+                WHERE id = %s
+                """,
+                (intent_id,),
+            )
+            cursor.execute(
+                """
+                SELECT bursar.create_checkout_intent(
+                    %s::uuid, %s, %s, %s, decode(%s, 'hex'), %s::timestamptz
+                )
+                """,
+                (
+                    USER_ID2,
+                    PROVIDER,
+                    "subscription",
+                    "pro_monthly",
+                    digest,
+                    retry_expiry,
+                ),
+            )
+            assert cursor.fetchone() == (intent_id,)
+            cursor.execute(
+                """
+                SELECT status, provider_session_id, checkout_url, expires_at
+                FROM bursar.billing_checkout_intents
+                WHERE id = %s
+                """,
+                (intent_id,),
+            )
+            assert cursor.fetchone() == ("open", None, None, retry_expiry)
+
+
+# ── Auto-recharge profile ─────────────────────────────────────────────
+
+
+class TestAutoRechargeProfile:
+    def test_eligible_projected_topup_can_enable_auto_recharge(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        config = deepcopy(PRICING_DICT)
+        config["commerce"]["auto_recharge"] = {
+            "eligible_topups": ["standard_topup"],
+            "balance_below": {
+                "minimum": "100",
+                "maximum": "5000",
+                "default": "1000",
+            },
+            "rearm_above": "6000",
+            "quantity": {"minimum": 1, "maximum": 3, "default": 1},
+            "limits": {
+                "max_purchases": 3,
+                "window": {
+                    "type": "rolling",
+                    "duration": {"unit": "day", "count": 30},
+                },
+                "max_charge_minor": 3000,
+                "cooldown": {"unit": "hour", "count": 1},
+            },
+        }
+        CreditsService(pg_store).publish_pricing_from_dict(config)  # type: ignore[arg-type]
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT topup.id
+                FROM bursar.catalog_topups AS topup
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = topup.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE topup.topup_key = 'standard_topup'
+                """
+            )
+            topup_id = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+            cursor.execute(
+                """
+                SELECT bursar.upsert_auto_recharge_profile(
+                    %s::uuid, true, %s, %s::uuid, 1, 1000,
+                    3, 'day', 30, 'rolling', 'UTC'
+                )
+                """,
+                (USER_ID, PROVIDER, topup_id),
+            )
+            assert cursor.fetchone() == (True,)
+            cursor.execute(
+                """
+                SELECT enabled, provider, topup_id
+                FROM bursar.billing_auto_recharge_profiles
+                WHERE subject_id = %s::uuid
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchone() == (True, PROVIDER, topup_id)
+
+    def test_attempt_claims_are_isolated_by_subject_and_environment(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT topup.id, topup.catalog_revision_id
+                FROM bursar.catalog_topups AS topup
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = topup.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE topup.topup_key = 'standard_topup'
+                """
+            )
+            topup_id, revision_id = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+            cursor.execute(
+                """
+                INSERT INTO bursar.subjects(id)
+                VALUES (%s::uuid), (%s::uuid)
+                ON CONFLICT (tenant_id, id) DO NOTHING
+                """,
+                (USER_ID, USER_ID2),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.billing_auto_recharge_attempts(
+                    subject_id,
+                    provider,
+                    provider_environment,
+                    idempotency_key,
+                    topup_id,
+                    catalog_revision_id,
+                    quantity,
+                    window_start,
+                    window_end
+                )
+                VALUES
+                    (
+                        %s::uuid, %s, 'live', 'live-user-1',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    ),
+                    (
+                        %s::uuid, %s, 'live', 'live-user-2',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    ),
+                    (
+                        %s::uuid, %s, 'test', 'test-user-1',
+                        %s::uuid, %s::uuid, 1, now(), now() + interval '1 day'
+                    )
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                    USER_ID2,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                    USER_ID,
+                    PROVIDER,
+                    topup_id,
+                    revision_id,
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT provider_environment, count(*)
+                FROM bursar.billing_auto_recharge_attempts
+                GROUP BY provider_environment
+                ORDER BY provider_environment
+                """
+            )
+            assert cursor.fetchall() == [("live", 2), ("test", 1)]
+
+    def test_entitlement_selection_is_isolated_by_environment(
+        self,
+        pg_database_url: str,
+        pg_store: object,
+    ) -> None:
+        _bootstrap_auth_users(pg_database_url)
+        _make_components(pg_database_url, pg_store)
+
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            _bind_tenant(cursor)
+            cursor.execute(
+                """
+                SELECT offer.id, offer.catalog_revision_id
+                FROM bursar.catalog_offers AS offer
+                JOIN bursar.catalog_revisions AS revision
+                  ON revision.id = offer.catalog_revision_id
+                 AND revision.status = 'active'
+                WHERE offer.offer_key = 'pro_monthly'
+                """
+            )
+            offer_id, revision_id = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+            cursor.execute(
+                """
+                INSERT INTO bursar.subjects(id)
+                VALUES (%s::uuid)
+                ON CONFLICT (tenant_id, id) DO NOTHING
+                """,
+                (USER_ID,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bursar.billing_subscriptions(
+                    subject_id,
+                    provider,
+                    provider_environment,
+                    provider_subscription_id,
+                    offer_id,
+                    catalog_revision_id,
+                    status
+                )
+                VALUES
+                    (
+                        %s::uuid, %s, 'live', 'sub-live',
+                        %s::uuid, %s::uuid, 'active'
+                    ),
+                    (
+                        %s::uuid, %s, 'test', 'sub-test',
+                        %s::uuid, %s::uuid, 'active'
+                    )
+                RETURNING id, provider_environment
+                """,
+                (
+                    USER_ID,
+                    PROVIDER,
+                    offer_id,
+                    revision_id,
+                    USER_ID,
+                    PROVIDER,
+                    offer_id,
+                    revision_id,
+                ),
+            )
+            subscription_ids = {environment: subscription_id for subscription_id, environment in cursor.fetchall()}
+
+            for environment in ("live", "test"):
+                cursor.execute(
+                    "SELECT set_config('bursar.provider_environment', %s, false)",
+                    (environment,),
+                )
+                cursor.execute(
+                    "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid)",
+                    (USER_ID, subscription_ids[environment]),
+                )
+                assert cursor.fetchone() == (True,)
+
+            cursor.execute(
+                """
+                SELECT provider_environment
+                FROM bursar.billing_entitlement_sources
+                WHERE subject_id = %s::uuid
+                  AND selected
+                ORDER BY provider_environment
+                """,
+                (USER_ID,),
+            )
+            assert cursor.fetchall() == [("live",), ("test",)]
+
+
+# ── Customer CRUD ─────────────────────────────────────────────────────
 
 
 class TestCustomerCrud:
@@ -213,8 +700,8 @@ class TestCustomerCrud:
         _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
-        result = bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
-        assert result.get("error") == "user_id_mismatch"
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
         assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:
@@ -240,7 +727,7 @@ class TestSubscriptionCrud:
             provider_customer_id=CUSTOMER_ID,
             offer_key="pro_monthly",
             plan="pro",
-            status="active",
+            status=BillingSubscriptionStatus.active,
             current_period_start="2025-01-01T00:00:00Z",
             current_period_end="2025-02-01T00:00:00Z",
         )
@@ -264,7 +751,8 @@ class TestSubscriptionCrud:
                 user_id=USER_ID,
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
-                status="active",
+                offer_key="pro_monthly",
+                status=BillingSubscriptionStatus.active,
             )
         )
         bs.upsert_billing_subscription(
@@ -272,7 +760,7 @@ class TestSubscriptionCrud:
                 user_id=USER_ID,
                 provider=PROVIDER,
                 provider_subscription_id=SUB_ID,
-                status="canceled",
+                status=BillingSubscriptionStatus.canceled,
             )
         )
         sub = bs.get_billing_subscription(PROVIDER, SUB_ID)
@@ -290,7 +778,7 @@ class TestEventIdempotency:
         event = BillingEvent(
             provider=PROVIDER,
             event_id=EVENT_ID,
-            event_type="customer.created",
+            event_type=BillingEventType.customer_created,
             occurred_at=_now(),
             user_id=USER_ID,
         )
@@ -327,12 +815,17 @@ class TestEventIdempotency:
 
         def claim(_: int):
             pool = psycopg2.pool.ThreadedConnectionPool(1, 1, pg_database_url)
-            local = PostgresBillingStore(pg_database_url, pool=pool)
+            local = PostgresBillingStore(
+                pg_database_url,
+                tenant_id=TEST_TENANT_ID,
+                pool=pool,
+            )
             try:
                 barrier.wait(timeout=30)
                 return local.claim_billing_event(PROVIDER, "evt_concurrent_claim", "test.event")
             finally:
                 local.close()
+                pool.closeall()
 
         with ThreadPoolExecutor(max_workers=12) as executor:
             claims = list(executor.map(claim, range(12)))
@@ -354,7 +847,7 @@ class TestEventIdempotency:
             nonlocal called
             called = True
 
-        sink = BillingServiceImpl(
+        sink = BillingService(
             bs,
             provisioning=_cm,
             event_handlers={
@@ -380,21 +873,23 @@ class TestEventIdempotency:
 class TestTopup:
     def test_compute_topup_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
-        result = BillingServiceImpl._compute_topup_credits(2000, 1000)
-        assert result == 20000
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
+        assert topup is not None
+        assert bs.compute_topup_credits(2000, topup) == 2000
 
     def test_compute_topup_credits_odd_amount(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
-        _bs, _cm, _sink = _make_components(pg_database_url, pg_store)
-        result = BillingServiceImpl._compute_topup_credits(1999, 1000)
-        assert result == 19990
+        bs, _cm, _sink = _make_components(pg_database_url, pg_store)
+        topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
+        assert topup is not None
+        assert bs.compute_topup_credits(1999, topup) == 0
 
 
-# ── BillingServiceImpl lifecycle ───────────────────────────────────────────
+# ── BillingService lifecycle ───────────────────────────────────────────────
 
 
-class TestBillingServiceImplLifecycle:
+class TestBillingServiceLifecycle:
     def test_subscription_lifecycle_full(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
@@ -403,7 +898,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_1",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
@@ -413,13 +908,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_create_1",
-                event_type="subscription.created",
+                event_type=BillingEventType.subscription_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
@@ -446,13 +941,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cancel_1",
-                event_type="subscription.canceled",
+                event_type=BillingEventType.subscription_canceled,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID,
-                    status="canceled",
+                    status=BillingSubscriptionStatus.canceled,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -471,7 +966,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_customer_2",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -481,7 +976,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_payment_2",
-                event_type="payment.succeeded",
+                event_type=BillingEventType.payment_succeeded,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -496,7 +991,7 @@ class TestBillingServiceImplLifecycle:
         )
 
         balance = cm.get_balance(USER_ID2)
-        assert balance.balance == Decimal("20000")
+        assert balance.balance == Decimal("2000")
 
     def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
@@ -508,7 +1003,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_refund",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -518,7 +1013,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_pay_refund",
-                event_type="payment.succeeded",
+                event_type=BillingEventType.payment_succeeded,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -532,13 +1027,13 @@ class TestBillingServiceImplLifecycle:
             )
         )
         balance_after_grant = cm.get_balance(uid)
-        assert balance_after_grant.balance == Decimal("20000")
+        assert balance_after_grant.balance == Decimal("2000")
 
         result = sink.ingest_billing_event(
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_refund_1",
-                event_type="refund.created",
+                event_type=BillingEventType.refund_created,
                 occurred_at=_now(),
                 user_id=uid,
                 customer=BillingCustomerInfo(provider_customer_id="cus_refund_test"),
@@ -547,6 +1042,7 @@ class TestBillingServiceImplLifecycle:
                     provider_payment_id=payment_id,
                     amount_minor=2000,
                     currency="USD",
+                    status="succeeded",
                 ),
             )
         )
@@ -562,7 +1058,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_pause",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -572,13 +1068,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_1",
-                event_type="subscription.created",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID2,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -589,7 +1085,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_2",
-                event_type="subscription.paused",
+                event_type=BillingEventType.subscription_paused,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -604,13 +1100,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_pause_3",
-                event_type="subscription.resumed",
+                event_type=BillingEventType.subscription_resumed,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id=SUB_ID2,
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     refs=ProviderRef(product_id=PRODUCT_ID, price_id=PRICE_ID),
                 ),
             )
@@ -640,7 +1136,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dup_test"),
@@ -652,7 +1148,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID2,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dup_test"),
@@ -674,11 +1170,17 @@ class TestBillingServiceImplLifecycle:
         _bootstrap_auth_users(pg_database_url)
         bs, cm, _sink = _make_components(pg_database_url, pg_store)
         config = deepcopy(PRICING_DICT)
-        config["payments"]["subscriptions"]["new_offer"] = {
+        config["commerce"]["offers"]["new_offer"] = {
+            "type": "subscription",
+            "display_name": "New Offer",
+            "price": {"amount_minor": 1000, "currency": "USD"},
             "plan": "free",
-            "billing_period": {"unit": "month", "count": 1},
+            "billing_interval": {"unit": "month", "count": 1},
             "providers": {
-                "stripe": {"lookup": {"type": "price_id", "value": "price_new_offer"}},
+                "stripe": {
+                    "type": "stripe_price",
+                    "price_id": "price_new_offer",
+                },
             },
         }
         cm.publish_pricing_from_dict(config)
@@ -694,7 +1196,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg1",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID3,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
@@ -704,13 +1206,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg1",
-                event_type="subscription.created",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID3,
                 customer=BillingCustomerInfo(provider_customer_id=CUSTOMER_ID2),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_test",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(
@@ -733,7 +1235,7 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_cus_cg2",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
@@ -743,13 +1245,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2a",
-                event_type="subscription.created",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_replace",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-06-01T00:00:00Z",
                     period_end="2025-07-01T00:00:00Z",
                     refs=ProviderRef(
@@ -769,13 +1271,13 @@ class TestBillingServiceImplLifecycle:
             BillingEvent(
                 provider=PROVIDER,
                 event_id="evt_sub_cg2b",
-                event_type="subscription.renewed",
+                event_type=BillingEventType.subscription_renewed,
                 occurred_at=_now(),
                 user_id=USER_ID4,
                 customer=BillingCustomerInfo(provider_customer_id="cus_cg_replace"),
                 subscription=BillingSubscriptionInfo(
                     provider_subscription_id="sub_cg_replace",
-                    status="active",
+                    status=BillingSubscriptionStatus.active,
                     period_start="2025-07-01T00:00:00Z",
                     period_end="2025-08-01T00:00:00Z",
                     refs=ProviderRef(
@@ -801,7 +1303,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_lifecycle",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_lifecycle"),
@@ -821,7 +1323,7 @@ class TestDodoBillingIntegration:
                     "previous_billing_date": datetime.now(UTC).strftime(
                         "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
                     ),
-                    "next_billing_date": datetime.now(UTC).strftime(
+                    "next_billing_date": (datetime.now(UTC) + timedelta(days=30)).strftime(
                         "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
                     ),
                 },
@@ -853,7 +1355,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_dup",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_dup"),
@@ -890,7 +1392,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_multi",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_multi"),
@@ -935,7 +1437,7 @@ class TestDodoBillingIntegration:
             BillingEvent(
                 provider="dodo",
                 event_id="dodo:customer.created:cus_dodo_date",
-                event_type="customer.created",
+                event_type=BillingEventType.customer_created,
                 occurred_at=_now(),
                 user_id=USER_ID5,
                 customer=BillingCustomerInfo(provider_customer_id="cus_dodo_date"),
@@ -943,7 +1445,9 @@ class TestDodoBillingIntegration:
         )
 
         js_date = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
-        js_date_future = datetime.now(UTC).strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)")
+        js_date_future = (datetime.now(UTC) + timedelta(days=30)).strftime(
+            "%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)"
+        )
 
         asyncio.run(
             handle_dodo_billing_event(

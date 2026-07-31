@@ -15,6 +15,16 @@ from bursar.stores.supabase import HttpxSupabaseStore
 JavaScript exports `CreditStore` and `PostgresStore` from
 `@zonastery/bursar`.
 
+PostgreSQL stores are tenant-bound:
+
+```python
+store = PostgresStore(database_url, tenant_id=tenant_id)
+```
+
+```ts
+const store = new PostgresStore(databaseUrl, tenantId);
+```
+
 Use the memory store for deterministic unit tests and PostgreSQL for durable,
 concurrent account state. The Supabase HTTP store calls the same canonical
 RPCs and observes the same account/ledger contract.

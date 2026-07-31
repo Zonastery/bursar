@@ -13,6 +13,51 @@ bursar migrate
 records checksums, and fails if an already-applied file changed. A second run
 is a no-op.
 
+Provision tenants with the same operator connection:
+
+```bash
+bursar tenant create acme \
+  --id 018f7f5f-7b4a-7000-8000-000000000001 \
+  --display-name "Acme"
+bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
+```
+
+For a deployment bootstrap, provision a tenant and publish its initial config
+through one idempotent command:
+
+```bash
+export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+bursar tenant bootstrap acme ./pricing.yaml \
+  --display-name "Acme"
+```
+
+`tenant bootstrap` validates the config before provisioning. Tenant creation
+and config publication are each idempotent, so the command is safe to retry
+after an operational failure. Host applications should use these operator
+commands instead of writing Bursar-owned tables.
+
+Application commands such as `bursar config set` also require
+`BURSAR_TENANT_ID`.
+
+## Host integration SQL
+
+Applications can add trusted, host-owned SQL after Bursar's bundled migrations:
+
+```bash
+bursar migrate \
+  --post-migrate-sql ./database/host-integration.sql \
+  --post-migrate-sql ./database/scheduled-maintenance.sql
+```
+
+The option is repeatable and files execute in command-line order, under the
+same advisory lock and transaction as pending Bursar migrations. A failure
+rolls back the entire transaction.
+
+Post-migration files are intentionally not added to Bursar's checksum ledger
+and execute on every invocation. Keep them idempotent and under the host
+application's source control. Only pass trusted files: they execute with the
+database privileges in `DATABASE_URL`.
+
 Deploy in this order:
 
 1. Run `bursar migrate`.

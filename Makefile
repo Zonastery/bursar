@@ -57,6 +57,7 @@ test-pg-down:                       ## Stop and remove the isolated Postgres tes
 	docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
 
 test-integration:                  ## Run Python and JS tests against an isolated Postgres database
+	set -euo pipefail
 	$(MAKE) test-pg-up
 	trap '$(MAKE) test-pg-down' EXIT
 	DATABASE_URL=$(TEST_PG_URL) $(MAKE) test-python

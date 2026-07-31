@@ -14,9 +14,41 @@ import type {
   SavedPaymentChargeParams,
   SavedPaymentChargeResult,
   SavedPaymentChargeQuote,
+  WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
 import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
+
+function mockIdentityInput(
+  providerEventType: string,
+  data: Record<string, unknown>,
+  metadata: Record<string, string>,
+) {
+  const customer =
+    typeof data.customer === "object" && data.customer !== null
+      ? (data.customer as Record<string, unknown>)
+      : {};
+  const customerId = String(data.customer_id ?? customer.customer_id ?? "").trim() || null;
+  const emailValue = customer.email;
+  return {
+    provider: "mock",
+    providerEventType,
+    normalizedEventType: providerEventType,
+    customerId,
+    email:
+      typeof emailValue === "string" && emailValue.trim() ? emailValue.trim().toLowerCase() : null,
+    metadata,
+    successful:
+      providerEventType === "payment.succeeded" ||
+      providerEventType === "subscription.active" ||
+      providerEventType === "subscription.renewed",
+    checkoutKind: providerEventType.startsWith("subscription.")
+      ? ("subscription" as const)
+      : metadata.credits
+        ? ("credit_topup" as const)
+        : null,
+  };
+}
 
 export class MockPaymentProvider implements PaymentProvider {
   readonly provider = "mock" as const;
@@ -57,6 +89,12 @@ export class MockPaymentProvider implements PaymentProvider {
 
   async reactivateSubscription(_subscriptionId: string): Promise<void> {}
 
+  async cancelScheduledPlanChange(
+    _subscriptionId: string,
+    _providerOperationId?: string | null,
+    _idempotencyKey?: string,
+  ): Promise<void> {}
+
   async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
     return [];
   }
@@ -90,15 +128,27 @@ export class MockPaymentProvider implements PaymentProvider {
     return { url: "https://example.com/invoice" };
   }
 
-  async handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }> {
+  async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
     let payload: Record<string, unknown> | null;
     try {
       payload = JSON.parse(req.rawBody);
     } catch {
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
     if (!payload || typeof payload !== "object") {
-      return { received: false, retryable: false };
+      return {
+        received: false,
+        retryable: false,
+        provider: this.provider,
+        eventId: null,
+        eventType: null,
+      };
     }
 
     const data = (payload.data ?? {}) as Record<string, unknown>;
@@ -106,7 +156,9 @@ export class MockPaymentProvider implements PaymentProvider {
     let userId: string | null = metadata.userId ?? null;
 
     if (!userId && this.resolveUser) {
-      userId = await this.resolveUser(data, metadata);
+      userId = await this.resolveUser(
+        mockIdentityInput(String(payload.type ?? ""), data, metadata),
+      );
     }
 
     await handleDodoBillingEvent(
@@ -118,7 +170,15 @@ export class MockPaymentProvider implements PaymentProvider {
       this.logger,
     );
 
-    return { received: true };
+    const rawEventId =
+      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
+    return {
+      received: true,
+      retryable: false,
+      provider: this.provider,
+      eventId: rawEventId == null ? null : String(rawEventId),
+      eventType: typeof payload.type === "string" ? payload.type : null,
+    };
   }
 
   async changePlan(_params: ChangePlanParams): Promise<void> {}

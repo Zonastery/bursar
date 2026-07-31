@@ -3,6 +3,14 @@ export interface WebhookRequest {
   headers: Record<string, string>;
 }
 
+export interface WebhookResult {
+  received: boolean;
+  retryable: boolean;
+  provider: string;
+  eventId: string | null;
+  eventType: string | null;
+}
+
 export interface CheckoutParams {
   userId?: string;
   customerId?: string;
@@ -41,6 +49,23 @@ export interface CreateCustomerParams {
   email: string;
   name: string;
   metadata: Record<string, string>;
+}
+
+export interface ProviderUrlResult {
+  url: string;
+}
+
+export interface CreateCustomerResult {
+  customerId: string;
+}
+
+export interface CheckoutSessionResult extends ProviderUrlResult {
+  customerId?: string;
+  providerSessionId?: string;
+}
+
+export interface CheckoutSessionStatus {
+  paymentStatus: CheckoutPaymentStatus;
 }
 
 export interface PaymentMethodInfo {
@@ -96,36 +121,24 @@ export function deduplicatePaymentMethods(methods: PaymentMethodInfo[]): Payment
   });
 }
 
-export type ResolveUserCallback = (
-  data: Record<string, unknown>,
-  metadata: Record<string, string>,
-  eventType?: string,
-) => Promise<string | null>;
-
-export interface ProviderLogger {
-  debug?: (msg: string, ctx?: Record<string, unknown>) => void;
-  info?: (msg: string, ctx?: Record<string, unknown>) => void;
-  warn?: (msg: string, ctx?: Record<string, unknown>) => void;
-  error?: (msg: string, ctx?: Record<string, unknown>) => void;
+export interface ResolveIdentityInput {
+  provider: string;
+  providerEventType: string;
+  normalizedEventType: string | null;
+  customerId: string | null;
+  email: string | null;
+  metadata: Record<string, string>;
+  successful: boolean;
+  checkoutKind: "subscription" | "credit_topup" | null;
 }
 
-export type NormalizedProviderLogger = Required<ProviderLogger>;
+export type ResolveUserCallback = (input: ResolveIdentityInput) => Promise<string | null>;
 
-export const noopLogger: NormalizedProviderLogger = {
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-};
-
-export function normalizeProviderLogger(logger?: ProviderLogger | null): NormalizedProviderLogger {
-  return {
-    debug: logger?.debug ?? noopLogger.debug,
-    info: logger?.info ?? noopLogger.info,
-    warn: logger?.warn ?? noopLogger.warn,
-    error: logger?.error ?? noopLogger.error,
-  };
-}
+export { noopLogger, normalizeLogger as normalizeProviderLogger } from "../shared/logger.js";
+export type {
+  Logger as ProviderLogger,
+  NormalizedLogger as NormalizedProviderLogger,
+} from "../shared/logger.js";
 
 export type CheckoutPaymentStatus =
   | null
@@ -189,31 +202,31 @@ export interface ChangePlanPreview {
   customerCredits?: number;
 }
 
+export interface ChangePlanResult {
+  providerOperationId?: string;
+}
+
 export interface PaymentProvider {
-  readonly provider: "stripe" | "dodo" | "mock";
+  readonly provider: string;
 
   /** Retrieve the provider state for a checkout session, or null if it no longer exists. */
-  getCheckoutSessionStatus?(providerSessionId: string): Promise<{
-    paymentStatus: CheckoutPaymentStatus;
-  } | null>;
+  getCheckoutSessionStatus?(providerSessionId: string): Promise<CheckoutSessionStatus | null>;
 
-  createCheckoutSession(
-    params: CheckoutParams,
-  ): Promise<{ url: string; customerId?: string; providerSessionId?: string }>;
+  createCheckoutSession(params: CheckoutParams): Promise<CheckoutSessionResult>;
 
-  createCustomerPortalSession(params: PortalParams): Promise<{ url: string }>;
+  createCustomerPortalSession?(params: PortalParams): Promise<ProviderUrlResult>;
 
-  createUpdatePaymentMethodSession(params: UpdatePaymentMethodParams): Promise<{ url: string }>;
+  createUpdatePaymentMethodSession?(params: UpdatePaymentMethodParams): Promise<ProviderUrlResult>;
 
-  createPaymentMethodSetupSession(params: PaymentMethodSetupParams): Promise<{ url: string }>;
+  createPaymentMethodSetupSession?(params: PaymentMethodSetupParams): Promise<ProviderUrlResult>;
 
-  createCustomer(params: CreateCustomerParams): Promise<{ customerId: string }>;
+  createCustomer?(params: CreateCustomerParams): Promise<CreateCustomerResult>;
 
-  handleWebhook(req: WebhookRequest): Promise<{ received: boolean; retryable?: boolean }>;
+  handleWebhook(req: WebhookRequest): Promise<WebhookResult>;
 
-  cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  cancelSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
-  reactivateSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void>;
+  reactivateSubscription?(subscriptionId: string, idempotencyKey?: string): Promise<void>;
 
   /** Removes a pending plan switch while retaining the current subscription. */
   cancelScheduledPlanChange?(
@@ -222,17 +235,17 @@ export interface PaymentProvider {
     idempotencyKey?: string,
   ): Promise<void>;
 
-  listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]>;
+  listPaymentMethods?(customerId: string): Promise<PaymentMethodInfo[]>;
 
   getDefaultPaymentMethod?(customerId: string): Promise<PaymentMethodInfo | null>;
 
   previewSavedPaymentCharge?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeQuote>;
 
-  chargeSavedPaymentMethod(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
+  chargeSavedPaymentMethod?(params: SavedPaymentChargeParams): Promise<SavedPaymentChargeResult>;
 
-  getInvoiceUrl(providerPaymentId: string): Promise<{ url: string } | null>;
+  getInvoiceUrl?(providerPaymentId: string): Promise<ProviderUrlResult | null>;
 
-  changePlan(params: ChangePlanParams): Promise<{ providerOperationId?: string } | void>;
+  changePlan?(params: ChangePlanParams): Promise<ChangePlanResult | void>;
 
-  previewChangePlan(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
+  previewChangePlan?(params: PreviewChangePlanParams): Promise<ChangePlanPreview>;
 }

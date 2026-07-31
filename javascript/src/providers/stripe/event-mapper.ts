@@ -1,6 +1,6 @@
 import Stripe from "stripe";
 import type { BillingEventSink } from "../../bursar.js";
-import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/billing-types.js";
+import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import { callBillingEventSink } from "../_shared.js";
 
@@ -14,6 +14,19 @@ function buildEnd(subscription: Stripe.Subscription): string | null {
 function buildStart(subscription: Stripe.Subscription): string | null {
   const raw = (subscription as { current_period_start?: number }).current_period_start;
   return raw ? new Date(raw * 1000).toISOString() : null;
+}
+
+function timestamp(value: number | null | undefined): string | null {
+  return value == null ? null : new Date(value * 1000).toISOString();
+}
+
+function subscriptionRefs(subscription: Stripe.Subscription) {
+  const price = subscription.items?.data?.[0]?.price;
+  if (!price) return undefined;
+  return {
+    priceId: price.id,
+    productId: typeof price.product === "string" ? price.product : price.product?.id,
+  };
 }
 
 function buildEndFromInvoice(invoice: Stripe.Invoice): string | null {
@@ -42,6 +55,10 @@ export async function handleStripeWebhook(
   logger?: ProviderLogger | null,
 ): Promise<{ received: boolean }> {
   const log = normalizeProviderLogger(logger);
+  const occurredAt =
+    typeof event.created === "number" && Number.isFinite(event.created)
+      ? new Date(event.created * 1000).toISOString()
+      : new Date().toISOString();
   try {
     switch (event.type) {
       case "checkout.session.completed": {
@@ -86,7 +103,7 @@ export async function handleStripeWebhook(
               provider: "stripe",
               eventId: event.id,
               eventType: "checkout.completed",
-              occurredAt: new Date().toISOString(),
+              occurredAt,
               userId,
               customer: customerInfo,
               subscription: {
@@ -95,7 +112,10 @@ export async function handleStripeWebhook(
                 cancelAtPeriodEnd: sub.cancel_at_period_end,
                 periodEnd: end,
                 periodStart: currentPeriodStart,
-                refs: planSlug ? { lookupKey: planSlug } : undefined,
+                trialEnd: timestamp(sub.trial_end),
+                cancelAt: timestamp(sub.cancel_at),
+                endedAt: timestamp(sub.ended_at),
+                refs: planSlug ? { lookupKey: planSlug } : subscriptionRefs(sub),
               },
             });
           } catch (err) {
@@ -124,7 +144,7 @@ export async function handleStripeWebhook(
             provider: "stripe",
             eventId: event.id,
             eventType: "payment.succeeded",
-            occurredAt: new Date().toISOString(),
+            occurredAt,
             userId,
             customer: customerInfo,
             payment,
@@ -155,7 +175,7 @@ export async function handleStripeWebhook(
           provider: "stripe",
           eventId: event.id,
           eventType,
-          occurredAt: new Date().toISOString(),
+          occurredAt,
           userId,
           customer: {
             providerCustomerId: customerId(sub.customer),
@@ -164,7 +184,12 @@ export async function handleStripeWebhook(
             providerSubscriptionId: sub.id,
             status: sub.status as BillingSubscriptionStatus,
             cancelAtPeriodEnd: sub.cancel_at_period_end,
+            periodStart: buildStart(sub),
             periodEnd: end,
+            trialEnd: timestamp(sub.trial_end),
+            cancelAt: timestamp(sub.cancel_at),
+            endedAt: timestamp(sub.ended_at),
+            refs: subscriptionRefs(sub),
           },
         });
         break;
@@ -176,11 +201,20 @@ export async function handleStripeWebhook(
           provider: "stripe",
           eventId: event.id,
           eventType: "subscription.canceled",
-          occurredAt: new Date().toISOString(),
+          occurredAt,
           customer: {
             providerCustomerId: customerId(sub.customer),
           },
-          subscription: { providerSubscriptionId: sub.id },
+          subscription: {
+            providerSubscriptionId: sub.id,
+            status: "canceled",
+            periodStart: buildStart(sub),
+            periodEnd: buildEnd(sub),
+            trialEnd: timestamp(sub.trial_end),
+            cancelAt: timestamp(sub.cancel_at),
+            endedAt: timestamp(sub.ended_at) ?? occurredAt,
+            refs: subscriptionRefs(sub),
+          },
         });
         break;
       }
@@ -197,6 +231,7 @@ export async function handleStripeWebhook(
           taxMinor: null,
           currency: intent.currency.toUpperCase(),
           purpose: "credit_topup",
+          status: succeeded ? "succeeded" : "failed",
           refs: {
             productId: metadata.product_id,
             priceId: metadata.price_id,
@@ -206,7 +241,7 @@ export async function handleStripeWebhook(
           provider: "stripe",
           eventId: event.id,
           eventType: succeeded ? "payment.succeeded" : "payment.failed",
-          occurredAt: new Date().toISOString(),
+          occurredAt,
           userId: metadata.userId,
           payment,
         });
@@ -232,11 +267,13 @@ export async function handleStripeWebhook(
         }
 
         let stripeSub: Stripe.Subscription | undefined;
-        if (!userId) {
-          try {
-            stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
+        try {
+          stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
+          if (!userId) {
             userId = stripeSub.metadata?.userId;
-          } catch (err) {
+          }
+        } catch (err) {
+          if (!userId) {
             log.error("invoice.paid: failed to retrieve subscription", {
               subscriptionId,
               err,
@@ -259,7 +296,7 @@ export async function handleStripeWebhook(
           provider: "stripe",
           eventId: event.id,
           eventType: "invoice.paid",
-          occurredAt: new Date().toISOString(),
+          occurredAt,
           userId,
           customer: {
             providerCustomerId: customerId(invoice.customer),
@@ -269,6 +306,10 @@ export async function handleStripeWebhook(
             status: subStatus as BillingSubscriptionStatus,
             periodEnd,
             periodStart,
+            trialEnd: timestamp(stripeSub?.trial_end),
+            cancelAt: timestamp(stripeSub?.cancel_at),
+            endedAt: timestamp(stripeSub?.ended_at),
+            refs: stripeSub ? subscriptionRefs(stripeSub) : undefined,
           },
           invoice: {
             providerInvoiceId: invoice.id,
@@ -276,6 +317,44 @@ export async function handleStripeWebhook(
             amountPaidMinor: invoice.amount_paid,
             amountDueMinor: invoice.amount_due,
             currency: invoice.currency?.toUpperCase() ?? "USD",
+            periodStart,
+            periodEnd,
+          },
+        });
+        break;
+      }
+
+      case "refund.created":
+      case "refund.updated":
+      case "refund.failed": {
+        const refund = event.data.object as Stripe.Refund;
+        const status =
+          refund.status === "succeeded" ||
+          refund.status === "failed" ||
+          refund.status === "canceled"
+            ? refund.status
+            : "pending";
+        await callBillingEventSink(sink, {
+          provider: "stripe",
+          eventId: event.id,
+          eventType:
+            event.type === "refund.failed"
+              ? "refund.failed"
+              : event.type === "refund.updated"
+                ? "refund.updated"
+                : "refund.created",
+          occurredAt,
+          userId: refund.metadata?.userId,
+          refund: {
+            providerRefundId: refund.id,
+            providerPaymentId:
+              typeof refund.payment_intent === "string"
+                ? refund.payment_intent
+                : (refund.payment_intent?.id ?? null),
+            amountMinor: refund.amount,
+            currency: refund.currency.toUpperCase(),
+            reason: refund.reason,
+            status,
           },
         });
         break;

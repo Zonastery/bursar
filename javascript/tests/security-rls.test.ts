@@ -11,8 +11,8 @@ describe.runIf(DATABASE_URL)("configuration catalog migration smoke test", () =>
     await applyMigrations(pool);
   }, 60_000);
   afterAll(async () => pool.end());
-  it("creates the private Bursar catalog", async () => {
-    const result = await pool.query("SELECT to_regclass('bursar.bursar_config') AS catalog");
-    expect(result.rows[0].catalog).toBe("bursar.bursar_config");
+  it("creates the private normalized Bursar catalog", async () => {
+    const result = await pool.query("SELECT to_regclass('bursar.catalog_revisions') AS catalog");
+    expect(result.rows[0].catalog).toBe("bursar.catalog_revisions");
   });
 });

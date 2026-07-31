@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bursar.billing.models import BillingEventResult, BillingEventType
+from bursar.billing.types import BillingEventResult, BillingEventType
 from bursar.providers.dodo.event_mapper import (
     _normalize_date,
     handle_dodo_billing_event,
@@ -25,6 +25,7 @@ from tests.dodo_fixtures import (
     DODO_SUBSCRIPTION_ACTIVE_NO_DATES,
     DODO_SUBSCRIPTION_ACTIVE_PLAN_SLUG,
     DODO_SUBSCRIPTION_CANCELLATION_SCHEDULED,
+    DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED,
     DODO_SUBSCRIPTION_CANCELLED,
     DODO_SUBSCRIPTION_EXPIRED,
     DODO_SUBSCRIPTION_FAILED,
@@ -178,11 +179,11 @@ async def test_subscription_active_to_subscription_created(sink):
 
 
 @pytest.mark.asyncio
-async def test_subscription_renewed_to_subscription_activated(sink):
+async def test_subscription_renewed_to_subscription_renewed(sink):
     await handle_dodo_billing_event("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink)
     call = sink.ingest_billing_event.call_args
     assert call is not None
-    assert call[0][0].event_type == BillingEventType.subscription_activated
+    assert call[0][0].event_type == BillingEventType.subscription_renewed
 
 
 @pytest.mark.asyncio
@@ -191,6 +192,8 @@ async def test_subscription_cancelled_to_subscription_canceled(sink):
     call = sink.ingest_billing_event.call_args
     assert call is not None
     assert call[0][0].event_type == BillingEventType.subscription_canceled
+    assert call[0][0].subscription.status.value == "canceled"
+    assert call[0][0].subscription.refs.product_id == "prod_monk"
 
 
 @pytest.mark.asyncio
@@ -199,6 +202,7 @@ async def test_subscription_expired_to_subscription_expired(sink):
     call = sink.ingest_billing_event.call_args
     assert call is not None
     assert call[0][0].event_type == BillingEventType.subscription_expired
+    assert call[0][0].subscription.status.value == "expired"
 
 
 @pytest.mark.asyncio
@@ -234,8 +238,19 @@ async def test_cancellation_scheduled(sink):
     assert call[0][0].subscription.cancel_at_period_end is True
 
 
-# cancellation_unscheduled, checkout.expired, and dynamic dispute.* dispatch
-# are covered by the JS test suite (those handlers don't exist in the Python mapper yet).
+@pytest.mark.asyncio
+async def test_cancellation_unscheduled(sink):
+    await handle_dodo_billing_event(
+        "subscription.cancellation_unscheduled",
+        DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED,
+        None,
+        {},
+        sink,
+    )
+    call = sink.ingest_billing_event.call_args
+    assert call is not None
+    assert call[0][0].event_type == BillingEventType.subscription_cancellation_unscheduled
+    assert call[0][0].subscription.cancel_at_period_end is False
 
 
 @pytest.mark.asyncio
@@ -333,6 +348,57 @@ async def test_falls_back_to_metadata_plan_slug(sink):
     call = sink.ingest_billing_event.call_args
     assert call is not None
     assert call[0][0].subscription.refs.lookup_key == "sage"
+
+
+@pytest.mark.asyncio
+async def test_ignores_blank_product_id_and_trims_plan_slug(sink):
+    payload = {"subscription_id": "sub_trimmed_refs", "product_id": "   "}
+    await handle_dodo_billing_event(
+        "subscription.updated",
+        payload,
+        "user_1",
+        {"plan_slug": "  sage  "},
+        sink,
+    )
+    call = sink.ingest_billing_event.call_args
+    assert call is not None
+    assert call[0][0].subscription.refs.lookup_key == "sage"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        ("subscription.cancelled", DODO_SUBSCRIPTION_CANCELLED),
+        ("subscription.expired", DODO_SUBSCRIPTION_EXPIRED),
+        ("subscription.failed", DODO_SUBSCRIPTION_FAILED),
+        ("subscription.on_hold", DODO_SUBSCRIPTION_ON_HOLD),
+        ("subscription.updated", DODO_SUBSCRIPTION_UPDATED),
+        ("subscription.cancellation_scheduled", DODO_SUBSCRIPTION_CANCELLATION_SCHEDULED),
+        ("subscription.cancellation_unscheduled", DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED),
+    ],
+)
+async def test_subscription_state_events_include_offer_and_cadence_context(sink, event_type, payload):
+    await handle_dodo_billing_event(
+        event_type,
+        {
+            **payload,
+            "product_id": " prod_monk ",
+            "payment_frequency_interval": "Month",
+            "payment_frequency_count": 1,
+            "previous_billing_date": DODO_JS_DATE,
+        },
+        "user_1",
+        {},
+        sink,
+    )
+    call = sink.ingest_billing_event.call_args
+    assert call is not None
+    subscription = call[0][0].subscription
+    assert subscription.refs.product_id == "prod_monk"
+    assert subscription.interval == "month"
+    assert subscription.interval_count == 1
+    assert subscription.period_start == DODO_ISO_DATE
 
 
 @pytest.mark.asyncio

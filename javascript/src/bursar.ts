@@ -1,140 +1,30 @@
 import {
-  BillingService as BillingServiceImpl,
+  BillingService as BillingEventService,
   type BillingServiceOptions,
 } from "./billing/billing-service.js";
 import type { BillingStore } from "./billing/billing-store.js";
 import {
   CreditsService as CreditsServiceImpl,
   type CreditsServiceOptions,
-} from "./credits-service.js";
-import type { CreditStore } from "./stores/credit-store.js";
-import type { CreditEventEmitter } from "./stores/events.js";
-import type {
-  BillingEvent,
-  BillingEventResult,
-  BillingAutoRechargeAttempt,
-  BillingAutoRechargeProfile,
-  BillingPreferences,
-  BillingOfferResult,
-  BillingTopupResult,
-  BillingCustomerRecord,
-  BillingSubscriptionChange,
-  BillingSubscriptionState,
-  CheckoutIntent,
-  BillingInvoiceInfo,
-} from "./billing/billing-types.js";
-import type { AutoRechargeService } from "./billing/auto-recharge-service.js";
-
-/** Boundary used by payment providers to submit normalized lifecycle events. */
-export interface BillingEventSink {
-  ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult>;
-}
-
-/** Public billing capability exposed by the Bursar facade. */
-export interface BillingService extends BillingEventSink {
-  readonly autoRecharge: AutoRechargeService;
-  createOrGetCheckoutIntent(input: {
-    actorKey: string;
-    provider: string;
-    type: "subscription" | "credit_pack";
-    productId: string;
-    requestFingerprint: string;
-    expiresAt: string;
-  }): Promise<CheckoutIntent>;
-  updateCheckoutIntent(
-    id: string,
-    update: {
-      status?: "open" | "completed" | "failed" | "expired";
-      providerSessionId?: string | null;
-      checkoutUrl?: string | null;
-    },
-  ): Promise<void>;
-  getCheckoutIntent(id: string, actorKey: string): Promise<CheckoutIntent | null>;
-  getUserSubscription(userId: string): Promise<BillingSubscriptionState | null>;
-  getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
-  getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
-  getUserPreferences(userId: string): Promise<BillingPreferences | null>;
-  getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
-  listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
-  pseudonymizeFinancialSubject(userId: string): Promise<void>;
-  listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
-  createBillingSubscriptionChange(
-    input: Omit<BillingSubscriptionChange, "id">,
-  ): Promise<BillingSubscriptionChange>;
-  getOpenBillingSubscriptionChange(
-    provider: string,
-    providerSubscriptionId: string,
-  ): Promise<BillingSubscriptionChange | null>;
-  updateBillingSubscriptionChange(
-    id: string,
-    update: Parameters<BillingServiceImpl["updateBillingSubscriptionChange"]>[1],
-  ): Promise<void>;
-  recordSubscriptionConflict(
-    input: Parameters<BillingServiceImpl["recordSubscriptionConflict"]>[0],
-  ): Promise<void>;
-  upsertBillingSubscription(state: BillingSubscriptionState): Promise<void>;
-  updateUserPreferences(prefs: BillingPreferences): Promise<void>;
-  getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
-  upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
-  claimAutoRechargeAttempt(input: {
-    userId: string;
-    provider: string;
-    topupKey: string;
-    quantity: number;
-    windowStart: string;
-    maxRecharges: number;
-    triggerBalance: number;
-    policySnapshot: Record<string, unknown>;
-    policyHash: string;
-    quotedAmountMinor: number | null;
-    currency: string | null;
-  }): Promise<BillingAutoRechargeAttempt | null>;
-  updateAutoRechargeAttempt(input: {
-    id: string;
-    state: string;
-    providerPaymentId?: string | null;
-    failureCode?: string | null;
-    actionUrl?: string | null;
-  }): Promise<void>;
-  updateAutoRechargeAttemptByProviderPayment(input: {
-    provider: string;
-    providerPaymentId: string;
-    state: string;
-    failureCode?: string | null;
-  }): Promise<void>;
-  countAutoRechargeAttempts(userId: string, windowDays: number): Promise<number>;
-  recordSubscriptionConflict(input: {
-    userId?: string | null;
-    provider: string;
-    duplicateSubscriptionId: string;
-    existingSubscriptionId?: string | null;
-    eventId?: string | null;
-    metadata?: Record<string, unknown>;
-  }): Promise<void>;
-  getCustomerByUserId(
-    userId: string,
-    provider?: string | null,
-  ): Promise<BillingCustomerRecord | null>;
-  resolveOffer(
-    provider: string,
-    productId?: string | null,
-    priceId?: string | null,
-  ): Promise<BillingOfferResult | null>;
-  resolveTopup(
-    provider: string,
-    productId?: string | null,
-    priceId?: string | null,
-  ): Promise<BillingTopupResult | null>;
-  upsertCustomer(
-    provider: string,
-    providerCustomerId: string,
-    userId: string,
-    email?: string | null,
-  ): Promise<void>;
-}
+} from "./credits/service.js";
+import type { CreditStore } from "./credits/store.js";
+import type { CreditEventEmitter } from "./credits/events.js";
+import type { BillingEvent, BillingEventResult } from "./billing/types/index.js";
+import type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+import { CommerceService as CommerceServiceImpl } from "./commerce/service.js";
+import { CommerceNotConfiguredError } from "./commerce/errors.js";
+import type { CommerceOptions } from "./commerce/types.js";
+import { loadConfigFromDict } from "./config.js";
+import type { ParsedBursarConfig } from "./config/types.js";
+import { ConfigError, PricingNotLoadedError } from "./errors.js";
+import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
+import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
+import { retryBursarOperation } from "./retry.js";
+export type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+export type { CommerceOptions } from "./commerce/types.js";
 
 /** Public credit capability. The implementation remains package-private. */
-export type CreditsService = CreditsServiceImpl;
+export type CreditsService = Pick<CreditsServiceImpl, keyof CreditsServiceImpl>;
 
 /** Options for constructing the single application-facing Bursar service. */
 export interface BursarOptions {
@@ -143,6 +33,7 @@ export interface BursarOptions {
   credits?: CreditsService | null;
   creditsOptions?: CreditsServiceOptions | null;
   billingOptions?: BillingServiceOptions | null;
+  commerceOptions?: CommerceOptions | null;
   emitter?: CreditEventEmitter | null;
 }
 
@@ -152,6 +43,16 @@ export class CatalogService {
 
   get active() {
     return this.credits.getActivePricing();
+  }
+
+  async getConfig(): Promise<ParsedBursarConfig> {
+    const active = await this.active;
+    if (!active) throw new PricingNotLoadedError("No active Bursar catalog is available");
+    return loadConfigFromDict(active.config);
+  }
+
+  async publicView(): Promise<PublicCatalog> {
+    return projectPublicCatalog(await this.getConfig());
   }
 
   publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
@@ -167,6 +68,69 @@ export class CatalogService {
   }
 }
 
+export interface AccountCreatedInput {
+  accountId: string;
+  eventKey: string;
+  region?: string | null;
+  metadata?: CreditMetadata | null;
+}
+
+export interface AccountCreatedResult {
+  accountId: string;
+  planKey: string;
+  planAssigned: boolean;
+  grants: GrantProgramAwardResult[];
+}
+
+/** Generic financial lifecycle operations for SaaS accounts. */
+export class AccountService {
+  constructor(
+    private readonly credits: CreditsService,
+    private readonly catalog: CatalogService,
+  ) {}
+
+  async onAccountCreated(input: AccountCreatedInput): Promise<AccountCreatedResult> {
+    if (!input.eventKey.trim()) throw new ConfigError("eventKey must not be empty");
+    const config = await retryBursarOperation(() => this.catalog.getConfig());
+    const fallback = Object.entries(config.plans).sort(
+      ([aKey, a], [bKey, b]) => a.rank - b.rank || aKey.localeCompare(bKey),
+    )[0]?.[0];
+    const planKey = config.catalog.defaultPlan ?? fallback;
+    if (!planKey) throw new ConfigError("The active catalog has no default account plan");
+
+    const current = await retryBursarOperation(() => this.credits.getUserPlan(input.accountId));
+    const planAssigned = current.planKey == null;
+    if (planAssigned) {
+      await retryBursarOperation(() => this.credits.setUserPlan(input.accountId, planKey));
+    }
+
+    const grants: GrantProgramAwardResult[] = [];
+    for (const [programKey, program] of Object.entries(config.credits.grantPrograms).sort(
+      ([a], [b]) => a.localeCompare(b),
+    )) {
+      if (program.trigger !== "account_created") continue;
+      grants.push(
+        ...(await retryBursarOperation(() =>
+          this.credits.executeGrantProgram({
+            trigger: "account_created",
+            programKey,
+            subjectId: input.accountId,
+            eventKey: input.eventKey,
+            region: input.region,
+            metadata: input.metadata,
+          }),
+        )),
+      );
+    }
+    return {
+      accountId: input.accountId,
+      planKey: current.planKey ?? planKey,
+      planAssigned,
+      grants,
+    };
+  }
+}
+
 /**
  * The application-facing Bursar boundary.
  *
@@ -178,7 +142,9 @@ export class CatalogService {
 export class Bursar implements BillingEventSink {
   readonly credits: CreditsService;
   readonly billing: BillingService | null;
+  readonly commerce: CommerceServiceImpl | null;
   readonly catalog: CatalogService;
+  readonly accounts: AccountService;
 
   constructor(options: BursarOptions) {
     this.credits =
@@ -190,13 +156,23 @@ export class Bursar implements BillingEventSink {
         options.creditsOptions ?? undefined,
       );
     this.catalog = new CatalogService(this.credits);
+    this.accounts = new AccountService(this.credits, this.catalog);
 
     this.billing = options.billingStore
-      ? new BillingServiceImpl(options.billingStore, {
+      ? new BillingEventService(options.billingStore, {
           ...(options.billingOptions ?? {}),
           provisioning: this.credits,
         })
       : null;
+    this.commerce =
+      this.billing && options.commerceOptions
+        ? new CommerceServiceImpl(this.billing, this.credits, this, options.commerceOptions)
+        : null;
+    if (this.commerce) {
+      this.credits.addPostDeductionHook(async ({ userId }) => {
+        await this.commerce!.autoRecharge.processIfNeeded({ accountId: userId });
+      });
+    }
   }
 
   /** Load the active catalog into the pricing engine. */
@@ -209,7 +185,8 @@ export class Bursar implements BillingEventSink {
    * lifecycle. Providers must not depend on BillingService directly.
    */
   async ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult> {
-    if (!this.billing) throw new Error("Bursar billing capability is not configured");
+    if (!this.billing)
+      throw new CommerceNotConfiguredError("Bursar billing capability is not configured");
     return this.billing.ingestBillingEvent(event);
   }
 }

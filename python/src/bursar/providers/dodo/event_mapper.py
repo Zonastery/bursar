@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from bursar.billing.models import (
+from bursar.billing.types import (
     BillingCustomerInfo,
     BillingDisputeInfo,
     BillingEvent,
@@ -43,7 +43,7 @@ def _normalize_date(raw: Any) -> str | None:
         return None
     s = str(raw)
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(UTC).isoformat()
+        return datetime.fromisoformat(s).astimezone(UTC).isoformat()
     except (ValueError, TypeError):
         pass
     try:
@@ -61,6 +61,14 @@ def _normalize_date(raw: Any) -> str | None:
     except Exception:
         pass
     return None
+
+
+def _subscription_refs(data: dict[str, Any], metadata: dict[str, str]) -> ProviderRef | None:
+    product_id = str(data.get("product_id") or "").strip()
+    if product_id:
+        return ProviderRef(product_id=product_id)
+    lookup_key = str(metadata.get("plan_slug") or "").strip()
+    return ProviderRef(lookup_key=lookup_key) if lookup_key else None
 
 
 def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
@@ -104,7 +112,7 @@ def _base_event(
     event_type: str | None = None,
     metadata: dict[str, str] | None = None,
 ) -> dict:
-    source_id = data.get("id") or data.get("payment_id")
+    source_id = data.get("id") or data.get("refund_id") or data.get("payment_id")
     if source_id:
         raw_id = str(source_id)
     else:
@@ -113,7 +121,10 @@ def _base_event(
     result: dict[str, Any] = {
         "provider": "dodo",
         "event_id": raw_id,
-        "occurred_at": datetime.now(UTC).isoformat(),
+        "occurred_at": (
+            _normalize_date(data.get("updated_at") or data.get("created_at") or data.get("timestamp"))
+            or datetime.now(UTC).isoformat()
+        ),
         "customer": customer_info,
     }
     if metadata:
@@ -142,19 +153,32 @@ async def _handle_subscription_active(
     sub_id = str(data.get("subscription_id", ""))
     customer_info = _make_customer_info(data)
 
-    product_id = data.get("product_id")
     kw = {
         **_base_event(data, customer_info, event_type, metadata),
         "event_type": BillingEventType.subscription_created,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
-            status=parse_status("active"),
+            status=parse_status(data.get("status", "active")),
             period_end=_normalize_date(data.get("next_billing_date")),
-            refs=ProviderRef(product_id=str(product_id))
-            if product_id
-            else (ProviderRef(lookup_key=metadata.get("plan_slug")) if metadata.get("plan_slug") else None),
+            refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
+    }
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+
+
+async def _handle_checkout_expired(
+    event_type: str,
+    data: dict[str, Any],
+    user_id: str | None,
+    metadata: dict[str, str],
+    sink: BillingEventSink,
+    logger: ProviderLogger,
+) -> None:
+    del logger
+    kw = {
+        **_base_event(data, _make_customer_info(data), event_type, metadata),
+        "event_type": BillingEventType.checkout_expired,
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
@@ -174,19 +198,15 @@ async def _handle_subscription_renewed(
     sub_id = str(data.get("subscription_id", ""))
     customer_info = _make_customer_info(data)
 
-    product_id = data.get("product_id")
-    plan_slug = metadata.get("plan_slug")
     kw = {
         **_base_event(data, customer_info, event_type, metadata),
-        "event_type": BillingEventType.subscription_activated,
+        "event_type": BillingEventType.subscription_renewed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
             status=parse_status("active"),
             period_end=_normalize_date(data.get("next_billing_date")),
             **_subscription_fields(data, metadata),
-            refs=ProviderRef(product_id=str(product_id))
-            if product_id
-            else (ProviderRef(lookup_key=plan_slug) if plan_slug else None),
+            refs=_subscription_refs(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -209,6 +229,9 @@ async def _handle_subscription_cancelled(
         "event_type": BillingEventType.subscription_canceled,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
+            status=parse_status("canceled"),
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -231,6 +254,9 @@ async def _handle_subscription_expired(
         "event_type": BillingEventType.subscription_expired,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
+            status=parse_status("expired"),
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -254,6 +280,8 @@ async def _handle_subscription_failed(
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
             status=parse_status("past_due"),
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -277,6 +305,8 @@ async def _handle_subscription_on_hold(
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
             status=parse_status("past_due"),
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -303,6 +333,7 @@ async def _handle_subscription_updated_event(
             status=parse_status(sub_status),
             period_end=_normalize_date(data.get("next_billing_date")),
             **_subscription_fields(data, metadata),
+            refs=_subscription_refs(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -326,6 +357,33 @@ async def _handle_subscription_cancellation_scheduled(
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
             cancel_at_period_end=True,
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
+        ),
+    }
+    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
+
+
+async def _handle_subscription_cancellation_unscheduled(
+    event_type: str,
+    data: dict[str, Any],
+    user_id: str | None,
+    metadata: dict[str, str],
+    sink: BillingEventSink,
+    logger: ProviderLogger,
+) -> None:
+    sub_id = str(data.get("subscription_id", ""))
+    if not sub_id:
+        return
+    customer_info = _make_customer_info(data)
+    kw = {
+        **_base_event(data, customer_info, event_type, metadata),
+        "event_type": BillingEventType.subscription_cancellation_unscheduled,
+        "subscription": BillingSubscriptionInfo(
+            provider_subscription_id=sub_id,
+            cancel_at_period_end=False,
+            refs=_subscription_refs(data, metadata),
+            **_subscription_fields(data, metadata),
         ),
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -343,19 +401,13 @@ async def _handle_subscription_plan_changed(
     if not sub_id:
         return
     customer_info = _make_customer_info(data)
-    product_id = str(data.get("product_id", ""))
-    refs = None
-    if product_id:
-        refs = ProviderRef(product_id=product_id)
-    elif metadata.get("plan_slug"):
-        refs = ProviderRef(lookup_key=metadata["plan_slug"])
     kw = {
         **_base_event(data, customer_info, event_type, metadata),
         "event_type": BillingEventType.subscription_plan_changed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
             status=parse_status("active"),
-            refs=refs,
+            refs=_subscription_refs(data, metadata),
             **_subscription_fields(data, metadata),
         ),
     }
@@ -385,14 +437,22 @@ async def _handle_payment_succeeded(
         tax_minor=int(data["settlement_tax"]) if data.get("settlement_tax") is not None else None,
         currency=str(data.get("settlement_currency", data.get("currency", "USD"))).upper(),
         purpose="subscription" if subscription_id else "credit_topup",
+        status="succeeded",
         refs=refs,
     )
 
-    kw = {
+    kw: dict[str, Any] = {
         **_base_event(data, customer_info, event_type, metadata),
         "event_type": BillingEventType.payment_succeeded,
         "payment": payment_info,
     }
+    if subscription_id:
+        kw["subscription"] = BillingSubscriptionInfo(
+            provider_subscription_id=subscription_id,
+            status=parse_status(data.get("subscription_status", "active")),
+            period_start=_normalize_date(data.get("previous_billing_date")),
+            period_end=_normalize_date(data.get("next_billing_date")),
+        )
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
@@ -409,18 +469,25 @@ async def _handle_payment_failed(
     payment_id = str(data.get("payment_id", ""))
     subscription_id = str(data.get("subscription_id", ""))
 
-    payment_info = BillingPaymentInfo(
-        provider_payment_id=payment_id or raw_id,
-        amount_minor=int(data.get("settlement_amount", data.get("amount", 0))),
-        currency=str(data.get("settlement_currency", data.get("currency", "USD"))).upper(),
-        purpose="subscription" if subscription_id else "unknown",
-    )
-
-    kw = {
+    kw: dict[str, Any] = {
         **_base_event(data, customer_info, event_type, metadata),
         "event_type": BillingEventType.payment_failed,
-        "payment": payment_info,
     }
+    if subscription_id:
+        kw["subscription"] = BillingSubscriptionInfo(
+            provider_subscription_id=subscription_id,
+        )
+    if payment_id or data.get("settlement_amount"):
+        product_id = data.get("product_id")
+        kw["payment"] = BillingPaymentInfo(
+            provider_payment_id=payment_id or raw_id,
+            amount_minor=int(data.get("settlement_amount", data.get("amount", 0))),
+            tax_minor=(int(data["settlement_tax"]) if data.get("settlement_tax") is not None else None),
+            currency=str(data.get("settlement_currency", data.get("currency", "USD"))).upper(),
+            purpose="subscription",
+            status="failed",
+            refs=ProviderRef(product_id=str(product_id)) if product_id else None,
+        )
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
@@ -433,15 +500,17 @@ async def _handle_refund_succeeded(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    refund_id = str(data.get("id", ""))
-    payment_id = str(data.get("payment_id", ""))
+    refund_id = str(data.get("refund_id") or data.get("id") or "")
+    payment_id = str(data.get("payment_id") or "") or None
+    reason = data.get("reason")
 
     refund_info = BillingRefundInfo(
         provider_refund_id=refund_id,
         provider_payment_id=payment_id,
         amount_minor=int(data.get("refund_amount", data.get("amount", 0))),
         currency=str(data.get("currency", "USD")).upper(),
-        reason=str(data.get("reason", "")),
+        reason=str(reason) if reason is not None else None,
+        status="succeeded",
     )
 
     kw = {
@@ -461,14 +530,14 @@ async def _handle_dispute_created(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = str(data.get("id", ""))
-    payment_id = str(data.get("payment_id", ""))
+    dispute_id = str(data.get("dispute_id") or data.get("id") or "")
+    payment_id = str(data.get("payment_id") or "") or None
+    reason = data.get("reason")
 
     dispute_info = BillingDisputeInfo(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
-        status="needs_response",
-        reason=str(data.get("reason", "")),
+        reason=str(reason) if reason is not None else None,
     )
 
     kw = {
@@ -488,14 +557,14 @@ async def _handle_dispute_closed(
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = str(data.get("id", ""))
-    payment_id = str(data.get("payment_id", ""))
+    dispute_id = str(data.get("dispute_id") or data.get("id") or "")
+    payment_id = str(data.get("payment_id") or "") or None
+    reason = data.get("reason")
 
     dispute_info = BillingDisputeInfo(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
-        status=str(data.get("status", "closed")),
-        reason=str(data.get("reason", "")),
+        reason=str(reason) if reason is not None else None,
     )
 
     kw = {
@@ -507,6 +576,7 @@ async def _handle_dispute_closed(
 
 
 _EVENT_HANDLERS: dict[str, Any] = {
+    "checkout.expired": _handle_checkout_expired,
     "subscription.active": _handle_subscription_active,
     "subscription.renewed": _handle_subscription_renewed,
     "subscription.cancelled": _handle_subscription_cancelled,
@@ -515,12 +585,19 @@ _EVENT_HANDLERS: dict[str, Any] = {
     "subscription.on_hold": _handle_subscription_on_hold,
     "subscription.updated": _handle_subscription_updated_event,
     "subscription.cancellation_scheduled": _handle_subscription_cancellation_scheduled,
+    "subscription.cancellation_unscheduled": _handle_subscription_cancellation_unscheduled,
     "subscription.plan_changed": _handle_subscription_plan_changed,
     "payment.succeeded": _handle_payment_succeeded,
     "payment.failed": _handle_payment_failed,
     "refund.succeeded": _handle_refund_succeeded,
     "dispute.created": _handle_dispute_created,
     "dispute.closed": _handle_dispute_closed,
+    "dispute.won": _handle_dispute_closed,
+    "dispute.lost": _handle_dispute_closed,
+    "dispute.accepted": _handle_dispute_closed,
+    "dispute.cancelled": _handle_dispute_closed,
+    "dispute.challenged": _handle_dispute_closed,
+    "dispute.expired": _handle_dispute_closed,
 }
 
 

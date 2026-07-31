@@ -38,6 +38,14 @@ describe("normalizeDate", () => {
     expect(normalizeDate(DODO_JS_DATE)).toBe(DODO_ISO_DATE);
   });
 
+  it("preserves milliseconds from SDK Date values", () => {
+    expect(normalizeDate(new Date("2026-07-18T05:15:24.987Z"))).toBe("2026-07-18T05:15:24.987Z");
+  });
+
+  it("returns null for an invalid Date object", () => {
+    expect(normalizeDate(new Date(Number.NaN))).toBeNull();
+  });
+
   it("passes through valid ISO 8601 unchanged", () => {
     expect(normalizeDate("2026-07-18T05:15:24.000Z")).toBe("2026-07-18T05:15:24.000Z");
     expect(normalizeDate("2026-07-18T00:00:00Z")).toBe("2026-07-18T00:00:00.000Z");
@@ -241,7 +249,7 @@ describe("event type routing", () => {
     );
   });
 
-  it("subscription.renewed → subscription.activated", async () => {
+  it("subscription.renewed → subscription.renewed", async () => {
     const sink = makeSink();
     await handleDodoBillingEvent(
       "subscription.renewed",
@@ -251,7 +259,7 @@ describe("event type routing", () => {
       sink,
     );
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: "subscription.activated" }),
+      expect.objectContaining({ eventType: "subscription.renewed" }),
     );
   });
 
@@ -267,7 +275,11 @@ describe("event type routing", () => {
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.canceled",
-        subscription: { providerSubscriptionId: "sub_dodo_cancelled_001" },
+        subscription: {
+          providerSubscriptionId: "sub_dodo_cancelled_001",
+          status: "canceled",
+          refs: { productId: "prod_monk" },
+        },
       }),
     );
   });
@@ -278,7 +290,7 @@ describe("event type routing", () => {
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.expired",
-        subscription: { providerSubscriptionId: "sub_dodo_expired_001" },
+        subscription: { providerSubscriptionId: "sub_dodo_expired_001", status: "expired" },
       }),
     );
   });
