@@ -236,9 +236,48 @@ describe("payment provider adapter contracts", () => {
     await expect(
       provider.createCustomerPortalSession({ returnUrl: "https://portal" }),
     ).resolves.toEqual({ url: "https://portal" });
+    await expect(
+      provider.createUpdatePaymentMethodSession({ returnUrl: "https://update" }),
+    ).resolves.toEqual({ url: "https://update" });
+    await expect(
+      provider.createPaymentMethodSetupSession({ returnUrl: "https://setup" }),
+    ).resolves.toEqual({ url: "https://setup" });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({
       url: "https://example.com/invoice",
     });
+    await expect(provider.listPaymentMethods("cus_1")).resolves.toEqual([]);
+    await expect(provider.getDefaultPaymentMethod("cus_1")).resolves.toBeNull();
+    await expect(
+      provider.previewSavedPaymentCharge({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+        productId: "prod_1",
+        quantity: 1,
+      }),
+    ).resolves.toEqual({ amountMinor: 0, currency: "USD" });
+    await expect(
+      provider.chargeSavedPaymentMethod({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+        productId: "prod_1",
+        quantity: 1,
+        idempotencyKey: "topup_1",
+      }),
+    ).resolves.toMatchObject({ providerPaymentId: "mock_pay_topup_1", status: "succeeded" });
+    await expect(
+      provider.createCustomer({ userId: "u1", email: "u1@example.com" }),
+    ).resolves.toMatchObject({ customerId: expect.stringMatching(/^mock_cus_/) });
+    await expect(
+      provider.changePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      provider.previewChangePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
+    ).resolves.toMatchObject({ totalAmount: 0, settlementAmount: 0, currency: "USD" });
+    await expect(provider.cancelSubscription("sub_1")).resolves.toBeUndefined();
+    await expect(provider.reactivateSubscription("sub_1")).resolves.toBeUndefined();
+    await expect(
+      provider.cancelScheduledPlanChange("sub_1", "op_1", "idem_1"),
+    ).resolves.toBeUndefined();
     await expect(provider.handleWebhook({ rawBody: "not-json", headers: {} })).resolves.toEqual({
       received: false,
       retryable: false,
