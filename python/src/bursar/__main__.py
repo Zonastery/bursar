@@ -19,10 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from pydantic import ValidationError
-
-from bursar.expr import ExpressionError
-
 if TYPE_CHECKING:
     from bursar.credits.store import CreditStore
     from bursar.credits.types import BursarConfigResult
@@ -277,7 +273,11 @@ def _provision_tenant(
                 "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
                 (str(tenant_id), slug, display_name),
             )
-            created_id = cursor.fetchone()[0]
+            row = cursor.fetchone()
+            if row is None:
+                print("Failed to create tenant: no result returned", file=sys.stderr)
+                raise SystemExit(1)
+            created_id = row[0]
     except psycopg2.Error as exc:
         print(f"Failed to create tenant: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -329,7 +329,11 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
                 "SELECT bursar.set_tenant_status(%s::uuid, %s::text)",
                 (str(tenant_id), args.status),
             )
-            updated = cursor.fetchone()[0]
+            row = cursor.fetchone()
+            if row is None:
+                print("Failed to update tenant: no result returned", file=sys.stderr)
+                raise SystemExit(1)
+            updated = row[0]
     except psycopg2.Error as exc:
         print(f"Failed to update tenant: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -359,15 +363,14 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
 
 
 def _validated_config(filepath: str) -> dict[str, Any]:
-    from bursar.config import BursarConfig
+    from bursar.config import ConfigError, canonical_bursar_config_dict
 
     data = _load_pricing_file(filepath)
     try:
-        BursarConfig.model_validate(data)
-    except (ValidationError, ExpressionError) as exc:
+        return canonical_bursar_config_dict(data)
+    except ConfigError as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-    return data
 
 
 def _set_config(

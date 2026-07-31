@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -101,7 +101,7 @@ def test_migrate_accepts_ordered_post_migration_sql_files(
     monkeypatch.setattr(cli, "_require_extra", lambda _extra: None)
     monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
 
-    args = SimpleNamespace(post_migrate_sql=[str(first), str(second)])
+    args = Namespace(post_migrate_sql=[str(first), str(second)])
     cli._cmd_migrate(args)
 
     assert calls == [
@@ -134,7 +134,7 @@ def test_migrate_rejects_unreadable_or_empty_post_migration_sql(
     monkeypatch.setattr("bursar.credits.postgres.store.run_migrations", run_migrations)
 
     with pytest.raises(SystemExit) as exc:
-        cli._cmd_migrate(SimpleNamespace(post_migrate_sql=[str(path)]))
+        cli._cmd_migrate(Namespace(post_migrate_sql=[str(path)]))
 
     assert exc.value.code == 1
     assert not called
@@ -206,7 +206,7 @@ def test_tenant_bootstrap_owns_provisioning_and_config_sequence(
     monkeypatch.setattr(cli, "_set_config", set_config)
 
     cli._cmd_tenant_bootstrap(
-        SimpleNamespace(
+        Namespace(
             file="pricing.yaml",
             id=None,
             slug="acme",
@@ -237,7 +237,7 @@ def test_tenant_bootstrap_requires_a_stable_tenant_id(
 
     with pytest.raises(SystemExit) as exc:
         cli._cmd_tenant_bootstrap(
-            SimpleNamespace(
+            Namespace(
                 file="pricing.yaml",
                 id=None,
                 slug="acme",
