@@ -21,6 +21,19 @@ bursar tenant create acme \
   --display-name "Acme"
 ```
 
+Deployments that also need to publish initial pricing can use the Bursar-owned
+bootstrap boundary:
+
+```bash
+export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+bursar tenant bootstrap acme ./pricing.yaml \
+  --display-name "Acme"
+```
+
+Do not insert into `bursar.tenants` from host migrations or seed SQL. Tenant
+storage and lifecycle are Bursar implementation details behind the operator
+CLI.
+
 Pass that UUID when constructing a store or runtime:
 
 ```python

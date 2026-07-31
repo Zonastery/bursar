@@ -22,6 +22,20 @@ bursar tenant create acme \
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
 ```
 
+For a deployment bootstrap, provision a tenant and publish its initial config
+through one idempotent command:
+
+```bash
+export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+bursar tenant bootstrap acme ./pricing.yaml \
+  --display-name "Acme"
+```
+
+`tenant bootstrap` validates the config before provisioning. Tenant creation
+and config publication are each idempotent, so the command is safe to retry
+after an operational failure. Host applications should use these operator
+commands instead of writing Bursar-owned tables.
+
 Application commands such as `bursar config set` also require
 `BURSAR_TENANT_ID`.
 

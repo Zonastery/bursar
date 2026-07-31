@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 
@@ -57,6 +58,25 @@ def test_parser_requires_a_command_and_config_subcommand() -> None:
         cli.main([])
     with pytest.raises(SystemExit):
         cli.main(["config"])
+
+
+def test_parser_exposes_tenant_bootstrap_as_one_operator_command() -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "tenant",
+            "bootstrap",
+            "acme",
+            "pricing.yaml",
+            "--display-name",
+            "Acme",
+        ]
+    )
+
+    assert args.func is cli._cmd_tenant_bootstrap
+    assert args.slug == "acme"
+    assert args.file == "pricing.yaml"
+    assert args.id is None
+    assert args.display_name == "Acme"
 
 
 def test_migrate_accepts_ordered_post_migration_sql_files(
@@ -140,3 +160,92 @@ def test_retry_transient_retries_only_transient_errors(monkeypatch: pytest.Monke
 
     with pytest.raises(SystemExit):
         cli._retry_transient(permanent, what="test")
+
+
+def test_tenant_bootstrap_owns_provisioning_and_config_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tenant_id = UUID("00000000-0000-4000-8000-000000000001")
+    config = {"version": 1}
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setenv("BURSAR_TENANT_ID", str(tenant_id))
+    monkeypatch.setattr(cli, "_validated_config", lambda filepath: config)
+
+    def provision_tenant(
+        *,
+        tenant_id: UUID,
+        slug: str,
+        display_name: str | None,
+    ) -> UUID:
+        calls.append(
+            (
+                "tenant",
+                (tenant_id, slug, display_name),
+            )
+        )
+        return tenant_id
+
+    def set_config(
+        data: dict[str, object],
+        *,
+        store_type: str,
+        tenant_id: str | None,
+        label: str | None,
+    ) -> bool:
+        calls.append(
+            (
+                "config",
+                (data, store_type, tenant_id, label),
+            )
+        )
+        return True
+
+    monkeypatch.setattr(cli, "_provision_tenant", provision_tenant)
+    monkeypatch.setattr(cli, "_set_config", set_config)
+
+    cli._cmd_tenant_bootstrap(
+        SimpleNamespace(
+            file="pricing.yaml",
+            id=None,
+            slug="acme",
+            display_name="Acme",
+            label="initial",
+            store="postgres",
+        )
+    )
+
+    assert calls == [
+        ("tenant", (tenant_id, "acme", "Acme")),
+        ("config", (config, "postgres", str(tenant_id), "initial")),
+    ]
+    assert capsys.readouterr().out == f"Tenant {tenant_id} bootstrapped successfully (config applied).\n"
+
+
+def test_tenant_bootstrap_requires_a_stable_tenant_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("BURSAR_TENANT_ID", raising=False)
+    monkeypatch.setattr(cli, "_validated_config", lambda filepath: {"version": 1})
+    monkeypatch.setattr(
+        cli,
+        "_provision_tenant",
+        lambda **kwargs: pytest.fail("tenant must not be provisioned"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli._cmd_tenant_bootstrap(
+            SimpleNamespace(
+                file="pricing.yaml",
+                id=None,
+                slug="acme",
+                display_name=None,
+                label=None,
+                store="postgres",
+            )
+        )
+
+    assert exc.value.code == 1
+    assert "BURSAR_TENANT_ID or --id is required" in capsys.readouterr().err

@@ -117,7 +117,11 @@ def _retry_transient[T](op: Callable[[], T], *, what: str) -> T:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _store_from_env(store_type: str | None = None) -> CreditStore:
+def _store_from_env(
+    store_type: str | None = None,
+    *,
+    tenant_id: str | None = None,
+) -> CreditStore:
     """Create a store from env vars (``DATABASE_URL``).
 
     Args:
@@ -135,13 +139,13 @@ def _store_from_env(store_type: str | None = None) -> CreditStore:
     if not database_url:
         print("DATABASE_URL required", file=sys.stderr)
         raise SystemExit(1)
-    tenant_id = os.environ.get("BURSAR_TENANT_ID")
-    if not tenant_id:
+    resolved_tenant_id = tenant_id or os.environ.get("BURSAR_TENANT_ID")
+    if not resolved_tenant_id:
         print("BURSAR_TENANT_ID required", file=sys.stderr)
         raise SystemExit(1)
     from bursar.credits.postgres.store import PostgresStore
 
-    return PostgresStore(database_url=database_url, tenant_id=tenant_id)
+    return PostgresStore(database_url=database_url, tenant_id=resolved_tenant_id)
 
 
 # ── File loading ─────────────────────────────────────────────────────────────
@@ -253,18 +257,17 @@ def _cmd_migrate(args: argparse.Namespace) -> None:
     print("Migrations applied successfully.")
 
 
-def _cmd_tenant_create(args: argparse.Namespace) -> None:
+def _provision_tenant(
+    *,
+    tenant_id: UUID,
+    slug: str,
+    display_name: str | None,
+) -> UUID:
     _require_extra("postgres")
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         print("DATABASE_URL is required", file=sys.stderr)
         raise SystemExit(1)
-
-    try:
-        tenant_id = UUID(args.id) if args.id else uuid4()
-    except ValueError:
-        print("Tenant ID must be a UUID", file=sys.stderr)
-        raise SystemExit(1) from None
 
     import psycopg2
 
@@ -272,13 +275,36 @@ def _cmd_tenant_create(args: argparse.Namespace) -> None:
         with psycopg2.connect(database_url) as connection, connection.cursor() as cursor:
             cursor.execute(
                 "SELECT bursar.create_tenant(%s::uuid, %s::text, %s::text)",
-                (str(tenant_id), args.slug, args.display_name),
+                (str(tenant_id), slug, display_name),
             )
             created_id = cursor.fetchone()[0]
     except psycopg2.Error as exc:
         print(f"Failed to create tenant: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
+    return UUID(str(created_id))
+
+
+def _parse_tenant_id(raw_tenant_id: str | None, *, generate: bool) -> UUID:
+    if raw_tenant_id is None and generate:
+        return uuid4()
+    if raw_tenant_id is None:
+        print("BURSAR_TENANT_ID or --id is required", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        return UUID(raw_tenant_id)
+    except ValueError:
+        print("Tenant ID must be a UUID", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
+def _cmd_tenant_create(args: argparse.Namespace) -> None:
+    tenant_id = _parse_tenant_id(args.id, generate=True)
+    created_id = _provision_tenant(
+        tenant_id=tenant_id,
+        slug=args.slug,
+        display_name=args.display_name,
+    )
     print(str(created_id))
 
 
@@ -332,28 +358,67 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
         print("Pricing config is valid.")
 
 
-def _cmd_config_set(args: argparse.Namespace) -> None:
+def _validated_config(filepath: str) -> dict[str, Any]:
     from bursar.config import BursarConfig
 
-    data = _load_pricing_file(args.file)
+    data = _load_pricing_file(filepath)
     try:
         BursarConfig.model_validate(data)
     except (ValidationError, ExpressionError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
+    return data
 
-    store = _store_from_env(args.store)
 
-    # Abort if identical to the currently active version — avoids pointless
-    # version churn and noisy diffs.  Only applies when an active version exists;
-    # first-time setup always proceeds.
+def _set_config(
+    data: dict[str, Any],
+    *,
+    store_type: str,
+    tenant_id: str | None = None,
+    label: str | None = None,
+) -> bool:
+    store = _store_from_env(store_type, tenant_id=tenant_id)
+
+    # Abort if identical to the currently active version to avoid pointless
+    # version churn. First-time setup always proceeds.
     active = store.get_active_pricing()
     if active is not None and data == active.config:
+        return False
+
+    _retry_transient(lambda: store.set_active_pricing(data, label=label), what="set pricing")
+    return True
+
+
+def _cmd_config_set(args: argparse.Namespace) -> None:
+    data = _validated_config(args.file)
+    if not _set_config(data, store_type=args.store, label=args.label):
         print("No changes — config is identical to the active version.")
         return
-
-    _retry_transient(lambda: store.set_active_pricing(data, label=args.label), what="set pricing")
     print("Bursar config set successfully.")
+
+
+def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
+    # Validate before provisioning so malformed config cannot leave behind a
+    # tenant that can never start. Provisioning and config publication are both
+    # idempotent, so an operational failure can be retried safely.
+    data = _validated_config(args.file)
+    tenant_id = _parse_tenant_id(
+        args.id or os.environ.get("BURSAR_TENANT_ID"),
+        generate=False,
+    )
+    created_id = _provision_tenant(
+        tenant_id=tenant_id,
+        slug=args.slug,
+        display_name=args.display_name,
+    )
+    changed = _set_config(
+        data,
+        store_type=args.store,
+        tenant_id=str(created_id),
+        label=args.label,
+    )
+    outcome = "config applied" if changed else "config unchanged"
+    print(f"Tenant {created_id} bootstrapped successfully ({outcome}).")
 
 
 def _cmd_config_get(args: argparse.Namespace) -> None:
@@ -485,6 +550,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional display name",
     )
     p_tenant_create.set_defaults(func=_cmd_tenant_create)
+    p_tenant_bootstrap = tenant_sub.add_parser(
+        "bootstrap",
+        help="Provision a tenant and apply its initial config",
+    )
+    p_tenant_bootstrap.add_argument("slug", help="Unique tenant slug")
+    p_tenant_bootstrap.add_argument(
+        "file",
+        help="JSON/YAML pricing file, or '-' for stdin",
+    )
+    p_tenant_bootstrap.add_argument(
+        "--id",
+        default=None,
+        help="Tenant UUID (defaults to BURSAR_TENANT_ID)",
+    )
+    p_tenant_bootstrap.add_argument(
+        "--display-name",
+        default=None,
+        help="Optional display name",
+    )
+    p_tenant_bootstrap.add_argument(
+        "--label",
+        default=None,
+        help="Optional label/message for the initial config version",
+    )
+    p_tenant_bootstrap.set_defaults(func=_cmd_tenant_bootstrap)
     p_tenant_status = tenant_sub.add_parser(
         "status",
         help="Activate, suspend, or close a tenant",
