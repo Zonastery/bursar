@@ -4,7 +4,7 @@ from bursar.billing.auto_recharge_service import (
     AutoRechargeProcessResult,
     AutoRechargeService,
 )
-from bursar.billing.billing_service import BillingService, BillingServiceImpl
+from bursar.billing.billing_service import BillingService
 from bursar.billing.billing_store import BillingStore
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
@@ -118,7 +118,6 @@ __all__ = [
     "BillingServiceOptions",
     "BillingProvider",
     "BillingService",
-    "BillingServiceImpl",
     "CheckoutIntent",
     "CheckoutIntentStatus",
     "ProviderRef",

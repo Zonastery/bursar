@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class CreditMetadata(BaseModel, extra="allow"):
@@ -49,8 +49,6 @@ class DeductionResult(BaseModel):
     balance_after: Decimal
     allowance_consumed: Decimal
     idempotent: bool
-    cap_warning: str | None
-    feature_limit_warning: str | None = None
     error: str | None = None
     bucket_breakdown: dict[str, Decimal] | None = None
 
@@ -130,24 +128,6 @@ class PlanMigrationBatchResult(BaseModel):
     migrated: int
     done: bool
     next_cursor: str | None = None
-
-
-class MigratePlanUsersResult(BaseModel):
-    """Deprecated one-shot migration result; mirrors the JavaScript SDK."""
-
-    plan_key: str
-    target_plan_id: str
-    target_config_version: int
-    migrated_count: int
-
-
-class SpendCap(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    user_id: str
-    type: Literal["daily", "monthly"]
-    model: str | None = None
-    limit: Decimal = Field(ge=0)
-    on_exceed: Literal["deny", "warn", "notify"]
 
 
 class DeductWithAllowanceOptions(BaseModel):

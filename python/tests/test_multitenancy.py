@@ -1,6 +1,7 @@
 """End-to-end shared-table tenant isolation regressions."""
 
 import json
+from copy import deepcopy
 from decimal import Decimal
 
 import psycopg2
@@ -95,6 +96,110 @@ def test_runtime_role_is_fail_closed(pg_database_url: str) -> None:
             """
         )
         assert cursor.fetchone() == (0,)
+
+
+def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
+    pg_database_url: str,
+) -> None:
+    subject_id = "00000000-0000-0000-0000-000000000101"
+    config = deepcopy(CONFIG)
+    config["catalog"] = {"default_plan": "pro"}
+    config["credits"]["grant_programs"] = {
+        "welcome": {
+            "trigger": "account_created",
+            "awards": [
+                {
+                    "recipient": "subject",
+                    "amount": "2",
+                    "bucket": "purchased",
+                }
+            ],
+            "max_awards_per_subject": 1,
+            "idempotency_scope": "subject",
+        }
+    }
+    store = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
+    try:
+        store.set_active_pricing(config, "host-trigger")
+    finally:
+        store.close()
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL(
+                """
+                CREATE TEMP TABLE host_trigger_users (
+                    id uuid PRIMARY KEY
+                );
+                CREATE TRIGGER host_trigger_account_created
+                AFTER INSERT ON host_trigger_users
+                FOR EACH ROW
+                EXECUTE FUNCTION
+                    bursar.provision_subject_account_on_insert({});
+                """
+            ).format(sql.Literal(TEST_TENANT_SLUG))
+        )
+        cursor.execute(
+            "INSERT INTO host_trigger_users(id) VALUES (%s)",
+            (subject_id,),
+        )
+        cursor.execute(
+            """
+            SELECT plan.plan_key, account.balance
+            FROM bursar.credit_accounts AS account
+            JOIN bursar.account_plan_assignments AS assignment
+              ON assignment.account_id = account.id
+             AND assignment.tenant_id = account.tenant_id
+            JOIN bursar.catalog_plans AS plan
+              ON plan.id = assignment.plan_id
+             AND plan.tenant_id = assignment.tenant_id
+            WHERE account.tenant_id = %s
+              AND account.subject_id = %s
+              AND account.account_kind = 'personal'
+            """,
+            (TEST_TENANT_ID, subject_id),
+        )
+        assert cursor.fetchone() == ("pro", Decimal("2"))
+
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.grant_award_executions AS execution
+            JOIN bursar.grant_program_events AS event
+              ON event.id = execution.grant_event_id
+            WHERE execution.tenant_id = %s
+              AND event.subject_id = %s
+            """,
+            (TEST_TENANT_ID, subject_id),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_tenant_aware_host_trigger_rejects_unknown_tenant(
+    pg_database_url: str,
+) -> None:
+    with (
+        psycopg2.connect(pg_database_url) as connection,
+        connection.cursor() as cursor,
+        pytest.raises(
+            psycopg2.errors.ObjectNotInPrerequisiteState,
+            match="Bursar tenant is not provisioned or active",
+        ),
+    ):
+        cursor.execute(
+            """
+            CREATE TEMP TABLE unknown_tenant_trigger_users (
+                id uuid PRIMARY KEY
+            );
+            CREATE TRIGGER unknown_tenant_account_created
+            AFTER INSERT ON unknown_tenant_trigger_users
+            FOR EACH ROW
+            EXECUTE FUNCTION
+                bursar.provision_subject_account_on_insert('missing-tenant');
+            INSERT INTO unknown_tenant_trigger_users(id)
+            VALUES ('00000000-0000-0000-0000-000000000102');
+            """
+        )
 
 
 def test_tenants_isolate_catalog_credit_and_provider_idempotency(
@@ -437,6 +542,7 @@ def test_runtime_role_cannot_execute_operator_functions(
             "bursar.ensure_storage_partition(text,timestamptz,boolean)",
             "bursar.is_nonempty_text(text)",
             "bursar.get_credit_state(uuid)",
+            "bursar.resolve_active_tenant_for_trigger(text)",
         ):
             cursor.execute(
                 "SELECT has_function_privilege('bursar_runtime', %s, 'EXECUTE')",
@@ -452,6 +558,31 @@ def test_runtime_role_cannot_execute_operator_functions(
             """
         )
         assert cursor.fetchone() == ("bursar_runtime",)
+
+        cursor.execute(
+            """
+            SELECT
+                pg_get_userbyid(resolver.proowner) <> 'bursar_runtime',
+                pg_get_userbyid(trigger_hook.proowner) = 'bursar_runtime',
+                has_function_privilege(
+                    current_user,
+                    trigger_hook.oid,
+                    'EXECUTE'
+                ),
+                has_function_privilege(
+                    'service_role',
+                    trigger_hook.oid,
+                    'EXECUTE'
+                )
+            FROM pg_proc AS resolver
+            CROSS JOIN pg_proc AS trigger_hook
+            WHERE resolver.oid =
+                'bursar.resolve_active_tenant_for_trigger(text)'::regprocedure
+              AND trigger_hook.oid =
+                'bursar.provision_subject_account_on_insert()'::regprocedure
+            """
+        )
+        assert cursor.fetchone() == (True, True, True, False)
 
 
 def test_partition_children_are_forced_rls_and_not_service_accessible(
@@ -509,7 +640,7 @@ def test_partition_children_are_forced_rls_and_not_service_accessible(
         assert exc_info.value.pgcode == "42501"
 
 
-def test_catalog_and_plan_migration_locks_are_tenant_scoped(
+def test_catalog_activation_and_plan_migration_are_tenant_scoped(
     pg_database_url: str,
 ) -> None:
     _ensure_second_tenant(pg_database_url)
@@ -541,5 +672,45 @@ def test_catalog_and_plan_migration_locks_are_tenant_scoped(
         first_cursor.execute("SELECT bursar.activate_catalog_revision(1)")
         second_cursor.execute("SELECT bursar.activate_catalog_revision(1)")
 
-        first_cursor.execute("SELECT * FROM bursar.migrate_plan_users('pro', NULL)")
-        second_cursor.execute("SELECT * FROM bursar.migrate_plan_users('pro', NULL)")
+        first_cursor.execute(
+            """
+            SELECT plan.id
+            FROM bursar.catalog_plans AS plan
+            JOIN bursar.catalog_revisions AS revision
+              ON revision.id = plan.catalog_revision_id
+            WHERE plan.plan_key = 'pro'
+              AND revision.status = 'active'
+            """
+        )
+        first_target = first_cursor.fetchone()[0]
+        second_cursor.execute(
+            """
+            SELECT plan.id
+            FROM bursar.catalog_plans AS plan
+            JOIN bursar.catalog_revisions AS revision
+              ON revision.id = plan.catalog_revision_id
+            WHERE plan.plan_key = 'pro'
+              AND revision.status = 'active'
+            """
+        )
+        second_target = second_cursor.fetchone()[0]
+
+        first_cursor.execute(
+            "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
+            (first_target,),
+        )
+        first_migration = first_cursor.fetchone()[0]
+        second_cursor.execute(
+            "SELECT bursar.start_plan_migration(NULL, %s::uuid)",
+            (second_target,),
+        )
+        second_migration = second_cursor.fetchone()[0]
+
+        first_cursor.execute(
+            "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",
+            (first_migration,),
+        )
+        second_cursor.execute(
+            "SELECT * FROM bursar.migrate_plan_batch(%s::uuid, 100)",
+            (second_migration,),
+        )

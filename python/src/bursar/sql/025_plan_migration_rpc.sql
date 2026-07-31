@@ -470,97 +470,11 @@ BEGIN
 END
 $$;
 
--- Compatibility convenience for the original SDK API. New callers should use
--- start_plan_migration/migrate_plan_batch for very large populations.
-CREATE FUNCTION bursar.migrate_plan_users(
-    p_plan_key text,
-    p_target_revision_no bigint DEFAULT NULL
-)
-RETURNS TABLE (
-    plan_key text,
-    target_plan_id uuid,
-    target_config_version bigint,
-    migrated_count integer
-)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_target bursar.catalog_plans;
-    v_revision_no bigint;
-    v_count integer;
-BEGIN
-    IF NOT bursar.is_nonempty_text(p_plan_key) THEN
-        RAISE EXCEPTION 'invalid_plan_key' USING ERRCODE = '22023';
-    END IF;
-
-    PERFORM pg_advisory_xact_lock(
-        hashtextextended(
-            'bursar.tenant:'
-            || bursar.require_tenant_id()::text
-            || ':plan-migration:'
-            || p_plan_key,
-            0
-        )
-    );
-
-    SELECT plan.*
-    INTO v_target
-    FROM bursar.catalog_plans AS plan
-    JOIN bursar.catalog_revisions AS revision
-      ON revision.id = plan.catalog_revision_id
-    WHERE plan.plan_key = p_plan_key
-      AND (
-          (
-              p_target_revision_no IS NULL
-              AND revision.status = 'active'
-          )
-          OR revision.revision_no = p_target_revision_no
-      )
-      AND revision.status IN ('active', 'retired')
-    ORDER BY
-        (revision.status = 'active') DESC,
-        revision.revision_no DESC
-    LIMIT 1;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'target_plan_not_found'
-            USING ERRCODE = '22023';
-    END IF;
-
-    SELECT revision_no
-    INTO v_revision_no
-    FROM bursar.catalog_revisions
-    WHERE id = v_target.catalog_revision_id;
-
-    PERFORM set_config(
-        'bursar.assignment_reason',
-        'sdk_plan_key_migration',
-        true
-    );
-
-    UPDATE bursar.account_plan_assignments
-    SET plan_id = v_target.id,
-        catalog_revision_id = v_target.catalog_revision_id,
-        plan_key = v_target.plan_key,
-        revision_policy = v_target.revision_policy,
-        source_type = 'migration',
-        source_id = NULL
-    WHERE account_plan_assignments.plan_key = p_plan_key
-      AND account_plan_assignments.plan_id <> v_target.id;
-
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-
-    RETURN QUERY
-    SELECT p_plan_key, v_target.id, v_revision_no, v_count;
-END
-$$;
-
 CREATE FUNCTION bursar.open_subscription_change(
     p_subscription_id uuid,
     p_to_offer_id uuid,
     p_effective_at timestamptz,
+    p_effective_behavior text,
     p_idempotency_key text,
     p_proration_behavior text DEFAULT 'provider_default'
 )
@@ -580,6 +494,7 @@ DECLARE
 BEGIN
     IF NOT bursar.is_nonempty_text(p_idempotency_key)
        OR p_effective_at IS NULL
+       OR p_effective_behavior NOT IN ('immediate', 'renewal')
        OR p_proration_behavior NOT IN (
            'provider_default',
            'invoice_immediately',
@@ -625,6 +540,7 @@ BEGIN
         IF change_row.from_offer_id <> subscription_row.offer_id
            OR change_row.to_offer_id <> p_to_offer_id
            OR change_row.effective_at IS DISTINCT FROM p_effective_at
+           OR change_row.effective_behavior <> p_effective_behavior
            OR change_row.proration_behavior <>
               p_proration_behavior
         THEN
@@ -656,17 +572,22 @@ BEGIN
         to_offer_id,
         to_catalog_revision_id,
         effective_at,
+        effective_behavior,
         proration_behavior,
         idempotency_key
     )
     VALUES (
         p_subscription_id,
-        'scheduled',
+        CASE
+            WHEN p_effective_behavior = 'renewal' THEN 'scheduled'
+            ELSE 'awaiting_payment'
+        END,
         subscription_row.offer_id,
         subscription_row.catalog_revision_id,
         target_offer.id,
         target_offer.catalog_revision_id,
         p_effective_at,
+        p_effective_behavior,
         p_proration_behavior,
         p_idempotency_key
     )
@@ -717,6 +638,11 @@ BEGIN
 
     IF (change_row.state, p_state) NOT IN (
         ('awaiting_payment', 'scheduled'),
+        -- Providers such as Dodo confirm an immediate plan change with a
+        -- single subscription.plan_changed event. That event is both the
+        -- payment confirmation and the effective subscription transition,
+        -- so it must be able to advance the persisted change directly.
+        ('awaiting_payment', 'applied'),
         ('awaiting_payment', 'canceled'),
         ('awaiting_payment', 'failed'),
         ('scheduled', 'applied'),

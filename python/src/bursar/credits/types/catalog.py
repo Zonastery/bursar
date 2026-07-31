@@ -22,12 +22,6 @@ class BursarConfigHistoryItem(BaseModel):
     created_at: str
 
 
-class PricingConfig(BaseModel):
-    """Pricing config wrapper for store results."""
-
-    pass
-
-
 class PlanAllowancePolicy(BaseModel):
     amount: Decimal | None
     reset_unit: str | None

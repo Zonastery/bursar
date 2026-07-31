@@ -15,7 +15,6 @@ import {
   CoreBillingDataUnavailableError,
   CreditError,
   ExpressionError,
-  FeatureLimitReachedError,
   FeatureNotEntitledError,
   ImportError as BursarImportError,
   InsufficientCreditsError,
@@ -85,12 +84,6 @@ const ERROR_CASES: ErrorCase[] = [
   {
     error: new CapReachedError("failure"),
     code: "CAP_REACHED",
-    category: "rate_limited",
-    status: 429,
-  },
-  {
-    error: new FeatureLimitReachedError("failure"),
-    code: "FEATURE_LIMIT_REACHED",
     category: "rate_limited",
     status: 429,
   },

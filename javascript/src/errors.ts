@@ -83,20 +83,6 @@ export class CapReachedError extends StoreError {
   override readonly retryable = false;
 }
 
-/**
- * Raised when a call would exceed a configured `deny` feature-limit.
- *
- * Stores return `error: "feature_limit_reached"` on the result object rather
- * than throwing; the manager maps that code to this exception — mirrors
- * `CapReachedError`.
- */
-export class FeatureLimitReachedError extends StoreError {
-  override readonly name = "FeatureLimitReachedError";
-  override readonly code = "FEATURE_LIMIT_REACHED";
-  override readonly category = "rate_limited" as const;
-  override readonly retryable = false;
-}
-
 export class RefundError extends StoreError {
   override readonly name = "RefundError";
   override readonly code = "REFUND_REJECTED";

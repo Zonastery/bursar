@@ -103,7 +103,7 @@ class AutoRechargeBillingPort(Protocol):
     def count_auto_recharge_attempts(
         self,
         user_id: str,
-        since: str | datetime | int | float,
+        since: str | datetime,
     ) -> int: ...
 
 
@@ -120,7 +120,6 @@ class _ResolvedAutoRechargePolicy:
     window_timezone: str
     window_start: str
     window_end: str
-    window_days: float
     product_id: str
 
 
@@ -173,7 +172,6 @@ class AutoRechargeService:
             window_timezone=period.timezone,
             window_start=period.start,
             window_end=period.end,
-            window_days=period.duration_days,
             product_id=product_id,
         )
 
@@ -238,7 +236,6 @@ class AutoRechargeService:
             topup_key=policy.topup_key,
             quantity=policy.quantity,
             max_recharges=policy.max_charges_per_window,
-            window_days=policy.window_days,
             window_start=policy.window_start,
             window_end=policy.window_end,
             recharges_in_window=self._billing.count_auto_recharge_attempts(

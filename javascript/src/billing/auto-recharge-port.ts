@@ -32,9 +32,6 @@ export interface AutoRechargeBillingPort {
     failureMessage?: string | null;
     metadata?: Record<string, unknown>;
   }): Promise<void>;
-  /**
-   * Count attempts since an exact instant. A numeric window in days remains
-   * accepted for backwards compatibility.
-   */
-  countAutoRechargeAttempts(userId: string, since: string | Date | number): Promise<number>;
+  /** Count attempts since an exact instant. */
+  countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;
 }

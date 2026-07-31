@@ -686,7 +686,7 @@ class CommerceService:
                 plan_key=plan_key,
                 interval=cast(Literal["month", "year"], interval),
                 effective_at=pending.effective_at,
-                scheduled=pending.proration_behavior == "none",
+                scheduled=pending.effective == "renewal",
                 provider_operation_id=pending.provider_operation_id,
             )
         status = _status_value(subscription.status) if subscription and subscription.status else None
@@ -890,7 +890,7 @@ class CommerceService:
             subscription.provider,
             subscription.provider_subscription_id,
         )
-        if existing is not None and existing.state == "scheduled" and existing.proration_behavior == "none":
+        if existing is not None and existing.state == "scheduled" and existing.effective == "renewal":
             if not _supports(provider, "cancel_scheduled_plan_change"):
                 raise ProviderCapabilityNotSupportedError(
                     provider.provider,
@@ -918,6 +918,7 @@ class CommerceService:
                 provider_subscription_id=subscription.provider_subscription_id,
                 to_offer_id=context["persisted"].offer_id,
                 effective_at=effective_at,
+                effective=context["policy"].effective,
                 idempotency_key=operation_key,
                 proration_behavior=("none" if context["policy"].proration == "none" else "invoice_immediately"),
             )
@@ -986,7 +987,7 @@ class CommerceService:
             subscription.provider,
             subscription.provider_subscription_id,
         )
-        if change is None or change.state != "scheduled" or change.proration_behavior != "none":
+        if change is None or change.state != "scheduled" or change.effective != "renewal":
             raise CommerceResourceNotFoundError("No scheduled plan change found")
         provider = await self.providers.get(subscription.provider)
         if not _supports(provider, "cancel_scheduled_plan_change"):
@@ -1107,14 +1108,13 @@ class CommerceService:
             ),
             None,
         )
-        legacy = metadata.get("dodo_payment_id") if isinstance(metadata.get("dodo_payment_id"), str) else None
-        if not document_id and not legacy:
+        if not document_id:
             return None
         return BillingDocumentLedgerRef(
             kind="ledger_entry",
             ledger_entry_id=entry.entry_id,
-            provider=provider or ("dodo" if legacy else None),
-            provider_document_id=document_id or legacy,
+            provider=provider,
+            provider_document_id=document_id,
             created_at=entry.created_at,
             entry_type=entry.entry_type,
             amount=entry.amount,
@@ -1168,7 +1168,7 @@ class CommerceService:
             transactions_available = False
             transactions = []
         try:
-            usage = self.credits.list_usage_entries(
+            usage = self.credits.list_usage_charges(
                 account_id,
                 limit=100,
             ).items
@@ -1246,7 +1246,7 @@ class CommerceService:
                 lifetime_purchases=balance.lifetime_purchased,
                 allowance=AccountAllowanceOverview(
                     remaining=allowance.allowance_remaining,
-                    limit=entitlement.allowance_amount,
+                    limit=entitlement.allowance.amount if entitlement.allowance is not None else None,
                     period_start=allowance.period_start or None,
                     period_end=allowance.period_end or None,
                 ),

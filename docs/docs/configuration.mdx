@@ -8,6 +8,22 @@ title: Canonical configuration
 contract, generates the published JSON Schema, and AJV validates the same
 contract in JavaScript. Unknown fields and legacy shapes are rejected.
 
+The top-level sections are organized by responsibility:
+
+| Section | Purpose |
+| --- | --- |
+| `pricing` | Usage operations, measures, dimensions, and reusable rate cards |
+| `credits` | Buckets, spending policies, grants, and display conversion |
+| `entitlements` | Typed product features |
+| `admission` | Reusable concurrency policies |
+| `plans` | Product access, allowances, quotas, and policy references |
+| `commerce` | Providers, subscriptions, top-ups, and auto-recharge |
+| `catalog` | Catalog-wide settings such as the default signup plan |
+
+Only `version` and `credits` are required. Fixed v1 accounting defaults to
+`credit`, six decimal places, and half-up rounding, so authors do not need to
+repeat that block. Plan `rank` defaults to `0`.
+
 ```yaml
 version: 1
 
@@ -33,7 +49,6 @@ pricing:
                 - { type: per_unit, measure: output_tokens, rate: "0.10" }
 
 credits:
-  accounting: { unit: credit, scale: 6, rounding: half_up }
   buckets:
     purchased:
       priority: 10
@@ -58,6 +73,15 @@ publication behavior, concurrency policies, provider-backed offers, and
 auto-recharge guardrails. All exact decimal values are strings; offer prices
 are integer minor units with an explicit currency.
 
+Rate matcher operators must agree with their dimension type: `prefix` is for
+strings, `range` is for numbers, and matcher values must have the declared
+string, number, or boolean type. Expression charges may reference the measures
+declared by their operation.
+
+For subscription-backed plans, explicitly setting `revision_policy` is
+recommended. When omitted, subscription-backed plans use `next_renewal` and
+other plans use `immediate`.
+
 Validate before publication:
 
 ```bash
@@ -69,24 +93,18 @@ integrations.
 
 ## Signup account trigger
 
-For immediate `account_created` grants, Bursar automatically installs its
-trigger hook on Better Auth's default `public."user"` table when that table
-exists during migration. No application code or setup call is required for
-that default table.
-
-To override the table, drop the default trigger and attach Bursar's trigger
-function in the SaaS's own migration:
+For immediate `account_created` grants, attach Bursar's tenant-aware trigger
+function to the SaaS principal table and pass the provisioned tenant slug:
 
 ```sql
 DROP TRIGGER IF EXISTS bursar_account_created ON public."user";
 CREATE TRIGGER bursar_account_created
 AFTER INSERT ON app.users
 FOR EACH ROW
-EXECUTE FUNCTION bursar.provision_subject_account_on_insert();
+EXECUTE FUNCTION bursar.provision_subject_account_on_insert('acme');
 ```
 
-The hook calls `bursar.account_for_subject(NEW.id, 'personal')`. It is
-idempotent and applies active `account_created` grant programs. If the user ID
-is not `NEW.id`, or the account kind is not `personal`, define a local wrapper
-trigger function that calls `bursar.account_for_subject()` with the appropriate
-mapping.
+The hook resolves the active tenant, binds transaction-local tenant context,
+assigns the active default plan, and applies eligible `account_created` grant
+programs. Host migrations do not need a wrapper function or access to
+Bursar-owned tables. The principal UUID must be available as `NEW.id`.

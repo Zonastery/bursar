@@ -59,21 +59,21 @@ export class CreditLeaseWorkflow {
     maxConcurrent: number | null;
   }> {
     const plan = await this.store.getUserPlan(userId);
+    const creditPolicy = plan.planId == null ? null : plan.creditPolicy;
     const planMode: BillingMode =
       plan.planId == null
         ? this.policy === "overdraft"
           ? "overdraft"
           : "strict"
-        : plan.billingMode;
-    const operationPolicy =
-      plan.planId == null ? null : (plan.perOperation?.[operationType] ?? null);
-    const billingMode = billingModeOverride ?? operationPolicy?.billingMode ?? planMode;
+        : creditPolicy?.type === "credit_line"
+          ? "overdraft"
+          : "strict";
+    const operationAdmission =
+      plan.planId == null ? null : (plan.admission?.operations[operationType] ?? null);
+    const billingMode = billingModeOverride ?? planMode;
     const floor =
       billingMode === "overdraft"
-        ? (operationPolicy?.overdraftFloor ??
-          plan.overdraftFloor ??
-          this.overdraftFloor ??
-          new Decimal(0))
+        ? (creditPolicy?.creditLimit?.negated() ?? this.overdraftFloor ?? new Decimal(0))
         : new Decimal(0);
     return {
       billingMode,
@@ -81,7 +81,7 @@ export class CreditLeaseWorkflow {
       maxConcurrent:
         plan.planId == null
           ? this.defaultMaxConcurrent
-          : (operationPolicy?.maxConcurrent ?? plan.maxConcurrent ?? null),
+          : (operationAdmission?.maxInFlight ?? plan.admission?.maxInFlight ?? null),
     };
   }
 
@@ -112,16 +112,9 @@ export class CreditLeaseWorkflow {
   ): Promise<LeaseResult> {
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] reserve", {
-      feature: options?.feature ?? options?.requiredFeature,
+      feature: options?.feature,
       operationType: options?.operationType,
     });
-    if (
-      options?.feature != null &&
-      options.requiredFeature != null &&
-      options.feature !== options.requiredFeature
-    ) {
-      throw new ConfigError("reserve feature and requiredFeature must match when both are set");
-    }
     const operationType =
       options?.operationType ?? (isAmount(metricsOrAmount) ? "usage" : metricsOrAmount.operation);
     const expectedPolicy = await this.expectedAdmissionPolicy(
@@ -133,7 +126,7 @@ export class CreditLeaseWorkflow {
     const amount = priced.amount;
     const model = priced.model ?? options?.model ?? null;
     const ttlSeconds = options?.ttl != null ? options.ttl : this.defaultTtl;
-    const feature = options?.feature ?? options?.requiredFeature ?? null;
+    const feature = options?.feature ?? null;
     const measures = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.measures ?? {}) };
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
     const region = typeof dimensions.region === "string" ? dimensions.region : null;
@@ -187,10 +180,8 @@ export class CreditLeaseWorkflow {
    * Charge the ACTUAL cost against a lease and finalize it (D5).
    *
    * De-clamped: bills the full actual cost even if it exceeds the lease hold
-   * (overdraft). Never blocks on floor/cap at settle — a cap breach surfaces as a
-   * non-blocking ``credits.cap_warning``/``credits.cap_reached`` signal. Emits
-   * ``credits.deducted``, then multi-level ``credits.low_balance`` and a
-   * ``credits.overdraft`` signal if the balance went negative.
+   * (overdraft). Emits ``credits.deducted``, then low-balance and overdraft
+   * signals as applicable.
    */
   async settle(
     userId: string,
@@ -315,7 +306,7 @@ export class CreditLeaseWorkflow {
     options?: CanAffordOptions,
   ): Promise<CanAffordResult> {
     await this.maybeLazyExpire(userId);
-    const feature = options?.feature ?? options?.requiredFeature ?? null;
+    const feature = options?.feature ?? null;
     const { amount: worstCase } = await this.costOf(metricsOrAmount, userId);
     const avail = await this.store.getAvailable(userId);
     let expectedPolicy;
@@ -393,13 +384,12 @@ export class CreditLeaseWorkflow {
     userId: string,
     options: RunBilledOptions<T>,
   ): Promise<{ result: T; deduction: DeductionResult }> {
-    const operationKey = options.operationKey ?? options.idempotencyKey ?? `billed:${randomUUID()}`;
+    const operationKey = options.operationKey ?? `billed:${randomUUID()}`;
     const operation = await this.beginBilledOperation(userId, {
       estimate: options.estimate,
       operationKey,
       operationType: options.operationType,
       billingMode: options.billingMode,
-      requiredFeature: options.requiredFeature,
       ttl: options.ttl,
       feature: options.feature,
       metadata: options.metadata,
@@ -438,7 +428,6 @@ export class CreditLeaseWorkflow {
     const lease = await this.reserve(userId, options.estimate, {
       operationType: options.operationType,
       billingMode: options.billingMode,
-      requiredFeature: options.requiredFeature,
       ttl: options.ttl,
       feature: options.feature,
       metadata: options.metadata,

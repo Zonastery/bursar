@@ -91,14 +91,6 @@ class CapReachedError(StoreError):
     retryable = False
 
 
-class FeatureLimitReachedError(StoreError):
-    """Raised when a call would exceed a configured ``deny`` feature-limit."""
-
-    code = "FEATURE_LIMIT_REACHED"
-    category: BursarErrorCategory = "rate_limited"
-    retryable = False
-
-
 class FeatureNotEntitledError(CreditError):
     """Raised when an operation requires a plan feature the user does not have."""
 

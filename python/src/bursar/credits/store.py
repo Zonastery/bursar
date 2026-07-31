@@ -31,7 +31,6 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     ExecuteGrantProgramRequest,
-    FeatureLimitResult,
     GetUserPlanResult,
     GrantProgramAwardResult,
     LeasePricingContext,
@@ -40,7 +39,6 @@ from bursar.credits.types import (
     LedgerEntry,
     LedgerPage,
     ListQuotaEventsOptions,
-    MigratePlanUsersResult,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
     QuotaEvent,
@@ -55,15 +53,14 @@ from bursar.credits.types import (
     TeamDeductionResult,
     TeamMember,
     TopUserRow,
+    UsageChargeCursor,
+    UsageChargePage,
 )
 from bursar.errors import (
     CapabilityNotSupportedError,
 )
 from bursar.errors import (
     CapReachedError as CapReachedError,
-)
-from bursar.errors import (
-    FeatureLimitReachedError as FeatureLimitReachedError,
 )
 from bursar.errors import (
     RefundError as RefundError,
@@ -184,11 +181,8 @@ class CreditStore(ABC):
             not the current balance (Fix 8).
         3. Consumes free allowance first (``allowance_consumed`` on the result),
             charging only the net remainder to the balance.
-        4. Enforces spend caps on the net: a ``deny`` cap aborts with
-            ``error="cap_reached"`` (no allowance consumed); ``warn``/``notify``
-            set ``cap_warning`` and continue.
-        5. Enforces the plan's balance floor server-side.
-        6. Debits the balance and inserts one ``usage`` transaction.
+        4. Enforces the canonical plan credit policy and quotas server-side.
+        5. Debits the balance and inserts one ``usage`` transaction.
 
         All-or-nothing: any failure rolls back allowance consumption and the
         balance change. Business failures are returned via
@@ -200,35 +194,16 @@ class CreditStore(ABC):
             amount: Gross cost (``Decimal``, ``>= 0``, fractional 6dp).
             idempotency_key: Optional user-scoped replay key.
             operation: Catalog operation key used for plan-aware policy.
-            feature: Optional feature key used for entitlement/limit checks.
+            feature: Optional feature key used for entitlement checks.
             model: Optional model name recorded on the transaction.
             region: Optional deployment region recorded on the transaction.
             measures: Usage measures evaluated by quota rules.
             dimensions: Usage dimensions evaluated by pricing/policy rules.
             metadata: Extra metadata merged onto the transaction.
-                ``feature_limit.period``, resolved by the manager via
-                :func:`bursar.allowance.resolve_calendar_window`.
-
-        Enforcement (inserted between the spend-cap step and the balance floor):
-        counting is **ledger-derived**, exactly like spend caps — no separate
-        counter table. The store counts prior committed ``usage`` transactions
-        with ``metadata.feature == feature`` in ``[feature_period_start,
-        feature_period_start + period)``; if that count has already reached
-        ``feature_limit.max_calls`` and ``feature_limit.on_exceed == "deny"``,
-        aborts with ``error="feature_limit_reached"`` (no allowance consumed,
-        no transaction inserted); ``warn``/``notify`` instead set
-        ``feature_limit_warning`` and continue. The ``usage`` transaction this
-        call inserts on success (tagged ``metadata.feature``) *is* the count
-        increment for future calls — there is nothing else to update. This
-        also means a later :meth:`refund_credits` of this transaction does
-        **not** free up quota (the row, and therefore the count, is untouched
-        by a refund), and a :meth:`release_lease` never counts at all (it
-        never inserts a ``usage`` row) — both are intentional.
 
         Returns:
             ``DeductionResult`` with net ``amount``, ``allowance_consumed``,
-            ``balance_after``, ``idempotent``, ``cap_warning``,
-            ``feature_limit_warning``, and ``error``.
+            ``balance_after``, ``idempotent``, and ``error``.
         """
         ...
 
@@ -252,31 +227,15 @@ class CreditStore(ABC):
 
         Under one lock the store: (1) ensures the balance row exists; (2) enforces
         ``max_concurrent`` by **counting active leases** for ``(user_id,
-        operation_type)``; (3) enforces ``deny`` spend caps for ``amount`` (admission
-        gate); (3b) enforces a ``deny`` ``feature_limit`` for ``feature`` — deny-only
-        at admission, exactly like spend caps: the same ledger-derived count as
-        :meth:`deduct_with_allowance` (counts prior committed ``usage`` transactions
-        tagged ``metadata.feature == feature`` in the window; ``warn``/``notify`` are
-        NOT checked here, mirroring how admission only ever enforces ``deny`` spend
-        caps); (4) computes ``available = balance − Σ active holds`` and rejects with
+        operation_type)``; (3) enforces canonical entitlements and quotas;
+        (4) computes ``available = balance − Σ active holds`` and rejects with
         ``error="insufficient_credits"`` if ``available − amount < floor``; (5)
-        inserts an ``active`` lease expiring after ``ttl_seconds``. No lease-record
-        change is needed for feature limits: since ``create_lease`` never inserts a
-        ``usage`` transaction (only :meth:`settle_lease` does), a lease that is later
-        released instead of settled was never counted in the first place — nothing
-        to undo.
+        inserts an ``active`` lease expiring after ``ttl_seconds``.
 
         ``floor`` is the resolved admission floor (``>= 0`` for strict; the negative
         ``overdraft_floor`` for overdraft). ``billing_mode``/``overdraft_floor`` are
         persisted on the lease for settle-time/observability. Business failures are
-        returned via ``LeaseResult.error`` (including ``"feature_limit_reached"``);
-        the store never raises domain exceptions.
-
-        ``period_start`` (WS9) keys the allowance-headroom lookup for
-        ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
-        UTC calendar month. ``feature``/``feature_limit``/``feature_period_start``
-        are resolved by the manager exactly as in :meth:`deduct_with_allowance`;
-        ``feature_limit=None`` skips enforcement.
+        returned via ``LeaseResult.error``; the store never raises domain exceptions.
         """
         ...
 
@@ -292,27 +251,9 @@ class CreditStore(ABC):
 
         De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft),
         never clamps to the lease amount.
-        Pipeline: idempotency replay → allowance consume (skipped when
-        ``skip_allowance=True``, Fix 7) → spend-cap (advisory at settle: a breach
-        sets ``cap_warning`` but never blocks) → feature-limit (advisory at settle,
-        same reasoning: the work already happened, so a breach only sets
-        ``feature_limit_warning`` and never blocks) → debit (no floor block; balance
-        may go negative in overdraft) → ledger row (tagged ``metadata.feature`` when
-        ``feature`` is given — this is what makes the call countable for future
-        checks) → mark lease ``settled``. ``amount == 0`` releases the lease without
-        charging (and does not tag/count anything).
-
-        ``skip_allowance=True`` prevents the free inference allowance from being
-        consumed at settle time — mirrors :meth:`deduct_with_allowance` Fix 7 so
-        the lease path and the direct-deduct path behave consistently.
-
-        ``period_start`` (WS9) keys allowance consumption for
-        ``rolling_30d``/``anniversary`` plans; ``None`` falls back to the current
-        UTC calendar month. ``feature``/``feature_limit``/``feature_period_start``
-        mirror :meth:`deduct_with_allowance` — the caller (manager) re-supplies
-        ``feature`` at settle time exactly as it already re-supplies ``model`` for
-        per-model spend-cap accuracy at settle (no feature name is persisted on the
-        lease itself).
+        Pipeline: idempotency replay → allowance consumption → quota accounting →
+        debit (the balance may go negative in overdraft) → ledger row → mark the
+        lease ``settled``. ``amount == 0`` releases the lease without charging.
 
         Lease-state failures are returned via ``DeductionResult.error``:
         ``lease_not_found`` (missing / other user / released) or ``lease_expired``
@@ -469,20 +410,19 @@ class CreditStore(ABC):
     def set_user_plan(
         self,
         user_id: str,
-        plan_id: str,
+        plan_key: str,
         plan_assigned_at: datetime | None = None,
     ) -> SetUserPlanResult:
         """Assign a plan to a user.
 
-        ``plan_assigned_at`` anchors the allowance window for
-        ``rolling_30d``/``anniversary`` plans. When omitted, the store sets
-        the anchor to the current time (backwards-compatible default).
+        ``plan_assigned_at`` anchors plan-assignment policy windows. When
+        omitted, the store uses the current time.
         """
         ...
 
     @abstractmethod
     def unset_user_plan(self, user_id: str) -> dict:
-        """Clear the user's plan (pauses allowance period)."""
+        """Clear the user's plan assignment."""
         ...
 
     @abstractmethod
@@ -504,26 +444,12 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def migrate_plan_users(
-        self,
-        plan_key: str,
-        target_config_version: int | None = None,
-    ) -> MigratePlanUsersResult:
-        """Deprecated one-shot migration; prefer resumable plan migrations."""
-        ...
-
-    @abstractmethod
     def get_quota_state(
         self,
         user_id: str,
         quota_key: str | None = None,
     ) -> list[QuotaState]:
         """Return current quota windows for a user."""
-        ...
-
-    @abstractmethod
-    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
-        """Deprecated quota-key compatibility query; mirrors JavaScript."""
         ...
 
     @abstractmethod
@@ -684,6 +610,17 @@ class CreditStore(ABC):
     ) -> LedgerPage:
         """List usage ledger entries with the same cursor contract."""
         return self.list_ledger_entries(user_id, ["usage"], from_date, to_date, limit, cursor)
+
+    def list_usage_charges(
+        self,
+        user_id: str,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: UsageChargeCursor | None = None,
+    ) -> UsageChargePage:
+        """List metered usage charges, including allowance-covered events."""
+        raise CapabilityNotSupportedError("list_usage_charges not supported by this store")
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
         """Return one ledger entry when it belongs to the user account."""

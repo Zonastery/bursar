@@ -431,29 +431,6 @@ BEGIN
             v_post.entry_id
         );
 
-        IF p_trigger_type = 'account_created' THEN
-            INSERT INTO bursar.account_creation_grants(
-                subject_id,
-                catalog_revision_id,
-                grant_program_id,
-                catalog_grant_award_id,
-                ledger_entry_id
-            )
-            VALUES (
-                p_subject_id,
-                v_revision,
-                v_program.id,
-                v_award.id,
-                v_post.entry_id
-            )
-            ON CONFLICT (
-                tenant_id,
-                subject_id,
-                grant_program_id,
-                catalog_grant_award_id
-            ) DO NOTHING;
-        END IF;
-
         RETURN QUERY
         SELECT
             v_event.id,
@@ -467,22 +444,126 @@ BEGIN
 END
 $$;
 
--- Host applications attach this hook to their own principal table. Bursar
--- deliberately does not guess or mutate a host table during installation.
+-- Resolve the host-configured tenant before the runtime trigger binds RLS
+-- context. This narrowly scoped helper retains the migration owner in the
+-- multitenancy security step and is executable only by bursar_runtime.
+CREATE FUNCTION bursar.resolve_active_tenant_for_trigger(
+    p_tenant_slug text
+)
+RETURNS uuid
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+DECLARE
+    v_tenant_id uuid;
+BEGIN
+    IF p_tenant_slug IS NULL
+       OR length(btrim(p_tenant_slug)) NOT BETWEEN 1 AND 100
+       OR lower(btrim(p_tenant_slug))
+          !~ '^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$'
+    THEN
+        RAISE EXCEPTION 'invalid Bursar tenant slug'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT id
+    INTO v_tenant_id
+    FROM bursar.tenants
+    WHERE slug = lower(btrim(p_tenant_slug))
+      AND status = 'active';
+
+    IF v_tenant_id IS NULL THEN
+        RAISE EXCEPTION 'Bursar tenant is not provisioned or active'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN v_tenant_id;
+END
+$$;
+
+COMMENT ON FUNCTION bursar.resolve_active_tenant_for_trigger(text) IS
+'Internal resolver used by the host-table trigger before tenant RLS context is bound.';
+
+-- Host applications attach this hook to their own principal table and pass
+-- their provisioned tenant slug as the sole trigger argument. Bursar owns
+-- tenant lookup, context binding, default-plan assignment, and signup grants.
 CREATE FUNCTION bursar.provision_subject_account_on_insert()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''
 AS $$
+DECLARE
+    v_tenant_id uuid;
+    v_plan_id uuid;
 BEGIN
-    PERFORM bursar.account_for_subject(NEW.id, 'personal');
+    IF TG_NARGS <> 1 THEN
+        RAISE EXCEPTION
+            'Bursar signup trigger requires exactly one tenant slug'
+            USING ERRCODE = '22023';
+    END IF;
+
+    v_tenant_id :=
+        bursar.resolve_active_tenant_for_trigger(TG_ARGV[0]);
+
+    PERFORM set_config(
+        'bursar.tenant_id',
+        v_tenant_id::text,
+        true
+    );
+
+    -- Serialize signup with catalog activation so a new assignment is either
+    -- included in the activation rollout or sees the newly active revision.
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'bursar.tenant:' || v_tenant_id::text || ':catalog.active',
+            0
+        )
+    );
+
+    -- A configured default is authoritative. Catalogs without one fall back
+    -- to deterministic rank/key ordering.
+    SELECT plan.id
+    INTO v_plan_id
+    FROM bursar.catalog_revisions AS revision
+    JOIN bursar.catalog_plans AS plan
+      ON plan.catalog_revision_id = revision.id
+     AND plan.tenant_id = v_tenant_id
+    WHERE revision.tenant_id = v_tenant_id
+      AND revision.status = 'active'
+      AND (
+          NULLIF(
+              revision.source_document #>> '{catalog,default_plan}',
+              ''
+          ) IS NULL
+          OR plan.plan_key = NULLIF(
+              revision.source_document #>> '{catalog,default_plan}',
+              ''
+          )
+      )
+    ORDER BY
+        COALESCE((plan.definition ->> 'rank')::numeric, 0),
+        plan.plan_key
+    LIMIT 1;
+
+    IF v_plan_id IS NULL THEN
+        RAISE EXCEPTION 'Bursar catalog has no active default plan'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT bursar.assign_plan(NEW.id, v_plan_id) THEN
+        RAISE EXCEPTION 'Bursar account provisioning failed'
+            USING ERRCODE = '55000';
+    END IF;
+
     RETURN NEW;
 END
 $$;
 
 COMMENT ON FUNCTION bursar.provision_subject_account_on_insert() IS
-'Host-table trigger hook that provisions a personal account and runs eligible account_created grant programs.';
+'Tenant-aware signup hook that assigns the active default plan and runs account_created grants.';
 
 CREATE FUNCTION bursar.post_credit(
     p_subject_id uuid,

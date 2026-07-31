@@ -125,6 +125,13 @@ export const baseConfig = () => ({
 });
 
 describe("typed v1 config", () => {
+  it("rejects the removed catalog activation field", () => {
+    const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
+    config.catalog = { activation: { mode: "on_publish" } };
+
+    expect(() => loadConfigFromDict(config)).toThrow(/additional properties/);
+  });
+
   it("accepts and canonicalizes the typed catalog", () => {
     const parsed = loadConfigFromDict(baseConfig());
     expect(parsed.plans.pro.creditAllowance?.amount.toString()).toBe("10");
@@ -135,11 +142,25 @@ describe("typed v1 config", () => {
     ).toEqual({ type: "credit_line", limit: "500.000000" });
   });
 
+  it("defaults fixed accounting and plan rank for config authors", () => {
+    const config = baseConfig();
+    delete (config.credits as Partial<typeof config.credits>).accounting;
+    delete (config.plans.pro as Partial<typeof config.plans.pro>).rank;
+
+    const parsed = loadConfigFromDict(config);
+
+    expect(parsed.credits.accounting).toEqual({
+      unit: "credit",
+      scale: 6,
+      rounding: "half_up",
+    });
+    expect(parsed.plans.pro.rank).toBe(0);
+  });
+
   it("projects public plans and prices without provider identifiers", () => {
     const config = baseConfig() as ReturnType<typeof baseConfig> & Record<string, unknown>;
     config.catalog = {
       default_plan: "pro",
-      activation: { mode: "on_publish" },
     };
     config.credits = {
       ...config.credits,
@@ -189,8 +210,109 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
   });
 
+  it("enforces feature types, integer bounds, and string patterns", () => {
+    const config = baseConfig();
+    const featureDefinitions = config.entitlements.features as Record<string, unknown>;
+    const planFeatures = config.plans.pro.features as Record<string, boolean | number | string>;
+    featureDefinitions.agent_limit = {
+      type: "integer",
+      default: 1,
+      minimum: 1,
+      maximum: 10,
+    };
+    featureDefinitions.support_tier = {
+      type: "string",
+      default: "standard",
+      pattern: "^(standard|priority)$",
+    };
+    planFeatures.tutor_chat = "yes";
+    planFeatures.agent_limit = 99;
+    planFeatures.support_tier = "unknown";
+
+    expect(() => loadConfigFromDict(config)).toThrow(/tutor_chat.*boolean/);
+    planFeatures.tutor_chat = true;
+    expect(() => loadConfigFromDict(config)).toThrow(/agent_limit.*maximum/);
+    planFeatures.agent_limit = 5;
+    expect(() => loadConfigFromDict(config)).toThrow(/support_tier.*pattern/);
+  });
+
+  it("validates default-bucket, policy, and allowance references", () => {
+    const config = baseConfig();
+    config.credits.default_bucket = "typo";
+    expect(() => loadConfigFromDict(config)).toThrow(/default_bucket/);
+
+    const creditPolicy = baseConfig();
+    creditPolicy.plans.pro.credit_policy = "typo";
+    expect(() => loadConfigFromDict(creditPolicy)).toThrow(/credit_policy/);
+
+    const admissionPolicy = baseConfig();
+    admissionPolicy.plans.pro.admission_policy = "typo";
+    expect(() => loadConfigFromDict(admissionPolicy)).toThrow(/admission_policy/);
+
+    const allowance = baseConfig();
+    delete (allowance.credits as Partial<typeof allowance.credits>).default_bucket;
+    expect(() => loadConfigFromDict(allowance)).toThrow(
+      /credit_allowance requires credits.default_bucket/,
+    );
+  });
+
+  it("requires matcher operators to match their dimension type", () => {
+    const config = baseConfig();
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0].when as Record<
+      string,
+      unknown
+    >;
+    when.model = {
+      op: "range",
+      gte: "1",
+    };
+    expect(() => loadConfigFromDict(config)).toThrow(/range matcher requires a number dimension/);
+  });
+
+  it("normalizes exact decimal strings for number-dimension matchers", () => {
+    const config = baseConfig();
+    config.pricing.operations.completion.dimensions.model.type = "number";
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0].when as Record<
+      string,
+      unknown
+    >;
+    when.model = { op: "eq", value: "1.5" };
+
+    const parsed = loadConfigFromDict(config);
+    const matcher = parsed.pricing?.rateCards.standard.operations.completion.rules[0].when.model;
+
+    expect(matcher?.op).toBe("eq");
+    if (matcher?.op === "eq") expect(matcher.value.toString()).toBe("1.5");
+  });
+
+  it("requires compatible provider references", () => {
+    const config = {
+      ...baseConfig(),
+      commerce: {
+        providers: { stripe: { type: "stripe" } },
+        offers: {
+          pro_monthly: {
+            type: "subscription",
+            display_name: "Pro monthly",
+            price: { amount_minor: 1200, currency: "USD" },
+            providers: {
+              stripe: {
+                type: "dodo_product",
+                product_id: "product_wrong_provider",
+              },
+            },
+            plan: "pro",
+            billing_interval: { unit: "month" },
+          },
+        },
+      },
+    };
+    expect(() => loadConfigFromDict(config)).toThrow(/incompatible provider reference/);
+  });
+
   it("requires version explicitly", () => {
-    const { version: _, ...config } = baseConfig();
+    const config: Record<string, unknown> = { ...baseConfig() };
+    delete config.version;
     expect(() => loadConfigFromDict(config)).toThrow(ConfigError);
   });
 

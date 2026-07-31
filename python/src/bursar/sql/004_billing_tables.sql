@@ -360,6 +360,9 @@ CREATE TABLE bursar.billing_subscription_changes (
     to_offer_id uuid NOT NULL,
     to_catalog_revision_id uuid NOT NULL,
     effective_at timestamptz,
+    effective_behavior text NOT NULL
+    CONSTRAINT billing_subscription_changes_effective_behavior_check
+    CHECK (effective_behavior IN ('immediate', 'renewal')),
     proration_behavior text NOT NULL DEFAULT 'provider_default'
     CHECK (proration_behavior IN (
         'provider_default', 'invoice_immediately', 'none'

@@ -156,7 +156,7 @@ export class BillingService {
     await this.management.updateAutoRechargeAttemptByProviderPayment(input);
   }
 
-  async countAutoRechargeAttempts(userId: string, since: string | Date | number): Promise<number> {
+  async countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number> {
     return this.management.countAutoRechargeAttempts(userId, since);
   }
 

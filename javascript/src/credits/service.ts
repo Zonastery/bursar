@@ -17,7 +17,6 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   ExecuteGrantProgramRequest,
-  FeatureLimitResult,
   GetUserPlanResult,
   GrantProgramAwardResult,
   LedgerEntry,
@@ -25,8 +24,8 @@ import type {
   LeaseResult,
   ListLedgerEntriesOptions,
   ListQuotaEventsOptions,
+  ListUsageChargesOptions,
   ListUsageEntriesOptions,
-  MigratePlanUsersResult,
   PlanMigrationBatchResult,
   PlanMigrationStartResult,
   QuotaEvent,
@@ -38,6 +37,7 @@ import type {
   SweepResult,
   TeamDeductionResult,
   TopUserRow,
+  UsageChargePage,
 } from "./types/index.js";
 import type { CreditStore } from "./store.js";
 import type { CreditEventEmitter, CreditEventType } from "./events.js";
@@ -87,15 +87,15 @@ import { type NormalizedLogger, normalizeLogger } from "../shared/logger.js";
  * Orchestrates credit operations.
  *
  * The deduction path is a single atomic, idempotency-keyed store call
- * (``deductWithAllowance``) that consumes free allowance, enforces spend caps,
- * applies the balance floor and debits the net amount in one transaction
+ * (``deductWithAllowance``) that consumes free allowance, enforces plan policy,
+ * and debits the net amount in one transaction
  * (contract §2). The manager is a thin layer that calculates the cost, maps
  * the store's typed ``error`` codes to exceptions, and emits lifecycle events
  * **only after** the operation has succeeded (contract §6).
  *
  * Optionally accepts a ``CreditEventEmitter`` to emit lifecycle events
  * (deducted, deduct_failed, added, refunded, refund_failed, expired,
- * cap_reached, cap_warning, low_balance).
+ * low_balance).
  */
 export class CreditsService {
   private readonly store: CreditStore;
@@ -138,7 +138,6 @@ export class CreditsService {
     this.balanceMonitor = new LowBalanceMonitor(
       options?.lowBalance,
       (type, userId, data) => this.emit(type, userId, data),
-      () => new Decimal(this.pricing.currentEngine?.minBalance ?? 0),
       this.logger,
     );
     this.lazyExpiry = options?.lazyExpiry ?? false;
@@ -205,19 +204,6 @@ export class CreditsService {
     return this.queries.listQuotaEvents(userId, options);
   }
 
-  /** @deprecated Use `getQuotaState`; `feature` is interpreted as a quota key. */
-  async checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult> {
-    return this.queries.checkFeatureLimit(userId, feature);
-  }
-
-  /** @deprecated Prefer resumable migrations for large populations. */
-  async migratePlanUsers(
-    planKey: string,
-    targetConfigVersion?: number | null,
-  ): Promise<MigratePlanUsersResult> {
-    return this.queries.migratePlanUsers(planKey, targetConfigVersion);
-  }
-
   async startPlanMigration(
     fromPlanId: string | null,
     toPlanId: string,
@@ -274,6 +260,13 @@ export class CreditsService {
     return this.queries.listUsageEntries(userId, options);
   }
 
+  async listUsageCharges(
+    userId: string,
+    options?: ListUsageChargesOptions,
+  ): Promise<UsageChargePage> {
+    return this.queries.listUsageCharges(userId, options);
+  }
+
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {
     return this.queries.topUsers(limit, start, end);
   }
@@ -303,18 +296,8 @@ export class CreditsService {
       };
       if (event.eventType === "blocked") {
         this.emit("credits.quota_blocked", userId, data);
-        // Compatibility notification for consumers of the former feature-limit API.
-        this.emit("credits.feature_limit_reached", userId, {
-          ...data,
-          feature: event.quotaKey,
-        });
       } else {
         this.emit("credits.quota_threshold", userId, data);
-        this.emit("credits.feature_limit_warning", userId, {
-          ...data,
-          feature: event.quotaKey,
-          action: "notify",
-        });
       }
     }
   }
@@ -500,7 +483,6 @@ export class CreditsService {
       allowanceConsumed: new Decimal(0),
       balanceAfter: result.newBalance,
       idempotent: result.idempotent ?? false,
-      capWarning: null,
     });
     return result;
   }
@@ -667,20 +649,18 @@ export class CreditsService {
    *
    * 1. ``breakdown = engine.calculate(metrics)``; ``cost = breakdown.total``
    *    (exact `Decimal`, **no truncation**).
-   * 2. If ``cost <= 0`` short-circuit with a zero-amount result.
-   * 3. Otherwise ``store.deductWithAllowance`` consumes allowance, enforces caps,
-   *    applies the balance floor and debits — idempotency-keyed end-to-end.
+   * 2. ``store.deductWithAllowance`` records the usage, enforces policy, consumes
+   *    allowance, and debits any remainder — idempotency-keyed end-to-end.
    *
    * On a store ``error`` a ``credits.deduct_failed`` event is emitted and a
-   * typed exception is thrown (``insufficient_credits`` → InsufficientCreditsError,
-   * ``cap_reached`` → CapReachedError). No success event is emitted on error.
+   * typed exception is thrown. No success event is emitted on error.
    */
   async deduct(
     userId: string,
     metrics: UsageMetrics,
     idempotencyKey?: string | null,
     metadata?: CreditMetadata | null,
-    /** Named feature to enforce/tag a per-feature invocation-count limit for. */
+    /** Entitlement feature required for this operation. */
     feature?: string | null,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
@@ -692,26 +672,6 @@ export class CreditsService {
     // 1) Calculate cost — exact Decimal, never truncated (H1).
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const cost = breakdown.total;
-
-    // 2) Short-circuit a zero (or non-positive) cost: nothing to charge.
-    if (cost.lte(0)) {
-      const balance = await this.store.getBalance(userId);
-      const result: DeductionResult = {
-        entryId: "",
-        userId,
-        amount: new Decimal(0),
-        allowanceConsumed: new Decimal(0),
-        balanceAfter: balance.balance,
-        idempotent: false,
-        capWarning: null,
-      };
-      this.emit("credits.deducted", userId, {
-        amount: new Decimal(0),
-        balanceAfter: balance.balance,
-        planCovered: true,
-      });
-      return result;
-    }
 
     // Build ledger metadata: caller fields FIRST, system fields LAST so the
     // system fields win (contract §5 / M7).
@@ -738,7 +698,8 @@ export class CreditsService {
       metadata: meta as CreditMetadata,
     };
 
-    // 3) Atomic charge.
+    // 2) Atomic charge. This records zero-cost usage too, so authorization,
+    // quotas, and usage history cannot be bypassed by a free rate.
     const result = await this.store.deductWithAllowance(userId, cost, options);
 
     if (result.error) {

@@ -59,10 +59,6 @@ export interface DeductionResult {
   allowanceConsumed: Decimal;
   balanceAfter: Decimal;
   idempotent: boolean;
-  /** @deprecated Use persisted quota events. */
-  capWarning: string | null;
-  /** @deprecated Use persisted quota events. */
-  featureLimitWarning?: string | null;
   error?: string | null;
   bucketBreakdown?: Record<string, Decimal> | null;
 }

@@ -261,8 +261,15 @@ class FlatCharge(StrictModel):
 class PerUnitCharge(StrictModel):
     type: Literal["per_unit"]
     measure: str
-    rate: DecimalValue = Field(ge=0)
-    unit_size: DecimalValue = Field(default=Decimal("1"), gt=0)
+    rate: DecimalValue = Field(
+        ge=0,
+        description="Credits charged for each unit_size units of the selected measure.",
+    )
+    unit_size: DecimalValue = Field(
+        default=Decimal("1"),
+        gt=0,
+        description="Number of measure units represented by one rate unit; use 1000000 for per-million-token rates.",
+    )
 
 
 class PackageCharge(StrictModel):
@@ -364,9 +371,9 @@ class RateCard(StrictModel):
 
 
 class CreditAccounting(StrictModel):
-    unit: Literal["credit"]
-    scale: Literal[6]
-    rounding: Literal["half_up"]
+    unit: Literal["credit"] = "credit"
+    scale: Literal[6] = 6
+    rounding: Literal["half_up"] = "half_up"
 
 
 class BucketDefinition(StrictModel):
@@ -428,7 +435,10 @@ class CreditDisplay(StrictModel):
 
 
 class CreditsConfig(StrictModel):
-    accounting: CreditAccounting
+    accounting: CreditAccounting = Field(
+        default_factory=CreditAccounting,
+        description="Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults.",
+    )
     buckets: dict[str, BucketDefinition] = Field(default_factory=dict)
     default_bucket: str | None = None
     policies: dict[str, CreditPolicy] = Field(default_factory=dict)
@@ -533,7 +543,11 @@ class QuotaDefinition(StrictModel):
 
 class PlanDefinition(StrictModel):
     display_name: str = Field(min_length=1)
-    rank: int = Field(ge=0)
+    rank: int = Field(
+        default=0,
+        ge=0,
+        description="Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.",
+    )
     description: str | None = None
     rate_card: str | None = None
     allowed_operations: list[str] = Field(default_factory=list)
@@ -542,7 +556,13 @@ class PlanDefinition(StrictModel):
     quotas: dict[str, QuotaDefinition] = Field(default_factory=dict)
     credit_policy: str | None = None
     admission_policy: str | None = None
-    revision_policy: Literal["immediate", "next_renewal", "pinned"] | None = None
+    revision_policy: Literal["immediate", "next_renewal", "pinned"] | None = Field(
+        default=None,
+        description=(
+            "Plan revision behavior. When omitted, subscription-backed plans use next_renewal "
+            "and other plans use immediate."
+        ),
+    )
 
 
 class StripeProvider(StrictModel):
@@ -682,7 +702,10 @@ class AutoRechargeLimits(StrictModel):
 class AutoRechargeGuardrails(StrictModel):
     eligible_topups: list[str] = Field(min_length=1)
     balance_below: DecimalRange
-    rearm_above: DecimalValue = Field(gt=0)
+    rearm_above: DecimalValue = Field(
+        gt=0,
+        description="Balance that rearms auto-recharge; it must exceed balance_below.maximum.",
+    )
     quantity: IntegerRange
     limits: AutoRechargeLimits
 
@@ -728,12 +751,7 @@ class PricingConfig(StrictModel):
         )
 
 
-class OnPublishActivation(StrictModel):
-    mode: Literal["on_publish"]
-
-
 class CatalogConfig(StrictModel):
-    activation: OnPublishActivation = Field(default_factory=lambda: OnPublishActivation(mode="on_publish"))
     default_plan: str | None = None
 
 
@@ -742,10 +760,30 @@ SumCharge.model_rebuild()
 
 class BursarConfig(StrictModel):
     version: Literal[1]
-    catalog: CatalogConfig = Field(default_factory=CatalogConfig)
-    pricing: PricingConfig | None = None
-    credits: CreditsConfig
-    entitlements: EntitlementsConfig = Field(default_factory=EntitlementsConfig)
-    admission: AdmissionConfig = Field(default_factory=AdmissionConfig)
-    plans: dict[str, PlanDefinition] = Field(default_factory=dict)
-    commerce: CommerceConfig = Field(default_factory=CommerceConfig)
+    catalog: CatalogConfig = Field(
+        default_factory=CatalogConfig,
+        description="Catalog-wide publication settings such as the default signup plan.",
+    )
+    pricing: PricingConfig | None = Field(
+        default=None,
+        description="Usage operations, their measures and dimensions, and reusable rate cards.",
+    )
+    credits: CreditsConfig = Field(
+        description="Credit buckets, spending policies, grants, and optional display conversion.",
+    )
+    entitlements: EntitlementsConfig = Field(
+        default_factory=EntitlementsConfig,
+        description="Typed feature definitions referenced by plan feature values.",
+    )
+    admission: AdmissionConfig = Field(
+        default_factory=AdmissionConfig,
+        description="Reusable global and per-operation concurrency policies.",
+    )
+    plans: dict[str, PlanDefinition] = Field(
+        default_factory=dict,
+        description="Product plans keyed by stable snake_case identifiers.",
+    )
+    commerce: CommerceConfig = Field(
+        default_factory=CommerceConfig,
+        description="Payment providers, subscription and top-up offers, and purchase guardrails.",
+    )

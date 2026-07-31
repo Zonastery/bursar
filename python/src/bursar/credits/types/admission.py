@@ -34,11 +34,3 @@ class ReleaseResult(BaseModel):
     user_id: str
     released: bool
     reason: str | None = None
-
-
-class CapCheckResult(BaseModel):
-    capped: bool
-    current_spend: Decimal
-    limit: Decimal
-    action: Literal["deny", "warn", "notify"] | None
-    model: str | None = None

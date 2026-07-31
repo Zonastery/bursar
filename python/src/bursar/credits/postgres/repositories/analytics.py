@@ -11,6 +11,7 @@ from bursar.credits.postgres.repositories.schemas import (
     SpendByModelRow,
     SpendByUserRow,
     TopUserRow,
+    UsageChargeRow,
 )
 
 
@@ -124,6 +125,7 @@ class AnalyticsRepository:
             "actor_user_id",
             "amount",
             "entry_type",
+            "operation",
             "reference_entry_id",
             "idempotency_key",
             "metadata",
@@ -143,9 +145,55 @@ class AnalyticsRepository:
             "actor_user_id",
             "amount",
             "entry_type",
+            "operation",
             "reference_entry_id",
             "idempotency_key",
             "metadata",
             "created_at",
         ]
         return LedgerEntry.model_validate(_to_dict(rows[0], fields))
+
+    def list_usage_charges(
+        self,
+        user_id: str,
+        from_date: str | None,
+        to_date: str | None,
+        limit: int,
+        cursor_event_at: str | None,
+        cursor_usage_id: str | None,
+    ) -> list[UsageChargeRow]:
+        validate_non_empty(user_id, "user_id")
+        validate_non_negative(limit, "limit")
+        if (cursor_event_at is None) != (cursor_usage_id is None):
+            raise ValueError("usage charge cursor requires both event_at and usage_id")
+        rows = (
+            self._callproc(
+                "list_usage_charges",
+                [
+                    user_id,
+                    cursor_event_at,
+                    cursor_usage_id,
+                    limit,
+                    from_date,
+                    to_date,
+                ],
+            )
+            or []
+        )
+        fields = [
+            "usage_id",
+            "account_id",
+            "operation",
+            "requested",
+            "charged",
+            "allowance_requested",
+            "allowance_covered",
+            "feature",
+            "model",
+            "region",
+            "event_at",
+            "idempotency_key",
+            "metadata",
+            "created_at",
+        ]
+        return [UsageChargeRow.model_validate(_to_dict(row, fields)) for row in rows]

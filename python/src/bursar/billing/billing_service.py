@@ -139,7 +139,7 @@ class BillingService:
         *,
         resolve_user: ResolveUser | None = None,
         event_handlers: dict[BillingEventType, BillingEventHandler] | None = None,
-        cancel_prior_providers: bool | None = None,
+        auto_select_entitlement_source: bool | None = None,
         provisioning: BillingProvisioningPort | None = None,
         terminal_plan_key: str | None = None,
         past_due_grace_period_ms: float | None = None,
@@ -147,8 +147,10 @@ class BillingService:
         options = options or BillingServiceOptions()
         resolve_user = resolve_user if resolve_user is not None else options.resolve_user
         event_handlers = event_handlers if event_handlers is not None else options.event_handlers
-        cancel_prior_providers = (
-            cancel_prior_providers if cancel_prior_providers is not None else options.cancel_prior_providers
+        auto_select_entitlement_source = (
+            auto_select_entitlement_source
+            if auto_select_entitlement_source is not None
+            else options.auto_select_entitlement_source
         )
         provisioning = provisioning if provisioning is not None else options.provisioning
         terminal_plan_key = terminal_plan_key if terminal_plan_key is not None else options.terminal_plan_key
@@ -162,7 +164,7 @@ class BillingService:
         self._provisioning = provisioning
         self._resolve_user = resolve_user
         self._event_handlers = event_handlers or {}
-        self._cancel_prior_providers = cancel_prior_providers
+        self._auto_select_entitlement_source = auto_select_entitlement_source
         self._terminal_plan_key = terminal_plan_key
         self._past_due_grace_period_ms = past_due_grace_period_ms
         self.auto_recharge = AutoRechargeService(self)
@@ -482,7 +484,7 @@ class BillingService:
     def count_auto_recharge_attempts(
         self,
         user_id: str,
-        since: str | datetime | int | float,
+        since: str | datetime,
     ) -> int:
         return self._store.count_auto_recharge_attempts(user_id, since)
 
@@ -543,9 +545,12 @@ class BillingService:
                 if event.event_type == BillingEventType.checkout_expired:
                     self._update_checkout_intent_from_event(event, "expired")
                 return BillingEventResult(handled=True, action="ignored")
+            event_type_name = (
+                event.event_type.value if isinstance(event.event_type, BillingEventType) else str(event.event_type)
+            )
             self._logger.warn(
                 "unhandled billing event type (marking as failed)",
-                {"event_type": event.event_type.value},
+                {"event_type": event_type_name},
             )
             return BillingEventResult(handled=False, error="unhandled_event_type")
         result = handler(event)
@@ -1364,13 +1369,13 @@ class BillingService:
 
         self._provisioning.set_user_plan(uid, plan_key, plan_assigned_at=period_start)
 
-        if self._cancel_prior_providers and event.provider:
-            result = self._store.deactivate_other_provider_subscriptions(
+        if self._auto_select_entitlement_source and event.provider:
+            selected = self._store.select_subscription_entitlement_source(
                 uid,
                 event.provider,
                 event.subscription.provider_subscription_id if event.subscription else None,
             )
-            if result.get("deactivated_count", 0) > 0:
+            if selected:
                 self._logger.info(
                     "selected subscription as entitlement source",
                     {
@@ -1458,7 +1463,3 @@ class BillingService:
                     )
         elif status_value in ("canceled", "expired", "unpaid", "paused", "incomplete_expired"):
             self._revoke_if_current_subscription(uid, event.subscription.provider_subscription_id)
-
-
-# Backwards-compatible implementation name retained for existing Python users.
-BillingServiceImpl = BillingService

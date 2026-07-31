@@ -128,7 +128,7 @@ def test_schema_and_public_rpc_comments_are_present(pg_database_url: str) -> Non
                   'create_lease_for_operation',
                   'settle_lease',
                   'upsert_auto_recharge_profile',
-                  'list_feature_limit_events'
+                  'list_subject_quota_events'
               )
             """
         )

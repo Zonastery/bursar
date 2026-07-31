@@ -7,12 +7,15 @@ import {
   parseExpiry,
   semanticError,
   validateIdentifiers,
+  validateRegions,
 } from "./parse-utils.js";
 import type { CreditPolicy, CreditsConfig, GrantProgram } from "./types.js";
 
 export function parseCredits(value: unknown): CreditsConfig {
   const raw = asObject(value);
-  const accountingRaw = asObject(raw.accounting);
+  const accountingRaw = asObject(
+    raw.accounting ?? { unit: "credit", scale: 6, rounding: "half_up" },
+  );
   const bucketsRaw = asObject(raw.buckets ?? {});
   const policiesRaw = asObject(raw.policies ?? {});
   const programsRaw = asObject(raw.grant_programs ?? {});
@@ -76,6 +79,14 @@ export function parseCredits(value: unknown): CreditsConfig {
       };
     });
     const eligibilityRaw = asObject(program.eligibility ?? {});
+    const eligibilityRegions = (eligibilityRaw.regions ?? []) as string[];
+    validateRegions(eligibilityRegions, `credits.grant_programs.${key}.eligibility.regions`);
+    if (
+      program.trigger !== "referral_completed" &&
+      awards.some((award) => award.recipient === "referrer")
+    ) {
+      semanticError(`grant program '${key}' referrer awards require referral_completed`);
+    }
     grantPrograms[key] = {
       trigger: program.trigger as GrantProgram["trigger"],
       awards,
@@ -84,7 +95,7 @@ export function parseCredits(value: unknown): CreditsConfig {
         : { availability: parseAvailability(program.availability) }),
       eligibility: {
         plans: (eligibilityRaw.plans ?? []) as string[],
-        regions: (eligibilityRaw.regions ?? []) as string[],
+        regions: eligibilityRegions,
       },
       maxAwardsPerSubject: asInteger(program.max_awards_per_subject ?? 1),
       idempotencyScope: (program.idempotency_scope ?? "subject") as "subject" | "event",

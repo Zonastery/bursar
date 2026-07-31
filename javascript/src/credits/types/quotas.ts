@@ -41,16 +41,3 @@ export interface ListQuotaEventsOptions {
   limit?: number;
   idempotencyKey?: string | null;
 }
-
-/** @deprecated Use `QuotaState`. */
-export interface FeatureLimitResult {
-  userId: string;
-  feature: string;
-  limited: boolean;
-  limit: number;
-  used: number;
-  remaining: number;
-  periodStart: string;
-  periodEnd: string;
-  action: "deny" | "warn" | "notify" | null;
-}

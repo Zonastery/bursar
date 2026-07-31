@@ -6,7 +6,6 @@ import type { CreditEvent, CreditEventType } from "./events.js";
 import type { DeductionResult } from "./types/index.js";
 import type { LowBalanceConfig } from "./service-types.js";
 
-const DEFAULT_THRESHOLD_MULTIPLIER = 2;
 const DEFAULT_MAX_TRACKED_USERS = 100_000;
 
 type EmitCreditEvent = (
@@ -29,7 +28,6 @@ export class LowBalanceMonitor {
   constructor(
     config: LowBalanceConfig | null | undefined,
     private readonly emit: EmitCreditEvent,
-    private readonly minBalance: () => Decimal,
     private readonly logger: NormalizedLogger,
   ) {
     this.thresholds = config?.thresholds?.length
@@ -75,7 +73,7 @@ export class LowBalanceMonitor {
     balanceAfter: Decimal,
   ): Promise<void> {
     if (!this.thresholds) {
-      const threshold = this.minBalance().times(DEFAULT_THRESHOLD_MULTIPLIER);
+      const threshold = new Decimal(0);
       if (balanceBefore.gt(threshold) && balanceAfter.lte(threshold)) {
         await this.fire(userId, balanceAfter, threshold);
       }

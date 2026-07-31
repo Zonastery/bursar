@@ -80,6 +80,7 @@
           "$ref": "#/$defs/DecimalRange"
         },
         "rearm_above": {
+          "description": "Balance that rearms auto-recharge; it must exceed balance_below.maximum.",
           "examples": [
             "10.500000"
           ],
@@ -324,9 +325,6 @@
     "CatalogConfig": {
       "additionalProperties": false,
       "properties": {
-        "activation": {
-          "$ref": "#/$defs/OnPublishActivation"
-        },
         "default_plan": {
           "anyOf": [
             {
@@ -477,25 +475,23 @@
       "properties": {
         "unit": {
           "const": "credit",
+          "default": "credit",
           "title": "Unit",
           "type": "string"
         },
         "scale": {
           "const": 6,
+          "default": 6,
           "title": "Scale",
           "type": "integer"
         },
         "rounding": {
           "const": "half_up",
+          "default": "half_up",
           "title": "Rounding",
           "type": "string"
         }
       },
-      "required": [
-        "unit",
-        "scale",
-        "rounding"
-      ],
       "title": "CreditAccounting",
       "type": "object"
     },
@@ -592,7 +588,8 @@
       "additionalProperties": false,
       "properties": {
         "accounting": {
-          "$ref": "#/$defs/CreditAccounting"
+          "$ref": "#/$defs/CreditAccounting",
+          "description": "Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults."
         },
         "buckets": {
           "additionalProperties": {
@@ -653,9 +650,6 @@
           "default": null
         }
       },
-      "required": [
-        "accounting"
-      ],
       "title": "CreditsConfig",
       "type": "object"
     },
@@ -1506,21 +1500,6 @@
       "title": "OfferPrice",
       "type": "object"
     },
-    "OnPublishActivation": {
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "const": "on_publish",
-          "title": "Mode",
-          "type": "string"
-        }
-      },
-      "required": [
-        "mode"
-      ],
-      "title": "OnPublishActivation",
-      "type": "object"
-    },
     "OperationAdmission": {
       "additionalProperties": false,
       "properties": {
@@ -1656,6 +1635,7 @@
           "type": "string"
         },
         "rate": {
+          "description": "Credits charged for each unit_size units of the selected measure.",
           "examples": [
             "10.500000"
           ],
@@ -1665,6 +1645,7 @@
         },
         "unit_size": {
           "default": "1",
+          "description": "Number of measure units represented by one rate unit; use 1000000 for per-million-token rates.",
           "examples": [
             "10.500000"
           ],
@@ -1714,6 +1695,8 @@
           "type": "string"
         },
         "rank": {
+          "default": 0,
+          "description": "Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.",
           "minimum": 0,
           "title": "Rank",
           "type": "integer"
@@ -1823,12 +1806,12 @@
             }
           ],
           "default": null,
+          "description": "Plan revision behavior. When omitted, subscription-backed plans use next_renewal and other plans use immediate.",
           "title": "Revision Policy"
         }
       },
       "required": [
-        "display_name",
-        "rank"
+        "display_name"
       ],
       "title": "PlanDefinition",
       "type": "object"
@@ -2729,7 +2712,8 @@
       "type": "integer"
     },
     "catalog": {
-      "$ref": "#/$defs/CatalogConfig"
+      "$ref": "#/$defs/CatalogConfig",
+      "description": "Catalog-wide publication settings such as the default signup plan."
     },
     "pricing": {
       "anyOf": [
@@ -2740,26 +2724,32 @@
           "type": "null"
         }
       ],
-      "default": null
+      "default": null,
+      "description": "Usage operations, their measures and dimensions, and reusable rate cards."
     },
     "credits": {
-      "$ref": "#/$defs/CreditsConfig"
+      "$ref": "#/$defs/CreditsConfig",
+      "description": "Credit buckets, spending policies, grants, and optional display conversion."
     },
     "entitlements": {
-      "$ref": "#/$defs/EntitlementsConfig"
+      "$ref": "#/$defs/EntitlementsConfig",
+      "description": "Typed feature definitions referenced by plan feature values."
     },
     "admission": {
-      "$ref": "#/$defs/AdmissionConfig"
+      "$ref": "#/$defs/AdmissionConfig",
+      "description": "Reusable global and per-operation concurrency policies."
     },
     "plans": {
       "additionalProperties": {
         "$ref": "#/$defs/PlanDefinition"
       },
+      "description": "Product plans keyed by stable snake_case identifiers.",
       "title": "Plans",
       "type": "object"
     },
     "commerce": {
-      "$ref": "#/$defs/CommerceConfig"
+      "$ref": "#/$defs/CommerceConfig",
+      "description": "Payment providers, subscription and top-up offers, and purchase guardrails."
     }
   },
   "required": [

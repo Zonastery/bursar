@@ -167,16 +167,12 @@ export abstract class BillingStore {
 
   abstract recordSubscriptionConflict(input: BillingSubscriptionConflictCreate): Promise<void>;
 
-  /**
-   * Switch the subject's selected entitlement to a current subscription from
-   * `keepProvider`. The compatibility name is retained, but implementations
-   * must not falsify provider-reported subscription status.
-   */
-  abstract deactivateOtherProviderSubscriptions(
+  /** Select a current provider subscription as the subject's entitlement source. */
+  abstract selectSubscriptionEntitlementSource(
     userId: string,
-    keepProvider: string,
-    keepProviderSubscriptionId?: string | null,
-  ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }>;
+    provider: string,
+    providerSubscriptionId?: string | null,
+  ): Promise<boolean>;
 
   abstract getBillingPreferences(userId: string): Promise<BillingPreferences | null>;
 
@@ -190,10 +186,7 @@ export abstract class BillingStore {
   abstract updateAutoRechargeAttemptByProviderPayment(
     input: AutoRechargeProviderPaymentUpdate,
   ): Promise<void>;
-  abstract countAutoRechargeAttempts(
-    userId: string,
-    since: string | Date | number,
-  ): Promise<number>;
+  abstract countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;
 
   abstract getBillingCustomerByUserId(
     userId: string,

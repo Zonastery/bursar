@@ -48,3 +48,53 @@ it("parses opt-in auto-recharge guardrails", () => {
   });
   expect(config.commerce.autoRecharge?.balanceBelow.default.toString()).toBe("1000");
 });
+
+it("cross-validates auto-recharge rearm and quantity ranges", () => {
+  const config = {
+    version: 1,
+    credits: {
+      buckets: { purchased: { priority: 10 } },
+      default_bucket: "purchased",
+    },
+    commerce: {
+      providers: { stripe: { type: "stripe" } },
+      offers: {
+        small_pack: {
+          type: "topup",
+          display_name: "1,000 credits",
+          price: { amount_minor: 500, currency: "USD" },
+          providers: {
+            stripe: { type: "stripe_price", price_id: "price_pack" },
+          },
+          credits_per_unit: "1000",
+          quantity: { minimum: 1, maximum: 3, default: 1 },
+          bucket: "purchased",
+        },
+      },
+      auto_recharge: {
+        eligible_topups: ["small_pack"],
+        balance_below: {
+          minimum: "100",
+          maximum: "5000",
+          default: "1000",
+        },
+        rearm_above: "500",
+        quantity: { minimum: 1, maximum: 3, default: 1 },
+        limits: {
+          max_purchases: 3,
+          window: {
+            type: "rolling",
+            duration: { unit: "day", count: 30 },
+          },
+          max_charge_minor: 1500,
+          cooldown: { unit: "hour", count: 1 },
+        },
+      },
+    },
+  };
+
+  expect(() => loadConfigFromDict(config)).toThrow(/rearm_above/);
+  config.commerce.auto_recharge.rearm_above = "6000";
+  config.commerce.auto_recharge.quantity.maximum = 4;
+  expect(() => loadConfigFromDict(config)).toThrow(/quantity must fit/);
+});

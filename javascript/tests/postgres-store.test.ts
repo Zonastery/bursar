@@ -392,7 +392,6 @@ describe("PostgresStore", () => {
       expect(result.allowanceConsumed.toString()).toBe("0");
       expect(result.balanceAfter.toString()).toBe("97.5");
       expect(result.idempotent).toBe(false);
-      expect(result.capWarning).toBeNull();
     });
 
     it("parses allowance consumption", async () => {
@@ -411,7 +410,6 @@ describe("PostgresStore", () => {
       const result = await store.deductWithAllowance("user-1", D(25));
       expect(result.amount.toString()).toBe("15");
       expect(result.allowanceConsumed.toString()).toBe("10");
-      expect(result.capWarning).toBeNull();
     });
 
     it("maps quota_exceeded error envelope to result.error (no throw)", async () => {
@@ -475,6 +473,55 @@ describe("PostgresStore", () => {
       const result = await store.getBalance("u1");
       expect(result.balance.toString()).toBe("42");
     });
+  });
+
+  it("lists allowance-covered usage and permits the maximum page look-ahead", async () => {
+    const eventAt = new Date("2030-01-02T00:00:00.000Z");
+    const { ctor, calls } = makeRecordingPool([
+      {
+        usage_id: "usage-1",
+        account_id: "account-1",
+        operation: "completion",
+        requested: "10",
+        charged: "2.5",
+        allowance_requested: "10",
+        allowance_covered: "7.5",
+        feature: "chat",
+        model: "gpt-5",
+        region: "in-west",
+        event_at: eventAt,
+        idempotency_key: "request-1",
+        metadata: { trace: "one" },
+        created_at: eventAt,
+      },
+    ]);
+    const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+    const page = await store.listUsageCharges("user-1", {
+      fromDate: new Date("2030-01-01T00:00:00.000Z"),
+      toDate: new Date("2030-02-01T00:00:00.000Z"),
+      limit: 200,
+      cursor: { eventAt: eventAt.toISOString(), usageId: "usage-cursor" },
+    });
+
+    expect(calls[0].text).toContain("list_usage_charges");
+    expect(calls[0].params).toEqual([
+      "user-1",
+      eventAt.toISOString(),
+      "usage-cursor",
+      201,
+      "2030-01-01T00:00:00.000Z",
+      "2030-02-01T00:00:00.000Z",
+    ]);
+    expect(page.nextCursor).toBeNull();
+    expect(page.items[0]).toMatchObject({
+      usageId: "usage-1",
+      operation: "completion",
+      feature: "chat",
+      eventAt: eventAt.toISOString(),
+    });
+    expect(page.items[0]?.charged.toString()).toBe("2.5");
+    expect(page.items[0]?.allowanceCovered.toString()).toBe("7.5");
   });
 
   it("getActivePricing returns null for empty results", async () => {
@@ -583,6 +630,7 @@ describe("PostgresStore", () => {
               to_offer_id: "offer-new",
               to_catalog_revision_id: "revision-new",
               effective_at: new Date("2027-01-01T00:00:00.000Z"),
+              effective_behavior: "renewal",
               state: "scheduled",
               proration_behavior: "none",
               idempotency_key: "change-key",
@@ -641,6 +689,7 @@ describe("PostgresStore", () => {
         interval: "year",
       },
       effectiveAt: "2027-01-01T00:00:00.000Z",
+      effective: "renewal",
       prorationBehavior: "none",
     });
   });

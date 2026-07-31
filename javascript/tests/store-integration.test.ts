@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, inject, it } from "vitest";
 import Decimal from "decimal.js";
 import pg from "pg";
 import { CreditsService } from "../src/credits/service.js";
-import { FeatureNotEntitledError, QuotaExceededError } from "../src/errors.js";
+import {
+  FeatureNotEntitledError,
+  OperationNotAllowedError,
+  QuotaExceededError,
+} from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import { BOOTSTRAP_SQL, TEST_TENANT_ID, applyMigrations } from "./helpers/bootstrap.js";
 
@@ -21,6 +25,8 @@ const CONFIG = {
         },
         dimensions: { model: { type: "string", required: false } },
       },
+      free_export: { measures: { calls: { unit: "call" } }, dimensions: {} },
+      internal_free: { measures: { calls: { unit: "call" } }, dimensions: {} },
     },
     rate_cards: {
       standard: {
@@ -42,6 +48,14 @@ const CONFIG = {
                 formula: "input_tokens + output_tokens",
               },
             },
+          },
+          free_export: {
+            rules: [],
+            unmatched: { action: "charge", charge: { type: "flat", amount: "0" } },
+          },
+          internal_free: {
+            rules: [],
+            unmatched: { action: "charge", charge: { type: "flat", amount: "0" } },
           },
         },
       },
@@ -75,7 +89,7 @@ const CONFIG = {
       display_name: "Pro",
       rank: 1,
       rate_card: "standard",
-      allowed_operations: ["completion"],
+      allowed_operations: ["completion", "free_export"],
       features: { premium_tools: true },
       quotas: {
         input_budget: {
@@ -157,6 +171,19 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       "premium_tools",
     );
     expect(result.amount.toString()).toBe("16");
+    const freeResult = await service.deduct(
+      USER_ID,
+      { operation: "free_export", measures: { calls: 1 }, dimensions: {} },
+      "public-config-free-usage",
+    );
+    expect(freeResult.amount.toString()).toBe("0");
+    await expect(
+      service.deduct(
+        USER_ID,
+        { operation: "internal_free", measures: { calls: 1 }, dimensions: {} },
+        "public-config-free-not-allowed",
+      ),
+    ).rejects.toBeInstanceOf(OperationNotAllowedError);
     const persistedUsage = await pool.query(
       `SELECT charge.measures, payload.dimensions
        FROM bursar.credit_usage_charges AS charge
@@ -206,14 +233,6 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       quotaEvents.some((event) => event.eventType === "threshold" && event.thresholdPercent === 50),
     ).toBe(true);
     expect(quotaEvents.some((event) => event.eventType === "blocked")).toBe(true);
-    const legacyLimit = await service.checkFeatureLimit(USER_ID, "input_budget");
-    expect(legacyLimit).toMatchObject({
-      limited: true,
-      limit: 3,
-      used: 2,
-      remaining: 1,
-      action: "deny",
-    });
 
     const firstLease = await service.reserve(
       REPLAY_USER_ID,
@@ -285,6 +304,32 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       limit: 10,
     });
     expect(usagePage.items.map((entry) => entry.entryId)).toContain(result.entryId);
+    const chargePage = await service.listUsageCharges(USER_ID, {
+      fromDate: startedAt,
+      toDate: new Date(Date.now() + 1_000),
+      limit: 200,
+    });
+    expect(chargePage.items).toContainEqual(
+      expect.objectContaining({
+        operation: "completion",
+        idempotencyKey: "public-config-charge-1",
+      }),
+    );
+    expect(chargePage.items).toContainEqual(
+      expect.objectContaining({
+        operation: "free_export",
+        idempotencyKey: "public-config-free-usage",
+      }),
+    );
+    expect(
+      chargePage.items
+        .find((charge) => charge.idempotencyKey === "public-config-free-usage")
+        ?.charged.toString(),
+    ).toBe("0");
+    const recordedCharge = chargePage.items.find(
+      (charge) => charge.idempotencyKey === "public-config-charge-1",
+    );
+    expect(recordedCharge?.charged.toString()).toBe("16");
     expect(await service.getLedgerEntry(USER_ID, result.entryId)).toMatchObject({
       entryId: result.entryId,
       entryType: "usage",
@@ -369,10 +414,25 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect((await store.getBursarConfig(draft!.version))?.config).toMatchObject({
       plans: { pro: { display_name: "Pro v2" } },
     });
+    const sourcePlanId = (await store.getUserPlan(USER_ID)).planId;
+    expect(sourcePlanId).not.toBeNull();
     await service.activatePricing(draft!.version);
     expect((await store.getActivePricing())?.version).toBe(draft!.version);
-    const migration = await service.migratePlanUsers("pro", draft!.version);
-    expect(migration.targetConfigVersion).toBe(draft!.version);
-    expect(migration.targetPlanId).not.toBe("");
+    const targetPlanResult = await pool.query<{ id: string }>(
+      `SELECT plan.id
+       FROM bursar.catalog_plans AS plan
+       JOIN bursar.catalog_revisions AS revision
+         ON revision.id = plan.catalog_revision_id
+       WHERE plan.tenant_id = $1::uuid
+         AND plan.plan_key = 'pro'
+         AND revision.revision_no = $2`,
+      [TEST_TENANT_ID, draft!.version],
+    );
+    const targetPlanId = targetPlanResult.rows[0]?.id;
+    expect(targetPlanId).toBeDefined();
+    const migration = await service.startPlanMigration(sourcePlanId, targetPlanId!);
+    const batch = await service.migratePlanBatch(migration.migrationId);
+    expect(batch.done).toBe(true);
+    expect((await store.getUserPlan(USER_ID)).planId).toBe(targetPlanId);
   });
 });

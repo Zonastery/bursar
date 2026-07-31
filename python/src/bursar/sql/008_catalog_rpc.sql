@@ -31,6 +31,8 @@ BEGIN
         RAISE EXCEPTION 'invalid_catalog' USING ERRCODE = '22023';
     END IF;
 
+    PERFORM bursar.require_catalog_document_shape(p_source_document);
+
     IF EXISTS (
         SELECT 1
         FROM jsonb_object_keys(p_source_document) AS key_name(key)
@@ -1006,10 +1008,6 @@ BEGIN
                 (
                     p_source_document
                         #>> '{commerce,auto_recharge,limits,max_consecutive_failures}'
-                )::integer,
-                (
-                    p_source_document
-                        #>> '{commerce,auto_recharge,limits,max_failures}'
                 )::integer,
                 3
             ),

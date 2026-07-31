@@ -56,7 +56,7 @@ class BillingServiceOptions(BaseModel):
     provisioning: BillingProvisioningPort | None = None
     resolve_user: ResolveUser | None = None
     event_handlers: dict[BillingEventType, BillingEventHandler] = Field(default_factory=dict)
-    cancel_prior_providers: bool = True
+    auto_select_entitlement_source: bool = True
     past_due_grace_period_ms: float = Field(
         default=7 * 24 * 60 * 60 * 1_000,
         ge=0,

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { makeCostBreakdown } from "../src/breakdown.js";
 import { CreditEventEmitter } from "../src/credits/events.js";
+import { raiseDeductError } from "../src/credits/service-errors.js";
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
 import type { PricingEngine } from "../src/engine.js";
@@ -19,6 +20,10 @@ describe("CreditsService mirror regressions", () => {
     expect(isRetryableBursarError(new StoreError("temporary"))).toBe(true);
     expect(isRetryableBursarError(new CapReachedError("permanent"))).toBe(false);
     expect(isRetryableBursarError(new CapabilityNotSupportedError("permanent"))).toBe(false);
+  });
+
+  it("maps invalid deduction requests to a caller error", () => {
+    expect(() => raiseDeductError("invalid_request", "user-1", new Decimal(1))).toThrow(RangeError);
   });
 
   it("retries only transient Bursar failures", async () => {
@@ -57,8 +62,6 @@ describe("CreditsService mirror regressions", () => {
       allowanceConsumed: new Decimal(0),
       balanceAfter: new Decimal(92),
       idempotent: true,
-      capWarning: null,
-      featureLimitWarning: null,
     });
     const store = {
       getUserPlan: vi.fn().mockResolvedValue({
@@ -98,24 +101,25 @@ describe("CreditsService mirror regressions", () => {
     );
   });
 
-  it("short-circuits a zero-cost deduction without calling the charge RPC", async () => {
-    const deductWithAllowance = vi.fn();
+  it("records zero-cost usage through the authoritative charge RPC", async () => {
+    const deductWithAllowance = vi.fn().mockResolvedValue({
+      entryId: "",
+      userId: "user-1",
+      amount: new Decimal(0),
+      allowanceConsumed: new Decimal(0),
+      balanceAfter: new Decimal(25),
+      idempotent: false,
+    });
     const store = {
       getUserPlan: vi.fn().mockResolvedValue({
         userId: "user-1",
-        configVersion: null,
         catalogVersion: null,
         rateCard: null,
       }),
-      getBalance: vi.fn().mockResolvedValue({
-        userId: "user-1",
-        balance: new Decimal(25),
-        lifetimePurchased: new Decimal(25),
-      }),
       deductWithAllowance,
+      listQuotaEvents: vi.fn().mockResolvedValue([]),
     } as unknown as CreditStore;
     const engine = {
-      minBalance: new Decimal(0),
       calculate: vi.fn().mockReturnValue(makeCostBreakdown()),
     } as unknown as PricingEngine;
     const emitter = new CreditEventEmitter();
@@ -128,13 +132,13 @@ describe("CreditsService mirror regressions", () => {
       dimensions: {},
     });
 
-    expect(deductWithAllowance).not.toHaveBeenCalled();
+    expect(deductWithAllowance).toHaveBeenCalledWith(
+      "user-1",
+      new Decimal(0),
+      expect.objectContaining({ operation: "free_operation" }),
+    );
     expect(result.amount.eq(0)).toBe(true);
     expect(result.balanceAfter.eq(25)).toBe(true);
-    expect(events).toEqual([
-      expect.objectContaining({
-        planCovered: true,
-      }),
-    ]);
+    expect(events).toEqual([expect.objectContaining({ amount: new Decimal(0) })]);
   });
 });

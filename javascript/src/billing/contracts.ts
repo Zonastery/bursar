@@ -175,7 +175,7 @@ export interface BillingCapability extends BillingEventSink {
   updateAutoRechargeAttemptByProviderPayment(
     input: AutoRechargeProviderPaymentUpdate,
   ): Promise<void>;
-  countAutoRechargeAttempts(userId: string, since: string | Date | number): Promise<number>;
+  countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number>;
   expirePastDueGracePeriods(now?: Date): Promise<number>;
   invalidateOfferCache(): void;
   getCustomerByUserId(

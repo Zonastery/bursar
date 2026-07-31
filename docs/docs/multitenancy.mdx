@@ -83,9 +83,19 @@ bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 
 ## Host triggers and external storage
 
-A trigger on an application-owned principal table must set the tenant locally
-before it calls a Bursar provisioning RPC. Use a host-owned wrapper trigger;
-do not attach the generic provisioning hook without tenant context.
+A host application attaches Bursar's tenant-aware trigger API to its principal
+table and passes its provisioned tenant slug:
+
+```sql
+CREATE TRIGGER bursar_account_created
+AFTER INSERT ON app.users
+FOR EACH ROW
+EXECUTE FUNCTION bursar.provision_subject_account_on_insert('acme');
+```
+
+Bursar resolves the active tenant, binds transaction-local context, assigns the
+active default plan, and runs eligible `account_created` grants. Host SQL must
+not read Bursar tables or implement those steps itself.
 
 The operator API can claim the global outbox, while SDK runtimes use the
 tenant-filtered claim overload so one runtime cannot take another tenant's

@@ -44,7 +44,7 @@ export interface CreditsServiceOptions {
   maxConcurrent?: number | null;
   /**
    * Edge-triggered low-balance thresholds and optional non-blocking handler.
-   * Defaults to `engine.minBalance * 2` when omitted.
+   * Defaults to zero when omitted.
    */
   lowBalance?: LowBalanceConfig | null;
   /** Default lease TTL in seconds. Defaults to 600. */
@@ -68,8 +68,6 @@ export interface ReserveOptions {
   idempotencyKey?: string | null;
   operationType?: string;
   billingMode?: BillingMode | null;
-  /** @deprecated Use `feature`. */
-  requiredFeature?: string | null;
   ttl?: number | null;
   metadata?: CreditMetadata | null;
   feature?: string | null;
@@ -80,14 +78,12 @@ export interface ReserveOptions {
 export interface SettleOptions {
   idempotencyKey?: string | null;
   metadata?: CreditMetadata | null;
-  /** Feature supplied at reserve time, used for invocation-count accounting. */
+  /** Entitlement key supplied at reserve time. */
   feature?: string | null;
 }
 
 export interface CanAffordOptions {
   feature?: string | null;
-  /** @deprecated Use `feature`. */
-  requiredFeature?: string | null;
   billingMode?: BillingMode | null;
   operationType?: string;
 }
@@ -108,12 +104,8 @@ export interface RunBilledOptions<T> {
   doWork: () => Promise<{ result: T; actual: MetricsOrAmount }>;
   operationType?: string;
   billingMode?: BillingMode | null;
-  /** @deprecated Use `feature`. */
-  requiredFeature?: string | null;
   /** Stable key for the complete reserve/work/settle operation. */
   operationKey?: string | null;
-  /** @deprecated Use `operationKey`. */
-  idempotencyKey?: string | null;
   ttl?: number | null;
   feature?: string | null;
   metadata?: CreditMetadata | null;
@@ -127,8 +119,6 @@ export interface BeginBilledOperationOptions {
   operationKey: string;
   operationType?: string;
   billingMode?: BillingMode | null;
-  /** @deprecated Use `feature`. */
-  requiredFeature?: string | null;
   ttl?: number | null;
   feature?: string | null;
   metadata?: CreditMetadata | null;

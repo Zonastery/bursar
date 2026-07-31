@@ -250,8 +250,7 @@ def _truncate_bursar_tables(dsn: str) -> None:
                                'usage_daily_rollups'
                            )
                            OR tablename LIKE 'billing_%'
-                           OR tablename LIKE 'catalog_%'
-                           OR tablename = 'account_creation_grants');
+                           OR tablename LIKE 'catalog_%');
 
                     IF v_tables IS NOT NULL THEN
                         EXECUTE 'TRUNCATE TABLE '

@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from bursar.billing.auto_recharge_service import AutoRechargeService
-from bursar.billing.billing_service import BillingServiceImpl
+from bursar.billing.billing_service import BillingService as BillingEventService
 from bursar.billing.billing_store import BillingStore
 from bursar.billing.contracts import (
     AutoRechargeAttemptClaim,
@@ -130,7 +130,7 @@ class BillingCapability(BillingEventSink, Protocol):
     def count_auto_recharge_attempts(
         self,
         user_id: str,
-        since: str | datetime | int | float,
+        since: str | datetime,
     ) -> int: ...
 
     def get_customer_by_user_id(self, user_id: str, provider: str | None = None) -> BillingCustomerRecord | None: ...
@@ -315,7 +315,7 @@ class Bursar:
         self.catalog = CatalogService(self.credits)
         self.accounts = AccountService(self.credits, self.catalog)
         self.billing = (
-            BillingServiceImpl(
+            BillingEventService(
                 options.billing_store,
                 (options.billing_options or BillingServiceOptions()).model_copy(update={"provisioning": self.credits}),
             )

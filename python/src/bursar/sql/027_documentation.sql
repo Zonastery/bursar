@@ -68,7 +68,6 @@ COMMENT ON TABLE bursar.credit_team_usage_charges IS
 'Member-attributed team usage used for audit and atomic member spend-cap enforcement.';
 COMMENT ON TABLE bursar.grant_program_events IS 'Idempotent business events that can execute catalog grant programs.';
 COMMENT ON TABLE bursar.grant_award_executions IS 'Append-only recipient-level executions of catalog grant awards.';
-COMMENT ON TABLE bursar.account_creation_grants IS 'Compatibility index for account-creation grant executions.';
 COMMENT ON TABLE bursar.credit_plan_migrations IS 'Batched account migration cursors between plans.';
 COMMENT ON TABLE bursar.billing_customers IS 'Provider customer identities linked to subjects.';
 COMMENT ON TABLE bursar.billing_subscriptions IS

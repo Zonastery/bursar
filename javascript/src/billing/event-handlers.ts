@@ -30,7 +30,7 @@ interface OfferContext {
 export class BillingEventHandlers {
   private readonly provisioning: BillingProvisioningPort | null;
   private readonly resolveUser: ResolveUser | null;
-  private readonly cancelPriorProviders: boolean;
+  private readonly autoSelectEntitlementSource: boolean;
   private readonly pastDueGracePeriodMs: number;
   private readonly terminalPlanKey: string | null;
   private readonly logger: NormalizedLogger;
@@ -48,7 +48,7 @@ export class BillingEventHandlers {
   ) {
     this.provisioning = options?.provisioning ?? null;
     this.resolveUser = options?.resolveUser ?? null;
-    this.cancelPriorProviders = options?.cancelPriorProviders ?? true;
+    this.autoSelectEntitlementSource = options?.autoSelectEntitlementSource ?? true;
     this.pastDueGracePeriodMs = options?.pastDueGracePeriodMs ?? 7 * 24 * 60 * 60 * 1000;
     if (!Number.isFinite(this.pastDueGracePeriodMs) || this.pastDueGracePeriodMs < 0) {
       throw new RangeError("pastDueGracePeriodMs must be a finite non-negative number");
@@ -752,16 +752,15 @@ export class BillingEventHandlers {
       : undefined;
     await this.provisioning.setUserPlan(uid, plan, planAssignedAt);
 
-    // Cancel subscriptions from other providers (migration support)
-    if (this.cancelPriorProviders && event.provider) {
-      const result = await this.store.deactivateOtherProviderSubscriptions(
+    if (this.autoSelectEntitlementSource && event.provider) {
+      const selected = await this.store.selectSubscriptionEntitlementSource(
         uid,
         event.provider,
         event.subscription?.providerSubscriptionId,
       );
-      if (result.deactivatedCount > 0) {
+      if (selected) {
         this.logger.debug(
-          `[BillingService] deactivated ${result.deactivatedCount} prior provider entitlement source(s) for user ${uid}`,
+          `[BillingService] selected ${event.provider} subscription as entitlement source for user ${uid}`,
         );
       }
     }

@@ -5,14 +5,13 @@ import type {
   BursarConfigResult,
   CheckFeatureResult,
   DailySpendRow,
-  FeatureLimitResult,
   GetUserPlanResult,
   LedgerEntry,
   LedgerPage,
   ListLedgerEntriesOptions,
   ListQuotaEventsOptions,
+  ListUsageChargesOptions,
   ListUsageEntriesOptions,
-  MigratePlanUsersResult,
   PlanMigrationBatchResult,
   PlanMigrationStartResult,
   QuotaEvent,
@@ -20,6 +19,7 @@ import type {
   SpendByModelRow,
   SpendByUserRow,
   TopUserRow,
+  UsageChargePage,
   UsageAnalyticsStore,
 } from "./types/index.js";
 
@@ -53,19 +53,6 @@ export class CreditQueries {
 
   async listQuotaEvents(userId: string, options?: ListQuotaEventsOptions): Promise<QuotaEvent[]> {
     return this.store.listQuotaEvents(userId, options);
-  }
-
-  /** @deprecated Use `getQuotaState`; `feature` is interpreted as a quota key. */
-  async checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult> {
-    return this.store.checkFeatureLimit(userId, feature);
-  }
-
-  /** @deprecated Prefer resumable migrations for large populations. */
-  async migratePlanUsers(
-    planKey: string,
-    targetConfigVersion?: number | null,
-  ): Promise<MigratePlanUsersResult> {
-    return this.store.migratePlanUsers(planKey, targetConfigVersion);
   }
 
   async startPlanMigration(
@@ -115,6 +102,13 @@ export class CreditQueries {
 
   async listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage> {
     return this.store.listUsageEntries(userId, options);
+  }
+
+  async listUsageCharges(
+    userId: string,
+    options?: ListUsageChargesOptions,
+  ): Promise<UsageChargePage> {
+    return this.store.listUsageCharges(userId, options);
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {

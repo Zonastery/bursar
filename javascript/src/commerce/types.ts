@@ -8,7 +8,12 @@ import type {
   BillingSubscriptionState,
   BillingSubscriptionStatus,
 } from "../billing/types/index.js";
-import type { BucketBalance, GetUserPlanResult, LedgerEntry } from "../credits/types/index.js";
+import type {
+  BucketBalance,
+  GetUserPlanResult,
+  LedgerEntry,
+  UsageCharge,
+} from "../credits/types/index.js";
 import type {
   ChangePlanPreview,
   PaymentMethodInfo,
@@ -214,7 +219,7 @@ export interface AccountCommerceOverview {
     lifetimePurchases: Decimal;
     allowance: {
       remaining: Decimal;
-      limit: Decimal;
+      limit: Decimal | null;
       periodStart: string | null;
       periodEnd: string | null;
     };
@@ -234,7 +239,7 @@ export interface AccountCommerceOverview {
   documents: BillingDocumentRef[];
   providerInvoices: BillingInvoiceInfo[];
   transactions: LedgerEntry[];
-  usage: LedgerEntry[];
+  usage: UsageCharge[];
   autoRecharge: BillingAutoRechargeStatus | null;
   availability: CommerceSectionAvailability;
 }

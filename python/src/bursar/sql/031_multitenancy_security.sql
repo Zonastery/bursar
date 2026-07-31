@@ -169,6 +169,7 @@ BEGIN
               'run_storage_partition_maintenance',
               'run_storage_maintenance',
               'maybe_run_storage_maintenance',
+              'resolve_active_tenant_for_trigger',
               'create_tenant'
           )
         ORDER BY function_info.oid
@@ -180,6 +181,37 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- The runtime-owned trigger is the stable host-integration API. Its only
+-- cross-tenant capability is resolving one active tenant slug through the
+-- migration-owned helper; all catalog reads and mutations then run with
+-- transaction-local tenant context under forced RLS.
+REVOKE ALL
+ON FUNCTION bursar.resolve_active_tenant_for_trigger(text)
+FROM PUBLIC;
+
+GRANT EXECUTE
+ON FUNCTION bursar.resolve_active_tenant_for_trigger(text)
+TO bursar_runtime;
+
+-- PostgreSQL checks EXECUTE when the host creates its trigger, not when that
+-- trigger later fires. Grant the trusted migration session just enough access
+-- to attach the runtime-owned hook. SET ROLE is required because the migration
+-- role has SET-only membership in bursar_runtime and therefore does not inherit
+-- ownership privileges.
+SET LOCAL ROLE bursar_runtime;
+
+DO $$
+BEGIN
+    EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION '
+        || 'bursar.provision_subject_account_on_insert() TO %I',
+        session_user
+    );
+END
+$$;
+
+RESET ROLE;
 
 REVOKE CREATE ON SCHEMA bursar FROM bursar_runtime;
 

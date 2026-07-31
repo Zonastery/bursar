@@ -3,7 +3,7 @@ CREATE TEMP TABLE bursar_trigger_users (id uuid PRIMARY KEY);
 CREATE TRIGGER bursar_trigger_users_account_created
 AFTER INSERT ON bursar_trigger_users
 FOR EACH ROW
-EXECUTE FUNCTION bursar.provision_subject_account_on_insert();
+EXECUTE FUNCTION bursar.provision_subject_account_on_insert('bursar-tests');
 
 DO $$
 DECLARE

@@ -2,7 +2,7 @@ import type Decimal from "decimal.js";
 import type { BursarConfig as GeneratedBursarConfigData } from "../generated/pricing-config.types.js";
 
 /** Raw, snake_case configuration accepted by the canonical JSON Schema. */
-export type BursarConfigData = GeneratedBursarConfigData & Record<string, unknown>;
+export type BursarConfigData = GeneratedBursarConfigData;
 export type FeatureValue = boolean | number | string;
 
 export interface Duration {
@@ -255,7 +255,7 @@ export interface SubscriptionChangePolicy {
 
 export interface ParsedBursarConfig {
   version: 1;
-  catalog: { activation: { mode: "on_publish" }; defaultPlan?: string };
+  catalog: { defaultPlan?: string };
   pricing?: PricingConfig;
   credits: CreditsConfig;
   entitlements: EntitlementsConfig;

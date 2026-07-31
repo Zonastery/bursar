@@ -310,49 +310,59 @@ DECLARE
     v_environment text:=bursar.current_provider_environment();
 
 BEGIN
-    IF p_enabled THEN
-        SELECT t.catalog_revision_id,t.topup_key,t.amount_minor
-        INTO v_revision,v_topup_key,v_amount_minor
-        FROM bursar.catalog_topups t
-        JOIN bursar.catalog_revisions r ON r.id=t.catalog_revision_id AND r.status='active'
-        WHERE t.id=p_topup_id;
+    -- Disabling an existing profile must not depend on the active catalog.
+    -- The previous implementation dereferenced the policy record below even
+    -- for this branch, which PostgreSQL reports as "record v_policy is not
+    -- assigned yet" when the profile is toggled off.
+    IF NOT p_enabled THEN
+        UPDATE bursar.billing_auto_recharge_profiles
+        SET enabled = false,
+            armed = true,
+            state = 'disabled'
+        WHERE subject_id = p_subject_id;
+        RETURN true;
+    END IF;
 
-        IF NOT FOUND THEN
-            RAISE EXCEPTION 'auto-recharge top-up is not active' USING ERRCODE='22023';
+    SELECT t.catalog_revision_id,t.topup_key,t.amount_minor
+    INTO v_revision,v_topup_key,v_amount_minor
+    FROM bursar.catalog_topups t
+    JOIN bursar.catalog_revisions r ON r.id=t.catalog_revision_id AND r.status='active'
+    WHERE t.id=p_topup_id;
 
-        END IF;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'auto-recharge top-up is not active' USING ERRCODE='22023';
 
-        SELECT policy.* INTO v_policy
-        FROM bursar.catalog_auto_recharge_policies AS policy
-        WHERE policy.catalog_revision_id = v_revision;
+    END IF;
 
-        IF NOT FOUND
-           OR NOT (v_topup_key=ANY(v_policy.eligible_topup_keys))
-           OR p_quantity NOT BETWEEN v_policy.quantity_min AND v_policy.quantity_max
-           OR p_threshold NOT BETWEEN v_policy.balance_min AND v_policy.balance_max
-           OR p_max_charges_per_window <> v_policy.max_purchases
-           OR p_window_unit <> v_policy.period_unit
-           OR p_window_count <> v_policy.period_count
-           OR p_window_anchor <> v_policy.period_anchor
-           OR p_window_timezone <> v_policy.period_timezone
-           OR (
-               v_policy.max_charge_minor IS NOT NULL
-               AND v_amount_minor::numeric * p_quantity
-                    > v_policy.max_charge_minor
-           )
-           OR NOT EXISTS (
-               SELECT 1
-               FROM bursar.catalog_provider_refs AS provider_ref
-               WHERE provider_ref.catalog_revision_id = v_revision
-                 AND provider_ref.provider_environment = v_environment
-                 AND provider_ref.provider = p_provider
-                 AND provider_ref.object_type = 'topup'
-                 AND provider_ref.object_key = v_topup_key
-           )
-        THEN
-            RAISE EXCEPTION 'auto-recharge profile does not match active catalog policy' USING ERRCODE='22023';
+    SELECT policy.* INTO v_policy
+    FROM bursar.catalog_auto_recharge_policies AS policy
+    WHERE policy.catalog_revision_id = v_revision;
 
-        END IF;
+    IF NOT FOUND
+       OR NOT (v_topup_key=ANY(v_policy.eligible_topup_keys))
+       OR p_quantity NOT BETWEEN v_policy.quantity_min AND v_policy.quantity_max
+       OR p_threshold NOT BETWEEN v_policy.balance_min AND v_policy.balance_max
+       OR p_max_charges_per_window <> v_policy.max_purchases
+       OR p_window_unit <> v_policy.period_unit
+       OR p_window_count <> v_policy.period_count
+       OR p_window_anchor <> v_policy.period_anchor
+       OR p_window_timezone <> v_policy.period_timezone
+       OR (
+           v_policy.max_charge_minor IS NOT NULL
+           AND v_amount_minor::numeric * p_quantity
+                > v_policy.max_charge_minor
+       )
+       OR NOT EXISTS (
+           SELECT 1
+           FROM bursar.catalog_provider_refs AS provider_ref
+           WHERE provider_ref.catalog_revision_id = v_revision
+             AND provider_ref.provider_environment = v_environment
+             AND provider_ref.provider = p_provider
+             AND provider_ref.object_type = 'topup'
+             AND provider_ref.object_key = v_topup_key
+       )
+    THEN
+        RAISE EXCEPTION 'auto-recharge profile does not match active catalog policy' USING ERRCODE='22023';
 
     END IF;
 
@@ -368,14 +378,13 @@ BEGIN
         window_timezone
     )
     VALUES (
-        p_subject_id,p_enabled,true,
-        CASE WHEN p_enabled THEN 'active' ELSE 'disabled' END,
+        p_subject_id,true,true,'active',
         p_provider,v_environment,v_revision,p_topup_id,p_quantity,p_threshold,
-        CASE WHEN p_enabled THEN v_policy.rearm_above ELSE p_threshold+1 END,
+        v_policy.rearm_above,
         p_max_charges_per_window,
-        CASE WHEN p_enabled THEN v_policy.max_charge_minor END,
-        CASE WHEN p_enabled THEN v_policy.cooldown_seconds ELSE 0 END,
-        CASE WHEN p_enabled THEN v_policy.max_consecutive_failures ELSE 3 END,
+        v_policy.max_charge_minor,
+        v_policy.cooldown_seconds,
+        v_policy.max_consecutive_failures,
         p_window_unit,p_window_count,p_window_anchor,p_window_timezone
     )
     ON CONFLICT (tenant_id, subject_id, provider_environment) DO UPDATE

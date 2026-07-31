@@ -48,13 +48,12 @@ class GrantProgramAwardRow(BaseModel):
 
 class DeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    entry_id: str = ""
+    # Allowance-only and zero-cost usage has no monetary ledger entry.
+    entry_id: str | None = None
     amount: str | Decimal | None = None
     balance_after: str | Decimal | None = None
     allowance_consumed: str | Decimal | None = None
     idempotent: bool = False
-    cap_warning: str | None = None
-    feature_limit_warning: str | None = None
     bucket_breakdown: dict[str, str | Decimal] | None = None
     error: str | None = None
     user_id: str = ""
@@ -156,14 +155,6 @@ class PlanMigrationBatchRow(BaseModel):
     next_cursor: str | None = None
 
 
-class PlanMigrationUsersRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    plan_key: str
-    target_plan_id: str
-    target_config_version: int
-    migrated_count: int
-
-
 class AllowanceRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     plan_id: str | None = None
@@ -226,12 +217,32 @@ class LedgerEntry(BaseModel):
     actor_user_id: str | None = None
     amount: str | Decimal | None = None
     entry_type: str = ""
+    operation: str = ""
     reference_entry_id: str | None = None
     idempotency_key: str | None = None
     metadata: dict[str, Any] | None = None
     created_at: str | datetime = ""
     next_cursor_created_at: str | datetime | None = None
     next_cursor_entry_id: str | None = None
+
+
+class UsageChargeRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    usage_id: str = ""
+    account_id: str = ""
+    operation: str = ""
+    requested: str | Decimal | None = None
+    charged: str | Decimal | None = None
+    allowance_requested: str | Decimal | None = None
+    allowance_covered: str | Decimal | None = None
+    feature: str | None = None
+    model: str | None = None
+    region: str | None = None
+    event_at: str | datetime = ""
+    idempotency_key: str = ""
+    metadata: dict[str, Any] | None = None
+    created_at: str | datetime = ""
 
 
 class CreateTeamRow(BaseModel):

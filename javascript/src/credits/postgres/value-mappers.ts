@@ -1,14 +1,8 @@
 import Decimal from "decimal.js";
 
-import type { AllowancePeriod } from "../../allowance.js";
 import { StoreError } from "../../errors.js";
-import type { LedgerEntryRow } from "./repositories/analytics.js";
-import type {
-  BillingMode,
-  BursarConfigResult,
-  LedgerEntry,
-  OperationPolicy,
-} from "../types/index.js";
+import type { LedgerEntryRow, UsageChargeRow } from "./repositories/analytics.js";
+import type { BursarConfigResult, LedgerEntry, UsageCharge } from "../types/index.js";
 
 export const ZERO = new Decimal(0);
 
@@ -73,39 +67,6 @@ export function parseAdmissionOperations(
   );
 }
 
-export function compatibilityOperationPolicies(
-  operations: Record<string, { maxInFlight: number | null }>,
-  billingMode: BillingMode,
-  overdraftFloor: Decimal | null,
-): Record<string, OperationPolicy> {
-  return Object.fromEntries(
-    Object.entries(operations).map(([operation, policy]) => [
-      operation,
-      {
-        billingMode,
-        maxConcurrent: policy.maxInFlight,
-        overdraftFloor,
-      },
-    ]),
-  );
-}
-
-export function compatibilityAllowancePeriod(row: Record<string, unknown>): AllowancePeriod | null {
-  const unit = row.credit_allowance_reset_unit;
-  const count = Number(row.credit_allowance_reset_count ?? 0);
-  const anchor = row.credit_allowance_reset_anchor;
-  if (anchor === "calendar" && unit === "month" && count === 1) {
-    return "calendar_month";
-  }
-  if (anchor === "rolling" && unit === "day" && count === 30) {
-    return "rolling_30d";
-  }
-  if (anchor === "plan_assignment" && unit === "month" && count === 1) {
-    return "anniversary";
-  }
-  return null;
-}
-
 export function normalizeBursarConfig(
   row: Record<string, unknown>,
   defaultVersion: number,
@@ -125,10 +86,32 @@ export function mapLedgerEntry(row: LedgerEntryRow): LedgerEntry {
     actorUserId: row.actor_user_id == null ? null : String(row.actor_user_id),
     amount: decimalValue(row.amount),
     entryType: String(row.entry_type),
+    operation: String(row.operation),
     referenceEntryId: row.reference_entry_id == null ? null : String(row.reference_entry_id),
     idempotencyKey: row.idempotency_key == null ? null : String(row.idempotency_key),
     metadata: row.metadata ?? null,
     createdAt:
       row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+  };
+}
+
+export function mapUsageCharge(row: UsageChargeRow): UsageCharge {
+  const toIso = (value: string | Date): string =>
+    value instanceof Date ? value.toISOString() : String(value);
+  return {
+    usageId: String(row.usage_id),
+    accountId: String(row.account_id),
+    operation: String(row.operation),
+    requested: decimalValue(row.requested),
+    charged: decimalValue(row.charged),
+    allowanceRequested: decimalValue(row.allowance_requested),
+    allowanceCovered: decimalValue(row.allowance_covered),
+    feature: row.feature == null ? null : String(row.feature),
+    model: row.model == null ? null : String(row.model),
+    region: row.region == null ? null : String(row.region),
+    eventAt: toIso(row.event_at),
+    idempotencyKey: String(row.idempotency_key),
+    metadata: row.metadata ?? null,
+    createdAt: toIso(row.created_at),
   };
 }

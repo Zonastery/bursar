@@ -5,12 +5,14 @@ import pytest
 
 from bursar import (
     ConcurrencyLimitError,
+    ConfigError,
     FeatureNotEntitledError,
     InsufficientCreditsError,
     LeaseExpiredError,
     LeaseNotFoundError,
     OperationNotAllowedError,
     QuotaExceededError,
+    StoreError,
 )
 from bursar.credits.postgres.repositories.analytics import AnalyticsRepository
 from bursar.credits.postgres.repositories.balance import BalanceRepository
@@ -26,10 +28,12 @@ from bursar.credits.postgres.repositories.schemas import (
 from bursar.credits.postgres.repositories.team import TeamRepository
 from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service import CreditsService
+from bursar.metrics import UsageMetrics
 
 USER_ID = "00000000-0000-0000-0000-000000000901"
 LEASE_ID = "00000000-0000-0000-0000-000000000902"
 ENTRY_ID = "00000000-0000-0000-0000-000000000903"
+USAGE_ID = "00000000-0000-0000-0000-000000000904"
 
 
 def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None:
@@ -49,9 +53,29 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
                     None,
                     "-8.5",
                     "usage",
+                    "completion",
                     None,
                     "usage-1",
                     {"operation": "completion"},
+                    "2030-01-01T00:00:00+00:00",
+                )
+            ]
+        if name == "list_usage_charges":
+            return [
+                (
+                    USAGE_ID,
+                    USER_ID,
+                    "completion",
+                    "10",
+                    "8.5",
+                    "10",
+                    "1.5",
+                    "chat",
+                    "gpt-5",
+                    "in-west",
+                    "2030-01-01T00:00:00+00:00",
+                    "usage-1",
+                    {"request": "one"},
                     "2030-01-01T00:00:00+00:00",
                 )
             ]
@@ -70,12 +94,21 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
         ENTRY_ID,
         usage_only=True,
     )
+    usage = repository.list_usage_charges(
+        USER_ID,
+        "2029-01-01",
+        "2030-01-01",
+        201,
+        "2030-01-01T00:00:00+00:00",
+        USAGE_ID,
+    )
 
     assert aggregate.active_users == 3
     assert top[0].user_id == USER_ID
     assert top[0].total_spend == "8.5"
     assert ledger[0].entry_id == ENTRY_ID
-    assert calls[-1] == (
+    assert ledger[0].operation == "completion"
+    assert calls[-2] == (
         "list_ledger",
         [
             USER_ID,
@@ -86,6 +119,19 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
             "2029-01-01",
             "2030-01-01",
             True,
+        ],
+    )
+    assert usage[0].usage_id == USAGE_ID
+    assert usage[0].allowance_covered == "1.5"
+    assert calls[-1] == (
+        "list_usage_charges",
+        [
+            USER_ID,
+            "2030-01-01T00:00:00+00:00",
+            USAGE_ID,
+            201,
+            "2029-01-01",
+            "2030-01-01",
         ],
     )
 
@@ -342,13 +388,11 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     public_plan = store.get_user_plan(USER_ID)
 
     assert public_plan.catalog_version == 4
-    assert public_plan.billing_mode == "overdraft"
-    assert public_plan.overdraft_floor == Decimal("-20")
     assert public_plan.credit_policy is not None
+    assert public_plan.credit_policy.type == "credit_line"
     assert public_plan.credit_policy.credit_limit == Decimal("20")
     assert public_plan.admission is not None
     assert public_plan.admission.operations["completion"].max_in_flight == 1
-    assert public_plan.per_operation["completion"].max_concurrent == 1
 
 
 def test_refund_repository_uses_entry_scoped_idempotent_rpc() -> None:
@@ -472,3 +516,25 @@ def test_revamped_lease_error_codes_map_to_public_domain_errors(
 
     with pytest.raises(exception):
         service._raise_lease_error(error, USER_ID, Decimal("1"))
+
+
+@pytest.mark.parametrize(
+    ("error", "exception"),
+    [
+        ("feature_not_entitled", FeatureNotEntitledError),
+        ("operation_not_allowed", OperationNotAllowedError),
+        ("missing_quota_measure", ConfigError),
+        ("insufficient_headroom", InsufficientCreditsError),
+        ("idempotency_conflict", StoreError),
+    ],
+)
+def test_deduction_error_codes_map_to_public_domain_errors(
+    error: str,
+    exception: type[Exception],
+) -> None:
+    service = object.__new__(CreditsService)
+    service._emitter = None
+    metrics = UsageMetrics(operation="completion", measures={}, dimensions={})
+
+    with pytest.raises(exception):
+        service._raise_deduct_error(error, USER_ID, Decimal("1"), metrics)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -285,6 +285,7 @@ class PostgresBillingStore(BillingStore):
             from_offer=from_offer,
             to_offer=to_offer,
             effective_at=_to_utc_iso(row.get("effective_at")),
+            effective=cast(Literal["immediate", "renewal"], str(row["effective_behavior"])),
             state=cast(BillingSubscriptionChangeState, str(row["state"])),
             proration_behavior=cast(
                 BillingSubscriptionProrationBehavior,
@@ -584,12 +585,14 @@ class PostgresBillingStore(BillingStore):
                    %s::uuid,
                    %s::timestamptz,
                    %s,
+                   %s,
                    %s
                )""",
             [
                 subscription.id,
                 input.to_offer_id,
                 input.effective_at,
+                input.effective,
                 input.idempotency_key,
                 input.proration_behavior,
             ],
@@ -1188,9 +1191,9 @@ class PostgresBillingStore(BillingStore):
         )
         return bool(rows[0]["marked"]) if rows else False
 
-    def deactivate_other_provider_subscriptions(
-        self, user_id: str, keep_provider: str, subscription_id: str | None = None
-    ) -> dict:
+    def select_subscription_entitlement_source(
+        self, user_id: str, provider: str, subscription_id: str | None = None
+    ) -> bool:
         rows = self._execute(
             "SELECT * FROM bursar.list_billing_subscriptions(%s::uuid)",
             [user_id],
@@ -1199,12 +1202,12 @@ class PostgresBillingStore(BillingStore):
         candidates = [
             r
             for r in rows
-            if str(r.get("provider", "")) == keep_provider
+            if str(r.get("provider", "")) == provider
             and str(r.get("status", "")) in eligible_statuses
             and (subscription_id is None or str(r.get("provider_subscription_id", "")) == subscription_id)
         ]
         if not candidates:
-            return {"user_id": user_id, "keep_provider": keep_provider, "deactivated_count": 0}
+            return False
         replacement = max(candidates, key=provider_timestamp_sort_key)
         selected = self._execute(
             "SELECT bursar.select_entitlement_source(%s::uuid, %s::uuid) AS selected",
@@ -1212,12 +1215,7 @@ class PostgresBillingStore(BillingStore):
         )
         if not selected or not selected[0].get("selected"):
             raise RuntimeError("entitlement source selection was rejected")
-        deactivated = sum(
-            1
-            for r in rows
-            if str(r.get("provider", "")) != keep_provider and str(r.get("status", "")) in eligible_statuses
-        )
-        return {"user_id": user_id, "keep_provider": keep_provider, "deactivated_count": deactivated}
+        return True
 
     def record_subscription_conflict(
         self,
@@ -1282,14 +1280,9 @@ class PostgresBillingStore(BillingStore):
     def count_auto_recharge_attempts(
         self,
         user_id: str,
-        since: str | datetime | int | float,
+        since: str | datetime,
     ) -> int:
-        if isinstance(since, datetime):
-            since_date = since
-        elif isinstance(since, int | float):
-            since_date = datetime.now(UTC) - timedelta(milliseconds=max(float(since), 1))
-        else:
-            since_date = datetime.fromisoformat(since)
+        since_date = since if isinstance(since, datetime) else datetime.fromisoformat(since)
         if since_date.tzinfo is None:
             raise ValueError("auto-recharge attempt window must include timezone")
         rows = self._execute(

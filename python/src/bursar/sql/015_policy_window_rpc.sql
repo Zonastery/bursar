@@ -9,9 +9,7 @@ RETURNS TABLE (
     catalog_revision_id uuid,
     plan_id uuid,
     minimum_balance numeric,
-    max_concurrent integer,
-    feature_max_calls integer,
-    feature_action text
+    max_concurrent integer
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
     WITH assignment AS (
@@ -50,9 +48,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
             WHEN 'credit_line' THEN -credit_limit
             ELSE 0
         END,
-        max_in_flight,
-        NULL::integer,
-        NULL::text
+        max_in_flight
     FROM assignment
 $$;
 

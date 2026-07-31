@@ -1,5 +1,5 @@
 import {
-  BillingService as BillingServiceImpl,
+  BillingService as BillingEventService,
   type BillingServiceOptions,
 } from "./billing/billing-service.js";
 import type { BillingStore } from "./billing/billing-store.js";
@@ -159,7 +159,7 @@ export class Bursar implements BillingEventSink {
     this.accounts = new AccountService(this.credits, this.catalog);
 
     this.billing = options.billingStore
-      ? new BillingServiceImpl(options.billingStore, {
+      ? new BillingEventService(options.billingStore, {
           ...(options.billingOptions ?? {}),
           provisioning: this.credits,
         })

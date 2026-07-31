@@ -80,14 +80,6 @@ const PlanMigrationBatchRowSchema = z
     next_cursor: z.string().nullable(),
   })
   .passthrough();
-const PlanMigrationUsersRowSchema = z
-  .object({
-    plan_key: z.string(),
-    target_plan_id: z.string(),
-    target_config_version: z.coerce.number(),
-    migrated_count: z.coerce.number(),
-  })
-  .passthrough();
 const decimal = z.union([z.string(), z.number()] as const);
 const QuotaStateRowSchema = z
   .object({
@@ -126,7 +118,6 @@ export type SetUserPlanRow = z.infer<typeof SetUserPlanRowSchema>;
 export type AllowanceRow = z.infer<typeof AllowanceRowSchema>;
 export type PlanMigrationStartRow = z.infer<typeof PlanMigrationStartRowSchema>;
 export type PlanMigrationBatchRow = z.infer<typeof PlanMigrationBatchRowSchema>;
-export type PlanMigrationUsersRow = z.infer<typeof PlanMigrationUsersRowSchema>;
 export type QuotaStateRow = z.infer<typeof QuotaStateRowSchema>;
 export type QuotaEventRow = z.infer<typeof QuotaEventRowSchema>;
 
@@ -203,18 +194,6 @@ export class PlanRepository {
       PlanMigrationBatchRowSchema,
       rows?.[0] ?? {},
       "PlanRepository.migratePlanBatch",
-    );
-  }
-
-  async migratePlanUsers(
-    planKey: string,
-    targetConfigVersion?: number | null,
-  ): Promise<PlanMigrationUsersRow> {
-    const rows = await this.callproc("migrate_plan_users", [planKey, targetConfigVersion ?? null]);
-    return safeParse(
-      PlanMigrationUsersRowSchema,
-      rows?.[0] ?? {},
-      "PlanRepository.migratePlanUsers",
     );
   }
 

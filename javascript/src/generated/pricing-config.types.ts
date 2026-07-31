@@ -6,7 +6,6 @@
  */
 
 export type Version = 1;
-export type Mode = "on_publish";
 export type DefaultPlan = string | null;
 export type Unit = string;
 export type Type = "string" | "number" | "boolean";
@@ -49,7 +48,13 @@ export type Type1 = "flat";
 export type Amount = string;
 export type Type2 = "per_unit";
 export type Measure = string;
+/**
+ * Credits charged for each unit_size units of the selected measure.
+ */
 export type Rate = string;
+/**
+ * Number of measure units represented by one rate unit; use 1000000 for per-million-token rates.
+ */
 export type UnitSize = string;
 export type Type3 = "package";
 export type Measure1 = string;
@@ -171,6 +176,9 @@ export type Pattern = string | null;
 export type MaxInFlight = number | null;
 export type MaxInFlight1 = number;
 export type DisplayName = string;
+/**
+ * Public catalog ordering. Lower ranks appear first; ties are ordered by plan key.
+ */
 export type Rank = number;
 export type Description = string | null;
 export type RateCard1 = string | null;
@@ -188,6 +196,9 @@ export type Enforcement = "block" | "allow";
 export type EmitAtPercent = number[];
 export type CreditPolicy = string | null;
 export type AdmissionPolicy1 = string | null;
+/**
+ * Plan revision behavior. When omitted, subscription-backed plans use next_renewal and other plans use immediate.
+ */
 export type RevisionPolicy = ("immediate" | "next_renewal" | "pinned") | null;
 export type Type22 = "stripe";
 export type Type23 = "dodo";
@@ -235,6 +246,9 @@ export type EligibleTopups = [string, ...string[]];
 export type Minimum2 = string;
 export type Maximum2 = string;
 export type Default5 = string;
+/**
+ * Balance that rearms auto-recharge; it must exceed balance_below.maximum.
+ */
 export type RearmAbove = string;
 export type Minimum3 = number;
 export type Maximum3 = number;
@@ -248,6 +262,9 @@ export type FailureAction = "pause";
 export interface BursarConfig {
   version: Version;
   catalog?: CatalogConfig;
+  /**
+   * Usage operations, their measures and dimensions, and reusable rate cards.
+   */
   pricing?: PricingConfig | null;
   credits: CreditsConfig;
   entitlements?: EntitlementsConfig;
@@ -255,12 +272,11 @@ export interface BursarConfig {
   plans?: Plans1;
   commerce?: CommerceConfig;
 }
+/**
+ * Catalog-wide publication settings such as the default signup plan.
+ */
 export interface CatalogConfig {
-  activation?: OnPublishActivation;
   default_plan?: DefaultPlan;
-}
-export interface OnPublishActivation {
-  mode: Mode;
 }
 export interface PricingConfig {
   operations: Operations;
@@ -376,18 +392,24 @@ export interface ChargeUnmatched {
   action: Action1;
   charge: Charge1;
 }
+/**
+ * Credit buckets, spending policies, grants, and optional display conversion.
+ */
 export interface CreditsConfig {
-  accounting: CreditAccounting;
+  accounting?: CreditAccounting;
   buckets?: Buckets;
   default_bucket?: DefaultBucket;
   policies?: Policies;
   grant_programs?: GrantPrograms;
   display?: CreditDisplay | null;
 }
+/**
+ * Fixed v1 accounting convention. It may be omitted; canonical output includes the defaults.
+ */
 export interface CreditAccounting {
-  unit: Unit1;
-  scale: Scale;
-  rounding: Rounding1;
+  unit?: Unit1;
+  scale?: Scale;
+  rounding?: Rounding1;
 }
 export interface Buckets {
   [k: string]: BucketDefinition;
@@ -470,6 +492,9 @@ export interface CreditDisplay {
   currency: Currency;
   units_per_major: UnitsPerMajor;
 }
+/**
+ * Typed feature definitions referenced by plan feature values.
+ */
 export interface EntitlementsConfig {
   features?: Features;
 }
@@ -496,6 +521,9 @@ export interface StringFeature {
   default: Default3;
   pattern?: Pattern;
 }
+/**
+ * Reusable global and per-operation concurrency policies.
+ */
 export interface AdmissionConfig {
   policies?: Policies1;
 }
@@ -512,12 +540,15 @@ export interface Operations2 {
 export interface OperationAdmission {
   max_in_flight: MaxInFlight1;
 }
+/**
+ * Product plans keyed by stable snake_case identifiers.
+ */
 export interface Plans1 {
   [k: string]: PlanDefinition;
 }
 export interface PlanDefinition {
   display_name: DisplayName;
-  rank: Rank;
+  rank?: Rank;
   description?: Description;
   rate_card?: RateCard1;
   allowed_operations?: AllowedOperations;
@@ -554,6 +585,9 @@ export interface QuotaDefinition {
   enforcement: Enforcement;
   emit_at_percent?: EmitAtPercent;
 }
+/**
+ * Payment providers, subscription and top-up offers, and purchase guardrails.
+ */
 export interface CommerceConfig {
   providers?: Providers;
   offers?: Offers;

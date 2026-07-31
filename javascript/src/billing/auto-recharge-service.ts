@@ -38,7 +38,6 @@ interface ResolvedAutoRechargePolicy {
   windowTimezone: string;
   windowStart: string;
   windowEnd: string;
-  windowDays: number;
   productId: string;
 }
 
@@ -86,7 +85,6 @@ export class AutoRechargeService {
       windowTimezone: period.timezone,
       windowStart: period.start,
       windowEnd: period.end,
-      windowDays: period.durationDays,
       productId,
     };
   }
@@ -144,7 +142,6 @@ export class AutoRechargeService {
       topupKey: policy.topupKey,
       quantity: policy.quantity,
       maxRecharges: policy.maxChargesPerWindow,
-      windowDays: policy.windowDays,
       windowStart: policy.windowStart,
       windowEnd: policy.windowEnd,
       rechargesInWindow: await this.billing.countAutoRechargeAttempts(

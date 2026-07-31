@@ -3,7 +3,8 @@ from decimal import Decimal
 import pytest
 
 from bursar import project_public_catalog
-from bursar.config import ConfigError, canonical_bursar_config_dict, load_config_from_dict
+from bursar.config import ConfigError, EqualMatcher, canonical_bursar_config_dict, load_config_from_dict
+from bursar.config.types import CreditLinePolicy
 
 
 def base_config() -> dict:
@@ -132,12 +133,32 @@ def base_config() -> dict:
     }
 
 
+def test_removed_catalog_activation_is_rejected() -> None:
+    config = base_config()
+    config["catalog"] = {"activation": {"mode": "on_publish"}}
+
+    with pytest.raises(ConfigError, match="activation"):
+        load_config_from_dict(config)
+
+
 def test_accepts_typed_catalog() -> None:
     config = load_config_from_dict(base_config())
     assert config.pricing is not None
     assert config.plans["pro"].credit_allowance is not None
     assert config.plans["pro"].credit_allowance.amount == Decimal("10")
     assert config.plans["pro"].revision_policy == "immediate"
+
+
+def test_fixed_accounting_and_plan_rank_have_authoring_defaults() -> None:
+    data = base_config()
+    data["credits"].pop("accounting")
+    data["plans"]["pro"].pop("rank")
+
+    config = load_config_from_dict(data)
+
+    assert config.credits.accounting.unit == "credit"
+    assert config.credits.accounting.scale == 6
+    assert config.plans["pro"].rank == 0
 
 
 def test_canonicalizes_credit_decimals_to_six_places() -> None:
@@ -177,6 +198,43 @@ def test_feature_values_are_typed_and_referenced() -> None:
         load_config_from_dict(data)
 
 
+def test_feature_values_enforce_declared_types_and_constraints() -> None:
+    data = base_config()
+    data["entitlements"]["features"].update(
+        {
+            "agent_limit": {
+                "type": "integer",
+                "default": 1,
+                "minimum": 1,
+                "maximum": 10,
+            },
+            "support_tier": {
+                "type": "string",
+                "default": "standard",
+                "pattern": "^(standard|priority)$",
+            },
+        }
+    )
+    data["plans"]["pro"]["features"].update(
+        {
+            "tutor_chat": "yes",
+            "agent_limit": 99,
+            "support_tier": "unknown",
+        }
+    )
+
+    with pytest.raises(ConfigError, match="tutor_chat.*boolean"):
+        load_config_from_dict(data)
+
+    data["plans"]["pro"]["features"]["tutor_chat"] = True
+    with pytest.raises(ConfigError, match="agent_limit.*maximum"):
+        load_config_from_dict(data)
+
+    data["plans"]["pro"]["features"]["agent_limit"] = 5
+    with pytest.raises(ConfigError, match="support_tier.*pattern"):
+        load_config_from_dict(data)
+
+
 def test_quota_references_declared_operation_measure() -> None:
     data = base_config()
     data["plans"]["pro"]["quotas"]["token_budget"]["measure"] = "calls"
@@ -186,13 +244,89 @@ def test_quota_references_declared_operation_measure() -> None:
 
 def test_credit_line_does_not_require_overdraft_bucket() -> None:
     config = load_config_from_dict(base_config())
-    assert config.credits.policies["invoice"].limit == Decimal("500")
+    policy = config.credits.policies["invoice"]
+    assert isinstance(policy, CreditLinePolicy)
+    assert policy.limit == Decimal("500")
 
 
 def test_duplicate_bucket_priorities_are_rejected() -> None:
     data = base_config()
     data["credits"]["buckets"]["purchased"]["priority"] = 10
     with pytest.raises(ConfigError, match="priorities"):
+        load_config_from_dict(data)
+
+
+def test_default_bucket_and_plan_policy_references_are_validated() -> None:
+    data = base_config()
+    data["credits"]["default_bucket"] = "typo"
+    with pytest.raises(ConfigError, match="default_bucket"):
+        load_config_from_dict(data)
+
+    data = base_config()
+    data["plans"]["pro"]["credit_policy"] = "typo"
+    with pytest.raises(ConfigError, match="credit_policy"):
+        load_config_from_dict(data)
+
+    data = base_config()
+    data["plans"]["pro"]["admission_policy"] = "typo"
+    with pytest.raises(ConfigError, match="admission_policy"):
+        load_config_from_dict(data)
+
+
+def test_credit_allowance_requires_a_default_bucket() -> None:
+    data = base_config()
+    data["credits"].pop("default_bucket")
+    with pytest.raises(ConfigError, match="credit_allowance requires credits.default_bucket"):
+        load_config_from_dict(data)
+
+
+def test_matcher_operator_must_match_dimension_type() -> None:
+    data = base_config()
+    data["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["rules"][0]["when"]["model"] = {
+        "op": "range",
+        "gte": "1",
+    }
+    with pytest.raises(ConfigError, match="range matcher requires a number dimension"):
+        load_config_from_dict(data)
+
+
+def test_numeric_matcher_decimal_strings_are_normalized() -> None:
+    data = base_config()
+    data["pricing"]["operations"]["completion"]["dimensions"]["model"]["type"] = "number"
+    data["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["rules"][0]["when"]["model"] = {
+        "op": "eq",
+        "value": "1.5",
+    }
+
+    config = load_config_from_dict(data)
+    matcher = config.pricing.rate_cards["standard"].operations["completion"].rules[0].when["model"]
+
+    assert isinstance(matcher, EqualMatcher)
+    assert matcher.value == Decimal("1.5")
+
+
+def test_provider_references_are_declared_and_compatible() -> None:
+    data = base_config()
+    data["commerce"] = {
+        "providers": {"stripe": {"type": "stripe"}},
+        "offers": {
+            "pro_monthly": {
+                "type": "subscription",
+                "display_name": "Pro monthly",
+                "price": {"amount_minor": 1200, "currency": "USD"},
+                "providers": {
+                    "stripe": {
+                        "type": "dodo_product",
+                        "product_id": "product_wrong_provider",
+                    }
+                },
+                "plan": "pro",
+                "billing_interval": {"unit": "month"},
+            }
+        },
+    }
+
+    with pytest.raises(ConfigError, match="incompatible provider reference"):
         load_config_from_dict(data)
 
 

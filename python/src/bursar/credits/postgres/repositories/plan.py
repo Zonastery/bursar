@@ -5,7 +5,6 @@ from bursar.credits.postgres.repositories._utils import validate_non_empty
 from bursar.credits.postgres.repositories.schemas import (
     AllowanceRow,
     PlanMigrationBatchRow,
-    PlanMigrationUsersRow,
     QuotaEventRow,
     QuotaStateRow,
     SetUserPlanRow,
@@ -62,7 +61,7 @@ class PlanRepository:
 
         Args:
             user_id: The user ID.
-            plan_id: The plan identifier.
+            plan_key: The public plan key.
             plan_assigned_at: ISO datetime string for the assignment, or None.
 
         Returns:
@@ -106,14 +105,14 @@ class PlanRepository:
         from_plan_id: str | None,
         to_plan_id: str,
     ) -> str | None:
-        """Migrate all users on a given plan key to a new config version.
+        """Start a resumable migration between catalog plan records.
 
         Args:
-            plan_key: The plan key to migrate users from.
-            target_config_version: The target config version, or None.
+            from_plan_id: Source catalog plan ID, or None for all assignments.
+            to_plan_id: Target catalog plan ID.
 
         Returns:
-            MigratePlanRow with migration results, or None on failure.
+            Migration ID, or None when the plan IDs are invalid.
         """
         if from_plan_id is not None:
             validate_non_empty(from_plan_id, "from_plan_id")
@@ -134,18 +133,6 @@ class PlanRepository:
         if not rows or not isinstance(rows[0], dict):
             return None
         return PlanMigrationBatchRow.model_validate(rows[0])
-
-    def migrate_plan_users(
-        self,
-        plan_key: str,
-        target_config_version: int | None = None,
-    ) -> PlanMigrationUsersRow:
-        validate_non_empty(plan_key, "plan_key")
-        rows = self._callproc(
-            "migrate_plan_users",
-            [plan_key, target_config_version],
-        )
-        return PlanMigrationUsersRow.model_validate((rows or [{}])[0])
 
     def get_quota_state(
         self,

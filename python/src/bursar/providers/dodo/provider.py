@@ -23,9 +23,9 @@ from bursar.providers.types import (
     PortalParams,
     PreviewChangePlanParams,
     ProviderLogger,
-    ProviderResolveUserFn,
     ProviderUrlResult,
     ResolveIdentityInput,
+    ResolveUserCallback,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -70,7 +70,7 @@ class DodoProvider(PaymentProvider):
         get_client: Callable[[], Any],
         config: dict[str, str],
         sink: BillingEventSink,
-        resolve_user: ProviderResolveUserFn | None = None,
+        resolve_user: ResolveUserCallback | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
         self._get_client = get_client

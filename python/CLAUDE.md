@@ -61,7 +61,6 @@ BillingService
 
 | File | What it covers |
 |------|----------------|
-| `tests/test_allowance.py` | Allowance window resolution |
 | `tests/test_config.py` | Config validation edge cases |
 | `tests/test_config_parity.py` | Config loading parity with JavaScript SDK |
 | `tests/test_engine.py` | PricingEngine expression evaluation |

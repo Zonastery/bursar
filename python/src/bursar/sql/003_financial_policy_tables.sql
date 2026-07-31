@@ -752,25 +752,6 @@ CREATE TABLE bursar.grant_award_executions (
     REFERENCES bursar.catalog_grant_awards (id, catalog_revision_id)
 );
 
-CREATE TABLE bursar.account_creation_grants (
-    tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
-    REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
-    subject_id uuid NOT NULL
-    REFERENCES bursar.subjects (id) ON DELETE CASCADE,
-    catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions (id),
-    grant_program_id uuid NOT NULL REFERENCES bursar.catalog_grant_programs (id),
-    catalog_grant_award_id uuid NOT NULL REFERENCES bursar.catalog_grant_awards (id),
-    ledger_entry_id uuid NOT NULL UNIQUE
-    REFERENCES bursar.credit_ledger_entries (id),
-    granted_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (
-        tenant_id,
-        subject_id,
-        grant_program_id,
-        catalog_grant_award_id
-    )
-);
-
 CREATE TABLE bursar.credit_plan_migrations (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,

@@ -130,6 +130,9 @@ ON bursar.credit_debt_repayments (account_id, created_at);
 CREATE INDEX usage_charge_account_created_idx
 ON bursar.credit_usage_charges (account_id, created_at DESC, id DESC);
 
+CREATE INDEX usage_charge_account_event_idx
+ON bursar.credit_usage_charges (account_id, event_at DESC, id DESC);
+
 CREATE INDEX usage_charge_operation_event_idx
 ON bursar.credit_usage_charges (operation, event_at, id);
 
@@ -325,9 +328,6 @@ CREATE INDEX grant_program_events_referrer_idx
 ON bursar.grant_program_events (referrer_subject_id)
 WHERE referrer_subject_id IS NOT null;
 
-CREATE INDEX account_creation_grants_revision_idx
-ON bursar.account_creation_grants (catalog_revision_id);
-
 CREATE INDEX credit_plan_migrations_from_plan_idx
 ON bursar.credit_plan_migrations (from_plan_id)
 WHERE from_plan_id IS NOT null;
@@ -473,12 +473,6 @@ WHERE payment_id IS NOT null;
 -- Every foreign key needs a leading-column index on the referencing side.
 -- PostgreSQL does not create these automatically, and parent deletes or key
 -- updates otherwise require full scans of the child relation.
-CREATE INDEX account_creation_grants_award_fk_idx
-ON bursar.account_creation_grants (catalog_grant_award_id);
-
-CREATE INDEX account_creation_grants_program_fk_idx
-ON bursar.account_creation_grants (grant_program_id);
-
 CREATE INDEX account_plan_assignments_plan_key_fk_idx
 ON bursar.account_plan_assignments (catalog_revision_id, plan_key);
 

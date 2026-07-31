@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bursar.billing.billing_service import BillingServiceImpl
+from bursar.billing.billing_service import BillingService
 from bursar.billing.contracts import (
     AutoRechargeAttemptUpdate,
     BillingSubscriptionChangeUpdate,
@@ -57,7 +57,7 @@ def test_list_cancellable_subscriptions_matches_javascript_statuses() -> None:
     store = MagicMock()
     subscriptions = [_subscription(status, f"sub_{status.value}") for status in BillingSubscriptionStatus]
     store.get_user_subscriptions.return_value = subscriptions
-    service = BillingServiceImpl(store)
+    service = BillingService(store)
 
     result = service.list_cancellable_subscriptions("00000000-0000-0000-0000-000000000001")
 
@@ -98,7 +98,7 @@ def test_expire_past_due_grace_periods_matches_javascript_cas_flow() -> None:
     )
     store.get_user_subscription.return_value = store.get_billing_subscription.return_value
     store.mark_subscription_grace_expired.return_value = True
-    service = BillingServiceImpl(store, provisioning=provisioning)
+    service = BillingService(store, provisioning=provisioning)
 
     assert service.expire_past_due_grace_periods(datetime(2026, 7, 30, tzinfo=UTC)) == 1
     provisioning.unset_user_plan.assert_called_once_with(user_id)
@@ -116,7 +116,7 @@ def test_async_billing_event_handler_is_awaited() -> None:
         await asyncio.sleep(0)
         called.append(f"{event.event_id}:{user_id}")
 
-    service = BillingServiceImpl(
+    service = BillingService(
         MagicMock(),
         event_handlers={BillingEventType.customer_created: handler},
     )
@@ -150,7 +150,7 @@ def test_unknown_cancellation_with_offer_refs_persists_tombstone() -> None:
         interval="month",
         interval_count=1,
     )
-    service = BillingServiceImpl(store)
+    service = BillingService(store)
 
     result = service.ingest_billing_event(
         _cancellation_event(event_id="evt_cancel_resolved", refs=ProviderRef(price_id="price_pro"))
@@ -176,7 +176,7 @@ def test_unknown_cancellation_without_offer_refs_is_failed_for_retry() -> None:
         billing_event_id="00000000-0000-0000-0000-000000000099",
     )
     store.get_billing_subscription.return_value = None
-    service = BillingServiceImpl(store)
+    service = BillingService(store)
 
     result = service.ingest_billing_event(_cancellation_event(event_id="evt_cancel_unresolved", refs=None))
 
@@ -192,8 +192,8 @@ def test_unknown_cancellation_without_offer_refs_is_failed_for_retry() -> None:
 def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -> None:
     provisioning = MagicMock()
     store = MagicMock()
-    store.deactivate_other_provider_subscriptions.return_value = {"deactivated_count": 0}
-    service = BillingServiceImpl(store, provisioning=provisioning)
+    store.select_subscription_entitlement_source.return_value = True
+    service = BillingService(store, provisioning=provisioning)
     user_id = "00000000-0000-0000-0000-000000000001"
     event = BillingEvent(
         provider="stripe",
@@ -287,12 +287,12 @@ def test_deactivate_other_providers_selects_newest_valid_replacement() -> None:
     store = object.__new__(PostgresBillingStore)
     store._execute = MagicMock(side_effect=[rows, [{"selected": True}]])
 
-    result = store.deactivate_other_provider_subscriptions(
+    result = store.select_subscription_entitlement_source(
         "00000000-0000-0000-0000-000000000001",
         "stripe",
     )
 
-    assert result["deactivated_count"] == 1
+    assert result is True
     assert store._execute.call_args_list[1].args[1][1] == "00000000-0000-0000-0000-000000000012"
 
 
@@ -308,7 +308,7 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
     to_revision_id = "00000000-0000-0000-0000-000000000016"
     store._execute = MagicMock(
         side_effect=[
-            [{"change_id": change_id, "state": "awaiting_payment", "error_code": None}],
+            [{"change_id": change_id, "state": "scheduled", "error_code": None}],
             [
                 {
                     "id": change_id,
@@ -318,7 +318,8 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
                     "to_offer_id": to_offer_id,
                     "to_catalog_revision_id": to_revision_id,
                     "effective_at": datetime(2026, 8, 1, tzinfo=UTC),
-                    "state": "awaiting_payment",
+                    "effective_behavior": "renewal",
+                    "state": "scheduled",
                     "proration_behavior": "provider_default",
                     "idempotency_key": "change-1",
                     "provider_operation_id": None,
@@ -354,6 +355,7 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
             provider_subscription_id="sub_1",
             to_offer_id=to_offer_id,
             effective_at="2026-08-01T00:00:00+00:00",
+            effective="renewal",
             idempotency_key="change-1",
         )
     )
@@ -361,6 +363,8 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
     assert change.subscription_id == "00000000-0000-0000-0000-000000000011"
     assert change.from_offer.offer_key == "monk_monthly"
     assert change.to_offer.plan == "sage"
+    assert change.effective == "renewal"
+    assert store._execute.call_args_list[0].args[1][3] == "renewal"
     sql_calls = [call.args[0] for call in store._execute.call_args_list]
     assert "bursar.open_subscription_change" in sql_calls[0]
     assert "bursar.get_billing_subscription_change" in sql_calls[1]
@@ -468,7 +472,7 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
         interval_count=1,
     )
     store.get_open_billing_subscription_change.return_value = SimpleNamespace(id="change_1")
-    service = BillingServiceImpl(store)
+    service = BillingService(store)
     event = BillingEvent(
         provider="dodo",
         event_id="evt_plan_change",
@@ -494,7 +498,7 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
 def test_event_claim_envelope_matches_javascript_shape() -> None:
     store = MagicMock()
     store.claim_billing_event.return_value = BillingEventClaim(status="duplicate")
-    service = BillingServiceImpl(store)
+    service = BillingService(store)
     event = BillingEvent(
         provider="stripe",
         event_id="evt_shape",

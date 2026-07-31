@@ -13,7 +13,7 @@ export interface BillingServiceOptions {
   provisioning?: BillingProvisioningPort | null;
   resolveUser?: ResolveUser | null;
   eventHandlers?: Partial<Record<BillingEventType, BillingEventHandler>>;
-  cancelPriorProviders?: boolean;
+  autoSelectEntitlementSource?: boolean;
   /** Access grace after a failed subscription payment. Defaults to seven days. */
   pastDueGracePeriodMs?: number;
   /** Plan assigned when a paid subscription reaches terminal state. */

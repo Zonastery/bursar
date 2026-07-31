@@ -76,10 +76,6 @@ class ResolveUserCallback(Protocol):
     ) -> Awaitable[str | None]: ...
 
 
-# Backwards-compatible spelling; the canonical name mirrors JavaScript.
-ProviderResolveUserFn = ResolveUserCallback
-
-
 class _ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

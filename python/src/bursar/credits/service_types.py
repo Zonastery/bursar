@@ -61,7 +61,6 @@ class ReserveOptions(_CreditsServiceModel):
     idempotency_key: str | None = None
     operation_type: str | None = None
     billing_mode: BillingMode | None = None
-    required_feature: str | None = None
     ttl: int | None = Field(default=None, ge=1)
     metadata: CreditMetadata | None = None
     feature: str | None = None
@@ -76,7 +75,6 @@ class SettleOptions(_CreditsServiceModel):
 
 class CanAffordOptions(_CreditsServiceModel):
     feature: str | None = None
-    required_feature: str | None = None
     billing_mode: BillingMode | None = None
     operation_type: str = "usage"
 
@@ -96,9 +94,7 @@ class RunBilledOptions(_CreditsServiceModel):
     do_work: Callable[[], tuple[Any, MetricsOrAmount]]
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    required_feature: str | None = None
     operation_key: str | None = None
-    idempotency_key: str | None = None
     ttl: int | None = Field(default=None, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None
@@ -110,9 +106,7 @@ class RunBilledAsyncOptions(_CreditsServiceModel):
     do_work: Callable[[], Awaitable[tuple[Any, MetricsOrAmount]]]
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    required_feature: str | None = None
     operation_key: str | None = None
-    idempotency_key: str | None = None
     ttl: int | None = Field(default=None, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None
@@ -124,7 +118,6 @@ class BeginBilledOperationOptions(_CreditsServiceModel):
     operation_key: str = Field(min_length=1)
     operation_type: str = "usage"
     billing_mode: BillingMode | None = None
-    required_feature: str | None = None
     ttl: int | None = Field(default=None, ge=1)
     feature: str | None = None
     metadata: CreditMetadata | None = None

@@ -14,12 +14,12 @@ from bursar.billing.types import (
     BillingSubscriptionChange,
     BillingSubscriptionState,
 )
-from bursar.credits.types import BucketBalance, GetUserPlanResult, LedgerEntry
+from bursar.credits.types import BucketBalance, GetUserPlanResult, LedgerEntry, UsageCharge
 from bursar.providers.types import (
     ChangePlanPreview,
     PaymentMethodInfo,
     PaymentProvider,
-    ProviderResolveUserFn,
+    ResolveUserCallback,
     SavedPaymentChargeResult,
     WebhookResult,
 )
@@ -43,7 +43,7 @@ class _CommerceModel(BaseModel):
 class CommerceProviderFactoryContext(_CommerceModel):
     tenant_id: str | None = None
     event_sink: SkipValidation[BillingEventSink]
-    identity_resolver: ProviderResolveUserFn | None = None
+    identity_resolver: ResolveUserCallback | None = None
 
 
 CommerceProviderFactory = Callable[
@@ -74,7 +74,7 @@ class CommerceOptions(_CommerceModel):
     default_provider: str | None = None
     checkout_intent_ttl_ms: int = 24 * 60 * 60 * 1_000
     preference_defaults: PreferencePatch = Field(default_factory=PreferencePatch)
-    identity_resolver: ProviderResolveUserFn | None = None
+    identity_resolver: ResolveUserCallback | None = None
     logger: SkipValidation[Logger] | None = None
 
 
@@ -238,7 +238,7 @@ class CommerceSectionAvailability(_CommerceModel):
 
 class AccountAllowanceOverview(_CommerceModel):
     remaining: Decimal
-    limit: Decimal
+    limit: Decimal | None
     period_start: str | None
     period_end: str | None
 
@@ -265,7 +265,7 @@ class AccountCommerceOverview(_CommerceModel):
     documents: list[BillingDocumentRef]
     provider_invoices: list[BillingInvoiceInfo]
     transactions: list[LedgerEntry]
-    usage: list[LedgerEntry]
+    usage: list[UsageCharge]
     auto_recharge: BillingAutoRechargeStatus | None
     availability: CommerceSectionAvailability
 

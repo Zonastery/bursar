@@ -245,7 +245,8 @@ function harness(input?: {
       fromOffer: { offerId: "offer-basic", offerKey: "basic_month" },
       toOffer: { offerId: value.toOfferId, offerKey: "pro_month" },
       effectiveAt: value.effectiveAt,
-      state: value.prorationBehavior === "none" ? "scheduled" : "awaiting_payment",
+      effective: value.effective,
+      state: value.effective === "renewal" ? "scheduled" : "awaiting_payment",
       prorationBehavior: value.prorationBehavior ?? "provider_default",
       idempotencyKey: value.idempotencyKey,
     })),
@@ -268,9 +269,15 @@ function harness(input?: {
     })),
     getUserPlan: vi.fn(async () => ({
       planKey: "basic",
-      features: {},
+      entitlements: {},
       allowedOperations: [],
-      allowanceAmount: new Decimal(10),
+      allowance: {
+        amount: new Decimal(10),
+        resetUnit: "month",
+        resetCount: 1,
+        resetAnchor: "calendar",
+        resetTimezone: "UTC",
+      },
     })),
     checkAllowance: vi.fn(async () => ({
       allowed: true,
@@ -280,6 +287,7 @@ function harness(input?: {
     })),
     listLedgerEntries: vi.fn(async () => ({ items: [], hasMore: false })),
     listUsageEntries: vi.fn(async () => ({ items: [], hasMore: false })),
+    listUsageCharges: vi.fn(async () => ({ items: [], nextCursor: null })),
     getLedgerEntry: vi.fn(async () => null),
   };
   const sink = { ingestBillingEvent: vi.fn(async () => ({ processed: true })) };
@@ -464,6 +472,33 @@ describe("CommerceService", () => {
     },
   );
 
+  it("does not misclassify an immediate no-proration change as scheduled", async () => {
+    const config = catalog();
+    config.commerce.subscription_changes.upgrade.proration = "none";
+    const { service, billing, alpha } = harness();
+    billing.getActiveBursarConfig.mockResolvedValue(config);
+    billing.getActiveSubscription.mockResolvedValue(activeSubscription());
+
+    const preview = await service.previewPlanChange({
+      accountId: "user-1",
+      offerKey: "pro_month",
+    });
+    const result = await service.confirmPlanChange({
+      accountId: "user-1",
+      offerKey: "pro_month",
+      quoteFingerprint: preview.quoteFingerprint,
+      operationKey: "immediate-without-proration",
+    });
+
+    expect(result.scheduled).toBe(false);
+    expect(billing.createBillingSubscriptionChange).toHaveBeenCalledWith(
+      expect.objectContaining({ effective: "immediate", prorationBehavior: "none" }),
+    );
+    expect(alpha.changePlan).toHaveBeenCalledWith(
+      expect.objectContaining({ effectiveAt: "immediately", prorationBillingMode: "do_not_bill" }),
+    );
+  });
+
   it("refreshes a quote and rejects financially changed confirmation", async () => {
     const alpha = provider("alpha");
     vi.mocked(alpha.previewChangePlan!)
@@ -520,6 +555,7 @@ describe("CommerceService", () => {
       fromOffer: { offerId: "offer-basic", offerKey: "basic_month" },
       toOffer: { offerId: "offer-pro", offerKey: "pro_month" },
       effectiveAt: "2026-09-01T00:00:00.000Z",
+      effective: "renewal" as const,
       state: "scheduled" as const,
       prorationBehavior: "none" as const,
       idempotencyKey: "old-operation",
@@ -532,6 +568,7 @@ describe("CommerceService", () => {
         id: "new-change",
         toOfferId: value.toOfferId,
         effectiveAt: value.effectiveAt,
+        effective: value.effective,
         state: "awaiting_payment",
         prorationBehavior: value.prorationBehavior ?? "provider_default",
         idempotencyKey: value.idempotencyKey,
@@ -613,7 +650,7 @@ describe("CommerceService", () => {
       },
     ]);
     credits.listLedgerEntries.mockRejectedValue(new Error("history unavailable"));
-    credits.listUsageEntries.mockRejectedValue(new Error("usage unavailable"));
+    credits.listUsageCharges.mockRejectedValue(new Error("usage unavailable"));
 
     const overview = await service.getAccountOverview("user-1");
 

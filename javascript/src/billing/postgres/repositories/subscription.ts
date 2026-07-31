@@ -212,16 +212,12 @@ export class BillingSubscriptionRepository {
     return String(id);
   }
 
-  /**
-   * Preserve the legacy cross-provider migration capability by selecting the
-   * replacement entitlement source. Provider subscription rows remain a
-   * faithful record of provider state and are never locally marked canceled.
-   */
-  async deactivateOtherProviderSubscriptions(
+  /** Select a provider subscription without modifying provider-reported state. */
+  async selectEntitlementSource(
     userId: string,
-    keepProvider: string,
-    keepProviderSubscriptionId?: string | null,
-  ): Promise<number> {
+    provider: string,
+    providerSubscriptionId?: string | null,
+  ): Promise<boolean> {
     const rows = (await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
       userId,
     ])) as Array<Record<string, unknown>>;
@@ -229,14 +225,13 @@ export class BillingSubscriptionRepository {
     const replacement = rows
       .filter(
         (row) =>
-          row.provider === keepProvider &&
+          row.provider === provider &&
           eligibleStatuses.has(String(row.status)) &&
-          (!keepProviderSubscriptionId ||
-            row.provider_subscription_id === keepProviderSubscriptionId),
+          (!providerSubscriptionId || row.provider_subscription_id === providerSubscriptionId),
       )
       .sort(compareProviderTimestampsDescending)[0];
 
-    if (replacement?.id == null) return 0;
+    if (replacement?.id == null) return false;
 
     const selectedRows = await this.query(
       `SELECT bursar.select_entitlement_source($1::uuid, $2::uuid) AS selected`,
@@ -246,8 +241,6 @@ export class BillingSubscriptionRepository {
       throw new Error("subscription entitlement source selection was rejected");
     }
 
-    return rows.filter(
-      (row) => row.provider !== keepProvider && eligibleStatuses.has(String(row.status)),
-    ).length;
+    return true;
   }
 }

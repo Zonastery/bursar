@@ -1,5 +1,3 @@
-import Decimal from "decimal.js";
-
 import { validateExpression } from "../expr.js";
 import {
   asBoolean,
@@ -14,6 +12,7 @@ import type {
   Charge,
   DimensionDefinition,
   DimensionMatcher,
+  GraduatedTier,
   MatcherScalar,
   OperationDefinition,
   OperationPricing,
@@ -21,31 +20,91 @@ import type {
   RateCard,
 } from "./types.js";
 
-function parseMatcherScalar(value: unknown): MatcherScalar {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return new Decimal(value);
-  return asString(value);
+function parseMatcherScalar(
+  value: unknown,
+  definition: DimensionDefinition,
+  path: string,
+): MatcherScalar {
+  if (definition.type === "boolean") {
+    if (typeof value !== "boolean") semanticError(`${path} matcher values must be booleans`);
+    return value;
+  }
+  if (definition.type === "number") {
+    if (typeof value !== "number" && typeof value !== "string") {
+      semanticError(`${path} matcher values must be decimal strings or numbers`);
+    }
+    return asDecimal(value);
+  }
+  if (typeof value !== "string") semanticError(`${path} matcher values must be strings`);
+  return value;
 }
 
-function parseMatcher(value: unknown): DimensionMatcher {
+function parseMatcher(
+  value: unknown,
+  definition: DimensionDefinition,
+  path: string,
+): DimensionMatcher {
   const raw = asObject(value);
   switch (raw.op) {
     case "in":
     case "not_in":
-      return { op: raw.op, values: (raw.values as unknown[]).map(parseMatcherScalar) };
-    case "prefix":
-      return { op: "prefix", value: asString(raw.value) };
-    case "range":
       return {
+        op: raw.op,
+        values: (raw.values as unknown[]).map((item) => parseMatcherScalar(item, definition, path)),
+      };
+    case "prefix":
+      if (definition.type !== "string") {
+        semanticError(`${path} prefix matcher requires a string dimension`);
+      }
+      return { op: "prefix", value: asString(raw.value) };
+    case "range": {
+      if (definition.type !== "number") {
+        semanticError(`${path} range matcher requires a number dimension`);
+      }
+      const parsed = {
         op: "range",
         ...(raw.gt == null ? {} : { gt: asDecimal(raw.gt) }),
         ...(raw.gte == null ? {} : { gte: asDecimal(raw.gte) }),
         ...(raw.lt == null ? {} : { lt: asDecimal(raw.lt) }),
         ...(raw.lte == null ? {} : { lte: asDecimal(raw.lte) }),
-      };
+      } as const;
+      if (parsed.gt == null && parsed.gte == null && parsed.lt == null && parsed.lte == null) {
+        semanticError(`${path} range matcher requires at least one bound`);
+      }
+      if (parsed.gt != null && parsed.gte != null) {
+        semanticError(`${path} range matcher cannot combine gt and gte`);
+      }
+      if (parsed.lt != null && parsed.lte != null) {
+        semanticError(`${path} range matcher cannot combine lt and lte`);
+      }
+      const lower = parsed.gt ?? parsed.gte;
+      const upper = parsed.lt ?? parsed.lte;
+      if (lower != null && upper != null && lower.gte(upper)) {
+        semanticError(`${path} range matcher lower bound must be less than upper bound`);
+      }
+      return parsed;
+    }
     default:
-      return { op: "eq", value: parseMatcherScalar(raw.value) };
+      return { op: "eq", value: parseMatcherScalar(raw.value, definition, path) };
   }
+}
+
+function parseTiers(value: unknown): GraduatedTier[] {
+  const tiers = (value as unknown[]).map((item) => {
+    const tier = asObject(item);
+    return {
+      ...(tier.up_to == null ? {} : { upTo: asDecimal(tier.up_to) }),
+      rate: asDecimal(tier.rate),
+    };
+  });
+  if (tiers.at(-1)?.upTo != null || tiers.slice(0, -1).some((tier) => tier.upTo == null)) {
+    semanticError("graduated and volume tiers must end with exactly one open-ended tier");
+  }
+  const finite = tiers.flatMap((tier) => (tier.upTo == null ? [] : [tier.upTo]));
+  if (finite.some((bound, index) => index > 0 && bound.lte(finite[index - 1]))) {
+    semanticError("graduated and volume tier bounds must be strictly increasing");
+  }
+  return tiers;
 }
 
 function parseCharge(value: unknown): Charge {
@@ -73,13 +132,7 @@ function parseCharge(value: unknown): Charge {
       return {
         type: raw.type,
         measure: asString(raw.measure),
-        tiers: (raw.tiers as unknown[]).map((item) => {
-          const tier = asObject(item);
-          return {
-            ...(tier.up_to == null ? {} : { upTo: asDecimal(tier.up_to) }),
-            rate: asDecimal(tier.rate),
-          };
-        }),
+        tiers: parseTiers(raw.tiers),
       };
     case "expression":
       return { type: "expression", formula: asString(raw.formula) };
@@ -142,6 +195,12 @@ export function parsePricing(value: unknown): PricingConfig {
   const cardsRaw = asObject(raw.rate_cards);
   validateIdentifiers(operationsRaw, "pricing.operations");
   validateIdentifiers(cardsRaw, "pricing.rate_cards");
+  if (Object.keys(operationsRaw).length === 0) {
+    semanticError("pricing.operations must not be empty");
+  }
+  if (Object.keys(cardsRaw).length === 0) {
+    semanticError("pricing.rate_cards must not be empty");
+  }
 
   const operations: Record<string, OperationDefinition> = {};
   for (const [operationKey, input] of Object.entries(operationsRaw)) {
@@ -150,6 +209,15 @@ export function parsePricing(value: unknown): PricingConfig {
     const dimensionsRaw = asObject(operation.dimensions ?? {});
     validateIdentifiers(measuresRaw, `pricing.operations.${operationKey}.measures`);
     validateIdentifiers(dimensionsRaw, `pricing.operations.${operationKey}.dimensions`);
+    if (Object.keys(measuresRaw).length === 0) {
+      semanticError(`pricing.operations.${operationKey}.measures must not be empty`);
+    }
+    const overlap = Object.keys(measuresRaw).filter((key) =>
+      Object.prototype.hasOwnProperty.call(dimensionsRaw, key),
+    );
+    if (overlap.length) {
+      semanticError(`operation '${operationKey}' reuses names as measures and dimensions`);
+    }
     operations[operationKey] = {
       measures: Object.fromEntries(
         Object.entries(measuresRaw).map(([key, definition]) => [
@@ -183,7 +251,7 @@ export function parsePricing(value: unknown): PricingConfig {
         semanticError(`rate card '${cardKey}' references unknown operation '${operationKey}'`);
       }
       const operationPriceRaw = asObject(operationInput);
-      const rules = (operationPriceRaw.rules as unknown[]).map((ruleInput, index) => {
+      const rules = ((operationPriceRaw.rules ?? []) as unknown[]).map((ruleInput, index) => {
         const ruleRaw = asObject(ruleInput);
         const whenRaw = asObject(ruleRaw.when);
         const unknownDimensions = Object.keys(whenRaw).filter(
@@ -198,7 +266,14 @@ export function parsePricing(value: unknown): PricingConfig {
         validateCharge(parsedCharge, definition, operationKey);
         return {
           when: Object.fromEntries(
-            Object.entries(whenRaw).map(([key, item]) => [key, parseMatcher(item)]),
+            Object.entries(whenRaw).map(([key, item]) => [
+              key,
+              parseMatcher(
+                item,
+                definition.dimensions[key],
+                `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].when.${key}`,
+              ),
+            ]),
           ),
           charge: parsedCharge,
         };

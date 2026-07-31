@@ -16,11 +16,9 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   ExecuteGrantProgramRequest,
-  FeatureLimitResult,
   GrantProgramAwardResult,
   GetUserPlanResult,
   ListQuotaEventsOptions,
-  MigratePlanUsersResult,
   PlanMigrationBatchResult,
   PlanMigrationStartResult,
   QuotaEvent,
@@ -28,8 +26,10 @@ import type {
   LeaseResult,
   LeasePricingContext,
   ListLedgerEntriesOptions,
+  ListUsageChargesOptions,
   ListUsageEntriesOptions,
   LedgerPage,
+  UsageChargePage,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
@@ -80,7 +80,7 @@ export interface SettleLeaseOptions extends OperationUsageOptions {
  *
  * Split into two tiers:
  *  - **Core** (abstract, must be implemented): balance/credit ops, the atomic
- *    lease lifecycle, bursar-config versioning, plan management, spend caps,
+ *    lease lifecycle, bursar-config versioning, plan management,
  *    refunds, and expiry sweeping. Every backend needs these.
  *  - **Optional capabilities** (concrete, default-throwing): usage analytics,
  *    ledger listing, and shared team-balance pools. A custom store that
@@ -108,8 +108,8 @@ export abstract class CreditStore {
   ): Promise<AddCreditsResult>;
   /**
    * Atomically calculate-and-charge in one server-side transaction:
-   * consume free allowance, enforce spend caps, apply the balance floor,
-   * and debit the net amount — idempotency-keyed end-to-end. See contract §2.
+   * consume free allowance, enforce plan policy and quotas, and debit the net
+   * amount — idempotency-keyed end-to-end. See contract §2.
    */
   abstract deductWithAllowance(
     userId: string,
@@ -130,7 +130,7 @@ export abstract class CreditStore {
    *
    * Under one critical section the store: (1) ensures the balance row exists;
    * (2) enforces ``maxConcurrent`` by counting active leases for ``(userId,
-   * operationType)``; (3) enforces ``deny`` spend caps for ``amount``; (4) computes
+   * operationType)``; (3) enforces plan entitlements and quotas; (4) computes
    * ``available = balance − Σ active holds`` and rejects with
    * ``error="insufficient_credits"`` if ``available − amount < floor``; (5) inserts
    * an ``active`` lease expiring after ``ttlSeconds``. Business failures are
@@ -146,10 +146,9 @@ export abstract class CreditStore {
   /**
    * Charge the actual cost against a lease, then mark it settled (D5).
    *
-   * De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft),
-   * and never clamps to the reserved ceiling. Spend caps are advisory at settle (a
-   * breach sets ``capWarning`` but never blocks); no floor block, so the balance may
-   * go negative in overdraft. ``amount === 0`` releases the lease without charging.
+   * De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft)
+   * and never clamps to the reserved ceiling. The balance may go negative in
+   * overdraft. ``amount === 0`` releases the lease without charging.
    * Lease-state failures (``lease_not_found``/``lease_expired``) are returned via
    * ``DeductionResult.error``; a replay returns the original result idempotently.
    */
@@ -207,15 +206,10 @@ export abstract class CreditStore {
   abstract getBursarConfig(version: number): Promise<BursarConfigResult | null>;
   abstract activatePricing(version: number): Promise<string>;
 
-  /** @deprecated Prefer the resumable migration methods for large populations. */
-  abstract migratePlanUsers(
-    planKey: string,
-    targetConfigVersion?: number | null,
-  ): Promise<MigratePlanUsersResult>;
   abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;
   abstract setUserPlan(
     userId: string,
-    planId: string,
+    planKey: string,
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult>;
   abstract unsetUserPlan(userId: string): Promise<{ userId: string }>;
@@ -230,8 +224,6 @@ export abstract class CreditStore {
   abstract checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
   abstract getQuotaState(userId: string, quotaKey?: string | null): Promise<QuotaState[]>;
   abstract listQuotaEvents(userId: string, options?: ListQuotaEventsOptions): Promise<QuotaEvent[]>;
-  /** @deprecated Use `getQuotaState`; `feature` is interpreted as the quota key. */
-  abstract checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult>;
   abstract checkAllowance(userId: string): Promise<AllowanceResult>;
 
   abstract revokeCreditsByEntryType(
@@ -306,6 +298,14 @@ export abstract class CreditStore {
     throw new CapabilityNotSupportedError("listLedgerEntries is not supported by this store");
   }
   abstract listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage>;
+
+  /** Read metered usage charges, including allowance-covered events. */
+  async listUsageCharges(
+    _userId: string,
+    _options?: ListUsageChargesOptions,
+  ): Promise<UsageChargePage> {
+    throw new CapabilityNotSupportedError("listUsageCharges is not supported by this store");
+  }
 
   // ── Single transaction lookup (optional capability — WS8) ────────────
   /**

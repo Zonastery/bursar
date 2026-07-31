@@ -120,6 +120,9 @@ BEGIN
     END IF;
 
     IF v_event.status='processing' AND v_event.claim_expires_at>now() THEN
+        -- Do not acknowledge an in-flight delivery as completed. If the active
+        -- worker dies after this request returns, a provider that received a
+        -- successful duplicate response may never retry the event.
         RETURN QUERY SELECT 'busy',v_event.id,NULL::uuid;
 
         RETURN;

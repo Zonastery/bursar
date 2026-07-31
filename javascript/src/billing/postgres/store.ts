@@ -300,12 +300,13 @@ export class PostgresBillingStore extends BillingStore {
     if (!subscription?.id) throw new Error("subscription change requires a persisted subscription");
     const rows = await this.queryFn(
       `SELECT * FROM bursar.open_subscription_change(
-         $1::uuid, $2::uuid, $3::timestamptz, $4, $5
+         $1::uuid, $2::uuid, $3::timestamptz, $4, $5, $6
        )`,
       [
         subscription.id,
         input.toOfferId,
         input.effectiveAt,
+        input.effective,
         input.idempotencyKey,
         input.prorationBehavior ?? "provider_default",
       ],
@@ -386,17 +387,16 @@ export class PostgresBillingStore extends BillingStore {
     await this.billingSubscription.recordConflict(input);
   }
 
-  async deactivateOtherProviderSubscriptions(
+  async selectSubscriptionEntitlementSource(
     userId: string,
-    keepProvider: string,
-    keepProviderSubscriptionId?: string | null,
-  ): Promise<{ userId: string; keepProvider: string; deactivatedCount: number }> {
-    const deactivatedCount = await this.billingSubscription.deactivateOtherProviderSubscriptions(
+    provider: string,
+    providerSubscriptionId?: string | null,
+  ): Promise<boolean> {
+    return this.billingSubscription.selectEntitlementSource(
       userId,
-      keepProvider,
-      keepProviderSubscriptionId,
+      provider,
+      providerSubscriptionId,
     );
-    return { userId, keepProvider, deactivatedCount };
   }
 
   private rowToTopup(r: Record<string, unknown>): BillingTopupResult | null {
@@ -674,6 +674,7 @@ export class PostgresBillingStore extends BillingStore {
       fromOffer,
       toOffer,
       effectiveAt: toIso(r.effective_at),
+      effective: String(r.effective_behavior) as BillingSubscriptionChange["effective"],
       state: String(r.state) as BillingSubscriptionChange["state"],
       prorationBehavior: String(
         r.proration_behavior,
@@ -749,7 +750,7 @@ export class PostgresBillingStore extends BillingStore {
     return this.billingAutoRecharge.updateAttemptByProviderPayment(input);
   }
 
-  async countAutoRechargeAttempts(userId: string, since: string | Date | number): Promise<number> {
+  async countAutoRechargeAttempts(userId: string, since: string | Date): Promise<number> {
     return this.billingAutoRecharge.countAttempts(userId, since);
   }
 

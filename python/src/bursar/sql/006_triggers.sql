@@ -204,10 +204,6 @@ CREATE TRIGGER grant_award_executions_append_only
 BEFORE UPDATE OR DELETE ON bursar.grant_award_executions
 FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
 
-CREATE TRIGGER account_creation_grants_append_only
-BEFORE UPDATE OR DELETE ON bursar.account_creation_grants
-FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
-
 CREATE TRIGGER account_updated_at
 BEFORE UPDATE ON bursar.credit_accounts
 FOR EACH ROW EXECUTE FUNCTION bursar.touch_updated_at();

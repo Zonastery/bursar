@@ -58,6 +58,9 @@ export function raiseDeductError(error: string, userId: string, cost: Decimal): 
     case "missing_quota_measure":
     case "invalid_measure":
       throw new ConfigError(`Invalid quota measures for user ${userId}: ${error}`);
+    case "invalid_amount":
+    case "invalid_request":
+      throw new RangeError(`Invalid deduction amount: ${cost}`);
     default:
       throw new StoreError(`Credit deduction failed: ${error}. user=${userId}, requested=${cost}`);
   }

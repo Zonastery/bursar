@@ -84,7 +84,7 @@ export interface DeductParams {
 export class DeductionRepository {
   constructor(private callproc: CallProc) {}
 
-  /** Atomically deduct credits with allowance consumption, spend cap enforcement, and floor check. */
+  /** Atomically deduct credits with allowance, entitlement, quota, and credit-policy enforcement. */
   async deductWithAllowance(params: DeductParams): Promise<DeductionRow> {
     const rows = await this.callproc("charge_usage_for_operation", [
       params.userId,

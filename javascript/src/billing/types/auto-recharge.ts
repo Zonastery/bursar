@@ -46,8 +46,6 @@ export interface BillingAutoRechargeStatus {
   topupKey: string;
   quantity: number;
   maxRecharges: number;
-  /** @deprecated Prefer the exact `windowStart` and `windowEnd` boundaries. */
-  windowDays: number;
   windowStart: string;
   windowEnd: string;
   rechargesInWindow: number;

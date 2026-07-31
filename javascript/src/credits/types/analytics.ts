@@ -51,22 +51,3 @@ export interface UsageAnalyticsStore {
   dailySpend(start: Date, end: Date): Promise<DailySpendRow[]>;
   aggregateStats(start: Date, end: Date): Promise<AggregateStats>;
 }
-
-// ── Spend caps and rate limiting ───────────────────────────────────────
-/** Configuration for a per-user spend cap. */
-export interface SpendCap {
-  userId: string;
-  type: "daily" | "monthly";
-  model?: string | null;
-  limit: Decimal;
-  onExceed: "deny" | "warn" | "notify";
-}
-
-/** Result of checking a spend cap. */
-export interface CapCheckResult {
-  capped: boolean;
-  currentSpend: Decimal;
-  limit: Decimal;
-  action: "deny" | "warn" | "notify" | null;
-  model?: string | null;
-}

@@ -59,7 +59,6 @@ new Bursar({ creditStore, creditsOptions?, billingStore?, billingOptions? })
 
 | File | What it covers |
 |------|----------------|
-| `tests/allowance.test.ts` | Allowance window resolution |
 | `tests/billing-integration.test.ts` | Billing lifecycle against real Postgres |
 | `tests/config-parity.test.ts` | Config loading parity with Python |
 | `tests/config.test.ts` | Config validation edge cases |

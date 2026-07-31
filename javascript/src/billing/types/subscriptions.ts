@@ -82,6 +82,7 @@ export interface BillingSubscriptionChange {
   fromOffer: BillingSubscriptionOfferContext;
   toOffer: BillingSubscriptionOfferContext;
   effectiveAt: string | null;
+  effective: "immediate" | "renewal";
   state: BillingSubscriptionChangeState;
   prorationBehavior: "provider_default" | "invoice_immediately" | "none";
   idempotencyKey: string;
@@ -94,6 +95,7 @@ export interface BillingSubscriptionChangeInput {
   providerSubscriptionId: string;
   toOfferId: string;
   effectiveAt: string;
+  effective: "immediate" | "renewal";
   idempotencyKey: string;
   prorationBehavior?: "provider_default" | "invoice_immediately" | "none";
 }

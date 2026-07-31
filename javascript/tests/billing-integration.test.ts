@@ -365,6 +365,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     const c1 = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
     expect(c1.status).toBe("claimed");
     if (c1.status !== "claimed") throw new Error("expected event claim token");
+    const activeClaim = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
+    expect(activeClaim.status).toBe("retry");
     await bs.completeBillingEvent(PROVIDER, "evt_claim_cycle", c1.claimToken);
     const c2 = await bs.claimBillingEvent(PROVIDER, "evt_claim_cycle", "test.event");
     expect(c2.status).toBe("duplicate");
@@ -392,9 +394,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
         }),
       );
       expect(claims.filter((claim) => claim.status === "claimed")).toHaveLength(1);
-      expect(
-        claims.filter((claim) => claim.status === "duplicate" || claim.status === "retry"),
-      ).toHaveLength(11);
+      expect(claims.filter((claim) => claim.status === "retry")).toHaveLength(11);
       const winner = claims.find((claim) => claim.status === "claimed");
       if (winner?.status !== "claimed") throw new Error("expected one claim winner");
       await bs.completeBillingEvent(PROVIDER, "evt_concurrent_claim", winner.claimToken);

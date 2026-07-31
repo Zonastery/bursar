@@ -14,7 +14,6 @@ import type {
   AllowanceResult,
   AvailableResult,
   BalanceResult,
-  BillingMode,
   CheckFeatureResult,
   CreateTeamResult,
   CreditMetadata,
@@ -22,20 +21,20 @@ import type {
   DeductionResult,
   DeductWithAllowanceOptions,
   ExecuteGrantProgramRequest,
-  FeatureLimitResult,
   GrantProgramAwardResult,
   GetUserPlanResult,
   LeaseResult,
   LeasePricingContext,
   ListLedgerEntriesOptions,
+  ListUsageChargesOptions,
   ListQuotaEventsOptions,
   ListUsageEntriesOptions,
-  MigratePlanUsersResult,
   PlanMigrationBatchResult,
   PlanMigrationStartResult,
   QuotaEvent,
   QuotaState,
   LedgerPage,
+  UsageChargePage,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
@@ -64,12 +63,11 @@ import { TeamRepository } from "./repositories/team.js";
 import { BucketRepository } from "./repositories/bucket.js";
 import {
   ZERO,
-  compatibilityAllowancePeriod,
-  compatibilityOperationPolicies,
   decimalParameter as decParam,
   decimalRecord as decRecord,
   decimalValue as dec,
   mapLedgerEntry,
+  mapUsageCharge,
   normalizeBursarConfig,
   parseAdmissionOperations,
   parseEntitlements,
@@ -285,8 +283,6 @@ export class PostgresStore extends CreditStore {
         allowanceConsumed: ZERO,
         balanceAfter: dec(row.balance_after),
         idempotent: false,
-        capWarning: null,
-        featureLimitWarning: null,
         error: String(row.error),
       };
     }
@@ -298,8 +294,6 @@ export class PostgresStore extends CreditStore {
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
-      capWarning: null,
-      featureLimitWarning: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
@@ -390,8 +384,6 @@ export class PostgresStore extends CreditStore {
         allowanceConsumed: ZERO,
         balanceAfter: ZERO,
         idempotent: false,
-        capWarning: null,
-        featureLimitWarning: null,
         error: "no result",
       };
     }
@@ -403,8 +395,6 @@ export class PostgresStore extends CreditStore {
         allowanceConsumed: ZERO,
         balanceAfter: dec(row.balance_after),
         idempotent: false,
-        capWarning: null,
-        featureLimitWarning: null,
         error: String(row.error),
       };
     }
@@ -415,8 +405,6 @@ export class PostgresStore extends CreditStore {
       allowanceConsumed: dec(row.allowance_consumed),
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
-      capWarning: null,
-      featureLimitWarning: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }
@@ -535,11 +523,8 @@ export class PostgresStore extends CreditStore {
         planId: null,
         planKey: null,
         planLabel: null,
-        allowanceAmount: ZERO,
         allowance: null,
-        allowancePeriod: null,
         entitlements: {},
-        billingMode: "strict",
         creditPolicy: null,
         admission: null,
         allowedOperations: [],
@@ -547,18 +532,11 @@ export class PostgresStore extends CreditStore {
     }
     const allowanceAmount = dec(row.credit_allowance_amount);
     const admissionOperations = parseAdmissionOperations(row.operation_admission);
-    const billingMode: BillingMode =
-      row.credit_policy_type === "credit_line" ? "overdraft" : "strict";
-    const overdraftFloor =
-      row.credit_policy_type === "credit_line" && row.credit_limit != null
-        ? dec(row.credit_limit).negated()
-        : null;
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
       planKey: (row.plan_key as string) ?? null,
       planLabel: (row.plan_label as string) ?? null,
-      allowanceAmount,
       allowance:
         row.credit_allowance_amount == null
           ? null
@@ -581,10 +559,8 @@ export class PostgresStore extends CreditStore {
                   ? null
                   : String(row.credit_allowance_reset_timezone),
             },
-      allowancePeriod: compatibilityAllowancePeriod(row),
       entitlements: parseEntitlements(row.entitlements),
       rateCard: row.rate_card != null ? String(row.rate_card) : null,
-      billingMode,
       creditPolicy:
         row.credit_policy_type == null
           ? null
@@ -603,21 +579,12 @@ export class PostgresStore extends CreditStore {
       allowedOperations: Array.isArray(row.allowed_operations)
         ? row.allowed_operations.map(String)
         : [],
-      perOperation: compatibilityOperationPolicies(
-        admissionOperations,
-        billingMode,
-        overdraftFloor,
-      ),
-      maxConcurrent:
-        row.admission_max_in_flight == null ? null : Number(row.admission_max_in_flight),
-      overdraftFloor,
       planAssignedAt: row.plan_assigned_at != null ? new Date(String(row.plan_assigned_at)) : null,
       assignmentSourceType:
         row.assignment_source_type == null ? null : String(row.assignment_source_type),
       assignmentSourceId:
         row.assignment_source_id == null ? null : String(row.assignment_source_id),
       revisionPolicy: row.revision_policy == null ? null : String(row.revision_policy),
-      configVersion: row.catalog_revision_no != null ? Number(row.catalog_revision_no) : null,
       catalogVersion: row.catalog_revision_no != null ? Number(row.catalog_revision_no) : null,
     };
   }
@@ -635,17 +602,17 @@ export class PostgresStore extends CreditStore {
 
   async setUserPlan(
     userId: string,
-    planId: string,
+    planKey: string,
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult> {
     const row = await this.planRepo.setUserPlan(
       userId,
-      planId,
+      planKey,
       planAssignedAt?.toISOString() ?? null,
     );
     return {
       userId: String(row.user_id ?? userId),
-      planId: String(row.plan_id ?? planId),
+      planId: String(row.plan_id),
       planAssignedAt: row.plan_assigned_at != null ? String(row.plan_assigned_at) : null,
     };
   }
@@ -673,19 +640,6 @@ export class PostgresStore extends CreditStore {
       migrated: Number(row.migrated ?? 0),
       done: Boolean(row.done),
       nextCursor: row.next_cursor != null ? String(row.next_cursor) : null,
-    };
-  }
-
-  async migratePlanUsers(
-    planKey: string,
-    targetConfigVersion?: number | null,
-  ): Promise<MigratePlanUsersResult> {
-    const row = await this.planRepo.migratePlanUsers(planKey, targetConfigVersion);
-    return {
-      planKey: row.plan_key,
-      targetPlanId: row.target_plan_id,
-      targetConfigVersion: row.target_config_version,
-      migratedCount: row.migrated_count,
     };
   }
 
@@ -734,34 +688,6 @@ export class PostgresStore extends CreditStore {
       usageChargeId: row.usage_charge_id,
       createdAt: row.created_at,
     }));
-  }
-
-  async checkFeatureLimit(userId: string, feature: string): Promise<FeatureLimitResult> {
-    const quota = (await this.getQuotaState(userId, feature))[0];
-    if (!quota) {
-      return {
-        userId,
-        feature,
-        limited: false,
-        limit: 0,
-        used: 0,
-        remaining: 0,
-        periodStart: "",
-        periodEnd: "",
-        action: null,
-      };
-    }
-    return {
-      userId,
-      feature,
-      limited: true,
-      limit: quota.limit.toNumber(),
-      used: quota.consumed.plus(quota.reserved).toNumber(),
-      remaining: quota.remaining.toNumber(),
-      periodStart: quota.windowStart,
-      periodEnd: quota.windowEnd,
-      action: quota.enforcement === "block" ? "deny" : "notify",
-    };
   }
 
   async checkAllowance(userId: string): Promise<AllowanceResult> {
@@ -911,6 +837,32 @@ export class PostgresStore extends CreditStore {
 
   async listUsageEntries(userId: string, options?: ListUsageEntriesOptions): Promise<LedgerPage> {
     return this.listLedgerPage(userId, options, true);
+  }
+
+  async listUsageCharges(
+    userId: string,
+    options?: ListUsageChargesOptions,
+  ): Promise<UsageChargePage> {
+    const limit = options?.limit ?? DEFAULT_PAGE_SIZE;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
+      throw new RangeError(`limit must be an integer between 1 and ${MAX_PAGE_SIZE}`);
+    }
+    const cursor = options?.cursor ?? null;
+    const rows = await this.analyticsRepo.listUsageCharges(
+      userId,
+      options?.fromDate?.toISOString() ?? null,
+      options?.toDate?.toISOString() ?? null,
+      limit + 1,
+      cursor?.eventAt ?? null,
+      cursor?.usageId ?? null,
+    );
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(mapUsageCharge);
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor: hasMore && last ? { eventAt: last.eventAt, usageId: last.usageId } : null,
+    };
   }
 
   async createTeam(

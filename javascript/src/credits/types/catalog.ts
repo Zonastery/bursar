@@ -1,6 +1,4 @@
 import type { Decimal } from "decimal.js";
-import type { AllowancePeriod, FeatureLimitPeriod } from "../../allowance.js";
-import type { BillingMode } from "./account.js";
 
 export interface BursarConfigResult {
   id: string;
@@ -34,35 +32,6 @@ export interface PlanAdmissionPolicy {
   operations: Record<string, { maxInFlight: number | null }>;
 }
 
-export interface OperationPolicy {
-  billingMode: BillingMode;
-  maxConcurrent?: number | null;
-  overdraftFloor?: Decimal | null;
-}
-
-/** @deprecated Configure plan quotas in the catalog. */
-export interface FeatureLimit {
-  value?: unknown;
-  maxCalls: number | null;
-  period: FeatureLimitPeriod;
-  onExceed: "deny" | "warn" | "notify";
-}
-
-/** @deprecated Use `PricingPlanDefinition`. */
-export interface PlanDefinition {
-  label: string;
-  tier?: number;
-  allowance: { amount: Decimal; period: AllowancePeriod };
-  safety: {
-    billingMode: BillingMode;
-    perOperation?: Record<string, OperationPolicy>;
-    maxConcurrent?: number | null;
-    overdraftFloor?: Decimal | null;
-  };
-  rateCard?: string | null;
-  entitlements?: Record<string, { value?: unknown }> | null;
-}
-
 export interface AllowanceResult {
   planId: string;
   allowanceRemaining: Decimal;
@@ -75,23 +44,16 @@ export interface GetUserPlanResult {
   planId: string | null;
   planKey: string | null;
   planLabel: string | null;
-  allowanceAmount: Decimal;
   allowance: PlanAllowancePolicy | null;
-  allowancePeriod: AllowancePeriod | null;
   entitlements: Record<string, { value: unknown }>;
   rateCard?: string | null;
-  billingMode: BillingMode;
   creditPolicy: PlanCreditPolicy | null;
   admission: PlanAdmissionPolicy | null;
   allowedOperations: string[];
-  perOperation?: Record<string, OperationPolicy>;
-  maxConcurrent?: number | null;
-  overdraftFloor?: Decimal | null;
   planAssignedAt?: Date | null;
   assignmentSourceType?: string | null;
   assignmentSourceId?: string | null;
   revisionPolicy?: string | null;
-  configVersion?: number | null;
   catalogVersion?: number | null;
 }
 
@@ -109,12 +71,4 @@ export interface PlanMigrationBatchResult {
   migrated: number;
   done: boolean;
   nextCursor: string | null;
-}
-
-/** @deprecated Prefer resumable plan migrations. */
-export interface MigratePlanUsersResult {
-  planKey: string;
-  targetPlanId: string;
-  targetConfigVersion: number;
-  migratedCount: number;
 }

@@ -199,13 +199,8 @@ export class BillingAutoRechargeRepository {
     }
   }
 
-  async countAttempts(userId: string, since: string | Date | number): Promise<number> {
-    const sinceDate =
-      typeof since === "number"
-        ? new Date(Date.now() - Math.max(since, 1) * 86_400_000)
-        : since instanceof Date
-          ? since
-          : new Date(since);
+  async countAttempts(userId: string, since: string | Date): Promise<number> {
+    const sinceDate = since instanceof Date ? since : new Date(since);
     if (Number.isNaN(sinceDate.getTime())) {
       throw new TypeError("auto-recharge attempt boundary must be a valid instant");
     }

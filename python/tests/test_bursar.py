@@ -40,19 +40,19 @@ def test_bursar_always_owns_billing_provisioning(monkeypatch):
     class FakeBilling:
         def __init__(self, store, options):
             captured["provisioning"] = options.provisioning
-            captured["cancel_prior_providers"] = options.cancel_prior_providers
+            captured["auto_select_entitlement_source"] = options.auto_select_entitlement_source
 
-    monkeypatch.setattr("bursar.bursar.BillingServiceImpl", FakeBilling)
+    monkeypatch.setattr("bursar.bursar.BillingEventService", FakeBilling)
     credits = FakeCredits()
     Bursar.create(
         credit_store=object(),
         billing_store=object(),
         credits=credits,
-        billing_options={"cancel_prior_providers": False},
+        billing_options={"auto_select_entitlement_source": False},
     )
 
     assert captured["provisioning"] is credits
-    assert captured["cancel_prior_providers"] is False
+    assert captured["auto_select_entitlement_source"] is False
 
 
 def test_bursar_routes_provider_events_through_billing_service():

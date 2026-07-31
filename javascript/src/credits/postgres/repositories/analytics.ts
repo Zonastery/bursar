@@ -49,8 +49,28 @@ const LedgerEntryRowSchema = z
     actor_user_id: z.string().nullable().optional(),
     amount: decimal,
     entry_type: z.string(),
+    operation: z.string(),
     reference_entry_id: z.string().nullable().optional(),
     idempotency_key: z.string().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+    created_at: z.union([z.string(), z.date()]),
+  })
+  .passthrough();
+
+const UsageChargeRowSchema = z
+  .object({
+    usage_id: z.string(),
+    account_id: z.string(),
+    operation: z.string(),
+    requested: decimal,
+    charged: decimal,
+    allowance_requested: decimal,
+    allowance_covered: decimal,
+    feature: z.string().nullable().optional(),
+    model: z.string().nullable().optional(),
+    region: z.string().nullable().optional(),
+    event_at: z.union([z.string(), z.date()]),
+    idempotency_key: z.string(),
     metadata: z.record(z.string(), z.unknown()).nullable().optional(),
     created_at: z.union([z.string(), z.date()]),
   })
@@ -62,6 +82,7 @@ export type TopUserRow = z.infer<typeof TopUserRowSchema>;
 export type DailySpendRow = z.infer<typeof DailySpendRowSchema>;
 export type AggregateStatsRow = z.infer<typeof AggregateStatsRowSchema>;
 export type LedgerEntryRow = z.infer<typeof LedgerEntryRowSchema>;
+export type UsageChargeRow = z.infer<typeof UsageChargeRowSchema>;
 
 export class AnalyticsRepository {
   constructor(private readonly callproc: CallProc) {}
@@ -163,5 +184,29 @@ export class AnalyticsRepository {
     const rows = await this.callproc("get_ledger_entry", [userId, entryId]);
     if (!rows?.length) return null;
     return safeParse(LedgerEntryRowSchema, rows[0], "AnalyticsRepository.getLedgerEntry");
+  }
+
+  async listUsageCharges(
+    userId: string,
+    fromDate: string | null,
+    toDate: string | null,
+    limit: number,
+    cursorEventAt: string | null,
+    cursorUsageId: string | null,
+  ): Promise<UsageChargeRow[]> {
+    if ((cursorEventAt == null) !== (cursorUsageId == null)) {
+      throw new Error("usage charge cursor requires both eventAt and usageId");
+    }
+    const rows = await this.callproc("list_usage_charges", [
+      userId,
+      cursorEventAt,
+      cursorUsageId,
+      limit,
+      fromDate,
+      toDate,
+    ]);
+    return (rows ?? []).map((row) =>
+      safeParse(UsageChargeRowSchema, row, "AnalyticsRepository.listUsageCharges"),
+    );
   }
 }

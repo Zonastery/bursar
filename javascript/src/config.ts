@@ -78,7 +78,6 @@ export function loadConfigFromDict(
   }
 
   const catalogRaw = asObject(raw.catalog ?? {});
-  asObject(catalogRaw.activation ?? { mode: "on_publish" });
   const defaultPlan = catalogRaw.default_plan == null ? undefined : String(catalogRaw.default_plan);
   if (defaultPlan != null && !plans[defaultPlan]) {
     semanticError(`catalog.default_plan references unknown plan '${defaultPlan}'`);
@@ -86,7 +85,6 @@ export function loadConfigFromDict(
   return {
     version: 1,
     catalog: {
-      activation: { mode: "on_publish" },
       ...(defaultPlan == null ? {} : { defaultPlan }),
     },
     ...(pricing == null ? {} : { pricing }),
@@ -114,11 +112,13 @@ function toSnakeCase(value: unknown): unknown {
 
 export function canonicalBursarConfigDict(
   data: BursarConfigData | Record<string, unknown>,
-): BursarConfigData {
-  return toSnakeCase(loadConfigFromDict(data)) as BursarConfigData;
+): BursarConfigData & Record<string, unknown> {
+  return toSnakeCase(loadConfigFromDict(data)) as BursarConfigData & Record<string, unknown>;
 }
 
 /** Serialize an already parsed configuration without re-validating camelCase fields as raw input. */
-export function canonicalParsedBursarConfigDict(data: ParsedBursarConfig): BursarConfigData {
-  return toSnakeCase(data) as BursarConfigData;
+export function canonicalParsedBursarConfigDict(
+  data: ParsedBursarConfig,
+): BursarConfigData & Record<string, unknown> {
+  return toSnakeCase(data) as BursarConfigData & Record<string, unknown>;
 }

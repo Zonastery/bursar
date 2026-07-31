@@ -264,6 +264,7 @@ RETURNS TABLE (
     actor_user_id uuid,
     amount numeric,
     entry_type text,
+    operation text,
     reference_entry_id uuid,
     idempotency_key text,
     metadata jsonb,
@@ -280,6 +281,7 @@ AS $$
         account.subject_id,
         entry.amount,
         entry.kind::text,
+        entry.operation,
         entry.reference_entry_id,
         entry.idempotency_key,
         entry.metadata,
@@ -288,7 +290,8 @@ AS $$
     JOIN bursar.credit_accounts AS account
       ON account.id = entry.account_id
     WHERE account.subject_id=p_subject_id
-      AND p_page_size BETWEEN 1 AND 200
+      -- SDKs fetch one look-ahead row to determine whether a cursor follows.
+      AND p_page_size BETWEEN 1 AND 201
       AND (
           p_entry_types IS NULL
           OR entry.kind::text = ANY(p_entry_types)
@@ -321,6 +324,7 @@ RETURNS TABLE (
     actor_user_id uuid,
     amount numeric,
     entry_type text,
+    operation text,
     reference_entry_id uuid,
     idempotency_key text,
     metadata jsonb,
@@ -337,6 +341,7 @@ AS $$
         account.subject_id,
         entry.amount,
         entry.kind::text,
+        entry.operation,
         entry.reference_entry_id,
         entry.idempotency_key,
         entry.metadata,
@@ -346,6 +351,76 @@ AS $$
       ON account.id = entry.account_id
     WHERE account.subject_id = p_subject_id
       AND entry.id = p_entry_id
+$$;
+
+-- Usage history is sourced from the usage-charge journal rather than the
+-- monetary ledger. This keeps allowance-covered events visible without
+-- fabricating a zero-value ledger entry.
+CREATE FUNCTION bursar.list_usage_charges(
+    p_subject_id uuid,
+    p_after_event_at timestamptz DEFAULT NULL,
+    p_after_id uuid DEFAULT NULL,
+    p_page_size integer DEFAULT 100,
+    p_from_at timestamptz DEFAULT NULL,
+    p_to_at timestamptz DEFAULT NULL
+)
+RETURNS TABLE (
+    usage_id uuid,
+    account_id uuid,
+    operation text,
+    requested numeric,
+    charged numeric,
+    allowance_requested numeric,
+    allowance_covered numeric,
+    feature text,
+    model text,
+    region text,
+    event_at timestamptz,
+    idempotency_key text,
+    metadata jsonb,
+    created_at timestamptz
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT
+        charge.id,
+        charge.account_id,
+        charge.operation,
+        charge.requested,
+        charge.charged,
+        charge.allowance_requested,
+        charge.allowance_covered,
+        charge.feature,
+        charge.model,
+        charge.region,
+        charge.event_at,
+        charge.idempotency_key,
+        COALESCE(payload.metadata, '{}'::jsonb),
+        charge.created_at
+    FROM bursar.credit_usage_charges AS charge
+    JOIN bursar.credit_accounts AS account
+      ON account.id = charge.account_id
+    LEFT JOIN bursar.usage_charge_payloads AS payload
+      ON payload.charge_id = charge.id
+     AND payload.event_at = charge.event_at
+    WHERE account.subject_id = p_subject_id
+      -- SDKs fetch one look-ahead row to determine whether a cursor follows.
+      AND p_page_size BETWEEN 1 AND 201
+      AND (p_from_at IS NULL OR charge.event_at >= p_from_at)
+      AND (p_to_at IS NULL OR charge.event_at < p_to_at)
+      AND (
+          (p_after_event_at IS NULL AND p_after_id IS NULL)
+          OR (
+              p_after_event_at IS NOT NULL AND p_after_id IS NOT NULL
+              AND (charge.event_at, charge.id)
+                    < (p_after_event_at, p_after_id)
+          )
+      )
+    ORDER BY charge.event_at DESC, charge.id DESC
+    LIMIT p_page_size
 $$;
 
 CREATE FUNCTION bursar.spend_by_user(

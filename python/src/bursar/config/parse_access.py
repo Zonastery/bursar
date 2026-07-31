@@ -11,6 +11,8 @@ from bursar.config.types import (
 
 def _validate_admission(admission: AdmissionConfig) -> AdmissionConfig:
     _validate_map_keys(admission.policies, "admission.policies")
+    for policy_key, policy in admission.policies.items():
+        _validate_map_keys(policy.operations, f"admission.policies.{policy_key}.operations")
     return admission
 
 

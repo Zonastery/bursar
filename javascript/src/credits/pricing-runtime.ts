@@ -130,7 +130,7 @@ export class PricingRuntime {
     if (userId == null) return this.requireEngine();
 
     const plan = await this.store.getUserPlan(userId);
-    const catalogVersion = plan.catalogVersion ?? plan.configVersion ?? null;
+    const catalogVersion = plan.catalogVersion ?? null;
     if (catalogVersion == null) {
       await this.refreshIfStale();
       return this.requireEngine();

@@ -31,8 +31,6 @@ export type CreditEventType =
   | "credits.refunded"
   | "credits.refund_failed"
   | "credits.expired"
-  | "credits.cap_reached"
-  | "credits.cap_warning"
   | "credits.low_balance"
   | "credits.plan_changed"
   | "credits.reserved"
@@ -40,8 +38,6 @@ export type CreditEventType =
   | "credits.lease_expired"
   | "credits.overdraft"
   | "credits.cycle_renewed"
-  | "credits.feature_limit_reached"
-  | "credits.feature_limit_warning"
   | "credits.quota_blocked"
   | "credits.quota_threshold";
 

@@ -91,6 +91,42 @@ def _ensure_user(store: PostgresStore) -> None:
         cursor.execute('INSERT INTO public."user" (id) VALUES (%s) ON CONFLICT DO NOTHING', [USER_ID])
 
 
+def test_catalog_shape_validator_rejects_removed_nested_fields(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            WITH schema AS (
+                SELECT bursar.catalog_document_shape_schema() AS document
+            )
+            SELECT bursar.catalog_shape_error(
+                '{"version":1,"credits":{},"catalog":{"activation":{"mode":"on_publish"}}}'::jsonb,
+                schema.document,
+                schema.document->'$defs'
+            )
+            FROM schema
+            """
+        )
+        assert cursor.fetchone()[0] == "$.catalog.activation is not allowed"
+
+        cursor.execute(
+            """
+            WITH schema AS (
+                SELECT bursar.catalog_document_shape_schema() AS document
+            )
+            SELECT bursar.catalog_shape_error(
+                '{"max_purchases":1,"window":{"type":"calendar","unit":"month","count":1,"timezone":"UTC"},"max_charge_minor":100,"cooldown":{"unit":"hour","count":1},"max_failures":3}'::jsonb,
+                schema.document #> '{$defs,AutoRechargeLimits}',
+                schema.document->'$defs',
+                '$.commerce.auto_recharge.limits'
+            )
+            FROM schema
+            """
+        )
+        assert cursor.fetchone()[0] == "$.commerce.auto_recharge.limits.max_failures is not allowed"
+
+
 def test_migrations_are_idempotent_and_detect_checksum_mismatch(
     pg_database_url: str,
 ) -> None:
@@ -206,7 +242,16 @@ def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStor
 
 def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    config = deepcopy(CONFIG)
+    config["pricing"]["operations"]["free_export"] = {
+        "measures": {"calls": {"unit": "call"}},
+        "dimensions": {},
+    }
+    config["pricing"]["rate_cards"]["standard"]["operations"]["free_export"] = {
+        "rules": [],
+        "unmatched": {"action": "charge", "charge": {"type": "flat", "amount": "0"}},
+    }
+    service.publish_pricing_from_dict(config)
     service.add_credits(
         USER_ID,
         Decimal("100"),
@@ -224,6 +269,16 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     )
 
     assert deduction.amount == Decimal("16")
+    free = service.deduct(
+        USER_ID,
+        UsageMetrics(operation="free_export", measures={"calls": 1}, dimensions={}),
+        idempotency_key="new-schema-free-usage",
+    )
+    assert free.amount == Decimal("0")
+    usage = service.list_usage_charges(USER_ID, limit=200)
+    free_charge = next(item for item in usage.items if item.idempotency_key == "new-schema-free-usage")
+    assert free_charge.operation == "free_export"
+    assert free_charge.charged == Decimal("0")
     assert service.get_balance(USER_ID).balance == Decimal("84")
     loaded = store.get_active_pricing()
     assert loaded is not None
@@ -423,8 +478,10 @@ def test_account_created_grant_program_posts_every_award(
         cursor.execute(
             """
             SELECT count(*)
-            FROM bursar.account_creation_grants
-            WHERE subject_id = %s
+            FROM bursar.grant_award_executions AS execution
+            JOIN bursar.grant_program_events AS event
+              ON event.id = execution.grant_event_id
+            WHERE event.subject_id = %s
             """,
             [REPLAY_USER_ID],
         )

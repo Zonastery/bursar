@@ -353,6 +353,7 @@ class BillingSubscriptionChange(BaseModel):
     from_offer: BillingSubscriptionOfferContext
     to_offer: BillingSubscriptionOfferContext
     effective_at: str | None
+    effective: Literal["immediate", "renewal"]
     state: BillingSubscriptionChangeState
     proration_behavior: BillingSubscriptionProrationBehavior
     idempotency_key: str
@@ -369,6 +370,7 @@ class BillingSubscriptionChangeInput(BaseModel):
     provider_subscription_id: str
     to_offer_id: str
     effective_at: str
+    effective: Literal["immediate", "renewal"]
     idempotency_key: str
     proration_behavior: BillingSubscriptionProrationBehavior = "provider_default"
 
@@ -483,7 +485,6 @@ class BillingAutoRechargeStatus(BaseModel):
     topup_key: str
     quantity: int
     max_recharges: int
-    window_days: float
     window_start: str
     window_end: str
     recharges_in_window: int

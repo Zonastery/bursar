@@ -4,6 +4,7 @@ import { ConfigError } from "../errors.js";
 import type { Availability, BillingInterval, Duration, ExpiryPolicy, Window } from "./types.js";
 
 const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
+const REGION = /^[A-Z]{2}(?:-[A-Z0-9]{1,3})?$/;
 
 export type JsonObject = Record<string, unknown>;
 
@@ -22,6 +23,15 @@ export function identifier(value: string, path: string): string {
 
 export function validateIdentifiers(value: JsonObject, path: string): void {
   for (const key of Object.keys(value)) identifier(key, `${path}.${key}`);
+}
+
+export function validateRegions(values: string[], path: string): void {
+  if (new Set(values).size !== values.length) {
+    semanticError(`${path} must not contain duplicates`);
+  }
+  if (values.some((value) => !REGION.test(value))) {
+    semanticError(`${path} must contain uppercase ISO-style region codes`);
+  }
 }
 
 export function asDecimal(value: unknown): Decimal {
@@ -85,10 +95,17 @@ export function parseWindow(value: unknown, path: string): Window {
 
 export function parseAvailability(value: unknown): Availability {
   const raw = asObject(value);
+  const startsAt = raw.starts_at == null ? undefined : asString(raw.starts_at);
+  const endsAt = raw.ends_at == null ? undefined : asString(raw.ends_at);
+  const regions = (raw.regions ?? []) as string[];
+  validateRegions(regions, "availability.regions");
+  if (startsAt != null && endsAt != null && Date.parse(endsAt) <= Date.parse(startsAt)) {
+    semanticError("availability.ends_at must be later than starts_at");
+  }
   return {
-    ...(raw.starts_at == null ? {} : { startsAt: asString(raw.starts_at) }),
-    ...(raw.ends_at == null ? {} : { endsAt: asString(raw.ends_at) }),
-    regions: (raw.regions ?? []) as string[],
+    ...(startsAt == null ? {} : { startsAt }),
+    ...(endsAt == null ? {} : { endsAt }),
+    regions,
   };
 }
 

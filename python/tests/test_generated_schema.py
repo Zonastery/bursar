@@ -8,6 +8,33 @@ from pathlib import Path
 from bursar.config import BursarConfig
 
 
+def _compact_shape_schema(value: object) -> object:
+    keys = {
+        "$ref",
+        "additionalProperties",
+        "anyOf",
+        "const",
+        "enum",
+        "items",
+        "oneOf",
+        "required",
+        "type",
+    }
+    if isinstance(value, list):
+        return [_compact_shape_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: (
+            {name: _compact_shape_schema(schema) for name, schema in item.items()}
+            if key in {"$defs", "properties"} and isinstance(item, dict)
+            else _compact_shape_schema(item)
+        )
+        for key, item in value.items()
+        if key in keys or key in {"$defs", "properties"}
+    }
+
+
 def test_generated_json_schema_is_current() -> None:
     repository = Path(__file__).resolve().parents[2]
     expected = BursarConfig.model_json_schema()
@@ -30,3 +57,7 @@ def test_generated_json_schema_is_current() -> None:
     ]
     for output in outputs:
         assert json.loads(output.read_text(encoding="utf-8")) == expected
+
+    sql = (repository / "python" / "src" / "bursar" / "sql" / "001_schema_and_types.sql").read_text(encoding="utf-8")
+    generated = sql.split("$catalog_json$", 2)[1]
+    assert json.loads(generated) == _compact_shape_schema(expected)

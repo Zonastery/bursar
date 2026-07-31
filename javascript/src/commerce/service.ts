@@ -635,7 +635,7 @@ export class CommerceService {
         planKey,
         interval,
         effectiveAt: pending.effectiveAt,
-        scheduled: pending.prorationBehavior === "none",
+        scheduled: pending.effective === "renewal",
         providerOperationId: pending.providerOperationId ?? null,
       };
     }
@@ -802,7 +802,7 @@ export class CommerceService {
       context.subscription.provider,
       context.subscription.providerSubscriptionId,
     );
-    if (existing?.state === "scheduled" && existing.prorationBehavior === "none") {
+    if (existing?.state === "scheduled" && existing.effective === "renewal") {
       if (!context.provider.cancelScheduledPlanChange) {
         throw new ProviderCapabilityNotSupportedError(
           context.provider.provider,
@@ -837,6 +837,7 @@ export class CommerceService {
       providerSubscriptionId: context.subscription.providerSubscriptionId,
       toOfferId: context.targetOfferId,
       effectiveAt,
+      effective: context.policy!.effective,
       idempotencyKey: input.operationKey,
       prorationBehavior: context.policy!.proration === "none" ? "none" : "invoice_immediately",
     });
@@ -897,7 +898,7 @@ export class CommerceService {
       subscription.provider,
       subscription.providerSubscriptionId,
     );
-    if (!change || change.state !== "scheduled" || change.prorationBehavior !== "none") {
+    if (!change || change.state !== "scheduled" || change.effective !== "renewal") {
       throw new CommerceResourceNotFoundError("No scheduled plan change found");
     }
     const provider = await this.providers.get(subscription.provider);
@@ -992,14 +993,12 @@ export class CommerceService {
           : typeof metadata.provider_payment_id === "string"
             ? metadata.provider_payment_id
             : undefined;
-    const legacyDocumentId =
-      typeof metadata.dodo_payment_id === "string" ? metadata.dodo_payment_id : undefined;
-    if (!normalizedDocumentId && !legacyDocumentId) return null;
+    if (!normalizedDocumentId) return null;
     return {
       kind: "ledger_entry",
       ledgerEntryId: entry.entryId,
-      provider: normalizedProvider ?? (legacyDocumentId ? "dodo" : null),
-      providerDocumentId: normalizedDocumentId ?? legacyDocumentId,
+      provider: normalizedProvider ?? null,
+      providerDocumentId: normalizedDocumentId,
       createdAt: entry.createdAt,
       entryType: entry.entryType,
       amount: entry.amount,
@@ -1057,7 +1056,7 @@ export class CommerceService {
     );
     const [transactionsResult, usageResult, invoicesResult] = await Promise.allSettled([
       this.credits.listLedgerEntries(accountId, { limit: 50 }),
-      this.credits.listUsageEntries(accountId, { limit: 100 }),
+      this.credits.listUsageCharges(accountId, { limit: 100 }),
       this.billing.listBillingInvoices(accountId),
     ]);
     const transactions =
@@ -1143,7 +1142,7 @@ export class CommerceService {
         lifetimePurchases: core.balance.lifetimePurchased,
         allowance: {
           remaining: core.allowance.allowanceRemaining,
-          limit: core.entitlement.allowanceAmount,
+          limit: core.entitlement.allowance?.amount ?? null,
           periodStart: core.allowance.periodStart ?? null,
           periodEnd: core.allowance.periodEnd ?? null,
         },

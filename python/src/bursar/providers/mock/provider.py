@@ -18,9 +18,9 @@ from bursar.providers.types import (
     PortalParams,
     PreviewChangePlanParams,
     ProviderLogger,
-    ProviderResolveUserFn,
     ProviderUrlResult,
     ResolveIdentityInput,
+    ResolveUserCallback,
     SavedPaymentChargeParams,
     SavedPaymentChargeQuote,
     SavedPaymentChargeResult,
@@ -37,7 +37,7 @@ class MockPaymentProvider(PaymentProvider):
     def __init__(
         self,
         sink: BillingEventSink,
-        resolve_user: ProviderResolveUserFn | None = None,
+        resolve_user: ResolveUserCallback | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
         self._sink = sink

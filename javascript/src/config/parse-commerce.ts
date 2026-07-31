@@ -63,6 +63,26 @@ function providerReferenceIsCompatible(
   );
 }
 
+function validateCurrency(value: string, path: string): string {
+  if (!/^[A-Z]{3}$/.test(value)) {
+    semanticError(`${path} must be an uppercase ISO-4217 currency code`);
+  }
+  return value;
+}
+
+function validateIntegerRange(
+  value: { minimum: number; maximum: number; default: number },
+  path: string,
+): void {
+  if (
+    value.minimum > value.maximum ||
+    value.default < value.minimum ||
+    value.default > value.maximum
+  ) {
+    semanticError(`${path} requires minimum <= default <= maximum`);
+  }
+}
+
 export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceConfig {
   const raw = asObject(value ?? {});
   const providersRaw = asObject(raw.providers ?? {});
@@ -114,7 +134,10 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
         : { availability: parseAvailability(offer.availability) }),
       price: {
         amountMinor: asInteger(asObject(offer.price).amount_minor),
-        currency: asString(asObject(offer.price).currency),
+        currency: validateCurrency(
+          asString(asObject(offer.price).currency),
+          `commerce.offers.${offerKey}.price.currency`,
+        ),
         taxBehavior: (asObject(offer.price).tax_behavior ??
           "unspecified") as OfferPrice["taxBehavior"],
       },
@@ -154,6 +177,12 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
       semanticError(`commerce.offers.${offerKey}.bucket references unknown bucket`);
     }
     const quantityRaw = asObject(offer.quantity ?? {});
+    const parsedQuantity = {
+      minimum: asInteger(quantityRaw.minimum ?? 1),
+      maximum: asInteger(quantityRaw.maximum ?? 1),
+      default: asInteger(quantityRaw.default ?? 1),
+    };
+    validateIntegerRange(parsedQuantity, `commerce.offers.${offerKey}.quantity`);
     const parsedExpiry =
       offer.expiry == null
         ? undefined
@@ -165,11 +194,7 @@ export function parseCommerce(value: unknown, credits: CreditsConfig): CommerceC
       ...common,
       type: "topup",
       creditsPerUnit: asDecimal(offer.credits_per_unit),
-      quantity: {
-        minimum: asInteger(quantityRaw.minimum ?? 1),
-        maximum: asInteger(quantityRaw.maximum ?? 1),
-        default: asInteger(quantityRaw.default ?? 1),
-      },
+      quantity: parsedQuantity,
       bucket,
       ...(parsedExpiry == null ? {} : { expiry: parsedExpiry }),
       lotBehavior: (offer.lot_behavior ?? "separate_lots") as TopupOffer["lotBehavior"],
@@ -235,19 +260,44 @@ function parseAutoRecharge(
   if (currencies.size !== 1) {
     semanticError("commerce.auto_recharge eligible top-ups must use one currency");
   }
+  const parsedQuantity = {
+    minimum: asInteger(quantity.minimum),
+    maximum: asInteger(quantity.maximum),
+    default: asInteger(quantity.default),
+  };
+  validateIntegerRange(parsedQuantity, "commerce.auto_recharge.quantity");
+  const parsedMinimum = asDecimal(threshold.minimum);
+  const parsedMaximum = asDecimal(threshold.maximum);
+  const parsedDefault = asDecimal(threshold.default);
+  if (
+    parsedMinimum.gt(parsedMaximum) ||
+    parsedDefault.lt(parsedMinimum) ||
+    parsedDefault.gt(parsedMaximum)
+  ) {
+    semanticError("commerce.auto_recharge.balance_below requires minimum <= default <= maximum");
+  }
+  for (const key of eligibleTopups) {
+    const offer = offers[key] as TopupOffer;
+    if (
+      parsedQuantity.minimum < offer.quantity.minimum ||
+      parsedQuantity.maximum > offer.quantity.maximum
+    ) {
+      semanticError(`commerce.auto_recharge.quantity must fit commerce.offers.${key}.quantity`);
+    }
+  }
+  const parsedRearmAbove = asDecimal(auto.rearm_above);
+  if (parsedRearmAbove.lte(parsedMaximum)) {
+    semanticError("commerce.auto_recharge.rearm_above must exceed balance_below.maximum");
+  }
   return {
     eligibleTopups,
     balanceBelow: {
-      minimum: asDecimal(threshold.minimum),
-      maximum: asDecimal(threshold.maximum),
-      default: asDecimal(threshold.default),
+      minimum: parsedMinimum,
+      maximum: parsedMaximum,
+      default: parsedDefault,
     },
-    rearmAbove: asDecimal(auto.rearm_above),
-    quantity: {
-      minimum: asInteger(quantity.minimum),
-      maximum: asInteger(quantity.maximum),
-      default: asInteger(quantity.default),
-    },
+    rearmAbove: parsedRearmAbove,
+    quantity: parsedQuantity,
     limits: {
       maxPurchases: asInteger(limits.max_purchases),
       window: parseWindow(limits.window, "commerce.auto_recharge.limits.window") as Extract<

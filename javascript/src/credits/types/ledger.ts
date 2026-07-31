@@ -9,6 +9,7 @@ export interface LedgerEntry {
   actorUserId: string | null;
   amount: Decimal;
   entryType: string;
+  operation: string;
   referenceEntryId: string | null;
   idempotencyKey: string | null;
   metadata: Record<string, unknown> | null;
@@ -34,6 +35,47 @@ export interface ListLedgerEntriesOptions {
 export interface LedgerPage {
   items: LedgerEntry[];
   nextCursor: LedgerCursor | null;
+}
+
+/**
+ * A metered usage charge from the usage charge journal.
+ *
+ * Usage charges are deliberately separate from ledger entries: included
+ * allowance consumption does not create a monetary ledger debit, but it is
+ * still a billable usage event that belongs in the usage history.
+ */
+export interface UsageCharge {
+  usageId: string;
+  accountId: string;
+  operation: string;
+  requested: Decimal;
+  charged: Decimal;
+  allowanceRequested: Decimal;
+  allowanceCovered: Decimal;
+  feature: string | null;
+  model: string | null;
+  region: string | null;
+  eventAt: string;
+  idempotencyKey: string;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface UsageChargeCursor {
+  eventAt: string;
+  usageId: string;
+}
+
+export interface ListUsageChargesOptions {
+  fromDate?: Date;
+  toDate?: Date;
+  limit?: number;
+  cursor?: UsageChargeCursor | null;
+}
+
+export interface UsageChargePage {
+  items: UsageCharge[];
+  nextCursor: UsageChargeCursor | null;
 }
 
 /** Cursor-only options for the usage-only ledger view. */

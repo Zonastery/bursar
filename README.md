@@ -78,24 +78,45 @@ facade.
 
 ## Canonical configuration
 
-Publish one configuration document with the top-level keys `usage`, `credits`,
-`plans`, and `payments`. Unknown historical shapes are rejected.
+Publish one strict, versioned configuration document. The sections are
+`pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
+`catalog`; only `version` and `credits` are required. Unknown historical shapes
+are rejected.
 
 ```yaml
-usage:
-  models:
-    _default: input_tokens + output_tokens
+version: 1
+
+pricing:
+  operations:
+    completion:
+      measures:
+        input_tokens: { unit: token }
+        output_tokens: { unit: token }
+      dimensions:
+        model: { type: string }
+  rate_cards:
+    standard:
+      operations:
+        completion:
+          unmatched:
+            action: charge
+            charge:
+              type: sum
+              components:
+                - { type: per_unit, measure: input_tokens, rate: "0.05" }
+                - { type: per_unit, measure: output_tokens, rate: "0.10" }
+
 credits:
   buckets:
     purchased:
       priority: 10
+  default_bucket: purchased
+
 plans:
   free:
-    label: Free
-    included_credits: 1000
-payments:
-  subscriptions: {}
-  topups: {}
+    display_name: Free
+    rate_card: standard
+    allowed_operations: [completion]
 ```
 
 Publish and activate through `bursar.catalog`. Billing and auto-recharge always

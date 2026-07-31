@@ -1,4 +1,4 @@
-"""Integration tests for PostgresBillingStore + BillingServiceImpl — mirrors
+"""Integration tests for PostgresBillingStore + BillingService — mirrors
 JavaScript tests/billing-integration.test.ts.
 
 Tests sync/resolve round-trips, customer/subscription CRUD, event
@@ -19,7 +19,7 @@ import psycopg2
 import psycopg2.pool
 import pytest
 
-from bursar.billing.billing_service import BillingServiceImpl
+from bursar.billing.billing_service import BillingService
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -253,14 +253,14 @@ def _bind_tenant(cursor: psycopg2.extensions.cursor) -> None:
 def _make_components(
     pg_database_url: str,
     pg_store: object,
-) -> tuple[PostgresBillingStore, CreditsService, BillingServiceImpl]:
+) -> tuple[PostgresBillingStore, CreditsService, BillingService]:
     bs = PostgresBillingStore(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
     )
     cm = CreditsService(pg_store)  # type: ignore[arg-type]
     cm.publish_pricing_from_dict(PRICING_DICT)
-    sink = BillingServiceImpl(bs, provisioning=cm)
+    sink = BillingService(bs, provisioning=cm)
     return bs, cm, sink
 
 
@@ -847,7 +847,7 @@ class TestEventIdempotency:
             nonlocal called
             called = True
 
-        sink = BillingServiceImpl(
+        sink = BillingService(
             bs,
             provisioning=_cm,
             event_handlers={
@@ -886,10 +886,10 @@ class TestTopup:
         assert bs.compute_topup_credits(1999, topup) == 0
 
 
-# ── BillingServiceImpl lifecycle ───────────────────────────────────────────
+# ── BillingService lifecycle ───────────────────────────────────────────────
 
 
-class TestBillingServiceImplLifecycle:
+class TestBillingServiceLifecycle:
     def test_subscription_lifecycle_full(self, pg_database_url: str, pg_store: object) -> None:
         _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)

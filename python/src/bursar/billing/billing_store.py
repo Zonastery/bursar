@@ -243,9 +243,9 @@ class BillingStore(ABC):
     def mark_subscription_grace_expired(self, id: str, expected_grace_ends_at: str, expired_at: str) -> bool: ...
 
     @abstractmethod
-    def deactivate_other_provider_subscriptions(
-        self, user_id: str, keep_provider: str, subscription_id: str | None = None
-    ) -> dict: ...
+    def select_subscription_entitlement_source(
+        self, user_id: str, provider: str, subscription_id: str | None = None
+    ) -> bool: ...
 
     @abstractmethod
     def record_subscription_conflict(
@@ -269,5 +269,5 @@ class BillingStore(ABC):
     def count_auto_recharge_attempts(
         self,
         user_id: str,
-        since: str | datetime | int | float,
+        since: str | datetime,
     ) -> int: ...

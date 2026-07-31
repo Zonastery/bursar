@@ -53,12 +53,6 @@ class PricingEngine:
     def pricing_schema(self) -> dict[str, Any]:
         return self._config.model_dump(mode="json", exclude_none=True)
 
-    @property
-    def min_balance(self) -> Decimal:
-        """Compatibility accessor; account-specific credit policy owns this value."""
-
-        return Decimal(0)
-
     def calculate(self, metrics: UsageMetrics, *, rate_card: str | None = None) -> CostBreakdown:
         pricing = self._config.pricing
         if pricing is None:

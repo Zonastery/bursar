@@ -40,5 +40,7 @@ All monetary mutations append a `LedgerEntry`, update the locked canonical
 account balance, and allocate or reverse lots atomically. History uses stable
 cursor pagination through `LedgerCursor` and `LedgerPage`.
 
-Configuration has exactly four public sections: `usage`, `credits`, `plans`,
-and `payments`.
+Configuration is one strict versioned document with `pricing`, `credits`,
+`entitlements`, `admission`, `plans`, `commerce`, and `catalog` sections. See
+the [canonical configuration](./configuration.mdx) reference for the validated
+shape.

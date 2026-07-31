@@ -2,7 +2,7 @@
 
 Orchestrates the credit lifecycle. The hot "calculate cost then charge now"
 path is a single atomic, idempotency-keyed store transaction
-(``deduct_with_allowance``) — allowance, spend cap, balance floor and debit all
+(``deduct_with_allowance``) — allowance, entitlement, quota, and debit all
 commit (or roll back) together inside the store (contract §2, C1).
 
 Example::
@@ -41,14 +41,13 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from bursar.allowance import resolve_allowance_window, resolve_calendar_window
 from bursar.config import ConfigError
 from bursar.credits.events import CreditEvent, CreditEventEmitter, CreditEventType
 from bursar.credits.service_types import (
@@ -69,9 +68,9 @@ from bursar.credits.store import (
     CapReachedError,
     CreateLeaseOptions,
     CreditStore,
-    FeatureLimitReachedError,
     RefundError,
     SettleLeaseOptions,
+    StoreError,
 )
 from bursar.credits.types import (
     AddCreditsResult,
@@ -88,8 +87,6 @@ from bursar.credits.types import (
     DailySpendRow,
     DeductionResult,
     ExecuteGrantProgramRequest,
-    FeatureLimit,
-    FeatureLimitResult,
     GetUserPlanResult,
     GrantProgramAwardResult,
     LeasePricingContext,
@@ -98,7 +95,6 @@ from bursar.credits.types import (
     LedgerEntry,
     LedgerPage,
     ListQuotaEventsOptions,
-    MigratePlanUsersResult,
     OperationPolicy,
     PlanMigrationBatchResult,
     PlanMigrationStartResult,
@@ -113,6 +109,8 @@ from bursar.credits.types import (
     TeamDeductionResult,
     TopUserRow,
     UsageAnalyticsStore,
+    UsageChargeCursor,
+    UsageChargePage,
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
@@ -130,11 +128,6 @@ from bursar.metrics import UsageMetrics
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
-#: Default ``low_balance`` threshold = this multiple of the engine's
-#: ``min_balance`` (contract §6 / M18). Override via the ``CreditsService``
-#: ``low_balance_threshold`` constructor argument.
-DEFAULT_LOW_BALANCE_MULTIPLIER = Decimal(2)
-
 #: Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
 #: Long batch/agentic jobs call :meth:`CreditsService.renew` before this elapses.
 DEFAULT_LEASE_TTL_SECONDS = 600
@@ -143,15 +136,6 @@ DEFAULT_LEASE_TTL_SECONDS = 600
 #: the floor ``>= 0`` (structural zero debt); ``overdraft`` permits a negative floor
 #: and bills the full actual cost at settle.
 POLICY_PRESETS = frozenset({"strict_prepaid", "overdraft"})
-
-
-@dataclass
-class _FeatureLimitResult:
-    """Named result from :meth:`_resolve_feature_limit`."""
-
-    limit: FeatureLimit | None
-    period_start: date | None
-    period_end: date | None
 
 
 class RunBilledResult(BaseModel):
@@ -209,8 +193,7 @@ class CreditsService:
         low_balance: An optional :class:`LowBalanceConfig` configuring the
             ``credits.low_balance`` signal (contract §6 / M18 / WS7). When
             ``None`` (the default), no explicit thresholds are configured and
-            the threshold is derived lazily from ``min_balance`` at deduct
-            time (see :class:`LowBalanceConfig`).
+            the threshold defaults to zero.
 
         pricing_ttl: Milliseconds after which the cached ``PricingEngine`` is
             considered stale and the next call to ``refresh_if_stale()`` will
@@ -376,7 +359,7 @@ class CreditsService:
             return self._engine
 
         plan = self._store.get_user_plan(user_id)
-        catalog_version = getattr(plan, "catalog_version", None) or plan.config_version
+        catalog_version = plan.catalog_version
         if catalog_version is None:
             self.refresh_if_stale()
             if not self._engine:
@@ -415,14 +398,8 @@ class CreditsService:
             }
             if event.event_type == "blocked":
                 self._emit("credits.quota_blocked", user_id, data)
-                self._emit("credits.feature_limit_reached", user_id, {**data, "feature": event.quota_key})
             elif event.event_type == "threshold":
                 self._emit("credits.quota_threshold", user_id, data)
-                self._emit(
-                    "credits.feature_limit_warning",
-                    user_id,
-                    {**data, "feature": event.quota_key, "action": "notify"},
-                )
 
     @staticmethod
     def _to_decimal(value: Decimal | int | float | str) -> Decimal:
@@ -434,13 +411,8 @@ class CreditsService:
         return Decimal(value)
 
     def _resolve_low_balance_threshold(self) -> Decimal:
-        """Resolve the low-balance threshold when no explicit thresholds are
-        configured (contract §6 / M18 / WS7): derived lazily from the engine's
-        ``min_balance`` (defaulting to ``Decimal(0)`` if no engine is loaded)
-        times :data:`DEFAULT_LOW_BALANCE_MULTIPLIER`.
-        """
-        min_bal = self._engine.min_balance if self._engine else Decimal(0)
-        return min_bal * DEFAULT_LOW_BALANCE_MULTIPLIER
+        """Return the zero default used when no explicit threshold is configured."""
+        return Decimal(0)
 
     # -- Pricing configuration -------------------------------------------
 
@@ -654,7 +626,6 @@ class CreditsService:
                 allowance_consumed=Decimal(0),
                 balance_after=result.new_balance,
                 idempotent=result.idempotent,
-                cap_warning=None,
             ),
         )
         return result
@@ -773,9 +744,8 @@ class CreditsService:
         Args:
             user_id: The user to assign the plan to.
             plan_key: The plan key to assign (e.g. ``"pro"``).
-            plan_assigned_at: Anchors the allowance window for
-                ``rolling_30d``/``anniversary`` plans. When omitted, the
-                store anchors to the current time (backwards-compatible).
+            plan_assigned_at: Anchor for plan-assignment policy windows. When
+                omitted, the store uses the current time.
 
         Returns:
             ``SetUserPlanResult`` confirming the assignment.
@@ -829,14 +799,6 @@ class CreditsService:
         """Advance a plan migration by one bounded batch."""
         return self._store.migrate_plan_batch(migration_id, batch_size)
 
-    def migrate_plan_users(
-        self,
-        plan_key: str,
-        target_config_version: int | None = None,
-    ) -> MigratePlanUsersResult:
-        """Deprecated one-shot migration; prefer resumable plan migrations."""
-        return self._store.migrate_plan_users(plan_key, target_config_version)
-
     def get_user_plan(self, user_id: str) -> GetUserPlanResult:
         """Fetch user's current plan (including feature entitlements)."""
         return self._store.get_user_plan(user_id)
@@ -856,10 +818,6 @@ class CreditsService:
     ) -> list[QuotaEvent]:
         """List persisted quota threshold and blocking events."""
         return self._store.list_quota_events(user_id, options)
-
-    def check_feature_limit(self, user_id: str, feature: str) -> FeatureLimitResult:
-        """Deprecated quota-key compatibility query; mirrors JavaScript."""
-        return self._store.check_feature_limit(user_id, feature)
 
     def check_feature(self, user_id: str, feature: str) -> CheckFeatureResult:
         """Check whether a user's plan has a specific feature entitlement.
@@ -928,12 +886,12 @@ class CreditsService:
         operation_type: str,
         billing_mode_override: BillingMode | None = None,
     ) -> OperationPolicy:
-        """Resolve the effective policy: explicit arg → per-op → plan → preset (§1).
+        """Resolve the effective policy: explicit arg → catalog plan → preset (§1).
 
         A **planless** user (``plan_id`` is ``None``) always gets the constructor
         preset, never silently unlimited (resolves M1). A user *with* a plan gets
-        the plan default, then any ``per_operation`` override, then the explicit
-        per-call ``billing_mode``.
+        its canonical credit and admission policies, then the explicit per-call
+        ``billing_mode``.
         """
         policy = self._preset_policy()
 
@@ -944,66 +902,41 @@ class CreditsService:
         plan = self._store.get_user_plan(user_id)
 
         if plan is not None and plan.plan_id:
-            policy = OperationPolicy(
-                billing_mode=plan.billing_mode,
-                max_concurrent=plan.max_concurrent if plan.max_concurrent is not None else policy.max_concurrent,
-                overdraft_floor=plan.overdraft_floor if plan.overdraft_floor is not None else policy.overdraft_floor,
+            credit_policy = plan.credit_policy
+            billing_mode: BillingMode = (
+                "overdraft" if credit_policy is not None and credit_policy.type == "credit_line" else "strict"
             )
-            op = (plan.per_operation or {}).get(operation_type)
-            if op is not None:
-                policy = OperationPolicy(
-                    billing_mode=op.billing_mode,
-                    max_concurrent=op.max_concurrent if op.max_concurrent is not None else policy.max_concurrent,
-                    overdraft_floor=op.overdraft_floor if op.overdraft_floor is not None else policy.overdraft_floor,
-                )
+            overdraft_floor = (
+                -credit_policy.credit_limit
+                if credit_policy is not None
+                and credit_policy.type == "credit_line"
+                and credit_policy.credit_limit is not None
+                else None
+            )
+            admission = plan.admission
+            max_concurrent = (
+                admission.max_in_flight
+                if admission is not None and admission.max_in_flight is not None
+                else policy.max_concurrent
+            )
+            operation_admission = admission.operations.get(operation_type) if admission is not None else None
+            if operation_admission is not None and operation_admission.max_in_flight is not None:
+                max_concurrent = operation_admission.max_in_flight
+            policy = OperationPolicy(
+                billing_mode=billing_mode,
+                max_concurrent=max_concurrent,
+                overdraft_floor=overdraft_floor,
+            )
 
         if billing_mode_override is not None:
             policy = policy.model_copy(update={"billing_mode": billing_mode_override})
         return policy
 
     def _resolve_floor(self, policy: OperationPolicy) -> Decimal:
-        """Admission floor for a policy: ``overdraft_floor`` (≤0) or ``min_balance`` (≥0)."""
+        """Admission floor for a policy: its credit-line floor, otherwise zero."""
         if policy.billing_mode == "overdraft":
             return policy.overdraft_floor if policy.overdraft_floor is not None else Decimal(0)
-        return self._engine.min_balance if self._engine else Decimal(0)
-
-    def _resolve_allowance_period_start(self, user_id: str) -> date | None:
-        """Resolve the allowance-window ``period_start`` for a user (WS9).
-
-        Fast path: a ``calendar_month`` plan (the default, and the pre-WS9
-        behavior) returns ``None`` so the store/SQL default (calendar-month via
-        ``date_trunc('month', now())``) applies with no extra computation —
-        this keeps existing calendar_month behavior byte-for-byte unchanged.
-
-        For ``rolling_30d``/``anniversary`` plans, resolves the window via
-        :func:`resolve_allowance_window` anchored on ``plan_assigned_at`` and
-        returns just the ``period_start`` date.
-        """
-        plan = self._store.get_user_plan(user_id)
-        if plan.allowance_period in (None, "calendar_month"):
-            return None
-        period_start, _period_end = resolve_allowance_window(
-            datetime.now(UTC), plan.allowance_period, plan.plan_assigned_at
-        )
-        return period_start
-
-    def _resolve_feature_limit(self, user_id: str, feature: str | None) -> _FeatureLimitResult:
-        """Resolve the configured ``FeatureLimit`` (if any) and its calendar window."""
-        if feature is None:
-            return _FeatureLimitResult(limit=None, period_start=None, period_end=None)
-        plan = self._store.get_user_plan(user_id)
-        entitlement = plan.entitlements.get(feature)
-        if entitlement is None or entitlement.max_calls is None:
-            return _FeatureLimitResult(limit=None, period_start=None, period_end=None)
-        limit = FeatureLimit.model_validate(
-            {
-                "max_calls": entitlement.max_calls,
-                "period": entitlement.period,
-                "on_exceed": entitlement.on_exceed,
-            }
-        )
-        period_start, period_end = resolve_calendar_window(datetime.now(UTC), limit.period)
-        return _FeatureLimitResult(limit=limit, period_start=period_start, period_end=period_end)
+        return Decimal(0)
 
     def _cost_of(
         self,
@@ -1041,10 +974,6 @@ class CreditsService:
             raise ConcurrencyLimitError(f"Concurrency limit reached. User={user_id}")
         if error == "quota_exceeded":
             raise QuotaExceededError(f"Usage quota exceeded. User={user_id}")
-        if error == "cap_reached":
-            raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={amount}")
-        if error == "feature_limit_reached":
-            raise FeatureLimitReachedError(f"Feature limit exceeded. User={user_id}")
         if error == "feature_not_entitled":
             raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
         if error == "operation_not_allowed":
@@ -1071,7 +1000,7 @@ class CreditsService:
     ) -> LeaseResult:
         """Atomically acquire a lease — the only admission control (D4).
 
-        Resolves the effective policy, enforces ``required_feature``, sizes the hold
+        Resolves the effective policy, enforces ``feature``, sizes the hold
         from ``metrics_or_amount`` (worst-case in strict, estimate in overdraft — the
         caller chooses what to pass), and calls the store's atomic ``create_lease``.
 
@@ -1080,29 +1009,15 @@ class CreditsService:
         for worst-case holds they can cover with allowance (Fix 1 / D4).
 
         ``model`` is inferred from ``UsageMetrics`` when passed; for raw
-        ``Decimal``/``int`` amounts use ``options.model`` so per-model
-        spend-caps and analytics remain accurate (Fix 5).
+        ``Decimal``/``int`` amounts use ``options.model`` so quota checks and
+        analytics remain accurate (Fix 5).
 
-        ``feature`` names a per-feature invocation-count limit (independent of
-        ``required_feature``, which is a boolean entitlement gate): when the
-        user's plan has a ``FeatureLimit`` configured for it, admission enforces
-        it as ``deny``-only (mirrors how admission only ever enforces ``deny``
-        spend caps — ``warn``/``notify`` have nothing to warn about yet, since no
-        charge has happened). Re-supply the same ``feature`` at :meth:`settle`
-        for accurate per-call counting, exactly as ``model`` is already
-        re-supplied at settle for per-model spend-cap accuracy (Fix 5).
+        ``feature`` is the canonical entitlement key checked at admission.
 
         On any business failure raises the coherent typed exception; on success emits
         ``credits.reserved`` and returns the :class:`LeaseResult`.
         """
         options = options or ReserveOptions()
-        if (
-            options.feature is not None
-            and options.required_feature is not None
-            and options.feature != options.required_feature
-        ):
-            raise ConfigError("reserve feature and required_feature must match when both are set")
-        effective_feature = options.feature or options.required_feature
         effective_operation = (
             options.operation_type
             if options.operation_type is not None
@@ -1137,7 +1052,7 @@ class CreditsService:
                 model=effective_model,
                 overdraft_floor=policy.overdraft_floor,
                 metadata=options.metadata,
-                feature=effective_feature,
+                feature=options.feature,
                 idempotency_key=lease_idempotency_key,
                 measures=measures,
                 dimensions=dimensions,
@@ -1184,19 +1099,9 @@ class CreditsService:
         """Charge the ACTUAL cost against a lease and finalize it (D5).
 
         De-clamped: bills the full actual cost even if it exceeds the lease hold
-        (overdraft). Never blocks on floor/cap at settle — a cap breach surfaces as a
-        non-blocking ``credits.cap_warning``/``credits.cap_reached`` signal. Emits
-        ``credits.deducted``, then multi-level ``credits.low_balance`` and a
-        ``credits.overdraft`` signal if the balance went negative.
-
-        ``feature`` re-supplies the same feature name passed to :meth:`reserve`
-        (no feature name is persisted on the lease itself) so the invocation is
-        tagged and counted for future invocation-count checks — exactly as
-        ``model`` is already re-supplied at settle for per-model spend-cap
-        accuracy (Fix 5). A breached ``FeatureLimit`` at settle is advisory only
-        (the work already happened) and surfaces as a non-blocking
-        ``credits.feature_limit_warning``/``credits.feature_limit_reached``
-        signal, never a raised exception.
+        (overdraft). Emits ``credits.deducted``, then low-balance and overdraft
+        signals as applicable. ``feature`` re-supplies the entitlement key passed
+        to :meth:`reserve`.
         """
         options = options or SettleOptions()
         amount, model = self._cost_of(
@@ -1262,47 +1167,6 @@ class CreditsService:
             },
         )
 
-        # Cap signal: 'deny' breaching at settle is non-blocking (work is done) and
-        # re-emitted as cap_reached; warn/notify as cap_warning (interface plan §7).
-        if result.cap_warning == "deny":
-            self._emit("credits.cap_reached", user_id, {"amount": result.amount, "model": model, "blocking": False})
-        elif result.cap_warning in ("warn", "notify"):
-            self._emit(
-                "credits.cap_warning",
-                user_id,
-                {
-                    "balance_after": result.balance_after,
-                    "amount": result.amount,
-                    "model": model,
-                    "action": result.cap_warning,
-                },
-            )
-
-        # Feature-limit signal: settle-time enforcement is advisory only (the work
-        # already happened) — a breach never raises, mirroring the cap-warning
-        # "prefer deny, else warn/notify" emission pattern immediately above.
-        if result.feature_limit_warning == "deny":
-            self._emit(
-                "credits.feature_limit_reached",
-                user_id,
-                {
-                    "feature": options.feature,
-                    "amount": result.amount,
-                    "blocking": False,
-                },
-            )
-        elif result.feature_limit_warning in ("warn", "notify"):
-            self._emit(
-                "credits.feature_limit_warning",
-                user_id,
-                {
-                    "feature": options.feature,
-                    "balance_after": result.balance_after,
-                    "amount": result.amount,
-                    "action": result.feature_limit_warning,
-                },
-            )
-
         self._post_charge_signals(user_id, result)
         if not result.idempotent:
             self._emit_quota_events(user_id, effective_idempotency_key)
@@ -1347,7 +1211,7 @@ class CreditsService:
         (Fix 1). Never use this as an admission gate; only ``reserve`` is authoritative.
         """
         options = options or CanAffordOptions()
-        feature = options.feature or options.required_feature
+        feature = options.feature
         worst_case, _ = self._cost_of(metrics_or_amount, user_id)
         avail = self._store.get_available(user_id)
 
@@ -1427,12 +1291,10 @@ class CreditsService:
         ``do_work`` may call :meth:`renew`. A crash between reserve and settle is
         covered by the lease TTL (and the store's reaper).
 
-        ``feature`` names a per-feature invocation-count limit and is passed
-        through to both :meth:`reserve` (deny-only admission check) and
-        :meth:`settle` (advisory recount + tagging) — the same feature name is
-        used at both ends since no feature name is persisted on the lease.
+        ``feature`` names an entitlement required by both admission and
+        settlement. The database remains the authoritative policy gate.
         """
-        operation_key = options.operation_key or options.idempotency_key or f"billed:{uuid4()}"
+        operation_key = options.operation_key or f"billed:{uuid4()}"
         operation = self.begin_billed_operation(
             user_id,
             BeginBilledOperationOptions(
@@ -1440,7 +1302,6 @@ class CreditsService:
                 operation_key=operation_key,
                 operation_type=options.operation_type,
                 billing_mode=options.billing_mode,
-                required_feature=options.required_feature,
                 ttl=options.ttl,
                 feature=options.feature,
                 metadata=options.metadata,
@@ -1468,7 +1329,7 @@ class CreditsService:
     ) -> RunBilledResult:
         """Async counterpart to :meth:`run_billed`."""
 
-        operation_key = options.operation_key or options.idempotency_key or f"billed:{uuid4()}"
+        operation_key = options.operation_key or f"billed:{uuid4()}"
         operation = self.begin_billed_operation(
             user_id,
             BeginBilledOperationOptions(
@@ -1476,7 +1337,6 @@ class CreditsService:
                 operation_key=operation_key,
                 operation_type=options.operation_type,
                 billing_mode=options.billing_mode,
-                required_feature=options.required_feature,
                 ttl=options.ttl,
                 feature=options.feature,
                 metadata=options.metadata,
@@ -1507,7 +1367,6 @@ class CreditsService:
             ReserveOptions(
                 operation_type=options.operation_type,
                 billing_mode=options.billing_mode,
-                required_feature=options.required_feature,
                 ttl=options.ttl,
                 feature=options.feature,
                 metadata=options.metadata,
@@ -1550,10 +1409,8 @@ class CreditsService:
     def _post_charge_signals(self, user_id: str, result: DeductionResult) -> None:
         """Emit overdraft, floor-breach, and multi-level low_balance after a charge.
 
-        Overdraft (balance < 0) is always signalled.  Floor breach (0 ≤ balance <
-        min_balance) is a non-blocking signal for strict-mode users: the work is
-        already done but the operator should know the balance slipped below the
-        configured floor, which means a prior hold was under-sized (Fix 2).
+        Overdraft (balance < 0) is always signalled. Explicit low-balance
+        thresholds are non-blocking operational signals.
 
         Idempotent replays are skipped entirely at the top: re-emitting overdraft
         or floor_breach with the *original* balance figures against the *current*
@@ -1656,15 +1513,19 @@ class CreditsService:
                 "feature": feature,
             },
         )
-        if error == "cap_reached":
-            raise CapReachedError(f"Spend cap exceeded. User={user_id}, requested={cost}")
-        if error == "feature_limit_reached":
-            raise FeatureLimitReachedError(f"Feature limit exceeded for {feature!r}. User={user_id}")
         if error == "quota_exceeded":
             raise QuotaExceededError(f"Usage quota exceeded. User={user_id}")
-        if error == "insufficient_credits":
+        if error == "feature_not_entitled":
+            raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
+        if error == "operation_not_allowed":
+            raise OperationNotAllowedError(f"Operation is not allowed. User={user_id}")
+        if error in {"missing_quota_measure", "invalid_measure"}:
+            raise ConfigError(f"Deduction configuration is invalid: {error}. User={user_id}")
+        if error in {"insufficient_credits", "insufficient_headroom"}:
             raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
-        raise InsufficientCreditsError(f"Deduction failed: {error}. User={user_id}, requested={cost}")
+        if error in {"invalid_amount", "invalid_request"}:
+            raise ValueError(f"Invalid deduction amount: {cost}")
+        raise StoreError(f"Credit deduction failed: {error}. User={user_id}, requested={cost}")
 
     def deduct(
         self,
@@ -1679,9 +1540,9 @@ class CreditsService:
 
         The flow is thin: ``breakdown = engine.calculate(metrics)`` →
         ``cost = breakdown.total`` (a ``Decimal``, charged exactly with **no**
-        truncation) → if ``cost <= 0`` short-circuit with a zero-amount result →
-        otherwise ``store.deduct_with_allowance(...)``. Allowance consumption,
-        spend-cap enforcement, the balance floor, and the debit all commit (or
+        truncation) → ``store.deduct_with_allowance(...)``. Usage recording,
+        allowance consumption,
+        entitlement, quota enforcement, and the debit all commit (or
         roll back) together inside the store (contract §2, C1). The manager only
         maps the returned ``error`` code to a typed exception and emits events.
 
@@ -1690,12 +1551,7 @@ class CreditsService:
             metrics: Usage metrics (model, tokens, tool calls, etc.).
             idempotency_key: Optional user-scoped key for idempotent replay.
             metadata: Extra metadata to attach to the transaction.
-            feature: Optional feature name naming a per-feature invocation-count
-                limit. When the user's plan has a ``FeatureLimit`` configured for
-                it, the store enforces it (``deny`` aborts; ``warn``/``notify``
-                surface a non-blocking ``feature_limit_warning``) and tags the
-                transaction's ``metadata.feature`` regardless of whether a limit
-                is configured.
+            feature: Optional entitlement key checked by the store.
 
         Returns:
             ``DeductionResult`` whose ``amount`` is the net (positive) charge to
@@ -1704,8 +1560,6 @@ class CreditsService:
         Raises:
             PricingNotLoadedError: If pricing hasn't been loaded.
             InsufficientCreditsError: If the balance floor would be breached.
-            CapReachedError: If a ``deny`` spend cap would be exceeded.
-            FeatureLimitReachedError: If a ``deny`` feature limit would be exceeded.
         """
         self._maybe_lazy_expire(user_id)
         # 1) Calculate cost — exact Decimal, NO truncation (H1).
@@ -1714,30 +1568,9 @@ class CreditsService:
         breakdown = engine.calculate(metrics, rate_card=plan.rate_card)
         cost = breakdown.total
 
-        # 2) Short-circuit a zero (or non-positive) cost: nothing to charge.
-        if cost <= 0:
-            balance = self._store.get_balance(user_id)
-            result = DeductionResult(
-                entry_id="",
-                user_id=user_id,
-                amount=Decimal(0),
-                allowance_consumed=Decimal(0),
-                balance_after=balance.balance,
-                idempotent=False,
-                cap_warning=None,
-            )
-            self._emit(
-                "credits.deducted",
-                user_id,
-                {
-                    "amount": Decimal(0),
-                    "balance_after": balance.balance,
-                    "plan_covered": True,
-                },
-            )
-            return result
-
-        # 3) One atomic transaction in the store: allowance → cap → floor → debit.
+        # 2) One atomic transaction records zero-cost usage too, so
+        # authorization, quotas, and usage history cannot be bypassed by a free
+        # rate.
         effective_idempotency_key = idempotency_key or f"usage:{uuid4()}"
         tx_meta = self._build_tx_metadata(
             metrics,
@@ -2023,6 +1856,17 @@ class CreditsService:
     ) -> LedgerPage:
         """List usage entries with the canonical ledger cursor."""
         return self._store.list_usage_entries(user_id, from_date, to_date, limit, cursor)
+
+    def list_usage_charges(
+        self,
+        user_id: str,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: UsageChargeCursor | None = None,
+    ) -> UsageChargePage:
+        """List metered usage charges, including allowance-covered events."""
+        return self._store.list_usage_charges(user_id, from_date, to_date, limit, cursor)
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
         """Return one ledger entry for a user account."""

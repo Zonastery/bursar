@@ -1,6 +1,28 @@
 """Keep canonical configuration examples valid."""
 
+import re
+from pathlib import Path
+
+import yaml
+
 from bursar.config import load_config_from_dict
+
+
+def test_documentation_canonical_yaml_examples_validate() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    examples = [
+        repository / "README.md",
+        repository / "docs" / "docs" / "configuration.mdx",
+    ]
+
+    for example in examples:
+        source = example.read_text(encoding="utf-8")
+        match = re.search(r"```yaml\n(.*?)\n```", source, flags=re.DOTALL)
+        assert match is not None
+
+        config = yaml.safe_load(match.group(1))
+
+        assert load_config_from_dict(config).plans["free"].display_name == "Free"
 
 
 def test_generic_operation_example_validates() -> None:

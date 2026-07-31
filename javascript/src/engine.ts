@@ -28,11 +28,7 @@ export class PricingEngine {
   }
 
   get pricingSchema(): Record<string, unknown> {
-    return canonicalParsedBursarConfigDict(this.config) as unknown as Record<string, unknown>;
-  }
-
-  get minBalance(): Decimal {
-    return new Decimal(0);
+    return canonicalParsedBursarConfigDict(this.config);
   }
 
   calculate(
