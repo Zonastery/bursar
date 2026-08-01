@@ -297,9 +297,9 @@ CREATE FUNCTION bursar.upsert_auto_recharge_profile(
     p_window_count integer,
     p_window_anchor text,
     p_window_timezone text,
-    p_armed boolean DEFAULT true,
+    p_armed boolean DEFAULT TRUE,
     p_state text DEFAULT 'active',
-    p_reset_cooldown boolean DEFAULT false
+    p_reset_cooldown boolean DEFAULT FALSE
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
