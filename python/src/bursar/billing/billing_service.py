@@ -517,6 +517,13 @@ class BillingService:
             )
             return BillingEventResult(handled=True, action="duplicate")
 
+        if claim.status == "busy":
+            self._logger.debug(
+                "billing event is already processing",
+                {"provider": event.provider, "event_id": event.event_id},
+            )
+            return BillingEventResult(handled=False, error="claim_busy")
+
         if claim.status == "retry":
             self._logger.warn(
                 "billing event retry — skipping",

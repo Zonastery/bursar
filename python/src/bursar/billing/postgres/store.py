@@ -463,6 +463,8 @@ class PostgresBillingStore(BillingStore):
             )
         if raw_status == "duplicate":
             return BillingEventClaim(status="duplicate")
+        if raw_status == "busy":
+            return BillingEventClaim(status="busy")
         return BillingEventClaim(status="retry")
 
     def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> None:

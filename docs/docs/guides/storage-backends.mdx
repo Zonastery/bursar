@@ -71,6 +71,10 @@ archive keys always carry `tenant_id` (S3 keys use
 `<prefix>/tenants/<tenant-id>/billing-events/...`, with the prefix defaulting
 to `bursar`).
 
+External detail is eventually consistent: the PostgreSQL receipt or billing
+claim commits immediately, while ClickHouse history and S3 objects become
+visible after the outbox worker delivers them.
+
 The runtime composition root wires the Postgres stores, the optional
 adapters, and the outbox worker onto one connection pool:
 

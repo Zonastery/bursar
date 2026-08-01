@@ -90,6 +90,20 @@ function clickHouseDate(value: string): string {
   return parsed.toISOString().replace("T", " ").replace("Z", "");
 }
 
+function readClickHouseDate(value: string): string {
+  // DateTime64 columns are declared as UTC, but ClickHouse's toString()
+  // returns no timezone suffix. Parsing that string with Date would apply the
+  // host timezone and would also discard the cursor's microsecond precision.
+  const normalized = value.replace(" ", "T");
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/.test(normalized)) {
+    throw new Error(`Invalid ClickHouse timestamp: ${value}`);
+  }
+  if (Number.isNaN(Date.parse(`${normalized}Z`))) {
+    throw new Error(`Invalid ClickHouse timestamp: ${value}`);
+  }
+  return `${normalized}Z`;
+}
+
 /**
  * Idempotent ClickHouse usage projection plus the analytics read port.
  *
@@ -210,8 +224,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
        ORDER BY key`,
-      start,
-      end,
+      this.analyticsParams(start, end),
     );
     return rows.map((row) => ({
       date: row.key,
@@ -231,8 +244,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          WHERE tenant_id = {tenantId:UUID}
            AND event_at >= parseDateTime64BestEffort({start:String})
            AND event_at < parseDateTime64BestEffort({end:String})`,
-        start,
-        end,
+        this.analyticsParams(start, end),
       ),
       this.spendRows("coalesce(model, 'unknown')", start, end, 1),
       this.spendRows("subject_id", start, end, 1),
@@ -295,8 +307,6 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
        WHERE ${predicates.join(" AND ")}
        ORDER BY event_at DESC, charge_id DESC
        LIMIT ${limit + 1}`,
-      new Date(0),
-      new Date(1),
       params,
     );
     const visible = rows.slice(0, limit);
@@ -311,10 +321,10 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       feature: row.feature ?? null,
       model: row.model ?? null,
       region: row.region ?? null,
-      eventAt: new Date(row.event_at).toISOString(),
+      eventAt: readClickHouseDate(row.event_at),
       idempotencyKey: row.idempotency_key,
       metadata: parseJsonObject(row.metadata),
-      createdAt: new Date(row.created_at).toISOString(),
+      createdAt: readClickHouseDate(row.created_at),
     })) satisfies UsageCharge[];
     const last = items.at(-1);
     return {
@@ -384,26 +394,23 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
        ORDER BY sum(charged) DESC, key${limitSql}`,
-      start,
-      end,
+      this.analyticsParams(start, end),
     );
   }
 
-  private async queryRows<T>(
-    query: string,
-    start: Date,
-    end: Date,
-    extraParams: Record<string, unknown> = {},
-  ): Promise<T[]> {
+  private analyticsParams(start: Date, end: Date): Record<string, unknown> {
+    return {
+      tenantId: this.tenantId,
+      start: start.toISOString(),
+      end: end.toISOString(),
+    };
+  }
+
+  private async queryRows<T>(query: string, params: Record<string, unknown>): Promise<T[]> {
     await this.initialize();
     const result = await this.client.query({
       query,
-      query_params: {
-        tenantId: this.tenantId,
-        start: start.toISOString(),
-        end: end.toISOString(),
-        ...extraParams,
-      },
+      query_params: params,
       format: "JSONEachRow",
     });
     return result.json<T[]>();

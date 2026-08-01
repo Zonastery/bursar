@@ -335,6 +335,8 @@ class BursarRuntime:
             raise RuntimeError(msg)
         if usage.tenant_id != outbox_event.tenant_id:
             raise RuntimeError("Usage export tenant does not match its outbox event")
+        if usage.charge_id != outbox_event.aggregate_id:
+            raise RuntimeError("Usage export charge does not match its outbox event")
         if self.clickhouse is not None:
             self.clickhouse.write_usage(usage, outbox_event.event_id)
 
@@ -356,6 +358,8 @@ class BursarRuntime:
             raise RuntimeError(msg)
         if event.tenant_id != outbox_event.tenant_id:
             raise RuntimeError("Billing export tenant does not match its outbox event")
+        if event.event_id != outbox_event.aggregate_id:
+            raise RuntimeError("Billing export event does not match its outbox event")
         if self.s3 is None:
             raise RuntimeError("S3 archive is not configured")
         archived = self.s3.archive(event)

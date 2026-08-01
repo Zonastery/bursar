@@ -172,6 +172,18 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
         assert usage.region == "in"
         assert usage.dimensions["tenant_tier"] == "starter"
         assert usage.metadata == {"trace_id": "trace-1"}
+        usage_outbox = client.query(
+            "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = %s::uuid",
+            [charge_id],
+        )[0]["payload"]
+        assert usage_outbox == {
+            "delivery_required": False,
+            "tenant_id": TEST_TENANT_ID,
+            "charge_id": charge_id,
+            "account_id": usage.account_id,
+            "event_at": usage.event_at,
+            "created_at": usage.created_at,
+        }
 
         billing_payload = repository.get_billing_event_payload(billing_event_id)
         assert billing_payload is not None

@@ -30,6 +30,8 @@ RETURNS TABLE (
 )
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 DECLARE v_account uuid;
+ v_tenant uuid;
+ v_subject uuid;
  v_existing bursar.credit_usage_charges;
  v_digest bytea;
  v_post record;
@@ -81,7 +83,11 @@ BEGIN
         );
     END IF;
 
-  PERFORM 1 FROM bursar.credit_accounts WHERE id=v_account FOR UPDATE;
+  SELECT account.tenant_id, account.subject_id
+  INTO v_tenant, v_subject
+  FROM bursar.credit_accounts AS account
+  WHERE account.id = v_account
+  FOR UPDATE;
 
   SELECT * INTO v_existing FROM bursar.credit_usage_charges WHERE account_id=v_account AND idempotency_key=p_idempotency_key FOR UPDATE;
 
@@ -230,8 +236,9 @@ BEGIN
         );
     END IF;
 
-    -- The outbox carries the complete immutable export. In ClickHouse mode it
-    -- is the only detailed usage copy kept in PostgreSQL.
+    -- ClickHouse mode stages the complete immutable export because the outbox
+    -- is the only detailed usage copy kept in PostgreSQL. PostgreSQL mode
+    -- retains only the compact notification that existing consumers expect.
     INSERT INTO bursar.event_outbox(
         topic,
         aggregate_type,
@@ -244,39 +251,49 @@ BEGIN
         'credit_usage_charge',
         v_id,
         'usage-charge:' || v_id::text,
-        jsonb_build_object(
-            'delivery_required', bursar.current_usage_backend() = 'clickhouse',
-            'tenant_id', (SELECT account.tenant_id FROM bursar.credit_accounts AS account WHERE account.id = v_account),
-            'charge_id', v_id,
-            'account_id', v_account,
-            'subject_id', (SELECT account.subject_id FROM bursar.credit_accounts AS account WHERE account.id = v_account),
-            'operation', p_operation,
-            'feature', p_feature,
-            'model', p_model,
-            'region', p_region,
-            'measures', COALESCE(p_measures, '{}'::jsonb),
-            'dimensions', COALESCE(p_dimensions, '{}'::jsonb)
-                || jsonb_strip_nulls(jsonb_build_object('model', p_model, 'region', p_region)),
-            'metadata', COALESCE(p_metadata, '{}'::jsonb),
-            'requested', bursar.digest_numeric_text(p_requested),
-            'charged', bursar.digest_numeric_text(p_requested - p_allowance),
-            'allowance_requested', bursar.digest_numeric_text(p_allowance_requested),
-            'allowance_covered', bursar.digest_numeric_text(p_allowance),
-            'catalog_revision_id', v_revision,
-            'plan_id', v_plan,
-            'rate_card_key', v_rate_card,
-            'pricing_snapshot', jsonb_build_object(
+        CASE bursar.current_usage_backend()
+            WHEN 'clickhouse' THEN jsonb_build_object(
+                'delivery_required', true,
+                'tenant_id', v_tenant,
+                'charge_id', v_id,
+                'account_id', v_account,
+                'subject_id', v_subject,
+                'operation', p_operation,
+                'feature', p_feature,
+                'model', p_model,
+                'region', p_region,
+                'measures', COALESCE(p_measures, '{}'::jsonb),
+                'dimensions', COALESCE(p_dimensions, '{}'::jsonb)
+                    || jsonb_strip_nulls(jsonb_build_object('model', p_model, 'region', p_region)),
+                'metadata', COALESCE(p_metadata, '{}'::jsonb),
                 'requested', bursar.digest_numeric_text(p_requested),
+                'charged', bursar.digest_numeric_text(p_requested - p_allowance),
+                'allowance_requested', bursar.digest_numeric_text(p_allowance_requested),
                 'allowance_covered', bursar.digest_numeric_text(p_allowance),
-                'charged', bursar.digest_numeric_text(p_requested - p_allowance)
-            ),
-            'ledger_entry_id', v_ledger_entry,
-            'correction_of_charge_id', NULL,
-            'idempotency_key', p_idempotency_key,
-            'request_digest', encode(v_digest, 'hex'),
-            'event_at', p_event_at,
-            'created_at', now()
-        )
+                'catalog_revision_id', v_revision,
+                'plan_id', v_plan,
+                'rate_card_key', v_rate_card,
+                'pricing_snapshot', jsonb_build_object(
+                    'requested', bursar.digest_numeric_text(p_requested),
+                    'allowance_covered', bursar.digest_numeric_text(p_allowance),
+                    'charged', bursar.digest_numeric_text(p_requested - p_allowance)
+                ),
+                'ledger_entry_id', v_ledger_entry,
+                'correction_of_charge_id', NULL,
+                'idempotency_key', p_idempotency_key,
+                'request_digest', encode(v_digest, 'hex'),
+                'event_at', p_event_at,
+                'created_at', now()
+            )
+            ELSE jsonb_build_object(
+                'delivery_required', false,
+                'tenant_id', v_tenant,
+                'charge_id', v_id,
+                'account_id', v_account,
+                'event_at', p_event_at,
+                'created_at', now()
+            )
+        END
     )
     ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
 

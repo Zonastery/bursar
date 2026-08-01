@@ -122,6 +122,18 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration (real Postgr
       dimensions: { tenant_tier: "starter" },
       metadata: { trace_id: "trace-1" },
     });
+    const usageOutbox = await pool.query(
+      "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = $1::uuid",
+      [chargeId],
+    );
+    expect(usageOutbox.rows[0]?.payload).toEqual({
+      delivery_required: false,
+      tenant_id: TEST_TENANT_ID,
+      charge_id: chargeId,
+      account_id: usage?.accountId,
+      event_at: usage?.eventAt,
+      created_at: usage?.createdAt,
+    });
 
     const billingPayload = await repository.getBillingEventPayload(billingEventId);
     expect(billingPayload).toMatchObject({

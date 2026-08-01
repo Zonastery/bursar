@@ -225,6 +225,77 @@ describe("ClickHouseUsageStore", () => {
       store.writeUsage({ ...usage, eventAt: "2026-07-29T12:00:00" }, "100"),
     ).rejects.toThrow("Invalid usage timestamp");
   });
+
+  it("preserves UTC and microsecond precision in usage-history cursors", async () => {
+    const query = vi.fn().mockResolvedValue({
+      json: async <T>() =>
+        [
+          {
+            usage_id: "00000000-0000-0000-0000-000000000042",
+            account_id: "00000000-0000-0000-0000-000000000006",
+            operation: "generate",
+            requested: "15.000000",
+            charged: "12.500000",
+            allowance_requested: "2.500000",
+            allowance_covered: "2.500000",
+            feature: "chat",
+            model: "gpt",
+            region: null,
+            event_at: "2026-07-29 12:00:00.123456",
+            idempotency_key: "job:42",
+            metadata: '{"trace_id":"trace-42"}',
+            created_at: "2026-07-29 12:00:00.654321",
+          },
+          {
+            usage_id: "00000000-0000-0000-0000-000000000041",
+            account_id: "00000000-0000-0000-0000-000000000006",
+            operation: "generate",
+            requested: "1.000000",
+            charged: "1.000000",
+            allowance_requested: "0.000000",
+            allowance_covered: "0.000000",
+            feature: null,
+            model: null,
+            region: null,
+            event_at: "2026-07-29 12:00:00.123455",
+            idempotency_key: "job:41",
+            metadata: "{}",
+            created_at: "2026-07-29 12:00:00.654320",
+          },
+        ] as T,
+    });
+    const store = new ClickHouseUsageStore({
+      client: {
+        command: vi.fn().mockResolvedValue(undefined),
+        insert: vi.fn().mockResolvedValue(undefined),
+        query,
+      },
+      tenantId: TEST_TENANT_ID,
+      createTable: false,
+    });
+
+    const page = await store.listUsageCharges("00000000-0000-0000-0000-000000000007", {
+      limit: 1,
+    });
+
+    expect(page.items[0]).toMatchObject({
+      eventAt: "2026-07-29T12:00:00.123456Z",
+      createdAt: "2026-07-29T12:00:00.654321Z",
+      metadata: { trace_id: "trace-42" },
+    });
+    expect(page.nextCursor).toEqual({
+      eventAt: "2026-07-29T12:00:00.123456Z",
+      usageId: "00000000-0000-0000-0000-000000000042",
+    });
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query_params: {
+          tenantId: TEST_TENANT_ID,
+          subjectId: "00000000-0000-0000-0000-000000000007",
+        },
+      }),
+    );
+  });
 });
 
 describe("BursarRuntime", () => {

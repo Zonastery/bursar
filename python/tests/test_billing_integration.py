@@ -830,7 +830,7 @@ class TestEventIdempotency:
         with ThreadPoolExecutor(max_workers=12) as executor:
             claims = list(executor.map(claim, range(12)))
         assert sum(c.status == "claimed" for c in claims) == 1
-        assert sum(c.status in ("duplicate", "retry") for c in claims) == 11
+        assert sum(c.status in ("duplicate", "busy", "retry") for c in claims) == 11
         winner = next(c for c in claims if c.status == "claimed")
         assert winner.claim_token is not None
         bs.complete_billing_event(PROVIDER, "evt_concurrent_claim", winner.claim_token)

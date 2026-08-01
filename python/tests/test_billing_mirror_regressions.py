@@ -537,6 +537,23 @@ def test_event_claim_envelope_matches_javascript_shape() -> None:
     assert "occurredAt" not in envelope
 
 
+def test_busy_billing_claim_is_retryable_by_provider_adapter() -> None:
+    store = MagicMock()
+    store.claim_billing_event.return_value = BillingEventClaim(status="busy")
+    service = BillingService(store)
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_busy",
+        event_type=BillingEventType.invoice_paid,
+        occurred_at="2026-07-29T00:00:00Z",
+    )
+
+    result = service.ingest_billing_event(event)
+
+    assert result.handled is False
+    assert result.error == "claim_busy"
+
+
 def test_subscription_repository_uses_current_catalog_and_lifecycle_rpc_shape() -> None:
     execute = MagicMock(
         side_effect=[
