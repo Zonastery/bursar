@@ -72,12 +72,14 @@ BEGIN
 
     v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',p_metadata)::text,'UTF8'),'sha256');
 
-    -- Keep partition DDL ahead of account and ledger locks so first-of-month
-    -- concurrent writers cannot invert the lock order.
-    PERFORM bursar.ensure_storage_partition(
-        'usage_charge_payloads',
-        p_event_at
-    );
+    -- Keep partition DDL ahead of account and ledger locks when PostgreSQL
+    -- owns the detailed usage payload.
+    IF bursar.current_usage_backend() = 'postgres' THEN
+        PERFORM bursar.ensure_storage_partition(
+            'usage_charge_payloads',
+            p_event_at
+        );
+    END IF;
 
   PERFORM 1 FROM bursar.credit_accounts WHERE id=v_account FOR UPDATE;
 
@@ -183,40 +185,100 @@ BEGIN
     PERFORM set_config('bursar.mutation_context','internal',true);
 
     INSERT INTO bursar.credit_usage_charges(
-        account_id,operation,event_at,measures,feature,model,region,requested,charged,
+        account_id,operation,event_at,requested,charged,
         allowance_requested,allowance_covered,catalog_revision_id,plan_id,
-        rate_card_key,pricing_snapshot,ledger_entry_id,idempotency_key,
+        rate_card_key,ledger_entry_id,idempotency_key,
         request_digest
     )
     VALUES(
         v_account,p_operation,p_event_at,
-        COALESCE(p_measures,'{}'::jsonb),
-        p_feature,p_model,p_region,p_requested,p_requested-p_allowance,
+        p_requested,p_requested-p_allowance,
         p_allowance_requested,p_allowance,v_revision,v_plan,v_rate_card,
-        jsonb_build_object(
-            'requested',bursar.digest_numeric_text(p_requested),
-            'allowance_covered',bursar.digest_numeric_text(p_allowance),
-            'charged',bursar.digest_numeric_text(p_requested-p_allowance)
-        ),
         v_ledger_entry,p_idempotency_key,v_digest
     )
     RETURNING id INTO v_id;
 
-    INSERT INTO bursar.usage_charge_payloads(
-        charge_id,
-        event_at,
-        dimensions,
-        metadata
+    IF bursar.current_usage_backend() = 'postgres' THEN
+        INSERT INTO bursar.usage_charge_payloads(
+            charge_id,
+            event_at,
+            measures,
+            feature,
+            model,
+            region,
+            dimensions,
+            metadata,
+            pricing_snapshot
+        )
+        VALUES(
+            v_id,
+            p_event_at,
+            COALESCE(p_measures, '{}'::jsonb),
+            p_feature,
+            p_model,
+            p_region,
+            COALESCE(p_dimensions, '{}'::jsonb)
+                || jsonb_strip_nulls(
+                    jsonb_build_object('model', p_model, 'region', p_region)
+                ),
+            COALESCE(p_metadata, '{}'::jsonb),
+            jsonb_build_object(
+                'requested', bursar.digest_numeric_text(p_requested),
+                'allowance_covered', bursar.digest_numeric_text(p_allowance),
+                'charged', bursar.digest_numeric_text(p_requested - p_allowance)
+            )
+        );
+    END IF;
+
+    -- The outbox carries the complete immutable export. In ClickHouse mode it
+    -- is the only detailed usage copy kept in PostgreSQL.
+    INSERT INTO bursar.event_outbox(
+        topic,
+        aggregate_type,
+        aggregate_id,
+        idempotency_key,
+        payload
     )
     VALUES(
+        'usage.charge_recorded',
+        'credit_usage_charge',
         v_id,
-        p_event_at,
-        COALESCE(p_dimensions, '{}'::jsonb)
-            || jsonb_strip_nulls(
-                jsonb_build_object('model', p_model, 'region', p_region)
+        'usage-charge:' || v_id::text,
+        jsonb_build_object(
+            'delivery_required', bursar.current_usage_backend() = 'clickhouse',
+            'tenant_id', (SELECT account.tenant_id FROM bursar.credit_accounts AS account WHERE account.id = v_account),
+            'charge_id', v_id,
+            'account_id', v_account,
+            'subject_id', (SELECT account.subject_id FROM bursar.credit_accounts AS account WHERE account.id = v_account),
+            'operation', p_operation,
+            'feature', p_feature,
+            'model', p_model,
+            'region', p_region,
+            'measures', COALESCE(p_measures, '{}'::jsonb),
+            'dimensions', COALESCE(p_dimensions, '{}'::jsonb)
+                || jsonb_strip_nulls(jsonb_build_object('model', p_model, 'region', p_region)),
+            'metadata', COALESCE(p_metadata, '{}'::jsonb),
+            'requested', bursar.digest_numeric_text(p_requested),
+            'charged', bursar.digest_numeric_text(p_requested - p_allowance),
+            'allowance_requested', bursar.digest_numeric_text(p_allowance_requested),
+            'allowance_covered', bursar.digest_numeric_text(p_allowance),
+            'catalog_revision_id', v_revision,
+            'plan_id', v_plan,
+            'rate_card_key', v_rate_card,
+            'pricing_snapshot', jsonb_build_object(
+                'requested', bursar.digest_numeric_text(p_requested),
+                'allowance_covered', bursar.digest_numeric_text(p_allowance),
+                'charged', bursar.digest_numeric_text(p_requested - p_allowance)
             ),
-        COALESCE(p_metadata, '{}'::jsonb)
-    );
+            'ledger_entry_id', v_ledger_entry,
+            'correction_of_charge_id', NULL,
+            'idempotency_key', p_idempotency_key,
+            'request_digest', encode(v_digest, 'hex'),
+            'event_at', p_event_at,
+            'created_at', now()
+        )
+    )
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
 
     RETURN QUERY SELECT v_id,v_ledger_entry,p_requested-p_allowance,p_allowance,false,NULL::text;
 

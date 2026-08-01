@@ -44,9 +44,9 @@ COMMENT ON TABLE bursar.credit_lot_source_restorations IS
 COMMENT ON TABLE bursar.credit_unallocated_debits IS 'Debit amounts not backed by lots when a policy permits debt.';
 COMMENT ON TABLE bursar.credit_debt_repayments IS 'Positive ledger amounts applied to outstanding account debt.';
 COMMENT ON TABLE bursar.credit_usage_charges IS
-'Permanent compact idempotent usage charge, pricing, and allowance evidence.';
+'Permanent compact idempotent usage receipt, accounting, and allowance evidence.';
 COMMENT ON TABLE bursar.usage_charge_payloads IS
-'Retention-bounded usage dimensions and application metadata, partitioned by event time.';
+'Retention-bounded usage details, pricing snapshot, dimensions, and application metadata, partitioned by event time.';
 COMMENT ON TABLE bursar.usage_daily_rollups IS 'Bounded exact daily usage aggregates for PostgreSQL-only analytics.';
 COMMENT ON FUNCTION bursar.uuid_v7()
 IS 'Generate an RFC 9562 UUIDv7 with millisecond time locality for database row identifiers.';

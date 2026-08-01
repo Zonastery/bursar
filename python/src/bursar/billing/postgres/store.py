@@ -101,9 +101,11 @@ class PostgresBillingStore(BillingStore):
         *,
         tenant_id: str | UUID,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+        billing_payload_backend: Literal["postgres", "s3"] = "postgres",
     ) -> None:
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
+        self._billing_payload_backend = billing_payload_backend
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
         self._owns_pool = pool is None
 
@@ -129,6 +131,10 @@ class PostgresBillingStore(BillingStore):
                 cur.execute(
                     "SELECT set_config('bursar.tenant_id', %s, true)",
                     (self._tenant_id,),
+                )
+                cur.execute(
+                    "SELECT set_config('bursar.billing_payload_backend', %s, true)",
+                    (self._billing_payload_backend,),
                 )
                 cur.execute(sql, params or [])
                 try:

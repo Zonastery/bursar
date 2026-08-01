@@ -177,7 +177,7 @@ BEFORE UPDATE OR DELETE ON bursar.credit_usage_charges
 FOR EACH ROW EXECUTE FUNCTION bursar.require_internal_mutation();
 
 CREATE TRIGGER usage_charge_projection
-AFTER INSERT ON bursar.credit_usage_charges
+AFTER INSERT ON bursar.usage_charge_payloads
 FOR EACH ROW EXECUTE FUNCTION bursar.project_usage_charge();
 
 CREATE TRIGGER quota_usage_events_append_only

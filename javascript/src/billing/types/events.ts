@@ -76,4 +76,5 @@ export interface BillingEventResult {
 export type BillingEventClaim =
   | { status: "claimed"; claimToken: string; billingEventId: string }
   | { status: "duplicate" }
+  | { status: "busy" }
   | { status: "retry" };

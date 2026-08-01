@@ -6,6 +6,10 @@ import type {
   SpendByUserRow,
   TopUserRow,
   UsageAnalyticsStore,
+  UsageCharge,
+  UsageChargePage,
+  ListUsageChargesOptions,
+  UsageChargeStore,
 } from "../../credits/types/index.js";
 import type { UsageChargeExport, UsageEventSink } from "../ports.js";
 
@@ -91,7 +95,7 @@ function clickHouseDate(value: string): string {
  *
  * `ReplacingMergeTree` and `FINAL` make replay after a worker crash safe.
  */
-export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore {
+export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore, UsageChargeStore {
   private readonly client: ClickHouseClient;
   private readonly tenantId: string;
   private readonly table: string;
@@ -244,6 +248,82 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     };
   }
 
+  async listUsageCharges(
+    userId: string,
+    options: ListUsageChargesOptions = {},
+  ): Promise<UsageChargePage> {
+    if (!userId.trim()) throw new TypeError("userId must not be empty");
+    const limit = options.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      throw new RangeError("limit must be between 1 and 200");
+    }
+    const predicates = ["tenant_id = {tenantId:UUID}", "subject_id = {subjectId:UUID}"];
+    const params: Record<string, unknown> = { tenantId: this.tenantId, subjectId: userId };
+    if (options.fromDate) {
+      predicates.push("event_at >= parseDateTime64BestEffort({fromDate:String})");
+      params.fromDate = options.fromDate.toISOString();
+    }
+    if (options.toDate) {
+      predicates.push("event_at < parseDateTime64BestEffort({toDate:String})");
+      params.toDate = options.toDate.toISOString();
+    }
+    if (options.cursor) {
+      predicates.push(
+        "(event_at, charge_id) < " +
+          "(parseDateTime64BestEffort({cursorEventAt:String}), {cursorUsageId:UUID})",
+      );
+      params.cursorEventAt = options.cursor.eventAt;
+      params.cursorUsageId = options.cursor.usageId;
+    }
+    const rows = await this.queryRows<UsageRow>(
+      `SELECT
+         toString(charge_id) AS usage_id,
+         toString(account_id) AS account_id,
+         operation,
+         toString(requested) AS requested,
+         toString(charged) AS charged,
+         toString(allowance_requested) AS allowance_requested,
+         toString(allowance_covered) AS allowance_covered,
+         feature,
+         model,
+         region,
+         toString(event_at) AS event_at,
+         idempotency_key,
+         metadata,
+         toString(created_at) AS created_at
+       FROM ${this.quotedTable} FINAL
+       WHERE ${predicates.join(" AND ")}
+       ORDER BY event_at DESC, charge_id DESC
+       LIMIT ${limit + 1}`,
+      new Date(0),
+      new Date(1),
+      params,
+    );
+    const visible = rows.slice(0, limit);
+    const items = visible.map((row) => ({
+      usageId: row.usage_id,
+      accountId: row.account_id,
+      operation: row.operation,
+      requested: new Decimal(row.requested),
+      charged: new Decimal(row.charged),
+      allowanceRequested: new Decimal(row.allowance_requested),
+      allowanceCovered: new Decimal(row.allowance_covered),
+      feature: row.feature ?? null,
+      model: row.model ?? null,
+      region: row.region ?? null,
+      eventAt: new Date(row.event_at).toISOString(),
+      idempotencyKey: row.idempotency_key,
+      metadata: parseJsonObject(row.metadata),
+      createdAt: new Date(row.created_at).toISOString(),
+    })) satisfies UsageCharge[];
+    const last = items.at(-1);
+    return {
+      items,
+      nextCursor:
+        rows.length > limit && last ? { eventAt: last.eventAt, usageId: last.usageId } : null,
+    };
+  }
+
   private async createProjectionTable(): Promise<void> {
     const ttl =
       this.retentionDays === null
@@ -309,7 +389,12 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
     );
   }
 
-  private async queryRows<T>(query: string, start: Date, end: Date): Promise<T[]> {
+  private async queryRows<T>(
+    query: string,
+    start: Date,
+    end: Date,
+    extraParams: Record<string, unknown> = {},
+  ): Promise<T[]> {
     await this.initialize();
     const result = await this.client.query({
       query,
@@ -317,9 +402,38 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
         tenantId: this.tenantId,
         start: start.toISOString(),
         end: end.toISOString(),
+        ...extraParams,
       },
       format: "JSONEachRow",
     });
     return result.json<T[]>();
   }
+}
+
+interface UsageRow {
+  usage_id: string;
+  account_id: string;
+  operation: string;
+  requested: string | number;
+  charged: string | number;
+  allowance_requested: string | number;
+  allowance_covered: string | number;
+  feature: string | null;
+  model: string | null;
+  region: string | null;
+  event_at: string;
+  idempotency_key: string;
+  metadata: string | Record<string, unknown> | null;
+  created_at: string;
+}
+
+function parseJsonObject(
+  value: string | Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (value === null) return null;
+  if (typeof value === "object") return value;
+  const parsed: unknown = JSON.parse(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
 }

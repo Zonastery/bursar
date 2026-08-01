@@ -359,8 +359,13 @@ AS $$
             'allowance_requested', charge.allowance_requested::text,
             'allowance_covered', charge.allowance_covered::text,
             'payload_available', payload.charge_id IS NOT NULL,
+            'measures', payload.measures,
+            'feature', payload.feature,
+            'model', payload.model,
+            'region', payload.region,
             'dimensions', payload.dimensions,
-            'metadata', payload.metadata
+            'metadata', payload.metadata,
+            'pricing_snapshot', payload.pricing_snapshot
         )
     FROM bursar.credit_usage_charges AS charge
     JOIN bursar.credit_accounts AS account
@@ -456,7 +461,7 @@ BEGIN
     WHERE id = p_event_id
     FOR UPDATE;
 
-    IF NOT FOUND OR v_event.status NOT IN ('completed', 'ignored') THEN
+    IF NOT FOUND THEN
         RETURN false;
     END IF;
 
@@ -919,11 +924,17 @@ BEGIN
     )
     SELECT count(*)::integer INTO v_rollups FROM deleted;
 
-    -- The hard age limit wins for every status, including dead letters.
+    -- Undelivered payloads are retained for replay. Operators explicitly
+    -- abandon dead letters after confirming the external archive is complete;
+    -- automatic retention must not silently destroy the only external copy.
     WITH candidates AS MATERIALIZED (
         SELECT outbox.id
         FROM bursar.event_outbox AS outbox
-        WHERE outbox.created_at
+        WHERE (
+                outbox.status = 'delivered'
+                OR outbox.payload->>'delivery_required' IS DISTINCT FROM 'true'
+              )
+          AND outbox.created_at
               < p_now - make_interval(
                   days => v_settings.outbox_max_retention_days
               )

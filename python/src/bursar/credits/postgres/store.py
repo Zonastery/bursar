@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -153,10 +153,12 @@ class PostgresStore(CreditStore):
         tenant_id: str | UUID | None,
         max_pool_size: int = 20,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+        usage_backend: Literal["postgres", "clickhouse"] = "postgres",
     ) -> None:
         super().__init__()
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
+        self._usage_backend = usage_backend
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, max_pool_size, database_url)
         self._owns_pool = pool is None
 
@@ -178,6 +180,10 @@ class PostgresStore(CreditStore):
         cursor.execute(
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (self._tenant_id,),
+        )
+        cursor.execute(
+            "SELECT set_config('bursar.usage_backend', %s, true)",
+            (self._usage_backend,),
         )
 
     # ── Repository getters ─────────────────────────────────────────────

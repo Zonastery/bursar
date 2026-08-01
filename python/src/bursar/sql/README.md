@@ -94,8 +94,13 @@ Bursar keeps accounting, idempotency, current quota state, and billing claim
 state in PostgreSQL permanently. High-cardinality or opaque payloads are kept
 in bounded tables:
 
-- `usage_charge_payloads` stores usage dimensions and application metadata.
-- `billing_event_payloads` stores raw provider webhook envelopes.
+- `credit_usage_charges` retains the compact accounting receipt and idempotency
+  evidence. PostgreSQL mode also stores dimensions/metadata in
+  `usage_charge_payloads` and maintains `usage_daily_rollups`; ClickHouse mode
+  carries those details in the transactional outbox instead.
+- `billing_event_payloads` stores raw provider webhook envelopes when
+  PostgreSQL owns payload storage. S3 mode keeps the envelope in the
+  transactional outbox until archival succeeds.
 - `event_outbox` provides asynchronous delivery to optional external sinks.
 - `usage_daily_rollups` serves exact built-in analytics without extra
   infrastructure. Each logical aggregate is deterministically spread across

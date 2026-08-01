@@ -51,9 +51,9 @@ BEGIN
           ON payload.charge_id = charge.id
          AND payload.event_at = charge.event_at
         WHERE charge.id = v_first.charge_id
-          AND charge.model = 'model-x'
-          AND charge.region = 'region-y'
-          AND charge.measures = '{"calls":1}'::jsonb
+          AND payload.model = 'model-x'
+          AND payload.region = 'region-y'
+          AND payload.measures = '{"calls":1}'::jsonb
           AND payload.dimensions =
               '{"model":"model-x","region":"region-y"}'::jsonb
           AND payload.metadata = '{"trace":"a"}'::jsonb

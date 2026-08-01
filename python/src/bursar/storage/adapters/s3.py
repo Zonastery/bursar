@@ -44,7 +44,7 @@ def _require_nonempty(value: str, name: str) -> str:
 
 
 class S3BillingArchive:
-    """Archive completed billing webhook envelopes under deterministic keys."""
+    """Archive received billing webhook envelopes under deterministic keys."""
 
     def __init__(self, options: S3BillingArchiveOptions) -> None:
         self._bucket = _require_nonempty(options.bucket, "S3 bucket")

@@ -191,7 +191,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       ),
     ).rejects.toBeInstanceOf(OperationNotAllowedError);
     const persistedUsage = await pool.query(
-      `SELECT charge.measures, payload.dimensions
+      `SELECT payload.measures, payload.dimensions
        FROM bursar.credit_usage_charges AS charge
        JOIN bursar.usage_charge_payloads AS payload
          ON payload.charge_id = charge.id

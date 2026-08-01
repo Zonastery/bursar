@@ -238,8 +238,21 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path TO ''
 AS $$
+DECLARE
+    v_charge bursar.credit_usage_charges;
 BEGIN
-    INSERT INTO bursar.usage_daily_rollups(
+    SELECT *
+    INTO v_charge
+    FROM bursar.credit_usage_charges AS charge
+    WHERE charge.id = NEW.charge_id
+      AND charge.event_at = NEW.event_at;
+
+    IF NOT FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    IF bursar.current_usage_backend() = 'postgres' THEN
+        INSERT INTO bursar.usage_daily_rollups(
         usage_day,
         account_id,
         operation,
@@ -252,16 +265,16 @@ BEGIN
     )
     VALUES(
         (NEW.event_at AT TIME ZONE 'UTC')::date,
-        NEW.account_id,
-        NEW.operation,
-        COALESCE(NEW.model, ''),
-        COALESCE(NEW.region, ''),
-        (get_byte(uuid_send(NEW.id), 15) & 31)::smallint,
-        NEW.charged,
-        NEW.allowance_covered,
+            v_charge.account_id,
+            v_charge.operation,
+            COALESCE(NEW.model, ''),
+            COALESCE(NEW.region, ''),
+        (get_byte(uuid_send(NEW.charge_id), 15) & 31)::smallint,
+            v_charge.charged,
+            v_charge.allowance_covered,
         1
     )
-    ON CONFLICT (
+        ON CONFLICT (
         usage_day,
         account_id,
         operation,
@@ -269,35 +282,14 @@ BEGIN
         region_key,
         rollup_shard
     )
-    DO UPDATE
-    SET charged = bursar.usage_daily_rollups.charged + EXCLUDED.charged,
+        DO UPDATE
+        SET charged = bursar.usage_daily_rollups.charged + EXCLUDED.charged,
         allowance_covered =
             bursar.usage_daily_rollups.allowance_covered
             + EXCLUDED.allowance_covered,
         charge_count = bursar.usage_daily_rollups.charge_count + 1,
-        updated_at = now();
-
-    INSERT INTO bursar.event_outbox(
-        topic,
-        aggregate_type,
-        aggregate_id,
-        idempotency_key,
-        payload
-    )
-    VALUES(
-        'usage.charge_recorded',
-        'credit_usage_charge',
-        NEW.id,
-        'usage-charge:' || NEW.id::text,
-        jsonb_build_object(
-            'tenant_id', NEW.tenant_id,
-            'charge_id', NEW.id,
-            'account_id', NEW.account_id,
-            'event_at', NEW.event_at,
-            'created_at', NEW.created_at
-        )
-    )
-    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
+            updated_at = now();
+    END IF;
 
     RETURN NEW;
 END
@@ -388,7 +380,8 @@ LANGUAGE plpgsql
 SET search_path TO ''
 AS $$
 BEGIN
-    IF NEW.status IN ('completed', 'ignored')
+    IF bursar.current_billing_payload_backend() = 'postgres'
+       AND NEW.status IN ('completed', 'ignored')
        AND OLD.status IS DISTINCT FROM NEW.status
     THEN
         INSERT INTO bursar.event_outbox(

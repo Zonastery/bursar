@@ -175,17 +175,6 @@ CREATE TABLE bursar.credit_usage_charges (
         AND bursar.is_bounded_text(operation, 255)
     ),
     event_at timestamptz NOT NULL DEFAULT now(),
-    measures jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(measures, 16384)),
-    feature text CHECK (
-        feature IS NULL OR bursar.is_bounded_text(feature, 255)
-    ),
-    model text CHECK (
-        model IS NULL OR bursar.is_bounded_text(model, 255)
-    ),
-    region text CHECK (
-        region IS NULL OR bursar.is_bounded_text(region, 255)
-    ),
     requested numeric(20, 6) NOT NULL
     CHECK (bursar.is_finite_numeric(requested) AND requested >= 0),
     charged numeric(20, 6) NOT NULL
@@ -205,8 +194,6 @@ CREATE TABLE bursar.credit_usage_charges (
     rate_card_key text CHECK (
         rate_card_key IS NULL OR bursar.is_bounded_text(rate_card_key, 255)
     ),
-    pricing_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(pricing_snapshot, 32768)),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
     idempotency_key text NOT NULL
     CHECK (
@@ -228,10 +215,23 @@ CREATE TABLE bursar.usage_charge_payloads (
     charge_id uuid NOT NULL
     REFERENCES bursar.credit_usage_charges (id) ON DELETE CASCADE,
     event_at timestamptz NOT NULL,
+    measures jsonb NOT NULL DEFAULT '{}'::jsonb
+    CHECK (bursar.is_bounded_json_object(measures, 16384)),
+    feature text CHECK (
+        feature IS NULL OR bursar.is_bounded_text(feature, 255)
+    ),
+    model text CHECK (
+        model IS NULL OR bursar.is_bounded_text(model, 255)
+    ),
+    region text CHECK (
+        region IS NULL OR bursar.is_bounded_text(region, 255)
+    ),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(dimensions, 65536)),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
+    pricing_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
+    CHECK (bursar.is_bounded_json_object(pricing_snapshot, 32768)),
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (event_at, charge_id)
 ) PARTITION BY RANGE (event_at);
@@ -291,7 +291,7 @@ CREATE TABLE bursar.event_outbox (
     payload_version smallint NOT NULL DEFAULT 1
     CHECK (payload_version > 0),
     payload jsonb NOT NULL DEFAULT '{}'::jsonb
-    CHECK (bursar.is_bounded_json_object(payload, 65536)),
+    CHECK (bursar.is_bounded_json_object(payload, 2097152)),
     status text NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'processing', 'delivered', 'dead_letter')),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),

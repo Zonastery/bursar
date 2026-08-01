@@ -10,6 +10,7 @@ import psycopg2
 import pytest
 from psycopg2.extras import Json
 
+from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.credits.types import (
     AggregateStats,
     DailySpendRow,
@@ -267,4 +268,133 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
         assert runtime.health().started is True
         assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
     finally:
+        runtime.close()
+
+
+def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
+        cursor.execute("SELECT set_config('bursar.usage_backend', 'clickhouse', true)")
+        cursor.execute(
+            """
+            WITH subject AS (
+                INSERT INTO bursar.subjects DEFAULT VALUES RETURNING id
+            ), account AS (
+                INSERT INTO bursar.credit_accounts(subject_id, account_kind)
+                SELECT id, 'personal' FROM subject
+                RETURNING subject_id
+            )
+            SELECT subject_id FROM account
+            """
+        )
+        subject_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT charge_id, error_code
+            FROM bursar.charge_usage(
+                %s::uuid, 'completion', 0, 'clickhouse-mode-usage-1',
+                p_measures => '{"tokens": 1}'::jsonb,
+                p_dimensions => '{"workspace": "one"}'::jsonb,
+                p_metadata => '{"trace_id": "trace-ch"}'::jsonb
+            )
+            """,
+            (subject_id,),
+        )
+        charge_id, error_code = cursor.fetchone()
+        assert error_code is None
+        cursor.execute(
+            "SELECT count(*) FROM bursar.usage_charge_payloads WHERE charge_id = %s",
+            (charge_id,),
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM bursar.usage_daily_rollups
+            WHERE account_id = (
+                SELECT account_id
+                FROM bursar.credit_usage_charges
+                WHERE id = %s
+            )
+            """,
+            (charge_id,),
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            """
+            SELECT payload->'metadata'->>'trace_id', payload->'dimensions'
+            FROM bursar.event_outbox
+            WHERE aggregate_id = %s
+            """,
+            (charge_id,),
+        )
+        payload = cursor.fetchone()
+        assert payload[0] == "trace-ch"
+        assert "workspace" in payload[1]
+
+
+def test_s3_billing_mode_keeps_envelope_only_in_outbox(
+    pg_database_url: str,
+) -> None:
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.tenant_id', %s, true)", (TEST_TENANT_ID,))
+        cursor.execute("SELECT set_config('bursar.billing_payload_backend', 's3', true)")
+        cursor.execute(
+            """
+            SELECT result, event_id
+            FROM bursar.claim_billing_event(
+                'stripe', 'evt-storage-s3-mode-1', 'invoice.paid',
+                '{"id": "evt-storage-s3-mode-1", "amount": 1200}'::jsonb
+            )
+            """
+        )
+        result, event_id = cursor.fetchone()
+        assert result == "claimed"
+        cursor.execute(
+            "SELECT count(*) FROM bursar.billing_event_payloads WHERE event_id = %s",
+            (event_id,),
+        )
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            """
+            SELECT payload->'envelope'->>'id'
+            FROM bursar.event_outbox
+            WHERE aggregate_id = %s AND topic = 'billing.webhook_received'
+            """,
+            (event_id,),
+        )
+        assert cursor.fetchone()[0] == "evt-storage-s3-mode-1"
+
+
+def test_s3_runtime_archives_received_outbox_payload(
+    pg_database_url: str,
+) -> None:
+    billing_store = PostgresBillingStore(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        billing_payload_backend="s3",
+    )
+    archive = RecordingBillingArchive()
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pg_database_url,
+            tenant_id=UUID(TEST_TENANT_ID),
+            s3=archive,
+            outbox=OutboxWorkerOptions(batch_size=10, poll_interval_ms=60_000),
+        )
+    )
+    try:
+        claim = billing_store.claim_billing_event(
+            "stripe",
+            "evt-storage-s3-runtime-1",
+            "invoice.paid",
+            {"id": "evt-storage-s3-runtime-1", "amount": 1200},
+        )
+        assert claim.status == "claimed"
+        assert runtime.flush() == OutboxRunResult(claimed=1, delivered=1, failed=0)
+        assert archive.events[0].envelope == {"id": "evt-storage-s3-runtime-1", "amount": 1200}
+    finally:
+        billing_store.close()
         runtime.close()

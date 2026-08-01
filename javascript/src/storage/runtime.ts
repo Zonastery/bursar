@@ -3,13 +3,19 @@ import { isRetryableBursarError, PricingNotLoadedError } from "../errors.js";
 import { PostgresBillingStore } from "../billing/postgres/store.js";
 import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
-import type { UsageAnalyticsStore } from "../credits/types/index.js";
+import type { UsageAnalyticsStore, UsageChargeStore } from "../credits/types/index.js";
 import { PostgresClient, type PostgresPool } from "../shared/postgres-client.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import { ClickHouseUsageStore, type ClickHouseUsageStoreOptions } from "./adapters/clickhouse.js";
 import { S3BillingArchive, type S3BillingArchiveOptions } from "./adapters/s3.js";
 import { OutboxWorker, type OutboxRunResult, type OutboxWorkerOptions } from "./outbox-worker.js";
-import type { BillingPayloadArchive, OutboxHandler, UsageEventSink } from "./ports.js";
+import type {
+  BillingEventPayloadExport,
+  BillingPayloadArchive,
+  OutboxHandler,
+  UsageChargeExport,
+  UsageEventSink,
+} from "./ports.js";
 import { PostgresStorageRepository } from "./postgres-repository.js";
 
 type RuntimeBursarOptions = Omit<
@@ -93,8 +99,12 @@ export class BursarRuntime {
         : new S3BillingArchive(options.s3)
       : null;
 
-    this.creditStore = new PostgresStore("", options.tenantId, pool);
-    this.billingStore = new PostgresBillingStore(pool as import("pg").Pool, options.tenantId);
+    this.creditStore = new PostgresStore("", options.tenantId, pool, {
+      usageBackend: this.clickhouse ? "clickhouse" : "postgres",
+    });
+    this.billingStore = new PostgresBillingStore(pool as import("pg").Pool, options.tenantId, {
+      billingPayloadBackend: this.s3 ? "s3" : "postgres",
+    });
     const bursarOptions = options.bursar ?? {};
     const commerceOptions = bursarOptions.commerceOptions
       ? {
@@ -110,10 +120,18 @@ export class BursarRuntime {
       creditsOptions: {
         ...(bursarOptions.creditsOptions ?? {}),
         analytics: this.clickhouse ?? undefined,
+        usageStore:
+          this.clickhouse && "listUsageCharges" in this.clickhouse
+            ? (this.clickhouse as UsageChargeStore)
+            : undefined,
       },
     });
 
-    const query: QueryFn = new PostgresClient(pool, { tenantId: options.tenantId }).query;
+    const query: QueryFn = new PostgresClient(pool, {
+      tenantId: options.tenantId,
+      usageBackend: this.clickhouse ? "clickhouse" : "postgres",
+      billingPayloadBackend: this.s3 ? "s3" : "postgres",
+    }).query;
     const repository = new PostgresStorageRepository(query, options.tenantId);
     const handlers = this.createHandlers(repository);
     this.worker =
@@ -187,7 +205,8 @@ export class BursarRuntime {
               `Unsupported usage outbox payload version ${outboxEvent.payloadVersion}`,
             );
           }
-          const usage = await repository.getUsageCharge(outboxEvent.aggregateId);
+          let usage = usageExportFromOutbox(outboxEvent.payload);
+          usage ??= await repository.getUsageCharge(outboxEvent.aggregateId);
           if (!usage) {
             throw new Error(`Usage charge ${outboxEvent.aggregateId} is unavailable for export`);
           }
@@ -200,21 +219,25 @@ export class BursarRuntime {
     }
     if (this.s3) {
       handlers.push({
-        topics: ["billing.webhook_completed"],
+        topics: ["billing.webhook_received", "billing.webhook_completed"],
         handle: async (outboxEvent) => {
           if (outboxEvent.payloadVersion !== 1) {
             throw new Error(
               `Unsupported billing outbox payload version ${outboxEvent.payloadVersion}`,
             );
           }
-          const event = await repository.getBillingEventPayload(outboxEvent.aggregateId);
+          const stored = await repository.getBillingEventPayload(outboxEvent.aggregateId);
+          if (stored?.objectKey) return;
+          const event =
+            outboxEvent.topic === "billing.webhook_received"
+              ? billingExportFromOutbox(outboxEvent.payload)
+              : stored;
           if (!event) {
             throw new Error(`Billing event ${outboxEvent.aggregateId} is unavailable for archive`);
           }
           if (event.tenantId !== outboxEvent.tenantId) {
             throw new Error("Billing export tenant does not match its outbox event");
           }
-          if (event.objectKey) return;
           const archived = await this.s3?.archive(event);
           if (!archived) throw new Error("S3 archive is not configured");
           const recorded = await repository.archiveBillingEventPayload(
@@ -241,4 +264,53 @@ export async function createBursarRuntime(options: BursarRuntimeOptions): Promis
   const pg = await import("pg");
   const pool = new pg.Pool({ connectionString: options.postgres }) as unknown as PostgresPool;
   return new BursarRuntime(pool, true, options);
+}
+
+function usageExportFromOutbox(payload: Record<string, unknown>): UsageChargeExport | null {
+  if (!payload.charge_id) return null;
+  return {
+    tenantId: String(payload.tenant_id),
+    chargeId: String(payload.charge_id),
+    accountId: String(payload.account_id),
+    subjectId: String(payload.subject_id),
+    operation: String(payload.operation),
+    feature: (payload.feature as string | null) ?? null,
+    model: (payload.model as string | null) ?? null,
+    region: (payload.region as string | null) ?? null,
+    measures: (payload.measures as Record<string, unknown>) ?? {},
+    dimensions: (payload.dimensions as Record<string, unknown>) ?? {},
+    metadata: (payload.metadata as Record<string, unknown>) ?? {},
+    requested: String(payload.requested),
+    charged: String(payload.charged),
+    allowanceRequested: String(payload.allowance_requested),
+    allowanceCovered: String(payload.allowance_covered),
+    catalogRevisionId: (payload.catalog_revision_id as string | null) ?? null,
+    planId: (payload.plan_id as string | null) ?? null,
+    rateCardKey: (payload.rate_card_key as string | null) ?? null,
+    pricingSnapshot: (payload.pricing_snapshot as Record<string, unknown>) ?? {},
+    ledgerEntryId: (payload.ledger_entry_id as string | null) ?? null,
+    correctionOfChargeId: (payload.correction_of_charge_id as string | null) ?? null,
+    idempotencyKey: String(payload.idempotency_key),
+    requestDigest: String(payload.request_digest),
+    eventAt: String(payload.event_at),
+    createdAt: String(payload.created_at),
+  };
+}
+
+function billingExportFromOutbox(payload: Record<string, unknown>): BillingEventPayloadExport {
+  return {
+    tenantId: String(payload.tenant_id),
+    eventId: String(payload.event_id),
+    provider: String(payload.provider),
+    providerEnvironment: String(payload.provider_environment),
+    providerEventId: String(payload.provider_event_id),
+    eventType: String(payload.event_type),
+    status: String(payload.status),
+    receivedAt: String(payload.received_at),
+    completedAt: payload.completed_at ? String(payload.completed_at) : null,
+    envelope: (payload.envelope as Record<string, unknown>) ?? null,
+    objectKey: (payload.object_key as string | null) ?? null,
+    objectVersion: (payload.object_version as string | null) ?? null,
+    archivedAt: (payload.archived_at as string | null) ?? null,
+  };
 }

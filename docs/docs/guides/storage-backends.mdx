@@ -49,23 +49,27 @@ invariants in [financial safety](./financial-safety.mdx) depend on them.
 
 ## Optional analytics and archive adapters
 
-For high-volume deployments, Bursar can mirror data into external systems
-through optional adapters. These are projections only — PostgreSQL remains
-the canonical source of truth. In Python they live under `bursar.storage`
+For high-volume deployments, Bursar can route high-cardinality data into
+external systems through optional adapters. PostgreSQL remains the canonical
+source for balances, compact usage receipts, billing claims, and idempotency.
+In Python they live under `bursar.storage`
 (importing requires the `postgres` extra; the native S3 adapter also needs
 the `s3` extra); in JavaScript they are exported from the Node-only
 `@zonastery/bursar/node` subpath.
 
 | Adapter | Purpose |
 | --- | --- |
-| `ClickHouseUsageStore` | Usage-analytics sink — mirrors usage charges for spend queries |
-| `S3BillingArchive` | Billing payload archive — offloads raw provider event payloads |
+| `ClickHouseUsageStore` | Usage history and analytics — skips PostgreSQL detail and rollup rows when enabled |
+| `S3BillingArchive` | Billing payload archive — skips PostgreSQL raw envelope rows when enabled |
 
-A transactional outbox drives both: an `OutboxWorker` claims committed events
-and delivers `usage.charge_recorded` to ClickHouse and
-`billing.webhook_completed` to S3. Exported rows and archive keys always
-carry `tenant_id` (S3 keys use `<prefix>/tenants/<tenant-id>/billing-events/...`,
-with the prefix defaulting to `bursar`).
+A transactional outbox carries the complete external payload in the same
+transaction as the canonical receipt or billing claim. An `OutboxWorker`
+delivers `usage.charge_recorded` to ClickHouse and
+`billing.webhook_received` to S3. This avoids a second permanent PostgreSQL
+copy while preserving retries during external outages. Exported rows and
+archive keys always carry `tenant_id` (S3 keys use
+`<prefix>/tenants/<tenant-id>/billing-events/...`, with the prefix defaulting
+to `bursar`).
 
 The runtime composition root wires the Postgres stores, the optional
 adapters, and the outbox worker onto one connection pool:
@@ -103,5 +107,6 @@ await runtime.start({ loadCatalog: true });
 The runtime exposes the composed `bursar` facade plus the underlying
 `creditStore` and `billingStore`. SDK runtimes claim outbox events through
 the tenant-filtered overload, so one runtime can never take another tenant's
-work. Without ClickHouse or S3 configured, the runtime constructs the same
-PostgreSQL-only Bursar with no background outbox polling.
+work. When ClickHouse is configured, analytics and usage-history methods route
+to ClickHouse; when S3 is configured, billing envelopes route to S3. Without
+either adapter, the runtime uses PostgreSQL for those methods and payloads.
