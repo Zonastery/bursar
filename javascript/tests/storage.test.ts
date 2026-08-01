@@ -296,6 +296,80 @@ describe("ClickHouseUsageStore", () => {
       }),
     );
   });
+
+  it("rejects malformed ClickHouse history timestamps", async () => {
+    const query = vi.fn().mockResolvedValue({
+      json: async <T>() =>
+        [
+          {
+            usage_id: "00000000-0000-0000-0000-000000000042",
+            account_id: "00000000-0000-0000-0000-000000000006",
+            operation: "generate",
+            requested: "1.000000",
+            charged: "1.000000",
+            allowance_requested: "0.000000",
+            allowance_covered: "0.000000",
+            feature: null,
+            model: null,
+            region: null,
+            event_at: "not-a-clickhouse-timestamp",
+            idempotency_key: "job:42",
+            metadata: "[]",
+            created_at: "2026-07-29 12:00:00.000000",
+          },
+        ] as T,
+    });
+    const store = new ClickHouseUsageStore({
+      client: {
+        command: vi.fn().mockResolvedValue(undefined),
+        insert: vi.fn().mockResolvedValue(undefined),
+        query,
+      },
+      tenantId: TEST_TENANT_ID,
+      createTable: false,
+    });
+
+    await expect(store.listUsageCharges("00000000-0000-0000-0000-000000000007")).rejects.toThrow(
+      "Invalid ClickHouse timestamp",
+    );
+  });
+
+  it("rejects syntactically valid but impossible ClickHouse timestamps", async () => {
+    const query = vi.fn().mockResolvedValue({
+      json: async <T>() =>
+        [
+          {
+            usage_id: "00000000-0000-0000-0000-000000000042",
+            account_id: "00000000-0000-0000-0000-000000000006",
+            operation: "generate",
+            requested: "1.000000",
+            charged: "1.000000",
+            allowance_requested: "0.000000",
+            allowance_covered: "0.000000",
+            feature: null,
+            model: null,
+            region: null,
+            event_at: "2026-99-99 12:00:00.000000",
+            idempotency_key: "job:42",
+            metadata: "{}",
+            created_at: "2026-07-29 12:00:00.000000",
+          },
+        ] as T,
+    });
+    const store = new ClickHouseUsageStore({
+      client: {
+        command: vi.fn().mockResolvedValue(undefined),
+        insert: vi.fn().mockResolvedValue(undefined),
+        query,
+      },
+      tenantId: TEST_TENANT_ID,
+      createTable: false,
+    });
+
+    await expect(store.listUsageCharges("00000000-0000-0000-0000-000000000007")).rejects.toThrow(
+      "Invalid ClickHouse timestamp",
+    );
+  });
 });
 
 describe("BursarRuntime", () => {
