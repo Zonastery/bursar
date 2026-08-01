@@ -274,7 +274,7 @@ class PostgresBillingStore(BillingStore):
         return map_context("from"), map_context("to")
 
     def _row_to_subscription_change(self, row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
-        if not row:
+        if not row or row.get("id") is None:
             return None
         from_offer, to_offer = self._subscription_offer_contexts(row)
         return BillingSubscriptionChange(
@@ -1071,6 +1071,7 @@ class PostgresBillingStore(BillingStore):
                 "succeeded": ["submitted", "processing", "succeeded"],
                 "failed": ["submitted", "processing", "failed"],
                 "unknown": ["submitted", "processing", "unknown"],
+                "action_required": ["submitted", "action_required"],
             },
             "submitted": {
                 "submitted": [],
@@ -1078,6 +1079,7 @@ class PostgresBillingStore(BillingStore):
                 "succeeded": ["processing", "succeeded"],
                 "failed": ["processing", "failed"],
                 "unknown": ["processing", "unknown"],
+                "action_required": ["action_required"],
             },
             "processing": {
                 "processing": [],

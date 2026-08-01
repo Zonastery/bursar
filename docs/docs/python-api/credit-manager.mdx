@@ -4,6 +4,12 @@ title: Credits service
 
 # Credits service
 
+`bursar.credits` owns credit balances, usage charging, the lease lifecycle,
+plans, teams, and ledger history. All monetary amounts are `Decimal` (six
+decimal places, `ROUND_HALF_UP`).
+
+## Balance operations
+
 ```python
 grant = bursar.credits.add_credits(
     user_id, 100, entry_type="purchase", idempotency_key="purchase:1"
@@ -14,9 +20,28 @@ charge = bursar.credits.deduct_credits(
 refund = bursar.credits.refund_credits(charge.entry_id)
 ```
 
-Every successful monetary result identifies its canonical entry with
-`entry_id`. Leases use `create_lease`, `settle_lease`, `renew_lease`, and
-`release_lease`.
+`add_credits` and `deduct_credits` move a raw amount; `refund_credits` reverses
+a prior entry. Every successful monetary result identifies its canonical ledger
+row with `entry_id`. `get_balance`, `get_available`, and `get_bucket_balances`
+are advisory reads.
+
+## Usage-based charging and leases
+
+`deduct(user_id, metrics, idempotency_key=...)` prices a `UsageMetrics` event
+with the active pricing engine and charges the cost in one atomic,
+idempotency-keyed transaction. `grant_subscription_cycle` grants a billing cycle
+idempotently, and `deduct_team` charges a team's shared pool.
+
+When the final cost is only known after the work runs, use the lease lifecycle.
+`reserve` acquires the hold (the only admission gate), `settle` bills the actual
+cost, `release` returns an unused hold, and `renew` extends an active lease.
+`run_billed` wraps reserve → work → settle in a single call.
+
+```python
+lease = bursar.credits.reserve(user_id, estimate)
+# ... do the work ...
+bursar.credits.settle(user_id, lease.lease_id, actual)
+```
 
 ## Ledger history
 
@@ -31,4 +56,5 @@ if page.next_cursor:
 ```
 
 `list_usage_entries` has the same cursor contract and filters the canonical
-ledger to usage entries. Offset pagination is not supported.
+ledger to usage entries; `list_usage_charges` returns metered usage charges.
+Offset pagination is not supported.

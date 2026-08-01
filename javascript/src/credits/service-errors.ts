@@ -34,6 +34,8 @@ export function raiseLeaseError(error: string, userId: string, amount: Decimal):
     case "released_lease":
     case "settled_lease":
       throw new LeaseNotFoundError(`Lease is already finalized. user=${userId}`);
+    case "policy_mismatch":
+      throw new ConfigError(`Invalid operation policy. user=${userId}`);
     case "missing_quota_measure":
     case "invalid_measure":
       throw new ConfigError(`Invalid quota measures for user ${userId}: ${error}`);
@@ -55,6 +57,8 @@ export function raiseDeductError(error: string, userId: string, cost: Decimal): 
     case "insufficient_headroom":
     case "insufficient_credits":
       throw new InsufficientCreditsError(`Insufficient credits. user=${userId}, requested=${cost}`);
+    case "policy_mismatch":
+      throw new ConfigError(`Invalid operation policy. user=${userId}`);
     case "missing_quota_measure":
     case "invalid_measure":
       throw new ConfigError(`Invalid quota measures for user ${userId}: ${error}`);

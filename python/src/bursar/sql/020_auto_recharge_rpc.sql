@@ -154,6 +154,7 @@ BEGIN
     IF (v_old,p_state) NOT IN (
         ('claimed','submitted'),
         ('submitted','processing'),
+        ('submitted','action_required'),
         ('processing','succeeded'),
         ('processing','failed'),
         ('processing','unknown'),
@@ -176,7 +177,15 @@ BEGIN
     -- A successful attempt remains disarmed until its credit grant updates the
     -- balance. Rearming here permits a second attempt before the first grant
     -- is posted.
-    IF p_state='failed' THEN
+    IF p_state='action_required' THEN
+        UPDATE bursar.billing_auto_recharge_profiles
+        SET state='paused',
+            armed=false
+        WHERE subject_id=v_subject
+          AND provider_environment=v_environment
+          AND enabled;
+
+    ELSIF p_state='failed' THEN
         UPDATE bursar.billing_auto_recharge_profiles
         SET consecutive_failures=consecutive_failures+1,
             armed=CASE

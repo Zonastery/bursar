@@ -4,18 +4,25 @@ title: Storage backends
 
 # Storage backends
 
-Python stores are under `bursar.stores`:
+`PostgresStore` is the only credit store. Import it, and the `CreditStore`
+abstract base, from the package top level:
 
 ```python
-from bursar.stores.memory import MemoryStore
-from bursar.stores.postgres import PostgresStore
-from bursar.stores.supabase import HttpxSupabaseStore
+from bursar import CreditStore, PostgresStore
 ```
 
-JavaScript exports `CreditStore` and `PostgresStore` from
-`@zonastery/bursar`.
+```ts
+import { CreditStore, PostgresStore } from "@zonastery/bursar";
+```
 
-PostgreSQL stores are tenant-bound:
+There is no `bursar.stores` package, and the former in-memory and Supabase HTTP
+stores have been removed. All account state lives in PostgreSQL.
+
+## PostgresStore
+
+The store is tenant-bound: pass the provisioned tenant UUID when constructing
+it. In Python `tenant_id` is a keyword argument; in JavaScript it is the second
+positional argument.
 
 ```python
 store = PostgresStore(database_url, tenant_id=tenant_id)
@@ -25,13 +32,61 @@ store = PostgresStore(database_url, tenant_id=tenant_id)
 const store = new PostgresStore(databaseUrl, tenantId);
 ```
 
-Use the memory store for deterministic unit tests and PostgreSQL for durable,
-concurrent account state. The Supabase HTTP store calls the same canonical
-RPCs and observes the same account/ledger contract.
+No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
+provision the tenant before constructing a store — see
+[CLI and deployment](./cli.mdx) and [multi-tenancy](./multitenancy.mdx).
 
-Custom stores implement `CreditStore`. They must preserve idempotency, account
+Custom stores subclass `CreditStore`. They must preserve idempotency, account
 locking semantics, append-only ledger history, cursor ordering by
-`(created_at, entry_id)`, and atomic lot allocation.
+`(created_at, entry_id)`, and atomic lot allocation, because the financial
+invariants in [financial safety](./financial-safety.mdx) depend on them.
 
-No store performs installation. Run `bursar migrate` with `DATABASE_URL`
-before constructing a store.
+## Optional analytics and archive adapters
+
+For high-volume deployments, Bursar can mirror data into external systems
+through optional adapters. These are projections only — PostgreSQL remains the
+canonical source of truth. In Python they live under `bursar.storage`
+(importing requires the `postgres` extra; the native S3 adapter also needs the
+`s3` extra); in JavaScript they are exported from the Node-only
+`@zonastery/bursar/node` subpath.
+
+| Adapter | Purpose |
+| --- | --- |
+| `ClickHouseUsageStore` | Usage-analytics sink — mirrors usage charges for spend queries |
+| `S3BillingArchive` | Billing payload archive — offloads raw provider event payloads |
+
+A transactional outbox drives both: an `OutboxWorker` claims committed events
+and delivers `usage.charge_recorded` to ClickHouse and
+`billing.webhook_completed` to S3. Exported rows and archive keys always carry
+`tenant_id` (S3 keys use `<prefix>/tenants/<tenant-id>/billing-events/...`, with
+the prefix defaulting to `bursar`).
+
+The runtime composition root wires the Postgres stores, the optional adapters,
+and the outbox worker onto one connection pool:
+
+```python
+from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
+
+runtime = create_bursar_runtime(
+    BursarRuntimeOptions(
+        postgres=database_url,
+        tenant_id=tenant_id,
+        clickhouse=clickhouse_options,  # optional
+        s3=s3_options,                  # optional
+    )
+)
+```
+
+```ts
+import { createBursarRuntime } from "@zonastery/bursar/node";
+
+const runtime = await createBursarRuntime({
+  postgres: databaseUrl,
+  tenantId,
+  clickhouse: clickhouseOptions, // optional
+  s3: s3Options, // optional
+});
+```
+
+Without ClickHouse or S3 configured, the runtime constructs the same
+PostgreSQL-only Bursar with no background outbox polling.

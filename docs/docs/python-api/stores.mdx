@@ -5,18 +5,29 @@ title: Stores
 # Python stores
 
 ```python
-from bursar.stores.memory import MemoryStore
-from bursar.stores.postgres import PostgresStore, run_migrations
-from bursar.stores.supabase import HttpxSupabaseStore
+from bursar import PostgresStore, CreditStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
 ```
 
-`CreditStore` in `bursar.stores.base` is the custom-store abstraction.
-Implementations provide the canonical account, ledger, lot, lease, plan, team,
-configuration, and billing-support operations required by their capabilities.
+`PostgresStore` is the only bundled store. It connects through `psycopg2` and
+runs every mutation as a canonical SQL function (RPC). `tenant_id` is a required
+keyword argument (a UUID string or `uuid.UUID`) bound to every transaction the
+store runs. `PostgresStore` requires the `bursar[postgres]` extra
+(`pip install bursar[postgres]`).
 
-Installation remains separate:
+`CreditStore` is the abstract base class for a custom backend. Implementations
+must preserve account locking, idempotency, append-only ledger history,
+credit-lot allocation, and stable `(created_at, entry_id)` cursor ordering for
+the account, ledger, lot, lease, plan, team, and configuration operations their
+capabilities require.
 
-```python
-run_migrations(database_url)
-store = PostgresStore(database_url)
+## Migrations
+
+The package never applies SQL on construction. Run the bundled migrations with
+the `bursar migrate` CLI (which reads `DATABASE_URL`) during deployment, before
+constructing a store:
+
+```bash
+bursar migrate
 ```

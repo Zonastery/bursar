@@ -38,8 +38,7 @@ Repeat `--post-migrate-sql` to apply multiple files in order. Host files are
 executed on every run and are not recorded in Bursar's migration ledger.
 
 ```python
-from bursar import Bursar
-from bursar.stores.postgres import PostgresStore
+from bursar import Bursar, PostgresStore
 
 store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)

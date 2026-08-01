@@ -68,24 +68,31 @@ export class ExpressionParser {
   }
 
   private comparison(): Node {
-    let left = this.addition();
-    if (this.match("not") && this.match("in")) {
-      left = {
-        type: "comparison",
-        op: "not in",
-        left,
-        right: this.addition(),
-      } as CompareNode;
-    }
-    while (this.match("==", "!=", "<", "<=", ">", ">=", "in")) {
-      left = {
+    const left = this.addition();
+    let node: Node;
+    if (this.check("not")) {
+      this.match("not");
+      if (!this.match("in")) {
+        throw new ExpressionError("expected 'in' after 'not'");
+      }
+      node = { type: "comparison", op: "not in", left, right: this.addition() } as CompareNode;
+    } else if (this.match("==", "!=", "<", "<=", ">", ">=", "in")) {
+      node = {
         type: "comparison",
         op: this.previous().value,
         left,
         right: this.addition(),
       } as CompareNode;
+    } else {
+      return left;
     }
-    return left;
+    // Reject chained comparisons (a < b < c): a left-associative fold would
+    // evaluate them as ((a<b)<c) whereas Python uses and-chaining semantics, so
+    // forbidding them keeps the two engines identical (parity).
+    if (this.check("==", "!=", "<", "<=", ">", ">=", "in", "not")) {
+      throw new ExpressionError("chained comparisons are not supported");
+    }
+    return node;
   }
 
   private addition(): Node {

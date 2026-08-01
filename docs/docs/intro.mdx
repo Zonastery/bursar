@@ -21,19 +21,21 @@ create database objects.
 
 ## Create a facade
 
-```python
-from bursar import Bursar
-from bursar.stores.postgres import PostgresStore
+`PostgresStore` is imported from the package top level and is bound to one
+tenant, so provision a tenant first (see [multi-tenancy](./multitenancy.mdx)).
 
-bursar = Bursar.create(credit_store=PostgresStore(database_url))
+```python
+from bursar import Bursar, PostgresStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
+bursar = Bursar.create(credit_store=store)
 ```
 
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const bursar = new Bursar({
-  creditStore: new PostgresStore(process.env.DATABASE_URL!),
-});
+const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+const bursar = new Bursar({ creditStore: store });
 ```
 
 All monetary mutations append a `LedgerEntry`, update the locked canonical

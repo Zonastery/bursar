@@ -117,6 +117,7 @@ export class BillingAutoRechargeRepository {
         succeeded: ["submitted", "processing", "succeeded"],
         failed: ["submitted", "processing", "failed"],
         unknown: ["submitted", "processing", "unknown"],
+        action_required: ["submitted", "action_required"],
       },
       submitted: {
         submitted: [],
@@ -124,6 +125,7 @@ export class BillingAutoRechargeRepository {
         succeeded: ["processing", "succeeded"],
         failed: ["processing", "failed"],
         unknown: ["processing", "unknown"],
+        action_required: ["action_required"],
       },
       processing: {
         processing: [],

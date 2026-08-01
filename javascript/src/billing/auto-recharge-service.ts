@@ -263,10 +263,9 @@ export class AutoRechargeService {
     if (charge.status === "requires_customer_action") {
       await this.billing.updateAutoRechargeAttempt({
         id: attempt.id,
-        state: "submitted",
+        state: "action_required",
         providerAttemptId: charge.providerPaymentId ?? null,
       });
-      await this.billing.upsertAutoRechargeProfile({ ...profile, state: "paused" });
       return { outcome: "action_required", charge };
     }
     if (charge.status === "succeeded" || charge.status === "processing") {

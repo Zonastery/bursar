@@ -97,7 +97,7 @@ For immediate `account_created` grants, attach Bursar's tenant-aware trigger
 function to the SaaS principal table and pass the provisioned tenant slug:
 
 ```sql
-DROP TRIGGER IF EXISTS bursar_account_created ON public."user";
+DROP TRIGGER IF EXISTS bursar_account_created ON app.users;
 CREATE TRIGGER bursar_account_created
 AFTER INSERT ON app.users
 FOR EACH ROW

@@ -1547,11 +1547,21 @@ class PostgresStore(CreditStore):
         """
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        # Thread the idempotency key through metadata (the RPC reads it from
-        # metadata->>'idempotency_key') for idempotent replay (H12).
-        if idempotency_key:
-            meta["idempotency_key"] = idempotency_key
-        result = self._team_repo.deduct_team(team_id, user_id, str(amount), json.dumps(meta))
+        # Generate a default idempotency key when the caller supplies none, so two
+        # otherwise-identical team charges are not collapsed into a single replay
+        # (mirrors the JS store). deduct_team dedupes on the key argument.
+        effective_key = idempotency_key or f"team-usage:{uuid4()}"
+        meta["idempotency_key"] = effective_key
+        operation_meta = meta.get("operation")
+        operation = operation_meta if isinstance(operation_meta, str) and operation_meta else "team_usage"
+        result = self._team_repo.deduct_team(
+            team_id,
+            user_id,
+            str(amount),
+            effective_key,
+            operation,
+            json.dumps(meta),
+        )
         if result is None:
             raise StoreError("deduct_team returned no result")
         if result.error is not None:

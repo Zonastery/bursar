@@ -7,15 +7,16 @@ title: JavaScript API
 The package is ESM-only and requires Node.js 22 or newer.
 
 ```ts
-import {
-  Bursar,
-  PostgresStore,
-  type LedgerCursor,
-  type LedgerEntry,
-  type LedgerPage,
-} from "@zonastery/bursar";
+import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const bursar = new Bursar({ creditStore: new PostgresStore(databaseUrl) });
+const store = new PostgresStore(databaseUrl, tenantId);
+const bursar = new Bursar({ creditStore: store });
 ```
 
-The facade exposes `credits`, `catalog`, and optional `billing` capabilities.
+`PostgresStore` is the only bundled store; extend the abstract `CreditStore` for
+a custom backend. `tenantId` scopes every store operation to a single tenant.
+Apply the database schema with the `bursar migrate` CLI before constructing a
+store (see the Stores reference).
+
+The facade exposes `credits`, `catalog`, and `accounts`, plus the optional
+`billing` and `commerce` capabilities.

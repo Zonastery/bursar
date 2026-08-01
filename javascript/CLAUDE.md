@@ -9,11 +9,11 @@ TypeScript (strict), `decimal.js` for all money (no native `number` for amounts)
 
 | File | Purpose |
 |------|---------|
-| `src/credits-service.ts` | Internal credit capability used by the `Bursar` facade. |
-| `src/stores/credit-store.ts` | `CreditStore` abstract class — interface every store implements. |
-| `src/stores/postgres-store.ts` | `PostgresStore` — calls SQL RPCs via `pg`. |
-| `src/stores/events.ts` (re-exported from `stores/`) | `CreditEventEmitter`, `CreditEvent`, event types. |
-| `src/types.ts` | All exported types: result types, `PlanDefinition`, `OperationPolicy`, `LeaseResult`, etc. |
+| `src/credits/service.ts` | Internal credit capability used by the `Bursar` facade. |
+| `src/credits/store.ts` | `CreditStore` abstract class — interface every store implements. |
+| `src/credits/postgres/store.ts` | `PostgresStore` — calls SQL RPCs via `pg`. |
+| `src/credits/events.ts` | `CreditEventEmitter`, `CreditEvent`, event types. |
+| `src/credits/types/` | All exported result types (`LeaseResult`, `BalanceResult`, ...). `PlanDefinition` lives in `config.ts`. |
 | `src/engine.ts` | `PricingEngine` — expression evaluation, same logic as Python. |
 | `src/errors.ts` | All error classes: `InsufficientCreditsError`, `ConcurrencyLimitError`, `FeatureNotEntitledError`, `LeaseExpiredError`, `LeaseNotFoundError`, etc. |
 | `src/metrics.ts` | `UsageMetrics`, `ToolCall`. |
@@ -45,7 +45,7 @@ Bursar facade
 - All amounts are `Decimal` from `decimal.js` — never plain `number`.
 - Import: `import Decimal from "decimal.js"`.
 - Money fields on result objects are always `Decimal`, not strings or numbers.
-- Parity with Python: same config, same rounding (`ROUND_HALF_UP`, 4dp), same result.
+- Parity with Python: same config, same rounding (`ROUND_HALF_UP`, 6dp), same result.
 
 ## Constructor signature
 ```typescript

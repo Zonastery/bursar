@@ -376,11 +376,10 @@ class AutoRechargeService:
             self._billing.update_auto_recharge_attempt(
                 AutoRechargeAttemptUpdate(
                     id=attempt.id,
-                    state="submitted",
+                    state="action_required",
                     provider_attempt_id=charge.provider_payment_id,
                 )
             )
-            self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
             return AutoRechargeProcessResult(outcome="action_required", charge=charge)
 
         if charge.status in {"succeeded", "processing"}:

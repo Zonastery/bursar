@@ -111,6 +111,16 @@ END
 $$;
 
 GRANT SELECT ON bursar.storage_settings TO bursar_runtime;
+-- storage_settings is a global (non-tenant) singleton, but 026 blanket-enables
+-- RLS on every bursar table. Without an explicit runtime policy the SELECT grant
+-- above returns zero rows for the NOBYPASSRLS bursar_runtime role, silently
+-- NULLing the storage config that the SECURITY INVOKER quota validators
+-- (check_quota_usage_event, validate_catalog_plan_quota) read directly -- which
+-- would disable the event-lateness and rolling-quota-retention guards. No tenant
+-- data lives here, so grant runtime read of this operator-global config.
+CREATE POLICY storage_settings_runtime_read ON bursar.storage_settings
+FOR SELECT TO bursar_runtime
+USING (TRUE);
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA bursar TO bursar_runtime;
 
 -- Runtime-owned SECURITY DEFINER RPCs may call ordinary validation, policy,

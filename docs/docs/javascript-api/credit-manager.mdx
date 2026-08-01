@@ -4,17 +4,45 @@ title: Credits service
 
 # Credits service
 
+`bursar.credits` owns credit balances, usage charging, the lease lifecycle,
+plans, teams, and ledger history. Every method is async and every monetary
+amount is a `Decimal` (six decimal places, `ROUND_HALF_UP`).
+
+## Balance operations
+
 ```ts
 const grant = await bursar.credits.addCredits(userId, 100, {
   type: "purchase",
+  idempotencyKey: "purchase:1",
 });
-const charge = await bursar.credits.deductCredits(userId, 5, {
-  idempotencyKey: "operation:1",
-});
+const charge = await bursar.credits.deductCredits(userId, 5);
 const refund = await bursar.credits.refundCredits(charge.entryId);
 ```
 
-Successful monetary results use `entryId`.
+`addCredits` and `deductCredits` move a raw amount; `refundCredits` reverses a
+prior entry. Successful monetary results identify their canonical ledger row
+with `entryId`. `addCredits` and `refundCredits` accept an `idempotencyKey` for
+replay-safe retries (`deductCredits` does not).
+
+## Usage-based charging and leases
+
+`deduct(userId, metrics, idempotencyKey?)` prices a `UsageMetrics` event with the
+active pricing engine and charges the cost in one atomic transaction.
+`grantSubscriptionCycle` grants a billing cycle idempotently, and `deductTeam`
+charges a team's shared pool.
+
+When the final cost is only known after the work runs, use the lease lifecycle.
+`reserve` acquires the hold (the only admission gate), `settle` bills the actual
+cost, `release` returns an unused hold, and `renew` extends an active lease.
+`runBilled` wraps reserve → work → settle in a single call.
+
+```ts
+const lease = await bursar.credits.reserve(userId, estimate);
+// ... do the work ...
+await bursar.credits.settle(userId, lease.leaseId, actual);
+```
+
+## Ledger history
 
 ```ts
 let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
@@ -28,5 +56,5 @@ if (page.nextCursor) {
 }
 ```
 
-`listUsageEntries` provides the usage-only cursor view. Offset pagination is
-not supported.
+`listUsageEntries` provides the usage-only cursor view; `listUsageCharges`
+returns metered usage charges. Offset pagination is not supported.

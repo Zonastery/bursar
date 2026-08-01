@@ -39,6 +39,25 @@ commands instead of writing Bursar-owned tables.
 Application commands such as `bursar config set` also require
 `BURSAR_TENANT_ID`.
 
+## Config versions
+
+Catalog versions are immutable and managed per tenant through `bursar config`:
+
+```bash
+bursar config validate ./pricing.yaml   # validate without applying (--json for CI)
+bursar config set ./pricing.yaml         # publish + activate a new version (--label)
+bursar config get                        # print the active version as JSON
+bursar config list                       # list all versions (* = active)
+bursar config activate 3                 # switch the active version
+bursar config export 3                   # dump one version as JSON
+bursar config diff 2 3                   # unified diff between two versions
+bursar config schema                     # print the config JSON Schema
+```
+
+`config set` always creates a new version and no-ops when the payload is
+identical to the active one. `validate`, `set`, and `export` accept `-` to read
+from stdin.
+
 ## Host integration SQL
 
 Applications can add trusted, host-owned SQL after Bursar's bundled migrations:

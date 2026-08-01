@@ -3,34 +3,34 @@
 Credit billing engine for AI SaaS. Calculates usage costs from expressions, manages user balances, enforces financial-safety policy via an atomic lease lifecycle, and handles provider billing (Stripe, Dodo) through a unified event-driven billing subsystem.
 
 ## Stack
-Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (no float), safe `ast`-based expression engine (no eval/exec). Optional Postgres (`psycopg2`) backend; in-memory store for testing. Stripe/Dodo provider integrations in `providers/`.
+Python 3.11+, Pydantic v2 (models/validation), `decimal.Decimal` for all money (no float), safe `ast`-based expression engine (no eval/exec). Optional Postgres (`psycopg2`) backend — `PostgresStore` is the only store. Stripe/Dodo provider integrations in `providers/`.
 
 ## Key source files
 
 | File | Purpose |
 |------|---------|
-| `src/bursar/credits_service.py` | Internal credit capability owned by the `Bursar` facade. |
-| `src/bursar/interface/base.py` | `CreditStore` ABC — the interface every store must implement. |
-| `src/bursar/interface/postgres.py` | `PostgresStore` — production store; all mutations call SQL RPCs via `psycopg2`. |
-| `src/bursar/interface/models.py` | All Pydantic result types, `PlanDefinition`, `OperationPolicy`. |
+| `src/bursar/credits/service.py` | Internal credit capability (`CreditsService`) owned by the `Bursar` facade. |
+| `src/bursar/credits/store.py` | `CreditStore` ABC — the interface every store must implement. |
+| `src/bursar/credits/postgres/store.py` | `PostgresStore` — production store; all mutations call SQL RPCs via `psycopg2`. |
+| `src/bursar/credits/types/` | Pydantic result types and policy types (`OperationPolicy`, `PlanCreditPolicy`, ...). `PlanDefinition` lives in `config/`. |
 | `src/bursar/engine.py` | `PricingEngine` — evaluates expression strings against `UsageMetrics`. |
-| `src/bursar/events.py` | `CreditEventEmitter` — typed pub/sub, 19 event types. |
+| `src/bursar/credits/events.py` | `CreditEventEmitter` — typed pub/sub for credit lifecycle events. |
 | `src/bursar/metrics.py` | `UsageMetrics`, `ToolCall` — inputs to the pricing engine. |
-| `src/bursar/config.py` | `BursarConfig` — validates expression strings at load time. |
-| `src/bursar/expr.py` | Safe `ast`-based expression evaluator for pricing formulas. |
+| `src/bursar/config/` | `BursarConfig` (`config/types.py`) — validates expression strings at load time. |
+| `src/bursar/expr/` | Safe `ast`-based expression evaluator for pricing formulas. |
 | `src/bursar/billing/billing_service.py` | Provider-agnostic billing orchestration owned by `Bursar`. |
-| `src/bursar/billing/postgres.py` | `PostgresBillingStore` — billing state persistence via `psycopg2`. |
-| `src/bursar/billing/store.py` | `BillingStore` ABC — interface for billing persistence. |
-| `src/bursar/billing/models.py` | Billing Pydantic models: events, subscriptions, invoices, payments, offers, topups. |
+| `src/bursar/billing/postgres/store.py` | `PostgresBillingStore` — billing state persistence via `psycopg2`. |
+| `src/bursar/billing/billing_store.py` | `BillingStore` ABC — interface for billing persistence. |
+| `src/bursar/billing/types/` | Billing Pydantic models: events, subscriptions, invoices, payments, offers, topups. |
 | `src/bursar/providers/` | Stripe and Dodo webhook→event mappers and provider wrappers. |
-| `src/bursar/repositories/` | Data-access layer (balance, bucket, lease, deduction, plan, pricing, team, analytics, billing sub-repos). |
+| `src/bursar/credits/postgres/repositories/` | Data-access layer (balance, bucket, lease, deduction, plan, pricing, team, analytics). |
 
 ## Architecture
 
 ```
 Bursar facade
   ├── PricingEngine          (calculate cost from UsageMetrics)
-  ├── CreditStore            (ABC — memory / postgres)
+  ├── CreditStore            (ABC — postgres only)
   │     ├── deduct_with_allowance()   atomic: allowance→cap→floor→debit (internal core)
   │     ├── create_lease / settle_lease / release_lease / renew_lease
   │     └── ... (30+ abstract methods)
@@ -54,7 +54,7 @@ BillingService
 
 ## Money invariants
 - All amounts are `decimal.Decimal`; never `float`.
-- Stored as `NUMERIC(18,4)` in Postgres; quantized with `ROUND_HALF_UP`.
+- Stored as `numeric(20,6)` in Postgres; quantized to 6dp with `ROUND_HALF_UP`.
 - Both Python and JS round identically — same config bills the same amount.
 
 ## Tests

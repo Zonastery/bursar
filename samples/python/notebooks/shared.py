@@ -48,7 +48,7 @@ def start_postgres_store(pgdata: str | None = None) -> tuple:
         ``(store, pgdata_path)``.  Caller **must** call ``cleanup(pgdata_path)``
         when done (e.g. in a ``finally`` block or final notebook cell).
     """
-    from bursar.stores.postgres import PostgresStore, run_migrations
+    from bursar.credits.postgres.store import PostgresStore, run_migrations
 
     pg_bin = _find_pg()
     pgdata = pgdata or tempfile.mkdtemp(prefix="bursar_demo_")

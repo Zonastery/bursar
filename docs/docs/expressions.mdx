@@ -36,6 +36,14 @@ The `**` / exponentiation operator is **rejected at config-load time** in both S
 | `in` | `"gpt-4" in model` |
 | `not in` | `"batch" not in job_type` |
 
+:::warning Chained comparisons (`a < b < c`) are not supported
+Both SDKs reject chained comparisons at parse time with an `ExpressionError`.
+Python's chaining semantics (`a < b and b < c`) cannot be reproduced by the
+JavaScript left-associative parser, so neither engine allows them — this keeps
+the two engines byte-identical. Write the explicit `and` form instead:
+`tool_calls > 0 and tool_calls <= 10`.
+:::
+
 ## Boolean
 
 | Operator | Example |

@@ -196,7 +196,7 @@ class BursarRuntime:
         )
 
         repository = PostgresStorageRepository(
-            PostgresClient.from_pool(psycopg_pool).query,
+            PostgresClient.from_pool(psycopg_pool, tenant_id=options.tenant_id).query,
             options.tenant_id,
         )
         handlers = self._create_handlers(repository)

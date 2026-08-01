@@ -5,12 +5,20 @@ title: Stores
 # JavaScript stores
 
 ```ts
-import { CreditStore, PostgresStore } from "@zonastery/bursar";
+import { PostgresStore, CreditStore } from "@zonastery/bursar";
+
+const store = new PostgresStore(databaseUrl, tenantId);
 ```
 
-`PostgresStore` uses the canonical SQL functions. Extend `CreditStore` for a
-custom backend and preserve account locking, idempotency, append-only history,
-lot allocation, and stable `(createdAt, entryId)` cursor ordering.
+`PostgresStore` is the only bundled store. It runs every mutation as a canonical
+SQL function (RPC) through `pg`. `tenantId` is a required argument that scopes
+every transaction to one tenant.
 
-The JavaScript package never installs SQL. Run the migration CLI during
-deployment before constructing the store.
+Extend `CreditStore` for a custom backend and preserve account locking,
+idempotency, append-only ledger history, credit-lot allocation, and stable
+`(createdAt, entryId)` cursor ordering.
+
+The JavaScript package ships no schema SQL and has no migration command of its
+own. Apply the bundled migrations with the `bursar migrate` CLI (from the Python
+`bursar` package, reading `DATABASE_URL`) during deployment, before constructing
+the store.

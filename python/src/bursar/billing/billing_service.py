@@ -618,6 +618,21 @@ class BillingService:
             if uid:
                 event.user_id = uid
                 return uid
+        # Refund/dispute events (e.g. a Stripe dashboard refund) carry no customer
+        # or subscription — the only link to the user is the stored payment row.
+        # Without this tier a refund's credit clawback is silently skipped (parity
+        # with the JS resolveUserId payment fallback).
+        provider_payment_id = (
+            (event.payment.provider_payment_id if event.payment else None)
+            or (event.refund.provider_payment_id if event.refund else None)
+            or (event.dispute.provider_payment_id if event.dispute else None)
+        )
+        if provider_payment_id:
+            payment = self._store.get_billing_payment(event.provider, provider_payment_id)
+            uid = payment.get("user_id") if isinstance(payment, dict) else None
+            if isinstance(uid, str) and uid:
+                event.user_id = uid
+                return uid
         return None
 
     def _offer_for_event(

@@ -7,10 +7,9 @@ commit (or roll back) together inside the store (contract §2, C1).
 
 Example::
 
-    from bursar import CreditsService, UsageMetrics
-    from bursar.stores.supabase import HttpxSupabaseStore
+    from bursar import CreditsService, PostgresStore, UsageMetrics
 
-    store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
+    store = PostgresStore(database_url, tenant_id=tenant_id)
     manager = CreditsService(store=store)
 
     # One-time setup (creates tables + RPCs)
@@ -185,7 +184,7 @@ class CreditsService:
     """Orchestrates credit operations: pricing -> atomic deduct.
 
     Args:
-        store: A ``CreditStore`` adapter (HttpxSupabaseStore, PostgresStore, etc.).
+        store: A ``CreditStore`` adapter (e.g. ``PostgresStore``).
         engine: An optional pre-configured ``PricingEngine``. If omitted,
             call ``load_pricing_from_store()`` or ``publish_pricing_from_dict()``
             before ``deduct()``.
@@ -1519,7 +1518,7 @@ class CreditsService:
             raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
         if error == "operation_not_allowed":
             raise OperationNotAllowedError(f"Operation is not allowed. User={user_id}")
-        if error in {"missing_quota_measure", "invalid_measure"}:
+        if error in {"missing_quota_measure", "invalid_measure", "policy_mismatch"}:
             raise ConfigError(f"Deduction configuration is invalid: {error}. User={user_id}")
         if error in {"insufficient_credits", "insufficient_headroom"}:
             raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")

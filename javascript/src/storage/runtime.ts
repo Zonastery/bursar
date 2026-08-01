@@ -4,7 +4,7 @@ import { PostgresBillingStore } from "../billing/postgres/store.js";
 import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
 import type { UsageAnalyticsStore } from "../credits/types/index.js";
-import type { PostgresPool } from "../shared/postgres-client.js";
+import { PostgresClient, type PostgresPool } from "../shared/postgres-client.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import { ClickHouseUsageStore, type ClickHouseUsageStoreOptions } from "./adapters/clickhouse.js";
 import { S3BillingArchive, type S3BillingArchiveOptions } from "./adapters/s3.js";
@@ -113,7 +113,7 @@ export class BursarRuntime {
       },
     });
 
-    const query: QueryFn = async (text, params) => (await pool.query(text, params)).rows;
+    const query: QueryFn = new PostgresClient(pool, { tenantId: options.tenantId }).query;
     const repository = new PostgresStorageRepository(query, options.tenantId);
     const handlers = this.createHandlers(repository);
     this.worker =

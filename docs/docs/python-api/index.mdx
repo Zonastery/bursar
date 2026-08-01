@@ -4,15 +4,23 @@ title: Python API
 
 # Python API
 
-Python 3.12 and 3.13 are supported.
+Python 3.12 and 3.13 are supported. Install the Postgres backend with
+`pip install bursar[postgres]`.
 
 ```python
-from bursar import Bursar, LedgerCursor, LedgerEntry, LedgerPage
-from bursar.stores.postgres import PostgresStore
+from bursar import Bursar, PostgresStore, CreditStore
 
-bursar = Bursar.create(credit_store=PostgresStore(database_url))
+store = PostgresStore(database_url, tenant_id=tenant_id)
+bursar = Bursar.create(credit_store=store)
 ```
 
-Use `bursar.credits` for account, lease, plan, team, and ledger operations;
-`bursar.catalog` for canonical configuration; and optional `bursar.billing`
-for provider lifecycle operations.
+`PostgresStore` is the only bundled store; `CreditStore` is the abstract base
+class for custom backends. `tenant_id` scopes every store operation to a single
+tenant. Apply the database schema with the `bursar migrate` CLI before
+constructing a store (see the Stores reference).
+
+The facade exposes `bursar.credits` for account, credit, lease, plan, team,
+ledger, and usage operations; `bursar.catalog` for canonical pricing
+configuration; `bursar.accounts` for account lifecycle; and the optional
+`bursar.billing` and `bursar.commerce` capabilities for payment-provider
+lifecycle operations.
