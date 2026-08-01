@@ -61,10 +61,13 @@ export class BillingAutoRechargeRepository {
     return row?.subject_id == null ? null : profileFromRow(row);
   }
 
-  async upsertProfile(profile: BillingAutoRechargeProfile): Promise<void> {
+  async upsertProfile(
+    profile: BillingAutoRechargeProfile,
+    options: { resetCooldown?: boolean } = {},
+  ): Promise<void> {
     const rows = await this.query(
       `SELECT bursar.upsert_auto_recharge_profile(
-         $1::uuid, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11
+         $1::uuid, $2, $3, $4::uuid, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
        ) AS updated`,
       [
         profile.userId,
@@ -78,6 +81,9 @@ export class BillingAutoRechargeRepository {
         profile.windowCount,
         profile.windowAnchor,
         profile.windowTimezone,
+        profile.armed,
+        profile.state,
+        options.resetCooldown ?? false,
       ],
     );
     if (!(rows[0] as Record<string, unknown> | undefined)?.updated) {
@@ -132,9 +138,21 @@ export class BillingAutoRechargeRepository {
         succeeded: ["succeeded"],
         failed: ["failed"],
         unknown: ["unknown"],
+        action_required: ["action_required"],
       },
-      unknown: { unknown: [], processing: ["processing"], action_required: ["action_required"] },
-      action_required: { action_required: [], processing: ["processing"] },
+      unknown: {
+        unknown: [],
+        processing: ["processing"],
+        succeeded: ["succeeded"],
+        failed: ["failed"],
+        action_required: ["action_required"],
+      },
+      action_required: {
+        action_required: [],
+        processing: ["processing"],
+        succeeded: ["succeeded"],
+        failed: ["failed"],
+      },
     };
     const path = paths[current]?.[input.state];
     if (!path) {

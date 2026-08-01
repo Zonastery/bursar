@@ -1,0 +1,222 @@
+---
+title: Billing and commerce
+---
+
+# Billing and commerce
+
+Billing connects your credit ledger to a payment provider. Bursar owns the
+offer catalog and the normalized event state machine; the provider only
+executes payments. The `commerce` section of the canonical config declares
+providers, offers, and auto-recharge guardrails.
+
+## Providers
+
+`commerce.providers` names the payment providers an environment supports.
+Each provider is one of `stripe`, `dodo`, or `custom` (with an `adapter`):
+
+```yaml
+commerce:
+  providers:
+    stripe: { type: stripe }
+```
+
+At runtime, each provider is a `PaymentProvider` adapter (Stripe, Dodo, or
+custom) registered in `CommerceOptions.providers`. Adapters do two jobs: they
+create checkout sessions, and they map provider webhooks to **normalized
+`BillingEvent`s**. Events enter through `bursar.ingest_billing_event(event)` /
+`ingestBillingEvent`, which claims each event by
+`(provider, event_id, event_type)`, routes it through the lifecycle handlers,
+and replays nothing twice.
+
+## Offers
+
+`commerce.offers` defines what customers can buy. Prices are integer minor
+units with a currency and a `tax_behavior`; provider references map the offer
+to provider objects (`stripe_price.price_id`, `dodo_product.product_id`).
+
+**Subscription offers** bind a plan to a billing interval, an optional trial,
+and an optional cycle grant — the Pro monthly plan with a 50,000-credit grant:
+
+```yaml
+offers:
+  pro_monthly:
+    type: subscription
+    display_name: Pro Monthly
+    price: { amount_minor: 2000, currency: USD }
+    providers:
+      stripe: { type: stripe_price, price_id: price_pro_monthly }
+    plan: pro
+    billing_interval: { unit: month, count: 1 }
+    cycle_grant:
+      amount: "50000"
+      bucket: purchased
+      renewal: replace_previous
+```
+
+**Topup offers** sell credit packs — `credits_per_unit` credits per unit,
+bounded `quantity`, a target `bucket`, and `lot_behavior` (`separate_lots`
+keeps each purchase as its own lot; `merge_and_refresh` merges):
+
+```yaml
+  credits_10k:
+    type: topup
+    display_name: "10,000 Credits"
+    price: { amount_minor: 500, currency: USD }
+    providers:
+      stripe: { type: stripe_price, price_id: price_credits_10k }
+    credits_per_unit: "10000"
+    quantity: { minimum: 1, maximum: 10, default: 1 }
+    bucket: purchased
+    lot_behavior: separate_lots
+```
+
+## Checkout
+
+`create_checkout` resolves the offer, enforces quantity bounds and existing
+subscriptions, records a checkout intent, and asks the provider for a session
+URL. The user pays on the provider's site; the provider webhook arrives as a
+`checkout.completed` event and completes the intent.
+
+```python
+from bursar import Bursar, CommerceOptions, CreateCheckoutInput, PostgresBillingStore, PostgresStore
+from bursar.providers.stripe.provider import StripeProvider
+
+bursar = Bursar.create(
+    credit_store=PostgresStore(database_url, tenant_id=tenant_id),
+    billing_store=PostgresBillingStore(database_url, tenant_id=tenant_id),
+    commerce_options=CommerceOptions(
+        default_provider="stripe",
+        providers={
+            "stripe": lambda ctx: StripeProvider(
+                sink=ctx.event_sink,
+                webhook_secret=stripe_webhook_secret,
+            )
+        },
+    ),
+)
+
+result = await bursar.commerce.create_checkout(
+    CreateCheckoutInput(
+        subject_id=user_id,
+        offer_key="credits_10k",
+        quantity=2,
+        return_url=...,      # success redirect
+        cancel_url=...,      # cancel redirect
+        operation_key="checkout:1",
+    )
+)
+print(result.url)
+```
+
+```ts
+import {
+  Bursar,
+  PostgresBillingStore,
+  PostgresStore,
+  StripeProvider,
+} from "@zonastery/bursar";
+
+const bursar = new Bursar({
+  creditStore: new PostgresStore(databaseUrl, tenantId),
+  billingStore: new PostgresBillingStore(databaseUrl, tenantId),
+  commerceOptions: {
+    defaultProvider: "stripe",
+    providers: {
+      stripe: (ctx) => new StripeProvider(() => stripe, ctx.eventSink, webhookSecret),
+    },
+  },
+});
+
+const result = await bursar.commerce.createCheckout({
+  subjectId: userId,
+  offerKey: "credits_10k",
+  quantity: 2,
+  returnUrl,
+  cancelUrl,
+  operationKey: "checkout:1",
+});
+console.log(result.url);
+```
+
+Webhook events also flow through `ingest_billing_event`, so a payment that
+never touches your checkout endpoint still settles credits. On
+`payment.succeeded` for a topup, the offer's credits are granted to the
+configured bucket; on `checkout.completed` for a subscription, the cycle grant
+posts and the plan is assigned.
+
+## Subscriptions
+
+`BillingSubscriptionStatus` covers the provider lifecycle: `incomplete`,
+`trialing`, `active`, `past_due`, `canceled`, `unpaid`, `paused`, and `expired`.
+A `past_due` subscription enters a grace period; when the grace end passes,
+the subscription is revoked (`expire_past_due_grace_periods` sweeps expired
+periods) and `grace_expired_at` is recorded.
+
+Subscriptions drive entitlement: activation events assign the offer's plan
+through a provisioning port (`set_user_plan`), and cancellation moves the
+account to the terminal plan or clears the assignment — the same path an
+admin's `set_user_plan` uses, so allowances, quotas, and admission all follow
+from the subscription state. `resolve_offer(provider, product_id=None, price_id=None)`
+maps a provider object to the configured offer, e.g. from a webhook payload:
+
+```python
+offer = bursar.billing.resolve_offer("stripe", price_id="price_pro_monthly")
+```
+
+## Plan changes
+
+`commerce.subscription_changes` configures how plan changes behave per
+direction — `upgrade`, `downgrade`, `lateral`, and `cadence_change`. Each
+policy sets `effective` (`immediate` or `renewal`), `proration` (`prorated` or
+`none`), and `payment_failure` (`prevent_change` or `apply_change`): a
+downgrade may wait for renewal, while an upgrade applies immediately.
+
+## Auto-recharge
+
+`commerce.auto_recharge` turns a low balance into a topup purchase without
+user interaction. Guardrails bound every decision:
+
+| Field | Meaning |
+| --- | --- |
+| `eligible_topups` | Topup offers auto-recharge may buy |
+| `balance_below` | Threshold that triggers a purchase (`min`/`max`/`default` credits) |
+| `rearm_above` | Balance that arms auto-recharge again (must exceed `balance_below.maximum`) |
+| `quantity` | Units per purchase |
+| `limits` | `max_purchases` per window, `max_charge_minor`, cooldown, and failure handling (`max_consecutive_failures`, `failure_action: pause`) |
+
+```yaml
+auto_recharge:
+  eligible_topups: [credits_10k]
+  balance_below: { minimum: "1000", maximum: "5000", default: "2000" }
+  rearm_above: "20000"
+  quantity: { minimum: 1, maximum: 10, default: 1 }
+  limits:
+    max_purchases: 5
+    window: { type: calendar, unit: day, count: 1 }
+    max_charge_minor: 5000
+    cooldown: { unit: hour, count: 1 }
+    max_consecutive_failures: 3
+    failure_action: pause
+```
+
+When commerce is enabled, the facade hooks auto-recharge after every
+deduction. Processing outcomes are `not_configured`, `disabled`,
+`above_threshold`, `already_processing`, `limit_reached`, `submitted`,
+`action_required`, and `failed`. Per-user profiles persist threshold, topup,
+quantity, window counts, and payment method, so recharges are idempotent and
+bounded even across process restarts.
+
+## The billing store
+
+Billing state persists in a `PostgresBillingStore` that must be constructed
+**alongside** the credit store — the two stores share the same database,
+tenant, and migrations, and billing only exists when both are passed to
+`Bursar.create(credit_store=..., billing_store=..., commerce_options=...)`.
+Without `billing_store`, `billing` and `commerce` are `None` on the facade and
+`ingest_billing_event` raises.
+
+## Related
+
+- [Canonical configuration](./configuration.mdx) — the `commerce` section in the full document
+- [Billing and subscriptions](../guides/subscription-integration.mdx) — wiring the stores
+- [Plans, entitlements, quotas, and admission](./plans.mdx) — what a subscription entitles

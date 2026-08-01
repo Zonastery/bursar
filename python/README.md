@@ -61,7 +61,8 @@ class are imported directly from the top-level package:
 - `from bursar import CreditStore` — the abstract base for custom implementations
 
 Use `bursar.catalog.publish_and_activate(config)` for a canonical document with
-`usage`, `credits`, `plans`, and `payments`. The optional billing service and
+`pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
+`catalog`. The optional billing service and
 auto-recharge policy read that same active document.
 
 Stores and `Bursar` do not install database objects. Deployment is:

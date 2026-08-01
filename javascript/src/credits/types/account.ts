@@ -49,7 +49,7 @@ export interface AddCreditsResult {
   newBalance: Decimal;
   lifetimePurchased: Decimal;
   bucket: string;
-  idempotent?: boolean;
+  idempotent: boolean;
 }
 
 export interface DeductionResult {

@@ -88,6 +88,8 @@ class AutoRechargeBillingPort(Protocol):
     def upsert_auto_recharge_profile(
         self,
         profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
     ) -> None: ...
 
     def claim_auto_recharge_attempt(
@@ -317,7 +319,10 @@ class AutoRechargeService:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled:
             raise ValueError("auto_recharge_disabled")
-        self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "active", "armed": True}))
+        self._billing.upsert_auto_recharge_profile(
+            profile.model_copy(update={"state": "active", "armed": True}),
+            reset_cooldown=True,
+        )
         return await self.process_if_needed(
             user_id,
             provider,
@@ -340,8 +345,6 @@ class AutoRechargeService:
         if profile is None or not profile.enabled or profile.state != "active":
             return AutoRechargeProcessResult(outcome="disabled")
         if Decimal(balance) >= policy.threshold:
-            if not profile.armed:
-                self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"armed": True}))
             return AutoRechargeProcessResult(outcome="above_threshold")
 
         payment = await self._payment_method(user_id, provider)
@@ -400,5 +403,4 @@ class AutoRechargeService:
                 failure_code="payment_failed",
             )
         )
-        self._billing.upsert_auto_recharge_profile(profile.model_copy(update={"state": "paused"}))
         return AutoRechargeProcessResult(outcome="failed", charge=charge)

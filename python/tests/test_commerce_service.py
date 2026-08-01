@@ -60,6 +60,7 @@ from bursar.providers.types import (
     ChangePlanPreview,
     ChangePlanResult,
     CheckoutParams,
+    CheckoutPaymentStatus,
     CheckoutSessionResult,
     CheckoutSessionStatus,
     PaymentMethodInfo,
@@ -111,7 +112,7 @@ class RecordingProvider(PaymentProvider):
         self.setup_payment_params: list[PaymentMethodSetupParams] = []
         self.invoice_ids: list[str] = []
         self.webhooks: list[WebhookRequest] = []
-        self.checkout_status: str | None = None
+        self.checkout_status: CheckoutPaymentStatus | None = None
         self.fail_checkout = False
         self.fail_change = False
 
@@ -802,7 +803,9 @@ async def test_plan_change_confirmation_cancels_replacements_and_persists_failur
     assert confirmed.pending is True
     assert provider.cancelled_changes == [("subscription-1", "provider-old-change", "change-1:replace")]
     assert provider.reactivated == [("subscription-1", "change-1:keep")]
-    assert provider.change_params[0].metadata["plan_slug"] == "pro"
+    change_metadata = provider.change_params[0].metadata
+    assert change_metadata is not None
+    assert change_metadata["plan_slug"] == "pro"
     assert billing.change_updates[0] == ("change-existing", {"state": "canceled"})
     assert billing.change_updates[-1] == ("change-row", {"provider_operation_id": "change-1"})
 
@@ -1015,8 +1018,12 @@ async def test_preferences_webhook_and_auto_recharge_workflows() -> None:
     assert provider.webhooks[0].headers == {"x-test": "1"}
 
     billing.customers[("user-1", None)] = BillingCustomerRecord(provider="alpha", provider_customer_id="customer-1")
-    assert (await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1", return_url="https://return"))).enabled
-    assert (await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1", return_url="https://return"))).enabled
+    assert (
+        await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    ).enabled
+    assert (
+        await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    ).enabled
     commerce.auto_recharge.disable("user-1")
     assert billing.auto_recharge.disabled == ["user-1"]
 
@@ -1044,9 +1051,9 @@ async def test_preferences_webhook_and_auto_recharge_workflows() -> None:
         window_anchor="calendar",
         window_timezone="UTC",
     )
-    assert (
-        await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))
-    ) == {"outcome": "charged"}
+    assert (await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))) == {
+        "outcome": "charged"
+    }
 
 
 def test_public_commerce_inputs_do_not_expose_provider_product_ids() -> None:

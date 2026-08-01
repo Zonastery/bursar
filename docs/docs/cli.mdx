@@ -4,14 +4,26 @@ title: CLI and deployment
 
 # CLI and deployment
 
+The `bursar` CLI is the operator interface for migrations, tenant lifecycle,
+and the canonical configuration. Connection secrets come from environment
+variables, never the command line:
+
+| Variable | Required for |
+| --- | --- |
+| `DATABASE_URL` | Every command |
+| `BURSAR_TENANT_ID` | `config` commands and `tenant bootstrap` without `--id` |
+
+## Migrate
+
 ```bash
 export DATABASE_URL=postgresql://...
 bursar migrate
 ```
 
-`DATABASE_URL` is required. The command applies pending ordered SQL files,
-records checksums, and fails if an already-applied file changed. A second run
-is a no-op.
+The command applies pending ordered SQL files, records checksums, and fails
+if an already-applied file changed. A second run is a no-op.
+
+## Tenants
 
 Provision tenants with the same operator connection:
 
@@ -19,7 +31,14 @@ Provision tenants with the same operator connection:
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
+```
+
+`tenant create` generates the UUID when `--id` is omitted and prints it.
+Change lifecycle state with `tenant status`:
+
+```bash
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
+bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 ```
 
 For a deployment bootstrap, provision a tenant and publish its initial config
@@ -36,12 +55,10 @@ and config publication are each idempotent, so the command is safe to retry
 after an operational failure. Host applications should use these operator
 commands instead of writing Bursar-owned tables.
 
-Application commands such as `bursar config set` also require
-`BURSAR_TENANT_ID`.
+## Config lifecycle
 
-## Config versions
-
-Catalog versions are immutable and managed per tenant through `bursar config`:
+Catalog versions are immutable and managed per tenant through `bursar config`.
+All subcommands require `BURSAR_TENANT_ID`:
 
 ```bash
 bursar config validate ./pricing.yaml   # validate without applying (--json for CI)
@@ -55,12 +72,16 @@ bursar config schema                     # print the config JSON Schema
 ```
 
 `config set` always creates a new version and no-ops when the payload is
-identical to the active one. `validate`, `set`, and `export` accept `-` to read
-from stdin.
+identical to the active one — the command reports "No changes" and does not
+churn versions. `validate`, `set`, and `export` accept `-` to read from
+stdin. `list` marks the active version with `*` and shows labels and
+timestamps; `diff` compares two canonicalized versions and `schema` prints
+the JSON Schema for editor autocompletion and CI validation.
 
-## Host integration SQL
+## Post-migration host SQL
 
-Applications can add trusted, host-owned SQL after Bursar's bundled migrations:
+Applications can add trusted, host-owned SQL after Bursar's bundled
+migrations:
 
 ```bash
 bursar migrate \
@@ -77,11 +98,23 @@ and execute on every invocation. Keep them idempotent and under the host
 application's source control. Only pass trusted files: they execute with the
 database privileges in `DATABASE_URL`.
 
+## A deployment workflow
+
 Deploy in this order:
 
-1. Run `bursar migrate`.
-2. Publish and activate the canonical configuration.
-3. Start or roll the application.
+1. Run `bursar migrate` against `DATABASE_URL`.
+2. Provision the tenant: `bursar tenant create <slug>` or the combined
+   `bursar tenant bootstrap <slug> ./pricing.yaml`.
+3. Publish and activate the canonical configuration — `bootstrap` covers
+   this; otherwise `bursar config set ./pricing.yaml` followed by
+   `bursar config activate <version>` if you are not activating the newest
+   version.
+4. Verify what is live: `bursar config get` and `bursar config list`.
+5. Start or roll the application; the store and runtime bind
+   `BURSAR_TENANT_ID` at construction time.
+6. To roll back a bad config, re-point with
+   `bursar config activate <previous-version>` — versions are immutable, so
+   the prior document is still exactly as published.
 
 For this greenfield cutover, drop and recreate the `bursar` schema in each
 non-production environment before applying the baseline. There is no

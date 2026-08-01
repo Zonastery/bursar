@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 import psycopg2
 import pytest
 from psycopg2.extras import Json
 
+from bursar.credits.types import (
+    AggregateStats,
+    DailySpendRow,
+    SpendByModelRow,
+    SpendByUserRow,
+    TopUserRow,
+)
 from bursar.shared.postgres_client import PostgresClient
 from bursar.storage import (
     BillingEventPayloadExport,
+    BillingPayloadArchiveResult,
     BursarRuntimeOptions,
     OutboxRunResult,
     OutboxWorkerOptions,
@@ -34,20 +44,31 @@ class RecordingUsageSink:
     def write_usage(self, event: UsageChargeExport, outbox_event_id: str) -> None:
         self.writes.append((event, outbox_event_id))
 
-    def spend_by_user(self, *_args: object, **_kwargs: object) -> list[object]:
+    def spend_by_user(self, start: datetime, end: datetime) -> list[SpendByUserRow]:
+        del start, end
         return []
 
-    def spend_by_model(self, *_args: object, **_kwargs: object) -> list[object]:
+    def spend_by_model(self, start: datetime, end: datetime) -> list[SpendByModelRow]:
+        del start, end
         return []
 
-    def top_users(self, *_args: object, **_kwargs: object) -> list[object]:
+    def top_users(self, limit: int, start: datetime, end: datetime) -> list[TopUserRow]:
+        del limit, start, end
         return []
 
-    def daily_spend(self, *_args: object, **_kwargs: object) -> list[object]:
+    def daily_spend(self, start: datetime, end: datetime) -> list[DailySpendRow]:
+        del start, end
         return []
 
-    def aggregate_stats(self, *_args: object, **_kwargs: object) -> object:
-        return {"total_spend": "0", "entry_count": 0}
+    def aggregate_stats(self, start: datetime, end: datetime) -> AggregateStats:
+        del start, end
+        return AggregateStats(
+            total_credits_consumed=Decimal(0),
+            active_users=0,
+            avg_daily_spend=Decimal(0),
+            top_model="",
+            top_user="",
+        )
 
 
 class RecordingBillingArchive:
@@ -57,16 +78,12 @@ class RecordingBillingArchive:
         self.events: list[BillingEventPayloadExport] = []
         self.closed = False
 
-    def archive(self, event: BillingEventPayloadExport):
+    def archive(self, event: BillingEventPayloadExport) -> BillingPayloadArchiveResult:
         self.events.append(event)
-        return type(
-            "ArchiveResult",
-            (),
-            {
-                "key": f"archive/{event.provider_event_id}.json",
-                "version_id": "version-runtime",
-            },
-        )()
+        return BillingPayloadArchiveResult(
+            key=f"archive/{event.provider_event_id}.json",
+            version_id="version-runtime",
+        )
 
     def close(self) -> None:
         self.closed = True

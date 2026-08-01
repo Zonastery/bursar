@@ -8,33 +8,39 @@ title: Storage backends
 abstract base, from the package top level:
 
 ```python
+# Python
 from bursar import CreditStore, PostgresStore
 ```
 
 ```ts
+// TypeScript
 import { CreditStore, PostgresStore } from "@zonastery/bursar";
 ```
 
-There is no `bursar.stores` package, and the former in-memory and Supabase HTTP
-stores have been removed. All account state lives in PostgreSQL.
+There is no `bursar.stores` package, and the former in-memory and Supabase
+HTTP stores have been removed. All account state lives in PostgreSQL.
 
 ## PostgresStore
 
 The store is tenant-bound: pass the provisioned tenant UUID when constructing
-it. In Python `tenant_id` is a keyword argument; in JavaScript it is the second
-positional argument.
+it. In Python `tenant_id` is a keyword argument; in JavaScript it is the
+second positional argument.
 
 ```python
+# Python
 store = PostgresStore(database_url, tenant_id=tenant_id)
 ```
 
 ```ts
+// TypeScript
 const store = new PostgresStore(databaseUrl, tenantId);
 ```
 
 No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
 provision the tenant before constructing a store — see
-[CLI and deployment](./cli.mdx) and [multi-tenancy](./multitenancy.mdx).
+[CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
+Bursar owns the schema, migrations, and tenant lifecycle; host migrations
+must not create, alter, or seed Bursar tables.
 
 Custom stores subclass `CreditStore`. They must preserve idempotency, account
 locking semantics, append-only ledger history, cursor ordering by
@@ -44,10 +50,10 @@ invariants in [financial safety](./financial-safety.mdx) depend on them.
 ## Optional analytics and archive adapters
 
 For high-volume deployments, Bursar can mirror data into external systems
-through optional adapters. These are projections only — PostgreSQL remains the
-canonical source of truth. In Python they live under `bursar.storage`
-(importing requires the `postgres` extra; the native S3 adapter also needs the
-`s3` extra); in JavaScript they are exported from the Node-only
+through optional adapters. These are projections only — PostgreSQL remains
+the canonical source of truth. In Python they live under `bursar.storage`
+(importing requires the `postgres` extra; the native S3 adapter also needs
+the `s3` extra); in JavaScript they are exported from the Node-only
 `@zonastery/bursar/node` subpath.
 
 | Adapter | Purpose |
@@ -57,36 +63,45 @@ canonical source of truth. In Python they live under `bursar.storage`
 
 A transactional outbox drives both: an `OutboxWorker` claims committed events
 and delivers `usage.charge_recorded` to ClickHouse and
-`billing.webhook_completed` to S3. Exported rows and archive keys always carry
-`tenant_id` (S3 keys use `<prefix>/tenants/<tenant-id>/billing-events/...`, with
-the prefix defaulting to `bursar`).
+`billing.webhook_completed` to S3. Exported rows and archive keys always
+carry `tenant_id` (S3 keys use `<prefix>/tenants/<tenant-id>/billing-events/...`,
+with the prefix defaulting to `bursar`).
 
-The runtime composition root wires the Postgres stores, the optional adapters,
-and the outbox worker onto one connection pool:
+The runtime composition root wires the Postgres stores, the optional
+adapters, and the outbox worker onto one connection pool:
 
 ```python
-from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
+# Python
+from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
 
 runtime = create_bursar_runtime(
     BursarRuntimeOptions(
         postgres=database_url,
         tenant_id=tenant_id,
-        clickhouse=clickhouse_options,  # optional
-        s3=s3_options,                  # optional
+        clickhouse=clickhouse_options,
+        s3=s3_options,
+        outbox=outbox_options,
     )
 )
+runtime.start(BursarRuntimeStartOptions(load_catalog=True))
 ```
 
 ```ts
+// TypeScript
 import { createBursarRuntime } from "@zonastery/bursar/node";
 
 const runtime = await createBursarRuntime({
   postgres: databaseUrl,
   tenantId,
-  clickhouse: clickhouseOptions, // optional
-  s3: s3Options, // optional
+  clickhouse: clickhouseOptions,
+  s3: s3Options,
+  outbox: outboxOptions,
 });
+await runtime.start({ loadCatalog: true });
 ```
 
-Without ClickHouse or S3 configured, the runtime constructs the same
+The runtime exposes the composed `bursar` facade plus the underlying
+`creditStore` and `billingStore`. SDK runtimes claim outbox events through
+the tenant-filtered overload, so one runtime can never take another tenant's
+work. Without ClickHouse or S3 configured, the runtime constructs the same
 PostgreSQL-only Bursar with no background outbox polling.

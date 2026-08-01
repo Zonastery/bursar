@@ -1,13 +1,59 @@
-# PricingEngine — JavaScript
+---
+title: PricingEngine
+---
+
+# PricingEngine
 
 `PricingEngine` is Bursar's database-free operation-pricing core. It validates
-the same canonical configuration as the Python SDK.
+the same canonical configuration as the rest of the SDK and prices
+`UsageMetrics` events without any store, connection, or facade.
 
 ## Creating an engine
 
 ```typescript
 import { PricingEngine } from "@zonastery/bursar";
 
+const engine = PricingEngine.fromDict(configDict);
+```
+
+`fromDict` accepts a canonical config document and returns an engine, or
+throws `ConfigError`. Unknown fields, undeclared measures or dimensions,
+invalid matcher types, and unsafe cross-references are rejected at
+construction. Fixed credit accounting and plan rank have authoring defaults.
+
+## Calculating cost
+
+```typescript
+const cost = engine.calculate({
+  operation: "completion",
+  measures: { input_tokens: 500, output_tokens: 200 },
+  dimensions: { model: "gpt-4o" },
+});
+
+console.log(cost.total.toString());
+```
+
+`calculate(metrics, { rateCard })` prices one event. The optional `rateCard`
+key is required when the config contains more than one rate card and the
+caller has not otherwise selected one (via `getRateCardForPlan`).
+
+`calculateBatch(metrics, { rateCard })` evaluates an array of `UsageMetrics`
+with the same rate-card selection and returns `CostBreakdown[]` in the same
+order.
+
+`getRateCardForPlan(planKey)` returns the rate-card key referenced by a
+configured plan — the canonical way to resolve the rate card for a user whose
+plan is known.
+
+`pricingSchema` returns the validated, canonicalized config as a plain object.
+
+## Example
+
+Using the canonical demo configuration (`pricing.operations.completion`,
+rate card `standard`, per-million-token rates for `gpt-4o`/`gpt-4o-mini`, and
+an expression-based fallback for unmatched models):
+
+```typescript
 const engine = PricingEngine.fromDict({
   version: 1,
   pricing: {
@@ -16,10 +62,9 @@ const engine = PricingEngine.fromDict({
         measures: {
           input_tokens: { unit: "token" },
           output_tokens: { unit: "token" },
+          cache_read_tokens: { unit: "token" },
         },
-        dimensions: {
-          model: { type: "string" },
-        },
+        dimensions: { model: { type: "string" } },
       },
     },
     rate_cards: {
@@ -28,20 +73,22 @@ const engine = PricingEngine.fromDict({
           completion: {
             rules: [
               {
-                when: { model: { op: "prefix", value: "gpt-" } },
+                when: { model: { op: "in", values: ["gpt-4o", "gpt-4o-mini"] } },
                 charge: {
-                  type: "per_unit",
-                  measure: "input_tokens",
-                  rate: "0.05",
+                  type: "sum",
+                  components: [
+                    { type: "per_unit", measure: "input_tokens", rate: "0.0025", unit_size: "1000000" },
+                    { type: "per_unit", measure: "output_tokens", rate: "0.0100", unit_size: "1000000" },
+                    { type: "per_unit", measure: "cache_read_tokens", rate: "0.00125", unit_size: "1000000" },
+                  ],
                 },
               },
             ],
             unmatched: {
               action: "charge",
               charge: {
-                type: "per_unit",
-                measure: "output_tokens",
-                rate: "0.10",
+                type: "expression",
+                formula: "input_tokens * 0.005 + output_tokens * 0.015",
               },
             },
           },
@@ -51,40 +98,16 @@ const engine = PricingEngine.fromDict({
   },
   credits: {},
 });
-```
 
-Fixed credit accounting and plan rank have authoring defaults. Unknown fields,
-undeclared measures or dimensions, invalid matcher types, and unsafe
-cross-references are rejected when the engine is created.
-
-## Calculating cost
-
-```typescript
 const cost = engine.calculate({
   operation: "completion",
-  measures: {
-    input_tokens: 500,
-    output_tokens: 200,
-  },
-  dimensions: {
-    model: "gpt-4.1",
-  },
+  measures: { input_tokens: 2_000_000, output_tokens: 500_000 },
+  dimensions: { model: "gpt-4o" },
 });
 
+// 0.0025 * 2 + 0.01 * 0.5 = 0.01
 console.log(cost.total.toString());
 ```
-
-`calculate(metrics, { rateCard })` accepts an optional rate-card key. It is
-required when the configuration contains more than one rate card and the
-caller has not otherwise selected one.
-
-`calculateBatch(metrics, { rateCard })` evaluates multiple operations with the
-same rate-card selection.
-
-`getRateCardForPlan(planKey)` returns the rate card referenced by a configured
-plan.
-
-`pricingSchema` returns the validated canonical snake_case configuration.
 
 ## UsageMetrics
 
@@ -101,8 +124,8 @@ dimensions must be present. Undeclared measures or dimensions are rejected.
 ## CostBreakdown
 
 All monetary fields are `Decimal` values quantized to six decimal places with
-half-up rounding. Operation pricing is reported in `operationCredits`; `total`
-is the complete quantized result.
+half-up rounding. Operation pricing is reported in `operationCredits`;
+`total` is the complete quantized result.
 
 | Field | Type |
 | --- | --- |
@@ -114,3 +137,7 @@ is the complete quantized result.
 | `fixedCredits` | `Decimal` |
 | `total` | `Decimal` |
 | `breakdown` | `Record<string, unknown>` |
+
+See [Pricing](/docs/concepts/pricing) for how rate cards, rules, and unmatched
+actions compose, and [Expressions](/docs/concepts/expressions) for the
+supported expression operators and functions.

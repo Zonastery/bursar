@@ -1,48 +1,77 @@
 ---
-sidebar_position: 1
-title: Bursar
+title: Introduction
 ---
 
-# Bursar
+# Introduction
 
-Bursar is a reusable credit-ledger and billing SDK for Python and JavaScript.
-Applications construct one `Bursar` facade and use its `credits`, `catalog`,
-and optional `billing` capabilities.
+Bursar is a reusable credit ledger and billing engine for AI SaaS. It gives
+your application one place to meter usage, sell prepaid credits, run plans and
+allowances, and orchestrate subscriptions — over a single PostgreSQL schema,
+from identical Python and JavaScript SDKs.
 
-## Install the database
+## The problem
 
-```bash
-export DATABASE_URL=postgresql://...
-bursar migrate
+AI costs are per-token and unpredictable. A completion's price depends on the
+model, input length, output length, and cache behavior, and the invoice lands
+long after the request. Naive approaches fail in familiar ways:
+
+- **Balances in Redis** drift under concurrency and lose history.
+- **Billing providers** know your prices but not your product — they cannot
+  meter `input_tokens` against a rate card, enforce a free plan's monthly
+  allowance, or gate a paid feature.
+- **Hand-rolled ledger code** is where float rounding, double spends, and
+  unreconcilable balances live.
+
+Bursar pushes metering, pricing, and money state into one system of record.
+
+## What you get
+
+- **One canonical config.** A single strict, versioned document drives pricing
+  operations and rate cards, credit buckets, entitlements, plans, quotas,
+  offers, and auto-recharge guardrails. The same document bills identically
+  in Python and JavaScript.
+- **An exact, append-only ledger.** All money is exact decimal, stored as
+  `numeric(20,6)` with half-up rounding. Every mutation appends a ledger entry
+  with a `balance_after` invariant; there is no floating-point drift.
+- **Atomic reserve/settle leases.** Long-running work reserves credits
+  up front, then settles the actual cost or releases the hold. Entitlements,
+  quotas, and concurrency limits are enforced atomically at admission.
+- **Idempotent mutations.** Every write is replay-safe through a per-account
+  idempotency key, so webhooks, retries, and worker redeliveries are no-ops.
+- **Per-tenant isolation.** One schema serves every tenant; row-level security
+  and composite foreign keys keep tenant data separate even under buggy code.
+- **Two SDKs, one schema.** The Python and JavaScript SDKs share API shape
+  (snake_case ↔ camelCase 1:1) and the same Postgres schema and config.
+
+## How it fits together
+
+Applications construct one `Bursar` facade and call its capabilities:
+
+```text
+Bursar
+├── credits   -> credit lifecycle: balances, ledger, leases
+├── catalog   -> active versioned config
+├── accounts  -> signup: default plan + grant programs
+├── billing   -> provider events, subscriptions, invoices (optional)
+└── commerce  -> checkout, offers, auto-recharge (optional)
+        │
+        ▼
+PostgreSQL: one schema, per-tenant RLS, append-only ledger
 ```
 
-The checksum runner is the only installation path. Stores and facades never
-create database objects.
+`billing` and `commerce` are present only when a `billing_store` (and, for
+`commerce`, `commerce_options`) is supplied at construction.
 
-## Create a facade
+## Language support
 
-`PostgresStore` is imported from the package top level and is bound to one
-tenant, so provision a tenant first (see [multi-tenancy](./multitenancy.mdx)).
+| SDK | Runtime | Install |
+| --- | --- | --- |
+| Python | Python 3.11+ | `pip install bursar[postgres]` |
+| JavaScript | Node.js 22+ | `npm install @zonastery/bursar` |
+| Database | PostgreSQL 16 | one `bursar` schema, one migration runner |
 
-```python
-from bursar import Bursar, PostgresStore
+## Next
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
-bursar = Bursar.create(credit_store=store)
-```
-
-```ts
-import { Bursar, PostgresStore } from "@zonastery/bursar";
-
-const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
-const bursar = new Bursar({ creditStore: store });
-```
-
-All monetary mutations append a `LedgerEntry`, update the locked canonical
-account balance, and allocate or reverse lots atomically. History uses stable
-cursor pagination through `LedgerCursor` and `LedgerPage`.
-
-Configuration is one strict versioned document with `pricing`, `credits`,
-`entitlements`, `admission`, `plans`, `commerce`, and `catalog` sections. See
-the [canonical configuration](./configuration.mdx) reference for the validated
-shape.
+Start with the [Quickstart](./quickstart.mdx) — schema, first config, first
+credits, and a first charge in about ten minutes. For the mental model first,
+read [The data model](./concepts/data-model.mdx).

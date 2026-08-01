@@ -88,7 +88,15 @@ const config: Config = {
           items: [
             {
               label: 'Getting Started',
-              to: '/docs/intro',
+              to: '/docs/quickstart',
+            },
+            {
+              label: 'Core concepts',
+              to: '/docs/concepts/data-model',
+            },
+            {
+              label: 'Guides',
+              to: '/docs/guides/credit-lifecycle',
             },
             {
               label: 'Python API',
@@ -136,7 +144,7 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-      additionalLanguages: ['python', 'bash', 'json'],
+      additionalLanguages: ['python', 'bash', 'json', 'yaml'],
     },
   } satisfies Preset.ThemeConfig,
 };

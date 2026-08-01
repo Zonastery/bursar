@@ -6,17 +6,65 @@ title: JavaScript API
 
 The package is ESM-only and requires Node.js 22 or newer.
 
+```bash
+npm install @zonastery/bursar
+```
+
+## Constructing the facade
+
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
 const store = new PostgresStore(databaseUrl, tenantId);
-const bursar = new Bursar({ creditStore: store });
+const bursar = new Bursar({
+  creditStore: store,
+  billingStore: undefined,
+  creditsOptions: undefined,
+  billingOptions: undefined,
+  commerceOptions: undefined,
+  emitter: undefined,
+});
 ```
 
-`PostgresStore` is the only bundled store; extend the abstract `CreditStore` for
-a custom backend. `tenantId` scopes every store operation to a single tenant.
-Apply the database schema with the `bursar migrate` CLI before constructing a
-store (see the Stores reference).
+- `creditStore` is the only required option. `PostgresStore` is the bundled
+  implementation; `CreditStore` is the abstract base for custom backends.
+- `tenantId` scopes every store operation to a single tenant.
+- `billingStore` plus `commerceOptions` enable the billing and commerce
+  capabilities (`ingestBillingEvent`, checkouts, subscriptions, auto-recharge).
+- `emitter` receives credit lifecycle events (`CreditEventEmitter`).
 
-The facade exposes `credits`, `catalog`, and `accounts`, plus the optional
-`billing` and `commerce` capabilities.
+Every facade method returns a `Promise`; all monetary amounts are `Decimal`.
+
+## Entry points
+
+| Subpath | Contents |
+| --- | --- |
+| `@zonastery/bursar` | The application API: facade, stores, `PricingEngine`, config, errors |
+| `@zonastery/bursar/node` | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
+| `@zonastery/bursar/browser` | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`) |
+| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock) |
+
+The `node` entry point depends on Node built-ins (`crypto`, `fs`) and is not
+compatible with Edge Runtime environments; `browser` contains no database
+stores or Node-only dependencies and is safe for Client Components.
+
+## Migrations
+
+The JavaScript package ships no schema SQL and has no migration command.
+Install the Python CLI once and run:
+
+```bash
+pip install "bursar[postgres]"
+DATABASE_URL=postgres://... bursar migrate
+```
+
+## Where to go next
+
+- [Credits service](/docs/javascript-api/credit-manager) — balances, metered
+  charging, leases, plans, ledger, analytics, teams
+- [PricingEngine](/docs/javascript-api/pricing-engine) — pricing without a database
+- [Stores](/docs/javascript-api/stores) — `PostgresStore`, `PostgresBillingStore`,
+  and the `CreditStore` contract
+- [API reference](/docs/javascript-api/reference) — generated TypeDoc reference
+- [Core concepts](/docs/concepts/data-model) and
+  [configuration](/docs/concepts/configuration) — the canonical config document

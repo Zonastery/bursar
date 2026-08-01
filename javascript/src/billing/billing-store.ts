@@ -178,7 +178,10 @@ export abstract class BillingStore {
 
   abstract upsertBillingPreferences(prefs: BillingPreferences): Promise<void>;
   abstract getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
-  abstract upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
+  abstract upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void>;
   abstract claimAutoRechargeAttempt(
     input: AutoRechargeAttemptClaim,
   ): Promise<BillingAutoRechargeAttempt | null>;

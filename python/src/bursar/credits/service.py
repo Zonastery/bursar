@@ -680,14 +680,12 @@ class CreditsService:
         amount_dec = self._to_decimal(amount)
 
         prior_leftover = Decimal(0)
-        pre_lifetime_purchased = Decimal(0)
         if options.replace_prior:
             buckets_before = self.get_bucket_balances(user_id)
             for tb in buckets_before.buckets:
                 if tb.bucket_key == options.bucket:
                     prior_leftover = tb.balance
                     break
-            pre_lifetime_purchased = self.get_balance(user_id).lifetime_purchased
 
         result = self._store.add_credits(
             user_id,
@@ -699,7 +697,7 @@ class CreditsService:
             idempotency_key=options.idempotency_key,
         )
 
-        is_fresh_grant = (result.lifetime_purchased - pre_lifetime_purchased) == amount_dec
+        is_fresh_grant = not result.idempotent
         if options.replace_prior and is_fresh_grant and prior_leftover > 0:
             replace_meta: dict[str, Any] = {"reason": "cycle_replaced"}
             self._store.add_credits(

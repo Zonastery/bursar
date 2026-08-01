@@ -1,0 +1,263 @@
+---
+title: The credit lifecycle
+---
+
+# The credit lifecycle
+
+Every credit that enters or leaves an account posts a canonical ledger entry:
+grants, purchases, usage charges, refunds, expiries, and revocations are all
+the same append-only history. This guide follows one user — Ada, at prompta,
+an AI assistant SaaS — through a single day of money in and money out.
+
+Setup first: publish the canonical configuration (see
+[canonical configuration](../concepts/configuration.mdx)) and bind a facade.
+
+```python
+# Python
+from bursar import Bursar, PostgresStore
+from shared import USER_ADA, base_config, publish_config
+
+bursar = publish_config(
+    PostgresStore(database_url, tenant_id=tenant_id),
+    base_config(),
+)
+user_id = USER_ADA
+```
+
+```ts
+// TypeScript
+import { Bursar, PostgresStore } from "@zonastery/bursar";
+import { USER_ADA, baseConfig, publishConfig } from "./shared";
+
+const bursar = await publishConfig(
+  new PostgresStore(databaseUrl, tenantId),
+  baseConfig(),
+);
+const userId = USER_ADA;
+```
+
+## 1. Signup
+
+Ada creates an account. The signup handler assigns the catalog's default plan
+and runs any `account_created` grant programs in one call:
+
+```python
+# Python
+result = bursar.accounts.on_account_created(
+    user_id, event_key="signup", region="us-east-1"
+)
+print(result["plan_key"], result["plan_assigned"], result["grants"])
+```
+
+```ts
+// TypeScript
+const result = await bursar.accounts.onAccountCreated({
+  accountId: userId,
+  eventKey: "signup",
+  region: "us-east-1",
+});
+console.log(result.planKey, result.planAssigned, result.grants);
+```
+
+The result reports the assigned plan (`free`, from `catalog.default_plan`) and
+any grant-program awards. The free plan carries a 10,000-credit monthly
+allowance, so Ada can use the product before she pays. The call is idempotent:
+a second signup event with the same key does not re-anchor the plan or
+double-grant.
+
+## 2. Buying credits
+
+Ada buys a 50,000-credit pack through Stripe checkout. When the payment
+webhook lands, credit the account as a `purchase` into the `purchased` bucket
+(priority 10, the configured default). Pass the provider event id as the
+idempotency key so a redelivered webhook replays the same entry instead of
+double-granting:
+
+```python
+# Python
+grant = bursar.credits.add_credits(
+    user_id,
+    50000,
+    entry_type="purchase",
+    idempotency_key="checkout:cs_123456",
+)
+print(grant.entry_id, grant.new_balance, grant.bucket, grant.idempotent)
+```
+
+```ts
+// TypeScript
+const grant = await bursar.credits.addCredits(userId, new Decimal(50000), {
+  type: "purchase",
+  idempotencyKey: "checkout:cs_123456",
+});
+console.log(grant.entryId, grant.newBalance, grant.bucket, grant.idempotent);
+```
+
+In the database this creates a credit lot: the `purchase` ledger entry plus a
+`credit_lots` row that tracks `granted - consumed`. Pass `expires_at` (or
+`expiresAt`) to give the lot an expiry date — expiring lots are handled by
+the sweep in step 5. TypeScript amounts are `decimal.js` `Decimal` values.
+
+## 3. Spending
+
+Ada asks for a completion. `deduct` prices the metrics with the `standard`
+rate card (input 0.0025 / output 0.01 / cache 0.00125 per 1M tokens, all
+exact `Decimal`), then charges in one atomic transaction:
+
+```python
+# Python
+from bursar.metrics import UsageMetrics
+
+charge = bursar.credits.deduct(
+    user_id,
+    UsageMetrics(
+        operation="completion",
+        measures={
+            "input_tokens": 4000,
+            "output_tokens": 1200,
+            "cache_read_tokens": 6000,
+        },
+        dimensions={"model": "gpt-4o-mini"},
+    ),
+    idempotency_key="chat:turn:42",
+)
+print(charge.amount, charge.allowance_consumed, charge.balance_after)
+```
+
+```ts
+// TypeScript
+const charge = await bursar.credits.deduct(userId, {
+  operation: "completion",
+  measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
+  dimensions: { model: "gpt-4o-mini" },
+}, "chat:turn:42");
+console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
+```
+
+The charge costs 0.000030 credits (the 6dp `ROUND_HALF_UP` total), and the
+free plan's allowance absorbs it: `allowance_consumed` is 0.000030 and the
+balance stays at 50000. Deductions draw allowance first, then debits from
+the balance in bucket priority order — `promotional` (1) before `purchased`
+(10) — so promotional credits burn first. On the Pro plan the 500k
+`output_tokens`/day quota is checked in the same transaction. If the account
+cannot cover the charge, `deduct` raises `InsufficientCreditsError`, which
+projects to HTTP 402 (`payment_required`).
+
+## 4. Refunds
+
+Ada's request returned a broken completion. Refund the charge by its entry
+id; pass an `amount` for a partial refund:
+
+```python
+# Python
+refund = bursar.credits.refund_credits(
+    charge.entry_id,
+    amount=0.000030,
+    reason="user_reported_bad_output",
+)
+print(refund.refund_entry_id, refund.new_balance)
+```
+
+```ts
+// TypeScript
+const refund = await bursar.credits.refundCredits(
+  charge.entryId,
+  new Decimal("0.000030"),
+  "user_reported_bad_output",
+);
+console.log(refund.refundEntryId, refund.newBalance);
+```
+
+A refund never rewrites the original entry. It posts a new `refund` ledger
+entry that restores the balance, linked back to the original via
+`reference_entry_id` / `originalEntryId`. The store rejects over-refunds,
+duplicates, and refunds of the wrong entry type with `RefundError`.
+
+## 5. Expiry
+
+Promotional credits can carry an expiry. First inspect what a sweep would
+expire, then run it:
+
+```python
+# Python
+dry = bursar.credits.sweep_expired_credits(dry_run=True)
+print(dry.expired_count, dry.expired_amount)
+
+result = bursar.credits.sweep_expired_credits()
+print(result.expired_count, result.expired_amount)
+```
+
+```ts
+// TypeScript
+const dry = await bursar.credits.sweepExpiredCredits(true);
+console.log(dry.expiredCount, dry.expiredAmount);
+
+const result = await bursar.credits.sweepExpiredCredits();
+console.log(result.expiredCount, result.expiredAmount);
+```
+
+Each expired lot posts an `expiry` ledger entry and the amount leaves the
+balance — expiry is an accounting event, not a read filter. Run the sweep on
+a schedule (for example hourly) or enable lazy expiry so a user's own next
+operation clears their due lots first.
+
+## 6. Revocation
+
+If a purchase is fraudulent or violates your ToS, revoke all credits of an
+entry type rather than adjusting the balance by hand:
+
+```python
+# Python
+revoked = bursar.credits.revoke_credits_by_entry_type(user_id, "purchase")
+print(revoked["amount"], revoked["new_balance"])
+```
+
+```ts
+// TypeScript
+const revoked = await bursar.credits.revokeCreditsByEntryType(userId, "purchase");
+console.log(revoked.amount, revoked.new_balance);
+```
+
+Revocation walks the `purchase` lots LIFO across tiers and posts `revocation`
+ledger entries, so the audit trail shows exactly what was taken back and why.
+
+## 7. Reading the ledger
+
+The ledger is the pricing evidence. Walk it with the cursor loop — pages are
+stable, ordered by `(created_at, entry_id)`:
+
+```python
+# Python
+page = bursar.credits.list_ledger_entries(user_id, limit=50)
+while True:
+    for entry in page.items:
+        print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
+    if not page.next_cursor:
+        break
+    page = bursar.credits.list_ledger_entries(
+        user_id, limit=50, cursor=page.next_cursor
+    )
+```
+
+```ts
+// TypeScript
+let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
+while (true) {
+  for (const entry of page.items) {
+    console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
+  }
+  if (!page.nextCursor) break;
+  page = await bursar.credits.listLedgerEntries(userId, {
+    limit: 50,
+    cursor: page.nextCursor,
+  });
+}
+```
+
+`list_usage_charges` is the same loop against metered usage — each row shows
+the operation, the measures, the `charged` amount, and how much the allowance
+covered. Filter by entry type or date range in either call; offset pagination
+is not supported.
+
+At the end of the day, `get_balance` and the ledger agree: the balance is the
+sum of its entries, always.

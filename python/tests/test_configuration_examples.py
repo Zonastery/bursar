@@ -12,7 +12,7 @@ def test_documentation_canonical_yaml_examples_validate() -> None:
     repository = Path(__file__).resolve().parents[2]
     examples = [
         repository / "README.md",
-        repository / "docs" / "docs" / "configuration.mdx",
+        repository / "docs" / "docs" / "concepts" / "configuration.mdx",
     ]
 
     for example in examples:

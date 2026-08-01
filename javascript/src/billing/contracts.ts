@@ -167,7 +167,10 @@ export interface BillingCapability extends BillingEventSink {
   upsertBillingSubscription(state: BillingSubscriptionState): Promise<void>;
   updateUserPreferences(preferences: BillingPreferences): Promise<void>;
   getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
-  upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
+  upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void>;
   claimAutoRechargeAttempt(
     input: AutoRechargeAttemptClaim,
   ): Promise<BillingAutoRechargeAttempt | null>;

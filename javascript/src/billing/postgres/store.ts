@@ -730,8 +730,11 @@ export class PostgresBillingStore extends BillingStore {
     return this.billingAutoRecharge.getProfile(userId);
   }
 
-  async upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void> {
-    return this.billingAutoRecharge.upsertProfile(profile);
+  async upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void> {
+    return this.billingAutoRecharge.upsertProfile(profile, options);
   }
 
   async claimAutoRechargeAttempt(

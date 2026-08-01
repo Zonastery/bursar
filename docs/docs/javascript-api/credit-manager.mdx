@@ -5,50 +5,159 @@ title: Credits service
 # Credits service
 
 `bursar.credits` owns credit balances, usage charging, the lease lifecycle,
-plans, teams, and ledger history. Every method is async and every monetary
-amount is a `Decimal` (six decimal places, `ROUND_HALF_UP`).
+plans, ledger history, analytics, and team charging. Every method is async,
+and every monetary amount is a `Decimal` quantized to six decimal places with
+half-up rounding. The account model is bucket-based: credits live in named
+buckets (e.g. `promotional` priority 1, `purchased` priority 10) and are
+consumed highest-priority-first.
 
-## Balance operations
+## Balances and adjustments
 
 ```ts
 const grant = await bursar.credits.addCredits(userId, 100, {
   type: "purchase",
   idempotencyKey: "purchase:1",
 });
-const charge = await bursar.credits.deductCredits(userId, 5);
-const refund = await bursar.credits.refundCredits(charge.entryId);
+const charge = await bursar.credits.deductCredits(userId, 5, {
+  entryType: "adjustment",
+});
+const refund = await bursar.credits.refundCredits(charge.entryId, undefined, "clawback");
 ```
 
 `addCredits` and `deductCredits` move a raw amount; `refundCredits` reverses a
-prior entry. Successful monetary results identify their canonical ledger row
-with `entryId`. `addCredits` and `refundCredits` accept an `idempotencyKey` for
-replay-safe retries (`deductCredits` does not).
+prior entry. Every successful monetary result identifies its canonical ledger
+row (`entryId` for adjustments, `refundEntryId` for refunds). `getBalance`,
+`getAvailable`, and `getBucketBalances` are advisory reads.
 
-## Usage-based charging and leases
+### Idempotency — read carefully
 
-`deduct(userId, metrics, idempotencyKey?)` prices a `UsageMetrics` event with the
-active pricing engine and charges the cost in one atomic transaction.
-`grantSubscriptionCycle` grants a billing cycle idempotently, and `deductTeam`
-charges a team's shared pool.
+`addCredits` and `refundCredits` accept an `idempotencyKey` for replay-safe
+retries: retrying with the same key replays the original result instead of
+double-applying.
 
-When the final cost is only known after the work runs, use the lease lifecycle.
-`reserve` acquires the hold (the only admission gate), `settle` bills the actual
-cost, `release` returns an unused hold, and `renew` extends an active lease.
-`runBilled` wraps reserve → work → settle in a single call.
+**`deductCredits` does not accept an `idempotencyKey`** — its options are
+`entryType`, `bucket`, and `metadata` only. It is an administrative adjustment
+(a refund clawback), not the metered path; do not build retries on it. For
+replay-safe charging, use `deduct(userId, metrics, idempotencyKey)` — the
+high-volume, idempotency-keyed path (see below).
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `addCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { type?, metadata?, expiresAt?, bucket?, idempotencyKey? }` | `Promise<AddCreditsResult>` |
+| `deductCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { entryType?, bucket?, metadata? }` | `Promise<AddCreditsResult>` |
+| `refundCredits` | `entryId: string`, `amount?`, `reason?`, `metadata?`, `idempotencyKey?` | `Promise<RefundResult>` |
+| `getBalance` | `userId: string` | `Promise<BalanceResult>` |
+| `getAvailable` | `userId: string` | `Promise<AvailableResult>` |
+| `getBucketBalances` | `userId: string` | `Promise<BucketBalancesResult>` |
+
+## Metered charging
+
+`deduct(userId, metrics, idempotencyKey?, metadata?, feature?)` prices a
+`UsageMetrics` event with the active pricing engine and charges the cost in
+one atomic, idempotency-keyed transaction. The idempotency key is **the**
+replay guard for metered usage: the same key returns the same
+`DeductionResult` instead of double-charging. When omitted, a random key is
+generated (`usage:...`), which makes retries by a caller responsible for
+supplying their own stable key.
 
 ```ts
-const lease = await bursar.credits.reserve(userId, estimate);
-// ... do the work ...
-await bursar.credits.settle(userId, lease.leaseId, actual);
+const result = await bursar.credits.deduct(
+  userId,
+  {
+    operation: "completion",
+    measures: { input_tokens: 500, output_tokens: 200 },
+    dimensions: { model: "gpt-4o" },
+  },
+  "request:9f8c",
+);
 ```
 
-## Ledger history
+`deduct` enforces the user's plan: unentitled operations, allowance limits,
+and quotas can block the charge. `feature` additionally requires a plan
+feature. `deductFlatJob` and `grantSubscriptionCycle` are specialized siblings
+for flat-rate jobs and billing-cycle grants. `revokeCreditsByEntryType`
+reverses every deduction of a given entry type, and
+`sweepExpiredCredits(dryRun = false)` expires eligible credit lots.
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `deduct` | `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
+| `deductFlatJob` | `userId: string`, `amount: Decimal \| number`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
+| `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
+| `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
+
+## Leases
+
+When the final cost is only known after the work runs, reserve the estimate,
+do the work, then settle the actual cost. `reserve` is the only admission
+gate; a lease whose TTL expires before settlement is released by the store's
+reaper. `settle` bills the actual amount and finalizes the lease; `release`
+returns an unused hold; `renew` extends an active lease without changing its
+captured policy snapshot.
+
+`runBilled(userId, options)` wraps reserve → work → settle in one call:
+`options.estimate` prices the hold, `options.doWork` runs the operation and
+resolves `{ result, actual }`, and any rejection from `doWork` releases the
+lease and re-throws. Long jobs may call `renew` from inside `doWork`; a crash
+between reserve and settle is covered by the lease TTL.
+
+```ts
+const lease = await bursar.credits.reserve(userId, estimate, {
+  idempotencyKey: "run:7",
+  ttl: 300,
+});
+// ... do the work ...
+await bursar.credits.settle(userId, lease.leaseId, actual, {
+  idempotencyKey: "run:7",
+});
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `reserve` | `userId: string`, `metricsOrAmount`, `options: ReserveOptions \| null` | `Promise<LeaseResult>` |
+| `settle` | `userId: string`, `leaseId: string`, `metricsOrAmount`, `options: SettleOptions \| null` | `Promise<DeductionResult>` |
+| `release` | `userId: string`, `leaseId: string` | `Promise<ReleaseResult>` |
+| `renew` | `userId: string`, `leaseId: string`, `ttl?: number \| null` | `Promise<LeaseResult>` |
+| `runBilled` | `userId: string`, `options: RunBilledOptions<T>` | `Promise<{ result: T; deduction: DeductionResult }>` |
+
+`ReserveOptions` carries `idempotencyKey`, `operationType`, `billingMode`,
+`ttl`, `metadata`, `feature`, and `model`; `SettleOptions` carries
+`idempotencyKey`, `metadata`, and `feature`.
+
+## Plans
+
+`setUserPlan(userId, planKey, planAssignedAt?)` assigns a plan from the active
+catalog and emits `credits.plan_changed`. `getUserPlan` returns the current
+plan. `checkAllowance` reports the plan's credit allowance (bucket + window)
+state, and `checkFeature` resolves a feature value against the plan's
+entitlements.
+
+```ts
+await bursar.credits.setUserPlan(userId, "pro");
+const allowance = await bursar.credits.checkAllowance(userId);
+const voice = await bursar.credits.checkFeature(userId, "voice_mode");
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `setUserPlan` | `userId: string`, `planKey: string`, `planAssignedAt?: Date \| null` | `Promise<void>` |
+| `getUserPlan` | `userId: string` | `Promise<GetUserPlanResult>` |
+| `checkAllowance` | `userId: string` | `Promise<AllowanceResult>` |
+| `checkFeature` | `userId: string`, `feature: string` | `Promise<CheckFeatureResult>` |
+
+## Ledger and usage charges
+
+All history views share one cursor contract: stable `(createdAt, entryId)`
+ordering, cursor-only pagination, and no offset support. `listLedgerEntries`
+is the full account ledger; `listUsageEntries` filters it to usage entries;
+`listUsageCharges` returns metered usage charges (including allowance-covered
+events).
 
 ```ts
 let page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
 const entry = await bursar.credits.getLedgerEntry(userId, page.items[0].entryId);
 
-if (page.nextCursor) {
+while (page.nextCursor) {
   page = await bursar.credits.listLedgerEntries(userId, {
     limit: 50,
     cursor: page.nextCursor,
@@ -56,5 +165,53 @@ if (page.nextCursor) {
 }
 ```
 
-`listUsageEntries` provides the usage-only cursor view; `listUsageCharges`
-returns metered usage charges. Offset pagination is not supported.
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `listLedgerEntries` | `userId: string`, `options?: { entryTypes?, fromDate?, toDate?, limit?, cursor? }` | `Promise<LedgerPage>` |
+| `getLedgerEntry` | `userId: string`, `entryId: string` | `Promise<LedgerEntry \| null>` |
+| `listUsageEntries` | `userId: string`, `options?: { fromDate?, toDate?, limit?, cursor? }` | `Promise<LedgerPage>` |
+| `listUsageCharges` | `userId: string`, `options?: { fromDate?, toDate?, limit?, cursor? }` | `Promise<UsageChargePage>` |
+
+## Analytics
+
+Usage analytics aggregate across all users of the tenant within a
+`[start, end)` window. These are optional store capabilities — custom stores
+that omit them reject with `CapabilityNotSupportedError`.
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `spendByUser` | `start: Date`, `end: Date` | `Promise<SpendByUserRow[]>` |
+| `spendByModel` | `start: Date`, `end: Date` | `Promise<SpendByModelRow[]>` |
+| `topUsers` | `limit: number`, `start: Date`, `end: Date` | `Promise<TopUserRow[]>` |
+| `dailySpend` | `start: Date`, `end: Date` | `Promise<DailySpendRow[]>` |
+| `aggregateStats` | `start: Date`, `end: Date` | `Promise<AggregateStats>` |
+
+## Teams
+
+Team management is a store-level capability: `createTeam`, `getTeamBalance`,
+`addTeamMember`, `removeTeamMember`, and `listTeamMembers` live on the
+`CreditStore` (call them on your store object), while
+`bursar.credits.deductTeam` charges the shared pool through the facade.
+
+```ts
+await store.createTeam(teamId, { displayName: "Acme" });
+await store.addTeamMember(teamId, userId);
+await bursar.credits.deductTeam(
+  teamId,
+  userId,
+  {
+    operation: "execution",
+    measures: { jobs: 1 },
+    dimensions: { model: "gpt-4o" },
+  },
+  "team:run:3",
+);
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?` | `Promise<TeamDeductionResult>` |
+
+See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
+model, and [Leases and financial safety](/docs/guides/financial-safety) for
+lease guarantees.

@@ -434,6 +434,7 @@ class PostgresStore(CreditStore):
         meta = metadata.model_dump(mode="json") if metadata else {}
         if expires_at:
             meta["expires_at"] = expires_at.isoformat()
+        effective_idempotency_key = idempotency_key or f"credit:{uuid4()}"
         result = self._balance_repo.add_credits(
             user_id,
             str(amount),
@@ -441,7 +442,7 @@ class PostgresStore(CreditStore):
             json.dumps(meta),
             expires_at.isoformat() if expires_at else None,
             bucket,
-            idempotency_key,
+            effective_idempotency_key,
         )
         if result is None:
             raise StoreError("credits_add returned no result")

@@ -2,23 +2,79 @@
 title: Stores
 ---
 
-# JavaScript stores
+# Stores
+
+Every `Bursar` facade is built on a store — the adapter that owns the
+database. `PostgresStore` is the only bundled credit store;
+`PostgresBillingStore` is the bundled billing store; `CreditStore` is the
+abstract contract a custom backend must implement.
+
+## PostgresStore
 
 ```ts
-import { PostgresStore, CreditStore } from "@zonastery/bursar";
+import { PostgresStore } from "@zonastery/bursar";
 
 const store = new PostgresStore(databaseUrl, tenantId);
 ```
 
-`PostgresStore` is the only bundled store. It runs every mutation as a canonical
-SQL function (RPC) through `pg`. `tenantId` is a required argument that scopes
-every transaction to one tenant.
+Connects through `pg` and runs every mutation as a canonical SQL function
+(RPC). `tenantId` is a required positional argument that scopes every
+transaction to one tenant.
 
-Extend `CreditStore` for a custom backend and preserve account locking,
-idempotency, append-only ledger history, credit-lot allocation, and stable
-`(createdAt, entryId)` cursor ordering.
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `databaseUrl` | `string` | Postgres connection string |
+| `tenantId` | `string` | Required tenant UUID scoping every transaction |
+| `poolOrCtor` | `Pool \| PoolConstructor \| undefined` | Reuse an existing `pg.Pool` or pass a pool constructor |
+
+The store owns its pool: call `await store.close()` to drain it.
+
+## PostgresBillingStore
+
+```ts
+import { PostgresBillingStore } from "@zonastery/bursar";
+
+const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+```
+
+Same shape: `poolOrUrl` (a `pg.Pool` or connection string) plus `tenantId`.
+It wraps all billing repositories (offer, topup, customer, subscription,
+event, payment, refund, invoice, dispute, config) behind one interface and is
+passed as `billingStore:` to `new Bursar({...})` to enable the billing and
+commerce capabilities.
+
+## The CreditStore contract
+
+`CreditStore` is the abstract base class for a custom backend. Implementations
+must preserve, for every capability they expose:
+
+- **Atomicity** — each mutation commits or rolls back as one unit; balances
+  and their ledger rows never diverge.
+- **Idempotency** — a replayed `idempotencyKey` returns the original result
+  instead of applying a second time.
+- **Append-only ledger** — history is immutable; corrections are new entries
+  (`adjustment`/`refund`), never updates.
+- **Credit-lot allocation** — credits are consumed lot-by-lot by priority and
+  expiry (FEFO), with `sweepExpiredCredits` expiring eligible lots.
+- **Stable cursor ordering** — every list view orders by
+  `(createdAt, entryId)` so cursor pagination never skips or duplicates rows.
+
+Optional capabilities (usage analytics, team management, usage-charge lists,
+`getLedgerEntry`) throw `CapabilityNotSupportedError` by default on the base
+class; override them if your backend supports them. Billing is a separate
+hierarchy (`BillingStore`/`PostgresBillingStore`) with its own repositories.
+
+## Migrations
 
 The JavaScript package ships no schema SQL and has no migration command of its
-own. Apply the bundled migrations with the `bursar migrate` CLI (from the Python
-`bursar` package, reading `DATABASE_URL`) during deployment, before constructing
-the store.
+own. Apply the bundled migrations with the Python CLI during deployment,
+before constructing any store:
+
+```bash
+pip install "bursar[postgres]"
+DATABASE_URL=postgres://... bursar migrate
+```
+
+See [CLI](/docs/cli) for `tenant`, `config`, and validation subcommands, and
+[Storage backends](/docs/guides/storage-backends) for the Node-only
+S3/ClickHouse adapters (`@zonastery/bursar/node`).

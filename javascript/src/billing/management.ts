@@ -122,8 +122,11 @@ export class BillingManagement {
     await this.store.pseudonymizeFinancialSubject(userId);
   }
 
-  async upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void> {
-    return this.store.upsertAutoRechargeProfile(profile);
+  async upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void> {
+    return this.store.upsertAutoRechargeProfile(profile, options);
   }
 
   async claimAutoRechargeAttempt(input: {

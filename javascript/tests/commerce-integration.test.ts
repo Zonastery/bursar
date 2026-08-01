@@ -131,7 +131,11 @@ const CONFIG = {
       upgrade: { effective: "immediate", proration: "prorated", payment_failure: "prevent_change" },
       downgrade: { effective: "renewal", proration: "none", payment_failure: "prevent_change" },
       lateral: { effective: "immediate", proration: "prorated", payment_failure: "prevent_change" },
-      cadence_change: { effective: "renewal", proration: "none", payment_failure: "prevent_change" },
+      cadence_change: {
+        effective: "renewal",
+        proration: "none",
+        payment_failure: "prevent_change",
+      },
     },
     auto_recharge: {
       eligible_topups: ["standard_topup"],
@@ -154,7 +158,12 @@ const CONFIG = {
 class IntegrationProvider implements PaymentProvider {
   readonly provider = "stripe";
   readonly charges: SavedPaymentChargeResult[] = [
-    { providerPaymentId: "auto_pay_processing", status: "processing", amountMinor: 500, currency: "USD" },
+    {
+      providerPaymentId: "auto_pay_processing",
+      status: "processing",
+      amountMinor: 500,
+      currency: "USD",
+    },
     {
       providerPaymentId: "auto_pay_action",
       status: "requires_customer_action",
@@ -178,7 +187,9 @@ class IntegrationProvider implements PaymentProvider {
   }
 
   async listPaymentMethods() {
-    return [{ id: "pm_card_visa", last4: "4242", brand: "visa", expiryMonth: 12, expiryYear: 2030 }];
+    return [
+      { id: "pm_card_visa", last4: "4242", brand: "visa", expiryMonth: 12, expiryYear: 2030 },
+    ];
   }
 
   async getDefaultPaymentMethod() {
@@ -197,12 +208,14 @@ class IntegrationProvider implements PaymentProvider {
   }
 
   async chargeSavedPaymentMethod(): Promise<SavedPaymentChargeResult> {
-    return this.charges.shift() ?? {
-      providerPaymentId: "auto_pay_success",
-      status: "succeeded",
-      amountMinor: 500,
-      currency: "USD",
-    };
+    return (
+      this.charges.shift() ?? {
+        providerPaymentId: "auto_pay_success",
+        status: "succeeded",
+        amountMinor: 500,
+        currency: "USD",
+      }
+    );
   }
 
   async cancelSubscription(): Promise<void> {}
@@ -263,10 +276,11 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
-    await pool.query(
-      `INSERT INTO auth.users (id) VALUES ($1), ($2), ($3) ON CONFLICT DO NOTHING`,
-      [USER_ID, USER_ID2, USER_ID3],
-    );
+    await pool.query(`INSERT INTO auth.users (id) VALUES ($1), ($2), ($3) ON CONFLICT DO NOTHING`, [
+      USER_ID,
+      USER_ID2,
+      USER_ID3,
+    ]);
     await pool.query(
       `INSERT INTO public."user" (id) VALUES ($1), ($2), ($3) ON CONFLICT DO NOTHING`,
       [USER_ID, USER_ID2, USER_ID3],
@@ -412,7 +426,9 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
     expect(enabled?.enabled).toBe(true);
     expect(enabled?.paymentMethodLast4).toBe("4242");
     expect(enabled?.quoteAmountMinor).toBe(500);
-    expect(await billingStore.countAutoRechargeAttempts(USER_ID, "2000-01-01T00:00:00.000Z")).toBe(1);
+    expect(await billingStore.countAutoRechargeAttempts(USER_ID, "2000-01-01T00:00:00.000Z")).toBe(
+      1,
+    );
 
     const blockedByCooldown = await bursar.commerce!.autoRecharge.processIfNeeded({
       accountId: USER_ID,
@@ -443,6 +459,18 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
     expect(actionRequired?.suspendedReason).toBe("auto_recharge_paused");
     expect((await billingStore.getAutoRechargeProfile(USER_ID2))?.state).toBe("paused");
 
+    await billingStore.updateAutoRechargeAttemptByProviderPayment({
+      provider: "stripe",
+      providerPaymentId: "auto_pay_action",
+      state: "succeeded",
+    });
+    const completedAction = await pool.query(
+      "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = $1",
+      [USER_ID2],
+    );
+    expect(completedAction.rows[0]?.state).toBe("succeeded");
+    expect((await billingStore.getAutoRechargeProfile(USER_ID2))?.state).toBe("active");
+
     await bursar.ingestBillingEvent({
       provider: "stripe",
       eventId: "evt_auto_customer_3",
@@ -462,7 +490,10 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
       returnUrl: "https://app.example/auto-recharge/failed",
     });
     expect(failed?.state).toBe("active");
-    expect((await billingStore.getAutoRechargeProfile(USER_ID3))?.state).toBe("active");
+    expect(await billingStore.getAutoRechargeProfile(USER_ID3)).toMatchObject({
+      state: "active",
+      armed: true,
+    });
     const failedAttempt = await pool.query(
       "SELECT state, failure_code FROM bursar.billing_auto_recharge_attempts WHERE subject_id = $1",
       [USER_ID3],
@@ -471,6 +502,36 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
       state: "failed",
       failure_code: "payment_failed",
     });
+
+    provider.charges.splice(0, provider.charges.length, {
+      providerPaymentId: "auto_pay_retry",
+      status: "processing",
+      amountMinor: 500,
+      currency: "USD",
+    });
+    await bursar.commerce!.autoRecharge.enable({
+      accountId: USER_ID3,
+      returnUrl: "https://app.example/auto-recharge/enable-again",
+    });
+    const cooldownAttempts = await pool.query(
+      "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = $1",
+      [USER_ID3],
+    );
+    expect(cooldownAttempts.rows).toEqual([{ state: "failed" }]);
+
+    const retried = await bursar.commerce!.autoRecharge.retry({
+      accountId: USER_ID3,
+      returnUrl: "https://app.example/auto-recharge/retry",
+    });
+    expect(retried?.state).toBe("active");
+    const retryAttempts = await pool.query(
+      "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = $1",
+      [USER_ID3],
+    );
+    expect(retryAttempts.rows).toHaveLength(2);
+    expect(retryAttempts.rows).toEqual(
+      expect.arrayContaining([{ state: "failed" }, { state: "processing" }]),
+    );
 
     await bursar.commerce!.autoRecharge.disable({ accountId: USER_ID });
     expect((await billingStore.getAutoRechargeProfile(USER_ID))?.enabled).toBe(false);

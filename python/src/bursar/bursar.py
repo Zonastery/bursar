@@ -110,7 +110,12 @@ class BillingCapability(BillingEventSink, Protocol):
 
     def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None: ...
 
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None: ...
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None: ...
 
     def claim_auto_recharge_attempt(
         self,

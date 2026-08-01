@@ -120,7 +120,7 @@ IS
 'Read the immutable catalog revision and rate-card context captured by a '
 'subject-owned lease for deterministic settlement pricing.';
 COMMENT ON FUNCTION bursar.upsert_auto_recharge_profile(
-    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text
+    uuid, boolean, text, uuid, integer, numeric, integer, text, integer, text, text, boolean, text, boolean
 )
 IS 'Upsert subject auto-recharge settings validated against the active catalog policy.';
 COMMENT ON FUNCTION bursar.record_subscription_conflict(uuid, text, text, text, text, jsonb)

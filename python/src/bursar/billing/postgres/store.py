@@ -969,13 +969,21 @@ class PostgresBillingStore(BillingStore):
             updated_at=_to_utc_iso(row.get("updated_at")),
         )
 
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None:
         rows = self._execute(
             """SELECT bursar.upsert_auto_recharge_profile(
                    %s::uuid,
                    %s,
                    %s,
                    %s::uuid,
+                   %s,
+                   %s,
+                   %s,
                    %s,
                    %s,
                    %s,
@@ -996,6 +1004,9 @@ class PostgresBillingStore(BillingStore):
                 profile.window_count,
                 profile.window_anchor,
                 profile.window_timezone,
+                profile.armed,
+                profile.state,
+                reset_cooldown,
             ],
         )
         if not rows or not rows[0].get("profile_updated"):
@@ -1086,15 +1097,20 @@ class PostgresBillingStore(BillingStore):
                 "succeeded": ["succeeded"],
                 "failed": ["failed"],
                 "unknown": ["unknown"],
+                "action_required": ["action_required"],
             },
             "unknown": {
                 "unknown": [],
                 "processing": ["processing"],
+                "succeeded": ["succeeded"],
+                "failed": ["failed"],
                 "action_required": ["action_required"],
             },
             "action_required": {
                 "action_required": [],
                 "processing": ["processing"],
+                "succeeded": ["succeeded"],
+                "failed": ["failed"],
             },
         }
         path = transitions.get(current, {}).get(state)

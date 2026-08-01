@@ -460,8 +460,13 @@ class BillingService:
         """Return the active canonical public Bursar configuration."""
         return self._store.get_active_bursar_config()
 
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
-        self._store.upsert_auto_recharge_profile(profile)
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None:
+        self._store.upsert_auto_recharge_profile(profile, reset_cooldown=reset_cooldown)
 
     def claim_auto_recharge_attempt(
         self,

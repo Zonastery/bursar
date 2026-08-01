@@ -9,6 +9,7 @@ from typing import Any
 import psycopg2
 import pytest
 
+from bursar.billing.contracts import AutoRechargeProviderPaymentUpdate
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -181,9 +182,7 @@ CONFIG: dict[str, Any] = {
                 "plan": "starter",
                 "billing_interval": {"unit": "month", "count": 1},
                 "price": {"amount_minor": 1000, "currency": "USD"},
-                "providers": {
-                    "stripe": {"type": "stripe_price", "price_id": "price_starter_month"}
-                },
+                "providers": {"stripe": {"type": "stripe_price", "price_id": "price_starter_month"}},
             },
             "pro_month": {
                 "type": "subscription",
@@ -191,9 +190,7 @@ CONFIG: dict[str, Any] = {
                 "plan": "pro",
                 "billing_interval": {"unit": "month", "count": 1},
                 "price": {"amount_minor": 2000, "currency": "USD"},
-                "providers": {
-                    "stripe": {"type": "stripe_price", "price_id": "price_pro_month"}
-                },
+                "providers": {"stripe": {"type": "stripe_price", "price_id": "price_pro_month"}},
             },
             "standard_topup": {
                 "type": "topup",
@@ -202,9 +199,7 @@ CONFIG: dict[str, Any] = {
                 "quantity": {"minimum": 1, "maximum": 5, "default": 1},
                 "bucket": "general",
                 "price": {"amount_minor": 500, "currency": "USD"},
-                "providers": {
-                    "stripe": {"type": "stripe_price", "price_id": "price_topup_500"}
-                },
+                "providers": {"stripe": {"type": "stripe_price", "price_id": "price_topup_500"}},
             },
         },
         "subscription_changes": {
@@ -242,9 +237,7 @@ def _bursar(pg_database_url: str, pg_store: object) -> tuple[Bursar, PostgresBil
     bursar = Bursar.create(
         credit_store=pg_store,  # type: ignore[arg-type]
         billing_store=billing_store,
-        commerce_options=CommerceOptions(
-            providers={"stripe": lambda context: provider}
-        ),
+        commerce_options=CommerceOptions(providers={"stripe": lambda context: provider}),
     )
     bursar.credits.publish_pricing_from_dict(CONFIG)
     return bursar, billing_store, provider
@@ -424,6 +417,21 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
         assert action_required.suspended_reason == "auto_recharge_paused"
         assert billing_store.get_auto_recharge_profile(USER_ID2).state == "paused"
 
+        billing_store.update_auto_recharge_attempt_by_provider_payment(
+            AutoRechargeProviderPaymentUpdate(
+                provider="stripe",
+                provider_payment_id="auto_pay_action",
+                state="succeeded",
+            )
+        )
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = %s::uuid",
+                (USER_ID2,),
+            )
+            assert cursor.fetchone() == ("succeeded",)
+        assert billing_store.get_auto_recharge_profile(USER_ID2).state == "active"
+
         provider.charges[:] = [
             SavedPaymentChargeResult(
                 provider_payment_id="auto_pay_failed",
@@ -440,7 +448,10 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
         )
         assert failed is not None
         assert failed.state == "active"
-        assert billing_store.get_auto_recharge_profile(USER_ID3).state == "active"
+        failed_profile = billing_store.get_auto_recharge_profile(USER_ID3)
+        assert failed_profile is not None
+        assert failed_profile.state == "active"
+        assert failed_profile.armed is True
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -451,6 +462,42 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
                 (USER_ID3,),
             )
             assert cursor.fetchone() == ("failed", "payment_failed")
+
+        provider.charges[:] = [
+            SavedPaymentChargeResult(
+                provider_payment_id="auto_pay_retry",
+                status="processing",
+                amount_minor=500,
+                currency="USD",
+            )
+        ]
+        await bursar.commerce.auto_recharge.enable(
+            AutoRechargeInput(
+                account_id=USER_ID3,
+                return_url="https://app.example/auto-recharge/enable-again",
+            )
+        )
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = %s::uuid",
+                (USER_ID3,),
+            )
+            assert cursor.fetchall() == [("failed",)]
+
+        retried = await bursar.commerce.auto_recharge.retry(
+            AutoRechargeInput(
+                account_id=USER_ID3,
+                return_url="https://app.example/auto-recharge/retry",
+            )
+        )
+        assert retried is not None
+        assert retried.state == "active"
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state FROM bursar.billing_auto_recharge_attempts WHERE subject_id = %s::uuid",
+                (USER_ID3,),
+            )
+            assert {row[0] for row in cursor.fetchall()} == {"failed", "processing"}
 
         bursar.commerce.auto_recharge.disable(USER_ID)
         assert billing_store.get_auto_recharge_profile(USER_ID).enabled is False

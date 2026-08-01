@@ -48,13 +48,6 @@ BEGIN
 
  END IF;
 
- IF v_profile.last_attempt_at IS NOT NULL
-    AND v_profile.last_attempt_at
-        + make_interval(secs=>v_profile.cooldown_seconds)>now()
- THEN
-  RETURN;
- END IF;
-
  SELECT balance INTO v_balance
  FROM bursar.credit_accounts
  WHERE subject_id=p_subject_id AND account_kind='personal'
@@ -75,6 +68,13 @@ BEGIN
 
     IF FOUND THEN RETURN NEXT v_attempt;
  RETURN;
+ END IF;
+
+ IF v_profile.last_attempt_at IS NOT NULL
+    AND v_profile.last_attempt_at
+        + make_interval(secs=>v_profile.cooldown_seconds)>now()
+ THEN
+  RETURN;
  END IF;
 
     SELECT window_start, window_end
@@ -158,9 +158,14 @@ BEGIN
         ('processing','succeeded'),
         ('processing','failed'),
         ('processing','unknown'),
+        ('processing','action_required'),
         ('unknown','processing'),
         ('unknown','action_required'),
-        ('action_required','processing')
+        ('unknown','succeeded'),
+        ('unknown','failed'),
+        ('action_required','processing'),
+        ('action_required','succeeded'),
+        ('action_required','failed')
     ) THEN
         RETURN false;
 
@@ -204,9 +209,17 @@ BEGIN
 
     ELSIF p_state='succeeded' THEN
         UPDATE bursar.billing_auto_recharge_profiles
-        SET consecutive_failures=0
+        SET consecutive_failures=0,
+            state='active',
+            armed=billing_auto_recharge_profiles.armed OR COALESCE((
+                SELECT account.balance >= billing_auto_recharge_profiles.rearm_above
+                FROM bursar.credit_accounts AS account
+                WHERE account.subject_id=v_subject
+                  AND account.account_kind='personal'
+            ), false)
         WHERE subject_id=v_subject
-          AND provider_environment=v_environment;
+          AND provider_environment=v_environment
+          AND enabled;
 
     END IF;
 
