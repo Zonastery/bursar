@@ -1,5 +1,14 @@
 # Bursar
 
+[![CI](https://github.com/Zonastery/bursar/actions/workflows/ci.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/ci.yml)
+[![Docs](https://github.com/Zonastery/bursar/actions/workflows/docs.yml/badge.svg)](https://github.com/Zonastery/bursar/actions/workflows/docs.yml)
+[![PyPI](https://img.shields.io/pypi/v/bursar.svg)](https://pypi.org/project/bursar/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
+[![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
+[![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
+[![License](https://img.shields.io/github/license/Zonastery/bursar.svg)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Zonastery/bursar)
+
 Bursar is Zonastery's reusable credit-ledger and billing SDK. Python and
 JavaScript expose the same application boundary: a `Bursar` facade with
 `credits`, `catalog`, and optional `billing` capabilities.
