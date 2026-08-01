@@ -2,21 +2,85 @@
 title: Stores
 ---
 
-# Python stores
+# Stores
+
+Every `Bursar` facade is built on a store — the adapter that owns the
+database. `PostgresStore` is the only bundled credit store; `PostgresBillingStore`
+is the bundled billing store; `CreditStore` is the abstract contract a custom
+backend must implement.
+
+## PostgresStore
 
 ```python
-from bursar.stores.memory import MemoryStore
-from bursar.stores.postgres import PostgresStore, run_migrations
-from bursar.stores.supabase import HttpxSupabaseStore
+from bursar import PostgresStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
 ```
 
-`CreditStore` in `bursar.stores.base` is the custom-store abstraction.
-Implementations provide the canonical account, ledger, lot, lease, plan, team,
-configuration, and billing-support operations required by their capabilities.
+Connects through `psycopg2` and runs every mutation as a canonical SQL function
+(RPC). Requires the `bursar[postgres]` extra
+(`pip install "bursar[postgres]"`).
 
-Installation remains separate:
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `database_url` | `str` | Postgres connection string (positional) |
+| `tenant_id` | `str \| UUID` | Required keyword argument scoping every transaction to one tenant |
+| `max_pool_size` | `int = 20` | Upper bound of the internal `ThreadedConnectionPool` |
+| `pool` | `ThreadedConnectionPool \| None` | Reuse an existing pool instead of creating one |
+
+The store owns its pool: call `store.close()` to drain it. `database_url` is
+exposed as a read-only property.
+
+## PostgresBillingStore
 
 ```python
-run_migrations(database_url)
-store = PostgresStore(database_url)
+from bursar import PostgresBillingStore
+
+billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
 ```
+
+Same shape: `database_url` (positional), required keyword `tenant_id`, and an
+optional `pool` (defaults to a fresh pool, max 10). It wraps all billing
+repositories (offer, topup, customer, subscription, event, payment, refund,
+invoice, dispute, config) behind one interface and is passed as
+`billing_store=` to `Bursar.create` to enable the billing and commerce
+capabilities. Also lazily imported from the top level; requires the
+`[postgres]` extra.
+
+## The CreditStore contract
+
+`CreditStore` is the abstract base class for a custom backend. Implementations
+must preserve, for every capability they expose:
+
+- **Atomicity** — each mutation commits or rolls back as one unit; balances
+  and their ledger rows never diverge.
+- **Idempotency** — a replayed `idempotency_key` returns the original result
+  instead of applying a second time.
+- **Append-only ledger** — history is immutable; corrections are new entries
+  (`adjustment`/`refund`), never updates.
+- **Credit-lot allocation** — credits are consumed lot-by-lot by priority and
+  expiry (FEFO), with `sweep_expired_credits` expiring eligible lots.
+- **Stable cursor ordering** — every list view orders by
+  `(created_at, entry_id)` so cursor pagination never skips or duplicates rows.
+
+Optional capabilities (usage analytics, team management, usage-charge lists,
+`get_ledger_entry`) raise `CapabilityNotSupportedError` by default on the ABC;
+override them if your backend supports them. Billing is a separate hierarchy
+(`BillingStore`/`PostgresBillingStore`) with its own repositories.
+
+## Migrations
+
+The package never applies SQL on construction — neither `PostgresStore` nor
+`Bursar` runs migrations. Apply the bundled migrations with the `bursar`
+CLI during deployment, before constructing any store:
+
+```bash
+DATABASE_URL=postgres://... bursar migrate
+```
+
+The CLI reads `DATABASE_URL` from the environment. See [CLI](/docs/cli) for
+`tenant`, `config`, and validation subcommands.
+
+See [Storage backends](/docs/guides/storage-backends) for S3/ClickHouse
+adapters and the storage runtime, and [custom stores](/docs/notebooks/custom_stores)
+for a worked example of a custom `CreditStore`.

@@ -212,7 +212,12 @@ class BillingStore(ABC):
     def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None: ...
 
     @abstractmethod
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None: ...
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None: ...
 
     @abstractmethod
     def claim_auto_recharge_attempt(

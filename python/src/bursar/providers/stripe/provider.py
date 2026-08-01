@@ -32,6 +32,7 @@ from bursar.providers.types import (
     WebhookRequest,
     WebhookResult,
     deduplicate_payment_methods,
+    normalize_provider_logger,
 )
 
 
@@ -66,7 +67,7 @@ class StripeProvider(PaymentProvider):
         self._sink = sink
         self._webhook_secret = webhook_secret
         self._get_stripe = get_stripe or (lambda: stripe_mod)
-        self._logger = logger
+        self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         if not params.user_id:

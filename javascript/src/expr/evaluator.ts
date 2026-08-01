@@ -121,7 +121,10 @@ function evaluateBinary(operator: string, left: Decimal, rightValue: () => Decim
       return left.dividedBy(right);
     case "//":
       if (right.isZero()) throw new ExpressionError("division by zero");
-      return left.dividedBy(right).floor();
+      // Truncate toward zero to match Python's Decimal `//` (parity): e.g.
+      // -7 // 2 == -3, not -4. decimal.js `.floor()` rounds toward -Infinity,
+      // which would silently bill a different amount for negative operands.
+      return left.divToInt(right);
     case "%":
       if (right.isZero()) throw new ExpressionError("modulo by zero");
       return left.modulo(right);

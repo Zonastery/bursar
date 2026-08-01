@@ -431,7 +431,7 @@ class BursarConfigHistoryItemRow(BaseModel):
     version: int = 0
     label: str | None = None
     active: bool = False
-    created_at: str = ""
+    created_at: str | datetime = ""
 
 
 class DeductParams(BaseModel):

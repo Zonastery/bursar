@@ -39,7 +39,8 @@ The public history contract consists of `LedgerEntry`, `LedgerCursor`, and
 `listUsageEntries` for the usage-only view.
 
 `bursar.catalog.publishAndActivate(config)` publishes a canonical configuration
-with `usage`, `credits`, `plans`, and `payments`. Billing and auto-recharge read
+with `pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
+`catalog`. Billing and auto-recharge read
 that active configuration; there is no separate billing configuration.
 
 The package keeps the `CreditStore` abstraction and `PostgresStore` for custom

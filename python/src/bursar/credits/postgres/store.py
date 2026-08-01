@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import psycopg2
@@ -153,10 +153,12 @@ class PostgresStore(CreditStore):
         tenant_id: str | UUID | None,
         max_pool_size: int = 20,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+        usage_backend: Literal["postgres", "clickhouse"] = "postgres",
     ) -> None:
         super().__init__()
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
+        self._usage_backend = usage_backend
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, max_pool_size, database_url)
         self._owns_pool = pool is None
 
@@ -178,6 +180,10 @@ class PostgresStore(CreditStore):
         cursor.execute(
             "SELECT set_config('bursar.tenant_id', %s, true)",
             (self._tenant_id,),
+        )
+        cursor.execute(
+            "SELECT set_config('bursar.usage_backend', %s, true)",
+            (self._usage_backend,),
         )
 
     # ── Repository getters ─────────────────────────────────────────────
@@ -434,6 +440,7 @@ class PostgresStore(CreditStore):
         meta = metadata.model_dump(mode="json") if metadata else {}
         if expires_at:
             meta["expires_at"] = expires_at.isoformat()
+        effective_idempotency_key = idempotency_key or f"credit:{uuid4()}"
         result = self._balance_repo.add_credits(
             user_id,
             str(amount),
@@ -441,7 +448,7 @@ class PostgresStore(CreditStore):
             json.dumps(meta),
             expires_at.isoformat() if expires_at else None,
             bucket,
-            idempotency_key,
+            effective_idempotency_key,
         )
         if result is None:
             raise StoreError("credits_add returned no result")
@@ -1547,11 +1554,21 @@ class PostgresStore(CreditStore):
         """
         amount = _dec(amount)
         meta = metadata.model_dump(mode="json", exclude_none=True) if metadata else {}
-        # Thread the idempotency key through metadata (the RPC reads it from
-        # metadata->>'idempotency_key') for idempotent replay (H12).
-        if idempotency_key:
-            meta["idempotency_key"] = idempotency_key
-        result = self._team_repo.deduct_team(team_id, user_id, str(amount), json.dumps(meta))
+        # Generate a default idempotency key when the caller supplies none, so two
+        # otherwise-identical team charges are not collapsed into a single replay
+        # (mirrors the JS store). deduct_team dedupes on the key argument.
+        effective_key = idempotency_key or f"team-usage:{uuid4()}"
+        meta["idempotency_key"] = effective_key
+        operation_meta = meta.get("operation")
+        operation = operation_meta if isinstance(operation_meta, str) and operation_meta else "team_usage"
+        result = self._team_repo.deduct_team(
+            team_id,
+            user_id,
+            str(amount),
+            effective_key,
+            operation,
+            json.dumps(meta),
+        )
         if result is None:
             raise StoreError("deduct_team returned no result")
         if result.error is not None:

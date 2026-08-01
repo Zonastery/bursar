@@ -87,7 +87,7 @@ DECLARE
         'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,text,text,bursar.billing_payment_status,timestamptz,text,jsonb)',
         'bursar.create_billing_credit_grant(uuid,uuid,uuid,numeric,integer,uuid)',
         'bursar.upsert_billing_refund(uuid,text,bigint,text,text,timestamptz,uuid,text,jsonb)',
-        'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text)',
+        'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text,boolean,text,boolean)',
         'bursar.upsert_billing_preferences(uuid,boolean,boolean,boolean,boolean,boolean)',
         'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz,jsonb,timestamptz)',
         'bursar.upsert_billing_dispute(text,text,uuid,text,text,jsonb,timestamptz)',

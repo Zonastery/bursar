@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NotFoundError } from "dodopayments";
+import { callBillingEventSink } from "../src/providers/_shared.js";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
 import { MockPaymentProvider } from "../src/providers/mock/provider.js";
 import { StripeProvider } from "../src/providers/stripe/provider.js";
@@ -7,6 +8,33 @@ import { StripeProvider } from "../src/providers/stripe/provider.js";
 const sink = { ingestBillingEvent: () => ({ handled: true, action: "ok" }) };
 
 describe("payment provider adapter contracts", () => {
+  it("retries an in-flight duplicate before returning its result", async () => {
+    vi.useFakeTimers();
+    try {
+      const ingestBillingEvent = vi
+        .fn()
+        .mockResolvedValueOnce({ handled: false, error: "claim_busy" })
+        .mockResolvedValueOnce({ handled: false, error: "claim_busy" })
+        .mockResolvedValue({ handled: true, action: "duplicate" });
+      const pending = callBillingEventSink(
+        { ingestBillingEvent },
+        {
+          provider: "stripe",
+          eventId: "evt_busy",
+          eventType: "invoice.paid",
+          occurredAt: "2026-07-29T12:00:00.000Z",
+        },
+      );
+
+      await vi.runAllTimersAsync();
+
+      await expect(pending).resolves.toMatchObject({ handled: true, action: "duplicate" });
+      expect(ingestBillingEvent).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps Dodo requests, idempotency, and response DTOs", async () => {
     const calls: unknown[][] = [];
     const client: any = {

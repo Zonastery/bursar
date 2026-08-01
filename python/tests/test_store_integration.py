@@ -240,6 +240,19 @@ def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStor
     assert service.get_balance(REPLAY_USER_ID).balance == Decimal("25")
 
 
+def test_add_credits_without_key_generates_distinct_operations(store: PostgresStore) -> None:
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(CONFIG)
+
+    first = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
+    second = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
+
+    assert first.idempotent is False
+    assert second.idempotent is False
+    assert second.entry_id != first.entry_id
+    assert service.get_balance(REPLAY_USER_ID).balance == Decimal("50")
+
+
 def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore) -> None:
     service = CreditsService(store=store)
     config = deepcopy(CONFIG)

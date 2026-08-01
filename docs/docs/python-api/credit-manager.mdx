@@ -4,6 +4,15 @@ title: Credits service
 
 # Credits service
 
+`bursar.credits` owns credit balances, usage charging, the lease lifecycle,
+plans, ledger history, analytics, and team charging. Every method is
+synchronous, and every monetary amount is a `Decimal` quantized to six decimal
+places with half-up rounding. The account model is bucket-based: credits live
+in named buckets (e.g. `promotional` priority 1, `purchased` priority 10) and
+are consumed highest-priority-first.
+
+## Balances and adjustments
+
 ```python
 grant = bursar.credits.add_credits(
     user_id, 100, entry_type="purchase", idempotency_key="purchase:1"
@@ -11,24 +20,185 @@ grant = bursar.credits.add_credits(
 charge = bursar.credits.deduct_credits(
     user_id, 5, idempotency_key="operation:1"
 )
-refund = bursar.credits.refund_credits(charge.entry_id)
+refund = bursar.credits.refund_credits(charge.entry_id, reason="clawback")
 ```
 
-Every successful monetary result identifies its canonical entry with
-`entry_id`. Leases use `create_lease`, `settle_lease`, `renew_lease`, and
-`release_lease`.
+`add_credits` and `deduct_credits` move a raw amount; `refund_credits` reverses
+a prior entry. Every successful monetary result identifies its canonical ledger
+row (`entry_id` for adjustments, `refund_entry_id` for refunds). `get_balance`,
+`get_available`, and `get_bucket_balances` are advisory reads.
 
-## Ledger history
+### Idempotency
+
+`add_credits`, `deduct_credits`, and `refund_credits` each accept an
+`idempotency_key` keyword argument: retrying with the same key replays the
+original result instead of double-applying. `deduct_credits` threads its key
+through to the store, so administrative deductions are replay-safe too.
+
+The high-volume path, however, is `deduct(metrics, idempotency_key)` — see
+below.
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `add_credits` | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `metadata`, `expires_at`, `bucket`, `idempotency_key` | `AddCreditsResult` |
+| `deduct_credits` | `user_id: str`, `amount: Decimal \| int`, `*, entry_type="adjustment"`, `bucket`, `metadata`, `idempotency_key` | `AddCreditsResult` |
+| `refund_credits` | `entry_id: str`, `amount=None`, `reason`, `metadata`, `idempotency_key` | `RefundResult` |
+| `get_balance` | `user_id: str` | `BalanceResult` |
+| `get_available` | `user_id: str` | `AvailableResult` |
+| `get_bucket_balances` | `user_id: str` | `BucketBalancesResult` |
+
+## Metered charging
+
+`deduct(user_id, metrics, idempotency_key=None, metadata=None, *, feature=None)`
+prices a `UsageMetrics` event with the active pricing engine and charges the
+cost in one atomic, idempotency-keyed transaction. The idempotency key is
+**the** replay guard for metered usage: the same key returns the same
+`DeductionResult` instead of double-charging.
+
+```python
+result = bursar.credits.deduct(
+    user_id,
+    UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": 500, "output_tokens": 200},
+        dimensions={"model": "gpt-4o"},
+    ),
+    idempotency_key="request:9f8c",
+)
+```
+
+`deduct` enforces the user's plan: unentitled operations, allowance limits, and
+quotas can block the charge. `feature` additionally requires a plan feature.
+`deduct_flat_job` and `grant_subscription_cycle` are specialized siblings for
+flat-rate jobs and billing-cycle grants. `revoke_credits_by_entry_type`
+reverses every deduction of a given entry type (e.g. claw back a whole batch),
+and `sweep_expired_credits(dry_run=False)` expires eligible credit lots.
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `deduct` | `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None`, `*, feature=None` | `DeductionResult` |
+| `deduct_flat_job` | `user_id: str`, `amount: Decimal \| int`, `idempotency_key=None`, `metadata=None`, `*, feature=None` | `DeductionResult` |
+| `revoke_credits_by_entry_type` | `user_id: str`, `entry_type: str` | `dict[str, Any]` |
+| `sweep_expired_credits` | `dry_run=False` | `SweepResult` |
+
+## Leases
+
+When the final cost is only known after the work runs, reserve the estimate,
+do the work, then settle the actual cost. `reserve` is the only admission
+gate; a lease whose TTL expires before settlement is released by the store's
+reaper. `settle` bills the actual amount and finalizes the lease; `release`
+returns an unused hold; `renew` extends an active lease without changing its
+captured policy snapshot.
+
+`run_billed(user_id, options)` wraps reserve → work → settle in one call:
+`options.estimate` prices the hold, `options.do_work` runs the operation and
+returns `(result, actual)`, and any exception from `do_work` releases the
+lease and re-raises. Long jobs may call `renew` from inside `do_work`; a crash
+between reserve and settle is covered by the lease TTL.
+
+```python
+lease = bursar.credits.reserve(
+    user_id,
+    UsageMetrics(operation="completion", measures={"input_tokens": 1000}),
+    options={"idempotency_key": "run:7", "ttl": 300},
+)
+# ... do the work ...
+bursar.credits.settle(user_id, lease.lease_id, actual_metrics)
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `reserve` | `user_id: str`, `metrics_or_amount`, `options: ReserveOptions \| None` | `LeaseResult` |
+| `settle` | `user_id: str`, `lease_id: str`, `metrics_or_amount`, `options: SettleOptions \| None` | `DeductionResult` |
+| `release` | `user_id: str`, `lease_id: str` | `ReleaseResult` |
+| `renew` | `user_id: str`, `lease_id: str`, `ttl: int \| None = None` | `LeaseResult` |
+| `run_billed` | `user_id: str`, `options: RunBilledOptions` | `RunBilledResult` |
+
+`ReserveOptions` carries `idempotency_key`, `operation_type`, `billing_mode`,
+`ttl`, `metadata`, `feature`, and `model`; `SettleOptions` carries
+`idempotency_key`, `metadata`, and `feature`.
+
+## Plans
+
+`set_user_plan(user_id, plan_key, plan_assigned_at=None)` assigns a plan from
+the active catalog and emits `credits.plan_changed`. `get_user_plan` returns
+the current plan. `check_allowance` reports the plan's credit allowance
+(bucket + window) state, and `check_feature` resolves a feature value against
+the plan's entitlements.
+
+```python
+bursar.credits.set_user_plan(user_id, "pro")
+allowance = bursar.credits.check_allowance(user_id)
+voice = bursar.credits.check_feature(user_id, "voice_mode")
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `set_user_plan` | `user_id: str`, `plan_key: str`, `plan_assigned_at=None` | `SetUserPlanResult` |
+| `get_user_plan` | `user_id: str` | `GetUserPlanResult` |
+| `check_allowance` | `user_id: str` | `AllowanceResult` |
+| `check_feature` | `user_id: str`, `feature: str` | `CheckFeatureResult` |
+
+## Ledger and usage charges
+
+All history views share one cursor contract: stable `(created_at, entry_id)`
+ordering, cursor-only pagination, and no offset support. `list_ledger_entries`
+is the full account ledger; `list_usage_entries` filters it to usage entries;
+`list_usage_charges` returns metered usage charges (including
+allowance-covered events).
 
 ```python
 page = bursar.credits.list_ledger_entries(user_id, limit=50)
 entry = bursar.credits.get_ledger_entry(user_id, page.items[0].entry_id)
 
-if page.next_cursor:
+while page.next_cursor:
     page = bursar.credits.list_ledger_entries(
         user_id, limit=50, cursor=page.next_cursor
     )
 ```
 
-`list_usage_entries` has the same cursor contract and filters the canonical
-ledger to usage entries. Offset pagination is not supported.
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `list_ledger_entries` | `user_id: str`, `entry_types=None`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `LedgerPage` |
+| `get_ledger_entry` | `user_id: str`, `entry_id: str` | `LedgerEntry \| None` |
+| `list_usage_entries` | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `LedgerPage` |
+| `list_usage_charges` | `user_id: str`, `from_date=None`, `to_date=None`, `limit=50`, `cursor=None` | `UsageChargePage` |
+
+## Analytics
+
+Usage analytics aggregate across all users of the tenant within a
+`[start, end)` window. These are optional store capabilities — custom stores
+that omit them raise `CapabilityNotSupportedError`.
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `spend_by_user` | `start: datetime`, `end: datetime` | `list[SpendByUserRow]` |
+| `spend_by_model` | `start: datetime`, `end: datetime` | `list[SpendByModelRow]` |
+| `top_users` | `limit: int`, `start: datetime`, `end: datetime` | `list[TopUserRow]` |
+| `daily_spend` | `start: datetime`, `end: datetime` | `list[DailySpendRow]` |
+| `aggregate_stats` | `start: datetime`, `end: datetime` | `AggregateStats` |
+
+## Teams
+
+Team management is a store-level capability: `create_team`, `get_team_balance`,
+`add_team_member`, `remove_team_member`, and `list_team_members` live on the
+`CreditStore` (call them on your store object), while `bursar.credits.deduct_team`
+charges the shared pool through the facade.
+
+```python
+store.create_team(team_id, display_name="Acme")
+store.add_team_member(team_id, user_id)
+bursar.credits.deduct_team(
+    team_id, user_id,
+    UsageMetrics(operation="execution", measures={"jobs": 1}, dimensions={"model": "gpt-4o"}),
+    idempotency_key="team:run:3",
+)
+```
+
+| Method | Parameters | Returns |
+| --- | --- | --- |
+| `deduct_team` | `team_id: str`, `user_id: str`, `metrics: UsageMetrics`, `idempotency_key=None`, `metadata=None` | `TeamDeductionResult` |
+
+See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
+model, and [Leases and financial safety](/docs/guides/financial-safety) for
+lease guarantees.

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from bursar.billing.types import BillingEvent, BillingEventResult
+from bursar.providers._shared import call_billing_event_sink
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
 from bursar.providers.stripe.provider import StripeProvider
@@ -50,6 +51,32 @@ class Sink:
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         del event
         return BillingEventResult(handled=True, action="ok")
+
+
+def test_billing_sink_retries_a_busy_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+    results = iter(
+        [
+            BillingEventResult(handled=False, error="claim_busy"),
+            BillingEventResult(handled=False, error="claim_busy"),
+            BillingEventResult(handled=True, action="duplicate"),
+        ]
+    )
+    sink = SimpleNamespace(ingest_billing_event=lambda _event: next(results))
+    sleep = SimpleNamespace(delays=[])
+    monkeypatch.setattr("bursar.providers._shared.time.sleep", sleep.delays.append)
+
+    result = call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id="evt_busy",
+            event_type="invoice.paid",
+            occurred_at="2026-07-29T12:00:00+00:00",
+        ),
+    )
+
+    assert result.action == "duplicate"
+    assert sleep.delays == [0.025, 0.05]
 
 
 class DodoClient:

@@ -254,7 +254,7 @@ class BillingCreditTopup(BaseModel):
 
 
 class BillingEventClaim(BaseModel):
-    status: Literal["claimed", "duplicate", "retry"]
+    status: Literal["claimed", "duplicate", "busy", "retry"]
     claim_token: str | None = None
     billing_event_id: str | None = None
 
@@ -263,7 +263,7 @@ class BillingEventClaim(BaseModel):
         if self.status == "claimed" and (self.claim_token is None or self.billing_event_id is None):
             raise ValueError("claimed billing event requires claim_token and billing_event_id")
         if self.status != "claimed" and (self.claim_token is not None or self.billing_event_id is not None):
-            raise ValueError("duplicate/retry billing event cannot include claim identifiers")
+            raise ValueError("non-claimed billing event cannot include claim identifiers")
         return self
 
 

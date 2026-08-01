@@ -57,6 +57,12 @@ def _validate_ast(node: ast.AST) -> None:
     if node_type not in allowed:
         raise ExpressionError(f"disallowed node type: {node_type.__name__}")
 
+    # Reject chained comparisons (a < b < c). Python's native chaining semantics
+    # (a<b and b<c) cannot be reproduced by the JS left-associative parser, so
+    # both engines forbid them to stay identical (parity).
+    if isinstance(node, ast.Compare) and len(node.ops) > 1:
+        raise ExpressionError("chained comparisons are not supported")
+
     if isinstance(node, ast.Call):
         func_name = node.func.id if isinstance(node.func, ast.Name) else None
         if func_name is None or func_name not in ALLOWED_FUNCTIONS:

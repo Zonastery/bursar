@@ -369,6 +369,34 @@ AS $$
        AND length(btrim(p_value)) BETWEEN 1 AND 255
 $$;
 
+CREATE FUNCTION bursar.current_usage_backend()
+RETURNS text
+LANGUAGE sql
+STABLE
+SET search_path TO ''
+AS $$
+    SELECT CASE
+        WHEN current_setting('bursar.usage_backend', true)
+             IN ('postgres', 'clickhouse')
+        THEN current_setting('bursar.usage_backend', true)
+        ELSE 'postgres'
+    END
+$$;
+
+CREATE FUNCTION bursar.current_billing_payload_backend()
+RETURNS text
+LANGUAGE sql
+STABLE
+SET search_path TO ''
+AS $$
+    SELECT CASE
+        WHEN current_setting('bursar.billing_payload_backend', true)
+             IN ('postgres', 's3')
+        THEN current_setting('bursar.billing_payload_backend', true)
+        ELSE 'postgres'
+    END
+$$;
+
 -- Tenancy is part of the baseline data model. Trusted application code binds
 -- one tenant to each transaction with:
 --

@@ -1,0 +1,218 @@
+---
+title: Billing and subscriptions
+---
+
+# Billing and subscriptions
+
+Bursar's billing capability turns provider lifecycle events into canonical
+credit mutations. Construct the facade with a billing store and commerce
+options when an application needs subscriptions, top-ups, or auto-recharge:
+
+```python
+# Python
+import os
+
+from bursar import Bursar, PostgresBillingStore, PostgresStore
+from bursar.commerce import CommerceOptions
+from bursar.providers import StripeProvider
+
+billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
+
+bursar = Bursar.create(
+    credit_store=PostgresStore(database_url, tenant_id=tenant_id),
+    billing_store=billing_store,
+    commerce_options=CommerceOptions(
+        providers={
+            "stripe": lambda context: StripeProvider(
+                context.event_sink,
+                webhook_secret=os.environ["STRIPE_WEBHOOK_SECRET"],
+            ),
+        },
+    ),
+)
+```
+
+```ts
+// TypeScript
+import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
+import { CommerceOptions } from "@zonastery/bursar";
+import { StripeProvider } from "@zonastery/bursar/providers";
+
+const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+
+const bursar = new Bursar({
+  creditStore: new PostgresStore(databaseUrl, tenantId),
+  billingStore,
+  commerceOptions: new CommerceOptions({
+    providers: {
+      stripe: (context) =>
+        new StripeProvider(() => stripe, context.eventSink, process.env.STRIPE_WEBHOOK_SECRET),
+    },
+  }),
+});
+```
+
+The active `commerce` section of `BursarConfig` supplies the offers, top-ups,
+and auto-recharge policy — see [canonical configuration](../concepts/configuration.mdx).
+The event model and subscription semantics are covered in
+[billing concepts](../concepts/billing.mdx).
+
+## Provider webhooks
+
+Provider adapters map raw webhooks to a normalized `BillingEvent` and submit
+it through the facade. `ingest_billing_event` claims each event on
+`(provider, event_id)` first, so redelivered webhooks are ignored and
+subscription grants never double-post:
+
+```python
+# Python
+from bursar.billing.types import (
+    BillingCustomerInfo,
+    BillingEvent,
+    BillingEventType,
+    BillingSubscriptionInfo,
+    ProviderRef,
+)
+
+bursar.ingest_billing_event(
+    BillingEvent(
+        provider="stripe",
+        event_id="evt_1Paid",
+        event_type=BillingEventType.subscription_created,
+        occurred_at=datetime.now(UTC).isoformat(),
+        user_id=user_id,
+        customer=BillingCustomerInfo(provider_customer_id="cus_123", email="ada@prompta.ai"),
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_123",
+            status="active",
+            refs=ProviderRef(price_id="price_pro_monthly"),
+            interval="month",
+            interval_count=1,
+        ),
+    )
+)
+```
+
+```ts
+// TypeScript
+import {
+  BillingCustomerInfo,
+  BillingEvent,
+  BillingEventType,
+  BillingSubscriptionInfo,
+  ProviderRef,
+} from "@zonastery/bursar";
+
+await bursar.ingestBillingEvent({
+  provider: "stripe",
+  eventId: "evt_1Paid",
+  eventType: BillingEventType.subscription_created,
+  occurredAt: new Date().toISOString(),
+  userId,
+  customer: { providerCustomerId: "cus_123", email: "ada@prompta.ai" },
+  subscription: {
+    providerSubscriptionId: "sub_123",
+    status: "active",
+    refs: { priceId: "price_pro_monthly" },
+    interval: "month",
+    intervalCount: 1,
+  },
+});
+```
+
+Events that identify the user only through the customer or subscription are
+resolved from persisted billing state before handling.
+
+## Subscription-driven plan assignment
+
+A `subscription_created`, `subscription_activated`, or
+`subscription_plan_changed` event in a positive state assigns the offer's
+plan through the credits service, anchoring the allowance window to the
+provider's `period_start`. Cancellation, expiry, pause, and customer deletion
+revoke the plan (unset it, or move the user to the configured
+`terminal_plan_key`) — but only when that subscription is the user's current
+one.
+
+A `subscription_renewed` (or `invoice_paid` / `payment_succeeded` with a
+subscription) event also grants the offer's cycle credits. The grant is an
+idempotency-keyed canonical ledger entry, and a `replace_previous` renewal
+expires the previous cycle's leftover in the bucket before the new grant
+lands:
+
+```python
+# Python
+bursar.ingest_billing_event(
+    BillingEvent(
+        provider="stripe",
+        event_id="evt_1Renewed",
+        event_type=BillingEventType.subscription_renewed,
+        occurred_at=datetime.now(UTC).isoformat(),
+        user_id=user_id,
+        subscription=BillingSubscriptionInfo(
+            provider_subscription_id="sub_123",
+            status="active",
+            refs=ProviderRef(price_id="price_pro_monthly"),
+            interval="month",
+            interval_count=1,
+        ),
+    )
+)
+```
+
+The TypeScript shape is the same as the webhook example above, with
+`eventType: BillingEventType.subscription_renewed`.
+
+## Offer and top-up resolution
+
+Offers are resolved from the active config by provider reference — `resolve_offer`
+/ `resolve_offer_by_lookup` for subscriptions, `resolve_topup` for credit
+packs. A `payment_succeeded` event with `purpose="credit_topup"` resolves the
+top-up, computes credits from `credits_per_unit` and quantity, and posts a
+`purchase`-type grant. A succeeded `refund_created` for that payment claws
+the grant back through a `refund_clawback` ledger entry.
+
+## Auto-recharge after deduction
+
+When commerce is configured, every deduction runs a post-deduction hook:
+`auto_recharge.process_if_needed` checks the account's profile against the
+config's `auto_recharge` section (`eligible_topups`, `balance_below`,
+`rearm_above`, `quantity`, and the limits: `max_purchases`, `max_charge_minor`,
+`cooldown`, `max_consecutive_failures`, `failure_action`). A payment attempt
+is claimed per user so concurrent deductions cannot start duplicate
+purchases. Users opt in through `bursar.commerce.auto_recharge.enable`, and
+the resulting `payment_succeeded` webhook grants the top-up and re-arms the
+profile.
+
+## Plan changes
+
+`commerce.preview_plan_change` quotes the provider's change and returns a
+fingerprint; `confirm_plan_change` re-quotes and rejects the change if the
+quote moved (`QuoteChangedError`). The config's `SubscriptionChangePolicy`
+drives whether the change is `immediate` or at `renewal`, and whether it
+prorates. Scheduled changes are persisted as billing subscription changes and
+can be cancelled before they take effect.
+
+```python
+# Python
+preview = await bursar.commerce.preview_plan_change(user_id, offer_key="pro_monthly")
+confirmed = await bursar.commerce.confirm_plan_change(
+    user_id,
+    "downgrade-1",
+    offer_key="pro_monthly",
+    quote_fingerprint=preview.quote_fingerprint,
+)
+```
+
+```ts
+// TypeScript
+const preview = await bursar.commerce.previewPlanChange({
+  accountId: userId,
+  offerKey: "pro_monthly",
+});
+const confirmed = await bursar.commerce.confirmPlanChange({
+  accountId: userId,
+  operationKey: "downgrade-1",
+  offerKey: "pro_monthly",
+  quoteFingerprint: preview.quoteFingerprint,
+});
+```

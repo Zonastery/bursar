@@ -21,6 +21,7 @@ import type {
   TopUserRow,
   UsageChargePage,
   UsageAnalyticsStore,
+  UsageChargeStore,
 } from "./types/index.js";
 
 /**
@@ -33,6 +34,7 @@ export class CreditQueries {
   constructor(
     private readonly store: CreditStore,
     private readonly analytics: UsageAnalyticsStore = store,
+    private readonly usageStore: UsageChargeStore = store,
   ) {}
 
   async getActivePricing(): Promise<BursarConfigResult | null> {
@@ -108,7 +110,7 @@ export class CreditQueries {
     userId: string,
     options?: ListUsageChargesOptions,
   ): Promise<UsageChargePage> {
-    return this.store.listUsageCharges(userId, options);
+    return this.usageStore.listUsageCharges(userId, options);
   }
 
   async topUsers(limit: number, start: Date, end: Date): Promise<TopUserRow[]> {

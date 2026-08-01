@@ -460,8 +460,13 @@ class BillingService:
         """Return the active canonical public Bursar configuration."""
         return self._store.get_active_bursar_config()
 
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
-        self._store.upsert_auto_recharge_profile(profile)
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None:
+        self._store.upsert_auto_recharge_profile(profile, reset_cooldown=reset_cooldown)
 
     def claim_auto_recharge_attempt(
         self,
@@ -511,6 +516,13 @@ class BillingService:
                 {"provider": event.provider, "event_id": event.event_id},
             )
             return BillingEventResult(handled=True, action="duplicate")
+
+        if claim.status == "busy":
+            self._logger.debug(
+                "billing event is already processing",
+                {"provider": event.provider, "event_id": event.event_id},
+            )
+            return BillingEventResult(handled=False, error="claim_busy")
 
         if claim.status == "retry":
             self._logger.warn(
@@ -616,6 +628,21 @@ class BillingService:
                 event.customer.email,
             )
             if uid:
+                event.user_id = uid
+                return uid
+        # Refund/dispute events (e.g. a Stripe dashboard refund) carry no customer
+        # or subscription — the only link to the user is the stored payment row.
+        # Without this tier a refund's credit clawback is silently skipped (parity
+        # with the JS resolveUserId payment fallback).
+        provider_payment_id = (
+            (event.payment.provider_payment_id if event.payment else None)
+            or (event.refund.provider_payment_id if event.refund else None)
+            or (event.dispute.provider_payment_id if event.dispute else None)
+        )
+        if provider_payment_id:
+            payment = self._store.get_billing_payment(event.provider, provider_payment_id)
+            uid = payment.get("user_id") if isinstance(payment, dict) else None
+            if isinstance(uid, str) and uid:
                 event.user_id = uid
                 return uid
         return None

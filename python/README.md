@@ -21,8 +21,7 @@ transaction. They run on every invocation, so they must be idempotent.
 Create the reusable facade after migrations have run:
 
 ```python
-from bursar import Bursar
-from bursar.stores.postgres import PostgresStore
+from bursar import Bursar, PostgresStore
 
 store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
@@ -55,15 +54,15 @@ while page.next_cursor is not None:
 Pagination is cursor-only. Usage history is available through
 `list_usage_entries`; one entry is available through `get_ledger_entry`.
 
-The store modules live under `bursar.stores`:
+`PostgresStore` is the only store, and both it and the `CreditStore` base
+class are imported directly from the top-level package:
 
-- `bursar.stores.postgres.PostgresStore`
-- `bursar.stores.memory.MemoryStore`
-- `bursar.stores.supabase.HttpxSupabaseStore`
-- `bursar.stores.base.CreditStore` for custom implementations
+- `from bursar import PostgresStore` — the production, tenant-scoped store
+- `from bursar import CreditStore` — the abstract base for custom implementations
 
 Use `bursar.catalog.publish_and_activate(config)` for a canonical document with
-`usage`, `credits`, `plans`, and `payments`. The optional billing service and
+`pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
+`catalog`. The optional billing service and
 auto-recharge policy read that same active document.
 
 Stores and `Bursar` do not install database objects. Deployment is:

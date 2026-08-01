@@ -30,6 +30,7 @@ from bursar.credits.types.analytics import (
     SpendByUserRow,
     TopUserRow,
     UsageAnalyticsStore,
+    UsageChargeStore,
 )
 from bursar.credits.types.catalog import (
     BursarConfigHistoryItem,
@@ -127,6 +128,7 @@ __all__ = [
     "TeamMember",
     "TopUserRow",
     "UsageAnalyticsStore",
+    "UsageChargeStore",
     "UsageCharge",
     "UsageChargeCursor",
     "UsageChargePage",

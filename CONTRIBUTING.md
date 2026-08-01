@@ -4,7 +4,7 @@ bursar is a **monorepo** with two independently published SDKs that must stay
 behaviorally in sync:
 
 - `python/` — the `bursar` package on PyPI (Pydantic models, `ast`-based safe
-  expression engine, Supabase/Postgres/in-memory stores).
+  expression engine, PostgreSQL-backed store).
 - `javascript/` — the `@zonastery/bursar` package on npm (TypeScript mirror using
   `decimal.js`).
 - `tests/parity/expression_cases.json` (repo root) — a shared fixture loaded by
@@ -125,17 +125,17 @@ authoritative gate.** Install them with `lefthook install`.
 
 ## Adding Storage Backends (Python)
 
-Implement the `CreditStore` ABC in `python/src/bursar/interface/`:
+Implement the `CreditStore` ABC in `python/src/bursar/credits/`:
 
-- All **29** abstract methods declared in
-  `python/src/bursar/interface/base.py` must be implemented (balance/credit ops,
-  the atomic `deduct_with_allowance`, the two-phase
-  `reserve_credits`/`deduct_credits`, pricing/version management, plans,
-  allowance/spend-cap checks, refunds, expiry sweep, analytics, transaction/
-  usage listing, and teams).
-- Return the typed Pydantic models from `python/src/bursar/interface/models.py`.
-- Mirror the implementation in `javascript/src/stores/` against the
-  `CreditStore` interface in `javascript/src/stores/credit-store.ts`.
+- All abstract methods declared in
+  `python/src/bursar/credits/store.py` must be implemented (balance/credit ops,
+  the atomic `deduct_with_allowance`, the
+  `create_lease`/`settle_lease`/`release_lease`/`renew_lease` lease lifecycle,
+  pricing/version management, plans, allowance/quota checks, refunds, expiry
+  sweep, analytics, ledger/usage listing, and teams).
+- Return the typed Pydantic models from `python/src/bursar/credits/types/`.
+- Mirror the implementation in `javascript/src/credits/` against the
+  `CreditStore` interface in `javascript/src/credits/store.ts`.
 - Add unit tests and, for DB-backed stores, integration tests (see
   `python/tests/test_store_integration.py` and
   `javascript/tests/store-integration.test.ts`).

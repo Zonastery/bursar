@@ -7,10 +7,9 @@ commit (or roll back) together inside the store (contract §2, C1).
 
 Example::
 
-    from bursar import CreditsService, UsageMetrics
-    from bursar.stores.supabase import HttpxSupabaseStore
+    from bursar import CreditsService, PostgresStore, UsageMetrics
 
-    store = HttpxSupabaseStore(url=supabase_url, key=service_role_key)
+    store = PostgresStore(database_url, tenant_id=tenant_id)
     manager = CreditsService(store=store)
 
     # One-time setup (creates tables + RPCs)
@@ -111,6 +110,7 @@ from bursar.credits.types import (
     UsageAnalyticsStore,
     UsageChargeCursor,
     UsageChargePage,
+    UsageChargeStore,
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
@@ -185,7 +185,7 @@ class CreditsService:
     """Orchestrates credit operations: pricing -> atomic deduct.
 
     Args:
-        store: A ``CreditStore`` adapter (HttpxSupabaseStore, PostgresStore, etc.).
+        store: A ``CreditStore`` adapter (e.g. ``PostgresStore``).
         engine: An optional pre-configured ``PricingEngine``. If omitted,
             call ``load_pricing_from_store()`` or ``publish_pricing_from_dict()``
             before ``deduct()``.
@@ -218,6 +218,7 @@ class CreditsService:
         default_ttl_seconds: int | None = None,
         pricing_ttl: int | None = None,
         analytics: UsageAnalyticsStore | None = None,
+        usage_store: UsageChargeStore | None = None,
         lazy_expiry: bool | None = None,
         post_deduction: (Callable[[PostDeductionContext], None | Awaitable[None]] | None) = None,
     ) -> None:
@@ -229,12 +230,14 @@ class CreditsService:
         default_ttl_seconds = default_ttl_seconds if default_ttl_seconds is not None else options.default_ttl_seconds
         pricing_ttl = pricing_ttl if pricing_ttl is not None else options.pricing_ttl
         analytics = analytics if analytics is not None else options.analytics
+        usage_store = usage_store if usage_store is not None else options.usage_store
         lazy_expiry = lazy_expiry if lazy_expiry is not None else options.lazy_expiry
         post_deduction = post_deduction if post_deduction is not None else options.post_deduction
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
         self._store = store
         self._analytics = analytics or store
+        self._usage_store = usage_store or store
         self._engine = engine
         self._emitter = emitter
         self._logger: NormalizedLogger = normalize_logger(options.logger)
@@ -681,14 +684,12 @@ class CreditsService:
         amount_dec = self._to_decimal(amount)
 
         prior_leftover = Decimal(0)
-        pre_lifetime_purchased = Decimal(0)
         if options.replace_prior:
             buckets_before = self.get_bucket_balances(user_id)
             for tb in buckets_before.buckets:
                 if tb.bucket_key == options.bucket:
                     prior_leftover = tb.balance
                     break
-            pre_lifetime_purchased = self.get_balance(user_id).lifetime_purchased
 
         result = self._store.add_credits(
             user_id,
@@ -700,7 +701,7 @@ class CreditsService:
             idempotency_key=options.idempotency_key,
         )
 
-        is_fresh_grant = (result.lifetime_purchased - pre_lifetime_purchased) == amount_dec
+        is_fresh_grant = not result.idempotent
         if options.replace_prior and is_fresh_grant and prior_leftover > 0:
             replace_meta: dict[str, Any] = {"reason": "cycle_replaced"}
             self._store.add_credits(
@@ -1519,7 +1520,7 @@ class CreditsService:
             raise FeatureNotEntitledError(f"Feature not entitled. User={user_id}")
         if error == "operation_not_allowed":
             raise OperationNotAllowedError(f"Operation is not allowed. User={user_id}")
-        if error in {"missing_quota_measure", "invalid_measure"}:
+        if error in {"missing_quota_measure", "invalid_measure", "policy_mismatch"}:
             raise ConfigError(f"Deduction configuration is invalid: {error}. User={user_id}")
         if error in {"insufficient_credits", "insufficient_headroom"}:
             raise InsufficientCreditsError(f"Insufficient credits. User={user_id}, requested={cost}")
@@ -1866,7 +1867,7 @@ class CreditsService:
         cursor: UsageChargeCursor | None = None,
     ) -> UsageChargePage:
         """List metered usage charges, including allowance-covered events."""
-        return self._store.list_usage_charges(user_id, from_date, to_date, limit, cursor)
+        return self._usage_store.list_usage_charges(user_id, from_date, to_date, limit, cursor)
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
         """Return one ledger entry for a user account."""

@@ -10,6 +10,30 @@
       "expected": "1.000000"
     },
     {
+      "name": "floor_div_negative_truncates_toward_zero",
+      "expr": "(input_tokens - 1000) // 2",
+      "vars": {
+        "input_tokens": 993
+      },
+      "expected": "-3.000000"
+    },
+    {
+      "name": "floor_div_positive",
+      "expr": "input_tokens // 3",
+      "vars": {
+        "input_tokens": 7
+      },
+      "expected": "2.000000"
+    },
+    {
+      "name": "chained_comparison_rejected",
+      "expr": "1 < input_tokens < 100",
+      "vars": {
+        "input_tokens": 50
+      },
+      "expect_error": true
+    },
+    {
       "name": "two_term_rate",
       "expr": "input_tokens * (0.01 / 1000) + output_tokens * (0.03 / 1000)",
       "vars": {

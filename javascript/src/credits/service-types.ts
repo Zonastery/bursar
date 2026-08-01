@@ -8,6 +8,7 @@ import type {
   CreditMetadata,
   DeductionResult,
   UsageAnalyticsStore,
+  UsageChargeStore,
 } from "./types/index.js";
 
 export type PolicyPreset = "strict_prepaid" | "overdraft";
@@ -36,6 +37,8 @@ export interface CreditsServiceOptions {
    * keeps PostgreSQL as the zero-infrastructure behavior.
    */
   analytics?: UsageAnalyticsStore | null;
+  /** Optional usage-history backend. Defaults to the credit store. */
+  usageStore?: UsageChargeStore | null;
   /** Fallback credit policy for subjects without a plan assignment. */
   policy?: PolicyPreset;
   /** Planless-subject floor used with the `overdraft` fallback. */

@@ -1,0 +1,187 @@
+---
+title: Plans, entitlements, quotas, and admission
+---
+
+# Plans, entitlements, quotas, and admission
+
+A plan bundles everything a paid tier gets: which operations are allowed,
+which rate card prices them, what credits come free, which features unlock,
+what usage is limited, and how concurrency is gated. Plans live in the
+canonical config and are enforced by the database — policy is never just
+application code.
+
+## What a plan contains
+
+| Field | Role |
+| --- | --- |
+| `display_name` | Customer-facing label |
+| `rank` | Catalog ordering; lower ranks first (default `0`) |
+| `rate_card` | The rate card that prices allowed operations |
+| `allowed_operations` | Operations the plan may run |
+| `features` | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`) |
+| `credit_allowance` | Free credits per window, consumed before the balance |
+| `quotas` | Per-operation measure limits over a window |
+| `credit_policy` | Reference to a `prepaid` or `credit_line` policy |
+| `admission_policy` | Reference to a named concurrency policy |
+| `revision_policy` | When config changes reach subscribers (`immediate` \| `next_renewal` \| `pinned`) |
+
+`catalog.default_plan` names the signup plan; when omitted, the lowest-rank
+plan is chosen.
+
+## Allowances
+
+A `credit_allowance` grants free credits that reset on a window — the `free`
+plan's monthly 10,000 credits:
+
+```yaml
+plans:
+  free:
+    display_name: Free
+    rank: 0
+    rate_card: standard
+    allowed_operations: [completion]
+    credit_allowance:
+      amount: "10000"
+      window: { type: calendar, unit: month, count: 1 }
+```
+
+Windows are `calendar` (aligned to a timezone), `rolling` (a duration since
+first use), or `plan_assignment` (anchored to when the plan was assigned).
+Allowance credits are consumed **before** the balance is debited: a deduction
+first draws down `allowance_remaining`, and `DeductionResult.allowance_consumed`
+reports how much of the charge the allowance covered. `check_allowance(user_id)`
+returns the current window (`plan_id`, `allowance_remaining`, `period_start`,
+`period_end`) for display and gating. `unset_user_plan` pauses the allowance
+window; reassigning re-anchors it.
+
+## Quotas
+
+A quota limits one measure of one operation over a window — the `pro` plan's
+daily output-token cap:
+
+```yaml
+quotas:
+  daily_tokens:
+    operation: completion
+    measure: output_tokens
+    limit: "500000"
+    window: { type: calendar, unit: day, count: 1 }
+    enforcement: block
+    emit_at_percent: [80, 100]
+```
+
+`enforcement` is `block` (the charge fails with `QuotaExceededError`) or
+`allow` (usage records, the balance still pays). `emit_at_percent` fires
+`credits.quota_threshold` events as usage crosses each percentage (plus
+`credits.quota_blocked` when a block fires); persisted events are listed with
+`list_quota_events`, and current windows with `get_quota_state`. Quotas are
+checked in the same atomic transaction as the deduction, so a race cannot slip
+usage past a block.
+
+## Features and entitlements
+
+`entitlements.features` declares typed product features with defaults;
+`check_feature(user_id, feature)` returns the plan's value with a
+`has_feature` flag. Presence is distinguished from truthiness: `true`, any
+number (including `0`), and any string (including `""`) count as present;
+`false`, `null`, and absence do not.
+
+```yaml
+entitlements:
+  features:
+    voice_mode: { type: boolean, default: false }
+    max_context: { type: integer, default: 128000, minimum: 8000, maximum: 200000 }
+```
+
+Feature types are `boolean`, `enum` (with `values`), `integer` (with optional
+`minimum`/`maximum`), and `string` (with optional `pattern`). Operations can
+require a feature at charge time: pass `feature="voice_mode"` to
+`deduct`/`reserve`/`settle` and the store rejects the call with
+`FeatureNotEntitledError` when the plan lacks it. The database, not the
+application, remains the gate.
+
+## Admission policies
+
+`admission.policies` name reusable concurrency limits — a global
+`max_in_flight` plus per-operation overrides:
+
+```yaml
+admission:
+  policies:
+    default: { max_in_flight: 4 }
+```
+
+A plan references one policy (`pro` uses `default`). `reserve` enforces the
+limit; exceeding it raises `ConcurrencyLimitError` before any hold is taken.
+The same policy can be shared by several plans.
+
+## Credit policies
+
+`credits.policies` name prepaid or credit-line policies:
+
+| Policy | Behavior |
+| --- | --- |
+| `prepaid` | Floor at zero; structural zero debt |
+| `credit_line` | `limit` allows a negative floor — a bounded overdraft |
+
+A plan's `credit_policy` reference applies its floor to deductions. The
+constructor preset (`strict_prepaid` by default) is the fallback for planless
+users.
+
+## Plan assignment
+
+New accounts get a plan via `accounts.on_account_created(...)`, which assigns
+`catalog.default_plan` (or the lowest-rank plan) and applies eligible
+`account_created` grant programs. Assignments change at runtime through the
+credits service:
+
+```python
+from bursar import Bursar
+
+bursar = Bursar.create(credit_store=store)
+bursar.accounts.on_account_created(user_id, "signup:1")   # assigns the default plan
+
+bursar.credits.set_user_plan(user_id, "pro")
+allowance = bursar.credits.check_allowance(user_id)
+print(allowance.allowance_remaining)
+
+feature = bursar.credits.check_feature(user_id, "voice_mode")
+if not feature.has_feature:
+    raise RuntimeError("voice mode is not enabled on this plan")
+```
+
+```ts
+import { Bursar } from "@zonastery/bursar";
+
+const bursar = new Bursar({ creditStore: store });
+await bursar.accounts.onAccountCreated({ accountId: userId, eventKey: "signup:1" });
+
+bursar.credits.setUserPlan(userId, "pro");
+const allowance = bursar.credits.checkAllowance(userId);
+console.log(allowance.allowanceRemaining);
+
+const feature = bursar.credits.checkFeature(userId, "voice_mode");
+if (!feature.hasFeature) {
+  throw new Error("voice mode is not enabled on this plan");
+}
+```
+
+`set_user_plan` emits `credits.plan_changed`; `unset_user_plan` clears the
+assignment and pauses the allowance. For large installs, `start_plan_migration(from_plan_id, to_plan_id)`
+opens a resumable migration and `migrate_plan_batch(migration_id, batch_size)`
+advances it one bounded batch at a time.
+
+## Revision policy
+
+When a new catalog version activates, `revision_policy` decides when
+subscribers move: `immediate` applies the change at once, `next_renewal` waits
+for the next subscription renewal, and `pinned` keeps the subscriber on the
+version in effect at assignment. When omitted, subscription-backed plans use
+`next_renewal` and other plans use `immediate`.
+
+## Related
+
+- [Canonical configuration](./configuration.mdx) — plans and policy references in one document
+- [Financial safety](../guides/financial-safety.mdx) — floors, holds, and the lease lifecycle
+- [Credit lifecycle](../notebooks/04_credit_lifecycle.mdx) — end-to-end walkthrough
+- API reference: [Credits service (Python)](../python-api/credit-manager.mdx) and [Credits service (JavaScript)](../javascript-api/credit-manager.mdx)

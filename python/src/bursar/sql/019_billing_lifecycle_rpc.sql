@@ -47,13 +47,14 @@ BEGIN
 
     v_digest:=extensions.digest(convert_to(v_envelope::text,'UTF8'),'sha256');
 
-    -- Establish the payload partition before taking locks in billing_events.
-    -- Creating a first-of-month partition after the event insert can invert the
-    -- lock order between concurrent claimers and deadlock the unique-key wait.
-    PERFORM bursar.ensure_storage_partition(
-        'billing_event_payloads',
-        v_received_at
-    );
+    -- Establish the payload partition only when PostgreSQL owns raw billing
+    -- envelopes. S3 mode stages the envelope in the transactional outbox.
+    IF bursar.current_billing_payload_backend() = 'postgres' THEN
+        PERFORM bursar.ensure_storage_partition(
+            'billing_event_payloads',
+            v_received_at
+        );
+    END IF;
 
     INSERT INTO bursar.billing_events(
         provider,provider_environment,provider_event_id,event_type,
@@ -72,16 +73,45 @@ BEGIN
     RETURNING * INTO v_event;
 
     IF FOUND THEN
-        INSERT INTO bursar.billing_event_payloads(
-            event_id,
-            received_at,
-            envelope
-        )
-        VALUES(
-            v_event.id,
-            v_received_at,
-            v_envelope
-        );
+        IF bursar.current_billing_payload_backend() = 'postgres' THEN
+            INSERT INTO bursar.billing_event_payloads(
+                event_id,
+                received_at,
+                envelope
+            )
+            VALUES(
+                v_event.id,
+                v_received_at,
+                v_envelope
+            );
+        ELSE
+            INSERT INTO bursar.event_outbox(
+                topic,
+                aggregate_type,
+                aggregate_id,
+                idempotency_key,
+                payload
+            )
+            VALUES(
+                'billing.webhook_received',
+                'billing_event',
+                v_event.id,
+                'billing-event-received:' || v_event.id::text,
+                jsonb_build_object(
+                    'delivery_required', true,
+                    'tenant_id', v_event.tenant_id,
+                    'event_id', v_event.id,
+                    'provider', v_event.provider,
+                    'provider_environment', v_event.provider_environment,
+                    'provider_event_id', v_event.provider_event_id,
+                    'event_type', v_event.event_type,
+                    'status', v_event.status,
+                    'received_at', v_event.payload_received_at,
+                    'completed_at', v_event.completed_at,
+                    'envelope', v_envelope
+                )
+            );
+        END IF;
 
         RETURN QUERY SELECT 'claimed',v_event.id,v_token;
 

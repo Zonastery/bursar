@@ -1,0 +1,217 @@
+---
+title: Quickstart
+---
+
+# Quickstart
+
+Ten minutes to a working credit ledger. You build *prompta*, an AI assistant,
+and wire Bursar to meter completions, hold balances, and charge users.
+
+## Prerequisites
+
+- Python 3.11+ with `pip install bursar[postgres]`, or Node.js 22+ with
+  `npm install @zonastery/bursar`
+- PostgreSQL 16 reachable from `DATABASE_URL`
+
+## 1. Install the schema
+
+```bash
+export DATABASE_URL=postgresql://...
+bursar migrate
+```
+
+`bursar migrate` applies the ordered SQL baseline, records checksums for every
+file, and fails if an applied file changed. It is safe to re-run — a second run
+is a no-op.
+
+Create a tenant (the printed UUID is your tenant id):
+
+```bash
+bursar tenant create acme
+# 018f7f5f-7b4a-7000-8000-000000000001
+export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+```
+
+## 2. Publish a config
+
+One strict, versioned document drives pricing, buckets, and plans. Save it as
+`pricing.yaml`:
+
+```yaml
+version: 1
+catalog:
+  default_plan: free
+pricing:
+  operations:
+    completion:
+      measures:
+        input_tokens: { unit: token }
+        output_tokens: { unit: token }
+      dimensions:
+        model: { type: string }
+  rate_cards:
+    standard:
+      operations:
+        completion:
+          rules:
+            - when:
+                model:
+                  op: in
+                  values: [gpt-4o, gpt-4o-mini]
+              charge:
+                type: per_unit
+                measure: input_tokens
+                rate: "0.0025"
+                unit_size: "1000000"
+          unmatched:
+            action: reject
+credits:
+  buckets:
+    promotional: { priority: 1 }
+    purchased: { priority: 10 }
+  default_bucket: purchased
+plans:
+  free:
+    display_name: Free
+    rate_card: standard
+    allowed_operations: [completion]
+    credit_allowance:
+      amount: "10000"
+      window: { type: calendar, unit: month, count: 1 }
+```
+
+The schema is strict: unknown fields are rejected, and all exact decimal
+values are strings. Validate, then publish:
+
+```bash
+bursar config validate pricing.yaml
+bursar config set pricing.yaml
+```
+
+`config set` validates again, creates an immutable version, and activates it.
+Check with `bursar config list`.
+
+## 3. First credits
+
+Connect the store to your tenant and build the facade:
+
+```python
+# Python
+from bursar import Bursar, PostgresStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
+bursar = Bursar.create(credit_store=store)
+```
+
+```ts
+// TypeScript
+import { Bursar, PostgresStore } from "@zonastery/bursar";
+
+const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+const bursar = new Bursar({ creditStore: store });
+```
+
+Register Ada and give her an account, a plan, and some credits. The free plan
+carries a 10,000-credit monthly allowance:
+
+```python
+# Python
+ada = "11111111-1111-4111-8111-111111111111"
+
+bursar.accounts.on_account_created(ada, event_key="signup")
+bursar.credits.add_credits(ada, 1000, entry_type="purchase")
+
+balance = bursar.credits.get_balance(ada)
+print(balance.balance, balance.lifetime_purchased)
+```
+
+```ts
+// TypeScript
+const ada = "11111111-1111-4111-8111-111111111111";
+
+await bursar.accounts.onAccountCreated({ accountId: ada, eventKey: "signup" });
+await bursar.credits.addCredits(ada, 1000, { type: "purchase" });
+
+const balance = await bursar.credits.getBalance(ada);
+console.log(balance.balance, balance.lifetimePurchased);
+```
+
+`on_account_created` assigns the default plan and runs eligible signup grants;
+`add_credits` with `entry_type="purchase"` grants into the default bucket and
+appends a `purchase` ledger entry.
+
+## 4. Charge for usage
+
+Meter one completion as a `UsageMetrics` and deduct in a single atomic call.
+This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
+`0.0025` credits per million tokens: `800 / 1,000,000 × 0.0025 = 0.000002`.
+
+```python
+# Python
+from decimal import Decimal
+from bursar.metrics import UsageMetrics
+
+metrics = UsageMetrics(
+    operation="completion",
+    measures={"input_tokens": Decimal(800)},
+    dimensions={"model": "gpt-4o"},
+)
+result = bursar.credits.deduct(ada, metrics, idempotency_key="turn_12345")
+print(result.amount, result.allowance_consumed, result.balance_after)
+```
+
+```ts
+// TypeScript
+const result = await bursar.credits.deduct(
+  ada,
+  {
+    operation: "completion",
+    measures: { input_tokens: 800 },
+    dimensions: { model: "gpt-4o" },
+  },
+  "turn_12345",
+);
+console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
+```
+
+The `DeductionResult` reports the split between allowance and balance:
+
+| Field | Meaning |
+| --- | --- |
+| `amount` | Net charge debited from the balance (after allowance) |
+| `allowance_consumed` | Amount covered by the plan's free allowance |
+| `balance_after` | Exact balance after the charge |
+
+On the free plan the 0.000002-credit charge is covered by the monthly
+allowance, so `amount` is 0, `allowance_consumed` is 0.000002, and
+`balance_after` is 1000.000000. Replaying `deduct` with the same
+`idempotency_key` is a no-op. Unmetered models are rejected by the
+`unmatched: reject` policy.
+
+Every mutation is visible in the append-only ledger:
+
+```python
+# Python
+for entry in bursar.credits.list_ledger_entries(ada, limit=50).items:
+    print(entry.entry_type, entry.amount, entry.balance_after)
+```
+
+```ts
+// TypeScript
+const page = await bursar.credits.listLedgerEntries(ada, { limit: 50 });
+for (const entry of page.items) {
+  console.log(entry.entryType, entry.amount, entry.balanceAfter);
+}
+```
+
+## 5. Next steps
+
+- [The data model](./concepts/data-model.mdx) — accounts, ledger, lots, leases.
+- [Canonical configuration](./concepts/configuration.mdx) — the full config
+  shape and validation rules.
+- [Expressions](./concepts/expressions.mdx) — formula charges for exotic
+  pricing.
+- [Architecture](./concepts/architecture.mdx) — facade and schema internals.
+- Notebooks: [Your first pricing config](/docs/notebooks/first_pricing_config) and
+  [The credit lifecycle](/docs/notebooks/credit_lifecycle) walk the same story
+  end to end.

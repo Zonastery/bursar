@@ -1,0 +1,120 @@
+---
+title: The data model
+---
+
+# The data model
+
+Before the API details, here is the shape of the money. One `Bursar` facade
+talks to one Postgres schema, and every concept maps to tables you can point a
+dashboard at.
+
+## Accounts
+
+A subject (typically one user) has one personal `credit_accounts` row, and
+optionally one `account_kind = 'team'` row per team. Each account carries a
+single locked canonical balance and a `version` that every mutation checks —
+the hot path never re-derives balance from history.
+
+## The append-only ledger
+
+Every monetary event is one row in `credit_ledger_entries`: a signed `amount`,
+the exact `balance_after` after posting, an idempotency key, and a
+`reference_entry_id` for reversals. Kinds are `grant`, `purchase`, `usage`,
+`expiry`, `revocation`, `refund`, `adjustment`, `reservation`, `release`, and
+`refund_clawback`. Positive kinds post credits; `usage`, `expiry`, and
+`reservation` post debits; `adjustment` can go either way. A refund reverses
+its source: the refund entry restores the spent balance, and a
+`refund_clawback` entry reverses the original debits.
+
+## Lots and allocations
+
+Every positive entry becomes a `credit_lots` row: the amount, its bucket,
+priority, and expiry. Debits consume lots in priority order — bucket tiering
+is `credit_lot_allocations` rows fanning out of the debit entry. When credits
+expire or are revoked, the remaining lot balance is allocated as `expiry` or
+`revocation` and the account balance moves by exactly that amount. Refunds
+restore the source lots that the original debit consumed, not the account
+globally, so expiry semantics survive refunds.
+
+## Leases
+
+`credit_leases` are the atomic admission gate for long-running work:
+`reserve` captures a worst-case hold, a policy snapshot, and the
+`minimum_balance` at reservation; `settle` charges the actual cost and
+finalizes; `release` returns the hold. Entitlement, quota, and
+`max_in_flight` checks all happen in the same transaction as the reserve, so
+nothing drifts between "can I afford this?" and "you are billed".
+
+## Plans as state
+
+Plans are non-monetary. `account_plan_assignments` records which plan an
+account holds against which catalog revision; `allowance_windows` and
+`quota_windows` track usage windows and consumption keyed by account. The
+allowance is real money *available* to the account, but it never enters the
+balance — `DeductionResult.allowance_consumed` tells you the split.
+
+## Usage charges
+
+Each metered charge writes one compact `credit_usage_charges` row: operation,
+measures, model, `requested`, `charged`, `allowance_requested`,
+`allowance_covered`, and the pricing snapshot. The `charged + allowance_covered
+= requested` check is part of the schema. Zero-cost usage is still recorded,
+so quotas and analytics cannot be bypassed by a free rate.
+
+## Core tables
+
+| Table | Purpose |
+| --- | --- |
+| `credit_accounts` | One locked balance and version per account (personal or team) |
+| `credit_ledger_entries` | Append-only money history with `balance_after` per entry |
+| `credit_lots` | Each positive entry as a spendable lot with bucket, priority, expiry |
+| `credit_lot_allocations` | Which lots a debit consumed, in priority order |
+| `credit_leases` | Temporary holds and policy snapshots for admission control |
+| `account_plan_assignments` | Current plan per account, pinned to a catalog revision |
+
+## The three money invariants
+
+1. **One locked balance per account.** `credit_accounts.balance` is written
+   only by the ledger-posting path, guarded by `version`; nothing mutates it
+   directly.
+2. **Balance equals the ledger.** Every mutation appends an entry whose
+   `balance_after` equals the resulting account balance — reading history and
+   reading the balance always agree.
+3. **The ledger is append-only and idempotent.** Entries are never updated or
+   deleted, and `(account_id, idempotency_key)` is unique, so a retried write
+   replays the original entry instead of double-posting.
+
+## Reading balances
+
+Balance reads are cheap — one locked row. Availability subtracts active
+holds; buckets break the balance into tiers:
+
+```python
+# Python
+balance = bursar.credits.get_balance(ada)
+available = bursar.credits.get_available(ada)
+buckets = bursar.credits.get_bucket_balances(ada)
+
+print(balance.balance)              # 1000.000000
+print(available.available)          # balance minus active holds
+for bucket in buckets.buckets:
+    print(bucket.bucket_key, bucket.priority, bucket.balance)
+```
+
+```ts
+// TypeScript
+const balance = await bursar.credits.getBalance(ada);
+const available = await bursar.credits.getAvailable(ada);
+const buckets = await bursar.credits.getBucketBalances(ada);
+
+console.log(balance.balance);            // 1000.000000
+console.log(available.available);        // balance minus active holds
+for (const bucket of buckets.buckets) {
+  console.log(bucket.bucketKey, bucket.priority, bucket.balance);
+}
+```
+
+`get_available` is advisory (UI only) — only `reserve` is authoritative for
+admission. See [Architecture](./architecture.mdx) for the full schema layout,
+or [Canonical configuration](./configuration.mdx) for the document that shapes
+it.

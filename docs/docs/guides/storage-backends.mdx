@@ -1,0 +1,116 @@
+---
+title: Storage backends
+---
+
+# Storage backends
+
+`PostgresStore` is the only credit store. Import it, and the `CreditStore`
+abstract base, from the package top level:
+
+```python
+# Python
+from bursar import CreditStore, PostgresStore
+```
+
+```ts
+// TypeScript
+import { CreditStore, PostgresStore } from "@zonastery/bursar";
+```
+
+There is no `bursar.stores` package, and the former in-memory and Supabase
+HTTP stores have been removed. All account state lives in PostgreSQL.
+
+## PostgresStore
+
+The store is tenant-bound: pass the provisioned tenant UUID when constructing
+it. In Python `tenant_id` is a keyword argument; in JavaScript it is the
+second positional argument.
+
+```python
+# Python
+store = PostgresStore(database_url, tenant_id=tenant_id)
+```
+
+```ts
+// TypeScript
+const store = new PostgresStore(databaseUrl, tenantId);
+```
+
+No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
+provision the tenant before constructing a store — see
+[CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
+Bursar owns the schema, migrations, and tenant lifecycle; host migrations
+must not create, alter, or seed Bursar tables.
+
+Custom stores subclass `CreditStore`. They must preserve idempotency, account
+locking semantics, append-only ledger history, cursor ordering by
+`(created_at, entry_id)`, and atomic lot allocation, because the financial
+invariants in [financial safety](./financial-safety.mdx) depend on them.
+
+## Optional analytics and archive adapters
+
+For high-volume deployments, Bursar can route high-cardinality data into
+external systems through optional adapters. PostgreSQL remains the canonical
+source for balances, compact usage receipts, billing claims, and idempotency.
+In Python they live under `bursar.storage`
+(importing requires the `postgres` extra; the native S3 adapter also needs
+the `s3` extra); in JavaScript they are exported from the Node-only
+`@zonastery/bursar/node` subpath.
+
+| Adapter | Purpose |
+| --- | --- |
+| `ClickHouseUsageStore` | Usage history and analytics — skips PostgreSQL detail and rollup rows when enabled |
+| `S3BillingArchive` | Billing payload archive — skips PostgreSQL raw envelope rows when enabled |
+
+A transactional outbox carries the complete external payload in the same
+transaction as the canonical receipt or billing claim. An `OutboxWorker`
+delivers `usage.charge_recorded` to ClickHouse and
+`billing.webhook_received` to S3. This avoids a second permanent PostgreSQL
+copy while preserving retries during external outages. Exported rows and
+archive keys always carry `tenant_id` (S3 keys use
+`<prefix>/tenants/<tenant-id>/billing-events/...`, with the prefix defaulting
+to `bursar`).
+
+External detail is eventually consistent: the PostgreSQL receipt or billing
+claim commits immediately, while ClickHouse history and S3 objects become
+visible after the outbox worker delivers them.
+
+The runtime composition root wires the Postgres stores, the optional
+adapters, and the outbox worker onto one connection pool:
+
+```python
+# Python
+from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
+
+runtime = create_bursar_runtime(
+    BursarRuntimeOptions(
+        postgres=database_url,
+        tenant_id=tenant_id,
+        clickhouse=clickhouse_options,
+        s3=s3_options,
+        outbox=outbox_options,
+    )
+)
+runtime.start(BursarRuntimeStartOptions(load_catalog=True))
+```
+
+```ts
+// TypeScript
+import { createBursarRuntime } from "@zonastery/bursar/node";
+
+const runtime = await createBursarRuntime({
+  postgres: databaseUrl,
+  tenantId,
+  clickhouse: clickhouseOptions,
+  s3: s3Options,
+  outbox: outboxOptions,
+});
+await runtime.start({ loadCatalog: true });
+```
+
+The runtime exposes the composed `bursar` facade plus the underlying
+`creditStore` and `billingStore`. SDK runtimes claim outbox events through
+the tenant-filtered overload, so one runtime can never take another tenant's
+work. When ClickHouse is configured, analytics and usage-history methods route
+to ClickHouse; when S3 is configured, billing envelopes route to S3. Without
+either adapter, the runtime uses PostgreSQL for those methods and payloads.

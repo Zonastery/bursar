@@ -19,6 +19,7 @@ from bursar.credits.types import (
     CreditMetadata,
     DeductionResult,
     UsageAnalyticsStore,
+    UsageChargeStore,
 )
 from bursar.metrics import UsageMetrics
 from bursar.shared.logger import Logger
@@ -47,6 +48,7 @@ class LowBalanceConfig(_CreditsServiceModel):
 class CreditsServiceOptions(_CreditsServiceModel):
     logger: SkipValidation[Logger] | None = None
     analytics: UsageAnalyticsStore | None = None
+    usage_store: UsageChargeStore | None = None
     policy: PolicyPreset = "strict_prepaid"
     overdraft_floor: Decimal | None = None
     max_concurrent: int | None = None

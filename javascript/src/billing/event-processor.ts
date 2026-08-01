@@ -58,6 +58,10 @@ export class BillingEventProcessor {
       this.logger.debug("[BillingService] duplicate event", { eventId: event.eventId });
       return { handled: true, action: "duplicate" };
     }
+    if (claim.status === "busy") {
+      this.logger.debug("[BillingService] event is already processing", { eventId: event.eventId });
+      return { handled: false, error: "claim_busy" };
+    }
     if (claim.status === "retry") {
       this.logger.warn("[BillingService] claim retry", { eventId: event.eventId });
       return { handled: false, error: "claim_failed_retry" };

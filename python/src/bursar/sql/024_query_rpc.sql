@@ -222,12 +222,15 @@ AS $$
             (charge.event_at AT TIME ZONE 'UTC')::date AS usage_day,
             charge.account_id,
             charge.operation,
-            charge.model,
-            charge.region,
+            payload.model,
+            payload.region,
             sum(charge.charged) AS charged,
             sum(charge.allowance_covered) AS allowance_covered,
             count(*) AS charge_count
         FROM bursar.credit_usage_charges AS charge
+        LEFT JOIN bursar.usage_charge_payloads AS payload
+          ON payload.charge_id = charge.id
+         AND payload.event_at = charge.event_at
         CROSS JOIN bounds
         WHERE charge.event_at >= p_start
           AND charge.event_at < p_end
@@ -240,8 +243,8 @@ AS $$
             (charge.event_at AT TIME ZONE 'UTC')::date,
             charge.account_id,
             charge.operation,
-            charge.model,
-            charge.region
+            payload.model,
+            payload.region
     )
     SELECT * FROM complete_days
     UNION ALL
@@ -393,9 +396,9 @@ AS $$
         charge.charged,
         charge.allowance_requested,
         charge.allowance_covered,
-        charge.feature,
-        charge.model,
-        charge.region,
+        payload.feature,
+        payload.model,
+        payload.region,
         charge.event_at,
         charge.idempotency_key,
         COALESCE(payload.metadata, '{}'::jsonb),

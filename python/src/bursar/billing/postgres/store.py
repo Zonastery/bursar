@@ -101,9 +101,11 @@ class PostgresBillingStore(BillingStore):
         *,
         tenant_id: str | UUID,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+        billing_payload_backend: Literal["postgres", "s3"] = "postgres",
     ) -> None:
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
+        self._billing_payload_backend = billing_payload_backend
         self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
         self._owns_pool = pool is None
 
@@ -129,6 +131,10 @@ class PostgresBillingStore(BillingStore):
                 cur.execute(
                     "SELECT set_config('bursar.tenant_id', %s, true)",
                     (self._tenant_id,),
+                )
+                cur.execute(
+                    "SELECT set_config('bursar.billing_payload_backend', %s, true)",
+                    (self._billing_payload_backend,),
                 )
                 cur.execute(sql, params or [])
                 try:
@@ -274,7 +280,7 @@ class PostgresBillingStore(BillingStore):
         return map_context("from"), map_context("to")
 
     def _row_to_subscription_change(self, row: dict[str, Any] | None) -> BillingSubscriptionChange | None:
-        if not row:
+        if not row or row.get("id") is None:
             return None
         from_offer, to_offer = self._subscription_offer_contexts(row)
         return BillingSubscriptionChange(
@@ -457,6 +463,8 @@ class PostgresBillingStore(BillingStore):
             )
         if raw_status == "duplicate":
             return BillingEventClaim(status="duplicate")
+        if raw_status == "busy":
+            return BillingEventClaim(status="busy")
         return BillingEventClaim(status="retry")
 
     def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> None:
@@ -969,13 +977,21 @@ class PostgresBillingStore(BillingStore):
             updated_at=_to_utc_iso(row.get("updated_at")),
         )
 
-    def upsert_auto_recharge_profile(self, profile: BillingAutoRechargeProfile) -> None:
+    def upsert_auto_recharge_profile(
+        self,
+        profile: BillingAutoRechargeProfile,
+        *,
+        reset_cooldown: bool = False,
+    ) -> None:
         rows = self._execute(
             """SELECT bursar.upsert_auto_recharge_profile(
                    %s::uuid,
                    %s,
                    %s,
                    %s::uuid,
+                   %s,
+                   %s,
+                   %s,
                    %s,
                    %s,
                    %s,
@@ -996,6 +1012,9 @@ class PostgresBillingStore(BillingStore):
                 profile.window_count,
                 profile.window_anchor,
                 profile.window_timezone,
+                profile.armed,
+                profile.state,
+                reset_cooldown,
             ],
         )
         if not rows or not rows[0].get("profile_updated"):
@@ -1071,6 +1090,7 @@ class PostgresBillingStore(BillingStore):
                 "succeeded": ["submitted", "processing", "succeeded"],
                 "failed": ["submitted", "processing", "failed"],
                 "unknown": ["submitted", "processing", "unknown"],
+                "action_required": ["submitted", "action_required"],
             },
             "submitted": {
                 "submitted": [],
@@ -1078,21 +1098,27 @@ class PostgresBillingStore(BillingStore):
                 "succeeded": ["processing", "succeeded"],
                 "failed": ["processing", "failed"],
                 "unknown": ["processing", "unknown"],
+                "action_required": ["action_required"],
             },
             "processing": {
                 "processing": [],
                 "succeeded": ["succeeded"],
                 "failed": ["failed"],
                 "unknown": ["unknown"],
+                "action_required": ["action_required"],
             },
             "unknown": {
                 "unknown": [],
                 "processing": ["processing"],
+                "succeeded": ["succeeded"],
+                "failed": ["failed"],
                 "action_required": ["action_required"],
             },
             "action_required": {
                 "action_required": [],
                 "processing": ["processing"],
+                "succeeded": ["succeeded"],
+                "failed": ["failed"],
             },
         }
         path = transitions.get(current, {}).get(state)

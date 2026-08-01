@@ -18,8 +18,8 @@ export interface S3BillingArchiveOptions {
   forcePathStyle?: boolean;
   prefix?: string;
   /**
-   * Delete the raw envelope from PostgreSQL after S3 confirms the upload.
-   * Defaults to true. The event and S3 pointer stay in PostgreSQL.
+   * Purge a legacy PostgreSQL envelope after S3 confirms the upload.
+   * New S3-routed events are staged only in the transactional outbox.
    */
   purgePostgresPayload?: boolean;
 }
@@ -34,7 +34,7 @@ function normalizePrefix(prefix: string | undefined): string {
   return (prefix ?? "bursar").replace(/^\/+|\/+$/g, "");
 }
 
-/** Archives completed billing webhook envelopes under deterministic keys. */
+/** Archives received billing webhook envelopes under deterministic keys. */
 export class S3BillingArchive implements BillingPayloadArchive {
   readonly purgePostgresPayload: boolean;
   private readonly bucket: string;

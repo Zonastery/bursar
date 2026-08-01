@@ -8,7 +8,12 @@ import {
   QuotaExceededError,
 } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
-import { BOOTSTRAP_SQL, TEST_TENANT_ID, applyMigrations } from "./helpers/bootstrap.js";
+import {
+  BOOTSTRAP_SQL,
+  TEST_TENANT_ID,
+  applyMigrations,
+  truncateBursarTables,
+} from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
@@ -127,6 +132,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     await pool.query('INSERT INTO public."user" (id) VALUES ($1) ON CONFLICT DO NOTHING', [
       USER_ID,
     ]);
+    await truncateBursarTables(pool);
   }, 60_000);
   afterAll(async () => pool.end());
 
@@ -185,7 +191,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       ),
     ).rejects.toBeInstanceOf(OperationNotAllowedError);
     const persistedUsage = await pool.query(
-      `SELECT charge.measures, payload.dimensions
+      `SELECT payload.measures, payload.dimensions
        FROM bursar.credit_usage_charges AS charge
        JOIN bursar.usage_charge_payloads AS payload
          ON payload.charge_id = charge.id

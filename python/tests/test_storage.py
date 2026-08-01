@@ -313,6 +313,45 @@ def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
         )
 
 
+def test_clickhouse_serves_usage_history_with_a_cursor() -> None:
+    client = FakeClickHouseClient()
+    client.query_rows = [
+        {
+            "usage_id": "00000000-0000-0000-0000-000000000042",
+            "account_id": "00000000-0000-0000-0000-000000000006",
+            "operation": "completion",
+            "requested": "15.000000",
+            "charged": "12.500000",
+            "allowance_requested": "2.500000",
+            "allowance_covered": "2.500000",
+            "feature": "chat",
+            "model": "gpt",
+            "region": None,
+            "event_at": "2026-07-29 12:00:00.000000",
+            "idempotency_key": "job:42",
+            "metadata": '{"trace_id":"trace-42"}',
+            "created_at": "2026-07-29 12:00:00.000000",
+        }
+    ]
+    store = ClickHouseUsageStore(
+        ClickHouseUsageStoreOptions(
+            client=client,
+            tenant_id=UUID(TENANT_ID),
+            create_table=False,
+        )
+    )
+
+    page = store.list_usage_charges(
+        "00000000-0000-0000-0000-000000000007",
+        limit=10,
+    )
+
+    assert page.next_cursor is None
+    assert page.items[0].usage_id == _usage_export().charge_id
+    assert page.items[0].metadata == {"trace_id": "trace-42"}
+    assert str(page.items[0].charged) == "12.500000"
+
+
 def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     pool = FakePool()
     runtime = create_bursar_runtime(
@@ -383,5 +422,49 @@ def test_runtime_routes_analytics_through_clickhouse_without_changing_store() ->
         datetime(2026, 8, 1, tzinfo=UTC),
     )
     assert str(rows[0].total_spend) == "4"
+    runtime.close()
+    pool.closeall.assert_not_called()
+
+
+def test_runtime_routes_usage_history_through_clickhouse() -> None:
+    pool = FakePool()
+    client = FakeClickHouseClient()
+    client.query_rows = [
+        {
+            "usage_id": "00000000-0000-0000-0000-000000000042",
+            "account_id": "00000000-0000-0000-0000-000000000006",
+            "operation": "completion",
+            "requested": "15.000000",
+            "charged": "12.500000",
+            "allowance_requested": "2.500000",
+            "allowance_covered": "2.500000",
+            "feature": "chat",
+            "model": "gpt",
+            "region": None,
+            "event_at": "2026-07-29 12:00:00.000000",
+            "idempotency_key": "job:42",
+            "metadata": '{"trace_id":"trace-42"}',
+            "created_at": "2026-07-29 12:00:00.000000",
+        }
+    ]
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pool,
+            tenant_id=UUID(TENANT_ID),
+            clickhouse=ClickHouseUsageStoreOptions(
+                client=client,
+                tenant_id=UUID(TENANT_ID),
+                create_table=False,
+            ),
+            outbox=False,
+        )
+    )
+
+    page = runtime.bursar.credits.list_usage_charges(
+        "00000000-0000-0000-0000-000000000007",
+        limit=10,
+    )
+
+    assert page.items[0].metadata == {"trace_id": "trace-42"}
     runtime.close()
     pool.closeall.assert_not_called()

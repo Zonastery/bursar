@@ -4,15 +4,68 @@ title: Python API
 
 # Python API
 
-Python 3.12 and 3.13 are supported.
+Python 3.12 and 3.13 are supported. Install the Postgres backend with:
 
-```python
-from bursar import Bursar, LedgerCursor, LedgerEntry, LedgerPage
-from bursar.stores.postgres import PostgresStore
-
-bursar = Bursar.create(credit_store=PostgresStore(database_url))
+```bash
+pip install "bursar[postgres]"
 ```
 
-Use `bursar.credits` for account, lease, plan, team, and ledger operations;
-`bursar.catalog` for canonical configuration; and optional `bursar.billing`
-for provider lifecycle operations.
+## Constructing the facade
+
+`Bursar.create` wires a store, the optional billing/commerce capabilities, and
+an optional event emitter into one application-facing facade:
+
+```python
+from bursar import Bursar, PostgresStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
+bursar = Bursar.create(
+    credit_store=store,
+    billing_store=None,
+    credits_options=None,
+    billing_options=None,
+    commerce_options=None,
+    emitter=None,
+)
+```
+
+- `credit_store` is the only required argument. `PostgresStore` is the bundled
+  implementation; `CreditStore` is the abstract base for custom backends.
+- `tenant_id` scopes every store operation to a single tenant.
+- `billing_store` plus `commerce_options` enable the billing and commerce
+  capabilities (`ingest_billing_event`, checkouts, subscriptions, auto-recharge).
+- `emitter` receives credit lifecycle events (`CreditEventEmitter`).
+
+Apply the database schema with `bursar migrate` before constructing a store —
+the package never runs migrations from the store itself.
+
+## Package layout
+
+`bursar` is a flat namespace: everything you need is importable from the top
+level.
+
+| Export | Purpose |
+| --- | --- |
+| `Bursar` | The facade: `credits`, `catalog`, `accounts`, plus optional `billing`/`commerce` |
+| `PostgresStore` | Production, tenant-scoped credit store (requires the `[postgres]` extra) |
+| `PostgresBillingStore` | Billing store for payment-provider lifecycle (requires the `[postgres]` extra) |
+| `PricingEngine` | Database-free operation-pricing core |
+| `CreditStore` | Abstract base class for custom credit backends |
+| `BillingStore` | Abstract base class for custom billing backends |
+| `UsageMetrics` | One billable operation (measures + dimensions) |
+| `load_config_from_dict` | Validate and canonicalize a config document |
+| errors | `BursarError`, `CreditError`, `ConfigError`, `StoreError`, `CapabilityNotSupportedError`, … |
+
+`PostgresStore` and `PostgresBillingStore` are lazy-imported: they are only
+available when the optional `psycopg2` extra is installed.
+
+## Where to go next
+
+- [Credits service](/docs/python-api/credit-manager) — balances, metered
+  charging, leases, plans, ledger, analytics, teams
+- [PricingEngine](/docs/python-api/pricing-engine) — pricing without a database
+- [Stores](/docs/python-api/stores) — `PostgresStore`, `PostgresBillingStore`,
+  and the `CreditStore` contract
+- [API reference](/docs/python-api/reference) — generated symbol reference
+- [Core concepts](/docs/concepts/data-model) and
+  [configuration](/docs/concepts/configuration) — the canonical config document

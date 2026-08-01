@@ -21,6 +21,9 @@ from bursar.credits.types import (
     SpendByModelRow,
     SpendByUserRow,
     TopUserRow,
+    UsageCharge,
+    UsageChargeCursor,
+    UsageChargePage,
 )
 from bursar.storage.ports import UsageChargeExport
 
@@ -299,6 +302,97 @@ class ClickHouseUsageStore:
             top_user=str(users[0]["key"]) if users else "",
         )
 
+    def list_usage_charges(
+        self,
+        user_id: str,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
+        limit: int = 50,
+        cursor: UsageChargeCursor | None = None,
+    ) -> UsageChargePage:
+        if not user_id:
+            raise ValueError("user_id must not be empty")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if from_date is not None and from_date.tzinfo is None:
+            raise ValueError("from_date must include timezone")
+        if to_date is not None and to_date.tzinfo is None:
+            raise ValueError("to_date must include timezone")
+        if cursor is not None and (not cursor.event_at or not cursor.usage_id):
+            raise ValueError("usage charge cursor requires event_at and usage_id")
+
+        predicates = [
+            "tenant_id = {tenant_id:UUID}",
+            "subject_id = {subject_id:UUID}",
+        ]
+        parameters: dict[str, Any] = {
+            "tenant_id": str(self._tenant_id),
+            "subject_id": user_id,
+        }
+        if from_date is not None:
+            predicates.append("event_at >= parseDateTime64BestEffort({from_date:String})")
+            parameters["from_date"] = from_date.isoformat()
+        if to_date is not None:
+            predicates.append("event_at < parseDateTime64BestEffort({to_date:String})")
+            parameters["to_date"] = to_date.isoformat()
+        if cursor is not None:
+            predicates.append(
+                "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}), {cursor_usage_id:UUID})"
+            )
+            parameters["cursor_event_at"] = cursor.event_at
+            parameters["cursor_usage_id"] = cursor.usage_id
+
+        rows = self._query_rows_with_parameters(
+            f"""
+            SELECT
+                toString(charge_id) AS usage_id,
+                toString(account_id) AS account_id,
+                operation,
+                toString(requested) AS requested,
+                toString(charged) AS charged,
+                toString(allowance_requested) AS allowance_requested,
+                toString(allowance_covered) AS allowance_covered,
+                feature,
+                model,
+                region,
+                toString(event_at) AS event_at,
+                idempotency_key,
+                metadata,
+                toString(created_at) AS created_at
+            FROM {self._quoted_table} FINAL
+            WHERE {" AND ".join(predicates)}
+            ORDER BY event_at DESC, charge_id DESC
+            LIMIT {limit + 1}
+            """,
+            parameters,
+        )
+        has_more = len(rows) > limit
+        visible = rows[:limit]
+        items = [
+            UsageCharge(
+                usage_id=str(row["usage_id"]),
+                account_id=str(row["account_id"]),
+                operation=str(row["operation"]),
+                requested=Decimal(str(row["requested"])),
+                charged=Decimal(str(row["charged"])),
+                allowance_requested=Decimal(str(row["allowance_requested"])),
+                allowance_covered=Decimal(str(row["allowance_covered"])),
+                feature=str(row["feature"]) if row.get("feature") is not None else None,
+                model=str(row["model"]) if row.get("model") is not None else None,
+                region=str(row["region"]) if row.get("region") is not None else None,
+                event_at=self._read_timestamp(str(row["event_at"])).isoformat(),
+                idempotency_key=str(row["idempotency_key"]),
+                metadata=self._json_object(row.get("metadata")),
+                created_at=self._read_timestamp(str(row["created_at"])).isoformat(),
+            )
+            for row in visible
+        ]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = UsageChargeCursor(event_at=last.event_at, usage_id=last.usage_id)
+        return UsageChargePage(items=items, next_cursor=next_cursor)
+
     def _create_projection_table(self) -> None:
         ttl = "" if self._retention_days is None else f"\nTTL event_at + toIntervalDay({self._retention_days}) DELETE"
         self._client.command(
@@ -371,13 +465,24 @@ class ClickHouseUsageStore:
         end: datetime,
     ) -> list[dict[str, Any]]:
         self.initialize()
-        result = self._client.query(
+        return self._query_rows_with_parameters(
             query,
-            parameters={
+            {
                 "tenant_id": str(self._tenant_id),
                 "start": start.isoformat(),
                 "end": end.isoformat(),
             },
+        )
+
+    def _query_rows_with_parameters(
+        self,
+        query: str,
+        parameters: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        self.initialize()
+        result = self._client.query(
+            query,
+            parameters=parameters,
         )
         named_results = getattr(result, "named_results", None)
         if callable(named_results):
@@ -385,3 +490,20 @@ class ClickHouseUsageStore:
             return [dict(row) for row in rows]
         columns = list(result.column_names)
         return [dict(zip(columns, row, strict=True)) for row in result.result_rows]
+
+    @staticmethod
+    def _json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _read_timestamp(value: str) -> datetime:
+        normalized = value.replace(" ", "T", 1)
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)

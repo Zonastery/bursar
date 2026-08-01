@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal, Protocol, TypeGuard, cast
 from uuid import UUID
 
@@ -32,8 +33,10 @@ from bursar.storage.outbox_worker import (
     OutboxWorkerOptions,
 )
 from bursar.storage.ports import (
+    BillingEventPayloadExport,
     BillingPayloadArchive,
     OutboxEvent,
+    UsageChargeExport,
     UsageEventSink,
 )
 from bursar.storage.postgres_repository import PostgresStorageRepository
@@ -67,6 +70,10 @@ def _is_usage_analytics_sink(value: object) -> TypeGuard[UsageAnalyticsSink]:
 
 def _is_billing_payload_archive(value: object) -> TypeGuard[BillingPayloadArchive]:
     return hasattr(value, "archive") and hasattr(value, "purge_postgres_payload")
+
+
+def _is_usage_charge_store(value: object) -> bool:
+    return hasattr(value, "list_usage_charges")
 
 
 class _RuntimeModel(BaseModel):
@@ -174,14 +181,21 @@ class BursarRuntime:
             "",
             tenant_id=options.tenant_id,
             pool=psycopg_pool,
+            usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
         )
         self.billing_store = PostgresBillingStore(
             "",
             tenant_id=options.tenant_id,
             pool=psycopg_pool,
+            billing_payload_backend="s3" if self.s3 is not None else "postgres",
         )
         credits_options = (options.bursar.credits_options or CreditsServiceOptions()).model_copy(
-            update={"analytics": self.clickhouse}
+            update={
+                "analytics": self.clickhouse,
+                "usage_store": (
+                    self.clickhouse if self.clickhouse is not None and _is_usage_charge_store(self.clickhouse) else None
+                ),
+            }
         )
         commerce_options = options.bursar.commerce_options
         if commerce_options is not None:
@@ -196,7 +210,12 @@ class BursarRuntime:
         )
 
         repository = PostgresStorageRepository(
-            PostgresClient.from_pool(psycopg_pool).query,
+            PostgresClient.from_pool(
+                psycopg_pool,
+                tenant_id=options.tenant_id,
+                usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
+                billing_payload_backend="s3" if self.s3 is not None else "postgres",
+            ).query,
             options.tenant_id,
         )
         handlers = self._create_handlers(repository)
@@ -282,63 +301,77 @@ class BursarRuntime:
     ) -> list[_CallableOutboxHandler]:
         handlers: list[_CallableOutboxHandler] = []
         if self.clickhouse is not None:
-
-            def handle_usage(outbox_event: OutboxEvent) -> None:
-                if outbox_event.payload_version != 1:
-                    msg = f"Unsupported usage outbox payload version {outbox_event.payload_version}"
-                    raise RuntimeError(msg)
-                usage = repository.get_usage_charge(outbox_event.aggregate_id)
-                if usage is None:
-                    msg = f"Usage charge {outbox_event.aggregate_id} is unavailable for export"
-                    raise RuntimeError(msg)
-                if usage.tenant_id != outbox_event.tenant_id:
-                    msg = "Usage export tenant does not match its outbox event"
-                    raise RuntimeError(msg)
-                if self.clickhouse is not None:
-                    self.clickhouse.write_usage(usage, outbox_event.event_id)
-
             handlers.append(
                 _CallableOutboxHandler(
                     topics=("usage.charge_recorded",),
-                    callback=handle_usage,
+                    callback=partial(self._handle_usage, repository),
                 )
             )
         if self.s3 is not None:
-
-            def handle_billing(outbox_event: OutboxEvent) -> None:
-                if outbox_event.payload_version != 1:
-                    msg = f"Unsupported billing outbox payload version {outbox_event.payload_version}"
-                    raise RuntimeError(msg)
-                event = repository.get_billing_event_payload(outbox_event.aggregate_id)
-                if event is None:
-                    msg = f"Billing event {outbox_event.aggregate_id} is unavailable for archive"
-                    raise RuntimeError(msg)
-                if event.tenant_id != outbox_event.tenant_id:
-                    msg = "Billing export tenant does not match its outbox event"
-                    raise RuntimeError(msg)
-                if event.object_key is not None:
-                    return
-                if self.s3 is None:
-                    msg = "S3 archive is not configured"
-                    raise RuntimeError(msg)
-                archived = self.s3.archive(event)
-                recorded = repository.archive_billing_event_payload(
-                    event.event_id,
-                    archived.key,
-                    archived.version_id,
-                    self.s3.purge_postgres_payload,
-                )
-                if not recorded:
-                    msg = f"Could not record archive pointer for billing event {event.event_id}"
-                    raise RuntimeError(msg)
-
             handlers.append(
                 _CallableOutboxHandler(
-                    topics=("billing.webhook_completed",),
-                    callback=handle_billing,
+                    topics=("billing.webhook_received", "billing.webhook_completed"),
+                    callback=partial(self._handle_billing, repository),
                 )
             )
         return handlers
+
+    def _handle_usage(self, repository: PostgresStorageRepository, outbox_event: OutboxEvent) -> None:
+        if outbox_event.payload_version != 1:
+            msg = f"Unsupported usage outbox payload version {outbox_event.payload_version}"
+            raise RuntimeError(msg)
+        usage = None
+        if outbox_event.payload.get("charge_id") is not None:
+            try:
+                usage = UsageChargeExport.model_validate(
+                    {key: value for key, value in outbox_event.payload.items() if key != "delivery_required"}
+                )
+            except ValueError:
+                usage = None
+        if usage is None:
+            usage = repository.get_usage_charge(outbox_event.aggregate_id)
+        if usage is None:
+            msg = f"Usage charge {outbox_event.aggregate_id} is unavailable for export"
+            raise RuntimeError(msg)
+        if usage.tenant_id != outbox_event.tenant_id:
+            raise RuntimeError("Usage export tenant does not match its outbox event")
+        if usage.charge_id != outbox_event.aggregate_id:
+            raise RuntimeError("Usage export charge does not match its outbox event")
+        if self.clickhouse is not None:
+            self.clickhouse.write_usage(usage, outbox_event.event_id)
+
+    def _handle_billing(self, repository: PostgresStorageRepository, outbox_event: OutboxEvent) -> None:
+        if outbox_event.payload_version != 1:
+            msg = f"Unsupported billing outbox payload version {outbox_event.payload_version}"
+            raise RuntimeError(msg)
+        stored = repository.get_billing_event_payload(outbox_event.aggregate_id)
+        if stored is not None and stored.object_key is not None:
+            return
+        if outbox_event.topic == "billing.webhook_received":
+            event = BillingEventPayloadExport.model_validate(
+                {key: value for key, value in outbox_event.payload.items() if key != "delivery_required"}
+            )
+        else:
+            event = stored
+        if event is None:
+            msg = f"Billing event {outbox_event.aggregate_id} is unavailable for archive"
+            raise RuntimeError(msg)
+        if event.tenant_id != outbox_event.tenant_id:
+            raise RuntimeError("Billing export tenant does not match its outbox event")
+        if event.event_id != outbox_event.aggregate_id:
+            raise RuntimeError("Billing export event does not match its outbox event")
+        if self.s3 is None:
+            raise RuntimeError("S3 archive is not configured")
+        archived = self.s3.archive(event)
+        recorded = repository.archive_billing_event_payload(
+            event.event_id,
+            archived.key,
+            archived.version_id,
+            self.s3.purge_postgres_payload,
+        )
+        if not recorded:
+            msg = f"Could not record archive pointer for billing event {event.event_id}"
+            raise RuntimeError(msg)
 
 
 def create_bursar_runtime(options: BursarRuntimeOptions) -> BursarRuntime:

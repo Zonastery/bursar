@@ -296,7 +296,10 @@ CREATE FUNCTION bursar.upsert_auto_recharge_profile(
     p_window_unit text,
     p_window_count integer,
     p_window_anchor text,
-    p_window_timezone text
+    p_window_timezone text,
+    p_armed boolean DEFAULT TRUE,
+    p_state text DEFAULT 'active',
+    p_reset_cooldown boolean DEFAULT FALSE
 )
 RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
@@ -319,8 +322,16 @@ BEGIN
         SET enabled = false,
             armed = true,
             state = 'disabled'
-        WHERE subject_id = p_subject_id;
+        WHERE subject_id = p_subject_id
+          AND provider_environment = v_environment;
         RETURN true;
+    END IF;
+
+    IF p_armed IS NULL
+       OR p_state NOT IN ('active', 'paused')
+       OR p_reset_cooldown IS NULL
+    THEN
+        RAISE EXCEPTION 'invalid enabled auto-recharge state' USING ERRCODE='22023';
     END IF;
 
     SELECT t.catalog_revision_id,t.topup_key,t.amount_minor
@@ -378,7 +389,7 @@ BEGIN
         window_timezone
     )
     VALUES (
-        p_subject_id,true,true,'active',
+        p_subject_id,true,p_armed,p_state,
         p_provider,v_environment,v_revision,p_topup_id,p_quantity,p_threshold,
         v_policy.rearm_above,
         p_max_charges_per_window,
@@ -389,8 +400,7 @@ BEGIN
     )
     ON CONFLICT (tenant_id, subject_id, provider_environment) DO UPDATE
     SET enabled=EXCLUDED.enabled,
-        armed=CASE WHEN NOT billing_auto_recharge_profiles.enabled AND EXCLUDED.enabled
-                   THEN true ELSE billing_auto_recharge_profiles.armed END,
+        armed=EXCLUDED.armed,
         provider=EXCLUDED.provider,
         provider_environment=EXCLUDED.provider_environment,
         catalog_revision_id=EXCLUDED.catalog_revision_id,
@@ -406,7 +416,11 @@ BEGIN
         window_count=EXCLUDED.window_count,
         window_anchor=EXCLUDED.window_anchor,
         window_timezone=EXCLUDED.window_timezone,
-        state=EXCLUDED.state;
+        state=EXCLUDED.state,
+        last_attempt_at=CASE
+            WHEN p_reset_cooldown THEN NULL
+            ELSE billing_auto_recharge_profiles.last_attempt_at
+        END;
 
     RETURN true;
 

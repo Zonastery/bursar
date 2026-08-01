@@ -119,7 +119,11 @@ export class CreditsService {
     options?: CreditsServiceOptions | null,
   ) {
     this.store = store;
-    this.queries = new CreditQueries(store, options?.analytics ?? store);
+    this.queries = new CreditQueries(
+      store,
+      options?.analytics ?? store,
+      options?.usageStore ?? store,
+    );
     const policy = options?.policy ?? "strict_prepaid";
     if (!POLICY_PRESETS.has(policy)) {
       throw new ConfigError(
@@ -529,20 +533,13 @@ export class CreditsService {
         : options?.expiresAt;
     const amountDec = toDecimal(amount);
 
-    // Snapshot the bucket's leftover balance and lifetimePurchased BEFORE granting.
-    // A redelivered webhook must be a full no-op -- including skipping the
-    // replace-prior wipe below -- not just avoiding a double-grant. AddCreditsResult
-    // carries no reliable cross-store "was this a replay" flag (Postgres/Supabase
-    // never populate `idempotent`), so a genuine new grant is detected after the
-    // fact by checking whether lifetimePurchased actually moved by `amountDec`; an
-    // idempotent replay leaves it unchanged.
+    // Snapshot the bucket's leftover balance before granting. A redelivered
+    // webhook must skip the replace-prior wipe as well as the duplicate grant.
     let priorLeftover = new Decimal(0);
-    let preLifetimePurchased = new Decimal(0);
     if (replacePrior) {
       const bucketsBefore = await this.getBucketBalances(userId);
       const current = bucketsBefore.buckets.find((t) => t.bucketKey === bucket);
       if (current) priorLeftover = current.balance;
-      preLifetimePurchased = (await this.getBalance(userId)).lifetimePurchased;
     }
 
     let result = await this.store.addCredits(
@@ -555,8 +552,9 @@ export class CreditsService {
       options?.idempotencyKey,
     );
 
-    const isFreshGrant = result.lifetimePurchased.minus(preLifetimePurchased).eq(amountDec);
-    // TODO: once PostgresAddCreditsResult reliably populates idempotent, use result.idempotent instead
+    // The store contract exposes the mutation's replay result directly, avoiding
+    // a racy lifetime-balance comparison and an extra database round trip.
+    const isFreshGrant = !result.idempotent;
     if (replacePrior && isFreshGrant && priorLeftover.gt(0)) {
       await this.store.addCredits(
         userId,

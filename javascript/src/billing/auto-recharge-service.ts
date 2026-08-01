@@ -209,11 +209,14 @@ export class AutoRechargeService {
   }): Promise<AutoRechargeProcessResult> {
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
     if (!profile?.enabled) throw new Error("auto_recharge_disabled");
-    await this.billing.upsertAutoRechargeProfile({
-      ...profile,
-      state: "active",
-      armed: true,
-    });
+    await this.billing.upsertAutoRechargeProfile(
+      {
+        ...profile,
+        state: "active",
+        armed: true,
+      },
+      { resetCooldown: true },
+    );
     return this.processIfNeeded(input);
   }
 
@@ -228,9 +231,6 @@ export class AutoRechargeService {
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
     if (!profile?.enabled || profile.state !== "active") return { outcome: "disabled" };
     if (input.balance >= policy.threshold) {
-      if (profile.armed === false) {
-        await this.billing.upsertAutoRechargeProfile({ ...profile, armed: true });
-      }
       return { outcome: "above_threshold" };
     }
 
@@ -263,10 +263,9 @@ export class AutoRechargeService {
     if (charge.status === "requires_customer_action") {
       await this.billing.updateAutoRechargeAttempt({
         id: attempt.id,
-        state: "submitted",
+        state: "action_required",
         providerAttemptId: charge.providerPaymentId ?? null,
       });
-      await this.billing.upsertAutoRechargeProfile({ ...profile, state: "paused" });
       return { outcome: "action_required", charge };
     }
     if (charge.status === "succeeded" || charge.status === "processing") {
@@ -284,7 +283,6 @@ export class AutoRechargeService {
       providerAttemptId: charge.providerPaymentId ?? null,
       failureCode: "payment_failed",
     });
-    await this.billing.upsertAutoRechargeProfile({ ...profile, state: "paused" });
     return { outcome: "failed", charge };
   }
 }

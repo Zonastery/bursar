@@ -1,0 +1,168 @@
+---
+title: Financial safety
+---
+
+# Financial safety
+
+Bursar enforces financial invariants at the canonical account boundary:
+
+- Each mutation locks the account before calculating a new balance.
+- An idempotency key maps to one ledger entry per account.
+- The account balance must equal the sum of its ledger entries.
+- Available lot amounts must equal derived bucket totals.
+- A strict-prepaid operation cannot cross its minimum balance.
+- Leases reserve capacity and can settle only once.
+- Refunds and expiry are reversal entries, never projection rewrites.
+
+## Idempotency keys
+
+Every monetary mutation accepts an idempotency key. The store indexes
+`(account, idempotency_key)` uniquely, so a retry with the same key and the
+same request replays the original entry — the result is returned with
+`idempotent=True` and no second ledger row is created:
+
+```python
+# Python
+first = bursar.credits.add_credits(
+    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+)
+replay = bursar.credits.add_credits(
+    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+)
+assert first.entry_id == replay.entry_id and replay.idempotent
+```
+
+```ts
+// TypeScript
+const first = await bursar.credits.addCredits(userId, 100, {
+  type: "purchase",
+  idempotencyKey: "checkout:42",
+});
+const replay = await bursar.credits.addCredits(userId, 100, {
+  type: "purchase",
+  idempotencyKey: "checkout:42",
+});
+console.assert(first.entryId === replay.entryId && replay.idempotent);
+```
+
+Reusing a key with a different request is a conflict, not a silent pass:
+the store rejects it, because two different payloads cannot share one ledger
+row. Use provider event ids as keys in webhook handlers so redelivery is a
+no-op — never a double charge. Keys are scoped per account.
+
+## The account row lock
+
+Every mutation runs inside one store transaction that takes a row lock on the
+account before snapshotting the balance and checking idempotency. That makes
+the account single-writer: two concurrent deductions cannot both read the
+same balance, so the invariant "balance equals the sum of ledger entries" is
+maintained under concurrency. There is no read-modify-write in application
+code, and no application-level counter that could drift from the ledger.
+
+## Leases: the safe path for long-running AI work
+
+When the final cost is only known after the work runs, charge through a
+lease instead of guessing at admission:
+
+1. `reserve` prices a worst-case estimate, enforces entitlement, quota, and
+   allowance, and atomically creates the lease — the only admission gate.
+2. Do the work. Call `renew` before the TTL elapses on long jobs.
+3. `settle` bills the actual cost and finalizes the lease; `release` returns
+   an unused hold on failure.
+
+```python
+# Python
+lease = bursar.credits.reserve(user_id, estimate_metrics)
+try:
+    actual = run_completion()
+    result = bursar.credits.settle(user_id, lease.lease_id, actual)
+except Exception:
+    bursar.credits.release(user_id, lease.lease_id)
+    raise
+```
+
+```ts
+// TypeScript
+const lease = await bursar.credits.reserve(userId, estimateMetrics);
+try {
+  const actual = await runCompletion();
+  const result = await bursar.credits.settle(userId, lease.leaseId, actual);
+} catch (err) {
+  await bursar.credits.release(userId, lease.leaseId);
+  throw err;
+}
+```
+
+The lease captures its `minimum_balance` and pricing snapshot at admission.
+Settlement honors that captured policy even if the user changes plans while
+the work is in flight, so a plan change can never strand approved work — or
+let it bypass the policy it was admitted under. A lease settles exactly once;
+a settled or released lease cannot be charged again.
+
+`run_billed` wraps reserve → work → settle in one call: on a `do_work`
+exception the lease is released automatically, and settlement is retried
+with a bounded attempt count because the outcome of a failed settle may be
+unknown:
+
+```python
+# Python
+outcome = bursar.credits.run_billed(
+    user_id,
+    RunBilledOptions(
+        estimate=estimate_metrics,
+        do_work=run_completion,
+    ),
+)
+```
+
+```ts
+// TypeScript
+const outcome = await bursar.credits.runBilled(userId, {
+  estimate: estimateMetrics,
+  doWork: runCompletion,
+});
+```
+
+A crashed worker leaves the lease to expire: the TTL plus the store's
+`expire_leases` reaper reclaims the hold without ever charging it.
+
+## Refund bounds
+
+`refund_credits(entry_id, amount=...)` refunds against the original entry,
+not the running balance. The store enforces the bounds: never more than the
+remaining original amount, no duplicate refunds, and only refundable entry
+kinds. Sources are preserved — the refund entry carries the original entry
+id — so the audit trail always shows which charge a refund reverses.
+
+```python
+# Python
+charge = bursar.credits.deduct_credits(user_id, 10, idempotency_key="operation:42")
+refund = bursar.credits.refund_credits(charge.entry_id, amount=5)
+print(refund.amount, refund.new_balance)
+```
+
+```ts
+// TypeScript
+const charge = await bursar.credits.deductCredits(userId, 10);
+const refund = await bursar.credits.refundCredits(charge.entryId, 5);
+console.log(refund.amount, refund.newBalance);
+```
+
+## Invariant checklist
+
+| Invariant | Enforcement |
+| --- | --- |
+| Balance equals the ledger sum | Account row lock + transactional postings |
+| One entry per (account, idempotency key) | Unique index, checked under the row lock |
+| Same key, different request | Rejected as a conflict |
+| No balance below minimum in strict-prepaid | Floor checked at admission and settlement |
+| Lease settles at most once | Lease status machine (`settling` → `settled`) |
+| Plan changes cannot strand leased work | Minimum balance captured at reserve |
+| Refund never exceeds the original | Refunded-amount bounds on the source entry |
+| Expiry is an accounting event | `expiry` ledger entries, never silent write-offs |
+
+Team charges use the same posting path: `deduct_team` debits the team pool
+with the member stored as the ledger actor, and member spend caps are
+enforced in the same transaction. Spend caps, allowance windows, usage
+quotas, and maximum concurrency are account-plan policy — they never
+duplicate the monetary balance.

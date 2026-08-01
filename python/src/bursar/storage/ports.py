@@ -85,9 +85,9 @@ class BillingEventPayloadExport(_StorageModel):
     received_at: str
     completed_at: str | None
     envelope: dict[str, Any] | None
-    object_key: str | None
-    object_version: str | None
-    archived_at: str | None
+    object_key: str | None = None
+    object_version: str | None = None
+    archived_at: str | None = None
 
 
 class UsageEventSink(Protocol):

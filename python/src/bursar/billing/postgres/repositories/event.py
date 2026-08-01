@@ -69,4 +69,7 @@ class BillingEventRepository:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT bursar.fail_billing_event(%s, %s, %s::uuid)", [provider, event_id, claim_token])
+        self._execute(
+            "SELECT bursar.fail_billing_event(%s, %s, %s::uuid, %s)",
+            [provider, event_id, claim_token, error],
+        )

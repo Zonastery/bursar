@@ -66,9 +66,16 @@ export class PostgresBillingStore extends BillingStore {
   private _dispute: BillingDisputeRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
-  constructor(poolOrUrl: import("pg").Pool | string, tenantId: string) {
+  constructor(
+    poolOrUrl: import("pg").Pool | string,
+    tenantId: string,
+    storageOptions?: { billingPayloadBackend?: "postgres" | "s3" },
+  ) {
     super();
-    this.postgres = new PostgresClient(poolOrUrl, { tenantId });
+    this.postgres = new PostgresClient(poolOrUrl, {
+      tenantId,
+      billingPayloadBackend: storageOptions?.billingPayloadBackend,
+    });
   }
 
   async close(): Promise<void> {
@@ -248,6 +255,7 @@ export class PostgresBillingStore extends BillingStore {
       };
     }
     if (s === "duplicate") return { status: "duplicate" as const };
+    if (s === "busy") return { status: "busy" as const };
     return { status: "retry" as const };
   }
 
@@ -730,8 +738,11 @@ export class PostgresBillingStore extends BillingStore {
     return this.billingAutoRecharge.getProfile(userId);
   }
 
-  async upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void> {
-    return this.billingAutoRecharge.upsertProfile(profile);
+  async upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void> {
+    return this.billingAutoRecharge.upsertProfile(profile, options);
   }
 
   async claimAutoRechargeAttempt(

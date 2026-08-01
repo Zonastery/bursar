@@ -433,6 +433,7 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
     store.upsert_auto_recharge_profile(profile)
 
     assert "bursar.upsert_auto_recharge_profile" in store._execute.call_args.args[0]
+    assert store._execute.call_args.args[1][-3:] == [True, "active", False]
     store._execute = MagicMock(
         side_effect=[
             [{"state": "claimed"}],
@@ -449,6 +450,16 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
     )
     assert "bursar.get_auto_recharge_attempt" in store._execute.call_args_list[0].args[0]
     assert all("bursar.advance_auto_recharge_attempt" in call.args[0] for call in store._execute.call_args_list[1:])
+
+    store._execute = MagicMock(side_effect=[[{"state": "action_required"}], [{"advanced": True}]])
+    store.update_auto_recharge_attempt(
+        AutoRechargeAttemptUpdate(
+            id="00000000-0000-0000-0000-000000000003",
+            state="succeeded",
+            provider_attempt_id="pay_1",
+        )
+    )
+    assert len(store._execute.call_args_list) == 2
 
 
 def test_plan_change_advances_before_subscription_upsert() -> None:
@@ -524,6 +535,23 @@ def test_event_claim_envelope_matches_javascript_shape() -> None:
     assert envelope["subscription"]["refs"] == {"priceId": "price_1"}
     assert envelope["metadata"] == {"provider_key": "must-not-be-renamed"}
     assert "occurredAt" not in envelope
+
+
+def test_busy_billing_claim_is_retryable_by_provider_adapter() -> None:
+    store = MagicMock()
+    store.claim_billing_event.return_value = BillingEventClaim(status="busy")
+    service = BillingService(store)
+    event = BillingEvent(
+        provider="stripe",
+        event_id="evt_busy",
+        event_type=BillingEventType.invoice_paid,
+        occurred_at="2026-07-29T00:00:00Z",
+    )
+
+    result = service.ingest_billing_event(event)
+
+    assert result.handled is False
+    assert result.error == "claim_busy"
 
 
 def test_subscription_repository_uses_current_catalog_and_lifecycle_rpc_shape() -> None:

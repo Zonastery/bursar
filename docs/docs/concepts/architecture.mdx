@@ -1,0 +1,108 @@
+---
+title: Architecture
+---
+
+# Architecture
+
+`Bursar` is the application boundary. Integrations construct one facade and
+use its capabilities; they never wire credit and billing services together
+independently.
+
+## Facade
+
+```text
+Bursar
+├── credits   -> CreditStore (PostgresStore)
+├── catalog   -> active BursarConfig
+├── accounts  -> account lifecycle (default plan + signup grants)
+├── billing   -> BillingStore + payment provider (optional)
+└── commerce  -> checkout, subscriptions, auto-recharge (optional)
+```
+
+`billing` and `commerce` are present only when a `billing_store` (and, for
+`commerce`, `commerce_options`) is supplied at construction. With commerce
+enabled, the facade registers an auto-recharge hook that runs after every
+deduction.
+
+## Capabilities
+
+- **credits** — balances, the append-only ledger, lots, leases, allowances,
+  quotas, and analytics.
+- **catalog** — publishes, activates, and pins versioned configurations;
+  billing never owns configuration writes.
+- **accounts** — assigns the default plan and executes `account_created`
+  grant programs on signup.
+- **billing** — provider-agnostic lifecycle: subscription events, invoices,
+  and subscription changes.
+- **commerce** — checkout intents, offers (subscriptions and top-ups), and
+  auto-recharge guardrails.
+
+See [The data model](./data-model.mdx) for the concepts, and
+[Canonical configuration](./configuration.mdx) for the document that drives
+them.
+
+## Database model
+
+PostgreSQL stores one balance per row in `credit_accounts`. Every purchase,
+grant, deduction, refund, expiry, lease settlement, and team charge passes
+through one locked ledger-posting function and appends to
+`credit_ledger_entries`.
+
+`credit_lots` and `credit_lot_allocations` derive bucket availability and
+expiry. `credit_leases` hold temporary reservations with their policy
+snapshot. Plan membership is non-monetary state in `account_plan_assignments`;
+usage windows and allowance consumption are keyed by account.
+
+All rows carry a mandatory `tenant_id`; tenant-prefixed unique constraints and
+composite foreign keys keep tenants isolated even under buggy code. See
+[Multi-tenancy](../guides/multitenancy.mdx) for provisioning and
+[Storage backends](../guides/storage-backends.mdx) for the store interface.
+
+## Migrations
+
+The baseline ships as ordered SQL files under `bursar/sql/`, ordered by
+dependency and domain — schema and types, tables, constraints, triggers, and
+indexes, followed by the RPC families (catalog, credit account, usage charge,
+credit lot, team, lease, policy window, operation, billing lifecycle,
+auto-recharge, billing customer/recharge/document, query, plan migration,
+catalog plan, and storage lifecycle), then privileges, documentation, and the
+multi-tenancy security lockdown:
+
+```text
+001_schema_and_types.sql          017_operation_lease_rpc.sql
+002_schema_types_tables.sql       018_team_rpc.sql
+003_financial_policy_tables.sql   019_billing_lifecycle_rpc.sql
+004_billing_tables.sql            020_auto_recharge_rpc.sql
+005_constraints.sql               021_billing_customer_rpc.sql
+006_triggers.sql                  022_billing_credit_recharge_rpc.sql
+007_indexes.sql                   023_billing_document_rpc.sql
+008_catalog_rpc.sql               024_query_rpc.sql
+009_credit_account_rpc.sql        025_plan_migration_rpc.sql
+010_usage_charge_rpc.sql          026_privileges.sql
+011_credit_lot_rpc.sql            027_documentation.sql
+012_team_credit_rpc.sql           028_catalog_plan_rpc.sql
+013_allowance_charge_rpc.sql      029_catalog_plan_privileges.sql
+014_lease_capacity_rpc.sql        030_storage_lifecycle_rpc.sql
+015_policy_window_rpc.sql         031_multitenancy_security.sql
+016_operation_charge_rpc.sql
+```
+
+Each object is created once. Future production changes append migration files
+and are protected by recorded checksums; `bursar migrate` fails if an
+already-applied file changed. The CLI is the only installation path — stores
+and facades never create database objects.
+
+## Concurrency and safety
+
+The hot path is one atomic store transaction: allowance consumption,
+entitlement, quota enforcement, and the debit commit or roll back together.
+Lease admission (`reserve`) enforces policy in the same transaction as the
+hold, so availability checks and the actual bill cannot disagree. Every
+mutation is idempotency-keyed per account, and the ledger is append-only, so
+retries and webhook redeliveries replay instead of double-posting.
+
+## Optional storage
+
+`PostgresStore` is the only credit store; `PostgresBillingStore` persists
+billing state. Both are constructed tenant-bound and run over the same
+migrated schema — see [Storage backends](../guides/storage-backends.mdx).

@@ -5,7 +5,7 @@ Manages a connection pool and provides a query function.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import psycopg2
@@ -23,6 +23,8 @@ class PostgresClient:
         max_connections: int = 10,
         *,
         tenant_id: str | UUID | None = None,
+        usage_backend: Literal["postgres", "clickhouse"] = "postgres",
+        billing_payload_backend: Literal["postgres", "s3"] = "postgres",
     ):
         self._pool: psycopg2.pool.ThreadedConnectionPool | None = psycopg2.pool.ThreadedConnectionPool(
             min_connections, max_connections, dsn
@@ -30,6 +32,8 @@ class PostgresClient:
         self._owns_pool = True
         self._closed = False
         self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
+        self._usage_backend = usage_backend
+        self._billing_payload_backend = billing_payload_backend
 
     @classmethod
     def from_pool(
@@ -37,6 +41,8 @@ class PostgresClient:
         pool: psycopg2.pool.ThreadedConnectionPool,
         *,
         tenant_id: str | UUID | None = None,
+        usage_backend: Literal["postgres", "clickhouse"] = "postgres",
+        billing_payload_backend: Literal["postgres", "s3"] = "postgres",
     ) -> PostgresClient:
         """Create client from existing pool (borrowed mode)."""
         instance = cls.__new__(cls)
@@ -44,6 +50,8 @@ class PostgresClient:
         instance._owns_pool = False
         instance._closed = False
         instance._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
+        instance._usage_backend = usage_backend
+        instance._billing_payload_backend = billing_payload_backend
         return instance
 
     def query(self, text: str, params: list | None = None) -> list[dict]:
@@ -59,6 +67,14 @@ class PostgresClient:
                     cur.execute(
                         "SELECT set_config('bursar.tenant_id', %s, true)",
                         (self._tenant_id,),
+                    )
+                    cur.execute(
+                        "SELECT set_config('bursar.usage_backend', %s, true)",
+                        (self._usage_backend,),
+                    )
+                    cur.execute(
+                        "SELECT set_config('bursar.billing_payload_backend', %s, true)",
+                        (self._billing_payload_backend,),
                     )
                 cur.execute(text, params or [])
                 if cur.description:

@@ -19,6 +19,8 @@ export interface PostgresClientOptions {
   poolConstructor?: PostgresPoolConstructor;
   closedError?: () => Error;
   tenantId?: string;
+  usageBackend?: "postgres" | "clickhouse";
+  billingPayloadBackend?: "postgres" | "s3";
 }
 
 /**
@@ -35,6 +37,8 @@ export class PostgresClient {
   private readonly ownsPool: boolean;
   private readonly closedError: () => Error;
   private readonly tenantId: string | null;
+  private readonly usageBackend: "postgres" | "clickhouse";
+  private readonly billingPayloadBackend: "postgres" | "s3";
   private closed = false;
 
   constructor(poolOrUrl: PostgresPool | string, options: PostgresClientOptions = {}) {
@@ -45,6 +49,8 @@ export class PostgresClient {
     this.closedError =
       options.closedError ?? (() => new Error("PostgreSQL client has been closed"));
     this.tenantId = options.tenantId ? normalizeTenantId(options.tenantId) : null;
+    this.usageBackend = options.usageBackend ?? "postgres";
+    this.billingPayloadBackend = options.billingPayloadBackend ?? "postgres";
   }
 
   readonly query: QueryFn = async (text: string, params?: unknown[]) => {
@@ -57,6 +63,12 @@ export class PostgresClient {
     try {
       await client.query("BEGIN");
       await client.query("SELECT set_config('bursar.tenant_id', $1, true)", [this.tenantId]);
+      await client.query("SELECT set_config('bursar.usage_backend', $1, true)", [
+        this.usageBackend,
+      ]);
+      await client.query("SELECT set_config('bursar.billing_payload_backend', $1, true)", [
+        this.billingPayloadBackend,
+      ]);
       const result = await client.query(text, params);
       await client.query("COMMIT");
       return result.rows;

@@ -1,24 +1,75 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from bursar.billing.contracts import CheckoutIntentCreate, CheckoutIntentUpdate
-from bursar.billing.types import CheckoutIntent, CheckoutIntentStatus
+from bursar.billing.types import (
+    BillingAutoRechargeProfile,
+    BillingAutoRechargeStatus,
+    BillingCustomerRecord,
+    BillingEvent,
+    BillingEventResult,
+    BillingInvoiceInfo,
+    BillingOfferResult,
+    BillingPreferences,
+    BillingSubscriptionChange,
+    BillingSubscriptionOfferContext,
+    BillingSubscriptionState,
+    BillingSubscriptionStatus,
+    CheckoutIntent,
+    CheckoutIntentStatus,
+)
 from bursar.commerce import (
+    AutoRechargeInput,
+    BillingDocumentInvoiceRef,
+    BillingDocumentLedgerRef,
+    CheckoutCompletedError,
     CommerceOptions,
+    CommerceResourceNotFoundError,
     CommerceService,
+    CoreBillingDataUnavailableError,
     CreateCheckoutInput,
+    InvalidOfferQuantityError,
+    MissingPaymentMethodError,
+    ProviderCapabilityNotSupportedError,
+    QuoteChangedError,
     UnknownOfferError,
 )
+from bursar.credits.types import (
+    AllowanceResult,
+    AvailableResult,
+    BalanceResult,
+    BucketBalance,
+    BucketBalancesResult,
+    GetUserPlanResult,
+    LedgerEntry,
+    LedgerPage,
+    UsageChargePage,
+)
 from bursar.providers.types import (
+    ChangePlanParams,
+    ChangePlanPreview,
+    ChangePlanResult,
     CheckoutParams,
+    CheckoutPaymentStatus,
     CheckoutSessionResult,
+    CheckoutSessionStatus,
+    PaymentMethodInfo,
+    PaymentMethodSetupParams,
     PaymentProvider,
+    PortalParams,
+    PreviewChangePlanParams,
+    ProviderUrlResult,
+    UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
 )
@@ -26,20 +77,57 @@ from bursar.providers.types import (
 CATALOG = json.loads((Path(__file__).parents[2] / "common" / "commerce-parity.json").read_text())["catalog"]
 
 
+def commerce_catalog() -> dict[str, Any]:
+    catalog = deepcopy(CATALOG)
+    catalog["commerce"]["offers"]["pack"] = {
+        "type": "topup",
+        "display_name": "Credit pack",
+        "credits_per_unit": "100",
+        "quantity": {"minimum": 2, "maximum": 5, "default": 2},
+        "bucket": "general",
+        "price": {"amount_minor": 500, "currency": "USD"},
+        "providers": {
+            "alpha": {
+                "type": "custom_object",
+                "object_kind": "one_time",
+                "external_id": "alpha-pack",
+            }
+        },
+    }
+    return catalog
+
+
 class RecordingProvider(PaymentProvider):
     provider = "alpha"
 
     def __init__(self) -> None:
         self.checkout_params: list[CheckoutParams] = []
+        self.cancelled: list[tuple[str, str | None]] = []
+        self.reactivated: list[tuple[str, str | None]] = []
+        self.cancelled_changes: list[tuple[str, str | None, str | None]] = []
+        self.change_params: list[ChangePlanParams] = []
+        self.preview_params: list[PreviewChangePlanParams] = []
+        self.portal_params: list[PortalParams] = []
+        self.update_payment_params: list[UpdatePaymentMethodParams] = []
+        self.setup_payment_params: list[PaymentMethodSetupParams] = []
+        self.invoice_ids: list[str] = []
+        self.webhooks: list[WebhookRequest] = []
+        self.checkout_status: CheckoutPaymentStatus | None = None
+        self.fail_checkout = False
+        self.fail_change = False
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         self.checkout_params.append(params)
+        if self.fail_checkout:
+            raise RuntimeError("checkout failed")
         return CheckoutSessionResult(
             url=f"https://checkout.example/{params.product_id}",
             provider_session_id="session-1",
+            customer_id="customer-1",
         )
 
     async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
+        self.webhooks.append(req)
         return WebhookResult(
             received=True,
             retryable=False,
@@ -48,28 +136,199 @@ class RecordingProvider(PaymentProvider):
             event_type="payment.succeeded",
         )
 
+    async def get_checkout_session_status(self, provider_session_id: str) -> CheckoutSessionStatus | None:
+        if self.checkout_status is None:
+            return None
+        return CheckoutSessionStatus(payment_status=self.checkout_status)
+
+    async def cancel_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+        self.cancelled.append((subscription_id, idempotency_key))
+
+    async def reactivate_subscription(self, subscription_id: str, idempotency_key: str | None = None) -> None:
+        self.reactivated.append((subscription_id, idempotency_key))
+
+    async def cancel_scheduled_plan_change(
+        self,
+        subscription_id: str,
+        provider_operation_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> None:
+        self.cancelled_changes.append((subscription_id, provider_operation_id, idempotency_key))
+
+    async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
+        return [
+            PaymentMethodInfo(
+                id="pm_1",
+                last4="4242",
+                brand="visa",
+                expiry_month=1,
+                expiry_year=2030,
+                is_default=True,
+            )
+        ]
+
+    async def get_invoice_url(self, provider_payment_id: str) -> ProviderUrlResult:
+        self.invoice_ids.append(provider_payment_id)
+        return ProviderUrlResult(url=f"https://invoice.example/{provider_payment_id}")
+
+    async def create_customer_portal_session(self, params: PortalParams) -> ProviderUrlResult:
+        self.portal_params.append(params)
+        return ProviderUrlResult(url="https://portal.example/session")
+
+    async def create_update_payment_method_session(self, params: UpdatePaymentMethodParams) -> ProviderUrlResult:
+        self.update_payment_params.append(params)
+        return ProviderUrlResult(url="https://portal.example/update-payment")
+
+    async def create_payment_method_setup_session(self, params: PaymentMethodSetupParams) -> ProviderUrlResult:
+        self.setup_payment_params.append(params)
+        return ProviderUrlResult(url="https://portal.example/setup-payment")
+
+    async def preview_change_plan(self, params: PreviewChangePlanParams) -> ChangePlanPreview:
+        self.preview_params.append(params)
+        return ChangePlanPreview(
+            total_amount=100,
+            settlement_amount=100,
+            currency="USD",
+            line_items=[],
+            effective_at="2026-08-01T00:00:00.000Z",
+            next_billing_date="2026-09-01T00:00:00.000Z",
+        )
+
+    async def change_plan(self, params: ChangePlanParams) -> ChangePlanResult:
+        self.change_params.append(params)
+        if self.fail_change:
+            raise RuntimeError("change failed")
+        return ChangePlanResult(provider_operation_id="change-1")
+
+
+class MinimalProvider(PaymentProvider):
+    """Custom provider implementing the same two required capabilities as JS."""
+
+    provider = "minimal"
+
+    async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
+        return CheckoutSessionResult(url=params.return_url)
+
+    async def handle_webhook(self, req: WebhookRequest) -> WebhookResult:
+        del req
+        return WebhookResult(
+            received=True,
+            retryable=False,
+            provider="minimal",
+            event_id=None,
+            event_type=None,
+        )
+
+
+class FakeAutoRecharge:
+    def __init__(self) -> None:
+        self.status = BillingAutoRechargeStatus(
+            enabled=True,
+            state="active",
+            threshold_credits=Decimal("10"),
+            topup_key="pack",
+            quantity=2,
+            max_recharges=3,
+            window_start="2026-07-01T00:00:00Z",
+            window_end="2026-08-01T00:00:00Z",
+            recharges_in_window=0,
+            payment_method_id="pm_1",
+            payment_method_last4="4242",
+            payment_method_brand="visa",
+            suspended_reason=None,
+            pending_attempt_id=None,
+            quote_amount_minor=500,
+            quote_currency="USD",
+        )
+        self.calls: list[tuple[str, str, Decimal | None, str | None]] = []
+        self.fail_payment_method = False
+        self.disabled: list[str] = []
+
+    async def get_status(self, user_id: str, provider: PaymentProvider) -> BillingAutoRechargeStatus:
+        self.calls.append(("status", user_id, None, provider.provider))
+        return self.status
+
+    async def enable(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+        *,
+        balance: Decimal,
+        return_url: str | None = None,
+    ) -> BillingAutoRechargeStatus:
+        self.calls.append(("enable", user_id, balance, return_url))
+        if self.fail_payment_method:
+            raise ValueError("payment_method_missing")
+        return self.status
+
+    def disable(self, user_id: str) -> None:
+        self.disabled.append(user_id)
+
+    async def retry(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+        *,
+        balance: Decimal,
+        return_url: str | None = None,
+    ) -> None:
+        self.calls.append(("retry", user_id, balance, return_url))
+        if self.fail_payment_method:
+            raise ValueError("payment_method_missing")
+
+    async def process_if_needed(
+        self,
+        user_id: str,
+        provider: PaymentProvider,
+        *,
+        balance: Decimal,
+        return_url: str | None = None,
+    ) -> dict[str, str]:
+        self.calls.append(("process", user_id, balance, return_url))
+        return {"outcome": "charged"}
+
 
 class FakeBilling:
     def __init__(self) -> None:
+        self.catalog = commerce_catalog()
+        self.auto_recharge = FakeAutoRecharge()
+        self.intent_factory: Any = None
+        self.checkout_intent: CheckoutIntent | None = None
         self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.customers: dict[tuple[str, str | None], BillingCustomerRecord] = {}
+        self.upserted_customers: list[tuple[str, str, str, str | None]] = []
+        self.subscription: BillingSubscriptionState | None = None
+        self.active_subscription: BillingSubscriptionState | None = None
+        self.blocking_subscription: BillingSubscriptionState | None = None
+        self.cancellable_subscriptions: list[BillingSubscriptionState] = []
+        self.events: list[BillingEvent] = []
+        self.preferences: BillingPreferences | None = None
+        self.saved_preferences: BillingPreferences | None = None
+        self.invoices: list[BillingInvoiceInfo] = []
+        self.open_change: BillingSubscriptionChange | None = None
+        self.created_changes: list[Any] = []
+        self.change_updates: list[tuple[str, dict[str, Any]]] = []
+        self.auto_recharge_profile: BillingAutoRechargeProfile | None = None
 
     def get_active_bursar_config(self) -> dict[str, Any]:
-        return CATALOG
+        return self.catalog
 
-    def get_blocking_subscription(self, account_id: str | None) -> None:
-        return None
+    def get_blocking_subscription(self, account_id: str | None) -> BillingSubscriptionState | None:
+        del account_id
+        return self.blocking_subscription
 
     def get_customer_by_user_id(
         self,
         account_id: str | None,
         provider: str | None = None,
-    ) -> None:
-        return None
+    ) -> BillingCustomerRecord | None:
+        if account_id is None:
+            return None
+        return self.customers.get((account_id, provider)) or self.customers.get((account_id, None))
 
-    def create_or_get_checkout_intent(
-        self,
-        input: CheckoutIntentCreate,
-    ) -> CheckoutIntent:
+    def create_or_get_checkout_intent(self, input: CheckoutIntentCreate) -> CheckoutIntent:
+        if self.intent_factory is not None:
+            return self.intent_factory(input)
         return CheckoutIntent(
             id="intent-1",
             subject_id=input.subject_id,
@@ -86,21 +345,277 @@ class FakeBilling:
         intent_id: str,
         update: CheckoutIntentUpdate,
     ) -> None:
-        self.updates.append(
-            (
-                intent_id,
-                update.model_dump(exclude_none=True),
-            )
+        self.updates.append((intent_id, update.model_dump(exclude_none=True)))
+
+    def get_checkout_intent(self, intent_id: str, subject_id: str) -> CheckoutIntent | None:
+        del subject_id
+        if self.checkout_intent and self.checkout_intent.id == intent_id:
+            return self.checkout_intent
+        return None
+
+    def upsert_customer(self, provider: str, customer_id: str, user_id: str, email: str | None = None) -> None:
+        self.upserted_customers.append((provider, customer_id, user_id, email))
+
+    def get_user_subscription(self, account_id: str) -> BillingSubscriptionState | None:
+        del account_id
+        return self.subscription
+
+    def get_active_subscription(self, account_id: str) -> BillingSubscriptionState | None:
+        del account_id
+        return self.active_subscription or self.subscription
+
+    def list_cancellable_subscriptions(self, account_id: str) -> list[BillingSubscriptionState]:
+        del account_id
+        return self.cancellable_subscriptions
+
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+        self.events.append(event)
+        return BillingEventResult(handled=True, action="ok")
+
+    def resolve_offer(
+        self, provider: str, product_id: str | None = None, price_id: str | None = None
+    ) -> BillingOfferResult:
+        del product_id, price_id
+        return BillingOfferResult(
+            offer_id="offer-pro",
+            offer_key="pro_month",
+            plan="pro",
+            interval="month",
+            interval_count=1,
         )
+
+    def resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> BillingOfferResult:
+        del provider
+        return BillingOfferResult(
+            offer_id=f"offer-{lookup_key}",
+            offer_key=lookup_key,
+            plan="pro" if lookup_key == "alpha-pro-month" else "starter",
+            interval="year" if lookup_key.endswith("year") else "month",
+            interval_count=1,
+        )
+
+    def get_open_billing_subscription_change(
+        self,
+        provider: str,
+        provider_subscription_id: str,
+    ) -> BillingSubscriptionChange | None:
+        del provider, provider_subscription_id
+        return self.open_change
+
+    def create_billing_subscription_change(self, value: Any) -> BillingSubscriptionChange:
+        self.created_changes.append(value)
+        return BillingSubscriptionChange(
+            id="change-row",
+            subscription_id="subscription-row",
+            from_offer_id="offer-starter",
+            to_offer_id=value.to_offer_id,
+            from_offer=BillingSubscriptionOfferContext(
+                offer_id="offer-starter",
+                offer_key="starter_month",
+                plan="starter",
+                interval="month",
+                interval_count=1,
+            ),
+            to_offer=BillingSubscriptionOfferContext(
+                offer_id=value.to_offer_id,
+                offer_key="pro_month",
+                plan="pro",
+                interval="month",
+                interval_count=1,
+            ),
+            effective_at=value.effective_at,
+            effective=value.effective,
+            state="scheduled" if value.effective == "renewal" else "awaiting_payment",
+            proration_behavior=value.proration_behavior,
+            idempotency_key=value.idempotency_key,
+        )
+
+    def update_billing_subscription_change(self, change_id: str, update: Any) -> None:
+        self.change_updates.append((change_id, update.model_dump(exclude_none=True)))
+
+    def get_user_preferences(self, account_id: str) -> BillingPreferences | None:
+        del account_id
+        return self.preferences
+
+    def update_user_preferences(self, preferences: BillingPreferences) -> None:
+        self.saved_preferences = preferences
+
+    def list_billing_invoices(self, account_id: str) -> list[BillingInvoiceInfo]:
+        del account_id
+        return self.invoices
+
+    def get_auto_recharge_profile(self, account_id: str) -> BillingAutoRechargeProfile | None:
+        del account_id
+        return self.auto_recharge_profile
+
+
+class FakeCredits:
+    def __init__(self) -> None:
+        self.balance = BalanceResult(
+            user_id="user-1",
+            balance=Decimal("25"),
+            lifetime_purchased=Decimal("100"),
+        )
+        self.available = AvailableResult(
+            user_id="user-1",
+            balance=Decimal("25"),
+            reserved=Decimal("0"),
+            available=Decimal("30"),
+        )
+        self.bucket_balances = BucketBalancesResult(
+            user_id="user-1",
+            buckets=[
+                BucketBalance(
+                    bucket_key="general",
+                    label="General",
+                    priority=10,
+                    expires=False,
+                    balance=Decimal("30"),
+                )
+            ],
+            total_balance=Decimal("30"),
+        )
+        self.plan = GetUserPlanResult(
+            user_id="user-1",
+            plan_id="plan-starter",
+            plan_key="starter",
+            plan_label="Starter",
+            allowance=None,
+            entitlements={},
+            credit_policy=None,
+            admission=None,
+            allowed_operations=[],
+        )
+        self.allowance = AllowanceResult(
+            plan_id="plan-starter",
+            allowance_remaining=Decimal("5"),
+            period_start="2026-07-01T00:00:00Z",
+            period_end="2026-08-01T00:00:00Z",
+        )
+        self.ledger_entries = LedgerPage(items=[], next_cursor=None)
+        self.usage_charges = UsageChargePage(items=[], next_cursor=None)
+        self.ledger_entry: LedgerEntry | None = None
+        self.fail_balance = False
+        self.fail_ledger = False
+        self.fail_usage = False
+
+    def get_balance(self, account_id: str) -> BalanceResult:
+        del account_id
+        if self.fail_balance:
+            raise RuntimeError("ledger unavailable")
+        return self.balance
+
+    def get_available(self, account_id: str) -> AvailableResult:
+        del account_id
+        return self.available
+
+    def get_bucket_balances(self, account_id: str) -> BucketBalancesResult:
+        del account_id
+        return self.bucket_balances
+
+    def get_user_plan(self, account_id: str) -> GetUserPlanResult:
+        del account_id
+        return self.plan
+
+    def check_allowance(self, account_id: str) -> AllowanceResult:
+        del account_id
+        return self.allowance
+
+    def list_ledger_entries(self, account_id: str, *, limit: int) -> LedgerPage:
+        del account_id, limit
+        if self.fail_ledger:
+            raise RuntimeError("history unavailable")
+        return self.ledger_entries
+
+    def list_usage_charges(self, account_id: str, *, limit: int) -> UsageChargePage:
+        del account_id, limit
+        if self.fail_usage:
+            raise RuntimeError("usage unavailable")
+        return self.usage_charges
+
+    def get_ledger_entry(self, account_id: str, entry_id: str) -> LedgerEntry | None:
+        del account_id
+        return self.ledger_entry if self.ledger_entry and self.ledger_entry.entry_id == entry_id else None
+
+
+class Sink:
+    def __init__(self) -> None:
+        self.events: list[BillingEvent] = []
+
+    def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+        self.events.append(event)
+        return BillingEventResult(handled=True, action="ok")
+
+
+def active_subscription(**overrides: Any) -> BillingSubscriptionState:
+    values = {
+        "user_id": "user-1",
+        "provider": "alpha",
+        "provider_subscription_id": "subscription-1",
+        "provider_customer_id": "customer-1",
+        "plan": "starter",
+        "interval": "month",
+        "interval_count": 1,
+        "status": BillingSubscriptionStatus.active,
+        "cancel_at_period_end": False,
+    }
+    values.update(overrides)
+    return BillingSubscriptionState(**values)
+
+
+def scheduled_change() -> BillingSubscriptionChange:
+    return BillingSubscriptionChange(
+        id="change-existing",
+        subscription_id="subscription-row",
+        from_offer_id="offer-starter",
+        to_offer_id="offer-pro",
+        from_offer=BillingSubscriptionOfferContext(
+            offer_id="offer-starter",
+            offer_key="starter_month",
+            plan="starter",
+            interval="month",
+            interval_count=1,
+        ),
+        to_offer=BillingSubscriptionOfferContext(
+            offer_id="offer-pro",
+            offer_key="pro_month",
+            plan="pro",
+            interval="month",
+            interval_count=1,
+        ),
+        effective_at="2026-09-01T00:00:00.000Z",
+        effective="renewal",
+        state="scheduled",
+        proration_behavior="none",
+        idempotency_key="old-change",
+        provider_operation_id="provider-old-change",
+    )
+
+
+def make_harness(
+    provider: PaymentProvider | None = None,
+) -> tuple[CommerceService, FakeBilling, FakeCredits, PaymentProvider]:
+    selected = provider or RecordingProvider()
+    billing = FakeBilling()
+    credits = FakeCredits()
+    providers = {"alpha": lambda _context: selected}
+    if selected.provider != "alpha":
+        providers[selected.provider] = lambda _context: selected
+    service = CommerceService(
+        billing,
+        credits,
+        Sink(),
+        CommerceOptions(providers=providers),
+    )
+    return service, billing, credits, selected
 
 
 def service(provider: RecordingProvider) -> CommerceService:
-    return CommerceService(
-        FakeBilling(),
-        object(),
-        object(),
-        CommerceOptions(providers={"alpha": lambda _context: provider}),
-    )
+    return make_harness(provider)[0]
+
+
+def run(awaitable: Any) -> Any:
+    return asyncio.run(awaitable)
 
 
 @pytest.mark.asyncio
@@ -140,9 +655,417 @@ async def test_checkout_rejects_unknown_catalog_offer() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_checkout_enforces_type_quantity_replay_and_failure_state() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+
+    with pytest.raises(UnknownOfferError):
+        await commerce.create_checkout(
+            CreateCheckoutInput(
+                subject_id="subject-1",
+                offer_key="pack",
+                type="subscription",
+                return_url="https://app.example/return",
+                cancel_url="https://app.example/cancel",
+                operation_key="wrong-type",
+            )
+        )
+    with pytest.raises(InvalidOfferQuantityError):
+        await commerce.create_checkout(
+            CreateCheckoutInput(
+                subject_id="subject-1",
+                offer_key="pack",
+                quantity=6,
+                return_url="https://app.example/return",
+                cancel_url="https://app.example/cancel",
+                operation_key="bad-qty",
+            )
+        )
+
+    provider.checkout_status = "succeeded"
+
+    def completed_intent(input: CheckoutIntentCreate) -> CheckoutIntent:
+        return CheckoutIntent(
+            id="intent-completed",
+            subject_id=input.subject_id,
+            provider=input.provider,
+            checkout_kind=input.checkout_kind,
+            product_key=input.product_key,
+            request_digest=input.request_digest,
+            status=CheckoutIntentStatus.open,
+            provider_session_id="session-existing",
+            checkout_url="https://checkout.example/existing",
+            expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+
+    billing.intent_factory = completed_intent
+    with pytest.raises(CheckoutCompletedError):
+        await commerce.create_checkout(
+            CreateCheckoutInput(
+                subject_id="subject-1",
+                offer_key="pack",
+                return_url="https://app.example/return",
+                cancel_url="https://app.example/cancel",
+                operation_key="completed",
+            )
+        )
+    assert billing.updates[-1] == ("intent-completed", {"status": "completed"})
+
+    provider.fail_checkout = True
+    billing.intent_factory = None
+    with pytest.raises(RuntimeError, match="checkout failed"):
+        await commerce.create_checkout(
+            CreateCheckoutInput(
+                subject_id="subject-1",
+                offer_key="pack",
+                return_url="https://app.example/return",
+                cancel_url="https://app.example/cancel",
+                operation_key="provider-fails",
+            )
+        )
+    assert billing.updates[-1] == ("intent-1", {"status": "failed"})
+
+
+def test_checkout_status_maps_terminal_pending_expired_and_missing() -> None:
+    commerce, billing, _credits, _provider = make_harness()
+    billing.checkout_intent = CheckoutIntent(
+        id="intent-open",
+        subject_id="subject-1",
+        provider="alpha",
+        checkout_kind="credit_topup",
+        product_key="pack",
+        request_digest="digest",
+        status=CheckoutIntentStatus.open,
+        expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    assert commerce.get_checkout_status("intent-open", "subject-1").status == "pending"
+    billing.checkout_intent = billing.checkout_intent.model_copy(update={"status": CheckoutIntentStatus.completed})
+    assert commerce.get_checkout_status("intent-open", "subject-1").status == "succeeded"
+    billing.checkout_intent = billing.checkout_intent.model_copy(
+        update={
+            "status": CheckoutIntentStatus.open,
+            "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+        }
+    )
+    assert commerce.get_checkout_status("intent-open", "subject-1").status == "expired"
+    with pytest.raises(CommerceResourceNotFoundError):
+        commerce.get_checkout_status("missing", "subject-1")
+
+
+@pytest.mark.asyncio
+async def test_subscription_commands_and_cancel_all_emit_provider_neutral_events() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.subscription = active_subscription(status=BillingSubscriptionStatus.past_due)
+
+    result = await commerce.cancel_subscription("user-1", "cancel-1")
+    assert result.pending is True
+    assert provider.cancelled == [("subscription-1", "cancel-1")]
+    assert billing.events[-1].subscription.cancel_at_period_end is True
+
+    billing.subscription = active_subscription(cancel_at_period_end=True)
+    result = await commerce.reactivate_subscription("user-1", "reactivate-1")
+    assert result.pending is True
+    assert provider.reactivated == [("subscription-1", "reactivate-1")]
+    assert billing.events[-1].subscription.cancel_at_period_end is False
+
+    billing.cancellable_subscriptions = [
+        active_subscription(provider_subscription_id="subscription-1"),
+        active_subscription(provider_subscription_id="subscription-2"),
+    ]
+    canceled = await commerce.cancel_all_subscriptions("user-1", "cancel-all")
+    assert canceled.canceled_count == 2
+    assert provider.cancelled[-2:] == [
+        ("subscription-1", "cancel-all:alpha:subscription-1"),
+        ("subscription-2", "cancel-all:alpha:subscription-2"),
+    ]
+    assert len(billing.events) == 4
+
+
+@pytest.mark.asyncio
+async def test_plan_change_confirmation_cancels_replacements_and_persists_failures() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.active_subscription = active_subscription(cancel_at_period_end=True)
+    billing.subscription = billing.active_subscription
+    billing.open_change = scheduled_change()
+
+    preview = await commerce.preview_plan_change("user-1", offer_key="pro_month")
+    assert preview.classification == "upgrade"
+    assert preview.quote_fingerprint is not None
+    confirmed = await commerce.confirm_plan_change(
+        "user-1",
+        "change-1",
+        offer_key="pro_month",
+        quote_fingerprint=preview.quote_fingerprint,
+    )
+    assert confirmed.pending is True
+    assert provider.cancelled_changes == [("subscription-1", "provider-old-change", "change-1:replace")]
+    assert provider.reactivated == [("subscription-1", "change-1:keep")]
+    change_metadata = provider.change_params[0].metadata
+    assert change_metadata is not None
+    assert change_metadata["plan_slug"] == "pro"
+    assert billing.change_updates[0] == ("change-existing", {"state": "canceled"})
+    assert billing.change_updates[-1] == ("change-row", {"provider_operation_id": "change-1"})
+
+    provider.fail_change = True
+    billing.open_change = None
+    preview = await commerce.preview_plan_change("user-1", offer_key="pro_month")
+    with pytest.raises(RuntimeError, match="change failed"):
+        await commerce.confirm_plan_change(
+            "user-1",
+            "change-fails",
+            offer_key="pro_month",
+            quote_fingerprint=preview.quote_fingerprint or "",
+        )
+    assert billing.change_updates[-1] == ("change-row", {"state": "failed", "error_message": "change failed"})
+
+
+@pytest.mark.asyncio
+async def test_plan_change_quote_mismatch_and_cancel_scheduled_change() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.active_subscription = active_subscription()
+    billing.subscription = billing.active_subscription
+
+    with pytest.raises(QuoteChangedError):
+        await commerce.confirm_plan_change(
+            "user-1",
+            "change-mismatch",
+            offer_key="pro_month",
+            quote_fingerprint="stale",
+        )
+    assert not provider.change_params
+
+    billing.open_change = scheduled_change()
+    assert await commerce.cancel_scheduled_plan_change("user-1", "cancel-scheduled") == {"success": True}
+    assert provider.cancelled_changes == [("subscription-1", "provider-old-change", "cancel-scheduled")]
+    assert billing.change_updates[-1] == ("change-existing", {"state": "canceled"})
+
+
+@pytest.mark.asyncio
+async def test_portal_session_variants_and_optional_capability_errors() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.customers[("user-1", None)] = BillingCustomerRecord(provider="alpha", provider_customer_id="customer-1")
+    billing.subscription = active_subscription()
+
+    assert (await commerce.create_portal_session("user-1", "https://return")).url.endswith("/session")
+    assert (
+        await commerce.create_portal_session(
+            "user-1",
+            "https://return",
+            purpose="payment-method",
+        )
+    ).url.endswith("/update-payment")
+    billing.subscription = None
+    assert (
+        await commerce.create_portal_session(
+            "user-1",
+            "https://return",
+            purpose="payment-method",
+            cancel_url="https://cancel",
+        )
+    ).url.endswith("/setup-payment")
+
+    unsupported, unsupported_billing, _credits, _provider = make_harness(MinimalProvider())
+    unsupported_billing.customers[("user-1", None)] = BillingCustomerRecord(
+        provider="minimal",
+        provider_customer_id="customer-1",
+    )
+    with pytest.raises(ProviderCapabilityNotSupportedError):
+        await unsupported.create_portal_session("user-1", "https://return")
+
+
+@pytest.mark.asyncio
+async def test_overview_documents_payment_methods_preferences_and_optional_failures() -> None:
+    provider = RecordingProvider()
+    commerce, billing, credits, _provider = make_harness(provider)
+    billing.subscription = active_subscription(grace_ends_at=(datetime.now(UTC) + timedelta(days=1)).isoformat())
+    billing.open_change = scheduled_change()
+    billing.customers[("user-1", "alpha")] = BillingCustomerRecord(
+        provider="alpha",
+        provider_customer_id="customer-1",
+    )
+    billing.preferences = BillingPreferences(
+        user_id="user-1",
+        auto_recharge=True,
+        overage_protection=True,
+        email_notifications=False,
+        usage_alerts=True,
+        invoice_reminders=True,
+    )
+    billing.invoices = [
+        BillingInvoiceInfo(
+            provider="alpha",
+            provider_invoice_id="invoice-1",
+            status="paid",
+            amount_paid_minor=1000,
+            currency="USD",
+        )
+    ]
+    credits.ledger_entries = LedgerPage(
+        items=[
+            LedgerEntry(
+                entry_id="ledger-1",
+                account_id="account-1",
+                actor_user_id=None,
+                amount=Decimal("12"),
+                entry_type="purchase",
+                operation="credit_topup",
+                reference_entry_id=None,
+                idempotency_key="ledger-1",
+                metadata={"provider": "alpha", "provider_payment_id": "payment-1"},
+                created_at="2026-07-29T00:00:00Z",
+            )
+        ],
+        next_cursor=None,
+    )
+
+    overview = await commerce.get_account_overview("user-1")
+    assert overview.credits.effective_spendable_balance == Decimal("35")
+    assert overview.subscription_summary.pending_change.plan_key == "pro"
+    assert overview.payment_methods[0].last4 == "4242"
+    assert {document.kind for document in overview.documents} == {"provider_invoice", "ledger_entry"}
+    assert overview.availability.payment_methods is True
+
+    credits.fail_ledger = True
+    credits.fail_usage = True
+    billing.invoices = []
+    overview = await commerce.get_account_overview("user-1")
+    assert overview.availability.transactions is False
+    assert overview.availability.usage is False
+    assert overview.availability.documents is False
+
+    credits.fail_balance = True
+    with pytest.raises(CoreBillingDataUnavailableError):
+        await commerce.get_account_overview("user-1")
+
+
+@pytest.mark.asyncio
+async def test_invoice_links_are_authorized_for_invoice_and_ledger_documents() -> None:
+    provider = RecordingProvider()
+    commerce, billing, credits, _provider = make_harness(provider)
+    billing.invoices = [BillingInvoiceInfo(provider="alpha", provider_invoice_id="invoice-1")]
+    assert (
+        await commerce.get_invoice_link(
+            "user-1",
+            BillingDocumentInvoiceRef(
+                kind="provider_invoice",
+                provider="alpha",
+                provider_document_id="invoice-1",
+            ),
+        )
+    ).url.endswith("/invoice-1")
+
+    credits.ledger_entry = LedgerEntry(
+        entry_id="ledger-1",
+        account_id="account-1",
+        actor_user_id=None,
+        amount=Decimal("12"),
+        entry_type="purchase",
+        operation="credit_topup",
+        reference_entry_id=None,
+        idempotency_key="ledger-1",
+        metadata={"provider": "alpha", "provider_document_id": "document-1"},
+        created_at="2026-07-29T00:00:00Z",
+    )
+    assert (
+        await commerce.get_invoice_link(
+            "user-1",
+            BillingDocumentLedgerRef(
+                kind="ledger_entry",
+                ledger_entry_id="ledger-1",
+                provider=None,
+                provider_document_id=None,
+                created_at="2026-07-29T00:00:00Z",
+                entry_type="purchase",
+                amount=Decimal("12"),
+            ),
+        )
+    ).url.endswith("/document-1")
+
+    with pytest.raises(CommerceResourceNotFoundError):
+        await commerce.get_invoice_link(
+            "user-1",
+            BillingDocumentInvoiceRef(
+                kind="provider_invoice",
+                provider="alpha",
+                provider_document_id="missing",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_preferences_webhook_and_auto_recharge_workflows() -> None:
+    provider = RecordingProvider()
+    commerce, billing, _credits, _provider = make_harness(provider)
+    billing.preferences = BillingPreferences(
+        user_id="user-1",
+        auto_recharge=True,
+        overage_protection=True,
+        email_notifications=False,
+        usage_alerts=True,
+        invoice_reminders=True,
+    )
+    prefs = commerce.update_preferences("user-1", {"usage_alerts": False})
+    assert prefs.usage_alerts is False
+    assert billing.saved_preferences == prefs
+
+    webhook = await commerce.handle_webhook(raw_body="{}", headers={"x-test": "1"}, provider="alpha")
+    assert webhook.event_id == "event-1"
+    assert provider.webhooks[0].headers == {"x-test": "1"}
+
+    billing.customers[("user-1", None)] = BillingCustomerRecord(provider="alpha", provider_customer_id="customer-1")
+    assert (
+        await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    ).enabled
+    assert (
+        await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    ).enabled
+    commerce.auto_recharge.disable("user-1")
+    assert billing.auto_recharge.disabled == ["user-1"]
+
+    billing.auto_recharge.fail_payment_method = True
+    with pytest.raises(MissingPaymentMethodError):
+        await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1"))
+    with pytest.raises(MissingPaymentMethodError):
+        await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1"))
+
+    billing.auto_recharge.fail_payment_method = False
+    assert (
+        await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))
+    ).outcome == "disabled"
+    billing.auto_recharge_profile = BillingAutoRechargeProfile(
+        user_id="user-1",
+        enabled=True,
+        state="active",
+        provider="alpha",
+        topup_id="topup-1",
+        quantity=2,
+        threshold=Decimal("10"),
+        max_charges_per_window=3,
+        window_unit="month",
+        window_count=1,
+        window_anchor="calendar",
+        window_timezone="UTC",
+    )
+    assert (await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))) == {
+        "outcome": "charged"
+    }
+
+
 def test_public_commerce_inputs_do_not_expose_provider_product_ids() -> None:
     checkout_fields = set(CreateCheckoutInput.model_fields)
     assert "offer_key" in checkout_fields
     assert "product_id" not in checkout_fields
     assert "product_id" not in inspect.signature(CommerceService.preview_plan_change).parameters
     assert "product_id" not in inspect.signature(CommerceService.confirm_plan_change).parameters
+
+
+def test_custom_provider_only_requires_the_js_core_contract() -> None:
+    provider = MinimalProvider()
+
+    with pytest.raises(NotImplementedError, match="cancel_subscription"):
+        run(provider.cancel_subscription("sub_1"))

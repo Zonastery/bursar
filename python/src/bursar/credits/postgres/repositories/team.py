@@ -65,7 +65,7 @@ class TeamRepository:
         team_id: str,
         user_id: str,
         role: str,
-        _spend_cap: str | None,
+        spend_cap: str | None,
     ) -> AddTeamMemberRow | None:
         """Add a member to a team with an optional spend cap.
 
@@ -80,7 +80,7 @@ class TeamRepository:
         """
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
-        rows = self._callproc("set_team_member", [team_id, user_id, role])
+        rows = self._callproc("set_team_member", [team_id, user_id, role, spend_cap])
         if not rows or rows[0] is not True:
             return None
         return AddTeamMemberRow(team_id=team_id, user_id=user_id, role=role)
@@ -100,9 +100,9 @@ class TeamRepository:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            data = dict(row)
-            data["user_id"] = data.pop("subject_id", "")
-            members.append(TeamMemberRow.model_validate(data))
+            # list_team_members RETURNS a `user_id` column already; the old
+            # pop("subject_id") remap found nothing and clobbered it with "".
+            members.append(TeamMemberRow.model_validate(row))
         return members
 
     def remove_team_member(self, team_id: str, user_id: str) -> bool:
@@ -117,6 +117,8 @@ class TeamRepository:
         team_id: str,
         user_id: str,
         amount: str,
+        idempotency_key: str,
+        operation: str,
         metadata: str,
     ) -> TeamDeductionRow | None:
         """Deduct credits from a team's balance on behalf of a member.
@@ -125,6 +127,8 @@ class TeamRepository:
             team_id: The team ID.
             user_id: The user ID making the deduction.
             amount: The amount to deduct as a string (Decimal-safe).
+            idempotency_key: Replay key stored on the charge (dedupe key).
+            operation: The operation label recorded on the charge.
             metadata: JSON metadata string.
 
         Returns:
@@ -133,7 +137,22 @@ class TeamRepository:
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
         validate_amount(amount, "amount")
-        rows = self._callproc("deduct_team", [team_id, user_id, amount, metadata])
-        if not rows:
+        validate_non_empty(idempotency_key, "idempotency_key")
+        validate_non_empty(operation, "operation")
+        rows = self._callproc(
+            "deduct_team",
+            [team_id, user_id, amount, idempotency_key, operation, metadata],
+        )
+        if not rows or not isinstance(rows[0], dict):
             return None
-        return TeamDeductionRow.model_validate(rows[0])
+        row = dict(rows[0])
+        # deduct_team RETURNS subject_id / balance_after / error_code; map them to
+        # the TeamDeductionRow field names (mirrors the JS repo remap).
+        return TeamDeductionRow.model_validate(
+            {
+                **row,
+                "user_id": row.get("subject_id", ""),
+                "team_balance_after": row.get("balance_after"),
+                "error": row.get("error_code"),
+            }
+        )

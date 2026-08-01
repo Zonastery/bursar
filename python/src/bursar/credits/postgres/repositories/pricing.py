@@ -57,10 +57,16 @@ class PricingRepository:
         rows = self._callproc("catalog_revision_by_number", [version]) or []
         if not rows or not isinstance(rows[0], dict):
             return None
-        return self._parse_revision(dict(rows[0]))
+        row = dict(rows[0])
+        if not row or all(value is None for value in row.values()):
+            return None
+        return self._parse_revision(row)
 
     def activate_pricing(self, version: int) -> ActivePricingRow | None:
         rows = self._callproc("activate_catalog_revision", [version]) or []
         if not rows or not isinstance(rows[0], dict):
             return None
-        return self._parse_revision(dict(rows[0]))
+        row = dict(rows[0])
+        if not row or all(value is None for value in row.values()):
+            return None
+        return self._parse_revision(row)

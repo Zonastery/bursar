@@ -19,7 +19,10 @@ export interface AutoRechargeBillingPort {
     provider?: string | null,
   ): Promise<BillingCustomerRecord | null>;
   getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null>;
-  upsertAutoRechargeProfile(profile: BillingAutoRechargeProfile): Promise<void>;
+  upsertAutoRechargeProfile(
+    profile: BillingAutoRechargeProfile,
+    options?: { resetCooldown?: boolean },
+  ): Promise<void>;
   claimAutoRechargeAttempt(input: {
     userId: string;
     idempotencyKey: string;
