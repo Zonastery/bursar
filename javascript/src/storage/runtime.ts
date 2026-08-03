@@ -308,6 +308,13 @@ function usageExportFromOutbox(payload: Record<string, unknown>): UsageChargeExp
     "correction_of_charge_id",
   ] as const;
   if (optionalStrings.some((key) => !isOptionalString(payload[key]))) return null;
+  if (
+    payload.billing_disposition !== undefined &&
+    payload.billing_disposition !== "billable" &&
+    payload.billing_disposition !== "record_only"
+  ) {
+    return null;
+  }
   return {
     tenantId: payload.tenant_id as string,
     chargeId: payload.charge_id as string,
@@ -324,6 +331,7 @@ function usageExportFromOutbox(payload: Record<string, unknown>): UsageChargeExp
     charged: payload.charged as string,
     allowanceRequested: payload.allowance_requested as string,
     allowanceCovered: payload.allowance_covered as string,
+    billingDisposition: payload.billing_disposition === "record_only" ? "record_only" : "billable",
     catalogRevisionId: (payload.catalog_revision_id as string | null) ?? null,
     planId: (payload.plan_id as string | null) ?? null,
     rateCardKey: (payload.rate_card_key as string | null) ?? null,

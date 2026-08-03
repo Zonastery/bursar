@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -55,6 +55,7 @@ class UsageCharge(BaseModel):
     charged: Decimal
     allowance_requested: Decimal
     allowance_covered: Decimal
+    billing_disposition: Literal["billable", "record_only"]
     feature: str | None
     model: str | None
     region: str | None
@@ -74,8 +75,19 @@ class UsageChargePage(BaseModel):
     next_cursor: UsageChargeCursor | None
 
 
+class UsageRecordResult(BaseModel):
+    """Result of appending usage without creating another balance debit."""
+
+    usage_id: str
+    user_id: str
+    requested: Decimal
+    idempotent: bool
+    error: str | None = None
+
+
 class ListUsageChargesOptions(BaseModel):
     from_date: datetime | None = None
     to_date: datetime | None = None
     limit: int | None = None
     cursor: UsageChargeCursor | None = None
+    include_record_only: bool = True

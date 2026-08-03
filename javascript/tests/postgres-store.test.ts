@@ -450,6 +450,61 @@ describe("PostgresStore", () => {
     });
   });
 
+  describe("recordUsage", () => {
+    it("records an exact cost without a ledger debit", async () => {
+      const { ctor, calls } = makeRecordingPool([
+        {
+          charge_id: "usage-1",
+          requested: "12.5000",
+          replayed: false,
+          error_code: null,
+        },
+      ]);
+      const store = new PostgresStore("postgresql://localhost/db", ctor);
+
+      const result = await store.recordUsage("user-1", "roadmap_generation", D("12.5"), {
+        idempotencyKey: "roadmap-1:outline",
+        model: "linkup",
+        measures: { requests: 1 },
+        dimensions: { provider: "linkup" },
+        metadata: { workflowStep: "outline" },
+      });
+
+      expect(calls[0].text).toContain("record_usage");
+      expect(calls[0].params).toEqual([
+        "user-1",
+        "roadmap_generation",
+        "12.5",
+        "roadmap-1:outline",
+        null,
+        "linkup",
+        null,
+        JSON.stringify({ workflowStep: "outline" }),
+        JSON.stringify({ requests: 1 }),
+        JSON.stringify({ provider: "linkup" }),
+      ]);
+      expect(result).toMatchObject({
+        usageId: "usage-1",
+        userId: "user-1",
+        idempotent: false,
+        error: null,
+      });
+      expect(result.requested.toString()).toBe("12.5");
+    });
+
+    it("fails closed when the RPC returns no result envelope", async () => {
+      const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
+
+      await expect(store.recordUsage("user-1", "roadmap_generation", D(12))).resolves.toMatchObject(
+        {
+          usageId: "",
+          requested: D(0),
+          error: "no result",
+        },
+      );
+    });
+  });
+
   describe("callproc unwrapping robustness", () => {
     it("list RPC returns ALL rows (not just the first)", async () => {
       const store = new PostgresStore(
@@ -486,6 +541,7 @@ describe("PostgresStore", () => {
         charged: "2.5",
         allowance_requested: "10",
         allowance_covered: "7.5",
+        billing_disposition: "billable",
         feature: "chat",
         model: "gpt-5",
         region: "in-west",
@@ -502,6 +558,7 @@ describe("PostgresStore", () => {
       toDate: new Date("2030-02-01T00:00:00.000Z"),
       limit: 200,
       cursor: { eventAt: eventAt.toISOString(), usageId: "usage-cursor" },
+      includeRecordOnly: false,
     });
 
     expect(calls[0].text).toContain("list_usage_charges");
@@ -512,11 +569,13 @@ describe("PostgresStore", () => {
       201,
       "2030-01-01T00:00:00.000Z",
       "2030-02-01T00:00:00.000Z",
+      false,
     ]);
     expect(page.nextCursor).toBeNull();
     expect(page.items[0]).toMatchObject({
       usageId: "usage-1",
       operation: "completion",
+      billingDisposition: "billable",
       feature: "chat",
       eventAt: eventAt.toISOString(),
     });

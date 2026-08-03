@@ -110,6 +110,7 @@ export type {
   UsageCharge,
   UsageChargeCursor,
   UsageChargePage,
+  UsageRecordResult,
   SweepResult,
   Team,
   TeamBalanceResult,

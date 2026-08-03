@@ -189,6 +189,8 @@ CREATE TABLE bursar.credit_usage_charges (
         bursar.is_finite_numeric(allowance_covered)
         AND allowance_covered >= 0
     ),
+    billing_disposition text NOT NULL DEFAULT 'billable'
+    CHECK (billing_disposition IN ('billable', 'record_only')),
     catalog_revision_id uuid REFERENCES bursar.catalog_revisions (id),
     plan_id uuid,
     rate_card_key text CHECK (
@@ -205,7 +207,20 @@ CREATE TABLE bursar.credit_usage_charges (
     UNIQUE (account_id, idempotency_key),
     FOREIGN KEY (plan_id, catalog_revision_id)
     REFERENCES bursar.catalog_plans (id, catalog_revision_id),
-    CHECK (charged + allowance_covered = requested),
+    CONSTRAINT credit_usage_charges_accounting_by_disposition_check
+    CHECK (
+        (
+            billing_disposition = 'billable'
+            AND charged + allowance_covered = requested
+        )
+        OR
+        (
+            billing_disposition = 'record_only'
+            AND charged = 0
+            AND allowance_requested = 0
+            AND allowance_covered = 0
+        )
+    ),
     CHECK (allowance_covered <= allowance_requested)
 );
 

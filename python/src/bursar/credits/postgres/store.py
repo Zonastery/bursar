@@ -83,6 +83,7 @@ from bursar.credits.types import (
     UsageCharge,
     UsageChargeCursor,
     UsageChargePage,
+    UsageRecordResult,
 )
 from bursar.sql import _get_sql_files
 
@@ -526,6 +527,55 @@ class PostgresStore(CreditStore):
             balance_after=_dec(result.balance_after),
             idempotent=bool(getattr(result, "idempotent", False)),
             bucket_breakdown=_dec_map(result.bucket_breakdown),
+        )
+
+    def record_usage(
+        self,
+        user_id: str,
+        operation: str,
+        requested: Decimal,
+        *,
+        idempotency_key: str | None = None,
+        feature: str | None = None,
+        model: str | None = None,
+        region: str | None = None,
+        measures: dict[str, Decimal | int | float] | None = None,
+        dimensions: dict[str, Any] | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> UsageRecordResult:
+        """Append priced usage telemetry without creating another debit."""
+        requested = _dec(requested)
+        effective_idempotency_key = idempotency_key or f"usage-record:{uuid4()}"
+        params = DeductParams(
+            user_id=user_id,
+            operation=operation,
+            amount=str(requested),
+            idempotency_key=effective_idempotency_key,
+            feature=feature,
+            model=model,
+            region=region,
+            measures=json.dumps(measures or {}, cls=DecimalEncoder),
+            dimensions=json.dumps(dimensions or {}, cls=DecimalEncoder),
+            metadata=json.dumps(
+                metadata.model_dump(mode="json", exclude_none=True) if metadata else {},
+                cls=DecimalEncoder,
+            ),
+        )
+        result = self._deduction_repo.record_usage(params)
+        if result is None or (result.charge_id is None and result.error_code is None):
+            return UsageRecordResult(
+                usage_id="",
+                user_id=user_id,
+                requested=Decimal(0),
+                idempotent=False,
+                error="no result",
+            )
+        return UsageRecordResult(
+            usage_id=str(result.charge_id or ""),
+            user_id=user_id,
+            requested=_dec(result.requested, requested),
+            idempotent=bool(result.replayed),
+            error=result.error_code,
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -1379,6 +1429,7 @@ class PostgresStore(CreditStore):
         to_date: datetime | None = None,
         limit: int = 50,
         cursor: UsageChargeCursor | None = None,
+        include_record_only: bool = True,
     ) -> UsageChargePage:
         if limit < 1 or limit > 200:
             raise ValueError("limit must be between 1 and 200")
@@ -1389,6 +1440,7 @@ class PostgresStore(CreditStore):
             limit + 1,
             cursor.event_at if cursor else None,
             cursor.usage_id if cursor else None,
+            include_record_only,
         )
         has_more = len(rows) > limit
         items = [
@@ -1400,6 +1452,7 @@ class PostgresStore(CreditStore):
                 charged=_dec(row.charged),
                 allowance_requested=_dec(row.allowance_requested),
                 allowance_covered=_dec(row.allowance_covered),
+                billing_disposition=row.billing_disposition,
                 feature=row.feature,
                 model=row.model,
                 region=row.region,

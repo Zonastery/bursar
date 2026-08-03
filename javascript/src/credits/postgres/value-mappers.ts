@@ -106,6 +106,7 @@ export function mapUsageCharge(row: UsageChargeRow): UsageCharge {
     charged: decimalValue(row.charged),
     allowanceRequested: decimalValue(row.allowance_requested),
     allowanceCovered: decimalValue(row.allowance_covered),
+    billingDisposition: row.billing_disposition,
     feature: row.feature == null ? null : String(row.feature),
     model: row.model == null ? null : String(row.model),
     region: row.region == null ? null : String(row.region),

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 class CreditMetadata(BaseModel, extra="allow"):
     operation: str | None = None
     measures: dict[str, Any] | None = None
-    dimensions: dict[str, str] | None = None
+    dimensions: dict[str, str | Decimal | bool] | None = None
     breakdown_total: str | None = None
     reference_type: str | None = None
     reference_id: str | None = None

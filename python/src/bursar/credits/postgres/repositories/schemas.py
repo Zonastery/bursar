@@ -59,6 +59,15 @@ class DeductionRow(BaseModel):
     user_id: str = ""
 
 
+class UsageRecordRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    charge_id: str | None = None
+    requested: str | Decimal | None = None
+    replayed: bool = False
+    error_code: str | None = None
+
+
 class RefundRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     refund_entry_id: str = ""
@@ -236,6 +245,7 @@ class UsageChargeRow(BaseModel):
     charged: str | Decimal | None = None
     allowance_requested: str | Decimal | None = None
     allowance_covered: str | Decimal | None = None
+    billing_disposition: Literal["billable", "record_only"] = "billable"
     feature: str | None = None
     model: str | None = None
     region: str | None = None

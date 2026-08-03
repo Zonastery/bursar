@@ -30,6 +30,7 @@ import type {
   ListUsageEntriesOptions,
   LedgerPage,
   UsageChargePage,
+  UsageRecordResult,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
@@ -305,6 +306,16 @@ export abstract class CreditStore {
     _options?: ListUsageChargesOptions,
   ): Promise<UsageChargePage> {
     throw new CapabilityNotSupportedError("listUsageCharges is not supported by this store");
+  }
+
+  /** Append priced usage telemetry without debiting the account again. */
+  async recordUsage(
+    _userId: string,
+    _operation: string,
+    _requested: Decimal,
+    _options?: DeductWithAllowanceOptions,
+  ): Promise<UsageRecordResult> {
+    throw new CapabilityNotSupportedError("recordUsage is not supported by this store");
   }
 
   // ── Single transaction lookup (optional capability — WS8) ────────────

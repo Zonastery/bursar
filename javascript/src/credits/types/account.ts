@@ -5,7 +5,7 @@ export type BillingMode = "strict" | "overdraft";
 export interface CreditMetadata {
   operation?: string | null;
   measures?: Record<string, unknown> | null;
-  dimensions?: Record<string, string> | null;
+  dimensions?: Record<string, string | number | boolean | Decimal.Value> | null;
   breakdownTotal?: string | null;
   referenceType?: string | null;
   referenceId?: string | null;

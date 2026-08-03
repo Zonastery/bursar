@@ -169,6 +169,16 @@ class PostgresStorageRepository:
                 "allowance_covered",
                 "usage charge export",
             ),
+            billing_disposition=(
+                "record_only"
+                if _required_string(
+                    row,
+                    "billing_disposition",
+                    "usage charge export",
+                )
+                == "record_only"
+                else "billable"
+            ),
             catalog_revision_id=_optional_string(row, "catalog_revision_id"),
             plan_id=_optional_string(row, "plan_id"),
             rate_card_key=_optional_string(row, "rate_card_key"),

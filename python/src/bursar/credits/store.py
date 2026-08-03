@@ -55,6 +55,7 @@ from bursar.credits.types import (
     TopUserRow,
     UsageChargeCursor,
     UsageChargePage,
+    UsageRecordResult,
 )
 from bursar.errors import (
     CapabilityNotSupportedError,
@@ -618,9 +619,27 @@ class CreditStore(ABC):
         to_date: datetime | None = None,
         limit: int = 50,
         cursor: UsageChargeCursor | None = None,
+        include_record_only: bool = True,
     ) -> UsageChargePage:
         """List metered usage charges, including allowance-covered events."""
         raise CapabilityNotSupportedError("list_usage_charges not supported by this store")
+
+    def record_usage(
+        self,
+        user_id: str,
+        operation: str,
+        requested: Decimal,
+        *,
+        idempotency_key: str,
+        feature: str | None = None,
+        model: str | None = None,
+        region: str | None = None,
+        metadata: CreditMetadata | None = None,
+        measures: dict[str, Any] | None = None,
+        dimensions: dict[str, Any] | None = None,
+    ) -> UsageRecordResult:
+        """Append priced usage telemetry without debiting the account again."""
+        raise CapabilityNotSupportedError("record_usage not supported by this store")
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
         """Return one ledger entry when it belongs to the user account."""

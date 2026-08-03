@@ -133,6 +133,10 @@ ON bursar.credit_usage_charges (account_id, created_at DESC, id DESC);
 CREATE INDEX usage_charge_account_event_idx
 ON bursar.credit_usage_charges (account_id, event_at DESC, id DESC);
 
+CREATE INDEX usage_charge_account_billable_event_idx
+ON bursar.credit_usage_charges (account_id, event_at DESC, id DESC)
+WHERE billing_disposition = 'billable';
+
 CREATE INDEX usage_charge_operation_event_idx
 ON bursar.credit_usage_charges (operation, event_at, id);
 
@@ -148,6 +152,10 @@ WHERE allowance_covered > 0;
 
 CREATE INDEX usage_charge_event_brin_idx
 ON bursar.credit_usage_charges USING brin (event_at);
+
+CREATE INDEX credit_usage_charges_record_only_retention_idx
+ON bursar.credit_usage_charges (event_at, id)
+WHERE billing_disposition = 'record_only';
 
 CREATE INDEX usage_charge_payload_charge_idx
 ON bursar.usage_charge_payloads (charge_id, event_at);

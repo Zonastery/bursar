@@ -66,6 +66,17 @@ export type DeductionRow = z.infer<typeof DeductionRowSchema>;
 export type RefundRow = z.infer<typeof RefundRowSchema>;
 export type RevokeRow = z.infer<typeof RevokeRowSchema>;
 
+const UsageRecordRowSchema = z
+  .object({
+    charge_id: z.string().nullable().optional(),
+    requested: z.union([z.string(), z.number()]).nullable().optional(),
+    replayed: pgBoolean.nullable().optional(),
+    error_code: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export type UsageRecordRow = z.infer<typeof UsageRecordRowSchema>;
+
 /** Typed input for the plan-aware operation charge RPC. */
 export interface DeductParams {
   userId: string;
@@ -124,6 +135,23 @@ export class DeductionRepository {
       },
       "DeductionRepository.deductWithAllowance",
     );
+  }
+
+  /** Append a priced usage event without creating another balance debit. */
+  async recordUsage(params: DeductParams): Promise<UsageRecordRow> {
+    const rows = await this.callproc("record_usage", [
+      params.userId,
+      params.operation,
+      params.amount,
+      params.idempotencyKey,
+      params.feature,
+      params.model,
+      params.region,
+      params.metadata,
+      params.measures,
+      params.dimensions,
+    ]);
+    return safeParse(UsageRecordRowSchema, rows?.[0] ?? {}, "DeductionRepository.recordUsage");
   }
 
   /** Refund a previous credit deduction. */

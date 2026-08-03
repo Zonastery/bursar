@@ -1,6 +1,12 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
-import { CapReachedError, ConfigError, InsufficientCreditsError, RefundError } from "../errors.js";
+import {
+  CapReachedError,
+  ConfigError,
+  InsufficientCreditsError,
+  RefundError,
+  StoreError,
+} from "../errors.js";
 import type { PricingEngine } from "../engine.js";
 import type {
   AddCreditsResult,
@@ -38,6 +44,7 @@ import type {
   TeamDeductionResult,
   TopUserRow,
   UsageChargePage,
+  UsageRecordResult,
 } from "./types/index.js";
 import type { CreditStore } from "./store.js";
 import type { CreditEventEmitter, CreditEventType } from "./events.js";
@@ -738,6 +745,50 @@ export class CreditsService {
       await this.afterDeduction(userId, "deduct", result);
     }
 
+    return result;
+  }
+
+  /**
+   * Record priced usage for a workflow without debiting the account again.
+   *
+   * This is intended for child work inside a fixed-price operation. The
+   * parent operation remains the only customer debit; the returned usage row
+   * preserves the child cost and metadata in Bursar's usage journal.
+   */
+  async recordUsage(
+    userId: string,
+    metrics: UsageMetrics,
+    idempotencyKey?: string | null,
+    metadata?: CreditMetadata | null,
+  ): Promise<UsageRecordResult> {
+    const engine = await this.pricing.engineForUser(userId);
+    const plan = await this.store.getUserPlan(userId);
+    const effectiveIdempotencyKey = idempotencyKey ?? `usage-record:${randomUUID()}`;
+    const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
+    const meta: Record<string, unknown> = {};
+    if (metadata) {
+      for (const [key, value] of Object.entries(metadata)) {
+        if (value != null) meta[key] = value;
+      }
+    }
+    meta.operation = metrics.operation;
+    meta.measures = { ...(metrics.measures ?? {}) };
+    meta.dimensions = { ...(metrics.dimensions ?? {}) };
+    meta.breakdownTotal = breakdown.total.toString();
+    meta.idempotencyKey = effectiveIdempotencyKey;
+
+    const result = await this.store.recordUsage(userId, metrics.operation, breakdown.total, {
+      idempotencyKey: effectiveIdempotencyKey,
+      operation: metrics.operation,
+      model: typeof metrics.dimensions?.model === "string" ? metrics.dimensions.model : null,
+      region: typeof metrics.dimensions?.region === "string" ? metrics.dimensions.region : null,
+      measures: { ...(metrics.measures ?? {}) },
+      dimensions: { ...(metrics.dimensions ?? {}) },
+      metadata: meta as CreditMetadata,
+    });
+    if (result.error) {
+      throw new StoreError(`Usage record failed: ${result.error}`);
+    }
     return result;
   }
 

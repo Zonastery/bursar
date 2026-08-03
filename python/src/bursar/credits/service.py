@@ -111,6 +111,7 @@ from bursar.credits.types import (
     UsageChargeCursor,
     UsageChargePage,
     UsageChargeStore,
+    UsageRecordResult,
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
@@ -1626,6 +1627,46 @@ class CreditsService:
 
         return result
 
+    def record_usage(
+        self,
+        user_id: str,
+        metrics: UsageMetrics,
+        idempotency_key: str | None = None,
+        metadata: CreditMetadata | None = None,
+    ) -> UsageRecordResult:
+        """Record priced child-work usage without debiting the account again.
+
+        Fixed-price workflows use this for their nested provider calls. The
+        parent fixed operation remains the only customer debit, while each
+        child gets an immutable Bursar usage-journal row.
+        """
+        engine = self._engine_for_user(user_id)
+        plan = self._store.get_user_plan(user_id)
+        effective_idempotency_key = idempotency_key or f"usage-record:{uuid4()}"
+        breakdown = engine.calculate(metrics, rate_card=plan.rate_card)
+        tx_meta = self._build_tx_metadata(
+            metrics,
+            breakdown.total,
+            effective_idempotency_key,
+            metadata,
+        )
+        model_dimension = metrics.dimensions.get("model")
+        region_dimension = metrics.dimensions.get("region")
+        result = self._store.record_usage(
+            user_id,
+            metrics.operation,
+            breakdown.total,
+            idempotency_key=effective_idempotency_key,
+            model=str(model_dimension) if model_dimension is not None else None,
+            region=str(region_dimension) if region_dimension is not None else None,
+            measures=dict(metrics.measures),
+            dimensions=dict(metrics.dimensions),
+            metadata=tx_meta,
+        )
+        if result.error:
+            raise StoreError(f"Usage record failed: {result.error}")
+        return result
+
     def deduct_flat_job(
         self,
         user_id: str,
@@ -1865,9 +1906,17 @@ class CreditsService:
         to_date: datetime | None = None,
         limit: int = 50,
         cursor: UsageChargeCursor | None = None,
+        include_record_only: bool = True,
     ) -> UsageChargePage:
         """List metered usage charges, including allowance-covered events."""
-        return self._usage_store.list_usage_charges(user_id, from_date, to_date, limit, cursor)
+        return self._usage_store.list_usage_charges(
+            user_id,
+            from_date,
+            to_date,
+            limit,
+            cursor,
+            include_record_only,
+        )
 
     def get_ledger_entry(self, user_id: str, entry_id: str) -> LedgerEntry | None:
         """Return one ledger entry for a user account."""

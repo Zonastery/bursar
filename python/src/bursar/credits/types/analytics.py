@@ -73,4 +73,5 @@ class UsageChargeStore(Protocol):
         to_date: datetime | None = None,
         limit: int = 50,
         cursor: UsageChargeCursor | None = None,
+        include_record_only: bool = True,
     ) -> UsageChargePage: ...

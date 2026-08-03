@@ -642,7 +642,8 @@ export class CommerceService {
     const status = subscription?.status ?? null;
     const isCurrent = status != null && CURRENT_SUBSCRIPTION_STATUSES.has(status);
     const isEntitled = entitlement.planKey != null;
-    if (entitlement.planKey && !config.plans[entitlement.planKey]) {
+    const planKey = entitlement.planKey ?? (isCurrent ? (subscription?.plan ?? null) : null);
+    if (planKey && !config.plans[planKey]) {
       throw new CoreBillingDataUnavailableError("The account plan is not present in the catalog");
     }
     const inGrace =
@@ -651,7 +652,7 @@ export class CommerceService {
       Date.parse(subscription.graceEndsAt) > Date.now();
     return {
       accountId,
-      planKey: entitlement.planKey ?? (isCurrent ? (subscription?.plan ?? null) : null),
+      planKey,
       status,
       lifecycleState: status ?? "none",
       accessState: isEntitled ? (inGrace ? "grace" : "entitled") : status ? "blocked" : "none",
@@ -803,20 +804,9 @@ export class CommerceService {
       context.subscription.providerSubscriptionId,
     );
     if (existing?.state === "scheduled" && existing.effective === "renewal") {
-      if (!context.provider.cancelScheduledPlanChange) {
-        throw new ProviderCapabilityNotSupportedError(
-          context.provider.provider,
-          "cancelScheduledPlanChange",
-        );
-      }
-      await context.provider.cancelScheduledPlanChange(
-        context.subscription.providerSubscriptionId,
-        existing.providerOperationId,
-        `${input.operationKey}:replace`,
+      throw new CheckoutConflictError(
+        "Cancel the existing plan change before choosing another plan",
       );
-      await this.billing.updateBillingSubscriptionChange(existing.id, {
-        state: "canceled",
-      });
     } else if (existing) {
       throw new CheckoutConflictError("A plan change is already awaiting payment");
     }
@@ -842,6 +832,7 @@ export class CommerceService {
       prorationBehavior: context.policy!.proration === "none" ? "none" : "invoice_immediately",
     });
 
+    let cancellationWasReactivated = false;
     try {
       if (context.subscription.cancelAtPeriodEnd) {
         if (!context.provider.reactivateSubscription) {
@@ -850,10 +841,17 @@ export class CommerceService {
             "reactivateSubscription",
           );
         }
+        if (!context.provider.cancelSubscription) {
+          throw new ProviderCapabilityNotSupportedError(
+            context.provider.provider,
+            "cancelSubscription",
+          );
+        }
         await context.provider.reactivateSubscription(
           context.subscription.providerSubscriptionId,
           `${input.operationKey}:keep`,
         );
+        cancellationWasReactivated = true;
       }
       const result = await context.provider.changePlan({
         providerSubscriptionId: context.subscription.providerSubscriptionId,
@@ -872,11 +870,25 @@ export class CommerceService {
           result && "providerOperationId" in result ? (result.providerOperationId ?? null) : null,
       });
     } catch (error) {
+      let failure = error;
+      if (cancellationWasReactivated) {
+        try {
+          await context.provider.cancelSubscription!(
+            context.subscription.providerSubscriptionId,
+            `${input.operationKey}:restore-cancellation`,
+          );
+        } catch (compensationError) {
+          failure = new AggregateError(
+            [error, compensationError],
+            "Plan change failed and the original subscription cancellation could not be restored",
+          );
+        }
+      }
       await this.billing.updateBillingSubscriptionChange(change.id, {
         state: "failed",
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorMessage: failure instanceof Error ? failure.message : String(failure),
       });
-      throw error;
+      throw failure;
     }
     return {
       success: true,
@@ -1056,7 +1068,7 @@ export class CommerceService {
     );
     const [transactionsResult, usageResult, invoicesResult] = await Promise.allSettled([
       this.credits.listLedgerEntries(accountId, { limit: 50 }),
-      this.credits.listUsageCharges(accountId, { limit: 100 }),
+      this.credits.listUsageCharges(accountId, { limit: 100, includeRecordOnly: false }),
       this.billing.listBillingInvoices(accountId),
     ]);
     const transactions =

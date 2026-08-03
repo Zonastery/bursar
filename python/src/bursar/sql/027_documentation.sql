@@ -44,7 +44,9 @@ COMMENT ON TABLE bursar.credit_lot_source_restorations IS
 COMMENT ON TABLE bursar.credit_unallocated_debits IS 'Debit amounts not backed by lots when a policy permits debt.';
 COMMENT ON TABLE bursar.credit_debt_repayments IS 'Positive ledger amounts applied to outstanding account debt.';
 COMMENT ON TABLE bursar.credit_usage_charges IS
-'Permanent compact idempotent usage receipt, accounting, and allowance evidence.';
+'Common idempotent usage journal for permanent billable receipts and retention-bound record-only workflow telemetry.';
+COMMENT ON COLUMN bursar.credit_usage_charges.billing_disposition IS
+'Whether the usage event affected billing or was retained only for cost attribution.';
 COMMENT ON TABLE bursar.usage_charge_payloads IS
 'Retention-bounded usage details, pricing snapshot, dimensions, and application metadata, partitioned by event time.';
 COMMENT ON TABLE bursar.usage_daily_rollups IS 'Bounded exact daily usage aggregates for PostgreSQL-only analytics.';
@@ -107,6 +109,10 @@ COMMENT ON FUNCTION bursar.execute_grant_program(text, text, uuid, text, uuid, t
 IS 'Execute an eligible catalog grant program with lifetime award limits and event- or subject-scoped idempotency.';
 COMMENT ON FUNCTION bursar.charge_usage_for_operation(uuid, text, numeric, text, text, text, text, jsonb, jsonb, jsonb)
 IS 'Authorize and record one operation charge using plan policy and allowance state.';
+COMMENT ON FUNCTION bursar.record_usage(
+    uuid, text, numeric, text, text, text, text, jsonb, jsonb, jsonb
+)
+IS 'Append one idempotent record-only usage event without a ledger debit or allowance consumption.';
 COMMENT ON FUNCTION bursar.create_lease_for_operation(
     uuid, text, numeric, text, interval, jsonb, text, jsonb, jsonb, numeric, integer
 )

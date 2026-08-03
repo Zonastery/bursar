@@ -33,6 +33,7 @@ from bursar.commerce import (
     BillingDocumentInvoiceRef,
     BillingDocumentLedgerRef,
     CheckoutCompletedError,
+    CheckoutConflictError,
     CommerceOptions,
     CommerceResourceNotFoundError,
     CommerceService,
@@ -498,6 +499,7 @@ class FakeCredits:
         self.fail_balance = False
         self.fail_ledger = False
         self.fail_usage = False
+        self.include_record_only: bool | None = None
 
     def get_balance(self, account_id: str) -> BalanceResult:
         del account_id
@@ -527,8 +529,15 @@ class FakeCredits:
             raise RuntimeError("history unavailable")
         return self.ledger_entries
 
-    def list_usage_charges(self, account_id: str, *, limit: int) -> UsageChargePage:
+    def list_usage_charges(
+        self,
+        account_id: str,
+        *,
+        limit: int,
+        include_record_only: bool = True,
+    ) -> UsageChargePage:
         del account_id, limit
+        self.include_record_only = include_record_only
         if self.fail_usage:
             raise RuntimeError("usage unavailable")
         return self.usage_charges
@@ -561,6 +570,22 @@ def active_subscription(**overrides: Any) -> BillingSubscriptionState:
     }
     values.update(overrides)
     return BillingSubscriptionState(**values)
+
+
+def test_account_summary_validates_subscription_plan_when_entitlements_lag() -> None:
+    provider = RecordingProvider()
+    commerce, billing, credits, _provider = make_harness(provider)
+    billing.subscription = active_subscription()
+    credits.plan = credits.plan.model_copy(update={"plan_id": None, "plan_key": None, "plan_label": None})
+
+    summary = commerce.get_account_subscription_summary("user-1")
+    assert summary.plan_key == "starter"
+    assert summary.is_current is True
+    assert summary.is_entitled is False
+
+    billing.subscription = active_subscription(plan="missing")
+    with pytest.raises(CoreBillingDataUnavailableError, match="not present in the catalog"):
+        commerce.get_account_subscription_summary("user-1")
 
 
 def scheduled_change() -> BillingSubscriptionChange:
@@ -784,7 +809,7 @@ async def test_subscription_commands_and_cancel_all_emit_provider_neutral_events
 
 
 @pytest.mark.asyncio
-async def test_plan_change_confirmation_cancels_replacements_and_persists_failures() -> None:
+async def test_plan_change_confirmation_requires_explicit_replacement_cancellation_and_restores_failures() -> None:
     provider = RecordingProvider()
     commerce, billing, _credits, _provider = make_harness(provider)
     billing.active_subscription = active_subscription(cancel_at_period_end=True)
@@ -794,6 +819,18 @@ async def test_plan_change_confirmation_cancels_replacements_and_persists_failur
     preview = await commerce.preview_plan_change("user-1", offer_key="pro_month")
     assert preview.classification == "upgrade"
     assert preview.quote_fingerprint is not None
+    with pytest.raises(CheckoutConflictError, match="Cancel the existing plan change"):
+        await commerce.confirm_plan_change(
+            "user-1",
+            "change-conflicts",
+            offer_key="pro_month",
+            quote_fingerprint=preview.quote_fingerprint,
+        )
+    assert provider.cancelled_changes == []
+    assert provider.reactivated == []
+    assert provider.change_params == []
+
+    billing.open_change = None
     confirmed = await commerce.confirm_plan_change(
         "user-1",
         "change-1",
@@ -801,16 +838,13 @@ async def test_plan_change_confirmation_cancels_replacements_and_persists_failur
         quote_fingerprint=preview.quote_fingerprint,
     )
     assert confirmed.pending is True
-    assert provider.cancelled_changes == [("subscription-1", "provider-old-change", "change-1:replace")]
     assert provider.reactivated == [("subscription-1", "change-1:keep")]
     change_metadata = provider.change_params[0].metadata
     assert change_metadata is not None
     assert change_metadata["plan_slug"] == "pro"
-    assert billing.change_updates[0] == ("change-existing", {"state": "canceled"})
     assert billing.change_updates[-1] == ("change-row", {"provider_operation_id": "change-1"})
 
     provider.fail_change = True
-    billing.open_change = None
     preview = await commerce.preview_plan_change("user-1", offer_key="pro_month")
     with pytest.raises(RuntimeError, match="change failed"):
         await commerce.confirm_plan_change(
@@ -820,6 +854,7 @@ async def test_plan_change_confirmation_cancels_replacements_and_persists_failur
             quote_fingerprint=preview.quote_fingerprint or "",
         )
     assert billing.change_updates[-1] == ("change-row", {"state": "failed", "error_message": "change failed"})
+    assert provider.cancelled[-1] == ("subscription-1", "change-fails:restore-cancellation")
 
 
 @pytest.mark.asyncio
@@ -925,6 +960,7 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
 
     overview = await commerce.get_account_overview("user-1")
     assert overview.credits.effective_spendable_balance == Decimal("35")
+    assert credits.include_record_only is False
     assert overview.subscription_summary.pending_change.plan_key == "pro"
     assert overview.payment_methods[0].last4 == "4242"
     assert {document.kind for document in overview.documents} == {"provider_invoice", "ledger_entry"}

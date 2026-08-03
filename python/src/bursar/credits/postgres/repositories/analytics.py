@@ -161,6 +161,7 @@ class AnalyticsRepository:
         limit: int,
         cursor_event_at: str | None,
         cursor_usage_id: str | None,
+        include_record_only: bool,
     ) -> list[UsageChargeRow]:
         validate_non_empty(user_id, "user_id")
         validate_non_negative(limit, "limit")
@@ -176,6 +177,7 @@ class AnalyticsRepository:
                     limit,
                     from_date,
                     to_date,
+                    include_record_only,
                 ],
             )
             or []
@@ -188,6 +190,7 @@ class AnalyticsRepository:
             "charged",
             "allowance_requested",
             "allowance_covered",
+            "billing_disposition",
             "feature",
             "model",
             "region",

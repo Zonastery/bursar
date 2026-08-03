@@ -167,6 +167,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
           charged: event.charged,
           allowance_requested: event.allowanceRequested,
           allowance_covered: event.allowanceCovered,
+          billing_disposition: event.billingDisposition,
           catalog_revision_id: event.catalogRevisionId,
           plan_id: event.planId,
           rate_card_key: event.rateCardKey,
@@ -220,6 +221,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          toString(count()) AS entry_count
        FROM ${this.quotedTable} FINAL
        WHERE tenant_id = {tenantId:UUID}
+         AND billing_disposition = 'billable'
          AND event_at >= parseDateTime64BestEffort({start:String})
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
@@ -242,6 +244,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
            toString(uniqExact(subject_id)) AS active_users
          FROM ${this.quotedTable} FINAL
          WHERE tenant_id = {tenantId:UUID}
+           AND billing_disposition = 'billable'
            AND event_at >= parseDateTime64BestEffort({start:String})
            AND event_at < parseDateTime64BestEffort({end:String})`,
         this.analyticsParams(start, end),
@@ -279,6 +282,9 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       predicates.push("event_at < parseDateTime64BestEffort({toDate:String})");
       params.toDate = options.toDate.toISOString();
     }
+    if (options.includeRecordOnly === false) {
+      predicates.push("billing_disposition = 'billable'");
+    }
     if (options.cursor) {
       predicates.push(
         "(event_at, charge_id) < " +
@@ -296,6 +302,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          toString(charged) AS charged,
          toString(allowance_requested) AS allowance_requested,
          toString(allowance_covered) AS allowance_covered,
+         billing_disposition,
          feature,
          model,
          region,
@@ -318,6 +325,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       charged: new Decimal(row.charged),
       allowanceRequested: new Decimal(row.allowance_requested),
       allowanceCovered: new Decimal(row.allowance_covered),
+      billingDisposition: row.billing_disposition === "record_only" ? "record_only" : "billable",
       feature: row.feature ?? null,
       model: row.model ?? null,
       region: row.region ?? null,
@@ -357,6 +365,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
         charged Decimal(20, 6),
         allowance_requested Decimal(20, 6),
         allowance_covered Decimal(20, 6),
+        billing_disposition LowCardinality(String) DEFAULT 'billable',
         catalog_revision_id Nullable(UUID),
         plan_id Nullable(UUID),
         rate_card_key Nullable(String),
@@ -372,6 +381,11 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
       ENGINE = ReplacingMergeTree(outbox_event_id)
       PARTITION BY toYYYYMM(event_at)
       ORDER BY (tenant_id, event_at, charge_id)${ttl}`,
+    });
+    await this.client.command({
+      query:
+        `ALTER TABLE ${this.quotedTable} ` +
+        "ADD COLUMN IF NOT EXISTS billing_disposition LowCardinality(String) DEFAULT 'billable'",
     });
   }
 
@@ -390,6 +404,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
          toString(count()) AS entry_count
        FROM ${this.quotedTable} FINAL
        WHERE tenant_id = {tenantId:UUID}
+         AND billing_disposition = 'billable'
          AND event_at >= parseDateTime64BestEffort({start:String})
          AND event_at < parseDateTime64BestEffort({end:String})
        GROUP BY key
@@ -425,6 +440,7 @@ interface UsageRow {
   charged: string | number;
   allowance_requested: string | number;
   allowance_covered: string | number;
+  billing_disposition: string;
   feature: string | null;
   model: string | null;
   region: string | null;

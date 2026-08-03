@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -62,6 +62,7 @@ class UsageChargeExport(_StorageModel):
     charged: str
     allowance_requested: str
     allowance_covered: str
+    billing_disposition: Literal["billable", "record_only"] = "billable"
     catalog_revision_id: str | None
     plan_id: str | None
     rate_card_key: str | None

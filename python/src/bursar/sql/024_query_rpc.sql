@@ -234,6 +234,7 @@ AS $$
         CROSS JOIN bounds
         WHERE charge.event_at >= p_start
           AND charge.event_at < p_end
+          AND charge.billing_disposition = 'billable'
           AND (
               bounds.full_start >= bounds.full_end
               OR charge.event_at < bounds.full_start
@@ -365,7 +366,8 @@ CREATE FUNCTION bursar.list_usage_charges(
     p_after_id uuid DEFAULT NULL,
     p_page_size integer DEFAULT 100,
     p_from_at timestamptz DEFAULT NULL,
-    p_to_at timestamptz DEFAULT NULL
+    p_to_at timestamptz DEFAULT NULL,
+    p_include_record_only boolean DEFAULT true
 )
 RETURNS TABLE (
     usage_id uuid,
@@ -375,6 +377,7 @@ RETURNS TABLE (
     charged numeric,
     allowance_requested numeric,
     allowance_covered numeric,
+    billing_disposition text,
     feature text,
     model text,
     region text,
@@ -396,6 +399,7 @@ AS $$
         charge.charged,
         charge.allowance_requested,
         charge.allowance_covered,
+        charge.billing_disposition,
         payload.feature,
         payload.model,
         payload.region,
@@ -414,6 +418,7 @@ AS $$
       AND p_page_size BETWEEN 1 AND 201
       AND (p_from_at IS NULL OR charge.event_at >= p_from_at)
       AND (p_to_at IS NULL OR charge.event_at < p_to_at)
+      AND (p_include_record_only OR charge.billing_disposition = 'billable')
       AND (
           (p_after_event_at IS NULL AND p_after_id IS NULL)
           OR (

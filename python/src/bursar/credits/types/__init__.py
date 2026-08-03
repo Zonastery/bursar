@@ -54,6 +54,7 @@ from bursar.credits.types.ledger import (
     UsageCharge,
     UsageChargeCursor,
     UsageChargePage,
+    UsageRecordResult,
 )
 from bursar.credits.types.quotas import (
     CheckFeatureResult,
@@ -132,4 +133,5 @@ __all__ = [
     "UsageCharge",
     "UsageChargeCursor",
     "UsageChargePage",
+    "UsageRecordResult",
 ]

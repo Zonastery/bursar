@@ -186,6 +186,7 @@ describe("ClickHouseUsageStore", () => {
       charged: "12.500000",
       allowanceRequested: "2.500000",
       allowanceCovered: "2.500000",
+      billingDisposition: "billable",
       catalogRevisionId: null,
       planId: null,
       rateCardKey: "standard",
@@ -220,6 +221,11 @@ describe("ClickHouseUsageStore", () => {
     expect(rows[0]?.userId).toBe(usage.subjectId);
     expect(rows[0]?.totalSpend.toString()).toBe("12.5");
     expect(rows[0]?.entryCount).toBe(2);
+    expect(query).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: expect.stringContaining("billing_disposition = 'billable'"),
+      }),
+    );
 
     await expect(
       store.writeUsage({ ...usage, eventAt: "2026-07-29T12:00:00" }, "100"),
@@ -276,6 +282,7 @@ describe("ClickHouseUsageStore", () => {
 
     const page = await store.listUsageCharges("00000000-0000-0000-0000-000000000007", {
       limit: 1,
+      includeRecordOnly: false,
     });
 
     expect(page.items[0]).toMatchObject({
@@ -289,6 +296,7 @@ describe("ClickHouseUsageStore", () => {
     });
     expect(query).toHaveBeenCalledWith(
       expect.objectContaining({
+        query: expect.stringContaining("billing_disposition = 'billable'"),
         query_params: {
           tenantId: TEST_TENANT_ID,
           subjectId: "00000000-0000-0000-0000-000000000007",

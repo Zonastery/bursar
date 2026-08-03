@@ -96,6 +96,7 @@ class FakeClickHouseClient:
     def __init__(self) -> None:
         self.commands: list[str] = []
         self.inserts: list[tuple[str, Sequence[Sequence[Any]], Sequence[str]]] = []
+        self.queries: list[str] = []
         self.query_rows = [
             {
                 "key": "00000000-0000-0000-0000-000000000007",
@@ -124,6 +125,7 @@ class FakeClickHouseClient:
     ) -> FakeClickHouseResult:
         assert query
         assert parameters is not None
+        self.queries.append(query)
         return FakeClickHouseResult(self.query_rows)
 
 
@@ -294,6 +296,7 @@ def test_clickhouse_writes_projection_and_serves_analytics() -> None:
     assert analytics[0].user_id == usage.subject_id
     assert str(analytics[0].total_spend) == "12.5"
     assert analytics[0].entry_count == 2
+    assert "billing_disposition = 'billable'" in client.queries[-1]
 
 
 def test_clickhouse_rejects_usage_timestamps_without_a_timezone() -> None:
@@ -344,12 +347,14 @@ def test_clickhouse_serves_usage_history_with_a_cursor() -> None:
     page = store.list_usage_charges(
         "00000000-0000-0000-0000-000000000007",
         limit=10,
+        include_record_only=False,
     )
 
     assert page.next_cursor is None
     assert page.items[0].usage_id == _usage_export().charge_id
     assert page.items[0].metadata == {"trace_id": "trace-42"}
     assert str(page.items[0].charged) == "12.500000"
+    assert "billing_disposition = 'billable'" in client.queries[-1]
 
 
 def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:

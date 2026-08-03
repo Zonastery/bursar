@@ -122,6 +122,7 @@ class ClickHouseUsageStore:
         "charged",
         "allowance_requested",
         "allowance_covered",
+        "billing_disposition",
         "catalog_revision_id",
         "plan_id",
         "rate_card_key",
@@ -182,6 +183,7 @@ class ClickHouseUsageStore:
             Decimal(event.charged),
             Decimal(event.allowance_requested),
             Decimal(event.allowance_covered),
+            event.billing_disposition,
             _optional_uuid(event.catalog_revision_id),
             _optional_uuid(event.plan_id),
             event.rate_card_key,
@@ -246,6 +248,7 @@ class ClickHouseUsageStore:
                 toString(count()) AS entry_count
             FROM {self._quoted_table} FINAL
             WHERE tenant_id = {{tenant_id:UUID}}
+              AND billing_disposition = 'billable'
               AND event_at >= parseDateTime64BestEffort({{start:String}})
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key
@@ -274,6 +277,7 @@ class ClickHouseUsageStore:
                     toString(uniqExact(subject_id)) AS active_users
                 FROM {self._quoted_table} FINAL
                 WHERE tenant_id = {{tenant_id:UUID}}
+                  AND billing_disposition = 'billable'
                   AND event_at >= parseDateTime64BestEffort({{start:String}})
                   AND event_at < parseDateTime64BestEffort({{end:String}})
                 """,
@@ -309,6 +313,7 @@ class ClickHouseUsageStore:
         to_date: datetime | None = None,
         limit: int = 50,
         cursor: UsageChargeCursor | None = None,
+        include_record_only: bool = True,
     ) -> UsageChargePage:
         if not user_id:
             raise ValueError("user_id must not be empty")
@@ -335,6 +340,8 @@ class ClickHouseUsageStore:
         if to_date is not None:
             predicates.append("event_at < parseDateTime64BestEffort({to_date:String})")
             parameters["to_date"] = to_date.isoformat()
+        if not include_record_only:
+            predicates.append("billing_disposition = 'billable'")
         if cursor is not None:
             predicates.append(
                 "(event_at, charge_id) < (parseDateTime64BestEffort({cursor_event_at:String}), {cursor_usage_id:UUID})"
@@ -352,6 +359,7 @@ class ClickHouseUsageStore:
                 toString(charged) AS charged,
                 toString(allowance_requested) AS allowance_requested,
                 toString(allowance_covered) AS allowance_covered,
+                billing_disposition,
                 feature,
                 model,
                 region,
@@ -377,6 +385,7 @@ class ClickHouseUsageStore:
                 charged=Decimal(str(row["charged"])),
                 allowance_requested=Decimal(str(row["allowance_requested"])),
                 allowance_covered=Decimal(str(row["allowance_covered"])),
+                billing_disposition=("record_only" if row.get("billing_disposition") == "record_only" else "billable"),
                 feature=str(row["feature"]) if row.get("feature") is not None else None,
                 model=str(row["model"]) if row.get("model") is not None else None,
                 region=str(row["region"]) if row.get("region") is not None else None,
@@ -414,6 +423,7 @@ class ClickHouseUsageStore:
                 charged Decimal(20, 6),
                 allowance_requested Decimal(20, 6),
                 allowance_covered Decimal(20, 6),
+                billing_disposition LowCardinality(String) DEFAULT 'billable',
                 catalog_revision_id Nullable(UUID),
                 plan_id Nullable(UUID),
                 rate_card_key Nullable(String),
@@ -430,6 +440,11 @@ class ClickHouseUsageStore:
             PARTITION BY toYYYYMM(event_at)
             ORDER BY (tenant_id, event_at, charge_id){ttl}
             """
+        )
+        self._client.command(
+            f"ALTER TABLE {self._quoted_table} "
+            "ADD COLUMN IF NOT EXISTS billing_disposition "
+            "LowCardinality(String) DEFAULT 'billable'"
         )
 
     def _spend_rows(
@@ -449,6 +464,7 @@ class ClickHouseUsageStore:
                 toString(count()) AS entry_count
             FROM {self._quoted_table} FINAL
             WHERE tenant_id = {{tenant_id:UUID}}
+              AND billing_disposition = 'billable'
               AND event_at >= parseDateTime64BestEffort({{start:String}})
               AND event_at < parseDateTime64BestEffort({{end:String}})
             GROUP BY key

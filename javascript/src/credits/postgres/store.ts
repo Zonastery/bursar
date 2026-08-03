@@ -35,6 +35,7 @@ import type {
   QuotaState,
   LedgerPage,
   UsageChargePage,
+  UsageRecordResult,
   BursarConfigHistoryItem,
   BursarConfigResult,
   RefundResult,
@@ -302,6 +303,43 @@ export class PostgresStore extends CreditStore {
       balanceAfter: dec(row.balance_after),
       idempotent: Boolean(row.idempotent),
       bucketBreakdown: decRecord(row.bucket_breakdown),
+    };
+  }
+
+  async recordUsage(
+    userId: string,
+    operation: string,
+    amount: Decimal,
+    options?: DeductWithAllowanceOptions,
+  ): Promise<UsageRecordResult> {
+    const idempotencyKey = options?.idempotencyKey ?? `usage-record:${randomUUID()}`;
+    const row = await this.deductionRepo.recordUsage({
+      userId,
+      operation,
+      amount: decParam(amount),
+      idempotencyKey,
+      feature: options?.feature ?? null,
+      model: options?.model ?? null,
+      region: options?.region ?? null,
+      measures: JSON.stringify(options?.measures ?? {}),
+      dimensions: JSON.stringify(options?.dimensions ?? {}),
+      metadata: JSON.stringify(options?.metadata ?? {}),
+    });
+    if (row.charge_id == null && row.error_code == null) {
+      return {
+        usageId: "",
+        userId,
+        requested: ZERO,
+        idempotent: false,
+        error: "no result",
+      };
+    }
+    return {
+      usageId: String(row.charge_id ?? ""),
+      userId,
+      requested: dec(row.requested),
+      idempotent: Boolean(row.replayed),
+      error: row.error_code != null ? String(row.error_code) : null,
     };
   }
 
@@ -862,6 +900,7 @@ export class PostgresStore extends CreditStore {
       limit + 1,
       cursor?.eventAt ?? null,
       cursor?.usageId ?? null,
+      options?.includeRecordOnly ?? true,
     );
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit).map(mapUsageCharge);

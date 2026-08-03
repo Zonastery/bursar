@@ -52,6 +52,7 @@ export interface UsageCharge {
   charged: Decimal;
   allowanceRequested: Decimal;
   allowanceCovered: Decimal;
+  billingDisposition: "billable" | "record_only";
   feature: string | null;
   model: string | null;
   region: string | null;
@@ -71,11 +72,21 @@ export interface ListUsageChargesOptions {
   toDate?: Date;
   limit?: number;
   cursor?: UsageChargeCursor | null;
+  includeRecordOnly?: boolean;
 }
 
 export interface UsageChargePage {
   items: UsageCharge[];
   nextCursor: UsageChargeCursor | null;
+}
+
+/** Result of appending a usage event without creating another balance debit. */
+export interface UsageRecordResult {
+  usageId: string;
+  userId: string;
+  requested: Decimal;
+  idempotent: boolean;
+  error?: string | null;
 }
 
 /** Cursor-only options for the usage-only ledger view. */

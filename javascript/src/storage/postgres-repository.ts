@@ -122,6 +122,10 @@ export class PostgresStorageRepository implements OutboxStore {
       charged: requiredString(row, "charged", "usage charge export"),
       allowanceRequested: requiredString(row, "allowance_requested", "usage charge export"),
       allowanceCovered: requiredString(row, "allowance_covered", "usage charge export"),
+      billingDisposition:
+        requiredString(row, "billing_disposition", "usage charge export") === "record_only"
+          ? "record_only"
+          : "billable",
       catalogRevisionId: optionalString(row, "catalog_revision_id"),
       planId: optionalString(row, "plan_id"),
       rateCardKey: optionalString(row, "rate_card_key"),

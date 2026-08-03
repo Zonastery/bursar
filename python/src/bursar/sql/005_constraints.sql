@@ -247,7 +247,7 @@ BEGIN
     WHERE charge.id = NEW.charge_id
       AND charge.event_at = NEW.event_at;
 
-    IF NOT FOUND THEN
+    IF NOT FOUND OR v_charge.billing_disposition = 'record_only' THEN
         RETURN NEW;
     END IF;
 

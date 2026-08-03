@@ -36,6 +36,31 @@ ENTRY_ID = "00000000-0000-0000-0000-000000000903"
 USAGE_ID = "00000000-0000-0000-0000-000000000904"
 
 
+def test_usage_metadata_preserves_typed_dimensions() -> None:
+    service = object.__new__(CreditsService)
+    metadata = service._build_tx_metadata(
+        UsageMetrics(
+            operation="search",
+            measures={"queries": 1},
+            dimensions={"provider": "linkup", "max_results": 12, "cached": False},
+        ),
+        Decimal("0"),
+        "search-1",
+        None,
+    )
+
+    assert metadata.dimensions == {
+        "provider": "linkup",
+        "max_results": Decimal("12"),
+        "cached": False,
+    }
+    assert metadata.model_dump(mode="json")["dimensions"] == {
+        "provider": "linkup",
+        "max_results": "12",
+        "cached": False,
+    }
+
+
 def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None:
     calls: list[tuple[str, list[object]]] = []
 
@@ -70,6 +95,7 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
                     "8.5",
                     "10",
                     "1.5",
+                    "billable",
                     "chat",
                     "gpt-5",
                     "in-west",
@@ -101,6 +127,7 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
         201,
         "2030-01-01T00:00:00+00:00",
         USAGE_ID,
+        False,
     )
 
     assert aggregate.active_users == 3
@@ -123,6 +150,7 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
     )
     assert usage[0].usage_id == USAGE_ID
     assert usage[0].allowance_covered == "1.5"
+    assert usage[0].billing_disposition == "billable"
     assert calls[-1] == (
         "list_usage_charges",
         [
@@ -132,6 +160,7 @@ def test_analytics_repository_mirrors_canonical_rpc_shapes_and_aliases() -> None
             201,
             "2029-01-01",
             "2030-01-01",
+            False,
         ],
     )
 
@@ -491,8 +520,59 @@ def test_deduction_repository_preserves_operation_usage_dimensions() -> None:
         ],
     )
     assert result is not None
+    assert result.user_id == USER_ID
     assert result.balance_after == "90"
     assert result.bucket_breakdown == {"purchased": "8"}
+
+
+def test_deduction_repository_records_child_usage_without_a_ledger_debit() -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def callproc(name: str, params: list[object]) -> list[object]:
+        calls.append((name, params))
+        assert name == "record_usage"
+        return [
+            {
+                "charge_id": USAGE_ID,
+                "requested": "12",
+                "replayed": False,
+                "error_code": None,
+            }
+        ]
+
+    result = DeductionRepository(callproc, callproc).record_usage(
+        DeductParams(
+            user_id=USER_ID,
+            operation="roadmap_gen",
+            amount="12",
+            idempotency_key="roadmap-1:usage:outline",
+            feature=None,
+            model=None,
+            region=None,
+            metadata='{"usage_kind":"workflow_step"}',
+            measures='{"jobs":0}',
+            dimensions='{"model":"linkup"}',
+        )
+    )
+
+    assert result is not None
+    assert result.charge_id == USAGE_ID
+    assert result.requested == "12"
+    assert calls[0] == (
+        "record_usage",
+        [
+            USER_ID,
+            "roadmap_gen",
+            "12",
+            "roadmap-1:usage:outline",
+            None,
+            None,
+            None,
+            '{"usage_kind":"workflow_step"}',
+            '{"jobs":0}',
+            '{"model":"linkup"}',
+        ],
+    )
 
 
 @pytest.mark.parametrize(

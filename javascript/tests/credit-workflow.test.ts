@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CreditsService } from "../src/credits/service.js";
 import type { CreditStore } from "../src/credits/store.js";
+import type { PricingEngine } from "../src/engine.js";
 import {
   ConfigError,
   LeaseExpiredError,
@@ -39,6 +40,55 @@ function makeService(
 }
 
 describe("credit lease workflow", () => {
+  it("records child workflow usage in the shared journal without another debit", async () => {
+    const recordUsage = vi.fn().mockResolvedValue({
+      usageId: "usage-1",
+      userId: "user-1",
+      requested: new Decimal(12),
+      idempotent: false,
+      error: null,
+    });
+    const engine = { calculate: vi.fn().mockReturnValue({ total: new Decimal(12) }) };
+    const service = new CreditsService(
+      {
+        getUserPlan: vi.fn().mockResolvedValue({ rateCard: "standard" }),
+        recordUsage,
+      } as unknown as CreditStore,
+      engine as unknown as PricingEngine,
+      null,
+      null,
+    );
+
+    const result = await service.recordUsage(
+      "user-1",
+      {
+        operation: "roadmap_gen",
+        measures: { jobs: 0 },
+        dimensions: { model: "linkup" },
+      },
+      "roadmap:usage:outline",
+      {
+        usageKind: "workflow_step",
+        workflowKey: "roadmap-1",
+      },
+    );
+
+    expect(result.usageId).toBe("usage-1");
+    expect(recordUsage).toHaveBeenCalledWith(
+      "user-1",
+      "roadmap_gen",
+      new Decimal(12),
+      expect.objectContaining({
+        idempotencyKey: "roadmap:usage:outline",
+        metadata: expect.objectContaining({
+          usageKind: "workflow_step",
+          workflowKey: "roadmap-1",
+          breakdownTotal: "12",
+        }),
+      }),
+    );
+  });
+
   it("derives overdraft policy from the preset when the user has no plan", async () => {
     const createLease = vi.fn().mockResolvedValue(leaseResult());
     const service = makeService(

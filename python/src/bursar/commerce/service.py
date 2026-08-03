@@ -669,8 +669,6 @@ class CommerceService:
         config: BursarConfig,
         pending: BillingSubscriptionChange | None,
     ) -> AccountSubscriptionSummary:
-        if entitlement.plan_key and entitlement.plan_key not in config.plans:
-            raise CoreBillingDataUnavailableError("The account plan is not present in the catalog")
         pending_change = None
         if pending is not None:
             plan_key = pending.to_offer.plan
@@ -692,6 +690,9 @@ class CommerceService:
         status = _status_value(subscription.status) if subscription and subscription.status else None
         is_current = status in _CURRENT_SUBSCRIPTION_STATUSES
         is_entitled = entitlement.plan_key is not None
+        plan_key = entitlement.plan_key or (subscription.plan if is_current and subscription else None)
+        if plan_key and plan_key not in config.plans:
+            raise CoreBillingDataUnavailableError("The account plan is not present in the catalog")
         grace_ends_at = subscription.grace_ends_at if subscription else None
         in_grace = (
             status == "past_due"
@@ -703,7 +704,7 @@ class CommerceService:
         )
         return AccountSubscriptionSummary(
             account_id=account_id,
-            plan_key=entitlement.plan_key or (subscription.plan if is_current and subscription else None),
+            plan_key=plan_key,
             status=status,
             lifecycle_state=status or "none",
             access_state=access_state,
@@ -891,21 +892,8 @@ class CommerceService:
             subscription.provider_subscription_id,
         )
         if existing is not None and existing.state == "scheduled" and existing.effective == "renewal":
-            if not _supports(provider, "cancel_scheduled_plan_change"):
-                raise ProviderCapabilityNotSupportedError(
-                    provider.provider,
-                    "cancel_scheduled_plan_change",
-                )
-            await provider.cancel_scheduled_plan_change(
-                subscription.provider_subscription_id,
-                existing.provider_operation_id,
-                f"{operation_key}:replace",
-            )
-            self.billing.update_billing_subscription_change(
-                existing.id,
-                BillingSubscriptionChangeUpdate(state="canceled"),
-            )
-        elif existing is not None:
+            raise CheckoutConflictError("Cancel the existing plan change before choosing another plan")
+        if existing is not None:
             raise CheckoutConflictError("A plan change is already awaiting payment")
 
         scheduled = context["policy"].effective == "renewal"
@@ -923,6 +911,7 @@ class CommerceService:
                 proration_behavior=("none" if context["policy"].proration == "none" else "invoice_immediately"),
             )
         )
+        cancellation_was_reactivated = False
         try:
             if subscription.cancel_at_period_end:
                 if not _supports(provider, "reactivate_subscription"):
@@ -930,10 +919,16 @@ class CommerceService:
                         provider.provider,
                         "reactivate_subscription",
                     )
+                if not _supports(provider, "cancel_subscription"):
+                    raise ProviderCapabilityNotSupportedError(
+                        provider.provider,
+                        "cancel_subscription",
+                    )
                 await provider.reactivate_subscription(
                     subscription.provider_subscription_id,
                     f"{operation_key}:keep",
                 )
+                cancellation_was_reactivated = True
             provider_effective, proration = _plan_change_provider_args(context["policy"])
             result = await provider.change_plan(
                 ChangePlanParams.model_validate(
@@ -958,14 +953,28 @@ class CommerceService:
                 BillingSubscriptionChangeUpdate(provider_operation_id=operation_id),
             )
         except Exception as exc:
+            failure: Exception = exc
+            if cancellation_was_reactivated:
+                try:
+                    await provider.cancel_subscription(
+                        subscription.provider_subscription_id,
+                        f"{operation_key}:restore-cancellation",
+                    )
+                except Exception as compensation_error:
+                    failure = ExceptionGroup(
+                        "Plan change failed and the original subscription cancellation could not be restored",
+                        [exc, compensation_error],
+                    )
             self.billing.update_billing_subscription_change(
                 change.id,
                 BillingSubscriptionChangeUpdate(
                     state="failed",
-                    error_message=str(exc),
+                    error_message=str(failure),
                 ),
             )
-            raise
+            if failure is exc:
+                raise
+            raise failure from exc
         return ConfirmPlanChangeResult(
             success=True,
             pending=True,
@@ -1171,6 +1180,7 @@ class CommerceService:
             usage = self.credits.list_usage_charges(
                 account_id,
                 limit=100,
+                include_record_only=False,
             ).items
         except Exception:
             usage_available = False

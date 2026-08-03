@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BillingCapability, BillingEventSink } from "../src/billing/contracts.js";
 import type { CheckoutIntent } from "../src/billing/types/index.js";
 import {
+  CheckoutConflictError,
   CheckoutCompletedError,
   CoreBillingDataUnavailableError,
   InvalidOfferQuantityError,
@@ -328,6 +329,24 @@ function activeSubscription(overrides = {}) {
 }
 
 describe("CommerceService", () => {
+  it("validates the active subscription plan when entitlements lag billing state", async () => {
+    const { service, billing, credits } = harness();
+    billing.getUserSubscription.mockResolvedValue(activeSubscription());
+    const currentPlan = await credits.getUserPlan("user-1");
+    credits.getUserPlan.mockResolvedValue({ ...currentPlan, planKey: null });
+
+    await expect(service.getAccountSubscriptionSummary("user-1")).resolves.toMatchObject({
+      planKey: "basic",
+      isCurrent: true,
+      isEntitled: false,
+    });
+
+    billing.getUserSubscription.mockResolvedValue(activeSubscription({ plan: "missing" }));
+    await expect(service.getAccountSubscriptionSummary("user-1")).rejects.toBeInstanceOf(
+      CoreBillingDataUnavailableError,
+    );
+  });
+
   it("lazily selects the provider referenced by an offer without an implicit default", async () => {
     const { service, betaFactory, alphaFactory, beta } = harness();
 
@@ -535,16 +554,8 @@ describe("CommerceService", () => {
     expect(alpha.changePlan).not.toHaveBeenCalled();
   });
 
-  it("cancels a scheduled replacement and persists before provider mutation", async () => {
-    const order: string[] = [];
+  it("requires explicit cancellation before replacing a scheduled plan change", async () => {
     const alpha = provider("alpha");
-    vi.mocked(alpha.cancelScheduledPlanChange!).mockImplementation(async () => {
-      order.push("cancel-old");
-    });
-    vi.mocked(alpha.changePlan!).mockImplementation(async () => {
-      order.push("provider-change");
-      return { providerOperationId: "replacement-1" };
-    });
     const { service, billing } = harness({ alpha });
     billing.getActiveSubscription.mockResolvedValue(activeSubscription());
     const existing = {
@@ -561,34 +572,57 @@ describe("CommerceService", () => {
       idempotencyKey: "old-operation",
     };
     billing.getOpenBillingSubscriptionChange.mockResolvedValue(existing);
-    billing.createBillingSubscriptionChange.mockImplementation(async (value) => {
-      order.push("persist-new");
-      return {
-        ...existing,
-        id: "new-change",
-        toOfferId: value.toOfferId,
-        effectiveAt: value.effectiveAt,
-        effective: value.effective,
-        state: "awaiting_payment",
-        prorationBehavior: value.prorationBehavior ?? "provider_default",
-        idempotencyKey: value.idempotencyKey,
-      };
-    });
     const preview = await service.previewPlanChange({
       accountId: "user-1",
       offerKey: "pro_month",
     });
 
-    await service.confirmPlanChange({
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        quoteFingerprint: preview.quoteFingerprint,
+        operationKey: "new-operation",
+      }),
+    ).rejects.toThrow(CheckoutConflictError);
+
+    expect(alpha.cancelScheduledPlanChange).not.toHaveBeenCalled();
+    expect(billing.createBillingSubscriptionChange).not.toHaveBeenCalled();
+    expect(alpha.changePlan).not.toHaveBeenCalled();
+  });
+
+  it("restores a scheduled cancellation when a provider plan change fails", async () => {
+    const alpha = provider("alpha");
+    vi.mocked(alpha.changePlan!).mockRejectedValue(new Error("change failed"));
+    const { service, billing } = harness({ alpha });
+    billing.getActiveSubscription.mockResolvedValue(
+      activeSubscription({ cancelAtPeriodEnd: true }),
+    );
+    const preview = await service.previewPlanChange({
       accountId: "user-1",
       offerKey: "pro_month",
-      quoteFingerprint: preview.quoteFingerprint,
-      operationKey: "new-operation",
     });
 
-    expect(order).toEqual(["cancel-old", "persist-new", "provider-change"]);
-    expect(billing.updateBillingSubscriptionChange).toHaveBeenCalledWith("old-change", {
-      state: "canceled",
+    await expect(
+      service.confirmPlanChange({
+        accountId: "user-1",
+        offerKey: "pro_month",
+        quoteFingerprint: preview.quoteFingerprint,
+        operationKey: "change-fails",
+      }),
+    ).rejects.toThrow("change failed");
+
+    expect(alpha.reactivateSubscription).toHaveBeenCalledWith(
+      "subscription-1",
+      "change-fails:keep",
+    );
+    expect(alpha.cancelSubscription).toHaveBeenCalledWith(
+      "subscription-1",
+      "change-fails:restore-cancellation",
+    );
+    expect(billing.updateBillingSubscriptionChange).toHaveBeenLastCalledWith(expect.any(String), {
+      state: "failed",
+      errorMessage: "change failed",
     });
   });
 
@@ -655,6 +689,10 @@ describe("CommerceService", () => {
     const overview = await service.getAccountOverview("user-1");
 
     expect(overview.credits.effectiveSpendableBalance.toString()).toBe("35");
+    expect(credits.listUsageCharges).toHaveBeenCalledWith("user-1", {
+      limit: 100,
+      includeRecordOnly: false,
+    });
     expect(overview.documents).toContainEqual(
       expect.objectContaining({
         kind: "provider_invoice",

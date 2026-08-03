@@ -2,6 +2,7 @@
 
 import time
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import psycopg2
@@ -298,6 +299,121 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     loaded = store.get_active_pricing()
     assert loaded is not None
     assert loaded.config["pricing"]["operations"]["completion"]
+
+
+def test_record_usage_appends_to_the_common_journal_without_debiting(store: PostgresStore) -> None:
+    service = CreditsService(store=store)
+    service.publish_pricing_from_dict(CONFIG)
+    service.add_credits(
+        USER_ID,
+        Decimal("100"),
+        "purchase",
+        bucket="purchased",
+        idempotency_key="record-only-grant",
+    )
+    balance_before = service.get_balance(USER_ID).balance
+    metrics = UsageMetrics(
+        operation="completion",
+        measures={"input_tokens": Decimal("2"), "output_tokens": Decimal("4")},
+        dimensions={"model": "premium-x"},
+    )
+    metadata = CreditMetadata.model_validate(
+        {
+            "reference_type": "fixed_workflow",
+            "reference_id": "roadmap-1",
+            "usage_kind": "workflow_step",
+            "workflow_key": "roadmap-1",
+            "workflow_step": "outline",
+        }
+    )
+
+    first = service.record_usage(
+        USER_ID,
+        metrics,
+        idempotency_key="roadmap-1:usage:outline",
+        metadata=metadata,
+    )
+    replay = service.record_usage(
+        USER_ID,
+        metrics,
+        idempotency_key="roadmap-1:usage:outline",
+        metadata=metadata,
+    )
+
+    assert first.requested == Decimal("16")
+    assert first.idempotent is False
+    assert replay.usage_id == first.usage_id
+    assert replay.idempotent is True
+    assert service.get_balance(USER_ID).balance == balance_before
+
+    rows = service.list_usage_charges(USER_ID, limit=200).items
+    recorded = [row for row in rows if row.idempotency_key == "roadmap-1:usage:outline"]
+    assert len(recorded) == 1
+    assert recorded[0].billing_disposition == "record_only"
+    assert recorded[0].requested == Decimal("16")
+    assert recorded[0].charged == Decimal("0")
+    assert recorded[0].allowance_requested == Decimal("0")
+    assert recorded[0].allowance_covered == Decimal("0")
+    assert recorded[0].metadata is not None
+    assert recorded[0].metadata["workflow_key"] == "roadmap-1"
+    now = datetime.now(UTC)
+    assert service.spend_by_user(now - timedelta(minutes=5), now + timedelta(minutes=5)) == []
+
+    with pytest.raises(StoreError, match="idempotency_conflict"):
+        service.record_usage(
+            USER_ID,
+            UsageMetrics(
+                operation="completion",
+                measures={"input_tokens": Decimal("3"), "output_tokens": Decimal("4")},
+                dimensions={"model": "premium-x"},
+            ),
+            idempotency_key="roadmap-1:usage:outline",
+            metadata=metadata,
+        )
+
+    # Record-only telemetry follows bounded usage retention, while an equally
+    # old billable receipt remains permanent accounting evidence.
+    service.deduct(
+        USER_ID,
+        metrics,
+        idempotency_key="roadmap-1:billable-retention-control",
+    )
+    maintenance_now = datetime.now(UTC)
+    old_event_at = maintenance_now - timedelta(days=100)
+    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('bursar.mutation_context', 'internal', true)")
+        cursor.execute(
+            """
+            UPDATE bursar.credit_usage_charges
+            SET event_at = %s
+            WHERE idempotency_key IN (%s, %s)
+            """,
+            [
+                old_event_at,
+                "roadmap-1:usage:outline",
+                "roadmap-1:billable-retention-control",
+            ],
+        )
+        assert cursor.rowcount == 2
+        cursor.execute(
+            "SELECT bursar.run_storage_maintenance(%s)",
+            [maintenance_now],
+        )
+        maintenance = cursor.fetchone()[0]  # type: ignore[index]
+        assert maintenance["record_only_usage_purged"] == 1
+        cursor.execute(
+            """
+            SELECT idempotency_key, billing_disposition
+            FROM bursar.credit_usage_charges
+            WHERE idempotency_key IN (%s, %s)
+            ORDER BY idempotency_key
+            """,
+            [
+                "roadmap-1:usage:outline",
+                "roadmap-1:billable-retention-control",
+            ],
+        )
+        assert cursor.fetchall() == [("roadmap-1:billable-retention-control", "billable")]
 
 
 def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: PostgresStore) -> None:

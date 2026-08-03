@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
 from bursar.credits.postgres.repositories._utils import validate_amount, validate_non_empty
-from bursar.credits.postgres.repositories.schemas import DeductionRow, DeductParams, RefundRow, RevokeRow
+from bursar.credits.postgres.repositories.schemas import (
+    DeductionRow,
+    DeductParams,
+    RefundRow,
+    RevokeRow,
+    UsageRecordRow,
+)
 
 
 class DeductionRepository:
@@ -59,6 +65,29 @@ class DeductionRepository:
             }
         )
         return DeductionRow.model_validate(row)
+
+    def record_usage(self, params: DeductParams) -> UsageRecordRow | None:
+        validate_non_empty(params.user_id, "user_id")
+        validate_amount(params.amount, "amount")
+        rows = (
+            self._callproc(
+                "record_usage",
+                [
+                    params.user_id,
+                    params.operation,
+                    params.amount,
+                    params.idempotency_key,
+                    params.feature,
+                    params.model,
+                    params.region,
+                    params.metadata,
+                    params.measures,
+                    params.dimensions,
+                ],
+            )
+            or []
+        )
+        return UsageRecordRow.model_validate(dict(rows[0])) if rows else None
 
     def refund_credits(
         self,

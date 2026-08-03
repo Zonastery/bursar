@@ -734,6 +734,7 @@ DECLARE
     v_usage_cutoff timestamptz;
     v_billing_cutoff timestamptz;
     v_usage_payloads integer := 0;
+    v_record_only_usage integer := 0;
     v_billing_payloads integer := 0;
     v_quota_events integer := 0;
     v_quota_notifications integer := 0;
@@ -790,6 +791,27 @@ BEGIN
         RETURNING payload.charge_id
     )
     SELECT count(*)::integer INTO v_usage_payloads FROM deleted;
+
+    -- Billable receipts are permanent accounting evidence. Record-only
+    -- workflow telemetry uses the same retention horizon as its detail
+    -- payload and is removed in bounded batches.
+    WITH candidates AS MATERIALIZED (
+        SELECT charge.event_at, charge.id
+        FROM bursar.credit_usage_charges AS charge
+        WHERE charge.billing_disposition = 'record_only'
+          AND charge.event_at < v_usage_cutoff
+        ORDER BY charge.event_at, charge.id
+        LIMIT v_settings.maintenance_batch_size
+        FOR UPDATE SKIP LOCKED
+    ),
+    deleted AS (
+        DELETE FROM bursar.credit_usage_charges AS charge
+        USING candidates
+        WHERE charge.event_at = candidates.event_at
+          AND charge.id = candidates.id
+        RETURNING charge.id
+    )
+    SELECT count(*)::integer INTO v_record_only_usage FROM deleted;
 
     WITH candidates AS MATERIALIZED (
         SELECT payload.received_at, payload.event_id
@@ -979,6 +1001,7 @@ BEGIN
     -- extra pass when a table had exactly one full batch.
     v_has_more :=
         v_usage_payloads = v_settings.maintenance_batch_size
+        OR v_record_only_usage = v_settings.maintenance_batch_size
         OR v_billing_payloads = v_settings.maintenance_batch_size
         OR v_quota_events = v_settings.maintenance_batch_size
         OR v_quota_notifications = v_settings.maintenance_batch_size
@@ -995,6 +1018,7 @@ BEGIN
         'batch_size', v_settings.maintenance_batch_size,
         'has_more', v_has_more,
         'usage_payloads_purged', v_usage_payloads,
+        'record_only_usage_purged', v_record_only_usage,
         'billing_payloads_purged', v_billing_payloads,
         'quota_usage_events_purged', v_quota_events,
         'quota_notifications_purged', v_quota_notifications,
@@ -1107,7 +1131,7 @@ COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(
 )
 IS 'Create near-term and drop fully expired partitions in a short DDL-only transaction.';
 COMMENT ON FUNCTION bursar.run_storage_maintenance(timestamptz)
-IS 'Perform one bounded row-retention pass without partition DDL.';
+IS 'Perform one bounded row-retention pass, including record-only usage telemetry, without partition DDL.';
 COMMENT ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
 IS 'Run one bounded retention pass only when the configured interval has elapsed.';
 

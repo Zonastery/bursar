@@ -66,6 +66,7 @@ const UsageChargeRowSchema = z
     charged: decimal,
     allowance_requested: decimal,
     allowance_covered: decimal,
+    billing_disposition: z.enum(["billable", "record_only"]),
     feature: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     region: z.string().nullable().optional(),
@@ -193,6 +194,7 @@ export class AnalyticsRepository {
     limit: number,
     cursorEventAt: string | null,
     cursorUsageId: string | null,
+    includeRecordOnly: boolean,
   ): Promise<UsageChargeRow[]> {
     if ((cursorEventAt == null) !== (cursorUsageId == null)) {
       throw new Error("usage charge cursor requires both eventAt and usageId");
@@ -204,6 +206,7 @@ export class AnalyticsRepository {
       limit,
       fromDate,
       toDate,
+      includeRecordOnly,
     ]);
     return (rows ?? []).map((row) =>
       safeParse(UsageChargeRowSchema, row, "AnalyticsRepository.listUsageCharges"),

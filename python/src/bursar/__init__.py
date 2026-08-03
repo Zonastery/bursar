@@ -212,6 +212,7 @@ from bursar.credits.types import (
     UsageCharge,
     UsageChargeCursor,
     UsageChargePage,
+    UsageRecordResult,
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
@@ -454,6 +455,7 @@ __all__ = [
     "UsageCharge",
     "UsageChargeCursor",
     "UsageChargePage",
+    "UsageRecordResult",
     "UpdatePaymentMethodParams",
     "UsageMetrics",
     "validate_expression",

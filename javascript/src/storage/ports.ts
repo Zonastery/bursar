@@ -43,6 +43,7 @@ export interface UsageChargeExport {
   charged: string;
   allowanceRequested: string;
   allowanceCovered: string;
+  billingDisposition: "billable" | "record_only";
   catalogRevisionId: string | null;
   planId: string | null;
   rateCardKey: string | null;
