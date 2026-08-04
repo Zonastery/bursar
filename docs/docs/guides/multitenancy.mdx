@@ -3,7 +3,21 @@ title: Multi-tenancy
 description: One PostgreSQL schema for every tenant — mandatory tenant_id columns, row-level security, and composite foreign keys.
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Multi-tenancy
+
+## Prerequisites
+
+- Install the Bursar CLI and have a PostgreSQL `DATABASE_URL` — see [CLI and deployment](../cli.mdx).
+- Read [data model](../concepts/data-model.mdx) for the tenant-scoped tables, and [storage backends](./storage-backends.mdx) for the store constructors.
+- Have a [canonical configuration](../concepts/configuration.mdx) if you want to bootstrap pricing with the tenant.
+
+## What you'll have when you're done
+
+- A provisioned tenant that every store and runtime is bound to by `tenant_id`.
+- Database-level isolation: tenant-prefixed unique constraints, forced row-level security, and composite foreign keys.
 
 Bursar uses one PostgreSQL schema with shared tables. Every catalog, credit,
 usage, quota, team, and billing row carries a mandatory `tenant_id`.
@@ -13,60 +27,71 @@ from referencing another tenant's rows even if privileged code has a bug.
 
 ## Provision and bind a tenant
 
-Run migrations, then provision the tenant with an operator connection:
+1. Run the migrations with `DATABASE_URL` set (see [CLI and deployment](../cli.mdx)).
+2. Provision the tenant with an operator connection:
 
-```bash
+```bash title="Terminal"
 export DATABASE_URL=postgresql://...
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
 ```
 
-Deployments that also need to publish initial pricing can use the idempotent
-bootstrap boundary, which validates the config before provisioning:
+3. Deployments that also need to publish initial pricing can use the
+   idempotent bootstrap boundary, which validates the config before
+   provisioning:
 
-```bash
+```bash title="Terminal"
 export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
 bursar tenant bootstrap acme ./pricing.yaml \
   --display-name "Acme"
 ```
 
+:::warning
 Do not insert into `bursar.tenants` from host migrations or seed SQL. Tenant
 storage and lifecycle are Bursar implementation details behind the operator
 CLI.
+:::
 
 Pass the tenant UUID when constructing a store. The store comes from the
 package top level; the optional runtime composition root lives in
 `bursar.storage` (Python) and the `@zonastery/bursar/node` subpath
 (JavaScript):
 
-```python
-# Python
-from bursar import PostgresStore
-from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-store = PostgresStore(database_url, tenant_id=tenant_id)
+  ```python
+  from bursar import PostgresStore
+  from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
-runtime = create_bursar_runtime(
-    BursarRuntimeOptions(
-        postgres=database_url,
-        tenant_id=tenant_id,
-    )
-)
-```
+  store = PostgresStore(database_url, tenant_id=tenant_id)
 
-```ts
-// TypeScript
-import { PostgresStore } from "@zonastery/bursar";
-import { createBursarRuntime } from "@zonastery/bursar/node";
+  runtime = create_bursar_runtime(
+      BursarRuntimeOptions(
+          postgres=database_url,
+          tenant_id=tenant_id,
+      )
+  )
+  ```
 
-const store = new PostgresStore(databaseUrl, tenantId);
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
 
-const runtime = await createBursarRuntime({
-  postgres: databaseUrl,
-  tenantId,
-});
-```
+  ```ts
+  import { PostgresStore } from "@zonastery/bursar";
+  import { createBursarRuntime } from "@zonastery/bursar/node";
+
+  const store = new PostgresStore(databaseUrl, tenantId);
+
+  const runtime = await createBursarRuntime({
+    postgres: databaseUrl,
+    tenantId,
+  });
+  ```
+
+  </TabItem>
+</Tabs>
 
 Each SDK checks out one pooled connection, starts a transaction, sets
 `bursar.tenant_id` with transaction-local scope, performs the RPC, then
@@ -89,7 +114,7 @@ transaction-local binding.
 Missing tenant context fails closed on writes. Suspended and closed tenants
 cannot read or mutate business rows. Operators change lifecycle state:
 
-```bash
+```bash title="Terminal"
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 ```
@@ -113,5 +138,7 @@ must not read Bursar tables or implement those steps itself.
 The operator API can claim the global outbox, while SDK runtimes use the
 tenant-filtered claim overload so one runtime cannot take another tenant's
 work. Claimed events and exported payloads include `tenant_id`. S3 keys use
-`tenants/<tenant-id>/...`, and ClickHouse rows and analytics queries include
-a tenant filter. Keep this field in any custom outbox handler or projection.
+`<prefix>/tenants/<tenant-id>/billing-events/...` (the prefix defaults to
+`bursar`), ClickHouse rows and analytics queries include a tenant filter, and
+archive exports embed the tenant id. Keep this field in any custom outbox
+handler or projection.

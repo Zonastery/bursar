@@ -1,5 +1,6 @@
 ---
 title: Stores
+description: bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 ---
 
 # Stores
@@ -70,7 +71,7 @@ The JavaScript package ships no schema SQL and has no migration command of its
 own. Apply the bundled migrations with the Python CLI during deployment,
 before constructing any store:
 
-```bash
+```bash title="Terminal"
 pip install "bursar[postgres]"
 DATABASE_URL=postgres://... bursar migrate
 ```

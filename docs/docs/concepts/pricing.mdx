@@ -5,6 +5,9 @@ description: How usage becomes money — operations, measures, rate cards, and p
 
 # Pricing
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 Pricing decides what a usage event costs. Bursar models it in four layers: an
 operation declares the inputs, a rate card names a pricing table, a price rule
 selects a charge, and the `PricingEngine` evaluates the charge in exact
@@ -112,34 +115,43 @@ tier's rate to the whole amount.
 `PricingEngine` is the stateless, database-free evaluation core. Both SDKs
 construct it from the same canonical document:
 
-```python
-from bursar.engine import PricingEngine
-from bursar.metrics import UsageMetrics
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-engine = PricingEngine.from_dict(config)          # validates the whole config
-cost = engine.calculate(
-    UsageMetrics(
-        operation="completion",
-        measures={"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 200},
-        dimensions={"model": "gpt-4o"},
-    ),
-    rate_card="standard",
-)
-```
+  ```python
+  from bursar.engine import PricingEngine
+  from bursar.metrics import UsageMetrics
 
-```ts
-import { PricingEngine } from "@zonastery/bursar";
+  engine = PricingEngine.from_dict(config)          # validates the whole config
+  cost = engine.calculate(
+      UsageMetrics(
+          operation="completion",
+          measures={"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 200},
+          dimensions={"model": "gpt-4o"},
+      ),
+      rate_card="standard",
+  )
+  ```
 
-const engine = PricingEngine.fromDict(config);
-const cost = engine.calculate(
-  {
-    operation: "completion",
-    measures: { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200 },
-    dimensions: { model: "gpt-4o" },
-  },
-  { rateCard: "standard" }
-);
-```
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  import { PricingEngine } from "@zonastery/bursar";
+
+  const engine = PricingEngine.fromDict(config);
+  const cost = engine.calculate(
+    {
+      operation: "completion",
+      measures: { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200 },
+      dimensions: { model: "gpt-4o" },
+    },
+    { rateCard: "standard" }
+  );
+  ```
+
+  </TabItem>
+</Tabs>
 
 The engine:
 

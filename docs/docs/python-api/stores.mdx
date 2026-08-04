@@ -1,5 +1,6 @@
 ---
 title: Stores
+description: bursar stores — PostgresStore, PostgresBillingStore, and the CreditStore contract for custom backends.
 ---
 
 # Stores
@@ -74,7 +75,7 @@ The package never applies SQL on construction — neither `PostgresStore` nor
 `Bursar` runs migrations. Apply the bundled migrations with the `bursar`
 CLI during deployment, before constructing any store:
 
-```bash
+```bash title="Terminal"
 DATABASE_URL=postgres://... bursar migrate
 ```
 

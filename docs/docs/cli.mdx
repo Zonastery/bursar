@@ -16,7 +16,7 @@ variables, never the command line:
 
 ## Migrate
 
-```bash
+```bash title="Terminal"
 export DATABASE_URL=postgresql://...
 bursar migrate
 ```
@@ -28,7 +28,7 @@ if an already-applied file changed. A second run is a no-op.
 
 Provision tenants with the same operator connection:
 
-```bash
+```bash title="Terminal"
 bursar tenant create acme \
   --id 018f7f5f-7b4a-7000-8000-000000000001 \
   --display-name "Acme"
@@ -37,7 +37,7 @@ bursar tenant create acme \
 `tenant create` generates the UUID when `--id` is omitted and prints it.
 Change lifecycle state with `tenant status`:
 
-```bash
+```bash title="Terminal"
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 suspended
 bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 ```
@@ -45,7 +45,7 @@ bursar tenant status 018f7f5f-7b4a-7000-8000-000000000001 active
 For a deployment bootstrap, provision a tenant and publish its initial config
 through one idempotent command:
 
-```bash
+```bash title="Terminal"
 export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
 bursar tenant bootstrap acme ./pricing.yaml \
   --display-name "Acme"
@@ -61,7 +61,7 @@ commands instead of writing Bursar-owned tables.
 Catalog versions are immutable and managed per tenant through `bursar config`.
 All subcommands require `BURSAR_TENANT_ID`:
 
-```bash
+```bash title="Terminal"
 bursar config validate ./pricing.yaml   # validate without applying (--json for CI)
 bursar config set ./pricing.yaml         # publish + activate a new version (--label)
 bursar config get                        # print the active version as JSON
@@ -74,17 +74,18 @@ bursar config schema                     # print the config JSON Schema
 
 `config set` always creates a new version and no-ops when the payload is
 identical to the active one — the command reports "No changes" and does not
-churn versions. `validate`, `set`, and `export` accept `-` to read from
-stdin. `list` marks the active version with `*` and shows labels and
+churn versions. `validate`, `set`, and `tenant bootstrap` accept `-` to read
+from stdin. `list` marks the active version with `*` and shows labels and
 timestamps; `diff` compares two canonicalized versions and `schema` prints
-the JSON Schema for editor autocompletion and CI validation.
+the JSON Schema for editor autocompletion and CI validation. `export` takes
+the version number and dumps that one immutable version as JSON.
 
 ## Post-migration host SQL
 
 Applications can add trusted, host-owned SQL after Bursar's bundled
 migrations:
 
-```bash
+```bash title="Terminal"
 bursar migrate \
   --post-migrate-sql ./database/host-integration.sql \
   --post-migrate-sql ./database/scheduled-maintenance.sql

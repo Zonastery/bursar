@@ -3,7 +3,22 @@ title: Financial safety
 description: The financial invariants Bursar enforces at the account boundary — exact money, atomic leases, and idempotent mutations.
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Financial safety
+
+## Prerequisites
+
+- Provision a tenant and a store first — see [multi-tenancy](./multitenancy.mdx) and [storage backends](./storage-backends.mdx).
+- Read [the credit lifecycle](./credit-lifecycle.mdx) to see the entry types these invariants protect.
+- Read [billing concepts](../concepts/billing.mdx) if you plan to use provider webhook ids as idempotency keys.
+
+## What you'll have when you're done
+
+- A billing path you can retry: the same idempotency key always replays the same ledger entry.
+- Leases that admit long-running work without charging it twice.
+- Refunds and expiry posted as auditable reversal entries, never silent write-offs.
 
 Bursar enforces financial invariants at the canonical account boundary:
 
@@ -22,29 +37,36 @@ Every monetary mutation accepts an idempotency key. The store indexes
 same request replays the original entry — the result is returned with
 `idempotent=True` and no second ledger row is created:
 
-```python
-# Python
-first = bursar.credits.add_credits(
-    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
-)
-replay = bursar.credits.add_credits(
-    user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
-)
-assert first.entry_id == replay.entry_id and replay.idempotent
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const first = await bursar.credits.addCredits(userId, 100, {
-  type: "purchase",
-  idempotencyKey: "checkout:42",
-});
-const replay = await bursar.credits.addCredits(userId, 100, {
-  type: "purchase",
-  idempotencyKey: "checkout:42",
-});
-console.assert(first.entryId === replay.entryId && replay.idempotent);
-```
+  ```python
+  first = bursar.credits.add_credits(
+      user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+  )
+  replay = bursar.credits.add_credits(
+      user_id, 100, entry_type="purchase", idempotency_key="checkout:42"
+  )
+  assert first.entry_id == replay.entry_id and replay.idempotent
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const first = await bursar.credits.addCredits(userId, 100, {
+    type: "purchase",
+    idempotencyKey: "checkout:42",
+  });
+  const replay = await bursar.credits.addCredits(userId, 100, {
+    type: "purchase",
+    idempotencyKey: "checkout:42",
+  });
+  console.assert(first.entryId === replay.entryId && replay.idempotent);
+  ```
+
+  </TabItem>
+</Tabs>
 
 Reusing a key with a different request is a conflict, not a silent pass:
 the store rejects it, because two different payloads cannot share one ledger
@@ -71,28 +93,35 @@ lease instead of guessing at admission:
 3. `settle` bills the actual cost and finalizes the lease; `release` returns
    an unused hold on failure.
 
-```python
-# Python
-lease = bursar.credits.reserve(user_id, estimate_metrics)
-try:
-    actual = run_completion()
-    result = bursar.credits.settle(user_id, lease.lease_id, actual)
-except Exception:
-    bursar.credits.release(user_id, lease.lease_id)
-    raise
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const lease = await bursar.credits.reserve(userId, estimateMetrics);
-try {
-  const actual = await runCompletion();
-  const result = await bursar.credits.settle(userId, lease.leaseId, actual);
-} catch (err) {
-  await bursar.credits.release(userId, lease.leaseId);
-  throw err;
-}
-```
+  ```python
+  lease = bursar.credits.reserve(user_id, estimate_metrics)
+  try:
+      actual = run_completion()
+      result = bursar.credits.settle(user_id, lease.lease_id, actual)
+  except Exception:
+      bursar.credits.release(user_id, lease.lease_id)
+      raise
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const lease = await bursar.credits.reserve(userId, estimateMetrics);
+  try {
+    const actual = await runCompletion();
+    const result = await bursar.credits.settle(userId, lease.leaseId, actual);
+  } catch (err) {
+    await bursar.credits.release(userId, lease.leaseId);
+    throw err;
+  }
+  ```
+
+  </TabItem>
+</Tabs>
 
 The lease captures its `minimum_balance` and pricing snapshot at admission.
 Settlement honors that captured policy even if the user changes plans while
@@ -105,24 +134,31 @@ exception the lease is released automatically, and settlement is retried
 with a bounded attempt count because the outcome of a failed settle may be
 unknown:
 
-```python
-# Python
-outcome = bursar.credits.run_billed(
-    user_id,
-    RunBilledOptions(
-        estimate=estimate_metrics,
-        do_work=run_completion,
-    ),
-)
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const outcome = await bursar.credits.runBilled(userId, {
-  estimate: estimateMetrics,
-  doWork: runCompletion,
-});
-```
+  ```python
+  outcome = bursar.credits.run_billed(
+      user_id,
+      RunBilledOptions(
+          estimate=estimate_metrics,
+          do_work=run_completion,
+      ),
+  )
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const outcome = await bursar.credits.runBilled(userId, {
+    estimate: estimateMetrics,
+    doWork: runCompletion,
+  });
+  ```
+
+  </TabItem>
+</Tabs>
 
 A crashed worker leaves the lease to expire: the TTL plus the store's
 `expire_leases` reaper reclaims the hold without ever charging it.
@@ -135,19 +171,26 @@ remaining original amount, no duplicate refunds, and only refundable entry
 kinds. Sources are preserved — the refund entry carries the original entry
 id — so the audit trail always shows which charge a refund reverses.
 
-```python
-# Python
-charge = bursar.credits.deduct_credits(user_id, 10, idempotency_key="operation:42")
-refund = bursar.credits.refund_credits(charge.entry_id, amount=5)
-print(refund.amount, refund.new_balance)
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const charge = await bursar.credits.deductCredits(userId, 10);
-const refund = await bursar.credits.refundCredits(charge.entryId, 5);
-console.log(refund.amount, refund.newBalance);
-```
+  ```python
+  charge = bursar.credits.deduct_credits(user_id, 10, idempotency_key="operation:42")
+  refund = bursar.credits.refund_credits(charge.entry_id, amount=5)
+  print(refund.amount, refund.new_balance)
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const charge = await bursar.credits.deductCredits(userId, 10);
+  const refund = await bursar.credits.refundCredits(charge.entryId, 5);
+  console.log(refund.amount, refund.newBalance);
+  ```
+
+  </TabItem>
+</Tabs>
 
 ## Invariant checklist
 

@@ -1,11 +1,8 @@
 # syntax=docker/dockerfile:1
 # ── Build stage ──────────────────────────────────────────────────────────────
-# Pinned base image (H8): a specific patch tag rather than the floating
-# `3.12-slim`, so a moved tag can't silently change the base. For an even
-# stronger guarantee, append a digest, e.g.:
-#   FROM python:3.12.7-slim-bookworm@sha256:<digest> AS build
-# (run `docker buildx imagetools inspect python:3.12.7-slim-bookworm` to get it).
-FROM python:3.12.7-slim-bookworm AS build
+# Pin the patch release and manifest digest for reproducible multi-platform
+# builds. Build tooling stays in this disposable stage.
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS build
 
 WORKDIR /app
 
@@ -15,15 +12,19 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-# Build a wheel and install it (plus the supabase extra) into an isolated prefix
+# Build a wheel and install it (plus the Postgres extra) into an isolated prefix
 # that the runtime stage copies in. Keeps build tooling out of the final image.
-RUN pip install --no-cache-dir build \
+RUN --mount=type=cache,id=zonastery-bursar-pip,target=/root/.cache/pip,sharing=locked \
+    python -m pip install --disable-pip-version-check build \
     && python -m build --wheel --outdir /tmp/dist \
     && WHEEL="$(ls /tmp/dist/*.whl)" \
-    && pip install --no-cache-dir --prefix=/install "${WHEEL}[supabase,postgres]"
+    && python -m pip install --disable-pip-version-check --prefix=/install "${WHEEL}[postgres]"
 
 # ── Runtime stage ────────────────────────────────────────────────────────────
-FROM python:3.12.7-slim-bookworm AS runtime
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # Run as a non-root user (H8).
 RUN useradd --create-home --uid 10001 bursar

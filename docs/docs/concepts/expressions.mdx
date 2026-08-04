@@ -19,7 +19,7 @@ across both SDKs. The engine quantizes the final cost to 6 decimal places with
 
 Rate cards can express most pricing with `per_unit` and `sum` charges — the
 canonical `standard` card prices gpt-4o and gpt-4o-mini entirely that way.
-Expressions shine where the cost is non-linear: formulas combining several
+Expressions handle the non-linear cases: formulas combining several
 measures, or prices that need `tier()`, `clamp()`, or `percentile()`. Every
 expression is validated at config load, so an invalid formula fails validation
 instead of reaching a charge; a wrong function argument count surfaces as an
@@ -87,7 +87,7 @@ the two engines byte-identical. Write the explicit `and` form instead:
 
 Python-style conditional expression:
 
-```
+```text
 output_tokens * 0.5 if output_tokens > 1000 else output_tokens * 0.3
 ```
 
@@ -124,7 +124,7 @@ therefore be **even and at least 4** (value + N≥1 pairs + default). Odd counts
 
 Returns `r_i` for the **first** threshold where `value < t_i`, else `default`:
 
-```
+```text
 tier(input_tokens, 10000, 5, 100000, 10, 20)
 # value < 10000   → 5
 # value < 100000  → 10
@@ -137,7 +137,7 @@ Sorts values, computes p-th percentile (`0 ≤ p ≤ 100`) via linear
 interpolation. Requires at least 2 arguments; a `p` outside `0..100` raises
 `ExpressionError`.
 
-```
+```text
 percentile(50, input_tokens, output_tokens, tool_calls)  # median of 3 values
 percentile(0, a, b, c)                                    # min
 percentile(100, a, b, c)                                  # max
@@ -190,5 +190,8 @@ when the configuration is loaded.
   rejected; division/modulo by zero raises; the final result is asserted
   finite. Non-finite results raise `ExpressionError` and never reach a charge.
 
-Expressions are validated at config load, so invalid configs never reach the
-engine.
+## Related
+
+- [Pricing](./pricing.mdx) — `expression` charges and how the engine evaluates them
+- [Canonical configuration](./configuration.mdx) — formulas validated at config load
+- [The expression language](../notebooks/03_expression_language.mdx) — a hands-on walkthrough

@@ -2,12 +2,16 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   docs: [
-    'intro',
-    'quickstart',
+    {
+      type: 'category',
+      label: 'Getting started',
+      link: {type: 'generated-index', description: 'What bursar is and the fastest way to a working credit ledger.'},
+      items: ['intro', 'quickstart'],
+    },
     {
       type: 'category',
       label: 'Core concepts',
-      link: {type: 'generated-index'},
+      link: {type: 'generated-index', description: 'How bursar models credit, pricing, plans, and billing.'},
       items: [
         'concepts/data-model',
         'concepts/configuration',
@@ -21,7 +25,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Guides',
-      link: {type: 'generated-index'},
+      link: {type: 'generated-index', description: 'Step-by-step how-tos for production workloads.'},
       items: [
         'guides/credit-lifecycle',
         'guides/financial-safety',
@@ -30,12 +34,12 @@ const sidebars: SidebarsConfig = {
         'guides/storage-backends',
       ],
     },
-    'cli',
     {
       type: 'category',
-      label: 'API reference',
-      link: {type: 'generated-index', slug: 'api'},
+      label: 'Reference',
+      link: {type: 'generated-index', slug: 'api', description: 'Complete reference for the CLI and both language APIs.'},
       items: [
+        'cli',
         {
           type: 'category',
           label: 'Python API',
@@ -73,7 +77,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Notebooks',
-      link: {type: 'generated-index', slug: 'notebooks'},
+      link: {type: 'generated-index', slug: 'notebooks', description: 'End-to-end Jupyter notebooks that pair with the guides.'},
       items: [
         'notebooks/why_bursar_and_setup',
         'notebooks/first_pricing_config',

@@ -1,27 +1,11 @@
-# Keep secrets and build cruft out of the Docker build context (H8).
-.env
-.env.*
-.venv/
-venv/
-dist/
-build/
-*.egg-info/
-
-# Tests, caches and VCS metadata are not needed at runtime.
-tests/
-.git/
-.gitignore
-.pytest_cache/
-.ruff_cache/
-.testmondata
-.coverage
-htmlcov/
-__pycache__/
-*.pyc
-.mypy_cache/
-
-# Local tooling / editor noise
-.DS_Store
-Dockerfile
-.dockerignore
-Makefile
+# This image builds only the package wheel. An allowlist keeps local virtual
+# environments, tests, coverage output, and secrets out of the build context.
+**
+!pyproject.toml
+!README.md
+!src/
+!src/**
+src/**/__pycache__/
+src/**/*.pyc
+src/**/*.pyo
+src/**/*.egg-info/

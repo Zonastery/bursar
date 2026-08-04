@@ -1,5 +1,6 @@
 ---
 title: PricingEngine
+description: The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
 ---
 
 # PricingEngine
@@ -41,7 +42,7 @@ caller has not otherwise selected one (via `getRateCardForPlan`).
 with the same rate-card selection and returns `CostBreakdown[]` in the same
 order.
 
-`getRateCardForPlan(planKey)` returns the rate-card key referenced by a
+`getRateCardForPlan(planId)` returns the rate-card key referenced by a
 configured plan — the canonical way to resolve the rate card for a user whose
 plan is known.
 
@@ -54,6 +55,8 @@ rate card `standard`, per-million-token rates for `gpt-4o`/`gpt-4o-mini`, and
 an expression-based fallback for unmatched models):
 
 ```typescript
+import Decimal from "decimal.js";
+
 const engine = PricingEngine.fromDict({
   version: 1,
   pricing: {
@@ -105,8 +108,12 @@ const cost = engine.calculate({
   dimensions: { model: "gpt-4o" },
 });
 
-// 0.0025 * 2 + 0.01 * 0.5 = 0.01
-console.log(cost.total.toString());
+// Exact decimals: 2,000,000 × 0.0025/M + 500,000 × 0.0100/M = 0.01
+const expected = new Decimal("0.0025").times(2).plus(new Decimal("0.0100").times(0.5));
+if (!cost.total.equals(expected)) {
+  throw new Error(`unexpected total: ${cost.total.toString()}`);
+}
+console.log(cost.total.toString()); // "0.01"
 ```
 
 ## UsageMetrics

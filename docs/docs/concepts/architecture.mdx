@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: The Bursar facade — credits, catalog, accounts, billing, and commerce capabilities over pluggable credit and billing stores.
+description: The Bursar facade and its capabilities — credits, catalog, accounts, billing, and commerce — over the Postgres schema, with migrations and tenant isolation.
 ---
 
 # Architecture
@@ -20,8 +20,8 @@ flowchart TB
     B --> C5["commerce — checkout, subscriptions, auto-recharge (optional)"]
 ```
 
-`billing` and `commerce` are present only when a `billing_store` (and, for
-`commerce`, `commerce_options`) is supplied at construction. With commerce
+`billing` and `commerce` are present only when you supply a `billing_store`
+(and, for `commerce`, `commerce_options`) at construction. With commerce
 enabled, the facade registers an auto-recharge hook that runs after every
 deduction.
 
@@ -35,7 +35,7 @@ deduction.
   grant programs on signup.
 - **billing** — provider-agnostic lifecycle: subscription events, invoices,
   and subscription changes.
-- **commerce** — checkout intents, offers (subscriptions and top-ups), and
+- **commerce** — checkout intents, offers (subscriptions and topups), and
   auto-recharge guardrails.
 
 See [The data model](./data-model.mdx) for the concepts, and
@@ -89,7 +89,7 @@ multi-tenancy security lockdown:
 ```
 
 Each object is created once. Future production changes append migration files
-and are protected by recorded checksums; `bursar migrate` fails if an
+and recorded checksums protect them; `bursar migrate` fails if an
 already-applied file changed. The CLI is the only installation path — stores
 and facades never create database objects.
 
@@ -107,3 +107,10 @@ retries and webhook redeliveries replay instead of double-posting.
 `PostgresStore` is the only credit store; `PostgresBillingStore` persists
 billing state. Both are constructed tenant-bound and run over the same
 migrated schema — see [Storage backends](../guides/storage-backends.mdx).
+
+## Related
+
+- [The data model](./data-model.mdx) — accounts, the ledger, lots, and leases on one schema
+- [Canonical configuration](./configuration.mdx) — the document the catalog publishes and activates
+- [Multi-tenancy](../guides/multitenancy.mdx) — tenant context and isolation
+- [Storage backends](../guides/storage-backends.mdx) — the store interface and the Postgres implementation

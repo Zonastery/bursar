@@ -13,7 +13,7 @@ and wire Bursar to meter completions, hold balances, and charge users.
 
 ## Prerequisites
 
-- Python 3.11+ with `pip install bursar[postgres]`, or Node.js 22+ with
+- Python 3.12+ with `pip install bursar[postgres]`, or Node.js 22+ with
   `npm install @zonastery/bursar`
 - PostgreSQL 16 reachable from `DATABASE_URL`
 
@@ -223,14 +223,15 @@ allowance, so `amount` is 0, `allowance_consumed` is 0.000002, and
 `idempotency_key` is a no-op. Unmetered models are rejected by the
 `unmatched: reject` policy.
 
-Every mutation is visible in the append-only ledger:
+Every mutation is visible in the append-only ledger. Each ledger entry
+exposes its entry id, type, exact amount, and creation time:
 
 <Tabs groupId="lang">
   <TabItem value="python" label="Python">
 
   ```python
   for entry in bursar.credits.list_ledger_entries(ada, limit=50).items:
-      print(entry.entry_type, entry.amount, entry.balance_after)
+      print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
   ```
 
   </TabItem>
@@ -239,7 +240,7 @@ Every mutation is visible in the append-only ledger:
   ```ts
   const page = await bursar.credits.listLedgerEntries(ada, { limit: 50 });
   for (const entry of page.items) {
-    console.log(entry.entryType, entry.amount, entry.balanceAfter);
+    console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
   }
   ```
 

@@ -1,5 +1,6 @@
 ---
 title: PricingEngine
+description: The bursar PricingEngine — database-free pricing from a canonical config document, pricing UsageMetrics, and CostBreakdown results.
 ---
 
 # PricingEngine
@@ -62,6 +63,8 @@ rate card `standard`, per-million-token rates for `gpt-4o`/`gpt-4o-mini`, and
 an expression-based fallback for unmatched models):
 
 ```python
+from decimal import Decimal
+
 config = {
     "version": 1,
     "pricing": {
@@ -115,7 +118,7 @@ cost = engine.calculate(
         dimensions={"model": "gpt-4o"},
     )
 )
-assert cost.total == 0.0025 * 2 + 0.01 * 0.5  # 0.0100
+assert cost.total == Decimal("0.01")  # 2,000,000 × 0.0025/M + 500,000 × 0.0100/M
 ```
 
 ## UsageMetrics

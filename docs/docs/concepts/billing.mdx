@@ -73,77 +73,19 @@ keeps each purchase as its own lot; `merge_and_refresh` merges):
 
 ## Checkout
 
-`create_checkout` resolves the offer, enforces quantity bounds and existing
-subscriptions, records a checkout intent, and asks the provider for a session
-URL. The user pays on the provider's site; the provider webhook arrives as a
-`checkout.completed` event and completes the intent.
-
-```python
-from bursar import Bursar, CommerceOptions, CreateCheckoutInput, PostgresBillingStore, PostgresStore
-from bursar.providers.stripe.provider import StripeProvider
-
-bursar = Bursar.create(
-    credit_store=PostgresStore(database_url, tenant_id=tenant_id),
-    billing_store=PostgresBillingStore(database_url, tenant_id=tenant_id),
-    commerce_options=CommerceOptions(
-        default_provider="stripe",
-        providers={
-            "stripe": lambda ctx: StripeProvider(
-                sink=ctx.event_sink,
-                webhook_secret=stripe_webhook_secret,
-            )
-        },
-    ),
-)
-
-result = await bursar.commerce.create_checkout(
-    CreateCheckoutInput(
-        subject_id=user_id,
-        offer_key="credits_10k",
-        quantity=2,
-        return_url=...,      # success redirect
-        cancel_url=...,      # cancel redirect
-        operation_key="checkout:1",
-    )
-)
-print(result.url)
-```
-
-```ts
-import {
-  Bursar,
-  PostgresBillingStore,
-  PostgresStore,
-  StripeProvider,
-} from "@zonastery/bursar";
-
-const bursar = new Bursar({
-  creditStore: new PostgresStore(databaseUrl, tenantId),
-  billingStore: new PostgresBillingStore(databaseUrl, tenantId),
-  commerceOptions: {
-    defaultProvider: "stripe",
-    providers: {
-      stripe: (ctx) => new StripeProvider(() => stripe, ctx.eventSink, webhookSecret),
-    },
-  },
-});
-
-const result = await bursar.commerce.createCheckout({
-  subjectId: userId,
-  offerKey: "credits_10k",
-  quantity: 2,
-  returnUrl,
-  cancelUrl,
-  operationKey: "checkout:1",
-});
-console.log(result.url);
-```
-
-Webhook events also flow through `ingest_billing_event`, so a payment that
-never touches your checkout endpoint still settles credits. On
-`payment.succeeded` for a topup, the offer's credits are granted to the
-configured bucket; on `checkout.completed` for a subscription, the cycle grant
-posts and the plan is assigned.
+A checkout has three phases. `create_checkout` resolves the offer, enforces
+quantity bounds and existing subscriptions, records a checkout intent, and
+asks the provider for a session URL — the intent exists before any money
+moves. The user pays on the provider's site. The provider webhook then
+arrives as a `checkout.completed` event and completes the intent, which is
+what grants credits or assigns the plan. Because the webhook is the only
+settlement path, a payment that never touches your checkout endpoint still
+settles credits through `ingest_billing_event`: on `payment.succeeded` for a
+topup, the offer's credits are granted to the configured bucket; on
+`checkout.completed` for a subscription, the cycle grant posts and the plan
+is assigned. The walkthrough in
+[Subscription integration](../guides/subscription-integration.mdx) shows the
+full flow end to end.
 
 ## Subscriptions
 

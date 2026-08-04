@@ -3,55 +3,83 @@ title: Billing and subscriptions
 description: Turn provider lifecycle events into canonical credit mutations — subscriptions, invoices, offers, and auto-recharge.
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Billing and subscriptions
+
+## Prerequisites
+
+- Follow [multi-tenancy](./multitenancy.mdx) to provision a tenant and get a `DATABASE_URL`.
+- Publish a [canonical configuration](../concepts/configuration.mdx) whose `commerce` section declares your provider, offers, and auto-recharge policy.
+- Read [billing concepts](../concepts/billing.mdx) for the offer model, normalized `BillingEvent`s, and subscription semantics.
+- Have provider credentials ready, for example a Stripe secret key and webhook secret.
+
+## What you'll have when you're done
+
+- A facade that turns provider webhooks into canonical credit mutations — plan assignment, cycle grants, and top-ups.
+- Auto-recharge after deductions and quote-checked plan changes, driven from the same config.
 
 Bursar's billing capability turns provider lifecycle events into canonical
 credit mutations. Construct the facade with a billing store and commerce
 options when an application needs subscriptions, top-ups, or auto-recharge:
 
-```python
-# Python
-import os
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-from bursar import Bursar, PostgresBillingStore, PostgresStore
-from bursar.commerce import CommerceOptions
-from bursar.providers import StripeProvider
+  ```python
+  import os
 
-billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
+  from bursar import Bursar, CommerceOptions, PostgresBillingStore, PostgresStore
+  from bursar.providers import StripeProvider
 
-bursar = Bursar.create(
-    credit_store=PostgresStore(database_url, tenant_id=tenant_id),
-    billing_store=billing_store,
-    commerce_options=CommerceOptions(
-        providers={
-            "stripe": lambda context: StripeProvider(
-                context.event_sink,
-                webhook_secret=os.environ["STRIPE_WEBHOOK_SECRET"],
-            ),
-        },
-    ),
-)
-```
+  billing_store = PostgresBillingStore(database_url, tenant_id=tenant_id)
 
-```ts
-// TypeScript
-import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
-import { CommerceOptions } from "@zonastery/bursar";
-import { StripeProvider } from "@zonastery/bursar/providers";
+  bursar = Bursar.create(
+      credit_store=PostgresStore(database_url, tenant_id=tenant_id),
+      billing_store=billing_store,
+      commerce_options=CommerceOptions(
+          default_provider="stripe",
+          providers={
+              "stripe": lambda context: StripeProvider(
+                  context.event_sink,
+                  webhook_secret=os.environ["STRIPE_WEBHOOK_SECRET"],
+              ),
+          },
+      ),
+  )
+  ```
 
-const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
 
-const bursar = new Bursar({
-  creditStore: new PostgresStore(databaseUrl, tenantId),
-  billingStore,
-  commerceOptions: new CommerceOptions({
-    providers: {
-      stripe: (context) =>
-        new StripeProvider(() => stripe, context.eventSink, process.env.STRIPE_WEBHOOK_SECRET),
+  ```ts
+  import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
+  import { StripeProvider } from "@zonastery/bursar/providers";
+
+  const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+
+  const bursar = new Bursar({
+    creditStore: new PostgresStore(databaseUrl, tenantId),
+    billingStore,
+    commerceOptions: {
+      defaultProvider: "stripe",
+      providers: {
+        stripe: (context) =>
+          new StripeProvider(() => stripe, context.eventSink, process.env.STRIPE_WEBHOOK_SECRET),
+      },
     },
-  }),
-});
-```
+  });
+  ```
+
+  </TabItem>
+</Tabs>
+
+:::note
+`commerce_options` is a plain value in both SDKs: Python takes the
+`CommerceOptions` model, TypeScript takes a plain object literal with the same
+fields (`providers`, optional `defaultProvider`).
+:::
 
 The active `commerce` section of `BursarConfig` supplies the offers, top-ups,
 and auto-recharge policy — see [canonical configuration](../concepts/configuration.mdx).
@@ -62,64 +90,73 @@ The event model and subscription semantics are covered in
 
 Provider adapters map raw webhooks to a normalized `BillingEvent` and submit
 it through the facade. `ingest_billing_event` claims each event on
-`(provider, event_id)` first, so redelivered webhooks are ignored and
-subscription grants never double-post:
+`(provider, event_id, event_type)` first, so redelivered webhooks are ignored
+and subscription grants never double-post:
 
-```python
-# Python
-from bursar.billing.types import (
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
+
+  ```python
+  from datetime import UTC, datetime
+
+  from bursar.billing.types import (
+      BillingCustomerInfo,
+      BillingEvent,
+      BillingEventType,
+      BillingSubscriptionInfo,
+      ProviderRef,
+  )
+
+  bursar.ingest_billing_event(
+      BillingEvent(
+          provider="stripe",
+          event_id="evt_1Paid",
+          event_type=BillingEventType.subscription_created,
+          occurred_at=datetime.now(UTC).isoformat(),
+          user_id=user_id,
+          customer=BillingCustomerInfo(provider_customer_id="cus_123", email="ada@prompta.ai"),
+          subscription=BillingSubscriptionInfo(
+              provider_subscription_id="sub_123",
+              status="active",
+              refs=ProviderRef(price_id="price_pro_monthly"),
+              interval="month",
+              interval_count=1,
+          ),
+      )
+  )
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  import {
     BillingCustomerInfo,
     BillingEvent,
     BillingEventType,
     BillingSubscriptionInfo,
     ProviderRef,
-)
+  } from "@zonastery/bursar";
 
-bursar.ingest_billing_event(
-    BillingEvent(
-        provider="stripe",
-        event_id="evt_1Paid",
-        event_type=BillingEventType.subscription_created,
-        occurred_at=datetime.now(UTC).isoformat(),
-        user_id=user_id,
-        customer=BillingCustomerInfo(provider_customer_id="cus_123", email="ada@prompta.ai"),
-        subscription=BillingSubscriptionInfo(
-            provider_subscription_id="sub_123",
-            status="active",
-            refs=ProviderRef(price_id="price_pro_monthly"),
-            interval="month",
-            interval_count=1,
-        ),
-    )
-)
-```
+  await bursar.ingestBillingEvent({
+    provider: "stripe",
+    eventId: "evt_1Paid",
+    eventType: BillingEventType.subscription_created,
+    occurredAt: new Date().toISOString(),
+    userId,
+    customer: { providerCustomerId: "cus_123", email: "ada@prompta.ai" },
+    subscription: {
+      providerSubscriptionId: "sub_123",
+      status: "active",
+      refs: { priceId: "price_pro_monthly" },
+      interval: "month",
+      intervalCount: 1,
+    },
+  });
+  ```
 
-```ts
-// TypeScript
-import {
-  BillingCustomerInfo,
-  BillingEvent,
-  BillingEventType,
-  BillingSubscriptionInfo,
-  ProviderRef,
-} from "@zonastery/bursar";
-
-await bursar.ingestBillingEvent({
-  provider: "stripe",
-  eventId: "evt_1Paid",
-  eventType: BillingEventType.subscription_created,
-  occurredAt: new Date().toISOString(),
-  userId,
-  customer: { providerCustomerId: "cus_123", email: "ada@prompta.ai" },
-  subscription: {
-    providerSubscriptionId: "sub_123",
-    status: "active",
-    refs: { priceId: "price_pro_monthly" },
-    interval: "month",
-    intervalCount: 1,
-  },
-});
-```
+  </TabItem>
+</Tabs>
 
 Events that identify the user only through the customer or subscription are
 resolved from persisted billing state before handling.
@@ -141,7 +178,6 @@ expires the previous cycle's leftover in the bucket before the new grant
 lands:
 
 ```python
-# Python
 bursar.ingest_billing_event(
     BillingEvent(
         provider="stripe",
@@ -193,27 +229,34 @@ drives whether the change is `immediate` or at `renewal`, and whether it
 prorates. Scheduled changes are persisted as billing subscription changes and
 can be cancelled before they take effect.
 
-```python
-# Python
-preview = await bursar.commerce.preview_plan_change(user_id, offer_key="pro_monthly")
-confirmed = await bursar.commerce.confirm_plan_change(
-    user_id,
-    "downgrade-1",
-    offer_key="pro_monthly",
-    quote_fingerprint=preview.quote_fingerprint,
-)
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const preview = await bursar.commerce.previewPlanChange({
-  accountId: userId,
-  offerKey: "pro_monthly",
-});
-const confirmed = await bursar.commerce.confirmPlanChange({
-  accountId: userId,
-  operationKey: "downgrade-1",
-  offerKey: "pro_monthly",
-  quoteFingerprint: preview.quoteFingerprint,
-});
-```
+  ```python
+  preview = await bursar.commerce.preview_plan_change(user_id, offer_key="pro_monthly")
+  confirmed = await bursar.commerce.confirm_plan_change(
+      user_id,
+      "downgrade-1",
+      offer_key="pro_monthly",
+      quote_fingerprint=preview.quote_fingerprint,
+  )
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const preview = await bursar.commerce.previewPlanChange({
+    accountId: userId,
+    offerKey: "pro_monthly",
+  });
+  const confirmed = await bursar.commerce.confirmPlanChange({
+    accountId: userId,
+    operationKey: "downgrade-1",
+    offerKey: "pro_monthly",
+    quoteFingerprint: preview.quoteFingerprint,
+  });
+  ```
+
+  </TabItem>
+</Tabs>

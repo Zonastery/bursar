@@ -8,7 +8,7 @@ description: What a paid tier gets — allowed operations, rate cards, free cred
 A plan bundles everything a paid tier gets: which operations are allowed,
 which rate card prices them, what credits come free, which features unlock,
 what usage is limited, and how concurrency is gated. Plans live in the
-canonical config and are enforced by the database — policy is never just
+canonical config and are enforced by the database — policy is never only
 application code.
 
 ## What a plan contains
@@ -157,11 +157,11 @@ import { Bursar } from "@zonastery/bursar";
 const bursar = new Bursar({ creditStore: store });
 await bursar.accounts.onAccountCreated({ accountId: userId, eventKey: "signup:1" });
 
-bursar.credits.setUserPlan(userId, "pro");
-const allowance = bursar.credits.checkAllowance(userId);
+await bursar.credits.setUserPlan(userId, "pro");
+const allowance = await bursar.credits.checkAllowance(userId);
 console.log(allowance.allowanceRemaining);
 
-const feature = bursar.credits.checkFeature(userId, "voice_mode");
+const feature = await bursar.credits.checkFeature(userId, "voice_mode");
 if (!feature.hasFeature) {
   throw new Error("voice mode is not enabled on this plan");
 }

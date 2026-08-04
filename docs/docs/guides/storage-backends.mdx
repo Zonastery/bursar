@@ -1,25 +1,47 @@
 ---
 title: Storage backends
-description: PostgreSQL, Supabase, and in-memory stores behind the same CreditStore interface — bring your own backend.
+description: PostgreSQL is the production credit store; optional ClickHouse and S3 adapters route high-cardinality data through a transactional outbox.
 ---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
 
 # Storage backends
 
-`PostgresStore` is the only credit store. Import it, and the `CreditStore`
-abstract base, from the package top level:
+## Prerequisites
 
-```python
-# Python
-from bursar import CreditStore, PostgresStore
-```
+- Run migrations and provision a tenant before constructing a store — see [CLI and deployment](../cli.mdx) and [multi-tenancy](./multitenancy.mdx).
+- Read [the credit lifecycle](./credit-lifecycle.mdx) to see the store in use.
+- For the optional adapters in Python, install the `postgres` extra (and the `s3` extra for the native S3 adapter); in TypeScript, import them from the Node-only `@zonastery/bursar/node` subpath.
 
-```ts
-// TypeScript
-import { CreditStore, PostgresStore } from "@zonastery/bursar";
-```
+## What you'll have when you're done
 
-There is no `bursar.stores` package, and the former in-memory and Supabase
-HTTP stores have been removed. All account state lives in PostgreSQL.
+- A `PostgresStore` credit ledger that owns all account state.
+- Optional ClickHouse usage history and S3 billing archives delivered through a transactional outbox on the same connection pool.
+
+`PostgresStore` is the production credit store. There is no `bursar.stores`
+package, and the former in-memory and Supabase HTTP stores have been removed.
+All account state lives in PostgreSQL.
+
+Import `PostgresStore` and the `CreditStore` abstract base from the package
+top level:
+
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
+
+  ```python
+  from bursar import CreditStore, PostgresStore
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  import { CreditStore, PostgresStore } from "@zonastery/bursar";
+  ```
+
+  </TabItem>
+</Tabs>
 
 ## PostgresStore
 
@@ -27,15 +49,22 @@ The store is tenant-bound: pass the provisioned tenant UUID when constructing
 it. In Python `tenant_id` is a keyword argument; in JavaScript it is the
 second positional argument.
 
-```python
-# Python
-store = PostgresStore(database_url, tenant_id=tenant_id)
-```
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-```ts
-// TypeScript
-const store = new PostgresStore(databaseUrl, tenantId);
-```
+  ```python
+  store = PostgresStore(database_url, tenant_id=tenant_id)
+  ```
+
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const store = new PostgresStore(databaseUrl, tenantId);
+  ```
+
+  </TabItem>
+</Tabs>
 
 No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
 provision the tenant before constructing a store — see
@@ -79,35 +108,42 @@ visible after the outbox worker delivers them.
 The runtime composition root wires the Postgres stores, the optional
 adapters, and the outbox worker onto one connection pool:
 
-```python
-# Python
-from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-runtime = create_bursar_runtime(
-    BursarRuntimeOptions(
-        postgres=database_url,
-        tenant_id=tenant_id,
-        clickhouse=clickhouse_options,
-        s3=s3_options,
-        outbox=outbox_options,
-    )
-)
-runtime.start(BursarRuntimeStartOptions(load_catalog=True))
-```
+  ```python
+  from bursar.storage import BursarRuntimeOptions, BursarRuntimeStartOptions, create_bursar_runtime
 
-```ts
-// TypeScript
-import { createBursarRuntime } from "@zonastery/bursar/node";
+  runtime = create_bursar_runtime(
+      BursarRuntimeOptions(
+          postgres=database_url,
+          tenant_id=tenant_id,
+          clickhouse=clickhouse_options,
+          s3=s3_options,
+          outbox=outbox_options,
+      )
+  )
+  runtime.start(BursarRuntimeStartOptions(load_catalog=True))
+  ```
 
-const runtime = await createBursarRuntime({
-  postgres: databaseUrl,
-  tenantId,
-  clickhouse: clickhouseOptions,
-  s3: s3Options,
-  outbox: outboxOptions,
-});
-await runtime.start({ loadCatalog: true });
-```
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  import { createBursarRuntime } from "@zonastery/bursar/node";
+
+  const runtime = await createBursarRuntime({
+    postgres: databaseUrl,
+    tenantId,
+    clickhouse: clickhouseOptions,
+    s3: s3Options,
+    outbox: outboxOptions,
+  });
+  await runtime.start({ loadCatalog: true });
+  ```
+
+  </TabItem>
+</Tabs>
 
 The runtime exposes the composed `bursar` facade plus the underlying
 `creditStore` and `billingStore`. SDK runtimes claim outbox events through

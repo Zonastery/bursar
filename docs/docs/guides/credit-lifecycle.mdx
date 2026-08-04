@@ -1,11 +1,21 @@
 ---
 title: The credit lifecycle
+description: Follow one user's credits from signup to ledger — grants, purchases, usage charges, refunds, expiry, and revocation as canonical ledger entries.
 ---
 
 # The credit lifecycle
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
+
+## Prerequisites
+
+- Publish a [canonical configuration](../concepts/configuration.mdx) and provision a tenant — see [multi-tenancy](./multitenancy.mdx) and [storage backends](./storage-backends.mdx).
+- Read [data model](../concepts/data-model.mdx) for buckets, lots, allowances, and ledger entries.
+
+## What you'll have when you're done
+
+- A facade you can run end to end: signup grants, a purchased lot, priced usage, a refund, an expiry sweep, and a revocation — every step auditable in the ledger.
 
 Every credit that enters or leaves an account posts a canonical ledger entry:
 grants, purchases, usage charges, refunds, expiries, and revocations are all

@@ -5,6 +5,9 @@ description: Accounts, the append-only ledger, lots, leases, and allowances — 
 
 # The data model
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 Before the API details, here is the shape of the money. One `Bursar` facade
 talks to one Postgres schema, and every concept maps to tables you can point a
 dashboard at.
@@ -90,32 +93,46 @@ so quotas and analytics cannot be bypassed by a free rate.
 Balance reads are cheap — one locked row. Availability subtracts active
 holds; buckets break the balance into tiers:
 
-```python
-# Python
-balance = bursar.credits.get_balance(ada)
-available = bursar.credits.get_available(ada)
-buckets = bursar.credits.get_bucket_balances(ada)
+<Tabs groupId="lang">
+  <TabItem value="python" label="Python">
 
-print(balance.balance)              # 1000.000000
-print(available.available)          # balance minus active holds
-for bucket in buckets.buckets:
-    print(bucket.bucket_key, bucket.priority, bucket.balance)
-```
+  ```python
+  balance = bursar.credits.get_balance(ada)
+  available = bursar.credits.get_available(ada)
+  buckets = bursar.credits.get_bucket_balances(ada)
 
-```ts
-// TypeScript
-const balance = await bursar.credits.getBalance(ada);
-const available = await bursar.credits.getAvailable(ada);
-const buckets = await bursar.credits.getBucketBalances(ada);
+  print(balance.balance)              # 1000.000000
+  print(available.available)          # balance minus active holds
+  for bucket in buckets.buckets:
+      print(bucket.bucket_key, bucket.priority, bucket.balance)
+  ```
 
-console.log(balance.balance);            // 1000.000000
-console.log(available.available);        // balance minus active holds
-for (const bucket of buckets.buckets) {
-  console.log(bucket.bucketKey, bucket.priority, bucket.balance);
-}
-```
+  </TabItem>
+  <TabItem value="ts" label="TypeScript">
+
+  ```ts
+  const balance = await bursar.credits.getBalance(ada);
+  const available = await bursar.credits.getAvailable(ada);
+  const buckets = await bursar.credits.getBucketBalances(ada);
+
+  console.log(balance.balance);            // 1000.000000
+  console.log(available.available);        // balance minus active holds
+  for (const bucket of buckets.buckets) {
+    console.log(bucket.bucketKey, bucket.priority, bucket.balance);
+  }
+  ```
+
+  </TabItem>
+</Tabs>
 
 `get_available` is advisory (UI only) — only `reserve` is authoritative for
 admission. See [Architecture](./architecture.mdx) for the full schema layout,
 or [Canonical configuration](./configuration.mdx) for the document that shapes
 it.
+
+## Related
+
+- [Architecture](./architecture.mdx) — the facade and how capabilities map to the schema
+- [Canonical configuration](./configuration.mdx) — the document that defines buckets, lots, and plans
+- [Financial safety](../guides/financial-safety.mdx) — holds, leases, and the money invariants in action
+- [The credit lifecycle](../notebooks/04_credit_lifecycle.mdx) — every entry kind on one ledger

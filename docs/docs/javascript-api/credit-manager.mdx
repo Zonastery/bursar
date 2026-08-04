@@ -1,5 +1,6 @@
 ---
 title: Credits service
+description: The async bursar credits service — balances and adjustments, metered charging, the lease lifecycle, plans, ledger history, analytics, and team charging.
 ---
 
 # Credits service
@@ -82,7 +83,7 @@ reverses every deduction of a given entry type, and
 | Method | Parameters | Returns |
 | --- | --- | --- |
 | `deduct` | `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
-| `deductFlatJob` | `userId: string`, `amount: Decimal \| number`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
+| `deductFlatJob` | `userId: string`, `jobName: string`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
 | `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
 | `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
 
