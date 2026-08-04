@@ -20,7 +20,7 @@ application code.
 | `rate_card` | The rate card that prices allowed operations |
 | `allowed_operations` | Operations the plan may run |
 | `features` | Feature values for the plan (`{ voice_mode: true, max_context: 200000 }`) |
-| `credit_allowance` | Free credits per window, consumed before the balance |
+| `credit_allowance` | Free credits per window; optional `priority` positions them among credit buckets |
 | `quotas` | Per-operation measure limits over a window |
 | `credit_policy` | Reference to a `prepaid` or `credit_line` policy |
 | `admission_policy` | Reference to a named concurrency policy |
@@ -35,6 +35,12 @@ A `credit_allowance` grants free credits that reset on a window — the `free`
 plan's monthly 10,000 credits:
 
 ```yaml
+credits:
+  buckets:
+    promotional: { priority: 1 }
+    purchased: { priority: 10 }
+  default_bucket: purchased
+
 plans:
   free:
     display_name: Free
@@ -43,17 +49,24 @@ plans:
     allowed_operations: [completion]
     credit_allowance:
       amount: "10000"
+      priority: 5
       window: { type: calendar, unit: month, count: 1 }
 ```
 
 Windows are `calendar` (aligned to a timezone), `rolling` (a duration since
 first use), or `plan_assignment` (anchored to when the plan was assigned).
-Allowance credits are consumed **before** the balance is debited: a deduction
-first draws down `allowance_remaining`, and `DeductionResult.allowance_consumed`
-reports how much of the charge the allowance covered. `check_allowance(user_id)`
-returns the current window (`plan_id`, `allowance_remaining`, `period_start`,
-`period_end`) for display and gating. `unset_user_plan` pauses the allowance
-window; reassigning re-anchors it.
+
+Allowance and bucket priorities use one ordering namespace; lower numbers spend
+first. In the example, promotional credits spend first, then the monthly
+allowance, then purchased credits. An allowance priority cannot equal a bucket
+priority. Omitting `priority` preserves the legacy allowance-first behavior.
+The allowance remains a plan entitlement with its own reset window rather than
+a synthetic bucket.
+
+`DeductionResult.allowance_consumed` reports how much of a charge the allowance
+covered. `check_allowance(user_id)` returns the current window (`plan_id`,
+`allowance_remaining`, `period_start`, `period_end`) for display and gating.
+`unset_user_plan` pauses the allowance window; reassigning re-anchors it.
 
 ## Quotas
 

@@ -145,6 +145,21 @@ export function parsePlans(
     if (admissionPolicy != null && !admission.policies[admissionPolicy]) {
       semanticError(`plans.${planKey}.admission_policy references unknown policy`);
     }
+    const allowanceInput =
+      plan.credit_allowance == null ? undefined : asObject(plan.credit_allowance);
+    const allowancePriority =
+      allowanceInput?.priority == null ? undefined : asInteger(allowanceInput.priority);
+    if (allowancePriority != null && allowancePriority < 0) {
+      semanticError(`plans.${planKey}.credit_allowance.priority must be non-negative`);
+    }
+    if (
+      allowancePriority != null &&
+      Object.values(credits.buckets).some((bucket) => bucket.priority === allowancePriority)
+    ) {
+      semanticError(
+        `plans.${planKey}.credit_allowance.priority conflicts with credit bucket priority ${allowancePriority}`,
+      );
+    }
 
     plans[planKey] = {
       displayName: asString(plan.display_name),
@@ -153,13 +168,14 @@ export function parsePlans(
       ...(rateCard == null ? {} : { rateCard }),
       allowedOperations,
       features,
-      ...(plan.credit_allowance == null
+      ...(allowanceInput == null
         ? {}
         : {
             creditAllowance: {
-              amount: asDecimal(asObject(plan.credit_allowance).amount),
+              amount: asDecimal(allowanceInput.amount),
+              ...(allowancePriority == null ? {} : { priority: allowancePriority }),
               window: parseWindow(
-                asObject(plan.credit_allowance).window,
+                allowanceInput.window,
                 `plans.${planKey}.credit_allowance.window`,
               ),
             },

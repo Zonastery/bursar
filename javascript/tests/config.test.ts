@@ -103,6 +103,7 @@ export const baseConfig = () => ({
       features: { tutor_chat: true, access_level: "full" },
       credit_allowance: {
         amount: "10.000000",
+        priority: 15,
         window: { type: "calendar", unit: "month", timezone: "UTC" },
       },
       quotas: {
@@ -135,6 +136,7 @@ describe("typed v1 config", () => {
   it("accepts and canonicalizes the typed catalog", () => {
     const parsed = loadConfigFromDict(baseConfig());
     expect(parsed.plans.pro.creditAllowance?.amount.toString()).toBe("10");
+    expect(parsed.plans.pro.creditAllowance?.priority).toBe(15);
     expect(parsed.plans.pro.revisionPolicy).toBe("immediate");
     const canonical = canonicalBursarConfigDict(baseConfig());
     expect(
@@ -186,6 +188,7 @@ describe("typed v1 config", () => {
 
     expect(projected.defaultPlan).toBe("pro");
     expect(projected.creditDisplay).toEqual({ currency: "USD", unitsPerMajor: "1000" });
+    expect(projected.plans[0]?.allowance?.priority).toBe(15);
     expect(projected.plans[0]?.offers[0]).toMatchObject({
       key: "pro_monthly",
       price: { amountMinor: 1900, currency: "USD" },
@@ -253,6 +256,12 @@ describe("typed v1 config", () => {
     delete (allowance.credits as Partial<typeof allowance.credits>).default_bucket;
     expect(() => loadConfigFromDict(allowance)).toThrow(
       /credit_allowance requires credits.default_bucket/,
+    );
+
+    const priorityConflict = baseConfig();
+    priorityConflict.plans.pro.credit_allowance.priority = 10;
+    expect(() => loadConfigFromDict(priorityConflict)).toThrow(
+      /credit_allowance.priority conflicts/,
     );
   });
 

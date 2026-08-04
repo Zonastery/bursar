@@ -520,6 +520,14 @@ class AdmissionConfig(StrictModel):
 
 class CreditAllowance(StrictModel):
     amount: DecimalValue = Field(ge=0)
+    priority: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Spend priority shared with credit buckets. Lower values are used first; "
+            "omitting priority preserves legacy allowance-first behavior."
+        ),
+    )
     window: Window
 
 

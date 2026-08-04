@@ -68,6 +68,7 @@ def project_public_catalog(config: BursarConfig) -> dict[str, Any]:
                 "allowance": (
                     {
                         "amount": str(plan.credit_allowance.amount),
+                        "priority": plan.credit_allowance.priority,
                         "window": _window(plan.credit_allowance.window),
                     }
                     if plan.credit_allowance

@@ -243,6 +243,13 @@ class AccountAllowanceOverview(_CommerceModel):
     period_end: str | None
 
 
+class CreditSpendSource(_CommerceModel):
+    type: Literal["allowance", "bucket"]
+    key: str
+    label: str
+    priority: int | None
+
+
 class AccountCreditOverview(_CommerceModel):
     ledger_balance: Decimal
     effective_spendable_balance: Decimal
@@ -250,6 +257,7 @@ class AccountCreditOverview(_CommerceModel):
     allowance: AccountAllowanceOverview
     buckets: list[BucketBalance]
     buckets_by_key: dict[str, Decimal]
+    spend_order: list[CreditSpendSource]
     display: dict[str, str] | None = None
 
 

@@ -92,12 +92,16 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
+    "@dodopayments/core": "^0.3.0",
     "dodopayments": "^2.40.1",
     "js-yaml": "^4.0.0",
     "pg": "^8.0.0",
     "stripe": "^22.2.0"
   },
   "peerDependenciesMeta": {
+    "@dodopayments/core": {
+      "optional": true
+    },
     "js-yaml": {
       "optional": true
     },

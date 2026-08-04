@@ -53,6 +53,7 @@ from bursar.commerce.types import (
     ConfirmPlanChangeResult,
     CreateCheckoutInput,
     CreateCheckoutResult,
+    CreditSpendSource,
     NormalizedPendingPlanChange,
     PlanChangePreviewResult,
     SubscriptionCommandResult,
@@ -1248,6 +1249,36 @@ class CommerceService:
             if credit_policy is not None and credit_policy.type == "credit_line"
             else Decimal(0)
         )
+        spend_order = [
+            *(
+                [
+                    CreditSpendSource(
+                        type="allowance",
+                        key="allowance",
+                        label="Plan allowance",
+                        priority=entitlement.allowance.priority,
+                    )
+                ]
+                if entitlement.allowance is not None
+                else []
+            ),
+            *[
+                CreditSpendSource(
+                    type="bucket",
+                    key=bucket.bucket_key,
+                    label=bucket.label,
+                    priority=bucket.priority,
+                )
+                for bucket in buckets.buckets
+            ],
+        ]
+        spend_order.sort(
+            key=lambda source: (
+                source.priority if source.priority is not None else -1,
+                0 if source.type == "allowance" else 1,
+                source.key,
+            )
+        )
         return AccountCommerceOverview(
             account_id=account_id,
             credits=AccountCreditOverview(
@@ -1262,6 +1293,7 @@ class CommerceService:
                 ),
                 buckets=buckets.buckets,
                 buckets_by_key={bucket.bucket_key: bucket.balance for bucket in buckets.buckets},
+                spend_order=spend_order,
                 display=(
                     {
                         "currency": config.credits.display.currency,

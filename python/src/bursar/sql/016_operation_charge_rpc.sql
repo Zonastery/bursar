@@ -104,6 +104,7 @@ BEGIN
         a.catalog_revision_id,
         a.starts_at,
         p.credit_allowance_amount,
+        p.credit_allowance_priority,
         p.credit_allowance_reset_unit,
         p.credit_allowance_reset_count,
         p.credit_allowance_reset_anchor,
@@ -268,6 +269,21 @@ BEGIN
               AND window_start = v_allowance_start
               AND window_end = v_allowance_end
             FOR UPDATE;
+        END IF;
+    END IF;
+
+    IF v_has_assignment AND v_free > 0 THEN
+        IF v_assignment.credit_allowance_priority IS NOT NULL THEN
+            v_free := least(
+                v_free,
+                greatest(
+                    p_requested - bursar.available_credit_before_priority(
+                        v_account,
+                        v_assignment.credit_allowance_priority
+                    ),
+                    0
+                )
+            );
         END IF;
     END IF;
 

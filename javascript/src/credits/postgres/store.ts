@@ -587,6 +587,10 @@ export class PostgresStore extends CreditStore {
           ? null
           : {
               amount: allowanceAmount,
+              priority:
+                row.credit_allowance_priority == null
+                  ? null
+                  : Number(row.credit_allowance_priority),
               resetUnit:
                 row.credit_allowance_reset_unit == null
                   ? null

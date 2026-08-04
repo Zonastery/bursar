@@ -392,6 +392,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
                 "plan_key": "pro",
                 "plan_label": "Pro",
                 "credit_allowance_amount": "100",
+                "credit_allowance_priority": 15,
                 "credit_policy_type": "credit_line",
                 "credit_limit": "20",
                 "admission_max_in_flight": 3,
@@ -417,6 +418,8 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     public_plan = store.get_user_plan(USER_ID)
 
     assert public_plan.catalog_version == 4
+    assert public_plan.allowance is not None
+    assert public_plan.allowance.priority == 15
     assert public_plan.credit_policy is not None
     assert public_plan.credit_policy.type == "credit_line"
     assert public_plan.credit_policy.credit_limit == Decimal("20")

@@ -1027,6 +1027,7 @@ BEGIN
         SELECT
             plan.allowed_operations,
             plan.credit_allowance_amount,
+            plan.credit_allowance_priority,
             plan.credit_allowance_reset_unit,
             plan.credit_allowance_reset_count,
             plan.credit_allowance_reset_anchor,
@@ -1195,6 +1196,21 @@ BEGIN
                   AND window_end = v_allowance_end
                 FOR UPDATE;
             END IF;
+        END IF;
+    END IF;
+
+    IF v_plan_id IS NOT NULL AND v_allowance_reserved > 0 THEN
+        IF v_plan.credit_allowance_priority IS NOT NULL THEN
+            v_allowance_reserved := least(
+                v_allowance_reserved,
+                greatest(
+                    p_estimate - bursar.available_credit_before_priority(
+                        v_account,
+                        v_plan.credit_allowance_priority
+                    ),
+                    0
+                )
+            );
         END IF;
     END IF;
 
@@ -1570,6 +1586,22 @@ BEGIN
                     )
                 );
             END IF;
+        END IF;
+    END IF;
+
+    IF v_lease.plan_id IS NOT NULL AND v_allowance > 0 THEN
+        IF v_plan.credit_allowance_priority IS NOT NULL THEN
+            v_allowance := least(
+                v_allowance,
+                greatest(
+                    p_actual - bursar.available_credit_before_priority(
+                        v_account,
+                        v_plan.credit_allowance_priority,
+                        v_lease.id
+                    ),
+                    0
+                )
+            );
         END IF;
     END IF;
 

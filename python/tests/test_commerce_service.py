@@ -54,6 +54,7 @@ from bursar.credits.types import (
     GetUserPlanResult,
     LedgerEntry,
     LedgerPage,
+    PlanAllowancePolicy,
     UsageChargePage,
 )
 from bursar.providers.types import (
@@ -960,6 +961,7 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
 
     overview = await commerce.get_account_overview("user-1")
     assert overview.credits.effective_spendable_balance == Decimal("35")
+    assert [(source.type, source.key) for source in overview.credits.spend_order] == [("bucket", "general")]
     assert credits.include_record_only is False
     assert overview.subscription_summary.pending_change.plan_key == "pro"
     assert overview.payment_methods[0].last4 == "4242"
@@ -977,6 +979,47 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
     credits.fail_balance = True
     with pytest.raises(CoreBillingDataUnavailableError):
         await commerce.get_account_overview("user-1")
+
+
+@pytest.mark.asyncio
+async def test_account_overview_interleaves_allowance_with_bucket_priorities() -> None:
+    commerce, _billing, credits, _provider = make_harness()
+    credits.bucket_balances = BucketBalancesResult(
+        user_id="user-1",
+        buckets=[
+            BucketBalance(
+                bucket_key="gifted",
+                label="Gifted",
+                priority=10,
+                expires=True,
+                balance=Decimal("10"),
+            ),
+            BucketBalance(
+                bucket_key="purchased",
+                label="Purchased",
+                priority=30,
+                expires=False,
+                balance=Decimal("20"),
+            ),
+        ],
+        total_balance=Decimal("30"),
+    )
+    credits.plan.allowance = PlanAllowancePolicy(
+        amount=Decimal("10"),
+        priority=20,
+        reset_unit="month",
+        reset_count=1,
+        reset_anchor="calendar",
+        reset_timezone="UTC",
+    )
+
+    overview = await commerce.get_account_overview("user-1")
+
+    assert [(source.type, source.key) for source in overview.credits.spend_order] == [
+        ("bucket", "gifted"),
+        ("allowance", "allowance"),
+        ("bucket", "purchased"),
+    ]
 
 
 @pytest.mark.asyncio

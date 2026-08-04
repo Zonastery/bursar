@@ -506,6 +506,20 @@
           "title": "Amount",
           "type": "string"
         },
+        "priority": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Spend priority shared with credit buckets. Lower values are used first; omitting priority preserves legacy allowance-first behavior.",
+          "title": "Priority"
+        },
         "window": {
           "discriminator": {
             "mapping": {

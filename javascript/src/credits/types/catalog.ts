@@ -16,6 +16,8 @@ export interface BursarConfigHistoryItem {
 
 export interface PlanAllowancePolicy {
   amount: Decimal | null;
+  /** Shared with bucket priorities; null means legacy allowance-first ordering. */
+  priority?: number | null;
   resetUnit: string | null;
   resetCount: number | null;
   resetAnchor: string | null;

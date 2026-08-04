@@ -565,6 +565,49 @@ $$;
 COMMENT ON FUNCTION bursar.provision_subject_account_on_insert() IS
 'Tenant-aware signup hook that assigns the active default plan and runs account_created grants.';
 
+-- Return unreserved, unexpired lot credit that sorts before a configured
+-- allowance priority. Account-scoped mutation RPCs hold the credit-account row
+-- lock before calling this helper, so the balance and aggregate lease holds are
+-- one atomic ordering snapshot.
+CREATE FUNCTION bursar.available_credit_before_priority(
+    p_account_id uuid,
+    p_priority integer,
+    p_excluded_lease_id uuid DEFAULT NULL
+)
+RETURNS numeric
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path TO ''
+AS $$
+    WITH available AS (
+        SELECT COALESCE(sum(lot.granted - lot.consumed), 0) AS amount
+        FROM bursar.credit_lots AS lot
+        WHERE lot.account_id = p_account_id
+          AND lot.consumed < lot.granted
+          AND (lot.expires_at IS NULL OR lot.expires_at > now())
+          AND p_priority IS NOT NULL
+          AND lot.priority < p_priority
+    ),
+    holds AS (
+        SELECT COALESCE(
+            sum(lease.reserved_amount - lease.reserved_allowance),
+            0
+        ) AS amount
+        FROM bursar.credit_leases AS lease
+        WHERE lease.account_id = p_account_id
+          AND lease.status = 'active'
+          AND lease.expires_at > now()
+          AND (
+              p_excluded_lease_id IS NULL
+              OR lease.id <> p_excluded_lease_id
+          )
+    )
+    SELECT greatest(available.amount - holds.amount, 0)
+    FROM available
+    CROSS JOIN holds
+$$;
+
 CREATE FUNCTION bursar.post_credit(
     p_subject_id uuid,
     p_kind bursar.ledger_entry_kind,

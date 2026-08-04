@@ -47,6 +47,7 @@ import type {
   CommerceWebhookResult,
   ConfirmPlanChangeInput,
   ConfirmPlanChangeResult,
+  CreditSpendSource,
   CreateCheckoutInput,
   CreateCheckoutResult,
   GetInvoiceLinkInput,
@@ -1144,6 +1145,29 @@ export class CommerceService {
       core.entitlement.creditPolicy?.type === "credit_line"
         ? (core.entitlement.creditPolicy.creditLimit ?? new Decimal(0)).negated()
         : new Decimal(0);
+    const spendOrder: CreditSpendSource[] = [
+      ...(core.entitlement.allowance
+        ? [
+            {
+              type: "allowance" as const,
+              key: "allowance",
+              label: "Plan allowance",
+              priority: core.entitlement.allowance.priority ?? null,
+            },
+          ]
+        : []),
+      ...core.bucketBalances.buckets.map((bucket) => ({
+        type: "bucket" as const,
+        key: bucket.bucketKey,
+        label: bucket.label,
+        priority: bucket.priority,
+      })),
+    ].sort((left, right) => {
+      const priority = (left.priority ?? -1) - (right.priority ?? -1);
+      if (priority !== 0) return priority;
+      if (left.type !== right.type) return left.type === "allowance" ? -1 : 1;
+      return left.key.localeCompare(right.key);
+    });
     return {
       accountId,
       credits: {
@@ -1162,6 +1186,7 @@ export class CommerceService {
         bucketsByKey: Object.fromEntries(
           core.bucketBalances.buckets.map((bucket) => [bucket.bucketKey, bucket.balance]),
         ),
+        spendOrder,
         display: core.config.credits.display ?? null,
       },
       entitlement: core.entitlement,

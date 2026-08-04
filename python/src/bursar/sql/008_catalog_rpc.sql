@@ -108,6 +108,33 @@ BEGIN
         FROM jsonb_each(
             COALESCE(p_source_document->'plans', '{}'::jsonb)
         ) AS plan_entry(key, value)
+        WHERE plan_entry.value #>> '{credit_allowance,priority}' IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_each(
+                  COALESCE(
+                      p_source_document #> '{credits,buckets}',
+                      '{}'::jsonb
+                  )
+              ) AS bucket_entry(key, value)
+              WHERE (bucket_entry.value->>'priority')::integer =
+                    (
+                        plan_entry.value
+                            #>> '{credit_allowance,priority}'
+                    )::integer
+          )
+    )
+    THEN
+        RAISE EXCEPTION
+            'credit allowance priority must not conflict with a bucket priority'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_each(
+            COALESCE(p_source_document->'plans', '{}'::jsonb)
+        ) AS plan_entry(key, value)
         WHERE value ? 'credit_allowance'
           AND v_default_bucket IS NULL
     )
@@ -513,6 +540,7 @@ BEGIN
         admission_policy_key,
         revision_policy,
         credit_allowance_amount,
+        credit_allowance_priority,
         credit_allowance_bucket,
         credit_allowance_reset_unit,
         credit_allowance_reset_count,
@@ -557,6 +585,11 @@ BEGIN
             THEN (
                 plan_entry.value #>> '{credit_allowance,amount}'
             )::numeric
+        END,
+        CASE WHEN plan_entry.value ? 'credit_allowance'
+            THEN (
+                plan_entry.value #>> '{credit_allowance,priority}'
+            )::integer
         END,
         CASE WHEN plan_entry.value ? 'credit_allowance'
             THEN v_default_bucket

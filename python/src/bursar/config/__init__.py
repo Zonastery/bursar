@@ -124,8 +124,17 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
             measures = config.pricing.operations[quota.operation].measures
             if quota.measure not in measures:
                 raise ValueError(f"plans.{plan_key}.quotas.{quota_key} references unknown measure '{quota.measure}'")
-        if plan.credit_allowance is not None and config.credits.default_bucket is None:
-            raise ValueError(f"plans.{plan_key}.credit_allowance requires credits.default_bucket")
+        if plan.credit_allowance is not None:
+            if config.credits.default_bucket is None:
+                raise ValueError(f"plans.{plan_key}.credit_allowance requires credits.default_bucket")
+            allowance_priority = plan.credit_allowance.priority
+            if allowance_priority is not None and any(
+                bucket.priority == allowance_priority for bucket in config.credits.buckets.values()
+            ):
+                raise ValueError(
+                    f"plans.{plan_key}.credit_allowance.priority conflicts with "
+                    f"credit bucket priority {allowance_priority}"
+                )
         if plan.credit_policy is not None and plan.credit_policy not in config.credits.policies:
             raise ValueError(f"plans.{plan_key}.credit_policy references unknown policy '{plan.credit_policy}'")
         if plan.admission_policy is not None and plan.admission_policy not in config.admission.policies:

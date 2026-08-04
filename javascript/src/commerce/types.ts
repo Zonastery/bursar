@@ -135,7 +135,11 @@ export interface CancelAllSubscriptionsResult {
 }
 
 export type PlanChangeClassification =
-  "unchanged" | "upgrade" | "downgrade" | "lateral" | "cadence_change";
+  | "unchanged"
+  | "upgrade"
+  | "downgrade"
+  | "lateral"
+  | "cadence_change";
 
 export interface PlanChangePreviewResult {
   unchanged: boolean;
@@ -211,6 +215,14 @@ export interface CommerceSectionAvailability {
   autoRecharge: boolean;
 }
 
+export interface CreditSpendSource {
+  type: "allowance" | "bucket";
+  key: string;
+  label: string;
+  /** Null is the backward-compatible allowance-first sentinel. */
+  priority: number | null;
+}
+
 export interface AccountCommerceOverview {
   accountId: string;
   credits: {
@@ -225,6 +237,7 @@ export interface AccountCommerceOverview {
     };
     buckets: BucketBalance[];
     bucketsByKey: Record<string, Decimal>;
+    spendOrder: CreditSpendSource[];
     display: {
       currency: string;
       unitsPerMajor: Decimal;

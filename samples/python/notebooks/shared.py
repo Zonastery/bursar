@@ -158,6 +158,7 @@ _BASE_CONFIG = {
             "allowed_operations": ["completion"],
             "credit_allowance": {
                 "amount": "10000",
+                "priority": 5,
                 "window": {"type": "calendar", "unit": "month", "count": 1},
             },
         },

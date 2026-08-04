@@ -130,5 +130,28 @@ plans:
 Publish and activate through `bursar.catalog`. Billing and auto-recharge always
 read the active canonical configuration.
 
+Plan allowances and credit buckets can share one explicit spend order. Lower
+priorities spend first, so an allowance at priority `20` sits between a gifted
+bucket at `10` and a purchased bucket at `30`:
+
+```yaml
+credits:
+  buckets:
+    gifted: { priority: 10 }
+    purchased: { priority: 30 }
+  default_bucket: purchased
+
+plans:
+  seeker:
+    credit_allowance:
+      amount: "10000"
+      priority: 20
+      window: { type: calendar, unit: month, count: 1 }
+```
+
+An allowance priority cannot equal a bucket priority. Omitting it preserves the
+legacy allowance-first behavior. The allowance remains a plan entitlement with
+its own reset window; it is not a synthetic credit bucket.
+
 See the [Python package](python/README.md), [JavaScript package](javascript/README.md),
 and [documentation site](docs/docs/intro.mdx).

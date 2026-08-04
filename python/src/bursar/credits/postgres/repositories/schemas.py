@@ -133,6 +133,7 @@ class UserPlanRow(BaseModel):
     plan_label: str | None = None
     rate_card: str | None = None
     credit_allowance_amount: str | Decimal | None = None
+    credit_allowance_priority: int | None = None
     credit_allowance_reset_unit: str | None = None
     credit_allowance_reset_count: int | None = None
     credit_allowance_reset_anchor: str | None = None

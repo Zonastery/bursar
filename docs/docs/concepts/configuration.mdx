@@ -108,6 +108,7 @@ plans:
     allowed_operations: [completion]
     credit_allowance:
       amount: "10000"
+      priority: 5
       window: { type: calendar, unit: month, count: 1 }
   pro:
     display_name: Pro
@@ -174,6 +175,11 @@ reference only the measures declared by their operation.
 For subscription-backed plans, explicitly setting `revision_policy` is
 recommended. When omitted, subscription-backed plans use `next_renewal` and
 other plans use `immediate`.
+
+Credit bucket priorities and `credit_allowance.priority` share one ordering
+namespace, with lower numbers consumed first. Priorities cannot collide. When
+an allowance omits `priority`, it retains the legacy behavior of spending before
+all buckets.
 
 Validate before publication:
 

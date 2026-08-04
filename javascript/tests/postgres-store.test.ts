@@ -94,6 +94,26 @@ describe("PostgresStore", () => {
     expect(result.lifetimePurchased.toString()).toBe("0");
   });
 
+  it("maps the allowance priority returned by get_subject_plan", async () => {
+    const store = new PostgresStore(
+      "postgresql://localhost/db",
+      makeMockPool([
+        {
+          user_id: "user-1",
+          plan_id: "plan-1",
+          plan_key: "pro",
+          credit_allowance_amount: "100",
+          credit_allowance_priority: "20",
+        },
+      ]),
+    );
+
+    const result = await store.getUserPlan("user-1");
+
+    expect(result.allowance?.amount.toString()).toBe("100");
+    expect(result.allowance?.priority).toBe(20);
+  });
+
   it("addCredits returns default Decimals for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
     const result = await store.addCredits("user-1", D(100));

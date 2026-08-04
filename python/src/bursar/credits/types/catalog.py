@@ -24,6 +24,7 @@ class BursarConfigHistoryItem(BaseModel):
 
 class PlanAllowancePolicy(BaseModel):
     amount: Decimal | None
+    priority: int | None = None
     reset_unit: str | None
     reset_count: int | None
     reset_anchor: str | None

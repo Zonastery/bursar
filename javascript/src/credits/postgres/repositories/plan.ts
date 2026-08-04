@@ -13,6 +13,7 @@ const UserPlanRowSchema = z
       .union([z.string(), z.number()] as const)
       .nullable()
       .optional(),
+    credit_allowance_priority: z.coerce.number().int().nonnegative().nullable().optional(),
     credit_allowance_reset_unit: z.string().nullable().optional(),
     credit_allowance_reset_count: z.coerce.number().nullable().optional(),
     credit_allowance_reset_anchor: z.string().nullable().optional(),

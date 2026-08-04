@@ -25,6 +25,351 @@ BEGIN
 END $$;
 
 DO $$
+BEGIN
+    BEGIN
+        PERFORM bursar.publish_and_activate_catalog(
+            1,
+            $json$
+            {
+              "version": 1,
+              "credits": {
+                "buckets": {
+                  "gifted": {"priority": 10},
+                  "purchased": {"priority": 30}
+                },
+                "default_bucket": "purchased"
+              },
+              "plans": {
+                "collision": {
+                  "display_name": "Collision",
+                  "credit_allowance": {
+                    "amount": "50",
+                    "priority": 10,
+                    "window": {
+                      "type": "calendar",
+                      "unit": "month",
+                      "count": 1,
+                      "timezone": "UTC"
+                    }
+                  }
+                }
+              }
+            }
+            $json$::jsonb,
+            'allowance-priority-collision'
+        );
+        RAISE EXCEPTION 'colliding allowance priority was accepted';
+    EXCEPTION
+        WHEN SQLSTATE '22023' THEN
+            IF SQLERRM NOT LIKE '%allowance priority%bucket priority%' THEN
+                RAISE;
+            END IF;
+    END;
+END $$;
+
+DO $$
+DECLARE
+    v_revision uuid;
+    v_plan uuid;
+    v_direct_subject uuid := '00000000-0000-0000-0000-000000000556';
+    v_lease_subject uuid := '00000000-0000-0000-0000-000000000557';
+    v_charge record;
+    v_lease record;
+    v_settlement record;
+    v_gifted_consumed numeric;
+    v_purchased_consumed numeric;
+BEGIN
+    SELECT revision_id
+    INTO v_revision
+    FROM bursar.publish_and_activate_catalog(
+        1,
+        $json$
+        {
+          "version": 1,
+          "credits": {
+            "buckets": {
+              "gifted": {"priority": 10},
+              "purchased": {"priority": 30}
+            },
+            "default_bucket": "purchased"
+          },
+          "plans": {
+            "ordered": {
+              "display_name": "Ordered",
+              "credit_allowance": {
+                "amount": "50",
+                "priority": 20,
+                "window": {
+                  "type": "calendar",
+                  "unit": "month",
+                  "count": 1,
+                  "timezone": "UTC"
+                }
+              }
+            }
+          }
+        }
+        $json$::jsonb,
+        'ordered-allowance'
+    );
+
+    SELECT id
+    INTO v_plan
+    FROM bursar.catalog_plans
+    WHERE catalog_revision_id = v_revision
+      AND plan_key = 'ordered';
+
+    PERFORM bursar.assign_plan(v_direct_subject, v_plan, now(), NULL);
+    PERFORM bursar.post_credit(
+        v_direct_subject,
+        'grant',
+        30,
+        'seed',
+        'ordered-direct-gifted',
+        '{}'::jsonb,
+        'gifted',
+        v_revision
+    );
+    PERFORM bursar.post_credit(
+        v_direct_subject,
+        'purchase',
+        40,
+        'seed',
+        'ordered-direct-purchased',
+        '{}'::jsonb,
+        'purchased',
+        v_revision
+    );
+
+    SELECT *
+    INTO v_charge
+    FROM bursar.charge_usage_for_operation(
+        v_direct_subject,
+        'chat',
+        60,
+        'ordered-direct-charge-1'
+    );
+
+    IF v_charge.error_code IS NOT NULL
+       OR v_charge.charged <> 30
+       OR v_charge.allowance_covered <> 30
+    THEN
+        RAISE EXCEPTION
+            'direct charge did not apply gifted -> allowance: %',
+            row_to_json(v_charge);
+    END IF;
+
+    SELECT
+        COALESCE(sum(consumed) FILTER (WHERE bucket_key = 'gifted'), 0),
+        COALESCE(sum(consumed) FILTER (WHERE bucket_key = 'purchased'), 0)
+    INTO v_gifted_consumed, v_purchased_consumed
+    FROM bursar.credit_lots
+    WHERE account_id = bursar.account_for_subject(v_direct_subject);
+
+    IF v_gifted_consumed <> 30 OR v_purchased_consumed <> 0 THEN
+        RAISE EXCEPTION
+            'direct charge consumed the wrong buckets: gifted %, purchased %',
+            v_gifted_consumed,
+            v_purchased_consumed;
+    END IF;
+
+    SELECT *
+    INTO v_charge
+    FROM bursar.charge_usage_for_operation(
+        v_direct_subject,
+        'chat',
+        40,
+        'ordered-direct-charge-2'
+    );
+
+    IF v_charge.error_code IS NOT NULL
+       OR v_charge.charged <> 20
+       OR v_charge.allowance_covered <> 20
+    THEN
+        RAISE EXCEPTION
+            'direct charge did not apply allowance -> purchased: %',
+            row_to_json(v_charge);
+    END IF;
+
+    SELECT COALESCE(sum(consumed), 0)
+    INTO v_purchased_consumed
+    FROM bursar.credit_lots
+    WHERE account_id = bursar.account_for_subject(v_direct_subject)
+      AND bucket_key = 'purchased';
+
+    IF v_purchased_consumed <> 20 THEN
+        RAISE EXCEPTION
+            'direct charge did not consume purchased credits last: %',
+            v_purchased_consumed;
+    END IF;
+
+    PERFORM bursar.assign_plan(v_lease_subject, v_plan, now(), NULL);
+    PERFORM bursar.post_credit(
+        v_lease_subject,
+        'grant',
+        30,
+        'seed',
+        'ordered-lease-gifted',
+        '{}'::jsonb,
+        'gifted',
+        v_revision
+    );
+    PERFORM bursar.post_credit(
+        v_lease_subject,
+        'purchase',
+        40,
+        'seed',
+        'ordered-lease-purchased',
+        '{}'::jsonb,
+        'purchased',
+        v_revision
+    );
+
+    SELECT *
+    INTO v_lease
+    FROM bursar.create_lease_for_operation(
+        v_lease_subject,
+        'chat',
+        60,
+        'ordered-lease-create'
+    );
+
+    IF v_lease.error_code IS NOT NULL
+       OR (
+           SELECT reserved_allowance
+           FROM bursar.credit_leases
+           WHERE id = v_lease.lease_id
+       ) <> 30
+    THEN
+        RAISE EXCEPTION
+            'lease did not reserve allowance after gifted credit: %',
+            row_to_json(v_lease);
+    END IF;
+
+    SELECT *
+    INTO v_settlement
+    FROM bursar.settle_lease(
+        v_lease_subject,
+        v_lease.lease_id,
+        60,
+        'ordered-lease-settle'
+    );
+
+    SELECT *
+    INTO v_charge
+    FROM bursar.credit_usage_charges
+    WHERE idempotency_key = 'ordered-lease-settle'
+      AND account_id = bursar.account_for_subject(v_lease_subject);
+
+    IF v_settlement.error_code IS NOT NULL
+       OR v_charge.charged <> 30
+       OR v_charge.allowance_covered <> 30
+    THEN
+        RAISE EXCEPTION
+            'lease settlement did not preserve source ordering: settlement %, charge %',
+            row_to_json(v_settlement),
+            row_to_json(v_charge);
+    END IF;
+
+    SELECT
+        COALESCE(sum(consumed) FILTER (WHERE bucket_key = 'gifted'), 0),
+        COALESCE(sum(consumed) FILTER (WHERE bucket_key = 'purchased'), 0)
+    INTO v_gifted_consumed, v_purchased_consumed
+    FROM bursar.credit_lots
+    WHERE account_id = bursar.account_for_subject(v_lease_subject);
+
+    IF v_gifted_consumed <> 30 OR v_purchased_consumed <> 0 THEN
+        RAISE EXCEPTION
+            'lease settlement consumed the wrong buckets: gifted %, purchased %',
+            v_gifted_consumed,
+            v_purchased_consumed;
+    END IF;
+END $$;
+
+DO $$
+DECLARE
+    v_revision uuid;
+    v_plan uuid;
+    v_subject uuid := '00000000-0000-0000-0000-000000000558';
+    v_charge record;
+    v_gifted_consumed numeric;
+BEGIN
+    SELECT revision_id
+    INTO v_revision
+    FROM bursar.publish_and_activate_catalog(
+        1,
+        $json$
+        {
+          "version": 1,
+          "credits": {
+            "buckets": {
+              "gifted": {"priority": 10},
+              "purchased": {"priority": 30}
+            },
+            "default_bucket": "purchased"
+          },
+          "plans": {
+            "legacy": {
+              "display_name": "Legacy",
+              "credit_allowance": {
+                "amount": "50",
+                "window": {
+                  "type": "calendar",
+                  "unit": "month",
+                  "count": 1,
+                  "timezone": "UTC"
+                }
+              }
+            }
+          }
+        }
+        $json$::jsonb,
+        'legacy-allowance-order'
+    );
+
+    SELECT id
+    INTO v_plan
+    FROM bursar.catalog_plans
+    WHERE catalog_revision_id = v_revision
+      AND plan_key = 'legacy';
+
+    PERFORM bursar.assign_plan(v_subject, v_plan, now(), NULL);
+    PERFORM bursar.post_credit(
+        v_subject,
+        'grant',
+        20,
+        'seed',
+        'legacy-gifted',
+        '{}'::jsonb,
+        'gifted',
+        v_revision
+    );
+
+    SELECT *
+    INTO v_charge
+    FROM bursar.charge_usage_for_operation(
+        v_subject,
+        'chat',
+        20,
+        'legacy-allowance-charge'
+    );
+
+    SELECT COALESCE(sum(consumed), 0)
+    INTO v_gifted_consumed
+    FROM bursar.credit_lots
+    WHERE account_id = bursar.account_for_subject(v_subject)
+      AND bucket_key = 'gifted';
+
+    IF v_charge.error_code IS NOT NULL
+       OR v_charge.allowance_covered <> 20
+       OR v_gifted_consumed <> 0
+    THEN
+        RAISE EXCEPTION
+            'omitted allowance priority did not preserve allowance-first behavior';
+    END IF;
+END $$;
+
+DO $$
 DECLARE
     v_revision uuid;
     v_subject uuid := '00000000-0000-0000-0000-000000000123';

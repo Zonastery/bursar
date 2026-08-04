@@ -107,6 +107,7 @@ def base_config() -> dict:
                 "features": {"tutor_chat": True, "access_level": "full"},
                 "credit_allowance": {
                     "amount": "10.000000",
+                    "priority": 15,
                     "window": {
                         "type": "calendar",
                         "unit": "month",
@@ -146,6 +147,7 @@ def test_accepts_typed_catalog() -> None:
     assert config.pricing is not None
     assert config.plans["pro"].credit_allowance is not None
     assert config.plans["pro"].credit_allowance.amount == Decimal("10")
+    assert config.plans["pro"].credit_allowance.priority == 15
     assert config.plans["pro"].revision_policy == "immediate"
 
 
@@ -253,6 +255,13 @@ def test_duplicate_bucket_priorities_are_rejected() -> None:
     data = base_config()
     data["credits"]["buckets"]["purchased"]["priority"] = 10
     with pytest.raises(ConfigError, match="priorities"):
+        load_config_from_dict(data)
+
+
+def test_allowance_priority_must_not_conflict_with_a_bucket() -> None:
+    data = base_config()
+    data["plans"]["pro"]["credit_allowance"]["priority"] = 10
+    with pytest.raises(ConfigError, match="credit_allowance.priority conflicts"):
         load_config_from_dict(data)
 
 
@@ -384,6 +393,7 @@ def test_public_catalog_preserves_prices_without_provider_identifiers() -> None:
 
     assert public["default_plan"] == "pro"
     assert public["credit_display"] == {"currency": "USD", "units_per_major": "1000"}
+    assert public["plans"][0]["allowance"]["priority"] == 15
     assert public["plans"][0]["offers"][0]["price"]["amount_minor"] == 1200
     assert "price_secret_pro_monthly" not in str(public)
 

@@ -257,14 +257,45 @@ jobs:
       - run: echo "Python and JS suites both passed against tests/parity/expression_cases.json — engines agree."
 
   # ── Release ───────────────────────────────────────────────────────────────
-  # Split PyPI and npm into separate jobs so one registry failing does not leave
-  # the other half-published (audit H13). Both use OIDC trusted publishing (no
-  # long-lived tokens) and a protected `release` environment so only an approved
-  # tag push can publish.
+  # Validate the complete release before either registry is touched. Publishing
+  # is ordered PyPI -> npm and both steps are safe to rerun, so an npm outage can
+  # be recovered without changing the immutable release tag.
+
+  release-preflight:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, typecheck, test, js-test, js-typecheck, sdk-contract-parity, package-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - name: Verify tag and SDK versions agree
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+
+          python_version = tomllib.loads(Path("python/pyproject.toml").read_text())["project"]["version"]
+          javascript_version = json.loads(Path("javascript/package.json").read_text())["version"]
+          release_tag = os.environ["RELEASE_TAG"]
+          expected_tag = f"v{python_version}"
+
+          if python_version != javascript_version:
+              raise SystemExit(
+                  f"SDK version mismatch: Python={python_version}, JavaScript={javascript_version}"
+              )
+          if release_tag != expected_tag:
+              raise SystemExit(f"release tag {release_tag!r} must equal {expected_tag!r}")
+          PY
 
   release-pypi:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, typecheck, test, js-test, js-typecheck]
+    needs: [release-preflight]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -279,11 +310,11 @@ jobs:
       - working-directory: python
         run: |
           uv build
-          uv publish # uses PyPI OIDC (id-token: write); no token needed
+          uv publish --check-url https://pypi.org/simple
 
   release-npm:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, typecheck, test, js-test, js-typecheck]
+    needs: [release-pypi]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -305,4 +336,16 @@ jobs:
         run: |
           bun ci --ignore-scripts
           bun run build
-          npm publish --access public --provenance
+          package_name="$(node -p 'require("./package.json").name')"
+          package_version="$(node -p 'require("./package.json").version')"
+          published_integrity="$(npm view "${package_name}@${package_version}" dist.integrity 2>/dev/null || true)"
+          if [ -n "$published_integrity" ]; then
+            local_integrity="$(npm pack --dry-run --json | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => console.log(JSON.parse(s)[0].integrity))')"
+            if [ "$local_integrity" != "$published_integrity" ]; then
+              echo "npm ${package_name}@${package_version} already exists with different contents" >&2
+              exit 1
+            fi
+            echo "npm ${package_name}@${package_version} already contains this artifact; skipping"
+          else
+            npm publish --access public --provenance
+          fi

@@ -266,7 +266,15 @@ function harness(input?: {
     })),
     getAvailable: vi.fn(async () => ({ available: new Decimal(30) })),
     getBucketBalances: vi.fn(async () => ({
-      buckets: [{ bucketKey: "general", balance: new Decimal(30) }],
+      buckets: [
+        {
+          bucketKey: "general",
+          label: "General",
+          priority: 10,
+          expires: false,
+          balance: new Decimal(30),
+        },
+      ],
     })),
     getUserPlan: vi.fn(async () => ({
       planKey: "basic",
@@ -274,6 +282,7 @@ function harness(input?: {
       allowedOperations: [],
       allowance: {
         amount: new Decimal(10),
+        priority: 20,
         resetUnit: "month",
         resetCount: 1,
         resetAnchor: "calendar",
@@ -689,6 +698,10 @@ describe("CommerceService", () => {
     const overview = await service.getAccountOverview("user-1");
 
     expect(overview.credits.effectiveSpendableBalance.toString()).toBe("35");
+    expect(overview.credits.spendOrder).toEqual([
+      { type: "bucket", key: "general", label: "General", priority: 10 },
+      { type: "allowance", key: "allowance", label: "Plan allowance", priority: 20 },
+    ]);
     expect(credits.listUsageCharges).toHaveBeenCalledWith("user-1", {
       limit: 100,
       includeRecordOnly: false,

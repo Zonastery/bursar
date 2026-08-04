@@ -979,6 +979,7 @@ class PostgresStore(CreditStore):
             allowance=(
                 PlanAllowancePolicy(
                     amount=allowance_amount,
+                    priority=result.credit_allowance_priority,
                     reset_unit=result.credit_allowance_reset_unit,
                     reset_count=result.credit_allowance_reset_count,
                     reset_anchor=result.credit_allowance_reset_anchor,

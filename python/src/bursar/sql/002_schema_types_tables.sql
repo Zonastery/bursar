@@ -425,6 +425,11 @@ CREATE TABLE bursar.catalog_plans (
             AND credit_allowance_amount >= 0
         )
     ),
+    credit_allowance_priority integer
+    CHECK (
+        credit_allowance_priority IS null
+        OR credit_allowance_priority >= 0
+    ),
     credit_allowance_bucket text,
     credit_allowance_reset_unit text
     CHECK (credit_allowance_reset_unit IN (
@@ -465,6 +470,7 @@ CREATE TABLE bursar.catalog_plans (
     CHECK (
         (
             credit_allowance_amount IS null
+            AND credit_allowance_priority IS null
             AND credit_allowance_bucket IS null
             AND credit_allowance_reset_unit IS null
             AND credit_allowance_reset_count IS null
