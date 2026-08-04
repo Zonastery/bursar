@@ -1,5 +1,6 @@
 ---
 title: Introduction
+description: Bursar is a reusable credit ledger and billing engine for AI SaaS — one config, two SDKs (Python and JavaScript), exact money on a single PostgreSQL schema.
 ---
 
 # Introduction
@@ -47,16 +48,18 @@ Bursar pushes metering, pricing, and money state into one system of record.
 
 Applications construct one `Bursar` facade and call its capabilities:
 
-```text
-Bursar
-├── credits   -> credit lifecycle: balances, ledger, leases
-├── catalog   -> active versioned config
-├── accounts  -> signup: default plan + grant programs
-├── billing   -> provider events, subscriptions, invoices (optional)
-└── commerce  -> checkout, offers, auto-recharge (optional)
-        │
-        ▼
-PostgreSQL: one schema, per-tenant RLS, append-only ledger
+```mermaid
+flowchart TB
+    B["Bursar"] --> C1["credits — credit lifecycle: balances, ledger, leases"]
+    B --> C2["catalog — active versioned config"]
+    B --> C3["accounts — signup: default plan + grant programs"]
+    B --> C4["billing — provider events, subscriptions, invoices (optional)"]
+    B --> C5["commerce — checkout, offers, auto-recharge (optional)"]
+    C1 --> P[("PostgreSQL: one schema, per-tenant RLS, append-only ledger")]
+    C2 --> P
+    C3 --> P
+    C4 --> P
+    C5 --> P
 ```
 
 `billing` and `commerce` are present only when a `billing_store` (and, for

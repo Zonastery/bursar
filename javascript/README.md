@@ -2,6 +2,19 @@
 
 `@zonastery/bursar` is ESM-only and requires Node.js 22 or newer.
 
+## Development
+
+Use Bun 1.3.14 to install dependencies and orchestrate the SDK's development
+commands. The emitted package remains standard ESM for Node.js 22 or newer;
+Bun is not required by applications that consume the published package.
+
+```bash
+bun ci
+bun run typecheck
+bun run test
+bun run build
+```
+
 Apply the SQL baseline with the Python migration CLI before starting an
 application:
 

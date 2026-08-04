@@ -140,13 +140,14 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
-          cache-dependency-path: javascript/package-lock.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
       # Also loads tests/parity/expression_cases.json (parity gate, §7).
       # Coverage thresholds live in vitest.config.ts (ratchet up, never down).
       - working-directory: javascript
         run: |
-          npm ci
+          bun ci --ignore-scripts
           postgres_container=$(docker ps --filter 'ancestor=postgres:16' --format '{{.ID}}' | head -1)
           docker exec "$postgres_container" psql -U postgres -d bursar -c "ALTER SYSTEM SET max_connections = 500"
           docker restart "$postgres_container"
@@ -154,8 +155,8 @@ jobs:
             if docker exec "$postgres_container" pg_isready -U postgres -d bursar >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          npx vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
-          npx vitest --config vitest.providers.config.ts run --coverage
+          bunx --no-install vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
+          bunx --no-install vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: matrix.node-version == '22'
         with:
@@ -169,12 +170,13 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: javascript/package-lock.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
       - working-directory: javascript
         run: |
-          npm ci
-          npx tsc --noEmit
+          bun ci --ignore-scripts
+          bun run typecheck
 
   sdk-contract-parity:
     name: Cross-SDK deterministic contract parity
@@ -189,11 +191,12 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: javascript/package-lock.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
       - run: pip install -e "python/[test]"
       - working-directory: javascript
-        run: npm ci && npm run build
+        run: bun ci --ignore-scripts && bun run build
       - name: Export and compare shared contract vectors
         run: |
           python python/scripts/export_contract_results.py /tmp/bursar-python-contract.json
@@ -219,14 +222,15 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: javascript/package-lock.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
       - working-directory: javascript
         run: |
-          npm ci
-          npm run build
+          bun ci --ignore-scripts
+          bun run build
           mkdir -p /tmp/bursar-npm
-          npm pack --pack-destination /tmp/bursar-npm
+          bun pm pack --destination /tmp/bursar-npm --ignore-scripts
       - name: Install npm artifact in a clean consumer
         run: |
           consumer=$(mktemp -d)
@@ -290,14 +294,15 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: javascript/package-lock.json
           registry-url: "https://registry.npmjs.org"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
       # npm >= 11.5.1 supports OIDC trusted publishing; the npm CLI mints a
       # short-lived token from the id-token, so no NODE_AUTH_TOKEN is required.
       - run: npm install -g npm@latest
       - working-directory: javascript
         run: |
-          npm ci
-          npm run build
+          bun ci --ignore-scripts
+          bun run build
           npm publish --access public --provenance

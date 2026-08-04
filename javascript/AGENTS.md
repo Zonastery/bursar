@@ -3,7 +3,7 @@
 Credit billing engine for AI SaaS — TypeScript-first mirror of the Python SDK. Same public API surface, same money semantics, same lease lifecycle; all async, all `Decimal` (decimal.js).
 
 ## Stack
-TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests. One store backend: `PostgresStore` (`pg`). Exports: `@zonastery/bursar` (main), `@zonastery/bursar/node` (Node-only: `loadPricingFile`).
+TypeScript (strict), `decimal.js` for all money (no native `number` for amounts), Vitest for tests, and Bun 1.3.14 for dependency management and script orchestration. Published output targets Node.js 22 or newer. One store backend: `PostgresStore` (`pg`). Exports: `@zonastery/bursar` (main), `@zonastery/bursar/node` (Node-only: `loadPricingFile`).
 
 ## Key source files
 
@@ -71,12 +71,12 @@ new Bursar({ creditStore, creditsOptions?, billingStore?, billingOptions? })
 | `tests/store-integration.test.ts` | Real Postgres tests incl. facade-owned credit capability end-to-end |
 | `tests/security-rls.test.ts` | RLS/privilege lockdown against real Postgres roles |
 
-Run: `npm test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
+Run: `bun run test`. Real-Postgres tests resolve a DSN from `DATABASE_URL` (CI's own
 service container) or, failing that, a testcontainers-managed `postgres:16`
 (Docker permitting) started automatically in `tests/global-setup.ts` — so a
-bare `npm test` with Docker available exercises them too, not just CI.
-Typecheck: `npm run typecheck`.
-Lint: `npm run lint`.
+bare `bun run test` with Docker available exercises them too, not just CI.
+Typecheck: `bun run typecheck`.
+Lint: `bun run lint`.
 
 ## Parity rule
 Behavior must match the Python SDK exactly. `PostgresStore` is the reference. JS Sets compare by reference — use `.toString()` keys when storing `Decimal` values in `Set`/`Map`. `Promise.all` in tests is sequential (single-threaded); concurrency tests assert invariants rather than race outcomes.

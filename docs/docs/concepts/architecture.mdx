@@ -1,5 +1,6 @@
 ---
 title: Architecture
+description: The Bursar facade — credits, catalog, accounts, billing, and commerce capabilities over pluggable credit and billing stores.
 ---
 
 # Architecture
@@ -10,13 +11,13 @@ independently.
 
 ## Facade
 
-```text
-Bursar
-├── credits   -> CreditStore (PostgresStore)
-├── catalog   -> active BursarConfig
-├── accounts  -> account lifecycle (default plan + signup grants)
-├── billing   -> BillingStore + payment provider (optional)
-└── commerce  -> checkout, subscriptions, auto-recharge (optional)
+```mermaid
+flowchart TB
+    B["Bursar"] --> C1["credits — CreditStore (PostgresStore)"]
+    B --> C2["catalog — active BursarConfig"]
+    B --> C3["accounts — account lifecycle (default plan + signup grants)"]
+    B --> C4["billing — BillingStore + payment provider (optional)"]
+    B --> C5["commerce — checkout, subscriptions, auto-recharge (optional)"]
 ```
 
 `billing` and `commerce` are present only when a `billing_store` (and, for

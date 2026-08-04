@@ -31,14 +31,14 @@ pre-commit:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
       run: |
-        npx prettier --check {staged_files} \
-          || { echo "↳ run: npx prettier --write <files>  (then review & re-stage)" >&2; exit 1; }
+        bunx --no-install prettier --check {staged_files} \
+          || { echo "↳ run: bunx --no-install prettier --write <files>  (then review & re-stage)" >&2; exit 1; }
     js-lint:
       root: "javascript/"
       glob: "*.{ts,js,mjs,cjs}"
       run: |
-        npx eslint {staged_files} \
-          || { echo "↳ run: npx eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
+        bunx --no-install eslint {staged_files} \
+          || { echo "↳ run: bunx --no-install eslint --fix <files>  (then review & re-stage)" >&2; exit 1; }
     trailing-whitespace:
       run: git diff --cached --name-only --diff-filter=ACM | xargs -r git --no-pager diff --check --cached --
     merge-conflicts:
@@ -65,12 +65,12 @@ pre-push:
     js-typecheck:
       root: "javascript/"
       glob: "src/**/*.ts"
-      run: npx tsc --noEmit
+      run: bun run typecheck
     js-test:
       root: "javascript/"
       glob: "src/**/*.ts"
-      run: npx vitest run
+      run: bun run test
     js-knip:
       root: "javascript/"
       glob: "src/**/*.ts"
-      run: npx knip
+      run: bun run knip

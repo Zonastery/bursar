@@ -16,6 +16,7 @@ const config: Config = {
   onBrokenLinks: 'throw',
   markdown: {
     format: 'detect',
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
     },
@@ -36,7 +37,19 @@ const config: Config = {
         sidebar: {autoConfiguration: false},
       },
     ],
+    [
+      '@easyops-cn/docusaurus-search-local',
+      {
+        indexDocs: true,
+        indexBlog: false,
+        indexPages: false,
+        hashed: true,
+        language: ['en'],
+      },
+    ],
   ],
+
+  themes: ['@docusaurus/theme-mermaid'],
 
   presets: [
     [
@@ -44,6 +57,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          showLastUpdateTime: true,
           editUrl:
             'https://github.com/zonastery/bursar/tree/main/docs/',
         },
@@ -56,7 +70,17 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/docusaurus-social-card.jpg',
+    image: 'img/social-card.png',
+    metadata: [{name: 'twitter:card', content: 'summary_large_image'}],
+    mermaid: {
+      theme: {light: 'neutral', dark: 'dark'},
+    },
+    docs: {
+      sidebar: {
+        hideable: true,
+        autoCollapseCategories: true,
+      },
+    },
     colorMode: {
       respectPrefersColorScheme: true,
     },
@@ -66,6 +90,7 @@ const config: Config = {
         alt: 'bursar',
         src: 'img/logo.svg',
       },
+      hideOnScroll: true,
       items: [
         {
           type: 'docSidebar',
@@ -75,8 +100,9 @@ const config: Config = {
         },
         {
           href: 'https://github.com/zonastery/bursar',
-          label: 'GitHub',
           position: 'right',
+          className: 'header-github-link',
+          'aria-label': 'GitHub repository',
         },
       ],
     },
@@ -139,7 +165,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} bursar. GNU AGPL-3.0.`,
+      copyright: `Copyright © ${new Date().getFullYear()} bursar. GNU AGPL-3.0. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,

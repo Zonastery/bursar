@@ -31,8 +31,11 @@ uv sync --group dev
 
 ```bash
 cd bursar/javascript
-npm install
+bun ci                        # Bun 1.3.14; installs the committed bun.lock
 ```
+
+The published SDK remains ESM for Node.js 22 or newer. Bun manages development
+dependencies and scripts; consumers do not need Bun.
 
 ## Running Tests
 
@@ -58,16 +61,16 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar uv run pytest
 
 The test fixtures bootstrap the Supabase `auth` stubs/roles and apply
 `python/src/bursar/sql/*.sql` themselves, so a bare `postgres:16` is enough. CI
-runs this matrix on Python 3.11, 3.12, and 3.13.
+runs this matrix on Python 3.12 and 3.13.
 
 ### JavaScript
 
 ```bash
 cd javascript
-npx vitest run                # unit, parity, and available Postgres tests
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar npx vitest run
+bun run test                  # unit, parity, and available Postgres tests
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bursar bun run test
                               # also runs the PostgresStore integration tests
-npx tsc --noEmit              # typecheck
+bun run typecheck             # typecheck
 ```
 
 ## Code Style
@@ -92,9 +95,9 @@ uv run pyright src/
 
 ```bash
 cd javascript
-npm run format:fix
-npm run lint
-npx tsc --noEmit
+bun run format:fix
+bun run lint
+bun run typecheck
 ```
 
 ### Git hooks (lefthook)
@@ -120,7 +123,7 @@ authoritative gate.** Install them with `lefthook install`.
    in both. Do not introduce a divergence.
 4. Ensure all tests pass and there are no new type errors.
 5. Open a PR against `main`.
-6. CI runs lint → typecheck → test (Python 3.11–3.13, Node 18/20/22, both
+6. CI runs lint → typecheck → test (Python 3.12–3.13, Node 22/24, both
    against `postgres:16`) and the cross-SDK parity gate.
 
 ## Adding Storage Backends (Python)
@@ -155,7 +158,8 @@ On a `v*` tag, CI runs the full matrix, then two separate publish jobs run under
 a **protected `release` GitHub environment**:
 
 - `release-pypi` — `uv build && uv publish` to PyPI via OIDC.
-- `release-npm` — `npm publish --access public --provenance` to npm via OIDC.
+- `release-npm` — Bun installs and builds the SDK, then
+  `npm publish --access public --provenance` publishes it via npm OIDC.
 
 Splitting the jobs means a failure in one registry does not leave the other
 half-published, and the `release` environment lets maintainers require approval

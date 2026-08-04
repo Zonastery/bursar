@@ -26,13 +26,13 @@ help:                                ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-install-hooks:                       ## Install lefthook git hooks (requires npm or uv)
-	@if command -v npx &>/dev/null && npx --yes lefthook install 2>/dev/null; then \
-		echo "hooks installed via npx"; \
+install-hooks:                       ## Install lefthook git hooks (requires Bun or uv)
+	@if command -v bunx &>/dev/null && (cd javascript && bunx --no-install lefthook install) 2>/dev/null; then \
+		echo "hooks installed via bunx"; \
 	elif command -v uvx &>/dev/null && uvx lefthook install 2>/dev/null; then \
 		echo "hooks installed via uvx"; \
 	else \
-		echo "Install lefthook via npm install -g lefthook or brew install lefthook" >&2; \
+		echo "Run 'cd javascript && bun ci' first, or install lefthook with brew" >&2; \
 		exit 1; \
 	fi
 
@@ -72,4 +72,4 @@ test-python:                         ## Python tests (mock + postgres via DATABA
 	cd python && pytest
 
 test-js:                             ## JS tests (mock + postgres via DATABASE_URL/testcontainers)
-	cd javascript && npx vitest run
+	cd javascript && bun run test

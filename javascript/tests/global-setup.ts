@@ -1,6 +1,6 @@
 /**
  * Vitest global setup — starts a disposable `postgres:16` testcontainer when
- * `DATABASE_URL` isn't already set, so `npm test` exercises the real
+ * `DATABASE_URL` isn't already set, so `bun run test` exercises the real
  * PostgresStore integration/concurrency suite by default (Docker permitting)
  * instead of silently skipping it. CI sets `DATABASE_URL` to its own service
  * container, so this is a no-op there — same fast path as before.
