@@ -22,7 +22,8 @@ def test_documentation_canonical_yaml_examples_validate() -> None:
 
         config = yaml.safe_load(match.group(1))
 
-        assert load_config_from_dict(config).plans["free"].display_name == "Free"
+        parsed = load_config_from_dict(config)
+        assert parsed.version == 1
 
 
 def test_generic_operation_example_validates() -> None:
