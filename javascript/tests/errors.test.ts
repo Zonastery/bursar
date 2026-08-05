@@ -31,9 +31,13 @@ import {
   QuoteChangedError,
   RefundError,
   StoreError,
+  StoreClosedError,
+  StoreTimeoutError,
+  StoreUnavailableError,
   UnknownOfferError,
   bursarErrorHttpStatus,
   bursarErrorPublicMessage,
+  isBursarError,
   isRetryableBursarError,
   type BursarErrorCategory,
 } from "../src/index.js";
@@ -79,7 +83,26 @@ const ERROR_CASES: ErrorCase[] = [
     code: "STORE_ERROR",
     category: "unavailable",
     status: 503,
+  },
+  {
+    error: new StoreUnavailableError("failure"),
+    code: "STORE_UNAVAILABLE",
+    category: "unavailable",
+    status: 503,
     retryable: true,
+  },
+  {
+    error: new StoreTimeoutError("failure"),
+    code: "STORE_TIMEOUT",
+    category: "unavailable",
+    status: 503,
+    retryable: true,
+  },
+  {
+    error: new StoreClosedError("failure"),
+    code: "STORE_CLOSED",
+    category: "conflict",
+    status: 409,
   },
   {
     error: new CapReachedError("failure"),
@@ -234,4 +257,32 @@ describe("Bursar error taxonomy", () => {
       expect(isRetryableBursarError(error)).toBe(retryable ?? false);
     },
   );
+
+  it("preserves causes and emits a stable JSON-safe shape", () => {
+    const cause = new Error("socket closed");
+    const error = new StoreUnavailableError("Database unavailable", {
+      cause,
+      indeterminate: true,
+      details: { operation: "settle", networkCode: "ECONNRESET" },
+    });
+
+    expect(error.cause).toBe(cause);
+    expect(error.indeterminate).toBe(true);
+    expect(isBursarError(error)).toBe(true);
+    expect(error.toJSON()).toEqual({
+      name: "StoreUnavailableError",
+      message: "Database unavailable",
+      code: "STORE_UNAVAILABLE",
+      category: "unavailable",
+      retryable: true,
+      indeterminate: true,
+      details: { operation: "settle", networkCode: "ECONNRESET" },
+    });
+    expect(JSON.stringify(error)).not.toContain("socket closed");
+  });
+
+  it("allows custom stores to mark only known transient failures retryable", () => {
+    expect(isRetryableBursarError(new StoreError("permanent"))).toBe(false);
+    expect(isRetryableBursarError(new StoreError("temporary", { retryable: true }))).toBe(true);
+  });
 });

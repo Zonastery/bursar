@@ -4,6 +4,7 @@ import {
   boundedDiagnosticMessage,
   optionalBoundedDiagnosticMessage,
 } from "../src/shared/diagnostics.js";
+import { BillingEventHandlers } from "../src/billing/event-handlers.js";
 import { BillingEventProcessor } from "../src/billing/event-processor.js";
 import { BillingEventRepository } from "../src/billing/postgres/repositories/event.js";
 import type { BillingEvent } from "../src/billing/types/index.js";
@@ -113,5 +114,57 @@ describe("billing diagnostic and repository boundaries", () => {
     await expect(repository.fail("stripe", "evt_repository", CLAIM_TOKEN, "failed")).resolves.toBe(
       false,
     );
+  });
+});
+
+describe("subscription plan-change provisioning", () => {
+  it("starts immediately when the existing allowance anchor is unavailable", async () => {
+    const setUserPlan = vi.fn().mockResolvedValue(undefined);
+    const store = {
+      getBillingSubscription: vi.fn().mockResolvedValue({
+        userId: "user-1",
+        provider: "dodo",
+        providerSubscriptionId: "sub-1",
+        status: "active",
+      }),
+      resolveBillingOffer: vi.fn().mockResolvedValue({
+        offerId: "offer-sage",
+        offerKey: "sage_monthly",
+        plan: "sage",
+      }),
+      getOpenBillingSubscriptionChange: vi.fn().mockResolvedValue(null),
+      upsertBillingSubscription: vi.fn().mockResolvedValue(undefined),
+    } as unknown as BillingStore;
+
+    const handlers = new BillingEventHandlers(store, {
+      autoSelectEntitlementSource: false,
+      provisioning: {
+        setUserPlan,
+        unsetUserPlan: vi.fn(),
+        addCredits: vi.fn(),
+        deductCredits: vi.fn(),
+        revokeCreditsByEntryType: vi.fn(),
+      },
+    });
+
+    const handler = handlers.getHandler(BillingEventType.SUBSCRIPTION_PLAN_CHANGED);
+    await handler?.({
+      provider: "dodo",
+      eventId: "evt_plan_change",
+      eventType: BillingEventType.SUBSCRIPTION_PLAN_CHANGED,
+      occurredAt: "2026-08-05T00:00:00Z",
+      userId: "user-1",
+      subscription: {
+        providerSubscriptionId: "sub-1",
+        status: "active",
+        periodStart: "2030-01-01T00:00:00.000Z",
+        refs: { productId: "product-sage" },
+      },
+    });
+
+    expect(setUserPlan).toHaveBeenCalledTimes(1);
+    const assignedAt = setUserPlan.mock.calls[0]?.[2];
+    expect(assignedAt).toBeInstanceOf(Date);
+    expect((assignedAt as Date).getTime()).toBeLessThanOrEqual(Date.now());
   });
 });

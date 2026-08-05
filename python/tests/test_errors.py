@@ -47,7 +47,7 @@ ERROR_CASES = [
     (InsufficientCreditsError("failure"), "INSUFFICIENT_CREDITS", "payment_required", 402, False),
     (PricingNotLoadedError("failure"), "PRICING_NOT_LOADED", "unavailable", 503, False),
     (BursarImportError("failure"), "BURSAR_IMPORT_ERROR", "unavailable", 503, False),
-    (StoreError("failure"), "STORE_ERROR", "unavailable", 503, True),
+    (StoreError("failure"), "STORE_ERROR", "unavailable", 503, False),
     (CapReachedError("failure"), "CAP_REACHED", "rate_limited", 429, False),
     (RefundError("failure"), "REFUND_REJECTED", "conflict", 409, False),
     (ConcurrencyLimitError("failure"), "CONCURRENCY_LIMIT_REACHED", "rate_limited", 429, False),

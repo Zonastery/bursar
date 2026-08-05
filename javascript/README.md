@@ -35,7 +35,11 @@ bursar migrate
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+const store = new PostgresStore(process.env.DATABASE_URL!, tenantId, {
+  connectionTimeoutMs: 10_000,
+  statementTimeoutMs: 30_000,
+  onPoolError: (error) => console.error("Bursar PostgreSQL pool error", error),
+});
 const bursar = new Bursar({ creditStore: store });
 
 const grant = await bursar.credits.addCredits(userId, 500, {
@@ -64,6 +68,47 @@ document:
 ```ts
 await bursar.catalog.publishAndActivate(config);
 ```
+
+## Errors, deadlines, and retries
+
+All Bursar-classified failures extend `BursarError` and carry stable `code`,
+`category`, and `retryable` fields. Native `cause` chains retain the underlying
+driver error without exposing it from
+`bursarErrorPublicMessage()` or the serialized `toJSON()` shape. PostgreSQL
+failures are classified primarily from SQLSTATE and network error codes, with
+narrow fallbacks for the stable timeout messages emitted by `pg` itself.
+
+`PostgresStore` and `PostgresBillingStore` use a 10-second connection deadline,
+a 30-second server-side statement deadline, and a 30-second idle-transaction
+deadline by default. All are configurable. An SDK-owned pool also installs an
+idle-client error listener so a network partition cannot become an uncaught
+EventEmitter error.
+
+Use `retryBursarOperation()` only for reads or idempotent mutations. It uses
+bounded exponential backoff with jitter, an elapsed-time budget, and optional
+`AbortSignal` cancellation:
+
+```ts
+import { isBursarError, retryBursarOperation } from "@zonastery/bursar";
+
+try {
+  const balance = await retryBursarOperation(() => bursar.credits.getBalance(userId), {
+    maxAttempts: 3,
+    signal: request.signal,
+  });
+} catch (error) {
+  if (isBursarError(error)) {
+    console.error("Bursar request failed", error.toJSON());
+  }
+  throw error;
+}
+```
+
+`StoreError.indeterminate` means a transport failure occurred when a mutation
+may have reached PostgreSQL. Retry only with the same idempotency key. A plain
+`StoreError` is deliberately non-retryable; custom stores should throw
+`StoreUnavailableError` or `StoreTimeoutError` only for classified transient
+failures.
 
 ## Optional S3 and ClickHouse storage
 

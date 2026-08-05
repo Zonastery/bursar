@@ -15,12 +15,57 @@ export type BursarErrorCategory =
   | "unavailable"
   | "internal";
 
+/** Structured, non-secret context that is safe to attach to an SDK error. */
+export type BursarErrorDetails = Readonly<Record<string, unknown>>;
+
+/** Options shared by all Bursar errors. */
+export interface BursarErrorOptions extends ErrorOptions {
+  details?: BursarErrorDetails;
+}
+
+export interface StoreErrorOptions extends BursarErrorOptions {
+  indeterminate?: boolean;
+  retryable?: boolean;
+}
+
+export interface SerializedBursarError {
+  name: string;
+  message: string;
+  code: string;
+  category: BursarErrorCategory;
+  retryable: boolean;
+  details?: BursarErrorDetails;
+  indeterminate?: boolean;
+}
+
+const BURSAR_ERROR_BRAND = Symbol.for("@zonastery/bursar.error");
+
 /** Base error for all Bursar SDK failures. */
 export class BursarError extends Error {
   override readonly name: string = "BursarError";
   readonly code: string = "BURSAR_ERROR";
   readonly category: BursarErrorCategory = "internal";
   readonly retryable: boolean = false;
+
+  readonly details?: BursarErrorDetails;
+
+  constructor(message: string, options: BursarErrorOptions = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.details = options.details ? Object.freeze({ ...options.details }) : undefined;
+    Object.defineProperty(this, BURSAR_ERROR_BRAND, { value: true });
+  }
+
+  /** A predictable representation for logs and protocol adapters. */
+  toJSON(): SerializedBursarError {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      category: this.category,
+      retryable: this.retryable,
+      ...(this.details ? { details: this.details } : {}),
+    };
+  }
 }
 
 /** Base error for credit-domain admission and settlement failures. */
@@ -36,8 +81,9 @@ export class ConfigError extends BursarError {
   constructor(
     message: string,
     readonly validationErrors: readonly unknown[] = [],
+    options: BursarErrorOptions = {},
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -68,12 +114,44 @@ export class StoreError extends BursarError {
   override readonly name: string = "StoreError";
   override readonly code: string = "STORE_ERROR";
   override readonly category: BursarErrorCategory = "unavailable";
+  override readonly retryable: boolean;
 
   /**
-   * Store failures are retryable by default. Domain/capability subclasses
-   * override this so hosts never have to reconstruct Bursar's error taxonomy.
+   * Whether the operation may have committed even though no result was
+   * observed. Callers must reuse the same idempotency key before retrying an
+   * indeterminate mutation.
    */
-  readonly retryable: boolean = true;
+  readonly indeterminate: boolean;
+
+  constructor(message: string, options: StoreErrorOptions = {}) {
+    super(message, options);
+    this.indeterminate = options.indeterminate ?? false;
+    this.retryable = options.retryable ?? false;
+  }
+
+  override toJSON(): SerializedBursarError {
+    return { ...super.toJSON(), indeterminate: this.indeterminate };
+  }
+}
+
+/** A transient store/transport failure for which a bounded retry can help. */
+export class StoreUnavailableError extends StoreError {
+  override readonly name: string = "StoreUnavailableError";
+  override readonly code: string = "STORE_UNAVAILABLE";
+  override readonly retryable = true;
+}
+
+/** A store operation exceeded its configured deadline. */
+export class StoreTimeoutError extends StoreUnavailableError {
+  override readonly name = "StoreTimeoutError";
+  override readonly code = "STORE_TIMEOUT";
+}
+
+/** The application attempted to use a store after closing it. */
+export class StoreClosedError extends StoreError {
+  override readonly name = "StoreClosedError";
+  override readonly code = "STORE_CLOSED";
+  override readonly category = "conflict" as const;
 }
 
 export class CapReachedError extends StoreError {
@@ -137,9 +215,22 @@ export class CapabilityNotSupportedError extends StoreError {
   override readonly retryable = false;
 }
 
+/**
+ * Cross-package-copy-safe check for an SDK error. `instanceof` alone fails
+ * when an application installs two copies of the package.
+ */
+export function isBursarError(error: unknown): error is BursarError {
+  if (error instanceof BursarError) return true;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as Record<PropertyKey, unknown>)[BURSAR_ERROR_BRAND] === true
+  );
+}
+
 /** Return whether retrying the failed Bursar operation can be useful. */
 export function isRetryableBursarError(error: unknown): boolean {
-  return error instanceof BursarError && error.retryable;
+  return isBursarError(error) && error.retryable;
 }
 
 /** Project a Bursar failure category to its conventional HTTP status. */

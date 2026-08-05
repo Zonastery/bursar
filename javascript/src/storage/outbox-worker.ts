@@ -9,7 +9,7 @@ export interface OutboxWorkerOptions {
   retryDelaySeconds?: number;
   maxRetryDelaySeconds?: number;
   attemptLimit?: number;
-  onError?: (error: unknown) => void;
+  onError?: (error: unknown) => void | Promise<void>;
 }
 
 export interface OutboxRunResult {
@@ -26,7 +26,7 @@ interface NormalizedWorkerOptions {
   retryDelaySeconds: number;
   maxRetryDelaySeconds: number;
   attemptLimit: number;
-  onError: ((error: unknown) => void) | null;
+  onError: ((error: unknown) => void | Promise<void>) | null;
 }
 
 function integerOption(
@@ -65,6 +65,9 @@ export class OutboxWorker {
     options: OutboxWorkerOptions = {},
   ) {
     if (handlers.length === 0) throw new TypeError("OutboxWorker requires at least one handler");
+    if (options.onError !== undefined && typeof options.onError !== "function") {
+      throw new TypeError("onError must be a function");
+    }
     this.store = store;
     for (const handler of handlers) {
       if (handler.topics.length === 0) {
@@ -134,10 +137,19 @@ export class OutboxWorker {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
       void this.runOnce()
-        .catch((error: unknown) => this.options.onError?.(error))
+        .catch((error: unknown) => this.reportError(error))
         .finally(() => this.schedule(this.options.pollIntervalMs));
     }, delayMs);
     this.timer.unref?.();
+  }
+
+  private reportError(error: unknown): void {
+    try {
+      const result = this.options.onError?.(error);
+      if (result) void Promise.resolve(result).catch(() => {});
+    } catch {
+      // Observability callbacks must never stop the delivery loop.
+    }
   }
 
   private async dispatchOnce(): Promise<OutboxRunResult> {

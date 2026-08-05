@@ -49,11 +49,21 @@ export {
   RefundError,
   QuotaExceededError,
   StoreError,
+  StoreClosedError,
+  StoreTimeoutError,
+  StoreUnavailableError,
   bursarErrorHttpStatus,
   bursarErrorPublicMessage,
+  isBursarError,
   isRetryableBursarError,
 } from "./errors.js";
-export type { BursarErrorCategory } from "./errors.js";
+export type {
+  BursarErrorCategory,
+  BursarErrorDetails,
+  BursarErrorOptions,
+  SerializedBursarError,
+  StoreErrorOptions,
+} from "./errors.js";
 export { retryBursarOperation } from "./retry.js";
 export type { BursarRetryOptions } from "./retry.js";
 export { validateExpression, evaluateExpression } from "./expr.js";
@@ -136,6 +146,8 @@ export type { CreateLeaseOptions, SettleLeaseOptions } from "./credits/store.js"
 // Stores
 export { CreditStore } from "./credits/store.js";
 export { PostgresStore } from "./credits/postgres/store.js";
+export type { PostgresStoreOptions } from "./credits/postgres/store.js";
+export type { PostgresConnectionOptions } from "./shared/postgres-client.js";
 
 // Events
 export type { CreditEvent, CreditEventType } from "./credits/events.js";
@@ -164,6 +176,7 @@ export type {
   BillingPaymentInfo,
   BillingPreferences,
   BillingProvider,
+  PostgresBillingStoreOptions,
   BillingRefundInfo,
   BillingSubscriptionInfo,
   BillingSubscriptionChange,

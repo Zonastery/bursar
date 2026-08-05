@@ -11,8 +11,11 @@ export function decimalValue(value: unknown, fallback: Decimal = ZERO): Decimal 
   if (value instanceof Decimal) return value;
   try {
     return new Decimal(typeof value === "string" ? value : String(value));
-  } catch {
-    throw new StoreError(`Failed to parse Decimal value: ${String(value)}`);
+  } catch (cause) {
+    throw new StoreError(`Failed to parse Decimal value: ${String(value)}`, {
+      cause,
+      details: { valueType: typeof value },
+    });
   }
 }
 

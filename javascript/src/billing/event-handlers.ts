@@ -740,16 +740,31 @@ export class BillingEventHandlers {
       return;
     }
     this.logger.debug("[BillingService] provisionSubscription setting plan", { uid, plan });
-    const periodStart =
-      preserveAllowanceAnchor && this.provisioning.getUserPlan
+    let periodStart: Date | string | null | undefined;
+    if (preserveAllowanceAnchor) {
+      const existingAnchor = this.provisioning.getUserPlan
         ? (await this.provisioning.getUserPlan(uid))?.planAssignedAt
-        : event.subscription?.periodStart;
+        : undefined;
+      if (existingAnchor) {
+        const anchor = new Date(existingAnchor);
+        // A provider's subscription period start may actually be its next
+        // renewal date. Never let a future anchor hide an already-active
+        // entitlement after a plan change.
+        if (!Number.isNaN(anchor.getTime()) && anchor.getTime() <= Date.now()) {
+          periodStart = anchor;
+        }
+      }
+    } else {
+      periodStart = event.subscription?.periodStart;
+    }
     const planAssignedAt = periodStart
       ? (() => {
           const d = new Date(periodStart);
           return Number.isNaN(d.getTime()) ? undefined : d;
         })()
-      : undefined;
+      : preserveAllowanceAnchor
+        ? new Date()
+        : undefined;
     await this.provisioning.setUserPlan(uid, plan, planAssignedAt);
 
     if (this.autoSelectEntitlementSource && event.provider) {

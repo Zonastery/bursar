@@ -122,6 +122,7 @@ from bursar.commerce import (
 if TYPE_CHECKING:
     from bursar.billing import PostgresBillingStore
     from bursar.credits.postgres.store import PostgresStore
+    from bursar.shared.postgres_client import PostgresConnectionOptions
 from bursar.config import (
     BursarConfig,
     BursarConfigData,
@@ -227,8 +228,12 @@ from bursar.errors import (
     BursarError,
     BursarErrorCategory,
     BursarImportError,
+    StoreClosedError,
+    StoreTimeoutError,
+    StoreUnavailableError,
     bursar_error_http_status,
     bursar_error_public_message,
+    is_bursar_error,
     is_retryable_bursar_error,
 )
 from bursar.expr import ExpressionError, evaluate_expression, quantize_money, validate_expression
@@ -261,6 +266,10 @@ def __getattr__(name: str):
         from bursar.credits.postgres.store import PostgresStore
 
         return PostgresStore
+    if name == "PostgresConnectionOptions":
+        from bursar.shared.postgres_client import PostgresConnectionOptions
+
+        return PostgresConnectionOptions
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 
@@ -306,8 +315,12 @@ __all__ = [
     "BursarError",
     "BursarErrorCategory",
     "BursarImportError",
+    "StoreClosedError",
+    "StoreTimeoutError",
+    "StoreUnavailableError",
     "bursar_error_http_status",
     "bursar_error_public_message",
+    "is_bursar_error",
     "is_retryable_bursar_error",
     "BursarRetryOptions",
     "retry_bursar_operation",
@@ -439,6 +452,7 @@ __all__ = [
     "PortalParams",
     "PostgresBillingStore",
     "PostgresStore",
+    "PostgresConnectionOptions",
     "BursarConfig",
     "BursarConfigResult",
     "BursarConfigHistoryItem",

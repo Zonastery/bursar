@@ -29,7 +29,12 @@ import type {
   CheckoutIntentUpdate,
 } from "../contracts.js";
 import type { QueryFn } from "../../shared/postgres-types.js";
-import { PostgresClient } from "../../shared/postgres-client.js";
+import {
+  PostgresClient,
+  type PostgresConnectionOptions,
+  type PostgresPool,
+} from "../../shared/postgres-client.js";
+import { StoreClosedError } from "../../errors.js";
 import { optionalBoundedDiagnosticMessage } from "../../shared/diagnostics.js";
 import { BillingOfferRepository } from "./repositories/offer.js";
 import { BillingTopupRepository } from "./repositories/topup.js";
@@ -53,6 +58,10 @@ function toIso(value: unknown): string | null {
   return String(value);
 }
 
+export interface PostgresBillingStoreOptions extends PostgresConnectionOptions {
+  billingPayloadBackend?: "postgres" | "s3";
+}
+
 export class PostgresBillingStore extends BillingStore {
   private readonly postgres: PostgresClient;
 
@@ -68,14 +77,22 @@ export class PostgresBillingStore extends BillingStore {
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
   constructor(
-    poolOrUrl: import("pg").Pool | string,
+    poolOrUrl: PostgresPool | string,
     tenantId: string,
-    storageOptions?: { billingPayloadBackend?: "postgres" | "s3" },
+    storageOptions?: PostgresBillingStoreOptions,
   ) {
     super();
     this.postgres = new PostgresClient(poolOrUrl, {
       tenantId,
       billingPayloadBackend: storageOptions?.billingPayloadBackend,
+      connectionTimeoutMs: storageOptions?.connectionTimeoutMs,
+      statementTimeoutMs: storageOptions?.statementTimeoutMs,
+      idleTransactionTimeoutMs: storageOptions?.idleTransactionTimeoutMs,
+      idleTimeoutMs: storageOptions?.idleTimeoutMs,
+      maxConnections: storageOptions?.maxConnections,
+      applicationName: storageOptions?.applicationName,
+      onPoolError: storageOptions?.onPoolError,
+      closedError: () => new StoreClosedError("Billing store has been closed"),
     });
   }
 

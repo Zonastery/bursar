@@ -3,9 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh",
+    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh && python3 scripts/gen-llms-files.py",
     "generate:erd": "bash scripts/generate_erd_docs.sh",
-    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh",
+    "generate:llms": "python3 scripts/gen-llms-files.py",
+    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh && python3 scripts/gen-llms-files.py",
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
     "build": "docusaurus build",

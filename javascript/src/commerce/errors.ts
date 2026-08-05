@@ -1,4 +1,4 @@
-import { BursarError, type BursarErrorCategory } from "../errors.js";
+import { BursarError, type BursarErrorCategory, type BursarErrorOptions } from "../errors.js";
 
 /** Base class for stable, transport-independent commerce failures. */
 export class CommerceError extends BursarError {
@@ -9,8 +9,9 @@ export class CommerceError extends BursarError {
     override readonly code: string,
     override readonly category: BursarErrorCategory = "internal",
     override readonly retryable: boolean = false,
+    options: BursarErrorOptions = {},
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -134,8 +135,8 @@ export class CoreBillingDataUnavailableError extends CommerceError {
 
   constructor(
     message = "Core credit and billing data is temporarily unavailable",
-    readonly cause?: unknown,
+    cause?: unknown,
   ) {
-    super(message, "CORE_BILLING_DATA_UNAVAILABLE", "unavailable", true);
+    super(message, "CORE_BILLING_DATA_UNAVAILABLE", "unavailable", true, { cause });
   }
 }

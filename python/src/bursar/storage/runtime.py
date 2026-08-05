@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import time
+import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Literal, Protocol, TypeGuard, cast
@@ -20,8 +21,9 @@ from bursar.credits.events import CreditEventEmitter
 from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.types import UsageAnalyticsStore
-from bursar.errors import PricingNotLoadedError, is_retryable_bursar_error
-from bursar.shared.postgres_client import PostgresClient
+from bursar.errors import PricingNotLoadedError, StoreClosedError, is_retryable_bursar_error
+from bursar.retry import BursarRetryOptions, retry_bursar_operation
+from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, create_pool
 from bursar.storage.adapters.clickhouse import (
     ClickHouseUsageStore,
     ClickHouseUsageStoreOptions,
@@ -90,6 +92,7 @@ class BursarRuntimeBursarOptions(_RuntimeModel):
 class BursarRuntimeOptions(_RuntimeModel):
     postgres: str | SkipValidation[PostgresPool]
     tenant_id: UUID
+    postgres_options: PostgresConnectionOptions = PostgresConnectionOptions()
     s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
     clickhouse: SkipValidation[UsageAnalyticsSink] | ClickHouseUsageStoreOptions | None = None
     outbox: OutboxWorkerOptions | Literal[False] | None = None
@@ -107,6 +110,7 @@ class BursarRuntimeStartOptions(_RuntimeModel):
     load_catalog: bool = False
     max_attempts: int = 1
     retry_delay_seconds: float = 0.25
+    max_elapsed_seconds: float = 30.0
     should_retry: SkipValidation[Callable[[BaseException], bool]] | None = None
 
     @model_validator(mode="after")
@@ -115,6 +119,8 @@ class BursarRuntimeStartOptions(_RuntimeModel):
             raise ValueError("max_attempts must be a positive integer")
         if self.retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds must not be negative")
+        if self.max_elapsed_seconds < 0:
+            raise ValueError("max_elapsed_seconds must not be negative")
         return self
 
 
@@ -182,12 +188,14 @@ class BursarRuntime:
             tenant_id=options.tenant_id,
             pool=psycopg_pool,
             usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
+            postgres_options=options.postgres_options,
         )
         self.billing_store = PostgresBillingStore(
             "",
             tenant_id=options.tenant_id,
             pool=psycopg_pool,
             billing_payload_backend="s3" if self.s3 is not None else "postgres",
+            postgres_options=options.postgres_options,
         )
         credits_options = (options.bursar.credits_options or CreditsServiceOptions()).model_copy(
             update={
@@ -215,6 +223,7 @@ class BursarRuntime:
                 tenant_id=options.tenant_id,
                 usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
                 billing_payload_backend="s3" if self.s3 is not None else "postgres",
+                postgres_options=options.postgres_options,
             ).query,
             options.tenant_id,
         )
@@ -223,70 +232,92 @@ class BursarRuntime:
         self.worker = (
             OutboxWorker(repository, handlers, worker_options) if handlers and options.outbox is not False else None
         )
+        self._lifecycle_lock = threading.RLock()
         self._started = False
         self._closed = False
+        self._close_failure: BaseException | None = None
 
     def start(self, options: BursarRuntimeStartOptions | None = None) -> None:
-        if self._started:
-            return
-        if self._closed:
-            msg = "BursarRuntime has been closed"
-            raise RuntimeError(msg)
-        start_options = options or BursarRuntimeStartOptions()
-        if start_options.load_catalog:
-            for attempt in range(1, start_options.max_attempts + 1):
-                try:
-                    self.bursar.load_catalog()
-                    break
-                except Exception as exc:
-                    retryable = (
-                        start_options.should_retry(exc)
-                        if start_options.should_retry is not None
-                        else isinstance(exc, PricingNotLoadedError) or is_retryable_bursar_error(exc)
-                    )
-                    if attempt >= start_options.max_attempts or not retryable:
-                        raise
-                    delay = min(start_options.retry_delay_seconds * (2 ** (attempt - 1)), 5.0)
-                    time.sleep(delay)
-        if self.clickhouse is not None:
-            initialize = getattr(self.clickhouse, "initialize", None)
-            if callable(initialize):
-                initialize()
-        if self.worker is not None:
-            self.worker.start()
-        self._started = True
+        with self._lifecycle_lock:
+            if self._started:
+                return
+            if self._closed:
+                msg = "BursarRuntime has been closed"
+                raise StoreClosedError(msg)
+            start_options = options or BursarRuntimeStartOptions()
+            if start_options.load_catalog:
+                retry_bursar_operation(
+                    self.bursar.load_catalog,
+                    retry_options=BursarRetryOptions(
+                        max_attempts=start_options.max_attempts,
+                        base_delay_seconds=start_options.retry_delay_seconds,
+                        max_delay_seconds=5.0,
+                        max_elapsed_seconds=start_options.max_elapsed_seconds,
+                        should_retry=start_options.should_retry
+                        or (lambda error: isinstance(error, PricingNotLoadedError) or is_retryable_bursar_error(error)),
+                    ),
+                )
+            if self.clickhouse is not None:
+                initialize = getattr(self.clickhouse, "initialize", None)
+                if callable(initialize):
+                    initialize()
+            if self.worker is not None:
+                self.worker.start()
+            self._started = True
 
     def health(self) -> BursarRuntimeHealth:
-        catalog_loaded = self.bursar.credits.pricing_engine is not None
-        return BursarRuntimeHealth(
-            ready=self._started and not self._closed and catalog_loaded,
-            started=self._started,
-            closed=self._closed,
-            catalog_loaded=catalog_loaded,
-        )
+        with self._lifecycle_lock:
+            catalog_loaded = self.bursar.credits.pricing_engine is not None
+            return BursarRuntimeHealth(
+                ready=self._started and not self._closed and catalog_loaded,
+                started=self._started,
+                closed=self._closed,
+                catalog_loaded=catalog_loaded,
+            )
 
     def flush(self) -> OutboxRunResult:
-        if self._closed:
-            msg = "BursarRuntime has been closed"
-            raise RuntimeError(msg)
-        if self.worker is None:
-            return OutboxRunResult(claimed=0, delivered=0, failed=0)
-        return self.worker.run_once()
+        with self._lifecycle_lock:
+            if self._closed:
+                msg = "BursarRuntime has been closed"
+                raise StoreClosedError(msg)
+            if self.worker is None:
+                return OutboxRunResult(claimed=0, delivered=0, failed=0)
+            return self.worker.run_once()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self.worker is not None:
-            self.worker.stop()
-        if self.s3 is not None:
-            close = getattr(self.s3, "close", None)
-            if callable(close):
-                close()
-        self.credit_store.close()
-        self.billing_store.close()
-        if self._owns_pool:
-            self._pool.closeall()
+        with self._lifecycle_lock:
+            if self._close_failure is not None:
+                raise self._close_failure
+            if self._closed:
+                return
+            self._closed = True
+            failures: list[BaseException] = []
+
+            resources: list[Callable[[], object]] = []
+            if self.worker is not None:
+                resources.append(self.worker.stop)
+            if self.s3 is not None:
+                close = getattr(self.s3, "close", None)
+                if callable(close):
+                    resources.append(close)
+            resources.extend((self.credit_store.close, self.billing_store.close))
+            if self._owns_pool:
+                resources.append(self._pool.closeall)
+
+            for close_resource in resources:
+                try:
+                    close_resource()
+                except BaseException as error:
+                    failures.append(error)
+
+            if not failures:
+                return
+            self._close_failure = (
+                failures[0]
+                if len(failures) == 1
+                else BaseExceptionGroup("BursarRuntime failed to close all resources", failures)
+            )
+            raise self._close_failure
 
     def __enter__(self) -> BursarRuntime:
         self.start()
@@ -379,6 +410,12 @@ def create_bursar_runtime(options: BursarRuntimeOptions) -> BursarRuntime:
         if not options.postgres.strip():
             msg = "postgres connection string must not be empty"
             raise ValueError(msg)
-        pool = psycopg2.pool.ThreadedConnectionPool(1, 10, options.postgres)
-        return BursarRuntime(pool, True, options)
+        pool = create_pool(options.postgres, postgres_options=options.postgres_options)
+        try:
+            return BursarRuntime(pool, True, options)
+        except BaseException:
+            # Do not leak an SDK-owned pool when composition/validation fails.
+            with suppress(BaseException):
+                pool.closeall()
+            raise
     return BursarRuntime(options.postgres, False, options)

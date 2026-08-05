@@ -137,7 +137,12 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
 
   initialize(): Promise<void> {
     if (!this.createTable) return Promise.resolve();
-    if (!this.initializePromise) this.initializePromise = this.createProjectionTable();
+    if (!this.initializePromise) {
+      this.initializePromise = this.createProjectionTable().catch((error: unknown) => {
+        this.initializePromise = null;
+        throw error;
+      });
+    }
     return this.initializePromise;
   }
 

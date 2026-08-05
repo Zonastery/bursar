@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 
 from pydantic import BaseModel, ConfigDict
 
@@ -158,7 +159,8 @@ class OutboxWorker:
                 self.run_once()
             except BaseException as error:
                 if self._options.on_error is not None:
-                    self._options.on_error(error)
+                    with suppress(BaseException):
+                        self._options.on_error(error)
             self._stop_event.wait(self._options.poll_interval_ms / 1_000)
 
     def _dispatch_event(self, event: OutboxEvent) -> bool:

@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 from uuid import UUID
 
 import psycopg2
-import psycopg2.extras
 import psycopg2.pool
 
 from bursar.billing.billing_store import BillingStore
@@ -67,6 +67,7 @@ from bursar.billing.types import (
 )
 from bursar.credits.postgres.repositories.schemas import SubscriptionRow
 from bursar.shared.diagnostics import optional_bounded_diagnostic_message
+from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions
 
 
 def _dec_credits(value: str | Decimal | None) -> Decimal | None:
@@ -103,20 +104,51 @@ class PostgresBillingStore(BillingStore):
         tenant_id: str | UUID,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
+        connection_timeout_seconds: float = 10.0,
+        statement_timeout_ms: int = 30_000,
+        idle_transaction_timeout_ms: int = 30_000,
+        application_name: str = "bursar-python",
+        on_pool_error: Any | None = None,
+        postgres_options: PostgresConnectionOptions | None = None,
     ) -> None:
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id)))
         self._billing_payload_backend = billing_payload_backend
-        self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, 10, database_url)
-        self._owns_pool = pool is None
+        self._client = (
+            PostgresClient.from_pool(
+                pool,
+                tenant_id=self._tenant_id,
+                billing_payload_backend=billing_payload_backend,
+                connection_timeout_seconds=connection_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
+                application_name=application_name,
+                on_pool_error=on_pool_error,
+                postgres_options=postgres_options,
+            )
+            if pool is not None
+            else PostgresClient(
+                database_url,
+                tenant_id=self._tenant_id,
+                billing_payload_backend=billing_payload_backend,
+                connection_timeout_seconds=connection_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
+                application_name=application_name,
+                on_pool_error=on_pool_error,
+                postgres_options=postgres_options,
+            )
+        )
 
     def close(self) -> None:
         """Close all connections in the pool."""
-        if self._pool is None:
-            return
-        if self._owns_pool:
-            self._pool.closeall()
-        self._pool = None
+        self._client.close()
+
+    def __del__(self) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            with suppress(BaseException):
+                client.close()
 
     def __enter__(self) -> PostgresBillingStore:
         return self
@@ -126,30 +158,7 @@ class PostgresBillingStore(BillingStore):
 
     def _execute(self, sql: str, params: list[Any] | None = None) -> list[Any]:
         """Execute raw SQL and return all result rows as dicts via the connection pool."""
-        conn = self._pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT set_config('bursar.tenant_id', %s, true)",
-                    (self._tenant_id,),
-                )
-                cur.execute(
-                    "SELECT set_config('bursar.billing_payload_backend', %s, true)",
-                    (self._billing_payload_backend,),
-                )
-                cur.execute(sql, params or [])
-                try:
-                    rows = cur.fetchall()
-                except psycopg2.ProgrammingError:
-                    rows = []
-            conn.commit()
-            return rows
-        except BaseException:
-            # Pool corruption — rollback and re-raise to protect connection state
-            conn.rollback()
-            raise
-        finally:
-            self._pool.putconn(conn)
+        return self._client.query(sql, params)
 
     @property
     def _offer_repo(self) -> BillingOfferRepository:

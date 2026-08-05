@@ -9,13 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import psycopg2
-import psycopg2.extras
 import psycopg2.pool
 
 from bursar.credits.postgres.repositories.analytics import AnalyticsRepository
@@ -85,6 +85,7 @@ from bursar.credits.types import (
     UsageChargePage,
     UsageRecordResult,
 )
+from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions
 from bursar.sql import _get_sql_files
 
 
@@ -155,13 +156,43 @@ class PostgresStore(CreditStore):
         max_pool_size: int = 20,
         pool: psycopg2.pool.ThreadedConnectionPool | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
+        connection_timeout_seconds: float = 10.0,
+        statement_timeout_ms: int = 30_000,
+        idle_transaction_timeout_ms: int = 30_000,
+        application_name: str = "bursar-python",
+        on_pool_error: Any | None = None,
+        postgres_options: PostgresConnectionOptions | None = None,
     ) -> None:
         super().__init__()
         self._database_url = database_url
         self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
         self._usage_backend = usage_backend
-        self._pool = pool or psycopg2.pool.ThreadedConnectionPool(1, max_pool_size, database_url)
-        self._owns_pool = pool is None
+        self._client = (
+            PostgresClient.from_pool(
+                pool,
+                tenant_id=self._tenant_id,
+                usage_backend=usage_backend,
+                connection_timeout_seconds=connection_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
+                application_name=application_name,
+                on_pool_error=on_pool_error,
+                postgres_options=postgres_options,
+            )
+            if pool is not None
+            else PostgresClient(
+                database_url,
+                max_connections=max_pool_size,
+                tenant_id=self._tenant_id,
+                usage_backend=usage_backend,
+                connection_timeout_seconds=connection_timeout_seconds,
+                statement_timeout_ms=statement_timeout_ms,
+                idle_transaction_timeout_ms=idle_transaction_timeout_ms,
+                application_name=application_name,
+                on_pool_error=on_pool_error,
+                postgres_options=postgres_options,
+            )
+        )
 
     @property
     def database_url(self) -> str:
@@ -238,15 +269,13 @@ class PostgresStore(CreditStore):
 
     def close(self) -> None:
         """Close all connections in the pool."""
-        if self._pool is None:
-            return
-        if self._owns_pool:
-            self._pool.closeall()
-        self._pool = None
+        self._client.close()
 
     def __del__(self) -> None:
-        if hasattr(self, "_pool") and self._pool is not None:
-            self.close()
+        client = getattr(self, "_client", None)
+        if client is not None:
+            with suppress(BaseException):
+                client.close()
 
     # ── RPC dispatcher ─────────────────────────────────────────────────
 
@@ -257,60 +286,19 @@ class PostgresStore(CreditStore):
         to its scalar value. Multi-column TABLE functions are returned as
         dictionaries keyed by their declared column names.
         """
-        pool = self._pool
-        if pool is None:
-            raise RuntimeError("cannot call RPC on a closed PostgresStore")
-        conn = pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                self._bind_tenant(cur)
-                # Bursar is deliberately isolated from Supabase's API schema.
-                # Keep public as a trailing compatibility namespace for the
-                # small number of host-owned auth objects it references.
-                cur.execute("SET LOCAL search_path TO bursar, public")
-                encoded_params = [
-                    psycopg2.extras.Json(value) if isinstance(value, (dict, list)) else value for value in params
-                ]
-                cur.callproc(name, encoded_params)
-                rows = cur.fetchall()
-            conn.commit()
-            return [next(iter(row.values())) if len(row) == 1 else dict(row) for row in (rows or [])]
-        except psycopg2.Error as e:
-            conn.rollback()
-            raise StoreError(f"database RPC {name!r} failed: {e}") from e
-        except BaseException:
-            # Rollback on non-database exceptions to avoid pool poisoning.
-            conn.rollback()
-            raise
-        finally:
-            pool.putconn(conn)
+        if self._tenant_id is None:
+            raise RuntimeError("tenant_id is required for Bursar store operations")
+        return self._client.callproc(name, params)
 
     def _query(self, sql: str, params: list[Any]) -> list[Any]:
-        pool = self._pool
-        if pool is None:
-            raise RuntimeError("cannot query on a closed PostgresStore")
-        conn = pool.getconn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                self._bind_tenant(cur)
-                cur.execute("SET LOCAL search_path TO bursar, public")
-                cur.execute(sql, params)
-                rows = cur.fetchall() if cur.description else []
-            conn.commit()
-            return [dict(row) for row in (rows or [])]
-        except psycopg2.Error as e:
-            conn.rollback()
-            raise StoreError(f"database query failed: {e}") from e
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            pool.putconn(conn)
+        if self._tenant_id is None:
+            raise RuntimeError("tenant_id is required for Bursar store operations")
+        return self._client.query(sql, params)
 
     def _conn(self):
         """Create a dedicated connection for one-time operations (e.g. setup)."""
         try:
-            return psycopg2.connect(self._database_url)
+            return psycopg2.connect(self._database_url, **self._client.connection_kwargs)
         except psycopg2.Error as e:
             raise StoreError(f"database connection failed: {e}") from e
 

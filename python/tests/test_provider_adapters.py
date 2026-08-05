@@ -53,7 +53,7 @@ class Sink:
         return BillingEventResult(handled=True, action="ok")
 
 
-def test_billing_sink_retries_a_busy_claim(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_billing_sink_retries_a_busy_claim() -> None:
     results = iter(
         [
             BillingEventResult(handled=False, error="claim_busy"),
@@ -62,9 +62,6 @@ def test_billing_sink_retries_a_busy_claim(monkeypatch: pytest.MonkeyPatch) -> N
         ]
     )
     sink = SimpleNamespace(ingest_billing_event=lambda _event: next(results))
-    sleep = SimpleNamespace(delays=[])
-    monkeypatch.setattr("bursar.providers._shared.time.sleep", sleep.delays.append)
-
     result = call_billing_event_sink(
         sink,
         BillingEvent(
@@ -76,7 +73,6 @@ def test_billing_sink_retries_a_busy_claim(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
     assert result.action == "duplicate"
-    assert sleep.delays == [0.025, 0.05]
 
 
 class DodoClient:

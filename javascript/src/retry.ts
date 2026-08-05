@@ -1,4 +1,8 @@
+import pRetry from "p-retry";
+
 import { isRetryableBursarError } from "./errors.js";
+
+const MAX_TIMER_MS = 2_147_483_647;
 
 export interface BursarRetryOptions {
   /** Total attempts, including the first call. Defaults to 3. */
@@ -7,34 +11,110 @@ export interface BursarRetryOptions {
   baseDelayMs?: number;
   /** Maximum delay between attempts. Defaults to 2 seconds. */
   maxDelayMs?: number;
-  /** Optional observer invoked before each retry. */
-  onRetry?: (error: unknown, attempt: number, delayMs: number) => void | Promise<void>;
+  /** Exponential-backoff multiplier. Defaults to 2. */
+  factor?: number;
+  /** Randomize backoff to prevent a thundering herd. Defaults to true. */
+  jitter?: boolean;
+  /** Maximum elapsed retry budget. Defaults to 30 seconds. */
+  maxElapsedMs?: number;
+  /** Abort retries and pending backoff when this signal is aborted. */
+  signal?: AbortSignal;
+  /** Allow Node.js to exit while waiting to retry. Defaults to false. */
+  unref?: boolean;
+  /**
+   * Override the default `error.retryable` decision. This does not make an
+   * operation idempotent; mutation retries must reuse their idempotency key.
+   */
+  shouldRetry?: (error: Error) => boolean | Promise<boolean>;
+  /** Observer invoked immediately before each retry is scheduled. */
+  onRetry?: (error: Error, nextAttempt: number, delayMs: number) => void | Promise<void>;
 }
 
-/** Execute a Bursar operation with bounded retries for SDK-classified transient failures. */
+function finiteNumber(
+  value: number,
+  name: string,
+  minimum: number,
+  maximum = Number.MAX_VALUE,
+): number {
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new RangeError(`${name} must be a finite number between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+/**
+ * Execute an operation with bounded, cancellable exponential backoff.
+ *
+ * Retries are deliberately opt-in at the error level: by default only typed
+ * Bursar errors whose `retryable` flag is true are attempted again. The
+ * operation must be read-only or idempotent because a transport failure can
+ * make a mutation's commit outcome indeterminate.
+ */
 export async function retryBursarOperation<T>(
-  operation: () => Promise<T>,
+  operation: () => PromiseLike<T> | T,
   options: BursarRetryOptions = {},
 ): Promise<T> {
-  const requestedAttempts = options.maxAttempts ?? 3;
-  const maxAttempts = Number.isFinite(requestedAttempts)
-    ? Math.max(1, Math.trunc(requestedAttempts))
-    : 3;
-  const requestedBaseDelay = options.baseDelayMs ?? 250;
-  const baseDelayMs = Number.isFinite(requestedBaseDelay) ? Math.max(0, requestedBaseDelay) : 250;
-  const requestedMaxDelay = options.maxDelayMs ?? 2_000;
-  const maxDelayMs = Number.isFinite(requestedMaxDelay)
-    ? Math.max(baseDelayMs, requestedMaxDelay)
-    : 2_000;
-
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (attempt >= maxAttempts || !isRetryableBursarError(error)) throw error;
-      const delayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
-      await options.onRetry?.(error, attempt + 1, delayMs);
-      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
+  if (typeof operation !== "function") throw new TypeError("operation must be a function");
+  if (options.jitter !== undefined && typeof options.jitter !== "boolean") {
+    throw new TypeError("jitter must be a boolean");
   }
+  if (options.unref !== undefined && typeof options.unref !== "boolean") {
+    throw new TypeError("unref must be a boolean");
+  }
+  if (options.shouldRetry !== undefined && typeof options.shouldRetry !== "function") {
+    throw new TypeError("shouldRetry must be a function");
+  }
+  if (options.onRetry !== undefined && typeof options.onRetry !== "function") {
+    throw new TypeError("onRetry must be a function");
+  }
+  if (
+    options.signal !== undefined &&
+    (typeof options.signal !== "object" ||
+      options.signal === null ||
+      typeof options.signal.throwIfAborted !== "function")
+  ) {
+    throw new TypeError("signal must be an AbortSignal");
+  }
+
+  const maxAttempts = options.maxAttempts ?? 3;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
+    throw new RangeError("maxAttempts must be a positive safe integer");
+  }
+
+  const baseDelayMs = finiteNumber(options.baseDelayMs ?? 250, "baseDelayMs", 0, MAX_TIMER_MS);
+  const maxDelayMs = finiteNumber(
+    options.maxDelayMs ?? Math.max(2_000, baseDelayMs),
+    "maxDelayMs",
+    0,
+    MAX_TIMER_MS,
+  );
+  if (maxDelayMs < baseDelayMs) {
+    throw new RangeError("maxDelayMs must be greater than or equal to baseDelayMs");
+  }
+  const factor = finiteNumber(options.factor ?? 2, "factor", Number.EPSILON);
+  const maxElapsedMs = finiteNumber(
+    options.maxElapsedMs ?? 30_000,
+    "maxElapsedMs",
+    0,
+    MAX_TIMER_MS,
+  );
+
+  return pRetry(operation, {
+    retries: maxAttempts - 1,
+    minTimeout: baseDelayMs,
+    maxTimeout: maxDelayMs,
+    factor,
+    randomize: options.jitter ?? true,
+    maxRetryTime: maxElapsedMs,
+    signal: options.signal,
+    unref: options.unref ?? false,
+    shouldRetry: async ({ error, attemptNumber, retryDelay }) => {
+      const retry = options.shouldRetry
+        ? await options.shouldRetry(error)
+        : isRetryableBursarError(error);
+      if (!retry) return false;
+      await options.onRetry?.(error, attemptNumber + 1, retryDelay);
+      return true;
+    },
+  });
 }

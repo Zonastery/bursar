@@ -68,7 +68,16 @@ from bursar.errors import (
     RefundError as RefundError,
 )
 from bursar.errors import (
+    StoreClosedError as StoreClosedError,
+)
+from bursar.errors import (
     StoreError as StoreError,
+)
+from bursar.errors import (
+    StoreTimeoutError as StoreTimeoutError,
+)
+from bursar.errors import (
+    StoreUnavailableError as StoreUnavailableError,
 )
 
 

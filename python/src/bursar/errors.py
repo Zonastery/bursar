@@ -5,7 +5,9 @@ All error classes used across the SDK, consolidated in one place.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Literal, TypeGuard
 
 BursarErrorCategory = Literal[
     "invalid_request",
@@ -26,6 +28,44 @@ class BursarError(Exception):
     category: BursarErrorCategory = "internal"
     retryable = False
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details = MappingProxyType(dict(details)) if details else None
+        self._cause = cause
+
+    @property
+    def cause(self) -> BaseException | None:
+        """Return the preserved native failure, including ``raise from`` causes."""
+
+        return self._cause if self._cause is not None else self.__cause__
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable, safe representation for logs and protocol adapters."""
+
+        result: dict[str, Any] = {
+            "name": type(self).__name__,
+            "message": str(self),
+            "code": self.code,
+            "category": self.category,
+            "retryable": self.retryable,
+        }
+        if self.details is not None:
+            result["details"] = dict(self.details)
+        if isinstance(self, StoreError):
+            result["indeterminate"] = self.indeterminate
+        return result
+
+    def to_json(self) -> dict[str, Any]:
+        """Alias matching the JavaScript SDK's serializable error contract."""
+
+        return self.to_dict()
+
 
 class ConfigError(BursarError):
     """Raised when a Bursar configuration is invalid."""
@@ -37,9 +77,13 @@ class ConfigError(BursarError):
         message: str | None = None,
         *,
         validation_error: Any | None = None,
+        cause: BaseException | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(
-            str(validation_error) if validation_error is not None else message or "invalid Bursar configuration"
+            str(validation_error) if validation_error is not None else message or "invalid Bursar configuration",
+            cause=cause,
+            details=details,
         )
         self.validation_error = validation_error
 
@@ -73,7 +117,39 @@ class StoreError(BursarError):
 
     code = "STORE_ERROR"
     category: BursarErrorCategory = "unavailable"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool | None = None,
+        indeterminate: bool = False,
+        cause: BaseException | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, cause=cause, details=details)
+        self.retryable = type(self).retryable if retryable is None else retryable
+        self.indeterminate = indeterminate
+
+
+class StoreUnavailableError(StoreError):
+    """A transient store or transport failure suitable for bounded retry."""
+
+    code = "STORE_UNAVAILABLE"
     retryable = True
+
+
+class StoreTimeoutError(StoreUnavailableError):
+    """A store operation exceeded its configured deadline."""
+
+    code = "STORE_TIMEOUT"
+
+
+class StoreClosedError(StoreError, RuntimeError):
+    """The application attempted to use a store after closing it."""
+
+    code = "STORE_CLOSED"
+    category: BursarErrorCategory = "conflict"
 
 
 class InsufficientCreditsError(CreditError):
@@ -155,10 +231,18 @@ class BursarImportError(BursarError):
     category: BursarErrorCategory = "unavailable"
 
 
+def is_bursar_error(error: object) -> TypeGuard[BursarError]:
+    """Return whether an exception belongs to the Bursar error contract."""
+
+    return isinstance(error, BursarError)
+
+
 def is_retryable_bursar_error(error: BaseException) -> bool:
     """Return whether retrying the failed Bursar operation can be useful."""
 
-    return isinstance(error, BursarError) and error.retryable
+    if not is_bursar_error(error):
+        return False
+    return error.retryable
 
 
 def bursar_error_http_status(error: BursarError) -> int:

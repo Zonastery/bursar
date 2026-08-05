@@ -1,10 +1,11 @@
+import pRetry from "p-retry";
+
 import type { BillingEvent, BillingEventResult } from "../billing/index.js";
 import type { BillingEventSink } from "../bursar.js";
+import { BursarError, StoreUnavailableError } from "../errors.js";
 
-const BUSY_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800];
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+class BillingClaimBusyError extends Error {
+  override readonly name = "BillingClaimBusyError";
 }
 
 /**
@@ -16,19 +17,47 @@ export async function callBillingEventSink(
   sink: BillingEventSink,
   event: BillingEvent,
 ): Promise<BillingEventResult> {
-  for (let attempt = 0; ; attempt += 1) {
-    const result = await sink.ingestBillingEvent(event);
-    if (result.error === "claim_busy" && attempt < BUSY_RETRY_DELAYS_MS.length) {
-      await delay(BUSY_RETRY_DELAYS_MS[attempt]);
-      continue;
+  let result: BillingEventResult;
+  try {
+    result = await pRetry(
+      async () => {
+        const attempted = await sink.ingestBillingEvent(event);
+        if (attempted.error === "claim_busy") throw new BillingClaimBusyError();
+        return attempted;
+      },
+      {
+        retries: 6,
+        minTimeout: 25,
+        maxTimeout: 800,
+        factor: 2,
+        randomize: true,
+        maxRetryTime: 5_000,
+        shouldRetry: ({ error }) => error instanceof BillingClaimBusyError,
+      },
+    );
+  } catch (cause) {
+    if (cause instanceof BillingClaimBusyError) {
+      throw new StoreUnavailableError("Billing event claim remained busy", {
+        cause,
+        details: { reason: "claim_busy" },
+      });
     }
-    if (
-      !result.handled &&
-      result.error !== "unhandled_event_type" &&
-      result.error !== "user_not_found"
-    ) {
-      throw new Error(`Bursar failed to ingest billing event: ${result.error}`);
-    }
-    return result;
+    throw cause;
   }
+
+  if (result.error === "claim_failed_retry") {
+    throw new StoreUnavailableError("Billing event claim could not be acquired", {
+      details: { reason: result.error },
+    });
+  }
+  if (
+    !result.handled &&
+    result.error !== "unhandled_event_type" &&
+    result.error !== "user_not_found"
+  ) {
+    throw new BursarError("Bursar failed to ingest the billing event", {
+      details: { reason: result.error ?? "unknown" },
+    });
+  }
+  return result;
 }

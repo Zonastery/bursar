@@ -5,6 +5,7 @@ JavaScript SDK's Node-only storage entry point. Using the native S3 adapter
 additionally requires the ``s3`` extra.
 """
 
+from bursar.shared.postgres_client import PostgresConnectionOptions
 from bursar.storage.adapters import (
     ClickHouseClient,
     ClickHouseQueryResult,
@@ -58,6 +59,7 @@ __all__ = [
     "OutboxStore",
     "OutboxWorker",
     "OutboxWorkerOptions",
+    "PostgresConnectionOptions",
     "S3BillingArchive",
     "S3BillingArchiveOptions",
     "S3Credentials",

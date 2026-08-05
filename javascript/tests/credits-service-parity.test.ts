@@ -11,13 +11,15 @@ import {
   CapReachedError,
   CapabilityNotSupportedError,
   StoreError,
+  StoreUnavailableError,
   isRetryableBursarError,
 } from "../src/errors.js";
 import { retryBursarOperation } from "../src/retry.js";
 
 describe("CreditsService mirror regressions", () => {
   it("only classifies transient store failures as retryable", () => {
-    expect(isRetryableBursarError(new StoreError("temporary"))).toBe(true);
+    expect(isRetryableBursarError(new StoreUnavailableError("temporary"))).toBe(true);
+    expect(isRetryableBursarError(new StoreError("unclassified"))).toBe(false);
     expect(isRetryableBursarError(new CapReachedError("permanent"))).toBe(false);
     expect(isRetryableBursarError(new CapabilityNotSupportedError("permanent"))).toBe(false);
   });
@@ -29,7 +31,7 @@ describe("CreditsService mirror regressions", () => {
   it("retries only transient Bursar failures", async () => {
     const transient = vi
       .fn<() => Promise<string>>()
-      .mockRejectedValueOnce(new StoreError("temporary"))
+      .mockRejectedValueOnce(new StoreUnavailableError("temporary"))
       .mockResolvedValue("ok");
     await expect(retryBursarOperation(transient, { maxAttempts: 3, baseDelayMs: 0 })).resolves.toBe(
       "ok",

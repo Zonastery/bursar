@@ -31,6 +31,7 @@ export function safeParse<T>(schema: z.ZodType<T>, data: unknown, context: strin
   } catch (e) {
     throw new StoreError(
       `${context}: schema validation failed — ${e instanceof Error ? e.message : String(e)}`,
+      { cause: e, details: { context } },
     );
   }
 }

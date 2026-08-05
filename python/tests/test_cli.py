@@ -10,7 +10,7 @@ from uuid import UUID
 import pytest
 
 from bursar import __main__ as cli
-from bursar.credits.store import StoreError
+from bursar.credits.store import StoreError, StoreUnavailableError
 
 
 def test_load_pricing_file_supports_json_yaml_and_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,7 +155,7 @@ def test_retry_transient_retries_only_transient_errors(monkeypatch: pytest.Monke
         nonlocal attempts
         attempts += 1
         if attempts < 3:
-            raise StoreError("PGRST205 schema cache")
+            raise StoreUnavailableError("PGRST205 schema cache")
         return "ok"
 
     monkeypatch.setattr(cli, "_RETRY_INITIAL_DELAY", 0)

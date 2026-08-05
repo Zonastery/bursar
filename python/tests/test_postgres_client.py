@@ -12,6 +12,12 @@ class FakePool:
     def closeall(self) -> None:
         self.close_calls += 1
 
+    def getconn(self) -> Any:
+        raise AssertionError("query was not expected")
+
+    def putconn(self, _conn: Any, close: bool = False) -> None:
+        return None
+
 
 def test_borrowed_pool_is_not_closed_but_client_cannot_be_reused() -> None:
     pool = FakePool()

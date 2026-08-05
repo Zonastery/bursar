@@ -15,20 +15,45 @@ abstract contract a custom backend must implement.
 ```ts
 import { PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(databaseUrl, tenantId);
+const store = new PostgresStore(databaseUrl, tenantId, {
+  connectionTimeoutMs: 10_000,
+  statementTimeoutMs: 30_000,
+  onPoolError: (error) => console.error("Bursar pool error", error),
+});
 ```
 
 Connects through `pg` and runs every mutation as a canonical SQL function
 (RPC). `tenantId` is a required positional argument that scopes every
 transaction to one tenant.
 
-| Parameter | Type | Meaning |
-| --- | --- | --- |
-| `databaseUrl` | `string` | Postgres connection string |
-| `tenantId` | `string` | Required tenant UUID scoping every transaction |
-| `poolOrCtor` | `Pool \| PoolConstructor \| undefined` | Reuse an existing `pg.Pool` or pass a pool constructor |
+| Parameter             | Type                                                           | Meaning                                                               |
+| --------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `databaseUrl`         | `string`                                                       | Postgres connection string                                            |
+| `tenantId`            | `string`                                                       | Required tenant UUID scoping every transaction                        |
+| `poolOrCtorOrOptions` | `Pool \| PoolConstructor \| PostgresStoreOptions \| undefined` | Reuse a pool, pass a pool constructor, or configure an SDK-owned pool |
+| `storageOptions`      | `PostgresStoreOptions \| undefined`                            | Options when the third argument is a pool or constructor              |
 
-The store owns its pool: call `await store.close()` to drain it.
+The store owns a pool it creates from `databaseUrl`: call `await store.close()`
+to drain it. A supplied pool is borrowed and is never ended by the store.
+
+### PostgreSQL reliability options
+
+`PostgresStoreOptions` and `PostgresBillingStoreOptions` share these controls:
+
+| Option                     | Default      | Meaning                                                                         |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------- |
+| `connectionTimeoutMs`      | `10_000`     | Maximum connection establishment or pool-acquisition time for an SDK-owned pool |
+| `statementTimeoutMs`       | `30_000`     | Per-transaction PostgreSQL statement deadline; `0` disables it                  |
+| `idleTransactionTimeoutMs` | `30_000`     | Deadline for an abandoned idle transaction; `0` disables it                     |
+| `idleTimeoutMs`            | `pg` default | Idle lifetime for connections in an SDK-owned pool                              |
+| `maxConnections`           | `pg` default | Maximum connections in an SDK-owned pool                                        |
+| `applicationName`          | `bursar-js`  | Value reported as PostgreSQL `application_name`                                 |
+| `onPoolError`              | no-op        | Observer for typed errors emitted by idle pool clients                          |
+
+The statement deadline is applied with transaction-local PostgreSQL settings,
+so it also protects operations that use a borrowed pool. Connection, SQLSTATE,
+timeout, and rollback failures are normalized into `StoreError` subclasses
+with the original driver error in `cause`.
 
 ## PostgresBillingStore
 
@@ -43,6 +68,9 @@ It wraps all billing repositories (offer, topup, customer, subscription,
 event, payment, refund, invoice, dispute, config) behind one interface and is
 passed as `billingStore:` to `new Bursar({...})` to enable the billing and
 commerce capabilities.
+
+Its optional third argument is `PostgresBillingStoreOptions` and accepts the
+same reliability controls listed above plus `billingPayloadBackend`.
 
 ## The CreditStore contract
 
@@ -59,6 +87,10 @@ must preserve, for every capability they expose:
   expiry (FEFO), with `sweepExpiredCredits` expiring eligible lots.
 - **Stable cursor ordering** — every list view orders by
   `(createdAt, entryId)` so cursor pagination never skips or duplicates rows.
+- **Typed failures** — permanent validation/invariant failures use
+  non-retryable `StoreError`; only known transient conditions use
+  `StoreUnavailableError` or `StoreTimeoutError`. Preserve native failures in
+  `cause` and mark uncertain mutation outcomes with `indeterminate: true`.
 
 Optional capabilities (usage analytics, team management, usage-charge lists,
 `getLedgerEntry`) throw `CapabilityNotSupportedError` by default on the base

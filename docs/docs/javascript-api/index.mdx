@@ -36,14 +36,51 @@ const bursar = new Bursar({
 
 Every facade method returns a `Promise`; all monetary amounts are `Decimal`.
 
+## Error and retry contract
+
+Every typed SDK failure extends `BursarError` and exposes stable `code`,
+`category`, and `retryable` fields. Use `isBursarError()` instead of relying
+only on `instanceof`; the guard also works when an application has two package
+copies. `error.cause` retains the underlying failure for diagnostics, while
+`bursarErrorPublicMessage(error)` provides safe user-facing copy.
+
+```ts
+import {
+  bursarErrorHttpStatus,
+  bursarErrorPublicMessage,
+  isBursarError,
+  retryBursarOperation,
+} from "@zonastery/bursar";
+
+try {
+  return await retryBursarOperation(
+    () => bursar.credits.getBalance(accountId),
+    { maxAttempts: 3, signal: request.signal },
+  );
+} catch (error) {
+  if (isBursarError(error)) {
+    return Response.json(
+      { code: error.code, message: bursarErrorPublicMessage(error) },
+      { status: bursarErrorHttpStatus(error) },
+    );
+  }
+  throw error;
+}
+```
+
+Retries use `p-retry` for bounded exponential backoff, jitter, elapsed-time
+budgets, and cancellation. The default classifier retries only errors marked
+`retryable`. Retry a mutation only when it has a stable idempotency key; when
+`StoreError.indeterminate` is true, the original attempt may have committed.
+
 ## Entry points
 
-| Subpath | Contents |
-| --- | --- |
-| `@zonastery/bursar` | The application API: facade, stores, `PricingEngine`, config, errors |
-| `@zonastery/bursar/node` | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
-| `@zonastery/bursar/browser` | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`) |
-| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock) |
+| Subpath                         | Contents                                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `@zonastery/bursar`             | The application API: facade, stores, `PricingEngine`, config, errors                                                            |
+| `@zonastery/bursar/node`        | Node-only: `loadPricingFile`, `BursarRuntime`/`createBursarRuntime`, `OutboxWorker`, `ClickHouseUsageStore`, `S3BillingArchive` |
+| `@zonastery/bursar/browser`     | Browser-safe: auto-recharge status types only (`AUTO_RECHARGE_STATES`, `BillingAutoRechargeStatus`)                             |
+| `@zonastery/bursar/providers/*` | Payment-provider adapters (Stripe, Dodo, mock)                                                                                  |
 
 The `node` entry point depends on Node built-ins (`crypto`, `fs`) and is not
 compatible with Edge Runtime environments; `browser` contains no database

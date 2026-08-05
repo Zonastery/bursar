@@ -5,7 +5,7 @@ import pytest
 from bursar import (
     BursarRetryOptions,
     CapReachedError,
-    StoreError,
+    StoreUnavailableError,
     is_retryable_bursar_error,
     retry_bursar_operation,
 )
@@ -18,10 +18,10 @@ def test_retry_taxonomy_and_executor() -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise StoreError("temporary")
+            raise StoreUnavailableError("temporary")
         return "ok"
 
-    assert is_retryable_bursar_error(StoreError("temporary")) is True
+    assert is_retryable_bursar_error(StoreUnavailableError("temporary")) is True
     assert is_retryable_bursar_error(CapReachedError("permanent")) is False
     assert (
         retry_bursar_operation(

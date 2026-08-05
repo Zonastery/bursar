@@ -48,7 +48,7 @@ export function validateExpression(expression: string, knownVariables?: Iterable
     }
   } catch (error) {
     if (error instanceof ExpressionError) throw error;
-    throw new ExpressionError(`invalid expression: ${(error as Error).message}`);
+    throw new ExpressionError(`invalid expression: ${(error as Error).message}`, { cause: error });
   }
 }
 
@@ -71,7 +71,7 @@ export function evaluateExpression(
     node = parseExpression(expression, "unexpected token: '{token}'");
   } catch (error) {
     if (error instanceof ExpressionError) throw error;
-    throw new ExpressionError(`syntax error: ${(error as Error).message}`);
+    throw new ExpressionError(`syntax error: ${(error as Error).message}`, { cause: error });
   }
   validateCalls(node);
   validateVariables(node, variables);

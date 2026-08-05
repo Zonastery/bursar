@@ -5,7 +5,7 @@ import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
-import { PricingNotLoadedError } from "../src/errors.js";
+import { PricingNotLoadedError, StoreClosedError } from "../src/errors.js";
 
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -92,6 +92,30 @@ describe("OutboxWorker", () => {
     await expect(worker.runOnce()).resolves.toEqual({ claimed: 1, delivered: 0, failed: 1 });
     expect(store.fail).toHaveBeenCalledWith(outboxEvent, "Error:   failed\uFFFDdelivery", 60, 10);
   });
+
+  it("isolates scheduler error observers and keeps polling", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = outboxStore([]);
+      store.claim.mockRejectedValue(new Error("PostgreSQL unavailable"));
+      const onError = vi.fn().mockRejectedValue(new Error("observer failed"));
+      const worker = new OutboxWorker(
+        store,
+        [{ topics: ["usage.charge_recorded"], handle: vi.fn() }],
+        { pollIntervalMs: 10, onError },
+      );
+
+      await worker.start();
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "PostgreSQL unavailable" }),
+      );
+      await worker.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("S3BillingArchive", () => {
@@ -165,6 +189,26 @@ describe("S3BillingArchive", () => {
 });
 
 describe("ClickHouseUsageStore", () => {
+  it("coalesces initialization and allows recovery after a transient failure", async () => {
+    const failure = new Error("ClickHouse unavailable");
+    const command = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(undefined);
+    const store = new ClickHouseUsageStore({
+      client: {
+        command,
+        insert: vi.fn().mockResolvedValue(undefined),
+        query: vi.fn(),
+      },
+      tenantId: TEST_TENANT_ID,
+    });
+
+    const first = store.initialize();
+    const second = store.initialize();
+    expect(second).toBe(first);
+    await expect(first).rejects.toBe(failure);
+    await expect(store.initialize()).resolves.toBeUndefined();
+    expect(command).toHaveBeenCalledTimes(3);
+  });
+
   it("writes a replay-safe usage projection and serves analytics", async () => {
     const insert = vi.fn().mockResolvedValue(undefined);
     const query = vi.fn().mockResolvedValue({
@@ -521,6 +565,69 @@ describe("BursarRuntime", () => {
     expect(runtime.health()).toMatchObject({ closed: true, ready: false });
     await expect(runtime.flush()).rejects.toThrow("BursarRuntime has been closed");
     await expect(runtime.start()).resolves.toBeUndefined();
+  });
+
+  it("coalesces concurrent lifecycle calls and completes cleanup after a close failure", async () => {
+    const initializing = Promise.withResolvers<void>();
+    const closing = Promise.withResolvers<void>();
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const clickhouse = {
+      initialize: vi.fn(() => initializing.promise),
+      writeUsage: vi.fn().mockResolvedValue(undefined),
+      spendByUser: vi.fn().mockResolvedValue([]),
+    };
+    const s3 = {
+      archive: vi.fn().mockResolvedValue({ key: "k", versionId: "v1" }),
+      close: vi.fn(() => closing.promise),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+      clickhouse,
+      s3,
+      outbox: false,
+    });
+
+    const firstStart = runtime.start();
+    const secondStart = runtime.start();
+    expect(secondStart).toBe(firstStart);
+    expect(clickhouse.initialize).toHaveBeenCalledOnce();
+    initializing.resolve();
+    await firstStart;
+
+    const firstClose = runtime.close();
+    const secondClose = runtime.close();
+    expect(secondClose).toBe(firstClose);
+    closing.resolve();
+    await firstClose;
+    expect(s3.close).toHaveBeenCalledOnce();
+  });
+
+  it("attempts all runtime cleanup stages when one resource fails to close", async () => {
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const closeFailure = new Error("S3 close failed");
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+      s3: {
+        archive: vi.fn().mockResolvedValue({ key: "k", versionId: "v1" }),
+        close: vi.fn(() => {
+          throw closeFailure;
+        }),
+      },
+      outbox: false,
+    });
+
+    await expect(runtime.close()).rejects.toBe(closeFailure);
+    await expect(runtime.creditStore.getBalance("user-1")).rejects.toBeInstanceOf(StoreClosedError);
   });
 
   it("rejects start after close before a first start", async () => {

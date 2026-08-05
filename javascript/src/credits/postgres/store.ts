@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
-import { StoreError } from "../../errors.js";
+import { StoreClosedError, StoreError } from "../../errors.js";
 import {
   canonicalBursarConfigDict,
   canonicalCatalogRolloutDict,
@@ -11,6 +11,7 @@ import {
 } from "../../config.js";
 import {
   PostgresClient,
+  type PostgresConnectionOptions,
   type PostgresPool,
   type PostgresPoolConstructor,
 } from "../../shared/postgres-client.js";
@@ -88,6 +89,10 @@ const MAX_PAGE_SIZE = 200;
 export type PgPool = PostgresPool;
 export type PgPoolConstructor = PostgresPoolConstructor;
 
+export interface PostgresStoreOptions extends PostgresConnectionOptions {
+  usageBackend?: "postgres" | "clickhouse";
+}
+
 export class PostgresStore extends CreditStore {
   private readonly postgres: PostgresClient;
 
@@ -159,22 +164,47 @@ export class PostgresStore extends CreditStore {
   constructor(
     databaseUrl: string,
     tenantId: string,
-    poolOrCtor?: PgPool | PgPoolConstructor,
-    storageOptions?: { usageBackend?: "postgres" | "clickhouse" },
+    poolOrCtorOrOptions?: PgPool | PgPoolConstructor | PostgresStoreOptions,
+    storageOptions?: PostgresStoreOptions,
   ) {
     super();
+    const isPool =
+      typeof poolOrCtorOrOptions === "object" &&
+      poolOrCtorOrOptions !== null &&
+      typeof (poolOrCtorOrOptions as PgPool).query === "function";
+    const isPoolConstructor = typeof poolOrCtorOrOptions === "function";
+    const poolOrCtor =
+      isPool || isPoolConstructor ? (poolOrCtorOrOptions as PgPool | PgPoolConstructor) : undefined;
+    const options =
+      poolOrCtorOrOptions && !isPool && !isPoolConstructor
+        ? (poolOrCtorOrOptions as PostgresStoreOptions)
+        : storageOptions;
     if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
       this.postgres = new PostgresClient(poolOrCtor as PgPool, {
         tenantId,
-        usageBackend: storageOptions?.usageBackend,
-        closedError: () => new StoreError("Store has been closed"),
+        usageBackend: options?.usageBackend,
+        connectionTimeoutMs: options?.connectionTimeoutMs,
+        statementTimeoutMs: options?.statementTimeoutMs,
+        idleTransactionTimeoutMs: options?.idleTransactionTimeoutMs,
+        idleTimeoutMs: options?.idleTimeoutMs,
+        maxConnections: options?.maxConnections,
+        applicationName: options?.applicationName,
+        onPoolError: options?.onPoolError,
+        closedError: () => new StoreClosedError("Credit store has been closed"),
       });
     } else {
       this.postgres = new PostgresClient(databaseUrl, {
         tenantId,
-        usageBackend: storageOptions?.usageBackend,
+        usageBackend: options?.usageBackend,
         poolConstructor: poolOrCtor as PgPoolConstructor | undefined,
-        closedError: () => new StoreError("Store has been closed"),
+        connectionTimeoutMs: options?.connectionTimeoutMs,
+        statementTimeoutMs: options?.statementTimeoutMs,
+        idleTransactionTimeoutMs: options?.idleTransactionTimeoutMs,
+        idleTimeoutMs: options?.idleTimeoutMs,
+        maxConnections: options?.maxConnections,
+        applicationName: options?.applicationName,
+        onPoolError: options?.onPoolError,
+        closedError: () => new StoreClosedError("Credit store has been closed"),
       });
     }
   }

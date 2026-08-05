@@ -3,6 +3,7 @@ import Decimal from "decimal.js";
 import type { PgPool, PgPoolConstructor } from "../src/credits/postgres/store.js";
 import { PostgresStore as BasePostgresStore } from "../src/credits/postgres/store.js";
 import { PostgresBillingStore as BasePostgresBillingStore } from "../src/billing/postgres/store.js";
+import { StoreUnavailableError } from "../src/errors.js";
 
 const D = (n: number | string) => new Decimal(n);
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
@@ -884,9 +885,11 @@ describe("PostgresStore", () => {
     expect(result.entryId).toBe("");
   });
 
-  // PG6 — Network/transport error bubbles as the underlying error (postgres store does not wrap)
-  it("pool query error propagates out of getBalance (PG6)", async () => {
-    const networkError = new Error("Connection refused");
+  // PG6 — Network/transport errors use the stable SDK taxonomy and retain cause.
+  it("classifies a pool connection error from getBalance (PG6)", async () => {
+    const networkError = Object.assign(new Error("Connection refused"), {
+      code: "ECONNREFUSED",
+    });
     const query = vi.fn(() => Promise.reject(networkError));
     const ctor = vi.fn(
       () =>
@@ -897,8 +900,20 @@ describe("PostgresStore", () => {
         }) as unknown as import("../src/credits/postgres/store.js").PgPool,
     ) as unknown as import("../src/credits/postgres/store.js").PgPoolConstructor;
     const store = new PostgresStore("postgresql://localhost/db", ctor);
-    // The postgres store propagates the raw error from the pool — callers should handle it.
-    await expect(store.getBalance("user-1")).rejects.toThrow("Connection refused");
+    const failure = store.getBalance("user-1");
+    await expect(failure).rejects.toBeInstanceOf(StoreUnavailableError);
+    await expect(failure).rejects.toMatchObject({
+      code: "STORE_UNAVAILABLE",
+      retryable: true,
+      indeterminate: false,
+      cause: networkError,
+      details: {
+        datastore: "postgresql",
+        operation: "query",
+        phase: "begin",
+        networkCode: "ECONNREFUSED",
+      },
+    });
   });
 
   // PG7 — NUMERIC string precision: values with more than 6dp are quantized to

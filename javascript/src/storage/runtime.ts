@@ -1,10 +1,21 @@
 import { Bursar, type BursarOptions } from "../bursar.js";
-import { isRetryableBursarError, PricingNotLoadedError } from "../errors.js";
+import {
+  ImportError as BursarImportError,
+  isRetryableBursarError,
+  PricingNotLoadedError,
+  StoreClosedError,
+} from "../errors.js";
+import { retryBursarOperation } from "../retry.js";
 import { PostgresBillingStore } from "../billing/postgres/store.js";
 import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
 import type { UsageAnalyticsStore, UsageChargeStore } from "../credits/types/index.js";
-import { PostgresClient, type PostgresPool } from "../shared/postgres-client.js";
+import {
+  PostgresClient,
+  postgresPoolConfig,
+  type PostgresConnectionOptions,
+  type PostgresPool,
+} from "../shared/postgres-client.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import { ClickHouseUsageStore, type ClickHouseUsageStoreOptions } from "./adapters/clickhouse.js";
 import { S3BillingArchive, type S3BillingArchiveOptions } from "./adapters/s3.js";
@@ -27,6 +38,8 @@ type RuntimeBursarOptions = Omit<
 
 export interface BursarRuntimeOptions {
   postgres: string | PostgresPool;
+  /** Applied to SDK-owned pools and per-transaction statement deadlines. */
+  postgresOptions?: PostgresConnectionOptions;
   tenantId: string;
   s3?: BillingPayloadArchive | S3BillingArchiveOptions | null;
   clickhouse?: (UsageEventSink & UsageAnalyticsStore) | ClickHouseUsageStoreOptions | null;
@@ -46,6 +59,10 @@ export interface BursarRuntimeStartOptions {
   /** Initial retry delay. Each retry doubles up to 5 seconds. */
   retryDelayMs?: number;
   shouldRetry?: (error: unknown) => boolean;
+  /** Maximum elapsed catalog-load retry budget. Defaults to 30 seconds. */
+  maxElapsedMs?: number;
+  /** Abort startup retries and pending backoff. */
+  signal?: AbortSignal;
 }
 
 export interface BursarRuntimeHealth {
@@ -71,6 +88,8 @@ export class BursarRuntime {
 
   private readonly pool: PostgresPool;
   private readonly ownsPool: boolean;
+  private startPromise: Promise<void> | null = null;
+  private closePromise: Promise<void> | null = null;
   private started = false;
   private closed = false;
 
@@ -86,7 +105,7 @@ export class BursarRuntime {
       !("writeUsage" in options.clickhouse) &&
       options.clickhouse.tenantId !== options.tenantId
     ) {
-      throw new Error("ClickHouse tenantId must match runtime tenantId");
+      throw new TypeError("ClickHouse tenantId must match runtime tenantId");
     }
     this.clickhouse = options.clickhouse
       ? "writeUsage" in options.clickhouse
@@ -100,9 +119,11 @@ export class BursarRuntime {
       : null;
 
     this.creditStore = new PostgresStore("", options.tenantId, pool, {
+      ...(options.postgresOptions ?? {}),
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
     });
-    this.billingStore = new PostgresBillingStore(pool as import("pg").Pool, options.tenantId, {
+    this.billingStore = new PostgresBillingStore(pool, options.tenantId, {
+      ...(options.postgresOptions ?? {}),
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
     });
     const bursarOptions = options.bursar ?? {};
@@ -128,6 +149,7 @@ export class BursarRuntime {
     });
 
     const query: QueryFn = new PostgresClient(pool, {
+      ...(options.postgresOptions ?? {}),
       tenantId: options.tenantId,
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
@@ -140,30 +162,35 @@ export class BursarRuntime {
         : null;
   }
 
-  async start(options: BursarRuntimeStartOptions = {}): Promise<void> {
-    if (this.started) return;
-    if (this.closed) throw new Error("BursarRuntime has been closed");
+  start(options: BursarRuntimeStartOptions = {}): Promise<void> {
+    if (this.started) return Promise.resolve();
+    if (this.closed) {
+      return Promise.reject(new StoreClosedError("BursarRuntime has been closed"));
+    }
+    if (!this.startPromise) {
+      this.startPromise = this.startRuntime(options).catch((error: unknown) => {
+        this.startPromise = null;
+        throw error;
+      });
+    }
+    return this.startPromise;
+  }
+
+  private async startRuntime(options: BursarRuntimeStartOptions): Promise<void> {
     if (options.loadCatalog) {
       const maxAttempts = options.maxAttempts ?? 1;
-      if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-        throw new RangeError("maxAttempts must be a positive integer");
-      }
       const shouldRetry =
         options.shouldRetry ??
         ((error: unknown) =>
           error instanceof PricingNotLoadedError || isRetryableBursarError(error));
-      let attempt = 0;
-      for (;;) {
-        attempt += 1;
-        try {
-          await this.bursar.loadCatalog();
-          break;
-        } catch (error) {
-          if (attempt >= maxAttempts || !shouldRetry(error)) throw error;
-          const delay = Math.min((options.retryDelayMs ?? 250) * 2 ** (attempt - 1), 5_000);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-        }
-      }
+      await retryBursarOperation(() => this.bursar.loadCatalog(), {
+        maxAttempts,
+        baseDelayMs: options.retryDelayMs ?? 250,
+        maxDelayMs: 5_000,
+        maxElapsedMs: options.maxElapsedMs,
+        signal: options.signal,
+        shouldRetry,
+      });
     }
     await this.clickhouse?.initialize?.();
     await this.worker?.start();
@@ -181,17 +208,55 @@ export class BursarRuntime {
   }
 
   async flush(): Promise<OutboxRunResult> {
-    if (this.closed) throw new Error("BursarRuntime has been closed");
+    if (this.closed) throw new StoreClosedError("BursarRuntime has been closed");
     return this.worker?.runOnce() ?? { claimed: 0, delivered: 0, failed: 0 };
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
-    await this.worker?.stop();
-    await this.s3?.close?.();
-    await Promise.all([this.creditStore.close(), this.billingStore.close()]);
-    if (this.ownsPool) await this.pool.end();
+    this.closePromise = this.closeRuntime();
+    return this.closePromise;
+  }
+
+  private async closeRuntime(): Promise<void> {
+    const failures: unknown[] = [];
+    const pendingStart = this.startPromise;
+    if (pendingStart && !this.started) {
+      try {
+        await pendingStart;
+      } catch {
+        // Startup callers receive their own failure; shutdown must still clean up.
+      }
+    }
+
+    try {
+      await this.worker?.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+
+    const resources = await Promise.allSettled([
+      Promise.resolve().then(() => this.s3?.close?.()),
+      Promise.resolve().then(() => this.creditStore.close()),
+      Promise.resolve().then(() => this.billingStore.close()),
+    ]);
+    for (const result of resources) {
+      if (result.status === "rejected") failures.push(result.reason);
+    }
+
+    if (this.ownsPool) {
+      try {
+        await this.pool.end();
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "BursarRuntime failed to close all resources");
+    }
   }
 
   private createHandlers(repository: PostgresStorageRepository): OutboxHandler[] {
@@ -267,8 +332,15 @@ export async function createBursarRuntime(options: BursarRuntimeOptions): Promis
     return new BursarRuntime(options.postgres, false, options);
   }
   if (!options.postgres.trim()) throw new TypeError("postgres connection string must not be empty");
-  const pg = await import("pg");
-  const pool = new pg.Pool({ connectionString: options.postgres }) as unknown as PostgresPool;
+  let pg: typeof import("pg");
+  try {
+    pg = await import("pg");
+  } catch (cause) {
+    throw new BursarImportError("pg is required for the Bursar runtime: npm install pg", { cause });
+  }
+  const pool = new pg.Pool(
+    postgresPoolConfig(options.postgres, options.postgresOptions),
+  ) as unknown as PostgresPool;
   return new BursarRuntime(pool, true, options);
 }
 

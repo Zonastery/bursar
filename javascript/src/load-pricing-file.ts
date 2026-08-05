@@ -36,7 +36,7 @@ function readFileClean(filepath: string): string {
     const code = (cause as NodeJS.ErrnoException).code;
     if (code === "ENOENT") throw new ConfigError(`File not found: ${filepath}`);
     if (code === "EACCES") throw new ConfigError(`Permission denied: ${filepath}`);
-    throw new ConfigError(`Could not read ${filepath}: ${(cause as Error).message}`);
+    throw new ConfigError(`Could not read ${filepath}: ${(cause as Error).message}`, [], { cause });
   }
   if (stat.isDirectory()) {
     throw new ConfigError(`Not a file (is a directory): ${filepath}`);
@@ -44,7 +44,7 @@ function readFileClean(filepath: string): string {
   try {
     return readFileSync(filepath, "utf-8");
   } catch (cause) {
-    throw new ConfigError(`Could not read ${filepath}: ${(cause as Error).message}`);
+    throw new ConfigError(`Could not read ${filepath}: ${(cause as Error).message}`, [], { cause });
   }
 }
 
@@ -88,7 +88,9 @@ export async function loadPricingFile(filepath: string): Promise<Record<string, 
     try {
       parsed = yaml.load(content);
     } catch (cause) {
-      throw new ConfigError(`Invalid YAML in ${filepath}: ${(cause as Error).message}`);
+      throw new ConfigError(`Invalid YAML in ${filepath}: ${(cause as Error).message}`, [], {
+        cause,
+      });
     }
     return assertNonEmptyObject(parsed, filepath);
   }
@@ -98,7 +100,9 @@ export async function loadPricingFile(filepath: string): Promise<Record<string, 
   try {
     parsed = JSON.parse(content);
   } catch (cause) {
-    throw new ConfigError(`Invalid JSON in ${filepath}: ${(cause as Error).message}`);
+    throw new ConfigError(`Invalid JSON in ${filepath}: ${(cause as Error).message}`, [], {
+      cause,
+    });
   }
   return assertNonEmptyObject(parsed, filepath);
 }
