@@ -54,8 +54,11 @@ COMMENT ON TABLE bursar.usage_charge_payloads IS
 COMMENT ON TABLE bursar.usage_daily_rollups IS 'Bounded exact daily usage aggregates for PostgreSQL-only analytics.';
 COMMENT ON FUNCTION bursar.uuid_v7()
 IS 'Generate an RFC 9562 UUIDv7 with millisecond time locality for database row identifiers.';
+COMMENT ON FUNCTION bursar.is_nonempty_bounded_text(text, integer)
+IS 'Validate trimmed non-empty text against an explicit character limit.';
 COMMENT ON TABLE bursar.event_outbox IS
-'Bounded claimable versioned events for optional external delivery and analytics sinks.';
+'Claimable versioned events for optional sinks; delivered payloads are '
+'retention-bounded while required undelivered events remain replayable.';
 COMMENT ON TABLE bursar.account_plan_assignments IS 'Current effective plan assignment for each account.';
 COMMENT ON TABLE bursar.account_plan_assignment_history IS 'Append-only effective-dated plan assignment history.';
 COMMENT ON TABLE bursar.plan_assignment_changes IS 'Scheduled or applied plan changes used for renewal-safe rollouts.';
@@ -101,8 +104,8 @@ COMMENT ON TABLE bursar.billing_invoices IS 'Provider invoice records associated
 COMMENT ON TABLE bursar.billing_disputes IS 'Provider dispute records and linked payment context.';
 COMMENT ON TABLE bursar.billing_preferences IS 'Subject-level billing notification and payment preferences.';
 
-COMMENT ON FUNCTION bursar.publish_and_activate_catalog(integer, jsonb, text, boolean)
-IS 'Validate and project one immutable catalog revision, optionally activating it.';
+COMMENT ON FUNCTION bursar.publish_and_activate_catalog(integer, jsonb, text, boolean, jsonb)
+IS 'Validate and project one immutable catalog revision, optionally activating it with a per-release rollout manifest.';
 COMMENT ON FUNCTION bursar.post_credit(
     uuid, bursar.ledger_entry_kind, numeric, text, text, jsonb, text, uuid, timestamptz, numeric
 )

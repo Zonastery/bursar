@@ -1,7 +1,14 @@
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
 import { StoreError } from "../../errors.js";
-import { canonicalBursarConfigDict } from "../../config.js";
+import {
+  canonicalBursarConfigDict,
+  canonicalCatalogRolloutDict,
+  loadCatalogRollout,
+  loadConfigFromDict,
+  validateCatalogRollout,
+  type CatalogRollout,
+} from "../../config.js";
 import {
   PostgresClient,
   type PostgresPool,
@@ -525,9 +532,21 @@ export class PostgresStore extends CreditStore {
     return normalizeBursarConfig(row, 0);
   }
 
-  async setActivePricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
+  async setActivePricing(
+    config: Record<string, unknown>,
+    label?: string | null,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
-    const row = await this.pricingRepo.setActivePricing(JSON.stringify(canonical), label ?? null);
+    const parsed = loadConfigFromDict(canonical);
+    const rolloutDocument = canonicalCatalogRolloutDict(
+      validateCatalogRollout(parsed, loadCatalogRollout(rollout ?? {})),
+    );
+    const row = await this.pricingRepo.setActivePricing(
+      JSON.stringify(canonical),
+      label ?? null,
+      rolloutDocument,
+    );
     return String(row.id ?? "");
   }
 
@@ -555,8 +574,22 @@ export class PostgresStore extends CreditStore {
     return normalizeBursarConfig(row, version);
   }
 
-  async activatePricing(version: number): Promise<string> {
-    const row = await this.pricingRepo.activatePricing(version);
+  async activatePricing(
+    version: number,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string> {
+    const target = await this.getBursarConfig(version);
+    const parsedRollout = loadCatalogRollout(rollout ?? {});
+    if (target != null) {
+      validateCatalogRollout(
+        loadConfigFromDict(target.config as Record<string, unknown>),
+        parsedRollout,
+      );
+    }
+    const row = await this.pricingRepo.activatePricing(
+      version,
+      canonicalCatalogRolloutDict(parsedRollout),
+    );
     return String(row.id ?? "");
   }
 
@@ -573,6 +606,7 @@ export class PostgresStore extends CreditStore {
         creditPolicy: null,
         admission: null,
         allowedOperations: [],
+        catalogRevisionPinned: false,
       };
     }
     const allowanceAmount = dec(row.credit_allowance_amount);
@@ -633,7 +667,7 @@ export class PostgresStore extends CreditStore {
         row.assignment_source_type == null ? null : String(row.assignment_source_type),
       assignmentSourceId:
         row.assignment_source_id == null ? null : String(row.assignment_source_id),
-      revisionPolicy: row.revision_policy == null ? null : String(row.revision_policy),
+      catalogRevisionPinned: row.catalog_revision_pinned === true,
       catalogVersion: row.catalog_revision_no != null ? Number(row.catalog_revision_no) : null,
     };
   }
@@ -669,6 +703,17 @@ export class PostgresStore extends CreditStore {
   async unsetUserPlan(userId: string): Promise<{ userId: string }> {
     const row = await this.planRepo.unsetUserPlan(userId);
     return { userId: String(row.user_id ?? userId) };
+  }
+
+  async setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
+    return this.planRepo.setPlanRevisionPin(userId, pinned);
+  }
+
+  async applyDuePlanChanges(limit = 100): Promise<number> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new RangeError("plan change limit must be an integer between 1 and 1000");
+    }
+    return this.planRepo.applyDuePlanChanges(limit);
   }
 
   async startPlanMigration(

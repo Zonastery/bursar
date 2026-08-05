@@ -5,6 +5,7 @@ import type { BillingEvent, BillingEventHandler, BillingEventResult } from "./ty
 import { BillingEventType } from "./types/index.js";
 import { BillingEventHandlers } from "./event-handlers.js";
 import type { BillingServiceOptions } from "./service-types.js";
+import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
 
 export class BillingEventProcessor {
   private readonly eventHandlers: Partial<Record<BillingEventType, BillingEventHandler>>;
@@ -67,30 +68,68 @@ export class BillingEventProcessor {
       return { handled: false, error: "claim_failed_retry" };
     }
 
+    let result: BillingEventResult;
     try {
-      const result = await this.routeEvent({
+      result = await this.routeEvent({
         ...event,
         billingEventId: claim.billingEventId,
       });
       this.logger.debug("[BillingService] routeEvent result", { result, eventId: event.eventId });
-      await this.store.completeBillingEvent(event.provider, event.eventId, claim.claimToken);
-      return result;
     } catch (err) {
-      this.logger.error(
-        `[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`,
-        { error: err instanceof Error ? err.message : String(err) },
-      );
-      await this.store.failBillingEvent(
+      return this.recordBillingEventFailure(event, claim.claimToken, err);
+    }
+
+    if (!result.handled) {
+      const message = boundedDiagnosticMessage(result.error, "billing_event_not_handled");
+      await this.recordBillingEventFailure(event, claim.claimToken, message, false);
+      return { ...result, error: message };
+    }
+
+    let completed: boolean;
+    try {
+      completed = await this.store.completeBillingEvent(
         event.provider,
         event.eventId,
         claim.claimToken,
-        err instanceof Error ? err.message : String(err),
       );
-      return {
-        handled: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+    } catch (err) {
+      return this.recordBillingEventFailure(event, claim.claimToken, err);
     }
+
+    if (!completed) {
+      return this.recordBillingEventFailure(
+        event,
+        claim.claimToken,
+        "billing_event_completion_rejected",
+      );
+    }
+    return result;
+  }
+
+  private async recordBillingEventFailure(
+    event: BillingEvent,
+    claimToken: string,
+    error: unknown,
+    logAsError = true,
+  ): Promise<BillingEventResult> {
+    const message = boundedDiagnosticMessage(error, "billing_event_processing_failed");
+    const log = logAsError ? this.logger.error : this.logger.warn;
+    log(`[BillingService] failed to handle billing event ${event.provider}/${event.eventId}`, {
+      error: message,
+    });
+    const failed = await this.store.failBillingEvent(
+      event.provider,
+      event.eventId,
+      claimToken,
+      message,
+    );
+    if (!failed) {
+      this.logger.warn("[BillingService] billing event failure was not persisted", {
+        provider: event.provider,
+        eventId: event.eventId,
+      });
+    }
+    return { handled: false, error: message };
   }
 
   private async routeEvent(event: BillingEvent): Promise<BillingEventResult> {

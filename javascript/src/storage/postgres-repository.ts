@@ -1,3 +1,4 @@
+import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
 import type { QueryFn } from "../shared/postgres-types.js";
 import type {
   BillingEventPayloadExport,
@@ -91,7 +92,13 @@ export class PostgresStorageRepository implements OutboxStore {
     return scalarBoolean(
       await this.query(
         "SELECT bursar.fail_outbox_event($1::bigint, $2::uuid, $3::text, $4::integer, $5::integer)",
-        [event.eventId, event.claimToken, error, retryDelaySeconds, attemptLimit],
+        [
+          event.eventId,
+          event.claimToken,
+          boundedDiagnosticMessage(error, "outbox_delivery_failed"),
+          retryDelaySeconds,
+          attemptLimit,
+        ],
       ),
     );
   }

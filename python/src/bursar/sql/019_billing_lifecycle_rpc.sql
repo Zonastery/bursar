@@ -196,7 +196,16 @@ CREATE FUNCTION bursar.fail_billing_event(
     p_error text DEFAULT NULL
 )
 RETURNS boolean
-LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+DECLARE
+    v_updated boolean;
+BEGIN
+    IF p_error IS NOT NULL
+       AND NOT bursar.is_nonempty_bounded_text(p_error, 8192)
+    THEN
+        RETURN false;
+    END IF;
+
     UPDATE bursar.billing_events
     SET status='failed',
         claim_token=NULL,
@@ -207,7 +216,10 @@ LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
       AND provider_event_id=p_event_id
       AND status='processing'
       AND claim_token=p_claim_token
-    RETURNING true
+    RETURNING true INTO v_updated;
+
+    RETURN COALESCE(v_updated, false);
+END
 $$;
 
 CREATE FUNCTION bursar.record_subscription_conflict(
@@ -229,8 +241,7 @@ DECLARE
 BEGIN
     IF NOT bursar.is_nonempty_text(p_provider)
        OR NOT bursar.is_nonempty_text(p_duplicate_provider_subscription_id)
-       OR p_metadata IS NULL
-       OR jsonb_typeof(p_metadata) <> 'object'
+       OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
     THEN
         RAISE EXCEPTION 'invalid subscription conflict'
             USING ERRCODE = '22023';

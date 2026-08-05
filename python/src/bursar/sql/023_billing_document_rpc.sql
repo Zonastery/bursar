@@ -97,15 +97,24 @@ DECLARE
     v_existing bursar.billing_invoices;
     v_metadata jsonb;
 BEGIN
-    IF p_provider_updated_at IS NULL
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_text(p_provider_invoice_id)
+       OR p_provider_updated_at IS NULL
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
     THEN
         RAISE EXCEPTION 'invalid invoice state' USING ERRCODE='22023';
     END IF;
 
     IF p_subscription_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM bursar.billing_subscriptions
-        WHERE id=p_subscription_id AND subject_id=p_subject_id
+        WHERE id=p_subscription_id
+          AND subject_id=p_subject_id
+          AND provider=p_provider
+          AND provider_environment=v_environment
     ) THEN
         RAISE EXCEPTION 'invoice subscription mismatch' USING ERRCODE='23514';
 
@@ -220,15 +229,27 @@ DECLARE
     v_existing bursar.billing_disputes;
     v_metadata jsonb;
 BEGIN
-    IF p_provider_updated_at IS NULL
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+    IF NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_text(p_provider_dispute_id)
+       OR p_payment_id IS NULL
+       OR p_provider_updated_at IS NULL
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
+       OR (
+           p_reason IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_reason, 2048)
+       )
     THEN
         RAISE EXCEPTION 'invalid dispute state' USING ERRCODE='22023';
     END IF;
 
     SELECT subject_id INTO v_subject
     FROM bursar.billing_payments
-    WHERE id=p_payment_id;
+    WHERE id=p_payment_id
+      AND provider=p_provider
+      AND provider_environment=v_environment;
 
     IF NOT FOUND THEN RAISE EXCEPTION 'dispute payment missing' USING ERRCODE='23503';
  END IF;
@@ -322,6 +343,14 @@ BEGIN
        OR NOT bursar.is_nonempty_text(p_product_key)
        OR octet_length(p_request_digest) <> 32
        OR p_expires_at <= now()
+       OR (
+           p_provider_session_id IS NOT NULL
+           AND NOT bursar.is_nonempty_text(p_provider_session_id)
+       )
+       OR (
+           p_checkout_url IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_checkout_url, 8192)
+       )
        OR (
            p_region IS NOT NULL
            AND upper(p_region) !~ '^[A-Z]{2,3}$'
@@ -463,8 +492,18 @@ AS $$
 DECLARE
     v_intent bursar.billing_checkout_intents;
 BEGIN
-    IF p_status IS NOT NULL
-       AND p_status NOT IN ('open', 'completed', 'failed', 'expired')
+    IF (
+           p_status IS NOT NULL
+           AND p_status NOT IN ('open', 'completed', 'failed', 'expired')
+       )
+       OR (
+           p_provider_session_id IS NOT NULL
+           AND NOT bursar.is_nonempty_text(p_provider_session_id)
+       )
+       OR (
+           p_checkout_url IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_checkout_url, 8192)
+       )
     THEN
         RETURN false;
     END IF;

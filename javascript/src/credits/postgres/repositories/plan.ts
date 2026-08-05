@@ -29,7 +29,7 @@ const UserPlanRowSchema = z
     allowed_operations: z.array(z.string()).optional(),
     assignment_source_type: z.string().nullable().optional(),
     assignment_source_id: z.string().nullable().optional(),
-    revision_policy: z.string().nullable().optional(),
+    catalog_revision_pinned: z.boolean().optional(),
     plan_assigned_at: z
       .union([z.string(), z.date().transform((value) => value.toISOString())])
       .nullable()
@@ -156,12 +156,13 @@ export class PlanRepository {
     if (rows?.[0] !== true) {
       throw new Error("PlanRepository.setUserPlan: assign_plan returned false");
     }
+    const assigned = await this.getUserPlan(userId);
     return safeParse(
       SetUserPlanRowSchema,
       {
         user_id: userId,
-        plan_id: planId,
-        plan_assigned_at: planAssignedAt,
+        plan_id: assigned?.plan_id ?? planId,
+        plan_assigned_at: assigned?.plan_assigned_at ?? planAssignedAt,
       },
       "PlanRepository.setUserPlan",
     );
@@ -174,6 +175,18 @@ export class PlanRepository {
       throw new Error("PlanRepository.unsetUserPlan: unassign_plan returned false");
     }
     return safeParse(UnsetPlanRowSchema, { user_id: userId }, "PlanRepository.unsetUserPlan");
+  }
+
+  /** Pin or unpin the user's current assignment to its catalog revision. */
+  async setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
+    const rows = await this.callproc("set_plan_revision_pin", [userId, pinned]);
+    return rows?.[0] === true;
+  }
+
+  /** Apply one bounded batch of renewal-effective plan changes. */
+  async applyDuePlanChanges(limit: number): Promise<number> {
+    const rows = await this.callproc("apply_due_plan_assignment_changes", [limit]);
+    return Number(rows?.[0] ?? 0);
   }
 
   /** Check a user's remaining free allowance. */

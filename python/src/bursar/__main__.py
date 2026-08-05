@@ -373,12 +373,35 @@ def _validated_config(filepath: str) -> dict[str, Any]:
         raise SystemExit(1) from None
 
 
+def _validated_rollout(
+    filepath: str | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if filepath is None:
+        return None
+
+    from bursar.config import (
+        ConfigError,
+        canonical_catalog_rollout_dict,
+        load_config_from_dict,
+    )
+
+    data = _load_pricing_file(filepath)
+    try:
+        parsed_config = load_config_from_dict(config) if config is not None else None
+        return canonical_catalog_rollout_dict(data, parsed_config)
+    except ConfigError as exc:
+        print(f"Rollout validation failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+
 def _set_config(
     data: dict[str, Any],
     *,
     store_type: str,
     tenant_id: str | None = None,
     label: str | None = None,
+    rollout: dict[str, Any] | None = None,
 ) -> bool:
     store = _store_from_env(store_type, tenant_id=tenant_id)
 
@@ -386,15 +409,30 @@ def _set_config(
     # version churn. First-time setup always proceeds.
     active = store.get_active_pricing()
     if active is not None and data == active.config:
+        if rollout is not None and rollout.get("plans"):
+            _retry_transient(
+                lambda: store.activate_pricing(active.version, rollout),
+                what="apply catalog rollout",
+            )
+            return True
         return False
 
-    _retry_transient(lambda: store.set_active_pricing(data, label=label), what="set pricing")
+    _retry_transient(
+        lambda: store.set_active_pricing(data, label=label, rollout=rollout),
+        what="set pricing",
+    )
     return True
 
 
 def _cmd_config_set(args: argparse.Namespace) -> None:
     data = _validated_config(args.file)
-    if not _set_config(data, store_type=args.store, label=args.label):
+    rollout = _validated_rollout(args.rollout, data)
+    if not _set_config(
+        data,
+        store_type=args.store,
+        label=args.label,
+        rollout=rollout,
+    ):
         print("No changes — config is identical to the active version.")
         return
     print("Bursar config set successfully.")
@@ -447,8 +485,35 @@ def _cmd_config_list(args: argparse.Namespace) -> None:
 
 def _cmd_config_activate(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
-    _retry_transient(lambda: store.activate_pricing(args.version), what="activate pricing")
+    rollout = _validated_rollout(args.rollout)
+    _retry_transient(
+        lambda: store.activate_pricing(args.version, rollout),
+        what="activate pricing",
+    )
     print(f"Pricing v{args.version} activated.")
+
+
+def _cmd_config_pin(args: argparse.Namespace) -> None:
+    store = _store_from_env(args.store)
+    pinned = not args.unpin
+    changed = _retry_transient(
+        lambda: store.set_plan_revision_pin(args.subject_id, pinned),
+        what="update plan revision pin",
+    )
+    if not changed:
+        print("No current plan assignment found.", file=sys.stderr)
+        raise SystemExit(1)
+    state = "pinned" if pinned else "unpinned"
+    print(f"Plan revision {state} for {args.subject_id}.")
+
+
+def _cmd_config_apply_due(args: argparse.Namespace) -> None:
+    store = _store_from_env(args.store)
+    applied = _retry_transient(
+        lambda: store.apply_due_plan_changes(args.limit),
+        what="apply due plan changes",
+    )
+    print(f"Applied {applied} due plan change(s).")
 
 
 def _cmd_config_export(args: argparse.Namespace) -> None:
@@ -600,6 +665,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_set = psub.add_parser("set", help="Apply config (always creates a new version)")
     p_set.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
     p_set.add_argument("--label", default=None, help="Optional label/message for this version")
+    p_set.add_argument(
+        "--rollout",
+        default=None,
+        metavar="FILE",
+        help="Optional JSON/YAML per-release rollout manifest",
+    )
     p_set.set_defaults(func=_cmd_config_set)
 
     p_get = psub.add_parser("get", help="Show the active Bursar config as JSON")
@@ -610,7 +681,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_activate = psub.add_parser("activate", help="Switch the active version")
     p_activate.add_argument("version", type=int, help="Version number to activate")
+    p_activate.add_argument(
+        "--rollout",
+        default=None,
+        metavar="FILE",
+        help="Optional JSON/YAML per-release rollout manifest",
+    )
     p_activate.set_defaults(func=_cmd_config_activate)
+
+    p_pin = psub.add_parser(
+        "pin",
+        help="Pin or unpin one subject's current plan revision",
+    )
+    p_pin.add_argument("subject_id", help="Subject UUID")
+    p_pin.add_argument(
+        "--unpin",
+        action="store_true",
+        help="Remove the pin; re-activate the catalog explicitly to catch up",
+    )
+    p_pin.set_defaults(func=_cmd_config_pin)
+
+    p_apply_due = psub.add_parser(
+        "apply-due",
+        help="Apply renewal-effective plan changes that are now due",
+    )
+    p_apply_due.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum assignments to process (1-1000; default: 100)",
+    )
+    p_apply_due.set_defaults(func=_cmd_config_apply_due)
 
     p_validate = psub.add_parser("validate", help="Validate a pricing file without applying it")
     p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")

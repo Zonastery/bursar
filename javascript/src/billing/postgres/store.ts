@@ -30,6 +30,7 @@ import type {
 } from "../contracts.js";
 import type { QueryFn } from "../../shared/postgres-types.js";
 import { PostgresClient } from "../../shared/postgres-client.js";
+import { optionalBoundedDiagnosticMessage } from "../../shared/diagnostics.js";
 import { BillingOfferRepository } from "./repositories/offer.js";
 import { BillingTopupRepository } from "./repositories/topup.js";
 import { BillingCustomerRepository } from "./repositories/customer.js";
@@ -259,8 +260,12 @@ export class PostgresBillingStore extends BillingStore {
     return { status: "retry" as const };
   }
 
-  async completeBillingEvent(provider: string, eventId: string, claimToken: string): Promise<void> {
-    await this.billingEvent.complete(provider, eventId, claimToken);
+  async completeBillingEvent(
+    provider: string,
+    eventId: string,
+    claimToken: string,
+  ): Promise<boolean> {
+    return this.billingEvent.complete(provider, eventId, claimToken);
   }
 
   async failBillingEvent(
@@ -268,8 +273,13 @@ export class PostgresBillingStore extends BillingStore {
     eventId: string,
     claimToken: string,
     error?: string,
-  ): Promise<void> {
-    await this.billingEvent.fail(provider, eventId, claimToken, error);
+  ): Promise<boolean> {
+    return this.billingEvent.fail(
+      provider,
+      eventId,
+      claimToken,
+      optionalBoundedDiagnosticMessage(error) ?? undefined,
+    );
   }
 
   async upsertBillingCustomer(
@@ -370,7 +380,12 @@ export class PostgresBillingStore extends BillingStore {
     if (!update.state) return;
     const rows = await this.queryFn(
       `SELECT bursar.advance_subscription_change($1::bigint, $2, $3, $4) AS advanced`,
-      [id, update.state, update.providerOperationId ?? null, update.errorMessage ?? null],
+      [
+        id,
+        update.state,
+        update.providerOperationId ?? null,
+        optionalBoundedDiagnosticMessage(update.errorMessage),
+      ],
     );
     if (!(rows[0] as Record<string, unknown> | undefined)?.advanced) {
       throw new Error(`subscription change transition rejected: ${id}`);

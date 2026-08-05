@@ -74,6 +74,9 @@ const config: Config = {
     metadata: [{name: 'twitter:card', content: 'summary_large_image'}],
     mermaid: {
       theme: {light: 'neutral', dark: 'dark'},
+      options: {
+        maxTextSize: 100000,
+      },
     },
     docs: {
       sidebar: {

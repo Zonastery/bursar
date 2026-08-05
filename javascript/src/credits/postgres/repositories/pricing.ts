@@ -41,17 +41,28 @@ export class PricingRepository {
     return this.parseRevision(row, "PricingRepository.getActivePricing");
   }
 
-  async setActivePricing(config: string, label: string | null): Promise<ActivePricingRow> {
-    return this.publishPricing(config, label, true);
+  async setActivePricing(
+    config: string,
+    label: string | null,
+    rollout: Record<string, unknown>,
+  ): Promise<ActivePricingRow> {
+    return this.publishPricing(config, label, true, rollout);
   }
 
   async publishPricing(
     config: string,
     label: string | null,
     activate = false,
+    rollout: Record<string, unknown> = { plans: {} },
   ): Promise<ActivePricingRow> {
     const published = (
-      await this.callproc("publish_and_activate_catalog", [1, JSON.parse(config), label, activate])
+      await this.callproc("publish_and_activate_catalog", [
+        1,
+        JSON.parse(config),
+        label,
+        activate,
+        rollout,
+      ])
     )[0] as Record<string, unknown> | undefined;
     if (published?.revision_no == null) {
       return safeParse(ActivePricingRowSchema, {}, "PricingRepository.publishPricing");
@@ -88,8 +99,11 @@ export class PricingRepository {
     );
   }
 
-  async activatePricing(version: number): Promise<ActivePricingRow> {
-    const rows = await this.callproc("activate_catalog_revision", [version]);
+  async activatePricing(
+    version: number,
+    rollout: Record<string, unknown>,
+  ): Promise<ActivePricingRow> {
+    const rows = await this.callproc("activate_catalog_revision", [version, rollout]);
     if (!rows?.length) throw new Error(`Catalog revision ${version} was not found`);
     return this.parseRevision(
       rows[0] as Record<string, unknown>,

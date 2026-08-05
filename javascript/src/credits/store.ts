@@ -45,6 +45,7 @@ import type {
   TopUserRow,
   LedgerEntry,
 } from "./types/index.js";
+import type { CatalogRollout } from "../config.js";
 
 export interface OperationUsageOptions {
   /** Entitlement feature that must be enabled for the operation. */
@@ -199,13 +200,17 @@ export abstract class CreditStore {
   abstract setActivePricing(
     config: Record<string, unknown>,
     label?: string | null,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string>;
   abstract publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string>;
 
   // H8: pricing history / activation — parity with Python base.py:293-312.
   abstract getPricingHistory(): Promise<BursarConfigHistoryItem[]>;
   abstract getBursarConfig(version: number): Promise<BursarConfigResult | null>;
-  abstract activatePricing(version: number): Promise<string>;
+  abstract activatePricing(
+    version: number,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string>;
 
   abstract getUserPlan(userId: string): Promise<GetUserPlanResult>;
   abstract setUserPlan(
@@ -214,6 +219,8 @@ export abstract class CreditStore {
     planAssignedAt?: Date | null,
   ): Promise<SetUserPlanResult>;
   abstract unsetUserPlan(userId: string): Promise<{ userId: string }>;
+  abstract setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean>;
+  abstract applyDuePlanChanges(limit?: number): Promise<number>;
   abstract startPlanMigration(
     fromPlanId: string | null,
     toPlanId: string,

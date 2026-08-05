@@ -1,8 +1,8 @@
 """Abstract credit store interface.
 
-All credit operations happen through a ``CreditStore`` adapter. This lets
-the package work with Supabase (via RPCs), vanilla PostgreSQL, or in-memory
-stores for testing.
+All credit operations happen through a ``CreditStore`` adapter. The
+production adapter is ``PostgresStore``; custom stores implement this
+interface to back Bursar with their own storage.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from bursar.config import CatalogRollout
 from bursar.credits.types import (
     AddCreditsResult,
     AddTeamMemberResult,
@@ -101,8 +102,8 @@ class SettleLeaseOptions(OperationUsageOptions):
 class CreditStore(ABC):
     """Interface for credit storage backends.
 
-    Implementors provide concrete adapters for Supabase, raw PostgreSQL,
-    or in-memory stores.
+    ``PostgresStore`` is the production adapter. Custom stores implement this
+    interface to back Bursar with their own storage.
     """
 
     def __init__(self) -> None:
@@ -331,6 +332,7 @@ class CreditStore(ABC):
         self,
         config: dict[str, Any],
         label: str | None = None,
+        rollout: CatalogRollout | dict[str, Any] | None = None,
     ) -> str:
         """Publish a new pricing configuration.
 
@@ -350,7 +352,11 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def activate_pricing(self, version: int) -> str:
+    def activate_pricing(
+        self,
+        version: int,
+        rollout: CatalogRollout | dict[str, Any] | None = None,
+    ) -> str:
         """Activate a specific pricing version (deactivates all others).
 
         Args:
@@ -424,6 +430,16 @@ class CreditStore(ABC):
     @abstractmethod
     def unset_user_plan(self, user_id: str) -> dict:
         """Clear the user's plan assignment."""
+        ...
+
+    @abstractmethod
+    def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
+        """Pin or unpin the current assignment's catalog revision."""
+        ...
+
+    @abstractmethod
+    def apply_due_plan_changes(self, limit: int = 100) -> int:
+        """Apply a bounded batch of scheduled plan changes that are now due."""
         ...
 
     @abstractmethod

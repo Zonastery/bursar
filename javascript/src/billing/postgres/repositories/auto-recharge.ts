@@ -1,5 +1,6 @@
 import type { QueryFn } from "../../../shared/postgres-types.js";
 import type { BillingAutoRechargeAttempt, BillingAutoRechargeProfile } from "../../types/index.js";
+import { optionalBoundedDiagnosticMessage } from "../../../shared/diagnostics.js";
 
 function iso(value: unknown): string {
   return new Date(String(value)).toISOString();
@@ -111,6 +112,7 @@ export class BillingAutoRechargeRepository {
     failureMessage?: string | null;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
+    const failureMessage = optionalBoundedDiagnosticMessage(input.failureMessage);
     const currentRows = await this.query(
       "SELECT * FROM bursar.get_auto_recharge_attempt($1::uuid)",
       [input.id],
@@ -173,7 +175,7 @@ export class BillingAutoRechargeRepository {
           state,
           input.providerAttemptId ?? null,
           input.failureCode ?? null,
-          input.failureMessage ?? null,
+          failureMessage,
           JSON.stringify(input.metadata ?? {}),
         ],
       );

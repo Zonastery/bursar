@@ -7,44 +7,49 @@
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![License](https://img.shields.io/github/license/Zonastery/bursar.svg)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Zonastery/bursar)
 
-Bursar is Zonastery's reusable credit-ledger and billing SDK. Python and
-JavaScript expose the same application boundary: a `Bursar` facade with
-`credits`, `catalog`, and optional `billing` capabilities.
+Bursar is Zonastery's open-source credit-ledger and billing SDK for AI SaaS
+platforms. It meters usage, prices operations, manages balances, and bills
+customers from one canonical PostgreSQL schema and one versioned configuration
+document. The Python and TypeScript SDKs share both, so they produce identical
+accounting and identical bills.
 
-The PostgreSQL model is intentionally canonical:
+## Highlights
 
-- `credit_accounts.balance` is the only stored account balance.
-- `credit_ledger_entries` is the only monetary history.
-- `credit_lots` and `credit_lot_allocations` determine bucket availability and
-  expiry.
-- `credit_leases` reserve credits for work that may settle or be released.
-- `account_plan_assignments` links an account to its active plan.
+- **Canonical accounting** — `credit_accounts.balance` is the only stored
+  balance and `credit_ledger_entries` the only monetary history; there are no
+  projected transaction or bucket-balance tables.
+- **Declarative configuration** — operations, rate cards, plans, allowances,
+  and billing live in one strict, versioned document, published through the
+  SDK and readable by billing and auto-recharge.
+- **Financial safety by default** — reserve-then-settle leases with
+  idempotency keys, expiry, and strict-prepaid or overdraft policies.
+- **Safe expressions** — an AST-based evaluator with a strict allowlist: no
+  `eval`, no arbitrary code execution.
+- **Identical behavior in Python and JavaScript** — same config, same
+  rounding, same results.
 
-There are no projected transaction or bucket-balance tables.
+## Quick start
 
-## Install and migrate
+Requirements: Python 3.12+ or Node.js 22+.
 
 ```bash
 pip install bursar[postgres]
 export DATABASE_URL=postgresql://...
 bursar migrate
-bursar tenant create acme --id 018f7f5f-7b4a-7000-8000-000000000001
 ```
 
-The migration runner records checksums and is safe to run again. Existing
-pre-release databases must drop and recreate the `bursar` schema before this
-greenfield baseline; no conversion migration is supplied.
+`bursar migrate` applies the ordered SQL baseline and records checksums, so it
+is safe to re-run. Hosts can append their own idempotent SQL in the same
+transaction with `bursar migrate --post-migrate-sql ./host-integration.sql`.
+Pre-release databases must be dropped and recreated; no conversion migration is
+supplied.
 
-Hosts can install trusted, idempotent integration SQL in the same transaction:
+Create a tenant, then build the facade:
 
 ```bash
-bursar migrate --post-migrate-sql ./host-integration.sql
+bursar tenant create acme --id 018f7f5f-7b4a-7000-8000-000000000001
 ```
-
-Repeat `--post-migrate-sql` to apply multiple files in order. Host files are
-executed on every run and are not recorded in Bursar's migration ledger.
 
 ```python
 from bursar import Bursar, PostgresStore
@@ -55,53 +60,32 @@ bursar = Bursar.create(credit_store=store)
 added = bursar.credits.add_credits(user_id, 1_000, entry_type="purchase")
 charged = bursar.credits.deduct_credits(user_id, 25)
 entry = bursar.credits.get_ledger_entry(user_id, charged.entry_id)
-page = bursar.credits.list_ledger_entries(user_id, limit=50)
-next_page = bursar.credits.list_ledger_entries(
-    user_id, limit=50, cursor=page.next_cursor
-)
 ```
 
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
-const bursar = new Bursar({ creditStore: store });
+const bursar = new Bursar({
+  creditStore: new PostgresStore(process.env.DATABASE_URL!, tenantId),
+});
 
 const added = await bursar.credits.addCredits(userId, 1_000, {
   type: "purchase",
 });
 const charged = await bursar.credits.deductCredits(userId, 25);
 const entry = await bursar.credits.getLedgerEntry(userId, charged.entryId);
-const page = await bursar.credits.listLedgerEntries(userId, { limit: 50 });
-const nextPage = page.nextCursor
-  ? await bursar.credits.listLedgerEntries(userId, {
-      limit: 50,
-      cursor: page.nextCursor,
-    })
-  : null;
 ```
 
-Database installation belongs to `bursar migrate`, not to stores or the
-facade.
-
-## Canonical configuration
-
-Publish one strict, versioned configuration document. The sections are
-`pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
-`catalog`; only `version` and `credits` are required. Unknown historical shapes
-are rejected.
+Pricing is one strict, versioned document. Publish and activate it through the
+facade:
 
 ```yaml
 version: 1
-
 pricing:
   operations:
     completion:
-      measures:
-        input_tokens: { unit: token }
-        output_tokens: { unit: token }
-      dimensions:
-        model: { type: string }
+      measures: { input_tokens: { unit: token }, output_tokens: { unit: token } }
+      dimensions: { model: { type: string } }
   rate_cards:
     standard:
       operations:
@@ -113,45 +97,29 @@ pricing:
               components:
                 - { type: per_unit, measure: input_tokens, rate: "0.05" }
                 - { type: per_unit, measure: output_tokens, rate: "0.10" }
-
 credits:
   buckets:
-    purchased:
-      priority: 10
+    purchased: { priority: 10 }
   default_bucket: purchased
-
-plans:
-  free:
-    display_name: Free
-    rate_card: standard
-    allowed_operations: [completion]
 ```
 
-Publish and activate through `bursar.catalog`. Billing and auto-recharge always
-read the active canonical configuration.
-
-Plan allowances and credit buckets can share one explicit spend order. Lower
-priorities spend first, so an allowance at priority `20` sits between a gifted
-bucket at `10` and a purchased bucket at `30`:
-
-```yaml
-credits:
-  buckets:
-    gifted: { priority: 10 }
-    purchased: { priority: 30 }
-  default_bucket: purchased
-
-plans:
-  seeker:
-    credit_allowance:
-      amount: "10000"
-      priority: 20
-      window: { type: calendar, unit: month, count: 1 }
+```python
+bursar.catalog.publish_and_activate(config)
 ```
 
-An allowance priority cannot equal a bucket priority. Omitting it preserves the
-legacy allowance-first behavior. The allowance remains a plan entitlement with
-its own reset window; it is not a synthetic credit bucket.
+```ts
+bursar.catalog.publishAndActivate(config);
+```
 
-See the [Python package](python/README.md), [JavaScript package](javascript/README.md),
-and [documentation site](docs/docs/intro.mdx).
+## Documentation
+
+The full documentation — concepts, guides, CLI, and API references — is at
+[https://zonastery.github.io/bursar/](https://zonastery.github.io/bursar/).
+
+- [Python package](python/README.md) — `bursar` on PyPI
+- [JavaScript package](javascript/README.md) — `@zonastery/bursar` on npm
+- [Contributing](CONTRIBUTING.md)
+
+## License
+
+AGPL-3.0. See [LICENSE](LICENSE).

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalBursarConfigDict, loadConfigFromDict } from "../src/config.js";
+import {
+  canonicalBursarConfigDict,
+  loadCatalogRollout,
+  loadConfigFromDict,
+  validateCatalogRollout,
+} from "../src/config.js";
 import { projectPublicCatalog } from "../src/catalog.js";
 import { ConfigError } from "../src/errors.js";
 
@@ -137,11 +142,41 @@ describe("typed v1 config", () => {
     const parsed = loadConfigFromDict(baseConfig());
     expect(parsed.plans.pro.creditAllowance?.amount.toString()).toBe("10");
     expect(parsed.plans.pro.creditAllowance?.priority).toBe(15);
-    expect(parsed.plans.pro.revisionPolicy).toBe("immediate");
+    expect(parsed.plans.pro.evolution.defaultRollout).toBe("immediate");
     const canonical = canonicalBursarConfigDict(baseConfig());
     expect(
       ((canonical.credits as Record<string, unknown>).policies as Record<string, unknown>).invoice,
     ).toEqual({ type: "credit_line", limit: "500.000000" });
+  });
+
+  it("supports new-assignments-only defaults and strict release overrides", () => {
+    const config = baseConfig();
+    Object.assign(config.plans.pro, {
+      evolution: { default_rollout: "new_assignments_only" },
+    });
+    const parsed = loadConfigFromDict(config);
+    expect(parsed.plans.pro.evolution.defaultRollout).toBe("new_assignments_only");
+
+    const rollout = loadCatalogRollout({
+      plans: { pro: { effective: "immediate", include_pinned: true } },
+    });
+    expect(validateCatalogRollout(parsed, rollout)).toEqual({
+      plans: { pro: { effective: "immediate", includePinned: true } },
+    });
+    expect(() =>
+      validateCatalogRollout(
+        parsed,
+        loadCatalogRollout({ plans: { enterprise: { effective: "immediate" } } }),
+      ),
+    ).toThrow(/unknown plan/);
+  });
+
+  it("rejects next-renewal evolution for a plan without a subscription offer", () => {
+    const config = baseConfig();
+    Object.assign(config.plans.pro, {
+      evolution: { default_rollout: "next_renewal" },
+    });
+    expect(() => loadConfigFromDict(config)).toThrow(/requires a subscription offer/);
   });
 
   it("defaults fixed accounting and plan rank for config authors", () => {

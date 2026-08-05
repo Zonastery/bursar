@@ -49,6 +49,7 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
 )
+from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
 
@@ -536,19 +537,72 @@ class BillingService:
         try:
             event.billing_event_id = claim.billing_event_id
             result = self._route_event(event)
-            self._store.complete_billing_event(event.provider, event.event_id, claim.claim_token)
-            return result
         except Exception as exc:
-            self._logger.error(
-                "failed to handle billing event",
+            return self._record_billing_event_failure(event, claim.claim_token, exc)
+
+        if not result.handled:
+            message = bounded_diagnostic_message(
+                result.error,
+                "billing_event_not_handled",
+            )
+            self._record_billing_event_failure(
+                event,
+                claim.claim_token,
+                message,
+                log_as_error=False,
+            )
+            return result.model_copy(update={"error": message})
+
+        try:
+            completed = self._store.complete_billing_event(
+                event.provider,
+                event.event_id,
+                claim.claim_token,
+            )
+        except Exception as exc:
+            return self._record_billing_event_failure(event, claim.claim_token, exc)
+
+        if not completed:
+            return self._record_billing_event_failure(
+                event,
+                claim.claim_token,
+                "billing_event_completion_rejected",
+            )
+        return result
+
+    def _record_billing_event_failure(
+        self,
+        event: BillingEvent,
+        claim_token: str,
+        error: object | None,
+        *,
+        log_as_error: bool = True,
+    ) -> BillingEventResult:
+        message = bounded_diagnostic_message(error, "billing_event_processing_failed")
+        log = self._logger.error if log_as_error else self._logger.warn
+        log(
+            "failed to handle billing event",
+            {
+                "provider": event.provider,
+                "event_id": event.event_id,
+                "error": message,
+            },
+        )
+        failed = self._store.fail_billing_event(
+            event.provider,
+            event.event_id,
+            claim_token,
+            message,
+        )
+        if not failed:
+            self._logger.warn(
+                "billing event failure was not persisted",
                 {
                     "provider": event.provider,
                     "event_id": event.event_id,
-                    "error": str(exc),
                 },
             )
-            self._store.fail_billing_event(event.provider, event.event_id, claim.claim_token, str(exc))
-            return BillingEventResult(handled=False, error=str(exc))
+        return BillingEventResult(handled=False, error=message)
 
     def _route_event(self, event: BillingEvent) -> BillingEventResult:
         handler = self._handlers.get(event.event_type)

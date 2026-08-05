@@ -4,7 +4,8 @@ CREATE FUNCTION bursar.publish_and_activate_catalog(
     p_yaml_schema_version integer,
     p_source_document jsonb,
     p_label text DEFAULT NULL,
-    p_activate boolean DEFAULT TRUE
+    p_activate boolean DEFAULT TRUE,
+    p_rollout jsonb DEFAULT '{"plans": {}}'::jsonb
 )
 RETURNS TABLE (
     revision_id uuid,
@@ -32,6 +33,23 @@ BEGIN
     END IF;
 
     PERFORM bursar.require_catalog_document_shape(p_source_document);
+
+    -- Canonicalize documented v1 defaults before hashing, storing, and
+    -- projecting the document. Omitting the fixed accounting block must be
+    -- semantically identical to spelling it out explicitly.
+    p_source_document := jsonb_set(
+        p_source_document,
+        '{credits,accounting}',
+        COALESCE(
+            p_source_document #> '{credits,accounting}',
+            '{
+                "unit": "credit",
+                "scale": 6,
+                "rounding": "half_up"
+            }'::jsonb
+        ),
+        true
+    );
 
     IF EXISTS (
         SELECT 1
@@ -148,15 +166,52 @@ BEGIN
         FROM jsonb_each(
             COALESCE(p_source_document->'plans', '{}'::jsonb)
         ) AS plan_entry(key, value)
-        WHERE CASE
-            WHEN jsonb_typeof(plan_entry.value->'rank') = 'number'
-            THEN (plan_entry.value->>'rank')::numeric < 0
+        WHERE plan_entry.value ? 'rank'
+          AND (
+              jsonb_typeof(plan_entry.value->'rank') <> 'number'
+              OR (plan_entry.value->>'rank')::numeric < 0
               OR mod((plan_entry.value->>'rank')::numeric, 1) <> 0
-            ELSE true
-        END
+          )
     )
     THEN
         RAISE EXCEPTION 'plans.*.rank must be a non-negative integer'
+            USING ERRCODE = '22023';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_each(
+            COALESCE(p_source_document->'plans', '{}'::jsonb)
+        ) AS plan_entry(key, value)
+        WHERE COALESCE(
+            plan_entry.value #>> '{evolution,default_rollout}',
+            CASE WHEN EXISTS (
+                SELECT 1
+                FROM jsonb_each(
+                    COALESCE(
+                        p_source_document #> '{commerce,offers}',
+                        '{}'::jsonb
+                    )
+                ) AS offer_entry(key, value)
+                WHERE offer_entry.value->>'type' = 'subscription'
+                  AND offer_entry.value->>'plan' = plan_entry.key
+            ) THEN 'next_renewal' ELSE 'immediate' END
+        ) = 'next_renewal'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM jsonb_each(
+                  COALESCE(
+                      p_source_document #> '{commerce,offers}',
+                      '{}'::jsonb
+                  )
+              ) AS offer_entry(key, value)
+              WHERE offer_entry.value->>'type' = 'subscription'
+                AND offer_entry.value->>'plan' = plan_entry.key
+          )
+    )
+    THEN
+        RAISE EXCEPTION
+            'next_renewal default rollout requires a subscription offer'
             USING ERRCODE = '22023';
     END IF;
 
@@ -282,8 +337,19 @@ BEGIN
             )
             VALUES (v_revision, p_label);
 
-            PERFORM bursar.schedule_catalog_plan_rollout(v_revision);
+            PERFORM bursar.schedule_catalog_plan_rollout(
+                v_revision,
+                p_rollout
+            );
             v_status := 'active';
+        ELSIF p_activate
+              AND p_rollout IS DISTINCT FROM '{}'::jsonb
+              AND p_rollout IS DISTINCT FROM '{"plans": {}}'::jsonb
+        THEN
+            PERFORM bursar.schedule_catalog_plan_rollout(
+                v_revision,
+                p_rollout
+            );
         END IF;
 
         RETURN QUERY
@@ -538,7 +604,7 @@ BEGIN
         allowed_operations,
         credit_policy_key,
         admission_policy_key,
-        revision_policy,
+        default_rollout,
         credit_allowance_amount,
         credit_allowance_priority,
         credit_allowance_bucket,
@@ -565,7 +631,7 @@ BEGIN
         plan_entry.value->>'credit_policy',
         plan_entry.value->>'admission_policy',
         COALESCE(
-            plan_entry.value->>'revision_policy',
+            plan_entry.value #>> '{evolution,default_rollout}',
             CASE WHEN EXISTS (
                 SELECT 1
                 FROM jsonb_each(
@@ -1101,7 +1167,10 @@ BEGIN
         )
         VALUES (v_revision, p_label);
 
-        PERFORM bursar.schedule_catalog_plan_rollout(v_revision);
+        PERFORM bursar.schedule_catalog_plan_rollout(
+            v_revision,
+            p_rollout
+        );
         v_status := 'active';
     ELSE
         v_status := 'published';
@@ -1164,7 +1233,8 @@ AS $$
 $$;
 
 CREATE FUNCTION bursar.activate_catalog_revision(
-    p_revision_no bigint
+    p_revision_no bigint,
+    p_rollout jsonb DEFAULT '{"plans": {}}'::jsonb
 )
 RETURNS bursar.catalog_revisions
 LANGUAGE plpgsql
@@ -1215,7 +1285,17 @@ BEGIN
         )
         VALUES (v_revision.id, v_revision.label);
 
-        PERFORM bursar.schedule_catalog_plan_rollout(v_revision.id);
+        PERFORM bursar.schedule_catalog_plan_rollout(
+            v_revision.id,
+            p_rollout
+        );
+    ELSIF p_rollout IS DISTINCT FROM '{}'::jsonb
+          AND p_rollout IS DISTINCT FROM '{"plans": {}}'::jsonb
+    THEN
+        PERFORM bursar.schedule_catalog_plan_rollout(
+            v_revision.id,
+            p_rollout
+        );
     END IF;
 
     RETURN v_revision;

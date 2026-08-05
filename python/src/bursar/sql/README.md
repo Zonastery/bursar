@@ -48,6 +48,12 @@ and stable error codes. `SECURITY DEFINER` functions must keep an empty
 `search_path` and schema-qualify every object reference. Internal mutation
 functions must use the `bursar.mutation_context` trigger contract.
 
+Catalog publication must accept every omission documented as a model default.
+The fixed credit-accounting default is canonicalized before the source
+document is digested, so omitted and explicitly stated forms do not create
+duplicate revisions. Other defaults must be applied consistently by every SQL
+projection and reader.
+
 Externally meaningful, independently generated, and cross-system identifiers
 use RFC 9562 UUIDv7. This preserves the UUID API while giving primary and
 unique B-tree indexes time-local insert patterns. Internal-only append and
@@ -58,21 +64,28 @@ remain UUIDv4 because they are credentials, not row keys.
 
 Business and provider keys are stored as `text`, trimmed/non-empty where
 required, and bounded to 255 characters before they can reach an index.
+Longer external values use `is_nonempty_bounded_text(value, explicit_limit)`;
+do not reuse the 255-character key helper for URLs, object keys, or diagnostic
+text.
 Currency codes use `text` plus an uppercase ISO-4217-shape check rather than
 blank-padded `char(3)`. Closed internal state machines use enums; provider
 states and workflows expected to evolve use `text` with a named allowlist
 check. Provider-owned records and uniqueness rules must include
-`provider_environment`; subject-scoped billing state uses
-`(subject_id, provider_environment)`.
+`provider_environment`; relationships between provider records include the
+provider and environment as part of the foreign key, not only in application
+validation. Subject-scoped billing state uses `(subject_id,
+provider_environment)`.
 
 Every foreign key must have an index whose leading columns match the child key.
 Do not add an index already covered by the leading columns and predicate of
-another index. Catalog regression tests enforce both rules.
+another index. Tenant-rewritten foreign keys use stable, descriptive names and
+partial child indexes when optional relationship columns are null. Catalog
+regression tests enforce both rules.
 
 ## Change policy
 
-This repository is still pre-production, so the numbered files may be
-reorganised as a new greenfield baseline. Once deployed, migration files are
+The baseline is still greenfield, so the numbered files may be reorganised
+until the schema is declared stable. Once deployed, migration files are
 immutable: formatting or logic changes must be appended as a new migration
 because the runner rejects checksum changes.
 
@@ -91,8 +104,15 @@ Postgres 16 instance after every baseline change.
 ## PostgreSQL-first storage lifecycle
 
 Bursar keeps accounting, idempotency, current quota state, and billing claim
-state in PostgreSQL permanently. High-cardinality or opaque payloads are kept
-in bounded tables:
+state in PostgreSQL permanently.
+
+The PostgreSQL mode is complete on its own. S3 and ClickHouse are optional
+delivery targets, never prerequisites for ingest or accounting correctness.
+Time-local identifiers, BRIN/time-leading indexes, monthly payload partitions,
+sharded rollups, and bounded maintenance let PostgreSQL absorb a continuously
+growing event stream without relying on either external system.
+
+High-cardinality or opaque payloads are kept in bounded tables:
 
 - `credit_usage_charges` retains the compact accounting receipt and idempotency
   evidence. PostgreSQL mode also stores dimensions/metadata in
@@ -121,6 +141,9 @@ for one payload table. It creates the current and next monthly partitions and
 drops fully expired partitions with a short lock timeout. A whole-partition
 drop avoids row-delete WAL and dead-table bloat. Keeping it separate is
 important because PostgreSQL holds DDL locks until transaction commit.
+The partition registry is treated as a cache: destructive maintenance locks
+the physical child and verifies its parent and exact bounds before dropping
+it, so stale or corrupted registry metadata cannot redirect cleanup.
 
 This keeps retention work out of ingestion transactions. Do not call
 maintenance inline from an end-user request.

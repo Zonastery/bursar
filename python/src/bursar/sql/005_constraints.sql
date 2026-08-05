@@ -975,6 +975,28 @@ AS $$
 DECLARE
     v_end timestamptz;
 BEGIN
+    IF TG_OP = 'UPDATE'
+       AND ROW(
+           NEW.plan_id,
+           NEW.catalog_revision_id,
+           NEW.plan_key,
+           NEW.source_type,
+           NEW.source_id,
+           NEW.starts_at,
+           NEW.ends_at
+       ) IS NOT DISTINCT FROM ROW(
+           OLD.plan_id,
+           OLD.catalog_revision_id,
+           OLD.plan_key,
+           OLD.source_type,
+           OLD.source_id,
+           OLD.starts_at,
+           OLD.ends_at
+       )
+    THEN
+        RETURN NEW;
+    END IF;
+
     v_end := CASE
         WHEN TG_OP = 'UPDATE'
              AND NEW.starts_at > OLD.starts_at
@@ -992,7 +1014,7 @@ BEGIN
             plan_id,
             catalog_revision_id,
             plan_key,
-            revision_policy,
+            catalog_revision_pinned,
             source_type,
             source_id,
             starts_at,
@@ -1005,7 +1027,7 @@ BEGIN
             OLD.plan_id,
             OLD.catalog_revision_id,
             OLD.plan_key,
-            OLD.revision_policy,
+            OLD.catalog_revision_pinned,
             OLD.source_type,
             OLD.source_id,
             OLD.starts_at,
@@ -1547,6 +1569,13 @@ $$;
 -- between tenant-owned tables with a tenant-prefixed composite foreign key.
 -- The original single-tenant foreign keys are removed after the composite
 -- constraints have been installed.
+--
+-- Subject identifiers are the only host-supplied IDs and may repeat between
+-- tenants. Build their final key up front so the relationship rewrite can use
+-- it directly instead of leaving a duplicate unique index behind.
+CREATE UNIQUE INDEX subjects_tenant_id_id_uidx
+ON bursar.subjects (tenant_id, id);
+
 CREATE TEMPORARY TABLE bursar_multitenant_foreign_keys
 ON COMMIT DROP
 AS
@@ -1560,7 +1589,9 @@ SELECT
     constraint_info.confupdtype,
     constraint_info.confdeltype,
     constraint_info.condeferrable,
-    constraint_info.condeferred
+    constraint_info.condeferred,
+    child_table.relname AS child_table_name,
+    parent_table.relname AS parent_table_name
 FROM pg_constraint AS constraint_info
 INNER JOIN pg_class AS child_table
     ON constraint_info.conrelid = child_table.oid
@@ -1593,10 +1624,18 @@ DO $$
 DECLARE
     v_fk record;
     v_child_columns text;
+    v_child_column_names text;
     v_parent_columns text;
+    v_parent_column_names text;
+    v_child_key smallint [];
+    v_parent_key smallint [];
+    v_child_tenant_attnum smallint;
+    v_parent_tenant_attnum smallint;
+    v_child_nullable_predicate text;
     v_parent_index_name text;
     v_child_index_name text;
     v_constraint_name text;
+    v_name_seed text;
     v_update_action text;
     v_delete_action text;
     v_deferrability text;
@@ -1604,54 +1643,152 @@ BEGIN
     FOR v_fk IN
         SELECT * FROM bursar_multitenant_foreign_keys ORDER BY oid
     LOOP
-        SELECT string_agg(
-            format('%I', attribute_info.attname),
-            ', ' ORDER BY key_info.ordinality
-        )
-        INTO v_child_columns
+        SELECT
+            string_agg(
+                format('%I', attribute_info.attname),
+                ', ' ORDER BY key_info.ordinality
+            ),
+            string_agg(
+                attribute_info.attname,
+                '_' ORDER BY key_info.ordinality
+            ),
+            string_agg(
+                format('%I IS NOT NULL', attribute_info.attname),
+                ' AND ' ORDER BY key_info.ordinality
+            ) FILTER (WHERE NOT attribute_info.attnotnull)
+        INTO
+            v_child_columns,
+            v_child_column_names,
+            v_child_nullable_predicate
         FROM unnest(v_fk.conkey) WITH ORDINALITY AS key_info(attnum, ordinality)
         JOIN pg_attribute AS attribute_info
           ON attribute_info.attrelid = v_fk.conrelid
          AND attribute_info.attnum = key_info.attnum;
 
-        SELECT string_agg(
-            format('%I', attribute_info.attname),
-            ', ' ORDER BY key_info.ordinality
-        )
-        INTO v_parent_columns
+        SELECT
+            string_agg(
+                format('%I', attribute_info.attname),
+                ', ' ORDER BY key_info.ordinality
+            ),
+            string_agg(
+                attribute_info.attname,
+                '_' ORDER BY key_info.ordinality
+            )
+        INTO v_parent_columns, v_parent_column_names
         FROM unnest(v_fk.confkey) WITH ORDINALITY AS key_info(attnum, ordinality)
         JOIN pg_attribute AS attribute_info
           ON attribute_info.attrelid = v_fk.confrelid
          AND attribute_info.attnum = key_info.attnum;
 
-        v_parent_index_name := 'mtuq_' || substr(
-            md5(v_fk.confrelid::text || ':' || v_fk.confkey::text),
-            1,
-            24
-        );
-        v_child_index_name := 'mtfk_idx_' || substr(
-            md5(v_fk.conrelid::text || ':' || v_fk.conkey::text),
-            1,
-            20
-        );
-        v_constraint_name := 'mtfk_' || substr(
-            md5(v_fk.conrelid::text || ':' || v_fk.conname),
-            1,
-            24
-        );
+        SELECT attribute_info.attnum
+        INTO v_child_tenant_attnum
+        FROM pg_attribute AS attribute_info
+        WHERE attribute_info.attrelid = v_fk.conrelid
+          AND attribute_info.attname = 'tenant_id'
+          AND NOT attribute_info.attisdropped;
 
-        EXECUTE format(
-            'CREATE UNIQUE INDEX IF NOT EXISTS %I ON %s (tenant_id, %s)',
-            v_parent_index_name,
-            v_fk.confrelid::regclass,
-            v_parent_columns
-        );
-        EXECUTE format(
-            'CREATE INDEX IF NOT EXISTS %I ON %s (tenant_id, %s)',
-            v_child_index_name,
-            v_fk.conrelid::regclass,
-            v_child_columns
-        );
+        SELECT attribute_info.attnum
+        INTO v_parent_tenant_attnum
+        FROM pg_attribute AS attribute_info
+        WHERE attribute_info.attrelid = v_fk.confrelid
+          AND attribute_info.attname = 'tenant_id'
+          AND NOT attribute_info.attisdropped;
+
+        v_child_key := array_prepend(v_child_tenant_attnum, v_fk.conkey);
+        v_parent_key := array_prepend(v_parent_tenant_attnum, v_fk.confkey);
+
+        v_name_seed := v_fk.parent_table_name
+            || '_tenant_id_'
+            || v_parent_column_names
+            || '_key';
+        v_parent_index_name := CASE
+            WHEN length(v_name_seed) <= 63 THEN v_name_seed
+            ELSE left(v_name_seed, 54)
+                || '_'
+                || substr(md5(v_name_seed), 1, 8)
+        END;
+
+        v_name_seed := v_fk.child_table_name
+            || '_tenant_id_'
+            || v_child_column_names
+            || '_idx';
+        v_child_index_name := CASE
+            WHEN length(v_name_seed) <= 63 THEN v_name_seed
+            ELSE left(v_name_seed, 54)
+                || '_'
+                || substr(md5(v_name_seed), 1, 8)
+        END;
+
+        v_name_seed := v_fk.child_table_name
+            || '_tenant_id_'
+            || v_child_column_names
+            || '_'
+            || v_fk.parent_table_name
+            || '_fkey';
+        v_constraint_name := CASE
+            WHEN length(v_name_seed) <= 63 THEN v_name_seed
+            ELSE left(v_name_seed, 54)
+                || '_'
+                || substr(md5(v_name_seed), 1, 8)
+        END;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_index AS index_info
+            WHERE index_info.indrelid = v_fk.confrelid
+              AND index_info.indisunique
+              AND index_info.indisvalid
+              AND index_info.indpred IS NULL
+              AND index_info.indnkeyatts = cardinality(v_parent_key)
+              AND (
+                  regexp_split_to_array(
+                      trim(index_info.indkey::text),
+                      ' +'
+                  )
+              )[1:cardinality(v_parent_key)]::smallint[] = v_parent_key
+        ) THEN
+            EXECUTE format(
+                'CREATE UNIQUE INDEX %I ON %s (tenant_id, %s)',
+                v_parent_index_name,
+                v_fk.confrelid::regclass,
+                v_parent_columns
+            );
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_index AS index_info
+            WHERE index_info.indrelid = v_fk.conrelid
+              AND index_info.indisvalid
+              AND index_info.indnkeyatts >= cardinality(v_child_key)
+              AND (
+                  regexp_split_to_array(
+                      trim(index_info.indkey::text),
+                      ' +'
+                  )
+              )[1:cardinality(v_child_key)]::smallint[] = v_child_key
+              AND (
+                  index_info.indpred IS NULL
+                  OR (
+                      v_child_nullable_predicate IS NOT NULL
+                      AND pg_get_expr(
+                          index_info.indpred,
+                          index_info.indrelid
+                      ) = v_child_nullable_predicate
+                  )
+              )
+        ) THEN
+            EXECUTE format(
+                'CREATE INDEX %I ON %s (tenant_id, %s)%s',
+                v_child_index_name,
+                v_fk.conrelid::regclass,
+                v_child_columns,
+                CASE
+                    WHEN v_child_nullable_predicate IS NULL THEN ''
+                    ELSE ' WHERE ' || v_child_nullable_predicate
+                END
+            );
+        END IF;
 
         v_update_action := CASE v_fk.confupdtype
             WHEN 'r' THEN ' ON UPDATE RESTRICT'
@@ -1706,4 +1843,5 @@ $$;
 -- same UUID in two tenants. Their primary key must therefore include tenancy.
 ALTER TABLE bursar.subjects DROP CONSTRAINT subjects_pkey;
 ALTER TABLE bursar.subjects
-ADD CONSTRAINT subjects_pkey PRIMARY KEY (tenant_id, id);
+ADD CONSTRAINT subjects_pkey
+PRIMARY KEY USING INDEX subjects_tenant_id_id_uidx;

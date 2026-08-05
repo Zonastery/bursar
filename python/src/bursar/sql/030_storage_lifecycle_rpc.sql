@@ -209,17 +209,19 @@ BEGIN
     WITH claimed AS (
         SELECT outbox.id
         FROM bursar.event_outbox AS outbox
-        WHERE (
-            (
-                outbox.status = 'pending'
-                AND outbox.available_at <= now()
-            ) OR (
-                outbox.status = 'processing'
-                AND outbox.claim_expires_at <= now()
-            )
-        )
+        WHERE outbox.status IN ('pending', 'processing')
+          AND CASE outbox.status
+              WHEN 'pending' THEN outbox.available_at
+              WHEN 'processing' THEN outbox.claim_expires_at
+          END <= now()
           AND (p_topics IS NULL OR outbox.topic = ANY(p_topics))
-        ORDER BY outbox.available_at, outbox.created_at, outbox.id
+        ORDER BY
+            CASE outbox.status
+                WHEN 'pending' THEN outbox.available_at
+                WHEN 'processing' THEN outbox.claim_expires_at
+            END,
+            outbox.created_at,
+            outbox.id
         FOR UPDATE SKIP LOCKED
         LIMIT p_limit
     )
@@ -299,17 +301,19 @@ BEGIN
           ON tenant.id = outbox.tenant_id
          AND tenant.status = 'active'
         WHERE outbox.tenant_id = p_tenant_id
-          AND (
-            (
-                outbox.status = 'pending'
-                AND outbox.available_at <= now()
-            ) OR (
-                outbox.status = 'processing'
-                AND outbox.claim_expires_at <= now()
-            )
-        )
+          AND outbox.status IN ('pending', 'processing')
+          AND CASE outbox.status
+              WHEN 'pending' THEN outbox.available_at
+              WHEN 'processing' THEN outbox.claim_expires_at
+          END <= now()
           AND (p_topics IS NULL OR outbox.topic = ANY(p_topics))
-        ORDER BY outbox.available_at, outbox.created_at, outbox.id
+        ORDER BY
+            CASE outbox.status
+                WHEN 'pending' THEN outbox.available_at
+                WHEN 'processing' THEN outbox.claim_expires_at
+            END,
+            outbox.created_at,
+            outbox.id
         FOR UPDATE OF outbox SKIP LOCKED
         LIMIT p_limit
     )
@@ -444,11 +448,10 @@ DECLARE
     v_event bursar.billing_events;
 BEGIN
     IF p_event_id IS NULL
-       OR NOT bursar.is_nonempty_text(p_object_key)
-       OR NOT bursar.is_bounded_text(p_object_key, 2048)
+       OR NOT bursar.is_nonempty_bounded_text(p_object_key, 2048)
        OR (
            p_object_version IS NOT NULL
-           AND NOT bursar.is_bounded_text(p_object_version, 255)
+           AND NOT bursar.is_nonempty_bounded_text(p_object_version, 1024)
        )
     THEN
         RAISE EXCEPTION 'invalid billing payload archive request'
@@ -498,8 +501,7 @@ DECLARE
 BEGIN
     IF p_retry_delay_seconds NOT BETWEEN 0 AND 86400
        OR p_attempt_limit NOT BETWEEN 1 AND 100
-       OR p_error IS NULL
-       OR NOT bursar.is_bounded_text(p_error, 8192)
+       OR NOT bursar.is_nonempty_bounded_text(p_error, 8192)
     THEN
         RAISE EXCEPTION 'invalid outbox failure request'
             USING ERRCODE = '22023';
@@ -539,6 +541,8 @@ DECLARE
     v_dropped integer := 0;
     v_lock_timeouts integer := 0;
     v_previous_lock_timeout text;
+    v_parent_oid regclass;
+    v_partition_oid regclass;
 BEGIN
     IF p_parent_table NOT IN (
         'usage_charge_payloads',
@@ -552,6 +556,8 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
+    v_parent_oid := format('bursar.%I', p_parent_table)::regclass;
+
     v_previous_lock_timeout := current_setting('lock_timeout');
     PERFORM set_config(
         'lock_timeout',
@@ -562,7 +568,9 @@ BEGIN
     FOR v_partition IN
         SELECT
             partition.parent_table,
-            partition.partition_table
+            partition.partition_table,
+            partition.range_start,
+            partition.range_end
         FROM bursar.storage_partitions AS partition
         WHERE partition.parent_table = p_parent_table
           AND partition.range_end <= p_cutoff
@@ -570,6 +578,38 @@ BEGIN
         LIMIT p_limit
     LOOP
         BEGIN
+            -- Lock the resolved relation before validating its identity. This
+            -- closes the check/drop race: the name cannot be rebound to an
+            -- unrelated table between catalog validation and DROP TABLE.
+            EXECUTE format(
+                'LOCK TABLE bursar.%I IN ACCESS EXCLUSIVE MODE',
+                v_partition.partition_table
+            );
+
+            v_partition_oid := to_regclass(
+                format('bursar.%I', v_partition.partition_table)
+            );
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_inherits
+                JOIN pg_class AS child
+                  ON child.oid = pg_inherits.inhrelid
+                WHERE pg_inherits.inhrelid = v_partition_oid
+                  AND pg_inherits.inhparent = v_parent_oid
+                  AND pg_get_expr(child.relpartbound, child.oid) = format(
+                      'FOR VALUES FROM (%L) TO (%L)',
+                      v_partition.range_start,
+                      v_partition.range_end
+                  )
+            ) THEN
+                RAISE EXCEPTION
+                    'storage partition drift: bursar.% is not the registered partition of bursar.%',
+                    v_partition.partition_table,
+                    p_parent_table
+                    USING ERRCODE = '55000';
+            END IF;
+
             -- Dropping a whole closed partition releases heap, TOAST, and
             -- index storage without producing row-by-row delete WAL or bloat.
             EXECUTE format(

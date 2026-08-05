@@ -14,6 +14,7 @@ const sidebars: SidebarsConfig = {
       link: {type: 'generated-index', description: 'How bursar models credit, pricing, plans, and billing.'},
       items: [
         'concepts/data-model',
+        'concepts/database-schema',
         'concepts/configuration',
         'concepts/pricing',
         'concepts/expressions',

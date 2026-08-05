@@ -28,7 +28,7 @@ BEGIN
       AND provider_environment=v_environment
     FOR UPDATE;
 
- IF p_idempotency_key IS NULL OR p_idempotency_key='' OR NOT FOUND THEN RETURN;
+ IF NOT bursar.is_nonempty_text(p_idempotency_key) OR NOT FOUND THEN RETURN;
  END IF;
 
  SELECT * INTO v_attempt
@@ -139,6 +139,26 @@ DECLARE
     v_environment text;
 
 BEGIN
+    IF (
+           p_provider_attempt_id IS NOT NULL
+           AND NOT bursar.is_nonempty_text(p_provider_attempt_id)
+       )
+       OR (
+           p_failure_code IS NOT NULL
+           AND NOT bursar.is_nonempty_text(p_failure_code)
+       )
+       OR (
+           p_failure_message IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_failure_message, 8192)
+       )
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
+    THEN
+        RETURN false;
+    END IF;
+
     SELECT state,subject_id,provider_environment
     INTO v_old,v_subject,v_environment
     FROM bursar.billing_auto_recharge_attempts

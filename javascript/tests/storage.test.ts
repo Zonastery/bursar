@@ -79,6 +79,19 @@ describe("OutboxWorker", () => {
     expect(store.complete).not.toHaveBeenCalled();
     expect(store.fail).toHaveBeenCalledWith(outboxEvent, "Error: ClickHouse unavailable", 10, 7);
   });
+
+  it("normalizes failure diagnostics before persistence", async () => {
+    const store = outboxStore([outboxEvent]);
+    const worker = new OutboxWorker(store, [
+      {
+        topics: ["usage.charge_recorded"],
+        handle: vi.fn().mockRejectedValue(new Error("  failed\0delivery  ")),
+      },
+    ]);
+
+    await expect(worker.runOnce()).resolves.toEqual({ claimed: 1, delivered: 0, failed: 1 });
+    expect(store.fail).toHaveBeenCalledWith(outboxEvent, "Error:   failed\uFFFDdelivery", 60, 10);
+  });
 });
 
 describe("S3BillingArchive", () => {

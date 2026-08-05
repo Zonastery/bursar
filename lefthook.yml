@@ -74,3 +74,7 @@ pre-push:
       root: "javascript/"
       glob: "src/**/*.ts"
       run: bun run knip
+    erd-docs:
+      root: "."
+      glob: "{python/src/bursar/sql/*.sql,docs/scripts/generate_erd_docs.sh,docs/package.json,docs/package-lock.json}"
+      run: cd docs && npm run generate:erd

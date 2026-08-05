@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { LRUCache } from "lru-cache";
-import { canonicalBursarConfigDict } from "../config.js";
+import { canonicalBursarConfigDict, type CatalogRollout } from "../config.js";
 import type { PricingEngine } from "../engine.js";
 import { PricingEngine as PricingEngineClass } from "../engine.js";
 import { LeaseNotFoundError, PricingNotLoadedError } from "../errors.js";
@@ -70,19 +70,26 @@ export class PricingRuntime {
     this.cache.delete("pricing");
   }
 
-  async publish(config: Record<string, unknown>, label?: string | null): Promise<void> {
+  async publish(
+    config: Record<string, unknown>,
+    label?: string | null,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<void> {
     this.logger.info("[CreditsService] publishPricing", { label });
     const canonical = canonicalBursarConfigDict(config);
     this.setEngine(PricingEngineClass.fromDict(canonical));
-    await this.store.setActivePricing(canonical, label);
+    await this.store.setActivePricing(canonical, label, rollout);
   }
 
   async publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
     return this.store.publishPricing(canonicalBursarConfigDict(config), label);
   }
 
-  async activate(version: number): Promise<string> {
-    const id = await this.store.activatePricing(version);
+  async activate(
+    version: number,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string> {
+    const id = await this.store.activatePricing(version, rollout);
     await this.loadFromStore();
     return id;
   }

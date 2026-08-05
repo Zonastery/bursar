@@ -173,11 +173,30 @@ CREATE INDEX storage_partitions_expiry_idx
 ON bursar.storage_partitions (parent_table, range_end);
 
 CREATE INDEX event_outbox_claimable_idx
-ON bursar.event_outbox (available_at, created_at, id)
+ON bursar.event_outbox (
+    (
+        CASE status
+            WHEN 'pending' THEN available_at
+            WHEN 'processing' THEN claim_expires_at
+        END
+    ),
+    created_at,
+    id
+)
 WHERE status IN ('pending', 'processing');
 
 CREATE INDEX event_outbox_topic_claimable_idx
-ON bursar.event_outbox (topic, available_at, created_at, id)
+ON bursar.event_outbox (
+    topic,
+    (
+        CASE status
+            WHEN 'pending' THEN available_at
+            WHEN 'processing' THEN claim_expires_at
+        END
+    ),
+    created_at,
+    id
+)
 WHERE status IN ('pending', 'processing');
 
 CREATE INDEX event_outbox_aggregate_idx
@@ -216,7 +235,7 @@ ON bursar.account_plan_assignment_history (
 );
 
 CREATE UNIQUE INDEX one_open_plan_assignment_change_idx
-ON bursar.plan_assignment_changes (account_id)
+ON bursar.plan_assignment_changes (account_id, change_kind)
 WHERE state = 'scheduled';
 
 CREATE INDEX plan_assignment_changes_due_idx
@@ -253,6 +272,21 @@ ON bursar.quota_usage_events (
     event_at DESC
 )
 INCLUDE (amount);
+
+CREATE INDEX quota_usage_events_lineage_idx
+ON bursar.quota_usage_events (
+    account_id,
+    quota_key,
+    operation_key,
+    measure_key,
+    event_at DESC
+)
+INCLUDE (
+    plan_id,
+    catalog_revision_id,
+    amount,
+    correction_of_event_id
+);
 
 CREATE INDEX quota_usage_events_retention_idx
 ON bursar.quota_usage_events (event_at, id);
@@ -481,15 +515,6 @@ WHERE payment_id IS NOT null;
 -- Every foreign key needs a leading-column index on the referencing side.
 -- PostgreSQL does not create these automatically, and parent deletes or key
 -- updates otherwise require full scans of the child relation.
-CREATE INDEX account_plan_assignments_plan_key_fk_idx
-ON bursar.account_plan_assignments (catalog_revision_id, plan_key);
-
-CREATE INDEX account_plan_assignments_plan_fk_idx
-ON bursar.account_plan_assignments (plan_id, catalog_revision_id);
-
-CREATE INDEX account_plan_assignment_history_plan_fk_idx
-ON bursar.account_plan_assignment_history (plan_id, catalog_revision_id);
-
 CREATE INDEX billing_auto_recharge_profiles_revision_fk_idx
 ON bursar.billing_auto_recharge_profiles (catalog_revision_id)
 WHERE catalog_revision_id IS NOT null;

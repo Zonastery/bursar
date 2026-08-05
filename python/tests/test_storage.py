@@ -216,6 +216,21 @@ def test_outbox_worker_releases_failure_with_bounded_backoff() -> None:
     ]
 
 
+def test_outbox_worker_normalizes_failure_diagnostics() -> None:
+    store = FakeOutboxStore([OUTBOX_EVENT])
+
+    def fail_handler(_event: OutboxEvent) -> None:
+        raise RuntimeError("  failed\x00delivery  ")
+
+    worker = OutboxWorker(
+        store,
+        [FakeHandler(("usage.charge_recorded",), fail_handler)],
+    )
+
+    assert worker.run_once() == OutboxRunResult(claimed=1, delivered=0, failed=1)
+    assert store.failed[0][1] == "RuntimeError:   failed\ufffddelivery"
+
+
 def test_s3_archive_uses_deterministic_key_and_preserves_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

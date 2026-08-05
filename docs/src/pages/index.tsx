@@ -75,9 +75,10 @@ export default function Home(): ReactNode {
                 Reserve-then-deduct pattern with idempotency keys, reservation
                 expiry, and min-balance enforcement.
               </Feature>
-              <Feature title="Pluggable Stores">
-                Supabase, PostgreSQL, or in-memory — same CreditStore
-                interface. Bring your own backend.
+              <Feature title="PostgreSQL-First">
+                One canonical schema, applied by <code>bursar migrate</code>. The
+                <code>CreditStore</code> abstraction keeps room for custom
+                stores.
               </Feature>
               <Feature title="Open Source">
                 AGPL-3.0 license. Use it, fork it, contribute.{' '}

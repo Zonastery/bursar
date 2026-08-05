@@ -15,6 +15,7 @@ import type {
   EntitlementsConfig,
   FeatureValue,
   PlanDefinition,
+  PlanRolloutStrategy,
   PricingConfig,
   QuotaDefinition,
 } from "./types.js";
@@ -81,6 +82,19 @@ export function parsePlans(
 
   for (const [planKey, input] of Object.entries(raw)) {
     const plan = asObject(input);
+    const evolution = plan.evolution == null ? undefined : asObject(plan.evolution);
+    const defaultRollout = (evolution?.default_rollout ??
+      (subscriptionPlans.has(planKey) ? "next_renewal" : "immediate")) as PlanRolloutStrategy;
+    if (
+      !(["immediate", "next_renewal", "new_assignments_only"] as const).includes(defaultRollout)
+    ) {
+      semanticError(`plans.${planKey}.evolution.default_rollout is invalid`);
+    }
+    if (defaultRollout === "next_renewal" && !subscriptionPlans.has(planKey)) {
+      semanticError(
+        `plans.${planKey}.evolution.default_rollout=next_renewal requires a subscription offer`,
+      );
+    }
     const rateCard = plan.rate_card == null ? undefined : asString(plan.rate_card);
     const allowedOperations = (plan.allowed_operations ?? []) as string[];
     if (new Set(allowedOperations).size !== allowedOperations.length) {
@@ -183,10 +197,7 @@ export function parsePlans(
       quotas,
       ...(creditPolicy == null ? {} : { creditPolicy }),
       ...(admissionPolicy == null ? {} : { admissionPolicy }),
-      revisionPolicy: (plan.revision_policy ??
-        (subscriptionPlans.has(planKey)
-          ? "next_renewal"
-          : "immediate")) as PlanDefinition["revisionPolicy"],
+      evolution: { defaultRollout },
     };
     if (plans[planKey].creditAllowance != null && credits.defaultBucket == null) {
       semanticError(`plans.${planKey}.credit_allowance requires credits.default_bucket`);

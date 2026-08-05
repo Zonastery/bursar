@@ -1805,29 +1805,43 @@
           "default": null,
           "title": "Admission Policy"
         },
-        "revision_policy": {
+        "evolution": {
           "anyOf": [
             {
-              "enum": [
-                "immediate",
-                "next_renewal",
-                "pinned"
-              ],
-              "type": "string"
+              "$ref": "#/$defs/PlanEvolution"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Plan revision behavior. When omitted, subscription-backed plans use next_renewal and other plans use immediate.",
-          "title": "Revision Policy"
+          "description": "Catalog evolution defaults. When omitted, subscription-backed plans use next_renewal and other plans use immediate; canonical output materializes the default."
         }
       },
       "required": [
         "display_name"
       ],
       "title": "PlanDefinition",
+      "type": "object"
+    },
+    "PlanEvolution": {
+      "additionalProperties": false,
+      "properties": {
+        "default_rollout": {
+          "description": "Default adoption timing for existing assignments when a newer catalog revision changes this plan. A catalog activation may override it for one release.",
+          "enum": [
+            "immediate",
+            "next_renewal",
+            "new_assignments_only"
+          ],
+          "title": "Default Rollout",
+          "type": "string"
+        }
+      },
+      "required": [
+        "default_rollout"
+      ],
+      "title": "PlanEvolution",
       "type": "object"
     },
     "PrefixMatcher": {

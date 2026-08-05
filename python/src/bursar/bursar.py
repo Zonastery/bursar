@@ -204,11 +204,33 @@ class CatalogService:
     def publish_draft(self, config: dict, label: str | None = None) -> str:
         return self._credits.publish_pricing_draft(config, label)
 
-    def activate(self, version: int) -> str:
-        return self._credits.activate_pricing(version)
+    def activate(
+        self,
+        version: int,
+        rollout: dict[str, Any] | None = None,
+    ) -> str:
+        if rollout is None:
+            return self._credits.activate_pricing(version)
+        return self._credits.activate_pricing(version, rollout)
 
-    def publish_and_activate(self, config: dict, label: str | None = None) -> None:
-        self._credits.publish_pricing(config, label)
+    def publish_and_activate(
+        self,
+        config: dict,
+        label: str | None = None,
+        rollout: dict[str, Any] | None = None,
+    ) -> None:
+        if rollout is None:
+            self._credits.publish_pricing(config, label)
+        else:
+            self._credits.publish_pricing(config, label, rollout)
+
+    def set_revision_pin(self, user_id: str, pinned: bool) -> bool:
+        """Pin or unpin one current assignment from automatic catalog rollout."""
+        return self._credits.set_plan_revision_pin(user_id, pinned)
+
+    def apply_due_changes(self, limit: int = 100) -> int:
+        """Apply one bounded batch of renewal-effective plan changes."""
+        return self._credits.apply_due_plan_changes(limit)
 
 
 class AccountService:

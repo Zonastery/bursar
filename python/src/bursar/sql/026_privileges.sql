@@ -48,10 +48,10 @@ DECLARE
     v_function text;
 
     v_service_functions constant text[]:=ARRAY[
-        'bursar.publish_and_activate_catalog(integer,jsonb,text,boolean)',
+        'bursar.publish_and_activate_catalog(integer,jsonb,text,boolean,jsonb)',
         'bursar.catalog_revision_by_number(bigint)',
         'bursar.list_catalog_revisions(integer)',
-        'bursar.activate_catalog_revision(bigint)',
+        'bursar.activate_catalog_revision(bigint,jsonb)',
         'bursar.active_catalog_revision()',
         'bursar.execute_grant_program(text,text,uuid,text,uuid,text,jsonb)',
         'bursar.post_credit(uuid,bursar.ledger_entry_kind,numeric,text,text,jsonb,text,uuid,timestamptz,numeric)',
@@ -96,6 +96,7 @@ DECLARE
         'bursar.advance_checkout_intent(uuid,text,text,text)',
         'bursar.assign_plan(uuid,uuid,timestamptz,timestamptz)',
         'bursar.unassign_plan(uuid,text)',
+        'bursar.set_plan_revision_pin(uuid,boolean)',
         'bursar.start_plan_migration(uuid,uuid)',
         'bursar.migrate_plan_batch(uuid,integer)',
         'bursar.open_subscription_change(uuid,uuid,timestamptz,text,text,text)',

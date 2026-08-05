@@ -57,14 +57,14 @@ export abstract class BillingStore {
     provider: string,
     eventId: string,
     claimToken: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   abstract failBillingEvent(
     provider: string,
     eventId: string,
     claimToken: string,
     error?: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
 
   abstract upsertBillingCustomer(
     provider: string,

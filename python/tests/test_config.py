@@ -3,7 +3,14 @@ from decimal import Decimal
 import pytest
 
 from bursar import project_public_catalog
-from bursar.config import ConfigError, EqualMatcher, canonical_bursar_config_dict, load_config_from_dict
+from bursar.config import (
+    ConfigError,
+    EqualMatcher,
+    canonical_bursar_config_dict,
+    load_catalog_rollout,
+    load_config_from_dict,
+    validate_catalog_rollout,
+)
 from bursar.config.types import CreditLinePolicy
 
 
@@ -148,7 +155,8 @@ def test_accepts_typed_catalog() -> None:
     assert config.plans["pro"].credit_allowance is not None
     assert config.plans["pro"].credit_allowance.amount == Decimal("10")
     assert config.plans["pro"].credit_allowance.priority == 15
-    assert config.plans["pro"].revision_policy == "immediate"
+    assert config.plans["pro"].evolution is not None
+    assert config.plans["pro"].evolution.default_rollout == "immediate"
 
 
 def test_fixed_accounting_and_plan_rank_have_authoring_defaults() -> None:
@@ -359,7 +367,49 @@ def test_subscription_defaults_to_next_renewal_and_uses_typed_provider_ref() -> 
         },
     }
     config = load_config_from_dict(data)
-    assert config.plans["pro"].revision_policy == "next_renewal"
+    assert config.plans["pro"].evolution is not None
+    assert config.plans["pro"].evolution.default_rollout == "next_renewal"
+
+
+def test_plan_evolution_accepts_new_assignments_only() -> None:
+    data = base_config()
+    data["plans"]["pro"]["evolution"] = {"default_rollout": "new_assignments_only"}
+
+    config = load_config_from_dict(data)
+
+    assert config.plans["pro"].evolution is not None
+    assert config.plans["pro"].evolution.default_rollout == "new_assignments_only"
+
+
+def test_next_renewal_evolution_requires_subscription_offer() -> None:
+    data = base_config()
+    data["plans"]["pro"]["evolution"] = {"default_rollout": "next_renewal"}
+
+    with pytest.raises(ConfigError, match="requires a subscription offer"):
+        load_config_from_dict(data)
+
+
+def test_catalog_rollout_is_strict_and_validated_against_target_config() -> None:
+    config = load_config_from_dict(base_config())
+    rollout = load_catalog_rollout(
+        {
+            "plans": {
+                "pro": {
+                    "effective": "immediate",
+                    "include_pinned": True,
+                }
+            }
+        }
+    )
+
+    assert validate_catalog_rollout(config, rollout) is rollout
+    assert rollout.plans["pro"].include_pinned is True
+
+    with pytest.raises(ConfigError, match="unknown plan"):
+        validate_catalog_rollout(
+            config,
+            load_catalog_rollout({"plans": {"enterprise": {"effective": "immediate"}}}),
+        )
 
 
 def test_public_catalog_preserves_prices_without_provider_identifiers() -> None:

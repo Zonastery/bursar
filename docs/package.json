@@ -3,8 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py",
-    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py",
+    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh",
+    "generate:erd": "bash scripts/generate_erd_docs.sh",
+    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh",
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
     "build": "docusaurus build",
@@ -29,6 +30,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "db-schema-toolkit": "1.1.13",
     "@docusaurus/module-type-aliases": "3.10.1",
     "@docusaurus/tsconfig": "3.10.1",
     "@docusaurus/types": "3.10.1",

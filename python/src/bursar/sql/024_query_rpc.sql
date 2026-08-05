@@ -367,7 +367,7 @@ CREATE FUNCTION bursar.list_usage_charges(
     p_page_size integer DEFAULT 100,
     p_from_at timestamptz DEFAULT NULL,
     p_to_at timestamptz DEFAULT NULL,
-    p_include_record_only boolean DEFAULT true
+    p_include_record_only boolean DEFAULT TRUE
 )
 RETURNS TABLE (
     usage_id uuid,
@@ -918,7 +918,7 @@ RETURNS TABLE (
     plan_assignment_ends_at timestamptz,
     assignment_source_type text,
     assignment_source_id uuid,
-    revision_policy text,
+    catalog_revision_pinned boolean,
     plan_id uuid,
     plan_key text,
     plan_label text,
@@ -948,7 +948,7 @@ AS $$
         assignment.ends_at,
         assignment.source_type,
         assignment.source_id,
-        assignment.revision_policy,
+        assignment.catalog_revision_pinned,
         plan.id,
         plan.plan_key,
         plan.display_name,
@@ -1201,33 +1201,31 @@ AS $$
         SELECT
             policy.*,
             CASE
-                WHEN policy.is_rolling THEN COALESCE((
-                    SELECT sum(event.amount)
-                    FROM bursar.quota_usage_events AS event
-                    WHERE event.account_id = policy.account_id
-                      AND event.catalog_quota_id =
-                          policy.catalog_quota_id
-                      AND event.event_at > policy.window_start
-                      AND event.event_at <= policy.window_end
-                ), 0)
+                WHEN policy.is_rolling THEN
+                    bursar.quota_lineage_consumed(
+                        policy.account_id,
+                        policy.plan_key,
+                        policy.quota_key,
+                        policy.operation_key,
+                        policy.measure_key,
+                        policy.starts_at,
+                        policy.window_start,
+                        policy.window_end
+                    )
                 ELSE COALESCE(quota_window.consumed, 0)
             END AS consumed,
             CASE
-                WHEN policy.is_rolling THEN COALESCE((
-                    SELECT sum(reservation.amount)
-                    FROM bursar.credit_lease_quota_reservations
-                        AS reservation
-                    JOIN bursar.credit_leases AS lease
-                      ON lease.id = reservation.lease_id
-                    WHERE reservation.catalog_quota_id =
-                          policy.catalog_quota_id
-                      AND reservation.released_at IS NULL
-                      AND reservation.created_at > policy.window_start
-                      AND reservation.created_at <= policy.window_end
-                      AND lease.account_id = policy.account_id
-                      AND lease.status = 'active'
-                      AND lease.expires_at > now()
-                ), 0)
+                WHEN policy.is_rolling THEN
+                    bursar.quota_lineage_reserved(
+                        policy.account_id,
+                        policy.plan_key,
+                        policy.quota_key,
+                        policy.operation_key,
+                        policy.measure_key,
+                        policy.starts_at,
+                        policy.window_start,
+                        policy.window_end
+                    )
                 ELSE COALESCE(quota_window.reserved, 0)
             END AS reserved
         FROM policy

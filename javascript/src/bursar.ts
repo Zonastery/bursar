@@ -15,7 +15,7 @@ import { CommerceService as CommerceServiceImpl } from "./commerce/service.js";
 import { CommerceNotConfiguredError } from "./commerce/errors.js";
 import type { CommerceOptions } from "./commerce/types.js";
 import { loadConfigFromDict } from "./config.js";
-import type { ParsedBursarConfig } from "./config/types.js";
+import type { CatalogRollout, ParsedBursarConfig } from "./config/types.js";
 import { ConfigError, PricingNotLoadedError } from "./errors.js";
 import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
 import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
@@ -59,12 +59,29 @@ export class CatalogService {
     return this.credits.publishPricingDraft(config, label);
   }
 
-  activate(version: number): Promise<string> {
-    return this.credits.activatePricing(version);
+  activate(
+    version: number,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string> {
+    return this.credits.activatePricing(version, rollout);
   }
 
-  publishAndActivate(config: Record<string, unknown>, label?: string | null): Promise<void> {
-    return this.credits.publishPricing(config, label);
+  publishAndActivate(
+    config: Record<string, unknown>,
+    label?: string | null,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<void> {
+    return this.credits.publishPricing(config, label, rollout);
+  }
+
+  /** Pin or unpin one current assignment from automatic catalog rollout. */
+  setRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
+    return this.credits.setPlanRevisionPin(userId, pinned);
+  }
+
+  /** Apply one bounded batch of renewal-effective plan changes. */
+  applyDueChanges(limit = 100): Promise<number> {
+    return this.credits.applyDuePlanChanges(limit);
   }
 }
 

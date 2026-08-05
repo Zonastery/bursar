@@ -9,8 +9,14 @@ import { parseCommerce } from "./config/parse-commerce.js";
 import { parseCredits } from "./config/parse-credits.js";
 import { parsePlans } from "./config/parse-plans.js";
 import { parsePricing } from "./config/parse-pricing.js";
-import { asObject, semanticError, type JsonObject } from "./config/parse-utils.js";
-import type { BursarConfigData, ParsedBursarConfig, SubscriptionOffer } from "./config/types.js";
+import { asObject, identifier, semanticError, type JsonObject } from "./config/parse-utils.js";
+import type {
+  BursarConfigData,
+  CatalogRollout,
+  ParsedBursarConfig,
+  PlanRolloutStrategy,
+  SubscriptionOffer,
+} from "./config/types.js";
 
 export type * from "./config/types.js";
 
@@ -121,4 +127,90 @@ export function canonicalParsedBursarConfigDict(
   data: ParsedBursarConfig,
 ): BursarConfigData & Record<string, unknown> {
   return toSnakeCase(data) as BursarConfigData & Record<string, unknown>;
+}
+
+const ROLLOUT_STRATEGIES = new Set<PlanRolloutStrategy>([
+  "immediate",
+  "next_renewal",
+  "new_assignments_only",
+]);
+
+function requirePlainObject(value: unknown, path: string): JsonObject {
+  if (value == null || Array.isArray(value) || typeof value !== "object") {
+    throw new ConfigError(`${path} must be an object`);
+  }
+  return value as JsonObject;
+}
+
+function rejectUnknownKeys(value: JsonObject, allowed: readonly string[], path: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new ConfigError(`${path} contains unknown field '${unknown[0]}'`);
+  }
+}
+
+/** Parse a one-release catalog rollout manifest. */
+export function loadCatalogRollout(data: unknown = {}): CatalogRollout {
+  const raw = requirePlainObject(data, "rollout");
+  rejectUnknownKeys(raw, ["plans"], "rollout");
+  const plansRaw = raw.plans == null ? {} : requirePlainObject(raw.plans, "rollout.plans");
+  const plans: CatalogRollout["plans"] = {};
+
+  for (const [planKey, value] of Object.entries(plansRaw)) {
+    identifier(planKey, `rollout.plans.${planKey}`);
+    const plan = requirePlainObject(value, `rollout.plans.${planKey}`);
+    rejectUnknownKeys(
+      plan,
+      ["effective", "include_pinned", "includePinned"],
+      `rollout.plans.${planKey}`,
+    );
+    if (!ROLLOUT_STRATEGIES.has(plan.effective as PlanRolloutStrategy)) {
+      throw new ConfigError(
+        `rollout.plans.${planKey}.effective must be immediate, next_renewal, or new_assignments_only`,
+      );
+    }
+    if (plan.include_pinned != null && plan.includePinned != null) {
+      throw new ConfigError(
+        `rollout.plans.${planKey} must not set both include_pinned and includePinned`,
+      );
+    }
+    const includePinned = plan.include_pinned ?? plan.includePinned;
+    if (includePinned != null && typeof includePinned !== "boolean") {
+      throw new ConfigError(`rollout.plans.${planKey}.include_pinned must be boolean`);
+    }
+    plans[planKey] = {
+      effective: plan.effective as PlanRolloutStrategy,
+      includePinned: includePinned === true,
+    };
+  }
+
+  return { plans };
+}
+
+/** Serialize a rollout manifest for the catalog activation RPC. */
+export function canonicalCatalogRolloutDict(data: unknown = {}): Record<string, unknown> {
+  return toSnakeCase(loadCatalogRollout(data)) as Record<string, unknown>;
+}
+
+/** Validate rollout references and renewal timing against its target catalog. */
+export function validateCatalogRollout(
+  config: ParsedBursarConfig,
+  rollout: CatalogRollout,
+): CatalogRollout {
+  const subscriptionPlans = new Set(
+    Object.values(config.commerce.offers)
+      .filter((offer): offer is SubscriptionOffer => offer.type === "subscription")
+      .map((offer) => offer.plan),
+  );
+  for (const [planKey, policy] of Object.entries(rollout.plans)) {
+    if (!config.plans[planKey]) {
+      throw new ConfigError(`rollout.plans references unknown plan '${planKey}'`);
+    }
+    if (policy.effective === "next_renewal" && !subscriptionPlans.has(planKey)) {
+      throw new ConfigError(
+        `rollout.plans.${planKey}.effective=next_renewal requires a subscription offer`,
+      );
+    }
+  }
+  return rollout;
 }

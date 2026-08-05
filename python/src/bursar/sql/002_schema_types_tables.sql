@@ -231,7 +231,7 @@ CREATE TABLE bursar.catalog_activation_history (
     activated_at timestamptz NOT NULL DEFAULT now(),
     deactivated_at timestamptz,
     label text,
-    CHECK (deactivated_at IS null OR deactivated_at > activated_at)
+    CHECK (deactivated_at IS null OR deactivated_at >= activated_at)
 );
 
 CREATE TABLE bursar.catalog_buckets (
@@ -415,8 +415,10 @@ CREATE TABLE bursar.catalog_plans (
     allowed_operations text [] NOT NULL DEFAULT ARRAY[]::text [],
     credit_policy_key text,
     admission_policy_key text,
-    revision_policy text NOT NULL DEFAULT 'immediate'
-    CHECK (revision_policy IN ('immediate', 'next_renewal', 'pinned')),
+    default_rollout text NOT NULL DEFAULT 'immediate'
+    CHECK (default_rollout IN (
+        'immediate', 'next_renewal', 'new_assignments_only'
+    )),
     credit_allowance_amount numeric(20, 6)
     CHECK (
         credit_allowance_amount IS null
@@ -450,6 +452,7 @@ CREATE TABLE bursar.catalog_plans (
     CHECK (bursar.is_bounded_json_object(definition, 262144)),
     UNIQUE (catalog_revision_id, plan_key),
     UNIQUE (id, catalog_revision_id),
+    UNIQUE (id, catalog_revision_id, plan_key),
     FOREIGN KEY (catalog_revision_id, rate_card)
     REFERENCES bursar.catalog_rate_cards (
         catalog_revision_id,

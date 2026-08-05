@@ -79,10 +79,11 @@ class PlanRepository:
         rows = self._callproc("assign_plan", params)
         if not rows or rows[0] is not True:
             return None
+        assigned = self.get_user_plan(user_id)
         return SetUserPlanRow(
             user_id=user_id,
-            plan_id=plan_id,
-            plan_assigned_at=plan_assigned_at,
+            plan_id=(assigned.plan_id if assigned and assigned.plan_id else plan_id),
+            plan_assigned_at=(assigned.plan_assigned_at if assigned is not None else plan_assigned_at),
         )
 
     def unset_user_plan(self, user_id: str) -> UnsetUserPlanRow | None:
@@ -99,6 +100,17 @@ class PlanRepository:
         if not rows or rows[0] is not True:
             return None
         return UnsetUserPlanRow(user_id=user_id)
+
+    def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
+        """Pin or unpin the user's current assignment to its catalog revision."""
+        validate_non_empty(user_id, "user_id")
+        rows = self._callproc("set_plan_revision_pin", [user_id, pinned])
+        return bool(rows and rows[0] is True)
+
+    def apply_due_plan_changes(self, limit: int) -> int:
+        """Apply one bounded batch of renewal-effective plan changes."""
+        rows = self._callproc("apply_due_plan_assignment_changes", [limit]) or []
+        return int(rows[0]) if rows else 0
 
     def start_plan_migration(
         self,

@@ -146,7 +146,7 @@ class UserPlanRow(BaseModel):
     allowed_operations: list[str] | None = None
     assignment_source_type: str | None = None
     assignment_source_id: str | None = None
-    revision_policy: str | None = None
+    catalog_revision_pinned: bool = False
     plan_assigned_at: str | datetime | None = None
     catalog_revision_no: int | None = None
 

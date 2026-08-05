@@ -9,7 +9,10 @@ CREATE TABLE bursar.billing_customers (
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     provider_customer_id text NOT NULL
     CHECK (bursar.is_nonempty_text(provider_customer_id)),
-    email text,
+    email text CHECK (
+        email IS NULL
+        OR bursar.is_nonempty_bounded_text(email, 320)
+    ),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -39,7 +42,10 @@ CREATE TABLE bursar.billing_subscriptions (
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     provider_subscription_id text NOT NULL
     CHECK (bursar.is_nonempty_text(provider_subscription_id)),
-    provider_customer_id text,
+    provider_customer_id text CHECK (
+        provider_customer_id IS NULL
+        OR bursar.is_nonempty_text(provider_customer_id)
+    ),
     offer_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     status bursar.billing_subscription_status NOT NULL,
@@ -47,7 +53,7 @@ CREATE TABLE bursar.billing_subscriptions (
     current_period_end timestamptz,
     trial_end timestamptz,
     cancel_at timestamptz,
-    cancel_at_period_end boolean NOT NULL DEFAULT false,
+    cancel_at_period_end boolean NOT NULL DEFAULT FALSE,
     ended_at timestamptz,
     grace_ends_at timestamptz,
     grace_expired_at timestamptz,
@@ -65,24 +71,25 @@ CREATE TABLE bursar.billing_subscriptions (
     ),
     UNIQUE (id, subject_id),
     UNIQUE (id, subject_id, provider_environment),
+    UNIQUE (id, subject_id, provider, provider_environment),
     FOREIGN KEY (offer_id, catalog_revision_id)
     REFERENCES bursar.catalog_offers (id, catalog_revision_id),
     CHECK (
-        current_period_end IS null
-        OR current_period_start IS null
+        current_period_end IS NULL
+        OR current_period_start IS NULL
         OR current_period_end > current_period_start
     ),
     CHECK (
-        ended_at IS null
+        ended_at IS NULL
         OR status IN ('incomplete_expired', 'canceled', 'expired')
     ),
     CHECK (
-        (grace_ends_at IS null AND grace_expired_at IS null)
+        (grace_ends_at IS NULL AND grace_expired_at IS NULL)
         OR
-        (status = 'past_due' AND grace_ends_at IS NOT null)
+        (status = 'past_due' AND grace_ends_at IS NOT NULL)
     ),
     CHECK (
-        grace_expired_at IS null
+        grace_expired_at IS NULL
         OR grace_expired_at >= grace_ends_at
     )
 );
@@ -96,7 +103,7 @@ CREATE TABLE bursar.billing_entitlement_sources (
     DEFAULT bursar.current_provider_environment()
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     subscription_id uuid NOT NULL,
-    selected boolean NOT NULL DEFAULT false,
+    selected boolean NOT NULL DEFAULT FALSE,
     selected_at timestamptz,
     deselected_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -113,12 +120,25 @@ CREATE TABLE bursar.billing_entitlement_sources (
         provider_environment
     ),
     CHECK (
-        (selected AND selected_at IS NOT null AND deselected_at IS null)
-        OR (NOT selected)
+        (
+            selected
+            AND selected_at IS NOT NULL
+            AND deselected_at IS NULL
+        )
+        OR (
+            NOT selected
+            AND (
+                (selected_at IS NULL AND deselected_at IS NULL)
+                OR (
+                    selected_at IS NOT NULL
+                    AND deselected_at IS NOT NULL
+                )
+            )
+        )
     ),
     CHECK (
-        deselected_at IS null
-        OR (selected_at IS NOT null AND deselected_at >= selected_at)
+        deselected_at IS NULL
+        OR (selected_at IS NOT NULL AND deselected_at >= selected_at)
     )
 );
 
@@ -134,7 +154,7 @@ CREATE TABLE bursar.billing_payments (
     provider_payment_id text NOT NULL
     CHECK (bursar.is_nonempty_text(provider_payment_id)),
     provider_invoice_id text
-    CHECK (provider_invoice_id IS null OR bursar.is_nonempty_text(provider_invoice_id)),
+    CHECK (provider_invoice_id IS NULL OR bursar.is_nonempty_text(provider_invoice_id)),
     amount_minor bigint NOT NULL CHECK (amount_minor >= 0),
     tax_minor bigint NOT NULL DEFAULT 0 CHECK (tax_minor >= 0),
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
@@ -152,7 +172,8 @@ CREATE TABLE bursar.billing_payments (
         provider_environment,
         provider_payment_id
     ),
-    UNIQUE (id, subject_id)
+    UNIQUE (id, subject_id),
+    UNIQUE (id, subject_id, provider, provider_environment)
 );
 
 CREATE TABLE bursar.billing_events (
@@ -181,19 +202,20 @@ CREATE TABLE bursar.billing_events (
     payload_received_at timestamptz NOT NULL DEFAULT now(),
     payload_archived_at timestamptz,
     payload_object_key text CHECK (
-        payload_object_key IS null
-        OR bursar.is_bounded_text(payload_object_key, 2048)
+        payload_object_key IS NULL
+        OR bursar.is_nonempty_bounded_text(payload_object_key, 2048)
     ),
     payload_object_version text CHECK (
-        payload_object_version IS null
-        OR bursar.is_bounded_text(payload_object_version, 255)
+        payload_object_version IS NULL
+        OR bursar.is_nonempty_bounded_text(payload_object_version, 1024)
     ),
     status bursar.billing_event_status NOT NULL DEFAULT 'processing',
     attempt_count integer NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
     claim_token uuid,
     claim_expires_at timestamptz,
     last_error text CHECK (
-        last_error IS null OR bursar.is_bounded_text(last_error, 8192)
+        last_error IS NULL
+        OR bursar.is_nonempty_bounded_text(last_error, 8192)
     ),
     completed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -207,29 +229,29 @@ CREATE TABLE bursar.billing_events (
     CHECK (
         (
             status = 'processing'
-            AND claim_token IS NOT null
-            AND claim_expires_at IS NOT null
+            AND claim_token IS NOT NULL
+            AND claim_expires_at IS NOT NULL
         )
         OR
         (
             status <> 'processing'
-            AND claim_token IS null
-            AND claim_expires_at IS null
+            AND claim_token IS NULL
+            AND claim_expires_at IS NULL
         )
     ),
     CHECK (
-        (status IN ('completed', 'ignored') AND completed_at IS NOT null)
+        (status IN ('completed', 'ignored') AND completed_at IS NOT NULL)
         OR
-        (status NOT IN ('completed', 'ignored') AND completed_at IS null)
+        (status NOT IN ('completed', 'ignored') AND completed_at IS NULL)
     ),
     CHECK (
         (
-            payload_archived_at IS null
-            AND payload_object_key IS null
-            AND payload_object_version IS null
+            payload_archived_at IS NULL
+            AND payload_object_key IS NULL
+            AND payload_object_version IS NULL
         )
         OR
-        (payload_archived_at IS NOT null AND payload_object_key IS NOT null)
+        (payload_archived_at IS NOT NULL AND payload_object_key IS NOT NULL)
     )
 );
 
@@ -284,7 +306,7 @@ CREATE TABLE bursar.billing_credit_grants (
     CHECK (bursar.is_finite_numeric(configured_credits) AND configured_credits > 0),
     quantity integer NOT NULL DEFAULT 1 CHECK (quantity > 0),
     expiry_policy_snapshot jsonb CHECK (
-        expiry_policy_snapshot IS null
+        expiry_policy_snapshot IS NULL
         OR octet_length(expiry_policy_snapshot::text) <= 32768
     ),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
@@ -297,9 +319,9 @@ CREATE TABLE bursar.billing_credit_grants (
     FOREIGN KEY (topup_id, catalog_revision_id)
     REFERENCES bursar.catalog_topups (id, catalog_revision_id),
     CHECK (
-        (payment_id IS NOT null AND topup_id IS NOT null AND subscription_id IS null)
+        (payment_id IS NOT NULL AND topup_id IS NOT NULL AND subscription_id IS NULL)
         OR
-        (topup_id IS null AND subscription_id IS NOT null)
+        (topup_id IS NULL AND subscription_id IS NOT NULL)
     ),
     UNIQUE NULLS NOT DISTINCT (payment_id, topup_id, billing_event_id, grant_key)
 );
@@ -319,7 +341,10 @@ CREATE TABLE bursar.billing_refunds (
     currency text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
     status text NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'succeeded', 'failed', 'canceled')),
-    reason text,
+    reason text CHECK (
+        reason IS NULL
+        OR bursar.is_nonempty_bounded_text(reason, 2048)
+    ),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
@@ -367,9 +392,15 @@ CREATE TABLE bursar.billing_subscription_changes (
     CHECK (proration_behavior IN (
         'provider_default', 'invoice_immediately', 'none'
     )),
-    provider_operation_id text,
+    provider_operation_id text CHECK (
+        provider_operation_id IS NULL
+        OR bursar.is_nonempty_text(provider_operation_id)
+    ),
     idempotency_key text NOT NULL CHECK (bursar.is_nonempty_text(idempotency_key)),
-    error_message text,
+    error_message text CHECK (
+        error_message IS NULL
+        OR bursar.is_nonempty_bounded_text(error_message, 8192)
+    ),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (subscription_id, idempotency_key),
@@ -378,18 +409,20 @@ CREATE TABLE bursar.billing_subscription_changes (
     FOREIGN KEY (to_offer_id, to_catalog_revision_id)
     REFERENCES bursar.catalog_offers (id, catalog_revision_id),
     CHECK (from_offer_id <> to_offer_id),
-    CHECK (effective_at IS NOT null OR state = 'awaiting_payment')
+    CHECK (effective_at IS NOT NULL OR state = 'awaiting_payment')
 );
 
 CREATE TABLE bursar.billing_auto_recharge_profiles (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
-    enabled boolean NOT NULL DEFAULT false,
-    armed boolean NOT NULL DEFAULT true,
-    state text NOT NULL DEFAULT 'active'
+    enabled boolean NOT NULL DEFAULT FALSE,
+    armed boolean NOT NULL DEFAULT TRUE,
+    state text NOT NULL DEFAULT 'disabled'
     CHECK (state IN ('active', 'paused', 'disabled')),
-    provider text,
+    provider text CHECK (
+        provider IS NULL OR bursar.is_nonempty_text(provider)
+    ),
     provider_environment text NOT NULL
     DEFAULT bursar.current_provider_environment()
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
@@ -401,8 +434,8 @@ CREATE TABLE bursar.billing_auto_recharge_profiles (
     rearm_above numeric(20, 6) NOT NULL DEFAULT 0
     CHECK (bursar.is_finite_numeric(rearm_above) AND rearm_above >= 0),
     max_charges_per_window integer
-    CHECK (max_charges_per_window IS null OR max_charges_per_window > 0),
-    max_charge_minor bigint CHECK (max_charge_minor IS null OR max_charge_minor > 0),
+    CHECK (max_charges_per_window IS NULL OR max_charges_per_window > 0),
+    max_charge_minor bigint CHECK (max_charge_minor IS NULL OR max_charge_minor > 0),
     cooldown_seconds integer NOT NULL DEFAULT 0 CHECK (cooldown_seconds >= 0),
     max_consecutive_failures integer NOT NULL DEFAULT 3
     CHECK (max_consecutive_failures > 0),
@@ -419,7 +452,9 @@ CREATE TABLE bursar.billing_auto_recharge_profiles (
     PRIMARY KEY (tenant_id, subject_id, provider_environment),
     FOREIGN KEY (topup_id, catalog_revision_id)
     REFERENCES bursar.catalog_topups (id, catalog_revision_id),
-    CHECK (NOT enabled OR (provider IS NOT null AND topup_id IS NOT null)),
+    CHECK (NOT enabled OR (provider IS NOT NULL AND topup_id IS NOT NULL)),
+    CHECK (enabled = (state <> 'disabled')),
+    CHECK (enabled OR armed),
     CHECK (rearm_above > threshold OR NOT enabled)
 );
 
@@ -443,18 +478,18 @@ CREATE TABLE bursar.billing_auto_recharge_attempts (
     quantity integer NOT NULL CHECK (quantity > 0),
     window_start timestamptz NOT NULL,
     window_end timestamptz NOT NULL,
-    quoted_amount_minor bigint CHECK (quoted_amount_minor IS null OR quoted_amount_minor >= 0),
+    quoted_amount_minor bigint CHECK (quoted_amount_minor IS NULL OR quoted_amount_minor >= 0),
     currency text,
     provider_attempt_id text CHECK (
-        provider_attempt_id IS null
-        OR bursar.is_bounded_text(provider_attempt_id, 255)
+        provider_attempt_id IS NULL
+        OR bursar.is_nonempty_text(provider_attempt_id)
     ),
     failure_code text CHECK (
-        failure_code IS null OR bursar.is_bounded_text(failure_code, 255)
+        failure_code IS NULL OR bursar.is_nonempty_text(failure_code)
     ),
     failure_message text CHECK (
-        failure_message IS null
-        OR bursar.is_bounded_text(failure_message, 8192)
+        failure_message IS NULL
+        OR bursar.is_nonempty_bounded_text(failure_message, 8192)
     ),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
@@ -469,8 +504,8 @@ CREATE TABLE bursar.billing_auto_recharge_attempts (
     FOREIGN KEY (topup_id, catalog_revision_id)
     REFERENCES bursar.catalog_topups (id, catalog_revision_id),
     CHECK (window_end > window_start),
-    CHECK ((quoted_amount_minor IS null) = (currency IS null)),
-    CHECK (currency IS null OR currency ~ '^[A-Z]{3}$')
+    CHECK ((quoted_amount_minor IS NULL) = (currency IS NULL)),
+    CHECK (currency IS NULL OR currency ~ '^[A-Z]{3}$')
 );
 
 CREATE TABLE bursar.catalog_auto_recharge_policies (
@@ -516,13 +551,19 @@ CREATE TABLE bursar.billing_checkout_intents (
     checkout_kind text NOT NULL
     CHECK (checkout_kind IN ('subscription', 'credit_topup')),
     product_key text NOT NULL CHECK (bursar.is_nonempty_text(product_key)),
-    region text CHECK (region IS null OR region ~ '^[A-Z]{2,3}$'),
+    region text CHECK (region IS NULL OR region ~ '^[A-Z]{2,3}$'),
     catalog_revision_id uuid NOT NULL REFERENCES bursar.catalog_revisions (id),
     request_digest bytea NOT NULL CHECK (octet_length(request_digest) = 32),
     status text NOT NULL DEFAULT 'open'
     CHECK (status IN ('open', 'completed', 'failed', 'expired')),
-    provider_session_id text,
-    checkout_url text,
+    provider_session_id text CHECK (
+        provider_session_id IS NULL
+        OR bursar.is_nonempty_text(provider_session_id)
+    ),
+    checkout_url text CHECK (
+        checkout_url IS NULL
+        OR bursar.is_nonempty_bounded_text(checkout_url, 8192)
+    ),
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -550,7 +591,7 @@ CREATE TABLE bursar.billing_invoices (
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     provider_invoice_id text NOT NULL
     CHECK (bursar.is_nonempty_text(provider_invoice_id)),
-    subscription_id uuid REFERENCES bursar.billing_subscriptions (id),
+    subscription_id uuid,
     status text NOT NULL
     CHECK (status IN ('draft', 'open', 'paid', 'void', 'uncollectible')),
     amount_due_minor bigint NOT NULL CHECK (amount_due_minor >= 0),
@@ -569,9 +610,20 @@ CREATE TABLE bursar.billing_invoices (
         provider_environment,
         provider_invoice_id
     ),
+    FOREIGN KEY (
+        subscription_id,
+        subject_id,
+        provider,
+        provider_environment
+    ) REFERENCES bursar.billing_subscriptions (
+        id,
+        subject_id,
+        provider,
+        provider_environment
+    ),
     CHECK (
-        period_end IS null
-        OR period_start IS null
+        period_end IS NULL
+        OR period_start IS NULL
         OR period_end > period_start
     )
 );
@@ -587,12 +639,15 @@ CREATE TABLE bursar.billing_disputes (
     CHECK (provider_environment IN ('live', 'test', 'sandbox')),
     provider_dispute_id text NOT NULL
     CHECK (bursar.is_nonempty_text(provider_dispute_id)),
-    payment_id uuid REFERENCES bursar.billing_payments (id),
+    payment_id uuid,
     status text NOT NULL
     CHECK (status IN (
         'needs_response', 'under_review', 'won', 'lost', 'closed'
     )),
-    reason text,
+    reason text CHECK (
+        reason IS NULL
+        OR bursar.is_nonempty_bounded_text(reason, 2048)
+    ),
     provider_updated_at timestamptz NOT NULL DEFAULT now(),
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(metadata, 16384)),
@@ -603,18 +658,30 @@ CREATE TABLE bursar.billing_disputes (
         provider,
         provider_environment,
         provider_dispute_id
-    )
+    ),
+    FOREIGN KEY (
+        payment_id,
+        subject_id,
+        provider,
+        provider_environment
+    ) REFERENCES bursar.billing_payments (
+        id,
+        subject_id,
+        provider,
+        provider_environment
+    ),
+    CHECK (payment_id IS NULL OR subject_id IS NOT NULL)
 );
 
 CREATE TABLE bursar.billing_preferences (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()
     REFERENCES bursar.tenants (id) ON DELETE RESTRICT,
     subject_id uuid NOT NULL REFERENCES bursar.subjects (id),
-    auto_recharge boolean NOT NULL DEFAULT false,
-    overage_protection boolean NOT NULL DEFAULT true,
-    email_notifications boolean NOT NULL DEFAULT true,
-    usage_alerts boolean NOT NULL DEFAULT true,
-    invoice_reminders boolean NOT NULL DEFAULT false,
+    auto_recharge boolean NOT NULL DEFAULT FALSE,
+    overage_protection boolean NOT NULL DEFAULT TRUE,
+    email_notifications boolean NOT NULL DEFAULT TRUE,
+    usage_alerts boolean NOT NULL DEFAULT TRUE,
+    invoice_reminders boolean NOT NULL DEFAULT FALSE,
     updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, subject_id)
 );
@@ -636,4 +703,4 @@ ON bursar.billing_auto_recharge_attempts (
     provider_environment,
     provider_attempt_id
 )
-WHERE provider_attempt_id IS NOT null;
+WHERE provider_attempt_id IS NOT NULL;

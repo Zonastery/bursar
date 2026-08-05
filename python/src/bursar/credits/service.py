@@ -448,6 +448,7 @@ class CreditsService:
         self,
         config: dict[str, Any],
         label: str | None = None,
+        rollout: dict[str, Any] | None = None,
     ) -> None:
         """Publish new pricing and update the engine in one call."""
         from bursar.config import canonical_bursar_config_dict
@@ -456,7 +457,10 @@ class CreditsService:
         self._engine = PricingEngine.from_dict(canonical)
         self._version_engines.clear()
         self._last_loaded = time.monotonic()
-        self._store.set_active_pricing(canonical, label)
+        if rollout is None:
+            self._store.set_active_pricing(canonical, label)
+        else:
+            self._store.set_active_pricing(canonical, label, rollout)
 
     def publish_pricing_draft(
         self,
@@ -469,9 +473,15 @@ class CreditsService:
         canonical = canonical_bursar_config_dict(config)
         return self._store.publish_pricing(canonical, label)
 
-    def activate_pricing(self, version: int) -> str:
+    def activate_pricing(
+        self,
+        version: int,
+        rollout: dict[str, Any] | None = None,
+    ) -> str:
         """Activate a previously published catalog version and reload it."""
-        result = self._store.activate_pricing(version)
+        result = (
+            self._store.activate_pricing(version) if rollout is None else self._store.activate_pricing(version, rollout)
+        )
         self.load_pricing_from_store()
         return result
 
@@ -784,6 +794,14 @@ class CreditsService:
                 "timestamp": datetime.now(UTC),
             },
         )
+
+    def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
+        """Pin or unpin the user's current assignment revision."""
+        return self._store.set_plan_revision_pin(user_id, pinned)
+
+    def apply_due_plan_changes(self, limit: int = 100) -> int:
+        """Apply one bounded batch of renewal-effective plan changes."""
+        return self._store.apply_due_plan_changes(limit)
 
     def start_plan_migration(
         self,

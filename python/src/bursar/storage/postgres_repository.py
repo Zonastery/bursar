@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.shared.postgres_types import QueryFn
 from bursar.storage.ports import (
     BillingEventPayloadExport,
@@ -126,7 +127,7 @@ class PostgresStorageRepository:
                 [
                     event.event_id,
                     event.claim_token,
-                    error,
+                    bounded_diagnostic_message(error, "outbox_delivery_failed"),
                     retry_delay_seconds,
                     attempt_limit,
                 ],

@@ -1,3 +1,4 @@
+import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
 import type { OutboxEvent, OutboxHandler, OutboxStore } from "./ports.js";
 
 export interface OutboxWorkerOptions {
@@ -171,11 +172,14 @@ export class OutboxWorker {
       }
       return true;
     } catch (error) {
-      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      const message = boundedDiagnosticMessage(
+        error instanceof Error ? `${error.name}: ${error.message}` : error,
+        "outbox_delivery_failed",
+      );
       const exponentialDelay =
         this.options.retryDelaySeconds * 2 ** Math.max(event.attemptCount - 1, 0);
       const retryDelay = Math.min(exponentialDelay, this.options.maxRetryDelaySeconds);
-      await this.store.fail(event, message.slice(0, 8_192), retryDelay, this.options.attemptLimit);
+      await this.store.fail(event, message, retryDelay, this.options.attemptLimit);
       return false;
     }
   }

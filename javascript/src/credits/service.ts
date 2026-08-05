@@ -8,6 +8,7 @@ import {
   StoreError,
 } from "../errors.js";
 import type { PricingEngine } from "../engine.js";
+import type { CatalogRollout } from "../config.js";
 import type {
   AddCreditsResult,
   AggregateStats,
@@ -353,8 +354,12 @@ export class CreditsService {
    * a persistence failure surfaces to the caller instead of becoming an
    * unhandled promise rejection.
    */
-  async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<void> {
-    await this.pricing.publish(config, label);
+  async publishPricing(
+    config: Record<string, unknown>,
+    label?: string | null,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<void> {
+    await this.pricing.publish(config, label, rollout);
   }
 
   /** Publish a validated, inactive catalog draft. */
@@ -366,8 +371,11 @@ export class CreditsService {
   }
 
   /** Activate an existing catalog version and reload the local engine. */
-  async activatePricing(version: number): Promise<string> {
-    return this.pricing.activate(version);
+  async activatePricing(
+    version: number,
+    rollout?: CatalogRollout | Record<string, unknown> | null,
+  ): Promise<string> {
+    return this.pricing.activate(version, rollout);
   }
 
   /** The current PricingEngine, or null if not loaded. */
@@ -400,6 +408,16 @@ export class CreditsService {
       planKey: null,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /** Pin or unpin the user's current assignment revision. */
+  async setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
+    return this.store.setPlanRevisionPin(userId, pinned);
+  }
+
+  /** Apply one bounded batch of renewal-effective plan changes. */
+  async applyDuePlanChanges(limit = 100): Promise<number> {
+    return this.store.applyDuePlanChanges(limit);
   }
 
   /** Sweep this user's expired lots when lazy expiry is enabled. */

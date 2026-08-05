@@ -79,6 +79,13 @@ def test_parser_exposes_tenant_bootstrap_as_one_operator_command() -> None:
     assert args.display_name == "Acme"
 
 
+def test_parser_exposes_bounded_due_plan_change_worker() -> None:
+    args = cli.build_parser().parse_args(["config", "apply-due", "--limit", "250"])
+
+    assert args.func is cli._cmd_config_apply_due
+    assert args.limit == 250
+
+
 def test_migrate_accepts_ordered_post_migration_sql_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

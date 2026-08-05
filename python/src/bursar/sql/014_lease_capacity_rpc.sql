@@ -148,6 +148,91 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION bursar.quota_lineage_consumed(
+    p_account_id uuid,
+    p_plan_key text,
+    p_quota_key text,
+    p_operation_key text,
+    p_measure_key text,
+    p_assignment_starts_at timestamptz,
+    p_window_start timestamptz,
+    p_window_end timestamptz
+)
+RETURNS numeric
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT COALESCE(sum(event.amount), 0)
+    FROM bursar.quota_usage_events AS event
+    JOIN bursar.catalog_plans AS event_plan
+      ON event_plan.id = event.plan_id
+     AND event_plan.catalog_revision_id = event.catalog_revision_id
+    WHERE event.account_id = p_account_id
+      AND event_plan.plan_key = p_plan_key
+      AND event.quota_key = p_quota_key
+      AND event.operation_key = p_operation_key
+      AND event.measure_key = p_measure_key
+      AND event.event_at > p_window_start
+      AND event.event_at <= p_window_end
+      AND (
+          (
+              event.correction_of_event_id IS NULL
+              AND event.event_at >= p_assignment_starts_at
+          )
+          OR (
+              event.correction_of_event_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM bursar.quota_usage_events AS original
+                  WHERE original.id = event.correction_of_event_id
+                    AND original.event_at >= p_assignment_starts_at
+              )
+          )
+      )
+$$;
+
+CREATE FUNCTION bursar.quota_lineage_reserved(
+    p_account_id uuid,
+    p_plan_key text,
+    p_quota_key text,
+    p_operation_key text,
+    p_measure_key text,
+    p_assignment_starts_at timestamptz,
+    p_window_start timestamptz,
+    p_window_end timestamptz,
+    p_exclude_lease_id uuid DEFAULT NULL
+)
+RETURNS numeric
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path TO ''
+AS $$
+    SELECT COALESCE(sum(reservation.amount), 0)
+    FROM bursar.credit_lease_quota_reservations AS reservation
+    JOIN bursar.credit_leases AS lease
+      ON lease.id = reservation.lease_id
+    JOIN bursar.catalog_plan_quotas AS reservation_quota
+      ON reservation_quota.id = reservation.catalog_quota_id
+    WHERE lease.account_id = p_account_id
+      AND reservation_quota.plan_key = p_plan_key
+      AND reservation_quota.quota_key = p_quota_key
+      AND reservation_quota.operation_key = p_operation_key
+      AND reservation_quota.measure_key = p_measure_key
+      AND reservation.released_at IS NULL
+      AND reservation.created_at >= p_assignment_starts_at
+      AND reservation.created_at > p_window_start
+      AND reservation.created_at <= p_window_end
+      AND lease.status = 'active'
+      AND lease.expires_at > now()
+      AND (
+          p_exclude_lease_id IS NULL
+          OR lease.id <> p_exclude_lease_id
+      )
+$$;
+
 CREATE FUNCTION bursar.check_operation_quotas(
     p_account_id uuid,
     p_plan_id uuid,
@@ -260,29 +345,28 @@ BEGIN
         );
 
         IF v_window.is_rolling THEN
-            SELECT COALESCE(sum(event.amount), 0)
-            INTO v_consumed
-            FROM bursar.quota_usage_events AS event
-            WHERE event.account_id = p_account_id
-              AND event.catalog_quota_id = v_quota.id
-              AND event.event_at > v_window.window_start
-              AND event.event_at <= v_window.window_end;
+            v_consumed := bursar.quota_lineage_consumed(
+                p_account_id,
+                v_plan.plan_key,
+                v_quota.quota_key,
+                v_quota.operation_key,
+                v_quota.measure_key,
+                v_plan.starts_at,
+                v_window.window_start,
+                v_window.window_end
+            );
 
-            SELECT COALESCE(sum(reservation.amount), 0)
-            INTO v_reserved
-            FROM bursar.credit_lease_quota_reservations AS reservation
-            JOIN bursar.credit_leases AS lease
-              ON lease.id = reservation.lease_id
-            WHERE reservation.catalog_quota_id = v_quota.id
-              AND reservation.released_at IS NULL
-              AND reservation.created_at > v_window.window_start
-              AND lease.account_id = p_account_id
-              AND lease.status = 'active'
-              AND lease.expires_at > now()
-              AND (
-                  p_exclude_lease_id IS NULL
-                  OR lease.id <> p_exclude_lease_id
-              );
+            v_reserved := bursar.quota_lineage_reserved(
+                p_account_id,
+                v_plan.plan_key,
+                v_quota.quota_key,
+                v_quota.operation_key,
+                v_quota.measure_key,
+                v_plan.starts_at,
+                v_window.window_start,
+                v_window.window_end,
+                p_exclude_lease_id
+            );
         ELSE
             SELECT
                 COALESCE(quota_window.consumed, 0),
@@ -614,25 +698,27 @@ BEGIN
         );
 
         IF v_window.is_rolling THEN
-            SELECT COALESCE(sum(event.amount), 0)
-            INTO v_before
-            FROM bursar.quota_usage_events AS event
-            WHERE event.account_id = p_account_id
-              AND event.catalog_quota_id = v_quota.id
-              AND event.event_at > v_window.window_start
-              AND event.event_at <= v_window.window_end;
+            v_before := bursar.quota_lineage_consumed(
+                p_account_id,
+                v_plan.plan_key,
+                v_quota.quota_key,
+                v_quota.operation_key,
+                v_quota.measure_key,
+                v_plan.starts_at,
+                v_window.window_start,
+                v_window.window_end
+            );
 
-            SELECT COALESCE(sum(reservation.amount), 0)
-            INTO v_reserved
-            FROM bursar.credit_lease_quota_reservations AS reservation
-            JOIN bursar.credit_leases AS lease
-              ON lease.id = reservation.lease_id
-            WHERE reservation.catalog_quota_id = v_quota.id
-              AND reservation.released_at IS NULL
-              AND reservation.created_at > v_window.window_start
-              AND lease.account_id = p_account_id
-              AND lease.status = 'active'
-              AND lease.expires_at > now();
+            v_reserved := bursar.quota_lineage_reserved(
+                p_account_id,
+                v_plan.plan_key,
+                v_quota.quota_key,
+                v_quota.operation_key,
+                v_quota.measure_key,
+                v_plan.starts_at,
+                v_window.window_start,
+                v_window.window_end
+            );
             v_window_id := NULL;
         ELSE
             INSERT INTO bursar.quota_windows(

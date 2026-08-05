@@ -16,6 +16,7 @@ from bursar.config.types import (
     AutoRechargeGuardrails,
     BooleanFeature,
     BursarConfig,
+    CatalogRollout,
     Charge,
     ChargeUnmatched,
     CommerceConfig,
@@ -35,6 +36,9 @@ from bursar.config.types import (
     PackageCharge,
     PerUnitCharge,
     PlanDefinition,
+    PlanEvolution,
+    PlanRollout,
+    PlanRolloutStrategy,
     PrefixMatcher,
     PriceRule,
     PricingConfig,
@@ -54,6 +58,32 @@ from bursar.config.types import (
 
 BursarConfigData = BursarConfig
 ParsedBursarConfig = BursarConfig
+
+
+def load_catalog_rollout(data: CatalogRollout | dict[str, Any] | None) -> CatalogRollout:
+    if data is None:
+        return CatalogRollout()
+    if isinstance(data, CatalogRollout):
+        return data
+    try:
+        return CatalogRollout.model_validate(data)
+    except ValidationError as exc:
+        raise ConfigError(validation_error=exc) from exc
+
+
+def validate_catalog_rollout(
+    config: BursarConfig,
+    rollout: CatalogRollout,
+) -> CatalogRollout:
+    subscription_plans = {
+        offer.plan for offer in config.commerce.offers.values() if isinstance(offer, SubscriptionOffer)
+    }
+    for plan_key, policy in rollout.plans.items():
+        if plan_key not in config.plans:
+            raise ConfigError(f"rollout.plans references unknown plan '{plan_key}'")
+        if policy.effective == "next_renewal" and plan_key not in subscription_plans:
+            raise ConfigError(f"rollout.plans.{plan_key}.effective=next_renewal requires a subscription offer")
+    return rollout
 
 
 def _validate_feature_value(
@@ -100,8 +130,12 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
     }
     for plan_key, plan in config.plans.items():
         _validate_plan(plan)
-        if plan.revision_policy is None:
-            plan.revision_policy = "next_renewal" if plan_key in subscription_plans else "immediate"
+        if plan.evolution is None:
+            plan.evolution = PlanEvolution(
+                default_rollout="next_renewal" if plan_key in subscription_plans else "immediate"
+            )
+        if plan.evolution.default_rollout == "next_renewal" and plan_key not in subscription_plans:
+            raise ValueError(f"plans.{plan_key}.evolution.default_rollout=next_renewal requires a subscription offer")
         if plan.rate_card is not None and (config.pricing is None or plan.rate_card not in config.pricing.rate_cards):
             raise ValueError(f"plans.{plan_key}.rate_card references unknown rate card '{plan.rate_card}'")
         if plan.allowed_operations and config.pricing is None:
@@ -205,6 +239,16 @@ def canonical_bursar_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     return load_config_from_dict(data).model_dump(mode="json", exclude_none=True)
 
 
+def canonical_catalog_rollout_dict(
+    data: CatalogRollout | dict[str, Any] | None,
+    config: BursarConfig | None = None,
+) -> dict[str, Any]:
+    rollout = load_catalog_rollout(data)
+    if config is not None:
+        validate_catalog_rollout(config, rollout)
+    return rollout.model_dump(mode="json")
+
+
 def canonical_parsed_bursar_config_dict(
     data: ParsedBursarConfig,
 ) -> dict[str, Any]:
@@ -216,7 +260,9 @@ __all__ = [
     "AutoRechargeGuardrails",
     "BursarConfig",
     "BursarConfigData",
+    "CatalogRollout",
     "canonical_bursar_config_dict",
+    "canonical_catalog_rollout_dict",
     "canonical_parsed_bursar_config_dict",
     "Charge",
     "ChargeUnmatched",
@@ -231,6 +277,7 @@ __all__ = [
     "FlatCharge",
     "GraduatedCharge",
     "InMatcher",
+    "load_catalog_rollout",
     "load_config_from_dict",
     "NotInMatcher",
     "OperationPricing",
@@ -238,6 +285,9 @@ __all__ = [
     "PerUnitCharge",
     "ParsedBursarConfig",
     "PlanDefinition",
+    "PlanEvolution",
+    "PlanRollout",
+    "PlanRolloutStrategy",
     "PrefixMatcher",
     "PriceRule",
     "PricingConfig",
@@ -250,6 +300,7 @@ __all__ = [
     "SumCharge",
     "TopupOffer",
     "validate_bursar_config",
+    "validate_catalog_rollout",
     "VolumeCharge",
     "Window",
     "_validate_map_keys",

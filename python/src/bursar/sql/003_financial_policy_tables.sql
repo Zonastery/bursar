@@ -79,7 +79,7 @@ CREATE TABLE bursar.credit_lot_sources (
     REFERENCES bursar.credit_ledger_entries (id),
     amount numeric(20, 6) NOT NULL
     CHECK (bursar.is_finite_numeric(amount) AND amount > 0),
-    source_type text NOT NULL,
+    source_type text NOT NULL CHECK (bursar.is_nonempty_text(source_type)),
     source_id uuid,
     created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -194,7 +194,7 @@ CREATE TABLE bursar.credit_usage_charges (
     catalog_revision_id uuid REFERENCES bursar.catalog_revisions (id),
     plan_id uuid,
     rate_card_key text CHECK (
-        rate_card_key IS NULL OR bursar.is_bounded_text(rate_card_key, 255)
+        rate_card_key IS NULL OR bursar.is_nonempty_text(rate_card_key)
     ),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
     idempotency_key text NOT NULL
@@ -314,7 +314,8 @@ CREATE TABLE bursar.event_outbox (
     claim_token uuid,
     claim_expires_at timestamptz,
     last_error text CHECK (
-        last_error IS NULL OR bursar.is_bounded_text(last_error, 8192)
+        last_error IS NULL
+        OR bursar.is_nonempty_bounded_text(last_error, 8192)
     ),
     delivered_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -350,8 +351,7 @@ CREATE TABLE bursar.account_plan_assignments (
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
-    revision_policy text NOT NULL
-    CHECK (revision_policy IN ('immediate', 'next_renewal', 'pinned')),
+    catalog_revision_pinned boolean NOT NULL DEFAULT false,
     source_type text NOT NULL DEFAULT 'manual'
     CHECK (source_type IN ('manual', 'subscription', 'migration', 'system')),
     source_id uuid,
@@ -359,10 +359,12 @@ CREATE TABLE bursar.account_plan_assignments (
     ends_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id),
-    FOREIGN KEY (catalog_revision_id, plan_key)
-    REFERENCES bursar.catalog_plans (catalog_revision_id, plan_key),
+    FOREIGN KEY (plan_id, catalog_revision_id, plan_key)
+    REFERENCES bursar.catalog_plans (
+        id,
+        catalog_revision_id,
+        plan_key
+    ),
     CHECK (ends_at IS NULL OR ends_at > starts_at)
 );
 
@@ -375,17 +377,21 @@ CREATE TABLE bursar.account_plan_assignment_history (
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
-    revision_policy text NOT NULL
-    CHECK (revision_policy IN ('immediate', 'next_renewal', 'pinned')),
+    catalog_revision_pinned boolean NOT NULL,
     source_type text NOT NULL,
     source_id uuid,
     starts_at timestamptz NOT NULL,
     ends_at timestamptz NOT NULL,
     replaced_at timestamptz NOT NULL DEFAULT now(),
-    replacement_reason text NOT NULL DEFAULT 'reassigned',
-    FOREIGN KEY (plan_id, catalog_revision_id)
-    REFERENCES bursar.catalog_plans (id, catalog_revision_id),
-    CHECK (ends_at > starts_at),
+    replacement_reason text NOT NULL DEFAULT 'reassigned'
+    CHECK (bursar.is_nonempty_text(replacement_reason)),
+    FOREIGN KEY (plan_id, catalog_revision_id, plan_key)
+    REFERENCES bursar.catalog_plans (
+        id,
+        catalog_revision_id,
+        plan_key
+    ),
+    CHECK (ends_at >= starts_at),
     UNIQUE (assignment_id, ends_at)
 );
 
@@ -396,15 +402,21 @@ CREATE TABLE bursar.plan_assignment_changes (
     account_id uuid NOT NULL REFERENCES bursar.credit_accounts (id),
     from_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
     to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
+    change_kind text NOT NULL DEFAULT 'manual'
+    CHECK (change_kind IN ('manual', 'catalog_revision')),
+    pin_overridden boolean NOT NULL DEFAULT false,
     strategy text NOT NULL CHECK (strategy IN ('immediate', 'next_renewal')),
     effective_at timestamptz NOT NULL,
     state text NOT NULL DEFAULT 'scheduled'
     CHECK (state IN ('scheduled', 'applied', 'canceled', 'failed')),
-    reason text NOT NULL,
-    error_message text,
+    reason text NOT NULL
+    CHECK (bursar.is_nonempty_bounded_text(reason, 2048)),
+    error_message text CHECK (
+        error_message IS NULL
+        OR bursar.is_nonempty_bounded_text(error_message, 8192)
+    ),
     created_at timestamptz NOT NULL DEFAULT now(),
     applied_at timestamptz,
-    UNIQUE (account_id, to_plan_id, effective_at),
     CHECK (from_plan_id <> to_plan_id),
     CHECK (
         (state = 'applied' AND applied_at IS NOT NULL)
@@ -441,7 +453,6 @@ CREATE TABLE bursar.allowance_windows (
     policy_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb
     CHECK (bursar.is_bounded_json_object(policy_snapshot, 32768)),
     CHECK (window_end > window_start),
-    CHECK (reserved + consumed <= allowance),
     UNIQUE (
         account_id,
         plan_id,
@@ -780,7 +791,10 @@ CREATE TABLE bursar.credit_plan_migrations (
     migrated_count integer NOT NULL DEFAULT 0 CHECK (migrated_count >= 0),
     status text NOT NULL DEFAULT 'running'
     CHECK (status IN ('running', 'completed', 'failed', 'canceled')),
-    last_error text,
+    last_error text CHECK (
+        last_error IS NULL
+        OR bursar.is_nonempty_bounded_text(last_error, 8192)
+    ),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     CHECK (from_plan_id IS NULL OR from_plan_id <> to_plan_id)

@@ -33,14 +33,32 @@ class PricingRepository:
             return None
         return self._parse_revision(row)
 
-    def set_active_pricing(self, config: str, label: str | None) -> ActivePricingRow | None:
-        return self._publish_pricing(config, label, activate=True)
+    def set_active_pricing(
+        self,
+        config: str,
+        label: str | None,
+        rollout: dict[str, object],
+    ) -> ActivePricingRow | None:
+        return self._publish_pricing(config, label, rollout, activate=True)
 
     def publish_pricing(self, config: str, label: str | None) -> ActivePricingRow | None:
-        return self._publish_pricing(config, label, activate=False)
+        return self._publish_pricing(config, label, {"plans": {}}, activate=False)
 
-    def _publish_pricing(self, config: str, label: str | None, *, activate: bool) -> ActivePricingRow | None:
-        rows = self._callproc("publish_and_activate_catalog", [1, json.loads(config), label, activate]) or []
+    def _publish_pricing(
+        self,
+        config: str,
+        label: str | None,
+        rollout: dict[str, object],
+        *,
+        activate: bool,
+    ) -> ActivePricingRow | None:
+        rows = (
+            self._callproc(
+                "publish_and_activate_catalog",
+                [1, json.loads(config), label, activate, rollout],
+            )
+            or []
+        )
         if not rows or not isinstance(rows[0], dict) or rows[0].get("revision_no") is None:
             return None
         return self.get_bursar_config(int(rows[0]["revision_no"]))
@@ -62,8 +80,12 @@ class PricingRepository:
             return None
         return self._parse_revision(row)
 
-    def activate_pricing(self, version: int) -> ActivePricingRow | None:
-        rows = self._callproc("activate_catalog_revision", [version]) or []
+    def activate_pricing(
+        self,
+        version: int,
+        rollout: dict[str, object],
+    ) -> ActivePricingRow | None:
+        rows = self._callproc("activate_catalog_revision", [version, rollout]) or []
         if not rows or not isinstance(rows[0], dict):
             return None
         row = dict(rows[0])

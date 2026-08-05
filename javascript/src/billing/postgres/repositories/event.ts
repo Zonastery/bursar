@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
 
 const BillingEventRowSchema = z
   .object({
@@ -11,6 +11,12 @@ const BillingEventRowSchema = z
   .passthrough();
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
+
+function booleanResult(rows: unknown[], key: string): boolean {
+  const row = rows[0] as Record<string, unknown> | undefined;
+  const parsed = pgBoolean.safeParse(row?.[key]);
+  return parsed.success && parsed.data;
+}
 
 /** Repository for billing event lifecycle operations. */
 export class BillingEventRepository {
@@ -40,21 +46,25 @@ export class BillingEventRepository {
   }
 
   /** Mark a billing event as completed. */
-  async complete(provider: string, eventId: string, claimToken: string): Promise<void> {
-    await this.query("SELECT * FROM bursar.complete_billing_event($1, $2, $3::uuid)", [
-      provider,
-      eventId,
-      claimToken,
-    ]);
+  async complete(provider: string, eventId: string, claimToken: string): Promise<boolean> {
+    const rows = await this.query(
+      "SELECT bursar.complete_billing_event($1, $2, $3::uuid) AS completed",
+      [provider, eventId, claimToken],
+    );
+    return booleanResult(rows, "completed");
   }
 
   /** Mark a billing event as failed. */
-  async fail(provider: string, eventId: string, claimToken: string, error?: string): Promise<void> {
-    await this.query("SELECT * FROM bursar.fail_billing_event($1, $2, $3::uuid, $4)", [
-      provider,
-      eventId,
-      claimToken,
-      error ?? null,
-    ]);
+  async fail(
+    provider: string,
+    eventId: string,
+    claimToken: string,
+    error?: string,
+  ): Promise<boolean> {
+    const rows = await this.query(
+      "SELECT bursar.fail_billing_event($1, $2, $3::uuid, $4) AS failed",
+      [provider, eventId, claimToken, error ?? null],
+    );
+    return booleanResult(rows, "failed");
   }
 }

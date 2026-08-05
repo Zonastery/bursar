@@ -162,6 +162,21 @@ export interface QuotaDefinition {
   emitAtPercent: number[];
 }
 
+export type PlanRolloutStrategy = "immediate" | "next_renewal" | "new_assignments_only";
+
+export interface PlanEvolution {
+  defaultRollout: PlanRolloutStrategy;
+}
+
+export interface PlanRollout {
+  effective: PlanRolloutStrategy;
+  includePinned: boolean;
+}
+
+export interface CatalogRollout {
+  plans: Record<string, PlanRollout>;
+}
+
 export interface PlanDefinition {
   displayName: string;
   /** Explicit commercial ordering; never inferred from declaration order. */
@@ -174,7 +189,7 @@ export interface PlanDefinition {
   quotas: Record<string, QuotaDefinition>;
   creditPolicy?: string;
   admissionPolicy?: string;
-  revisionPolicy: "immediate" | "next_renewal" | "pinned";
+  evolution: PlanEvolution;
 }
 
 export type ProviderDefinition =

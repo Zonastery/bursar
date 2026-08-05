@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from pydantic import BaseModel, ConfigDict
 
+from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.storage.ports import OutboxEvent, OutboxHandler, OutboxStore
 
 
@@ -176,7 +177,10 @@ class OutboxWorker:
                 raise RuntimeError(msg)
             return True
         except BaseException as error:
-            message = f"{type(error).__name__}: {error}"[:8_192]
+            message = bounded_diagnostic_message(
+                f"{type(error).__name__}: {error}",
+                "outbox_delivery_failed",
+            )
             exponential_delay = self._options.retry_delay_seconds * 2 ** max(event.attempt_count - 1, 0)
             retry_delay = min(exponential_delay, self._options.max_retry_delay_seconds)
             self._store.fail(

@@ -50,6 +50,9 @@ describe("Bursar facade", () => {
     const active = { version: 3 };
     vi.spyOn(bursar.credits, "getActivePricing").mockReturnValue(active as never);
     expect(bursar.catalog.active).toBe(active);
+    const applyDue = vi.spyOn(bursar.credits, "applyDuePlanChanges").mockResolvedValue(2);
+    await expect(bursar.catalog.applyDueChanges(25)).resolves.toBe(2);
+    expect(applyDue).toHaveBeenCalledWith(25);
   });
 
   it("configures billing with the facade-owned credit provisioning capability", () => {

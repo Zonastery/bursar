@@ -1,45 +1,46 @@
 # Bursar for Python
 
-Python 3.12 and 3.13 are supported.
+[![PyPI](https://img.shields.io/pypi/v/bursar.svg)](https://pypi.org/project/bursar/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
+
+The Python SDK for [Bursar](https://github.com/Zonastery/bursar). It meters
+usage, prices operations, and manages balances against the shared canonical
+PostgreSQL schema and the same versioned configuration document as the
+JavaScript SDK. Python 3.12 and 3.13 are supported.
+
+## Installation
 
 ```bash
 pip install bursar[postgres]
-DATABASE_URL=postgresql://... bursar migrate
 ```
 
-To install trusted host-owned database objects after Bursar, pass one or more
-repeatable integration files:
+Extras: `postgres` (default recommended), `providers` (Stripe, Dodo),
+`s3` (optional billing archive), and `test` (dev/test tooling).
+
+Apply the SQL baseline before starting an application:
 
 ```bash
-DATABASE_URL=postgresql://... \
-  bursar migrate --post-migrate-sql ./host-integration.sql
+export DATABASE_URL=postgresql://...
+bursar migrate
 ```
 
-The files run in order, after Bursar's pending migrations and in the same
-transaction. They run on every invocation, so they must be idempotent.
+`bursar migrate` applies the ordered SQL files, records checksums, and is safe
+to re-run. Repeat `--post-migrate-sql` to run idempotent host-owned SQL in the
+same transaction.
 
-Create the reusable facade after migrations have run:
+## Usage
 
 ```python
 from bursar import Bursar, PostgresStore
 
 store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
-```
 
-`bursar.credits` owns account operations:
-
-```python
 grant = bursar.credits.add_credits(
-    user_id,
-    500,
-    entry_type="purchase",
-    idempotency_key="checkout:42",
+    user_id, 500, entry_type="purchase", idempotency_key="checkout:42"
 )
 charge = bursar.credits.deduct_credits(
-    user_id,
-    20,
-    idempotency_key="job:42",
+    user_id, 20, idempotency_key="job:42"
 )
 refund = bursar.credits.refund_credits(charge.entry_id)
 
@@ -50,39 +51,23 @@ while page.next_cursor is not None:
     )
 ```
 
-`LedgerEntry`, `LedgerCursor`, and `LedgerPage` are exported from `bursar`.
-Pagination is cursor-only. Usage history is available through
-`list_usage_entries`; one entry is available through `get_ledger_entry`.
+`LedgerEntry`, `LedgerCursor`, and `LedgerPage` are exported from `bursar`;
+pagination is cursor-only. `PostgresStore` is the production, tenant-scoped
+store; `CreditStore` is the abstract base for custom implementations.
 
-`PostgresStore` is the only store, and both it and the `CreditStore` base
-class are imported directly from the top-level package:
+Publish one versioned configuration document through the facade — billing and
+auto-recharge read the same active document:
 
-- `from bursar import PostgresStore` — the production, tenant-scoped store
-- `from bursar import CreditStore` — the abstract base for custom implementations
-
-Use `bursar.catalog.publish_and_activate(config)` for a canonical document with
-`pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
-`catalog`. The optional billing service and
-auto-recharge policy read that same active document.
-
-Stores and `Bursar` do not install database objects. Deployment is:
-
-```text
-DATABASE_URL -> bursar migrate -> publish canonical config -> start app
+```python
+bursar.catalog.publish_and_activate(config)
 ```
 
 ## Optional S3 and ClickHouse storage
 
-`create_bursar_runtime` is the Python composition root when Bursar should
-manage optional storage projections. PostgreSQL remains authoritative for
-balances, leases, billing state, and the transactional outbox.
-
-With no extra infrastructure, it creates no background worker and analytics
-continue to query PostgreSQL:
+PostgreSQL remains authoritative. S3 and ClickHouse are optional delivery
+targets, managed by `create_bursar_runtime` from `bursar.storage`:
 
 ```python
-import os
-
 from bursar.storage import BursarRuntimeOptions, create_bursar_runtime
 
 runtime = create_bursar_runtime(
@@ -92,64 +77,28 @@ runtime = create_bursar_runtime(
     )
 )
 runtime.start()
-
 bursar = runtime.bursar
 ```
 
-Install `bursar[postgres,s3]` and add S3 connection settings when an archive is
-needed. ClickHouse remains structurally injected:
+With no S3/ClickHouse configuration the runtime creates no background worker
+and analytics query PostgreSQL directly. See the
+[storage guide](https://zonastery.github.io/bursar/docs/guides/storage-backends)
+for the full S3 and ClickHouse setup.
 
-```python
-import os
+## Development
 
-import clickhouse_connect
-
-from bursar.storage import (
-    BursarRuntimeOptions,
-    ClickHouseUsageStoreOptions,
-    S3BillingArchiveOptions,
-    S3Credentials,
-    create_bursar_runtime,
-)
-
-clickhouse_client = clickhouse_connect.get_client(
-    dsn=os.environ["CLICKHOUSE_URL"]
-)
-
-runtime = create_bursar_runtime(
-    BursarRuntimeOptions(
-        postgres=os.environ["DATABASE_URL"],
-        s3=S3BillingArchiveOptions(
-            bucket=os.environ["BURSAR_S3_BUCKET"],
-            region=os.environ["BURSAR_S3_REGION"],
-            endpoint=os.getenv("BURSAR_S3_ENDPOINT"),
-            force_path_style=os.getenv("BURSAR_S3_FORCE_PATH_STYLE") == "true",
-            credentials=S3Credentials(
-                access_key_id=os.environ["BURSAR_S3_ACCESS_KEY_ID"],
-                secret_access_key=os.environ["BURSAR_S3_SECRET_ACCESS_KEY"],
-            ),
-        ),
-        clickhouse=ClickHouseUsageStoreOptions(
-            client=clickhouse_client,
-            # Optional; omit to retain the projection indefinitely.
-            retention_days=730,
-        ),
-    )
-)
-
-runtime.start()
-# Use runtime.bursar in the application.
-# On graceful shutdown:
-runtime.close()
+```bash
+cd python
+uv sync --group dev        # runtime + dev/test deps
+uv run pytest              # full suite; integration tests need Postgres
+ruff check src/ tests/
+pyright src/
 ```
 
-External writes happen through a leased PostgreSQL outbox, never in a customer
-request. S3 object keys are deterministic and the ClickHouse projection is
-replay-safe. ClickHouse analytics are therefore eventually consistent.
-PostgreSQL payload retention should be at least as long as the outbox retry
-horizon, which is enforced by the SQL storage configuration.
+Real-Postgres tests resolve `DATABASE_URL`, else spin up a disposable
+`postgres:16` testcontainer. See
+[CONTRIBUTING.md](https://github.com/Zonastery/bursar/blob/main/CONTRIBUTING.md).
 
-Set `outbox=False` only when a separate process consumes the Bursar outbox.
-Database retention maintenance remains independent: schedule
-`bursar.maybe_run_storage_maintenance()` and partition maintenance with
-`pg_cron` as described in the SQL README.
+## License
+
+AGPL-3.0.

@@ -549,6 +549,44 @@ class QuotaDefinition(StrictModel):
         return values
 
 
+PlanRolloutStrategy = Literal["immediate", "next_renewal", "new_assignments_only"]
+
+
+class PlanEvolution(StrictModel):
+    default_rollout: PlanRolloutStrategy = Field(
+        description=(
+            "Default adoption timing for existing assignments when a newer catalog revision "
+            "changes this plan. A catalog activation may override it for one release."
+        )
+    )
+
+
+class PlanRollout(StrictModel):
+    effective: PlanRolloutStrategy
+    include_pinned: bool = False
+
+
+class CatalogRollout(StrictModel):
+    plans: dict[str, PlanRollout] = Field(default_factory=dict)
+
+    @field_validator("plans")
+    @classmethod
+    def validate_plan_keys(cls, values: dict[str, PlanRollout]) -> dict[str, PlanRollout]:
+        _validate_map_keys(values, "rollout.plans")
+        return values
+
+    def as_database_dict(self) -> dict[str, dict[str, dict[str, str | bool]]]:
+        return {
+            "plans": {
+                plan_key: {
+                    "effective": rollout.effective,
+                    "include_pinned": rollout.include_pinned,
+                }
+                for plan_key, rollout in self.plans.items()
+            }
+        }
+
+
 class PlanDefinition(StrictModel):
     display_name: str = Field(min_length=1)
     rank: int = Field(
@@ -564,11 +602,11 @@ class PlanDefinition(StrictModel):
     quotas: dict[str, QuotaDefinition] = Field(default_factory=dict)
     credit_policy: str | None = None
     admission_policy: str | None = None
-    revision_policy: Literal["immediate", "next_renewal", "pinned"] | None = Field(
+    evolution: PlanEvolution | None = Field(
         default=None,
         description=(
-            "Plan revision behavior. When omitted, subscription-backed plans use next_renewal "
-            "and other plans use immediate."
+            "Catalog evolution defaults. When omitted, subscription-backed plans use "
+            "next_renewal and other plans use immediate; canonical output materializes the default."
         ),
     )
 

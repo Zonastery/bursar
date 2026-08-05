@@ -4,16 +4,26 @@ export { makeCostBreakdown } from "./breakdown.js";
 export type { UsageMetrics } from "./metrics.js";
 export type {
   BursarConfigData,
+  CatalogRollout,
   ParsedBursarConfig,
   PricingConfig,
   CreditsConfig,
   PlanDefinition,
+  PlanEvolution,
+  PlanRollout,
+  PlanRolloutStrategy,
   CommerceConfig,
   Window,
   Charge,
   FeatureDefinition,
 } from "./config.js";
-export { loadConfigFromDict, canonicalBursarConfigDict } from "./config.js";
+export {
+  canonicalBursarConfigDict,
+  canonicalCatalogRolloutDict,
+  loadCatalogRollout,
+  loadConfigFromDict,
+  validateCatalogRollout,
+} from "./config.js";
 export { projectPublicCatalog } from "./catalog.js";
 export type {
   PublicCatalog,

@@ -13,7 +13,14 @@ DECLARE v_id uuid;
  v_environment text:=bursar.current_provider_environment();
 
 BEGIN
-    IF p_provider IS NULL OR p_provider='' OR p_provider_customer_id IS NULL OR p_provider_customer_id='' THEN
+    IF p_subject_id IS NULL
+       OR NOT bursar.is_nonempty_text(p_provider)
+       OR NOT bursar.is_nonempty_text(p_provider_customer_id)
+       OR (
+           p_email IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_email, 320)
+       )
+    THEN
         RAISE EXCEPTION 'invalid billing customer' USING ERRCODE='22023';
 
     END IF;
@@ -81,8 +88,15 @@ BEGIN
     IF NOT FOUND
        OR NOT bursar.is_nonempty_text(p_provider)
        OR NOT bursar.is_nonempty_text(p_provider_subscription_id)
+       OR (
+           p_provider_customer_id IS NOT NULL
+           AND NOT bursar.is_nonempty_text(p_provider_customer_id)
+       )
        OR p_provider_updated_at IS NULL
-       OR jsonb_typeof(COALESCE(p_metadata, '{}'::jsonb)) <> 'object'
+       OR NOT bursar.is_bounded_json_object(
+           COALESCE(p_metadata, '{}'::jsonb),
+           16384
+       )
        OR (p_status <> 'past_due' AND p_grace_ends_at IS NOT NULL)
     THEN
         RAISE EXCEPTION 'invalid billing subscription' USING ERRCODE='22023';

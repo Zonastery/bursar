@@ -856,6 +856,7 @@ class PostgresStore(CreditStore):
         self,
         config: dict[str, Any],
         label: str | None = None,
+        rollout: Any | None = None,
     ) -> str:
         """Set a new active pricing configuration.
 
@@ -870,10 +871,20 @@ class PostgresStore(CreditStore):
             StoreError: If the RPC returns no result.
             ConfigError: If the config fails validation.
         """
-        from bursar.config import canonical_bursar_config_dict
+        from bursar.config import (
+            canonical_bursar_config_dict,
+            canonical_catalog_rollout_dict,
+            load_config_from_dict,
+        )
 
         canonical = canonical_bursar_config_dict(config)
-        result = self._pricing_repo.set_active_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
+        parsed = load_config_from_dict(canonical)
+        rollout_document = canonical_catalog_rollout_dict(rollout, parsed)
+        result = self._pricing_repo.set_active_pricing(
+            json.dumps(canonical, cls=DecimalEncoder),
+            label,
+            rollout_document,
+        )
         if result is None:
             raise StoreError("set_active_pricing returned no result")
         return str(getattr(result, "id", ""))
@@ -907,7 +918,7 @@ class PostgresStore(CreditStore):
         """
         return self._normalize_bursar_config(self._pricing_repo.get_bursar_config(version))
 
-    def activate_pricing(self, version: int) -> str:
+    def activate_pricing(self, version: int, rollout: Any | None = None) -> str:
         """Activate a specific pricing configuration version.
 
         Args:
@@ -919,7 +930,21 @@ class PostgresStore(CreditStore):
         Raises:
             StoreError: If the version is not found.
         """
-        result = self._pricing_repo.activate_pricing(version)
+        from bursar.config import (
+            canonical_catalog_rollout_dict,
+            load_config_from_dict,
+        )
+
+        target = self.get_bursar_config(version)
+        target_config = load_config_from_dict(target.config) if target is not None else None
+        rollout_document = canonical_catalog_rollout_dict(
+            rollout,
+            target_config,
+        )
+        result = self._pricing_repo.activate_pricing(
+            version,
+            rollout_document,
+        )
         if result is None:
             msg = f"Version {version} not found"
             raise StoreError(msg)
@@ -1014,7 +1039,7 @@ class PostgresStore(CreditStore):
             plan_assigned_at=plan_assigned_at,
             assignment_source_type=result.assignment_source_type,
             assignment_source_id=result.assignment_source_id,
-            revision_policy=result.revision_policy,
+            catalog_revision_pinned=result.catalog_revision_pinned,
             catalog_version=result.catalog_revision_no,
         )
 
@@ -1073,6 +1098,16 @@ class PostgresStore(CreditStore):
         if result is None:
             return {"user_id": user_id}
         return {"user_id": str(getattr(result, "user_id", user_id))}
+
+    def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
+        """Pin or unpin the user's current catalog-plan revision."""
+        return self._plan_repo.set_plan_revision_pin(user_id, pinned)
+
+    def apply_due_plan_changes(self, limit: int = 100) -> int:
+        """Apply one bounded batch of renewal-effective plan changes."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("plan change limit must be an integer between 1 and 1000")
+        return self._plan_repo.apply_due_plan_changes(limit)
 
     def start_plan_migration(
         self,

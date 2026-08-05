@@ -66,6 +66,7 @@ from bursar.billing.types import (
     CheckoutIntentStatus,
 )
 from bursar.credits.postgres.repositories.schemas import SubscriptionRow
+from bursar.shared.diagnostics import optional_bounded_diagnostic_message
 
 
 def _dec_credits(value: str | Decimal | None) -> Decimal | None:
@@ -467,23 +468,28 @@ class PostgresBillingStore(BillingStore):
             return BillingEventClaim(status="busy")
         return BillingEventClaim(status="retry")
 
-    def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> None:
+    def complete_billing_event(self, provider: str, event_id: str, claim_token: str) -> bool:
         """Mark a billing event as completed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._event_repo.complete(provider, event_id, claim_token)
+        return self._event_repo.complete(provider, event_id, claim_token)
 
-    def fail_billing_event(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> None:
+    def fail_billing_event(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> bool:
         """Mark a billing event as failed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._event_repo.fail(provider, event_id, claim_token, error)
+        return self._event_repo.fail(
+            provider,
+            event_id,
+            claim_token,
+            optional_bounded_diagnostic_message(error),
+        )
 
     def upsert_billing_customer(
         self,
@@ -644,7 +650,7 @@ class PostgresBillingStore(BillingStore):
                 id,
                 update.state,
                 update.provider_operation_id,
-                update.error_message,
+                optional_bounded_diagnostic_message(update.error_message),
             ],
         )
         if not rows or not rows[0].get("advanced"):
@@ -1078,6 +1084,7 @@ class PostgresBillingStore(BillingStore):
         failure_message: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        failure_message = optional_bounded_diagnostic_message(failure_message)
         current_rows = self._execute(
             "SELECT * FROM bursar.get_auto_recharge_attempt(%s::uuid)",
             [attempt_id],

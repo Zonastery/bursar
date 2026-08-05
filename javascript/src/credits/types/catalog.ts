@@ -55,7 +55,7 @@ export interface GetUserPlanResult {
   planAssignedAt?: Date | null;
   assignmentSourceType?: string | null;
   assignmentSourceId?: string | null;
-  revisionPolicy?: string | null;
+  catalogRevisionPinned: boolean;
   catalogVersion?: number | null;
 }
 

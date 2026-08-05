@@ -29,6 +29,9 @@ class FakeCredits:
     def publish_pricing(self, config, label=None):
         return None
 
+    def apply_due_plan_changes(self, limit=100):
+        return limit
+
 
 def test_bursar_create_owns_catalog_and_delegates():
     credits = FakeCredits()
@@ -40,6 +43,7 @@ def test_bursar_create_owns_catalog_and_delegates():
     assert bursar.credits is credits
     assert bursar.billing is None
     assert bursar.catalog.active == {"version": 1}
+    assert bursar.catalog.apply_due_changes(7) == 7
 
 
 def test_bursar_always_owns_billing_provisioning(monkeypatch):

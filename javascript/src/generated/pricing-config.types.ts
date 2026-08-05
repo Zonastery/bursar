@@ -206,9 +206,9 @@ export type EmitAtPercent = number[];
 export type CreditPolicy = string | null;
 export type AdmissionPolicy1 = string | null;
 /**
- * Plan revision behavior. When omitted, subscription-backed plans use next_renewal and other plans use immediate.
+ * Default adoption timing for existing assignments when a newer catalog revision changes this plan. A catalog activation may override it for one release.
  */
-export type RevisionPolicy = ("immediate" | "next_renewal" | "pinned") | null;
+export type DefaultRollout = "immediate" | "next_renewal" | "new_assignments_only";
 export type Type22 = "stripe";
 export type Type23 = "dodo";
 export type Type24 = "custom";
@@ -571,7 +571,10 @@ export interface PlanDefinition {
   quotas?: Quotas;
   credit_policy?: CreditPolicy;
   admission_policy?: AdmissionPolicy1;
-  revision_policy?: RevisionPolicy;
+  /**
+   * Catalog evolution defaults. When omitted, subscription-backed plans use next_renewal and other plans use immediate; canonical output materializes the default.
+   */
+  evolution?: PlanEvolution | null;
 }
 export interface Features1 {
   [k: string]: boolean | number | string;
@@ -599,6 +602,9 @@ export interface QuotaDefinition {
   window: Window2;
   enforcement: Enforcement;
   emit_at_percent?: EmitAtPercent;
+}
+export interface PlanEvolution {
+  default_rollout: DefaultRollout;
 }
 /**
  * Payment providers, subscription and top-up offers, and purchase guardrails.

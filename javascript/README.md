@@ -1,31 +1,40 @@
 # Bursar for JavaScript
 
-`@zonastery/bursar` is ESM-only and requires Node.js 22 or newer.
+[![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
+[![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 
-## Development
+The TypeScript SDK for [Bursar](https://github.com/Zonastery/bursar) — a
+behavioral mirror of the Python SDK. It meters usage, prices operations, and
+manages balances against the shared canonical PostgreSQL schema and the same
+versioned configuration document, with identical rounding. `@zonastery/bursar`
+is ESM-only and requires Node.js 22 or newer.
 
-Use Bun 1.3.14 to install dependencies and orchestrate the SDK's development
-commands. The emitted package remains standard ESM for Node.js 22 or newer;
-Bun is not required by applications that consume the published package.
-
-```bash
-bun ci
-bun run typecheck
-bun run test
-bun run build
-```
-
-Apply the SQL baseline with the Python migration CLI before starting an
-application:
+## Installation
 
 ```bash
-DATABASE_URL=postgresql://... bursar migrate
+npm install @zonastery/bursar
 ```
+
+Optional peer dependencies: `pg` (PostgresStore), `stripe` and `dodopayments`
+(provider billing), `js-yaml` (YAML config loading). No peer is required for
+core credits.
+
+## Database setup
+
+Database installation belongs to the SQL baseline, not to the SDK. Apply it
+with the Python migration CLI:
+
+```bash
+pip install bursar[postgres]
+export DATABASE_URL=postgresql://...
+bursar migrate
+```
+
+## Usage
 
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const tenantId = process.env.BURSAR_TENANT_ID!;
 const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
 const bursar = new Bursar({ creditStore: store });
 
@@ -47,27 +56,19 @@ while (page.nextCursor) {
 }
 ```
 
-The public history contract consists of `LedgerEntry`, `LedgerCursor`, and
-`LedgerPage`. Pagination is cursor-only. Use `getLedgerEntry` for one entry and
-`listUsageEntries` for the usage-only view.
+`LedgerEntry`, `LedgerCursor`, and `LedgerPage` are the public history
+contract; pagination is cursor-only. Publish one versioned configuration
+document through the facade — billing and auto-recharge read the same active
+document:
 
-`bursar.catalog.publishAndActivate(config)` publishes a canonical configuration
-with `pricing`, `credits`, `entitlements`, `admission`, `plans`, `commerce`, and
-`catalog`. Billing and auto-recharge read
-that active configuration; there is no separate billing configuration.
-
-The package keeps the `CreditStore` abstraction and `PostgresStore` for custom
-applications. Database installation is deliberately not a store or `Bursar`
-method.
+```ts
+await bursar.catalog.publishAndActivate(config);
+```
 
 ## Optional S3 and ClickHouse storage
 
-`createBursarRuntime` is the Node composition root when Bursar should manage
-optional storage projections. PostgreSQL remains authoritative for balances,
-leases, billing state, and the transactional outbox.
-
-With no extra infrastructure, it creates no background worker and analytics
-continue to query PostgreSQL:
+PostgreSQL remains authoritative. S3 and ClickHouse are optional delivery
+targets, managed by `createBursarRuntime` from `@zonastery/bursar/node`:
 
 ```ts
 import { createBursarRuntime } from "@zonastery/bursar/node";
@@ -77,53 +78,29 @@ const runtime = await createBursarRuntime({
   tenantId: process.env.BURSAR_TENANT_ID!,
 });
 await runtime.start();
-
 const bursar = runtime.bursar;
 ```
 
-S3 connection settings and a structural ClickHouse client can be added when
-those projections are needed:
+With no S3/ClickHouse configuration the runtime creates no background worker
+and analytics query PostgreSQL directly. See the
+[storage guide](https://zonastery.github.io/bursar/docs/guides/storage-backends)
+for the full S3 and ClickHouse setup.
 
-```ts
-import { createClient } from "@clickhouse/client";
-import { createBursarRuntime } from "@zonastery/bursar/node";
+## Development
 
-const clickhouseClient = createClient({ url: process.env.CLICKHOUSE_URL! });
-
-const runtime = await createBursarRuntime({
-  postgres: process.env.DATABASE_URL!,
-  tenantId: process.env.BURSAR_TENANT_ID!,
-  s3: {
-    bucket: process.env.BURSAR_S3_BUCKET!,
-    region: process.env.BURSAR_S3_REGION!,
-    endpoint: process.env.BURSAR_S3_ENDPOINT,
-    forcePathStyle: process.env.BURSAR_S3_FORCE_PATH_STYLE === "true",
-    credentials: {
-      accessKeyId: process.env.BURSAR_S3_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.BURSAR_S3_SECRET_ACCESS_KEY!,
-    },
-  },
-  clickhouse: {
-    client: clickhouseClient,
-    tenantId: process.env.BURSAR_TENANT_ID!,
-    // Optional; omit to keep the ClickHouse projection indefinitely.
-    retentionDays: 730,
-  },
-});
-
-await runtime.start();
-// Use runtime.bursar in the application.
-// On graceful shutdown:
-await runtime.close();
+```bash
+cd javascript
+bun ci                        # Bun 1.3.14; installs the committed bun.lock
+bun run typecheck
+bun run test                  # integration tests need Postgres (DATABASE_URL or testcontainer)
+bun run lint
+bun run build
 ```
 
-External writes happen through a leased PostgreSQL outbox, never in a customer
-request. S3 object keys are deterministic and the ClickHouse projection is
-replay-safe. ClickHouse analytics are therefore eventually consistent.
-PostgreSQL payload retention should be at least as long as the outbox retry
-horizon, which is enforced by the SQL storage configuration.
+Bun manages development dependencies and scripts; consumers of the published
+package do not need it. See
+[CONTRIBUTING.md](https://github.com/Zonastery/bursar/blob/main/CONTRIBUTING.md).
 
-Use `outbox: false` only when a separate process consumes the Bursar outbox.
-Database retention maintenance remains independent: schedule
-`bursar.maybe_run_storage_maintenance()` and partition maintenance with
-`pg_cron` as described in the SQL README.
+## License
+
+AGPL-3.0.

@@ -188,10 +188,14 @@ DECLARE
     v_metadata jsonb;
 
 BEGIN
-    IF p_status NOT IN ('pending', 'succeeded', 'failed', 'canceled')
+    IF NOT bursar.is_nonempty_text(p_provider_refund_id)
+       OR p_status NOT IN ('pending', 'succeeded', 'failed', 'canceled')
        OR p_provider_updated_at IS NULL
-       OR p_metadata IS NULL
-       OR jsonb_typeof(p_metadata) <> 'object'
+       OR NOT bursar.is_bounded_json_object(p_metadata, 16384)
+       OR (
+           p_reason IS NOT NULL
+           AND NOT bursar.is_nonempty_bounded_text(p_reason, 2048)
+       )
     THEN
         RAISE EXCEPTION 'invalid refund state' USING ERRCODE='22023';
     END IF;

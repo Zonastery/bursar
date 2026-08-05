@@ -53,23 +53,28 @@ class BillingEventRepository:
             }
         )
 
-    def complete(self, provider: str, event_id: str, claim_token: str) -> None:
+    def complete(self, provider: str, event_id: str, claim_token: str) -> bool:
         """Mark a billing event as completed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute("SELECT bursar.complete_billing_event(%s, %s, %s::uuid)", [provider, event_id, claim_token])
+        rows = self._execute(
+            "SELECT bursar.complete_billing_event(%s, %s, %s::uuid) AS completed",
+            [provider, event_id, claim_token],
+        )
+        return bool(rows and isinstance(rows[0], dict) and rows[0].get("completed") is True)
 
-    def fail(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> None:
+    def fail(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> bool:
         """Mark a billing event as failed.
 
         Args:
             provider: The billing provider identifier.
             event_id: The provider event ID.
         """
-        self._execute(
-            "SELECT bursar.fail_billing_event(%s, %s, %s::uuid, %s)",
+        rows = self._execute(
+            "SELECT bursar.fail_billing_event(%s, %s, %s::uuid, %s) AS failed",
             [provider, event_id, claim_token, error],
         )
+        return bool(rows and isinstance(rows[0], dict) and rows[0].get("failed") is True)
