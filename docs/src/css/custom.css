@@ -29,6 +29,15 @@
   --ifm-hero-text-color: #ffffff;
 }
 
+/* Keep the brand mark responsive while preserving its intrinsic dimensions to
+   avoid layout shift as the introduction page loads. */
+.bursar-docs-logo {
+  display: block;
+  width: min(100%, 20rem);
+  height: auto;
+  margin: 0 auto 2rem;
+}
+
 /* GitHub icon in the navbar — canonical pattern from docusaurus.io */
 .header-github-link::before {
   content: '';

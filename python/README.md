@@ -3,6 +3,15 @@
 [![PyPI](https://img.shields.io/pypi/v/bursar.svg)](https://pypi.org/project/bursar/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/bursar.svg)](https://pypi.org/project/bursar/)
 
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/zonastery/bursar/main/docs/static/img/logo.png"
+    alt="Bursar logo"
+    width="192"
+    height="192"
+  />
+</p>
+
 The Python SDK for [Bursar](https://github.com/Zonastery/bursar). It meters
 usage, prices operations, and manages balances against the shared canonical
 PostgreSQL schema and the same versioned configuration document as the

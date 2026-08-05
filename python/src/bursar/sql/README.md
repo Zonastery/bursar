@@ -1,5 +1,14 @@
 # Bursar SQL layout
 
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/zonastery/bursar/main/docs/static/img/logo.png"
+    alt="Bursar logo"
+    width="192"
+    height="192"
+  />
+</p>
+
 These files are the canonical database contract shared by the Python and
 JavaScript SDKs. The migration runner applies every `NNN_*.sql` file in numeric
 order and records its SHA-256 checksum in `bursar.schema_migrations`.

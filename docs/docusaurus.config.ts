@@ -90,8 +90,10 @@ const config: Config = {
     navbar: {
       title: 'bursar',
       logo: {
-        alt: 'bursar',
-        src: 'img/logo.svg',
+        alt: 'Bursar logo',
+        src: 'img/logo.png',
+        width: 40,
+        height: 40,
       },
       hideOnScroll: true,
       items: [

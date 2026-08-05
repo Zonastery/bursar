@@ -3,6 +3,15 @@
 [![npm](https://img.shields.io/npm/v/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/zonastery/bursar/main/docs/static/img/logo.png"
+    alt="Bursar logo"
+    width="192"
+    height="192"
+  />
+</p>
+
 The TypeScript SDK for [Bursar](https://github.com/Zonastery/bursar) — a
 behavioral mirror of the Python SDK. It meters usage, prices operations, and
 manages balances against the shared canonical PostgreSQL schema and the same

@@ -8,6 +8,15 @@
 [![npm downloads](https://img.shields.io/npm/dm/@zonastery/bursar.svg)](https://www.npmjs.com/package/@zonastery/bursar)
 [![License](https://img.shields.io/github/license/Zonastery/bursar.svg)](https://github.com/Zonastery/bursar/blob/main/LICENSE)
 
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/zonastery/bursar/main/docs/static/img/logo.png"
+    alt="Bursar logo"
+    width="192"
+    height="192"
+  />
+</p>
+
 Bursar is Zonastery's open-source credit-ledger and billing SDK for AI SaaS
 platforms. It meters usage, prices operations, manages balances, and bills
 customers from one canonical PostgreSQL schema and one versioned configuration

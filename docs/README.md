@@ -1,5 +1,14 @@
 # Bursar documentation site
 
+<p align="center">
+  <img
+    src="https://raw.githubusercontent.com/zonastery/bursar/main/docs/static/img/logo.png"
+    alt="Bursar logo"
+    width="192"
+    height="192"
+  />
+</p>
+
 The Bursar documentation is a [Docusaurus](https://docusaurus.io/) site built
 from this directory and published to
 [https://zonastery.github.io/bursar/](https://zonastery.github.io/bursar/).
