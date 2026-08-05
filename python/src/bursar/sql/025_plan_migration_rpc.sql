@@ -228,7 +228,7 @@ CREATE FUNCTION bursar.carry_catalog_plan_revision_state(
     p_account_id uuid,
     p_from_plan_id uuid,
     p_to_plan_id uuid,
-    p_require_compatible boolean DEFAULT true
+    p_require_compatible boolean DEFAULT TRUE
 )
 RETURNS void
 LANGUAGE plpgsql

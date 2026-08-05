@@ -351,7 +351,7 @@ CREATE TABLE bursar.account_plan_assignments (
     plan_id uuid NOT NULL,
     catalog_revision_id uuid NOT NULL,
     plan_key text NOT NULL,
-    catalog_revision_pinned boolean NOT NULL DEFAULT false,
+    catalog_revision_pinned boolean NOT NULL DEFAULT FALSE,
     source_type text NOT NULL DEFAULT 'manual'
     CHECK (source_type IN ('manual', 'subscription', 'migration', 'system')),
     source_id uuid,
@@ -404,7 +404,7 @@ CREATE TABLE bursar.plan_assignment_changes (
     to_plan_id uuid NOT NULL REFERENCES bursar.catalog_plans (id),
     change_kind text NOT NULL DEFAULT 'manual'
     CHECK (change_kind IN ('manual', 'catalog_revision')),
-    pin_overridden boolean NOT NULL DEFAULT false,
+    pin_overridden boolean NOT NULL DEFAULT FALSE,
     strategy text NOT NULL CHECK (strategy IN ('immediate', 'next_renewal')),
     effective_at timestamptz NOT NULL,
     state text NOT NULL DEFAULT 'scheduled'

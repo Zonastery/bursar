@@ -33,6 +33,7 @@ from bursar.billing.types import (
     ProviderRef,
 )
 from bursar.credits.service import CreditsService
+from bursar.errors import StoreError
 from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from tests.conftest import TEST_TENANT_ID
 
@@ -700,8 +701,11 @@ class TestCustomerCrud:
         _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
-        with pytest.raises(psycopg2.errors.UniqueViolation):
+        with pytest.raises(StoreError) as failure:
             bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID2)
+        assert failure.value.details is not None
+        assert failure.value.details["sql_state"] == "23505"
+        assert isinstance(failure.value.cause, psycopg2.errors.UniqueViolation)
         assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:

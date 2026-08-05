@@ -240,8 +240,8 @@ CREATE FUNCTION bursar.check_operation_quotas(
     p_operation text,
     p_measures jsonb,
     p_idempotency_key text,
-    p_enforce boolean DEFAULT true,
-    p_exclude_lease_id uuid DEFAULT null
+    p_enforce boolean DEFAULT TRUE,
+    p_exclude_lease_id uuid DEFAULT NULL
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -895,14 +895,14 @@ CREATE FUNCTION bursar.create_lease(
     p_operation text,
     p_estimate numeric,
     p_idempotency_key text,
-    p_minimum_balance numeric DEFAULT null,
+    p_minimum_balance numeric DEFAULT NULL,
     p_ttl interval DEFAULT interval '10 minutes',
     p_policy_snapshot jsonb DEFAULT '{}'::jsonb,
     p_metadata jsonb DEFAULT '{}'::jsonb,
-    p_feature text DEFAULT null,
+    p_feature text DEFAULT NULL,
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb,
-    p_max_concurrent integer DEFAULT null
+    p_max_concurrent integer DEFAULT NULL
 )
 RETURNS TABLE (
     lease_id uuid,
@@ -1445,9 +1445,9 @@ CREATE FUNCTION bursar.settle_lease(
     p_lease_id uuid,
     p_actual numeric,
     p_idempotency_key text,
-    p_feature text DEFAULT null,
-    p_model text DEFAULT null,
-    p_region text DEFAULT null,
+    p_feature text DEFAULT NULL,
+    p_model text DEFAULT NULL,
+    p_region text DEFAULT NULL,
     p_measures jsonb DEFAULT '{}'::jsonb,
     p_dimensions jsonb DEFAULT '{}'::jsonb,
     p_metadata jsonb DEFAULT '{}'::jsonb

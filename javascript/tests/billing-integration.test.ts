@@ -282,7 +282,8 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     const { bs } = await makePgComponents(pool);
     await bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID);
     await expect(bs.upsertBillingCustomer(PROVIDER, CUSTOMER_ID, USER_ID2)).rejects.toMatchObject({
-      code: "23505",
+      code: "STORE_ERROR",
+      details: { sqlState: "23505" },
     });
     expect(await bs.getBillingCustomer(PROVIDER, CUSTOMER_ID)).toBe(USER_ID);
   });
