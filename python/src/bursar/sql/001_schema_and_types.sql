@@ -4,6 +4,47 @@ CREATE SCHEMA IF NOT EXISTS extensions;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
 
+-- pg_partman owns the generic creation and retirement of Bursar's monthly
+-- payload partitions. Keep its configuration and operator API isolated from
+-- the extensions used by tenant-facing functions.
+CREATE SCHEMA IF NOT EXISTS partman;
+
+CREATE EXTENSION IF NOT EXISTS pg_partman WITH SCHEMA partman;
+
+DO $$
+DECLARE
+    v_version text;
+    v_schema text;
+BEGIN
+    SELECT extension_info.extversion, namespace_info.nspname
+    INTO v_version, v_schema
+    FROM pg_extension AS extension_info
+    JOIN pg_namespace AS namespace_info
+      ON namespace_info.oid = extension_info.extnamespace
+    WHERE extension_info.extname = 'pg_partman';
+
+    IF v_version IS NULL OR v_version !~ '^5\.' THEN
+        RAISE EXCEPTION
+            'Bursar requires pg_partman 5.x; installed version is %',
+            COALESCE(v_version, '<missing>')
+            USING ERRCODE = '0A000';
+    END IF;
+
+    IF v_schema <> 'partman' THEN
+        RAISE EXCEPTION
+            'Bursar requires pg_partman in schema partman, not %',
+            v_schema
+            USING ERRCODE = '3F000';
+    END IF;
+END
+$$;
+
+REVOKE ALL ON SCHEMA partman FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA partman FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA partman FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA partman FROM PUBLIC;
+REVOKE ALL ON ALL PROCEDURES IN SCHEMA partman FROM PUBLIC;
+
 SET client_encoding = 'UTF8';
 
 SET standard_conforming_strings = on;

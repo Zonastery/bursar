@@ -35,17 +35,9 @@ erDiagram
         integer outbox_max_retention_days
         integer maintenance_interval_seconds
         integer maintenance_batch_size
-        integer maintenance_partition_drop_limit
         integer maintenance_lock_timeout_ms
         timestamptz last_maintenance_at
         timestamptz updated_at
-    }
-    storage_partitions {
-        TEXT parent_table "PK"
-        TEXT partition_table "PK"
-        TIMESTAMPTZ range_start "UK"
-        TIMESTAMPTZ range_end
-        TIMESTAMPTZ created_at
     }
     subjects {
         UUID tenant_id "FK"

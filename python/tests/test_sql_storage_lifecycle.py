@@ -29,6 +29,41 @@ def _create_account(cursor: psycopg2.extensions.cursor) -> tuple[str, str]:
     return subject_id, str(cursor.fetchone()[0])  # type: ignore[reportOptionalSubscript]
 
 
+def _create_managed_partition(
+    cursor: psycopg2.extensions.cursor,
+    parent_table: str,
+    partition_at: datetime,
+) -> None:
+    """Create a test partition and apply Bursar's production hardening hook."""
+    cursor.execute(
+        """
+        SELECT partman.create_partition_time(
+            %s,
+            ARRAY[%s::timestamptz]
+        )
+        """,
+        (parent_table, partition_at),
+    )
+    cursor.execute(
+        """
+        SELECT bursar.secure_tenant_partition(
+            format(
+                '%%I.%%I',
+                partition_schema,
+                partition_table
+            )::regclass
+        )
+        FROM partman.show_partition_name(
+            %s,
+            %s::timestamptz::text
+        )
+        WHERE table_exists
+        """,
+        (parent_table, partition_at),
+    )
+    assert cursor.fetchone() is not None
+
+
 def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
     pg_database_url: str,
 ) -> None:
@@ -41,8 +76,7 @@ def test_usage_payload_cleanup_is_batched_and_keeps_recent_data(
         cursor.execute(
             """
             SELECT bursar.configure_storage(
-                p_maintenance_batch_size => 2,
-                p_maintenance_partition_drop_limit => 0
+                p_maintenance_batch_size => 2
             )
             """
         )
@@ -148,6 +182,11 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         subject_id, _ = _create_account(cursor)
+        _create_managed_partition(
+            cursor,
+            "bursar.usage_charge_payloads",
+            expired_at,
+        )
         cursor.execute(
             """
             SELECT *
@@ -165,19 +204,20 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
 
         cursor.execute(
             """
-            SELECT partition_table
-            FROM bursar.storage_partitions
-            WHERE parent_table = 'usage_charge_payloads'
-              AND range_start = '2025-01-01 00:00:00+00'::timestamptz
-            """
+            SELECT partition_schema, partition_table
+            FROM partman.show_partition_name(
+                'bursar.usage_charge_payloads',
+                %s::timestamptz::text
+            )
+            """,
+            (expired_at,),
         )
-        partition_table = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        partition_schema, partition_table = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
 
         cursor.execute(
             """
             SELECT bursar.configure_storage(
-                p_usage_payload_retention_days => 90,
-                p_maintenance_partition_drop_limit => 12
+                p_usage_payload_retention_days => 90
             )
             """
         )
@@ -197,7 +237,7 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
 
         cursor.execute(
             "SELECT to_regclass(%s)",
-            (f"bursar.{partition_table}",),
+            (f"{partition_schema}.{partition_table}",),
         )
         assert cursor.fetchone() == (None,)
 
@@ -212,63 +252,92 @@ def test_fully_expired_payload_partition_is_dropped_without_deleting_core(
         assert cursor.fetchone() == (1,)
 
 
-def test_partition_registry_is_repaired_and_physical_drift_fails_loudly(
+def test_pg_partman_configuration_and_generated_children_are_hardened(
     pg_database_url: str,
 ) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT set_config('bursar.tenant_id', %s, true)",
-            (TEST_TENANT_ID,),
-        )
-        cursor.execute(
             """
-            SELECT parent_table, partition_table, range_start
-            FROM bursar.storage_partitions
-            WHERE parent_table = 'usage_charge_payloads'
-            ORDER BY range_start
-            LIMIT 1
+            SELECT extension_info.extversion LIKE '5.%%', namespace_info.nspname
+            FROM pg_extension AS extension_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = extension_info.extnamespace
+            WHERE extension_info.extname = 'pg_partman'
             """
         )
-        parent_table, partition_table, range_start = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
-        cursor.execute(
-            """
-            UPDATE bursar.storage_partitions
-            SET partition_table = 'stale_registry_entry'
-            WHERE parent_table = %s
-              AND range_start = %s
-            """,
-            (parent_table, range_start),
-        )
-        cursor.execute(
-            "SELECT bursar.ensure_storage_partition(%s, %s)",
-            (parent_table, range_start),
-        )
-        assert cursor.fetchone() == (partition_table,)
-        cursor.execute(
-            """
-            SELECT partition_table
-            FROM bursar.storage_partitions
-            WHERE parent_table = %s
-              AND range_start = %s
-            """,
-            (parent_table, range_start),
-        )
-        assert cursor.fetchone() == (partition_table,)
+        assert cursor.fetchone() == (True, "partman")
 
-        cursor.execute("CREATE TABLE bursar.usage_charge_payloads_209901(id integer)")
-        cursor.execute("SAVEPOINT partition_drift")
+        cursor.execute(
+            """
+            SELECT
+                parent_table,
+                control,
+                partition_interval::interval = interval '1 month',
+                premake = 4,
+                automatic_maintenance = 'off',
+                retention IS NULL,
+                retention_schema IS NULL,
+                NOT retention_keep_table,
+                NOT retention_keep_index,
+                infinite_time_partitions,
+                ignore_default_data,
+                NOT inherit_privileges,
+                NOT jobmon
+            FROM partman.part_config
+            WHERE parent_table IN (
+                'bursar.usage_charge_payloads',
+                'bursar.billing_event_payloads'
+            )
+            ORDER BY parent_table
+            """
+        )
+        configurations = cursor.fetchall()
+        assert [(row[0], row[1]) for row in configurations] == [
+            ("bursar.billing_event_payloads", "received_at"),
+            ("bursar.usage_charge_payloads", "event_at"),
+        ]
+        assert all(all(row[2:]) for row in configurations)
+
+        cursor.execute(
+            """
+            SELECT
+                count(*) > 0,
+                count(*) FILTER (
+                    WHERE pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT'
+                ) = 1,
+                bool_and(child.relrowsecurity AND child.relforcerowsecurity),
+                bool_and(obj_description(child.oid, 'pg_class') IS NOT NULL)
+            FROM pg_inherits AS inheritance
+            JOIN pg_class AS parent
+              ON parent.oid = inheritance.inhparent
+            JOIN pg_namespace AS parent_schema
+              ON parent_schema.oid = parent.relnamespace
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+            WHERE parent_schema.nspname = 'bursar'
+              AND parent.relname = 'usage_charge_payloads'
+            """
+        )
+        assert cursor.fetchone() == (True, True, True, True)
+
+        cursor.execute("SAVEPOINT pg_partman_drift")
+        cursor.execute(
+            """
+            UPDATE partman.part_config
+            SET premake = 1
+            WHERE parent_table = 'bursar.usage_charge_payloads'
+            """
+        )
         with pytest.raises(psycopg2.Error) as error:
             cursor.execute(
                 """
-                SELECT bursar.ensure_storage_partition(
-                    'usage_charge_payloads',
-                    '2099-01-15T00:00:00Z'::timestamptz
+                SELECT bursar.run_storage_partition_maintenance(
+                    'usage_charge_payloads'
                 )
                 """
             )
         assert error.value.pgcode == "55000"
-        cursor.execute("ROLLBACK TO SAVEPOINT partition_drift")
-        cursor.execute("DROP TABLE bursar.usage_charge_payloads_209901")
+        cursor.execute("ROLLBACK TO SAVEPOINT pg_partman_drift")
 
 
 def test_maybe_run_storage_maintenance_respects_interval(
@@ -304,6 +373,62 @@ def test_maybe_run_storage_maintenance_respects_interval(
         assert cursor.fetchone()[0]["status"] == "completed"  # type: ignore[reportOptionalSubscript]
 
 
+def test_default_partition_preserves_out_of_horizon_ingestion(
+    pg_database_url: str,
+) -> None:
+    maintenance_now = datetime(2026, 7, 15, 12, tzinfo=UTC)
+    far_future_at = maintenance_now + timedelta(days=3650)
+
+    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+        subject_id, _ = _create_account(cursor)
+        cursor.execute(
+            """
+            SELECT charge_id, error_code
+            FROM bursar.charge_usage(
+                %s::uuid,
+                'completion',
+                0,
+                'default-partition-fallback',
+                p_event_at => %s
+            )
+            """,
+            (subject_id, far_future_at),
+        )
+        charge_id, error_code = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+        assert error_code is None
+
+        cursor.execute(
+            """
+            SELECT
+                payload.tableoid::regclass::text,
+                child.oid::regclass::text
+            FROM bursar.usage_charge_payloads AS payload
+            JOIN pg_inherits AS inheritance
+              ON inheritance.inhparent = 'bursar.usage_charge_payloads'::regclass
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+             AND pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT'
+            WHERE payload.charge_id = %s::uuid
+            """,
+            (charge_id,),
+        )
+        payload_table, default_table = cursor.fetchone()  # type: ignore[reportGeneralTypeIssues]
+        assert payload_table == default_table
+
+        cursor.execute(
+            """
+            SELECT bursar.run_storage_partition_maintenance(
+                'usage_charge_payloads',
+                %s
+            )
+            """,
+            (maintenance_now,),
+        )
+        result = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
+        assert result["default_partition_has_rows"] is True
+        assert result["has_more"] is True
+
+
 def test_partition_maintenance_does_not_wait_behind_ingestion(
     pg_database_url: str,
 ) -> None:
@@ -312,6 +437,11 @@ def test_partition_maintenance_does_not_wait_behind_ingestion(
 
     with psycopg2.connect(pg_database_url) as setup, setup.cursor() as cursor:
         subject_id, _ = _create_account(cursor)
+        _create_managed_partition(
+            cursor,
+            "bursar.usage_charge_payloads",
+            expired_at,
+        )
         cursor.execute(
             """
             SELECT *
@@ -327,27 +457,8 @@ def test_partition_maintenance_does_not_wait_behind_ingestion(
         )
         cursor.execute(
             """
-            SELECT bursar.ensure_storage_partition(
-                'usage_charge_payloads',
-                %s
-            )
-            """,
-            (maintenance_now,),
-        )
-        cursor.execute(
-            """
-            SELECT bursar.ensure_storage_partition(
-                'usage_charge_payloads',
-                %s
-            )
-            """,
-            (maintenance_now + timedelta(days=31),),
-        )
-        cursor.execute(
-            """
             SELECT bursar.configure_storage(
                 p_usage_payload_retention_days => 90,
-                p_maintenance_partition_drop_limit => 1,
                 p_maintenance_lock_timeout_ms => 50
             )
             """
@@ -377,7 +488,7 @@ def test_partition_maintenance_does_not_wait_behind_ingestion(
             )
             result = cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript]
             assert result["partitions_dropped"] == 0
-            assert result["partition_lock_timeouts"] == 1
+            assert result["partition_lock_timeouts"] >= 1
             assert result["has_more"] is True
     finally:
         worker.rollback()

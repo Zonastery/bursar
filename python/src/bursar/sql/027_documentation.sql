@@ -7,8 +7,6 @@ COMMENT ON TABLE bursar.subjects IS
 'with irreversible financial pseudonymization state.';
 COMMENT ON TABLE bursar.storage_settings IS
 'Singleton PostgreSQL hot-storage retention, lateness, and maintenance policy.';
-COMMENT ON TABLE bursar.storage_partitions IS
-'Registry of Bursar-managed monthly payload partitions used for low-cost expiry.';
 COMMENT ON TABLE bursar.external_identities IS 'Provider-specific identities mapped to a Bursar subject.';
 COMMENT ON TABLE bursar.catalog_revisions IS 'Immutable published pricing/configuration revisions.';
 COMMENT ON TABLE bursar.catalog_activation_history IS 'Append-only audit trail of catalog activation and supersession.';

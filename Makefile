@@ -16,6 +16,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 TEST_PG_NAME ?= bursar-test-pg
+TEST_PG_IMAGE ?= ghcr.io/dbsystel/postgresql-partman:16-5
 TEST_PG_PORT ?= 55432
 TEST_PG_DATABASE ?= bursar
 TEST_PG_USER ?= postgres
@@ -45,7 +46,7 @@ test-pg-up:                         ## Start an isolated Postgres database for i
 	  -e POSTGRES_PASSWORD=$(TEST_PG_PASSWORD) \
 	  -e POSTGRES_DB=$(TEST_PG_DATABASE) \
 	  -p $(TEST_PG_PORT):5432 \
-	  postgres:16 -c max_connections=500
+	  $(TEST_PG_IMAGE) -c max_connections=500
 	for i in $$(seq 1 30); do
 	  if docker exec $(TEST_PG_NAME) pg_isready -U $(TEST_PG_USER) -d $(TEST_PG_DATABASE) >/dev/null 2>&1; then exit 0; fi
 	  sleep 1
@@ -65,9 +66,10 @@ test-integration:                  ## Run Python and JS tests against an isolate
 
 # Both suites resolve a real Postgres via DATABASE_URL (CI's service
 # container / an already-running instance) or, failing that, via
-# testcontainers — a disposable postgres:16 spun up automatically for the
-# duration of the run (Docker permitting). No manual container orchestration
-# needed; see python/tests/conftest.py and javascript/tests/global-setup.ts.
+# testcontainers — a disposable Postgres 16 + pg_partman 5 instance spun up
+# automatically for the duration of the run (Docker permitting). No manual
+# container orchestration needed; see python/tests/conftest.py and
+# javascript/tests/global-setup.ts.
 test-python:                         ## Python tests (mock + postgres via DATABASE_URL/testcontainers)
 	cd python && pytest
 

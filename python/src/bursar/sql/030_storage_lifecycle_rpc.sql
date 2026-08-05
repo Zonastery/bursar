@@ -26,7 +26,6 @@ CREATE FUNCTION bursar.configure_storage(
     p_outbox_max_retention_days integer DEFAULT NULL,
     p_maintenance_interval_seconds integer DEFAULT NULL,
     p_maintenance_batch_size integer DEFAULT NULL,
-    p_maintenance_partition_drop_limit integer DEFAULT NULL,
     p_maintenance_lock_timeout_ms integer DEFAULT NULL
 )
 RETURNS bursar.storage_settings
@@ -145,10 +144,6 @@ BEGIN
         maintenance_batch_size = COALESCE(
             p_maintenance_batch_size,
             maintenance_batch_size
-        ),
-        maintenance_partition_drop_limit = COALESCE(
-            p_maintenance_partition_drop_limit,
-            maintenance_partition_drop_limit
         ),
         maintenance_lock_timeout_ms = COALESCE(
             p_maintenance_lock_timeout_ms,
@@ -525,132 +520,6 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION bursar.drop_expired_storage_partitions(
-    p_parent_table text,
-    p_cutoff timestamptz,
-    p_limit integer,
-    p_lock_timeout_ms integer
-)
-RETURNS TABLE (partitions_dropped integer, lock_timeouts integer)
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path TO ''
-AS $$
-DECLARE
-    v_partition record;
-    v_dropped integer := 0;
-    v_lock_timeouts integer := 0;
-    v_previous_lock_timeout text;
-    v_parent_oid regclass;
-    v_partition_oid regclass;
-BEGIN
-    IF p_parent_table NOT IN (
-        'usage_charge_payloads',
-        'billing_event_payloads'
-    )
-       OR p_cutoff IS NULL
-       OR p_limit NOT BETWEEN 0 AND 12
-       OR p_lock_timeout_ms NOT BETWEEN 1 AND 5000
-    THEN
-        RAISE EXCEPTION 'invalid expired-partition cleanup request'
-            USING ERRCODE = '22023';
-    END IF;
-
-    v_parent_oid := format('bursar.%I', p_parent_table)::regclass;
-
-    v_previous_lock_timeout := current_setting('lock_timeout');
-    PERFORM set_config(
-        'lock_timeout',
-        p_lock_timeout_ms::text || 'ms',
-        true
-    );
-
-    FOR v_partition IN
-        SELECT
-            partition.parent_table,
-            partition.partition_table,
-            partition.range_start,
-            partition.range_end
-        FROM bursar.storage_partitions AS partition
-        WHERE partition.parent_table = p_parent_table
-          AND partition.range_end <= p_cutoff
-        ORDER BY partition.range_end, partition.partition_table
-        LIMIT p_limit
-    LOOP
-        BEGIN
-            -- Lock the resolved relation before validating its identity. This
-            -- closes the check/drop race: the name cannot be rebound to an
-            -- unrelated table between catalog validation and DROP TABLE.
-            EXECUTE format(
-                'LOCK TABLE bursar.%I IN ACCESS EXCLUSIVE MODE',
-                v_partition.partition_table
-            );
-
-            v_partition_oid := to_regclass(
-                format('bursar.%I', v_partition.partition_table)
-            );
-
-            IF NOT EXISTS (
-                SELECT 1
-                FROM pg_inherits
-                JOIN pg_class AS child
-                  ON child.oid = pg_inherits.inhrelid
-                WHERE pg_inherits.inhrelid = v_partition_oid
-                  AND pg_inherits.inhparent = v_parent_oid
-                  AND pg_get_expr(child.relpartbound, child.oid) = format(
-                      'FOR VALUES FROM (%L) TO (%L)',
-                      v_partition.range_start,
-                      v_partition.range_end
-                  )
-            ) THEN
-                RAISE EXCEPTION
-                    'storage partition drift: bursar.% is not the registered partition of bursar.%',
-                    v_partition.partition_table,
-                    p_parent_table
-                    USING ERRCODE = '55000';
-            END IF;
-
-            -- Dropping a whole closed partition releases heap, TOAST, and
-            -- index storage without producing row-by-row delete WAL or bloat.
-            EXECUTE format(
-                'DROP TABLE bursar.%I',
-                v_partition.partition_table
-            );
-
-            DELETE FROM bursar.storage_partitions AS partition
-            WHERE partition.parent_table = v_partition.parent_table
-              AND partition.partition_table = v_partition.partition_table;
-
-            v_dropped := v_dropped + 1;
-        EXCEPTION
-            WHEN lock_not_available THEN
-                -- Never wait behind ingestion for retention DDL. A later
-                -- maintenance pass will retry this closed partition.
-                v_lock_timeouts := v_lock_timeouts + 1;
-            WHEN undefined_table THEN
-                DELETE FROM bursar.storage_partitions AS partition
-                WHERE partition.parent_table = v_partition.parent_table
-                  AND partition.partition_table =
-                      v_partition.partition_table;
-        END;
-    END LOOP;
-
-    PERFORM set_config('lock_timeout', v_previous_lock_timeout, true);
-
-    RETURN QUERY SELECT v_dropped, v_lock_timeouts;
-EXCEPTION
-    WHEN OTHERS THEN
-        IF v_previous_lock_timeout IS NOT NULL THEN
-            PERFORM set_config(
-                'lock_timeout',
-                v_previous_lock_timeout,
-                true
-            );
-        END IF;
-        RAISE;
-END
-$$;
-
 CREATE FUNCTION bursar.run_storage_partition_maintenance(
     p_parent_table text,
     p_now timestamptz DEFAULT now()
@@ -659,14 +528,22 @@ RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path TO ''
+SET timezone TO 'UTC'
 AS $$
 DECLARE
     v_settings bursar.storage_settings;
-    v_cutoff timestamptz;
-    v_partitions integer := 0;
+    v_parent regclass;
+    v_parent_name text;
+    v_retention interval;
+    v_partitions_before integer := 0;
+    v_partitions_after_create integer := 0;
+    v_partitions_created integer := 0;
+    v_partitions_dropped integer := 0;
     v_lock_timeouts integer := 0;
-    v_drop_lock_timeouts integer := 0;
     v_previous_lock_timeout text;
+    v_partition regclass;
+    v_default_partition regclass;
+    v_default_has_rows boolean := false;
 BEGIN
     IF p_parent_table NOT IN (
         'usage_charge_payloads',
@@ -687,12 +564,41 @@ BEGIN
         RETURN jsonb_build_object('status', 'busy');
     END IF;
 
+    v_parent_name := format('bursar.%I', p_parent_table);
+    v_parent := v_parent_name::regclass;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM partman.part_config AS config
+        WHERE config.parent_table = v_parent_name
+          AND config.control = CASE p_parent_table
+              WHEN 'usage_charge_payloads' THEN 'event_at'
+              WHEN 'billing_event_payloads' THEN 'received_at'
+          END
+          AND config.partition_interval::interval = interval '1 month'
+          AND config.partition_type = 'range'
+          AND config.premake = 4
+          AND config.automatic_maintenance = 'off'
+          AND config.retention IS NULL
+          AND config.retention_schema IS NULL
+          AND NOT config.retention_keep_table
+          AND NOT config.retention_keep_index
+          AND config.infinite_time_partitions
+          AND config.ignore_default_data
+          AND NOT config.inherit_privileges
+          AND NOT config.jobmon
+    ) THEN
+        RAISE EXCEPTION 'pg_partman storage configuration drift for %',
+            v_parent_name
+            USING ERRCODE = '55000';
+    END IF;
+
     SELECT *
     INTO v_settings
     FROM bursar.storage_settings
     WHERE singleton;
 
-    v_cutoff := p_now - make_interval(
+    v_retention := make_interval(
         days => CASE p_parent_table
             WHEN 'usage_charge_payloads'
                 THEN v_settings.usage_payload_retention_days
@@ -701,6 +607,14 @@ BEGIN
         END
     );
 
+    SELECT count(*)::integer
+    INTO v_partitions_before
+    FROM pg_inherits AS inheritance
+    JOIN pg_class AS child
+      ON child.oid = inheritance.inhrelid
+    WHERE inheritance.inhparent = v_parent
+      AND pg_get_expr(child.relpartbound, child.oid) <> 'DEFAULT';
+
     v_previous_lock_timeout := current_setting('lock_timeout');
     PERFORM set_config(
         'lock_timeout',
@@ -708,56 +622,137 @@ BEGIN
         true
     );
 
-    -- Keep this RPC in its own short transaction. PostgreSQL retains DDL
-    -- locks until commit, so mixing partition DDL with row cleanup would
-    -- unnecessarily hold ingestion locks for the whole cleanup pass.
+    -- pg_partman pre-creates the configured horizon. Retention remains an
+    -- explicit second call so p_now is deterministic and Bursar's settings
+    -- remain the single public policy surface.
     BEGIN
-        PERFORM bursar.ensure_storage_partition(
-            p_parent_table,
-            p_now,
+        PERFORM partman.run_maintenance(
+            v_parent_name,
+            false,
             false
         );
     EXCEPTION
-        WHEN lock_not_available THEN
-            v_lock_timeouts := v_lock_timeouts + 1;
+        WHEN OTHERS THEN
+            -- pg_partman 5.3 re-raises lock_not_available as P0001 while
+            -- preserving PostgreSQL's exact message. Do not hide any other
+            -- extension failure.
+            IF SQLSTATE = '55P03'
+               OR (
+                   SQLSTATE = 'P0001'
+                   AND SQLERRM LIKE 'canceling statement due to lock timeout%'
+               )
+            THEN
+                v_lock_timeouts := v_lock_timeouts + 1;
+            ELSE
+                RAISE;
+            END IF;
     END;
 
+    SELECT count(*)::integer
+    INTO v_partitions_after_create
+    FROM pg_inherits AS inheritance
+    JOIN pg_class AS child
+      ON child.oid = inheritance.inhrelid
+    WHERE inheritance.inhparent = v_parent
+      AND pg_get_expr(child.relpartbound, child.oid) <> 'DEFAULT';
+
+    v_partitions_created := greatest(
+        v_partitions_after_create - v_partitions_before,
+        0
+    );
+
     BEGIN
-        PERFORM bursar.ensure_storage_partition(
-            p_parent_table,
-            p_now + interval '1 month',
-            false
-        );
+        SELECT partman.drop_partition_time(
+            v_parent_name,
+            v_retention,
+            false,
+            false,
+            NULL,
+            p_now
+        )
+        INTO v_partitions_dropped;
     EXCEPTION
-        WHEN lock_not_available THEN
-            v_lock_timeouts := v_lock_timeouts + 1;
+        WHEN OTHERS THEN
+            IF SQLSTATE = '55P03'
+               OR (
+                   SQLSTATE = 'P0001'
+                   AND SQLERRM LIKE 'canceling statement due to lock timeout%'
+               )
+            THEN
+                v_lock_timeouts := v_lock_timeouts + 1;
+            ELSE
+                RAISE;
+            END IF;
     END;
+
+    -- pg_partman deliberately does not know Bursar's tenant policy. Harden
+    -- every new child before returning from operator maintenance.
+    IF to_regprocedure(
+        'bursar.secure_tenant_partition(regclass)'
+    ) IS NOT NULL THEN
+        FOR v_partition IN
+            SELECT child.oid::regclass
+            FROM pg_inherits AS inheritance
+            JOIN pg_class AS child
+              ON child.oid = inheritance.inhrelid
+            WHERE inheritance.inhparent = v_parent
+              AND (
+                  NOT child.relrowsecurity
+                  OR NOT child.relforcerowsecurity
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM pg_policy AS policy
+                      WHERE policy.polrelid = child.oid
+                        AND policy.polname LIKE 'tenant_isolation_%'
+                  )
+              )
+            ORDER BY child.oid
+        LOOP
+            -- Security is fail-closed: never commit a newly visible child
+            -- unless its forced-RLS policy and direct-access revokes succeed.
+            EXECUTE
+                'SELECT bursar.secure_tenant_partition($1)'
+                USING v_partition;
+        END LOOP;
+    END IF;
+
+    SELECT child.oid::regclass
+    INTO v_default_partition
+    FROM pg_inherits AS inheritance
+    JOIN pg_class AS child
+      ON child.oid = inheritance.inhrelid
+    WHERE inheritance.inhparent = v_parent
+      AND pg_get_expr(child.relpartbound, child.oid) = 'DEFAULT';
+
+    IF v_default_partition IS NOT NULL THEN
+        EXECUTE format(
+            'SELECT EXISTS (SELECT 1 FROM %s LIMIT 1)',
+            v_default_partition
+        )
+        INTO v_default_has_rows;
+    END IF;
 
     PERFORM set_config('lock_timeout', v_previous_lock_timeout, true);
-
-    SELECT dropped.partitions_dropped, dropped.lock_timeouts
-    INTO v_partitions, v_drop_lock_timeouts
-    FROM bursar.drop_expired_storage_partitions(
-        p_parent_table,
-        v_cutoff,
-        v_settings.maintenance_partition_drop_limit,
-        v_settings.maintenance_lock_timeout_ms
-    ) AS dropped;
-    v_lock_timeouts := v_lock_timeouts + v_drop_lock_timeouts;
 
     RETURN jsonb_build_object(
         'status', 'completed',
         'parent_table', p_parent_table,
-        'partitions_dropped', v_partitions,
+        'partitions_created', v_partitions_created,
+        'partitions_dropped', v_partitions_dropped,
         'partition_lock_timeouts', v_lock_timeouts,
-        'has_more',
-            (
-                v_settings.maintenance_partition_drop_limit > 0
-                AND v_partitions =
-                    v_settings.maintenance_partition_drop_limit
-            )
-            OR v_lock_timeouts > 0
+        'default_partition_has_rows', v_default_has_rows,
+        'has_more', v_default_has_rows OR v_lock_timeouts > 0
     );
+EXCEPTION
+    WHEN OTHERS THEN
+        IF v_previous_lock_timeout IS NOT NULL THEN
+            PERFORM set_config(
+                'lock_timeout',
+                v_previous_lock_timeout,
+                true
+            );
+        END IF;
+        RAISE;
 END
 $$;
 
@@ -1112,27 +1107,95 @@ BEGIN
 END
 $$;
 
--- A fresh installation should not make its first customer request pay for
--- partition DDL. The scheduled partition-maintenance RPC keeps this horizon
--- ahead after installation; write-path creation remains only a safety net.
+-- Register the two native partitioned parents with pg_partman. Version 5.4
+-- renamed create_parent() to create_partition(); the named arguments used by
+-- Bursar are otherwise common to the audited 5.x APIs.
 DO $$
+DECLARE
+    v_partition_set record;
+    v_create_function text;
 BEGIN
-    PERFORM bursar.ensure_storage_partition(
-        'usage_charge_payloads',
-        now()
-    );
-    PERFORM bursar.ensure_storage_partition(
-        'usage_charge_payloads',
-        now() + interval '1 month'
-    );
-    PERFORM bursar.ensure_storage_partition(
-        'billing_event_payloads',
-        now()
-    );
-    PERFORM bursar.ensure_storage_partition(
-        'billing_event_payloads',
-        now() + interval '1 month'
-    );
+    PERFORM set_config('TimeZone', 'UTC', true);
+
+    SELECT CASE
+        WHEN EXISTS (
+            SELECT 1
+            FROM pg_proc AS function_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = function_info.pronamespace
+            WHERE namespace_info.nspname = 'partman'
+              AND function_info.proname = 'create_partition'
+        ) THEN 'create_partition'
+        WHEN EXISTS (
+            SELECT 1
+            FROM pg_proc AS function_info
+            JOIN pg_namespace AS namespace_info
+              ON namespace_info.oid = function_info.pronamespace
+            WHERE namespace_info.nspname = 'partman'
+              AND function_info.proname = 'create_parent'
+        ) THEN 'create_parent'
+    END
+    INTO v_create_function;
+
+    IF v_create_function IS NULL THEN
+        RAISE EXCEPTION 'unsupported pg_partman 5.x creation API'
+            USING ERRCODE = '0A000';
+    END IF;
+
+    FOR v_partition_set IN
+        SELECT *
+        FROM (
+            VALUES
+                ('bursar.usage_charge_payloads', 'event_at'),
+                ('bursar.billing_event_payloads', 'received_at')
+        ) AS partition_set(parent_table, control_column)
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM partman.part_config AS config
+            WHERE config.parent_table = v_partition_set.parent_table
+        ) THEN
+            EXECUTE format(
+                'SELECT partman.%I('
+                'p_parent_table := $1, '
+                'p_control := $2, '
+                'p_interval := ''1 month'', '
+                'p_type := ''range'', '
+                'p_premake := 4, '
+                'p_default_table := true, '
+                'p_automatic_maintenance := ''off'', '
+                'p_jobmon := false, '
+                'p_date_trunc_interval := ''month'''
+                ')',
+                v_create_function
+            )
+            USING
+                v_partition_set.parent_table,
+                v_partition_set.control_column;
+        END IF;
+
+        UPDATE partman.part_config
+        SET premake = 4,
+            automatic_maintenance = 'off',
+            retention = NULL,
+            retention_schema = NULL,
+            retention_keep_table = false,
+            retention_keep_index = false,
+            infinite_time_partitions = true,
+            ignore_default_data = true,
+            inherit_privileges = false,
+            jobmon = false
+        WHERE parent_table = v_partition_set.parent_table
+          AND control = v_partition_set.control_column
+          AND partition_interval::interval = interval '1 month'
+          AND partition_type = 'range';
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'pg_partman storage configuration drift for %',
+                v_partition_set.parent_table
+                USING ERRCODE = '55000';
+        END IF;
+    END LOOP;
 END
 $$;
 
@@ -1141,7 +1204,7 @@ IS 'Return PostgreSQL hot-storage retention and maintenance settings.';
 COMMENT ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer, integer, integer, integer, integer,
-    integer, integer, integer
+    integer, integer
 )
 IS 'Configure bounded PostgreSQL event retention and maintenance work budgets while preserving quota correctness.';
 COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text [])
@@ -1162,14 +1225,10 @@ COMMENT ON FUNCTION bursar.archive_billing_event_payload(
 IS 'Record an external webhook-envelope object and optionally purge its PostgreSQL payload.';
 COMMENT ON FUNCTION bursar.fail_outbox_event(bigint, uuid, text, integer, integer)
 IS 'Release or dead-letter one claimed outbox event after delivery failure.';
-COMMENT ON FUNCTION bursar.drop_expired_storage_partitions(
-    text, timestamptz, integer, integer
-)
-IS 'Internal low-lock-timeout removal of fully expired managed payload partitions.';
 COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(
     text, timestamptz
 )
-IS 'Create near-term and drop fully expired partitions in a short DDL-only transaction.';
+IS 'Run pg_partman creation and retention for one Bursar payload partition set.';
 COMMENT ON FUNCTION bursar.run_storage_maintenance(timestamptz)
 IS 'Perform one bounded row-retention pass, including record-only usage telemetry, without partition DDL.';
 COMMENT ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
@@ -1179,7 +1238,7 @@ REVOKE ALL ON FUNCTION bursar.get_storage_settings() FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.configure_storage(
     integer, integer, integer, integer, integer, integer,
     integer, integer, integer, integer, integer, integer,
-    integer, integer, integer
+    integer, integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.claim_outbox_events(
@@ -1193,9 +1252,6 @@ REVOKE ALL ON FUNCTION bursar.archive_billing_event_payload(
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.fail_outbox_event(
     bigint, uuid, text, integer, integer
-) FROM PUBLIC;
-REVOKE ALL ON FUNCTION bursar.drop_expired_storage_partitions(
-    text, timestamptz, integer, integer
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance(
     text, timestamptz
@@ -1212,7 +1268,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION bursar.configure_storage(
             integer, integer, integer, integer, integer, integer,
             integer, integer, integer, integer, integer, integer,
-            integer, integer, integer
+            integer, integer
         ) TO service_role;
         GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
             TO service_role;

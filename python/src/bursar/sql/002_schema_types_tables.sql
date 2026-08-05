@@ -96,8 +96,6 @@ CREATE TABLE bursar.storage_settings (
     CHECK (maintenance_interval_seconds BETWEEN 1 AND 86400),
     maintenance_batch_size integer NOT NULL DEFAULT 500
     CHECK (maintenance_batch_size BETWEEN 1 AND 5000),
-    maintenance_partition_drop_limit integer NOT NULL DEFAULT 2
-    CHECK (maintenance_partition_drop_limit BETWEEN 0 AND 12),
     maintenance_lock_timeout_ms integer NOT NULL DEFAULT 100
     CHECK (maintenance_lock_timeout_ms BETWEEN 1 AND 5000),
     last_maintenance_at timestamptz,
@@ -114,25 +112,6 @@ CREATE TABLE bursar.storage_settings (
 );
 
 INSERT INTO bursar.storage_settings (singleton) VALUES (true);
-
-CREATE TABLE bursar.storage_partitions (
-    parent_table text NOT NULL CHECK (
-        parent_table IN (
-            'usage_charge_payloads',
-            'billing_event_payloads'
-        )
-    ),
-    partition_table text NOT NULL CHECK (
-        bursar.is_nonempty_text(partition_table)
-        AND bursar.is_bounded_text(partition_table, 63)
-    ),
-    range_start timestamptz NOT NULL,
-    range_end timestamptz NOT NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (parent_table, partition_table),
-    UNIQUE (parent_table, range_start),
-    CHECK (range_end > range_start)
-);
 
 CREATE TABLE bursar.subjects (
     tenant_id uuid NOT NULL DEFAULT bursar.require_tenant_id()

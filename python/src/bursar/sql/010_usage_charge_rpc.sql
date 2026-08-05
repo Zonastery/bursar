@@ -74,15 +74,6 @@ BEGIN
 
     v_digest:=extensions.digest(convert_to(jsonb_build_object('operation',p_operation,'requested',bursar.digest_numeric_text(p_requested),'feature',p_feature,'model',p_model,'region',p_region,'allowance_requested',bursar.digest_numeric_text(p_allowance_requested),'allowance_covered',bursar.digest_numeric_text(p_allowance),'catalog_revision_id',p_catalog_revision_id,'plan_id',p_plan_id,'rate_card_key',p_rate_card_key,'minimum_balance',bursar.digest_numeric_text(p_minimum_balance),'measures',COALESCE(p_measures,'{}'::jsonb),'dimensions',COALESCE(p_dimensions,'{}'::jsonb),'metadata',p_metadata)::text,'UTF8'),'sha256');
 
-    -- Keep partition DDL ahead of account and ledger locks when PostgreSQL
-    -- owns the detailed usage payload.
-    IF bursar.current_usage_backend() = 'postgres' THEN
-        PERFORM bursar.ensure_storage_partition(
-            'usage_charge_payloads',
-            p_event_at
-        );
-    END IF;
-
   SELECT account.tenant_id, account.subject_id
   INTO v_tenant, v_subject
   FROM bursar.credit_accounts AS account
@@ -393,14 +384,6 @@ BEGIN
         ),
         'sha256'
     );
-
-    -- Keep partition DDL ahead of the account lock, matching charge_usage.
-    IF bursar.current_usage_backend() = 'postgres' THEN
-        PERFORM bursar.ensure_storage_partition(
-            'usage_charge_payloads',
-            v_event_at
-        );
-    END IF;
 
     SELECT account.tenant_id, account.subject_id
     INTO v_tenant, v_subject

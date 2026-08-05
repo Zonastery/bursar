@@ -24,7 +24,7 @@ OPERATOR_FUNCTIONS = (
     (
         "bursar.configure_storage(integer,integer,integer,integer,integer,"
         "integer,integer,integer,integer,integer,integer,integer,integer,"
-        "integer,integer)"
+        "integer)"
     ),
     "bursar.claim_outbox_events(integer,integer,text[])",
     "bursar.claim_outbox_events(uuid,integer,integer,text[])",
@@ -33,7 +33,6 @@ OPERATOR_FUNCTIONS = (
     "bursar.complete_outbox_event(bigint,uuid)",
     "bursar.archive_billing_event_payload(uuid,text,text,boolean)",
     "bursar.fail_outbox_event(bigint,uuid,text,integer,integer)",
-    "bursar.drop_expired_storage_partitions(text,timestamptz,integer,integer)",
     "bursar.run_storage_partition_maintenance(text,timestamptz)",
     "bursar.run_storage_maintenance(timestamptz)",
     "bursar.maybe_run_storage_maintenance(timestamptz)",
@@ -539,7 +538,6 @@ def test_runtime_role_cannot_execute_operator_functions(
         assert cursor.fetchall() == []
 
         for allowed_function in (
-            "bursar.ensure_storage_partition(text,timestamptz,boolean)",
             "bursar.is_nonempty_text(text)",
             "bursar.get_credit_state(uuid)",
             "bursar.resolve_active_tenant_for_trigger(text)",
@@ -558,6 +556,28 @@ def test_runtime_role_cannot_execute_operator_functions(
             """
         )
         assert cursor.fetchone() == ("bursar_runtime",)
+
+        cursor.execute(
+            """
+            SELECT
+                has_schema_privilege(
+                    'bursar_runtime',
+                    'partman',
+                    'USAGE'
+                ),
+                has_schema_privilege(
+                    'service_role',
+                    'partman',
+                    'USAGE'
+                ),
+                has_function_privilege(
+                    'service_role',
+                    'partman.run_maintenance(text,boolean,boolean)',
+                    'EXECUTE'
+                )
+            """
+        )
+        assert cursor.fetchone() == (False, False, False)
 
         cursor.execute(
             """
@@ -605,16 +625,18 @@ def test_partition_children_are_forced_rls_and_not_service_accessible(
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT partition.partition_table
-            FROM bursar.storage_partitions AS partition
-            WHERE partition.parent_table = 'billing_event_payloads'
-              AND partition.range_start <= now()
-              AND partition.range_end > now()
+            SELECT partition_schema, partition_table, table_exists
+            FROM partman.show_partition_name(
+                'bursar.billing_event_payloads',
+                now()::text
+            )
             """
         )
         partition_row = cursor.fetchone()
         assert partition_row is not None
-        partition_table = partition_row[0]
+        partition_schema, partition_table, table_exists = partition_row
+        assert partition_schema == "bursar"
+        assert table_exists is True
 
         cursor.execute(
             """
@@ -630,13 +652,18 @@ def test_partition_children_are_forced_rls_and_not_service_accessible(
             FROM pg_class AS table_info
             WHERE table_info.oid = %s::regclass
             """,
-            (f"bursar.{partition_table}",),
+            (f"{partition_schema}.{partition_table}",),
         )
         assert cursor.fetchone() == (True, True, True)
 
         cursor.execute("SET ROLE service_role")
         with pytest.raises(psycopg2.Error) as exc_info:
-            cursor.execute(sql.SQL("SELECT count(*) FROM bursar.{}").format(sql.Identifier(partition_table)))
+            cursor.execute(
+                sql.SQL("SELECT count(*) FROM {}.{}").format(
+                    sql.Identifier(partition_schema),
+                    sql.Identifier(partition_table),
+                )
+            )
         assert exc_info.value.pgcode == "42501"
 
 

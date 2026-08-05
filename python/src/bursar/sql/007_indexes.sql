@@ -169,9 +169,6 @@ ON bursar.usage_daily_rollups (operation, usage_day);
 CREATE INDEX usage_rollup_model_day_idx
 ON bursar.usage_daily_rollups (model_key, usage_day);
 
-CREATE INDEX storage_partitions_expiry_idx
-ON bursar.storage_partitions (parent_table, range_end);
-
 CREATE INDEX event_outbox_claimable_idx
 ON bursar.event_outbox (
     (

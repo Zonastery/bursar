@@ -125,8 +125,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA bursar TO bursar_runtime;
 
 -- Runtime-owned SECURITY DEFINER RPCs may call ordinary validation, policy,
 -- trigger, and calculation helpers. Grant only those SECURITY INVOKER
--- dependencies plus the partition creator used by tenant write paths. The
--- cross-tenant storage/operator functions deliberately remain unavailable.
+-- dependencies. Cross-tenant storage and pg_partman maintenance deliberately
+-- remain unavailable to the tenant runtime role.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bursar FROM bursar_runtime;
 
 DO $$
@@ -150,10 +150,6 @@ BEGIN
 END
 $$;
 
-GRANT EXECUTE
-ON FUNCTION bursar.ensure_storage_partition(text, timestamptz, boolean)
-TO bursar_runtime;
-
 DO $$
 DECLARE
     v_function record;
@@ -166,7 +162,6 @@ BEGIN
         WHERE namespace_info.nspname = 'bursar'
           AND function_info.prosecdef
           AND function_info.proname NOT IN (
-              'ensure_storage_partition',
               'get_storage_settings',
               'configure_storage',
               'claim_outbox_events',
@@ -175,7 +170,6 @@ BEGIN
               'complete_outbox_event',
               'archive_billing_event_payload',
               'fail_outbox_event',
-              'drop_expired_storage_partitions',
               'run_storage_partition_maintenance',
               'run_storage_maintenance',
               'maybe_run_storage_maintenance',
@@ -225,8 +219,8 @@ RESET ROLE;
 
 REVOKE CREATE ON SCHEMA bursar FROM bursar_runtime;
 
--- Apply tenant RLS to every business table and to current partitions. New
--- partitions receive the same policy from ensure_storage_partition().
+-- Apply tenant RLS to every business table and every partition created during
+-- pg_partman registration. The maintenance wrapper secures future children.
 DO $$
 DECLARE
     v_table record;
@@ -327,9 +321,16 @@ BEGIN
         v_partition
     );
     EXECUTE format(
-        'GRANT SELECT, INSERT, UPDATE, DELETE '
-        'ON TABLE bursar.%I TO bursar_runtime',
+        'REVOKE ALL ON TABLE bursar.%I FROM PUBLIC, bursar_runtime',
         v_partition
+    );
+    EXECUTE format(
+        'COMMENT ON TABLE bursar.%I IS %L',
+        v_partition,
+        format(
+            'pg_partman-managed child of bursar.%I; direct access is denied.',
+            v_parent
+        )
     );
 
     IF NOT EXISTS (
@@ -359,6 +360,34 @@ $$;
 REVOKE ALL
 ON FUNCTION bursar.secure_tenant_partition(regclass)
 FROM PUBLIC;
+
+-- The initial pg_partman children predate this helper. Re-apply the helper so
+-- they receive the same privileges, forced RLS policy, and documentation as
+-- children created by later maintenance runs.
+DO $$
+DECLARE
+    v_partition regclass;
+BEGIN
+    FOR v_partition IN
+        SELECT child.oid::regclass
+        FROM pg_inherits AS inheritance
+        JOIN pg_class AS child
+          ON child.oid = inheritance.inhrelid
+        JOIN pg_class AS parent
+          ON parent.oid = inheritance.inhparent
+        JOIN pg_namespace AS parent_schema
+          ON parent_schema.oid = parent.relnamespace
+        WHERE parent_schema.nspname = 'bursar'
+          AND parent.relname IN (
+              'usage_charge_payloads',
+              'billing_event_payloads'
+          )
+        ORDER BY child.oid
+    LOOP
+        PERFORM bursar.secure_tenant_partition(v_partition);
+    END LOOP;
+END
+$$;
 
 CREATE FUNCTION bursar.create_tenant(
     p_tenant_id uuid,
@@ -455,7 +484,7 @@ COMMENT ON FUNCTION bursar.current_tenant_is_active() IS
 'Returns true only when the current tenant exists and is active.';
 
 COMMENT ON FUNCTION bursar.secure_tenant_partition(regclass) IS
-'Applies the tenant runtime grant and forced RLS policy to a managed partition.';
+'Revokes direct access and applies forced tenant RLS to a managed partition.';
 
 COMMENT ON FUNCTION bursar.claim_outbox_events(integer, integer, text []) IS
 'Claims cross-tenant outbox work and returns the owning tenant UUID.';

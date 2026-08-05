@@ -96,7 +96,7 @@ pyright src/
 ```
 
 Real-Postgres tests resolve `DATABASE_URL`, else spin up a disposable
-`postgres:16` testcontainer. See
+Postgres 16 + pg_partman 5 testcontainer. See
 [CONTRIBUTING.md](https://github.com/Zonastery/bursar/blob/main/CONTRIBUTING.md).
 
 ## License

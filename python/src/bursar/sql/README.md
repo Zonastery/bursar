@@ -4,6 +4,11 @@ These files are the canonical database contract shared by the Python and
 JavaScript SDKs. The migration runner applies every `NNN_*.sql` file in numeric
 order and records its SHA-256 checksum in `bursar.schema_migrations`.
 
+The baseline requires PostgreSQL 16 and pg_partman 5.x. The server package for
+pg_partman must be available before migration; the migration creates the
+extension in the dedicated `partman` schema and fails loudly for another major
+version or schema. `pg_cron`, S3, and ClickHouse remain optional.
+
 ## File boundaries
 
 Files are organised by dependency and domain:
@@ -99,7 +104,7 @@ uv run --with sqlfluff sqlfluff lint python/src/bursar/sql --dialect postgres
 ```
 
 The SQL regression files in `python/tests/sql*.sql` must pass against a clean
-Postgres 16 instance after every baseline change.
+Postgres 16 instance with pg_partman 5 after every baseline change.
 
 ## PostgreSQL-first storage lifecycle
 
@@ -136,14 +141,31 @@ High-cardinality or opaque payloads are kept in bounded tables:
 - an advisory lock prevents concurrent maintenance passes; and
 - there is no partition DDL in the row-cleanup transaction.
 
-`bursar.run_storage_partition_maintenance()` is a separate, short transaction
-for one payload table. It creates the current and next monthly partitions and
-drops fully expired partitions with a short lock timeout. A whole-partition
-drop avoids row-delete WAL and dead-table bloat. Keeping it separate is
-important because PostgreSQL holds DDL locks until transaction commit.
-The partition registry is treated as a cache: destructive maintenance locks
-the physical child and verifies its parent and exact bounds before dropping
-it, so stale or corrupted registry metadata cannot redirect cleanup.
+pg_partman owns the two monthly partition sets. Bursar standardises each set as
+declarative range partitioning with four future partitions, a default safety
+partition, UTC month boundaries, and pg_partman's global automatic maintenance
+disabled. The default partition prevents ingestion failures if scheduling is
+temporarily delayed; it is an alert condition, not a steady-state destination.
+
+`bursar.run_storage_partition_maintenance()` is the supported operator entry
+point for one payload table. It calls pg_partman to create the configured
+horizon and retire fully expired partitions with a short lock timeout, then
+forces RLS, removes direct runtime access, and documents every new child. A
+whole-partition drop avoids row-delete WAL and dead-table bloat. Keeping it in
+a transaction separate from row cleanup is important because PostgreSQL holds
+DDL locks until transaction commit.
+
+Bursar intentionally leaves `partman.part_config.retention` unset. Retention is
+passed explicitly by the wrapper so `bursar.storage_settings` remains the one
+public policy surface and tests/operators can supply a deterministic `p_now`.
+Do not schedule pg_partman's global maintenance procedure as a substitute for
+the Bursar wrappers.
+
+The result field `default_partition_has_rows` must normally be false. If it is
+true, investigate timestamp skew or a missed schedule and use pg_partman's
+`partition_data_proc` in a separate operator session to move valid rows before
+the affected range becomes current. pg_partman cannot create an overlapping
+child while matching rows remain in the default partition.
 
 This keeps retention work out of ingestion transactions. Do not call
 maintenance inline from an end-user request.
@@ -181,9 +203,9 @@ SELECT cron.schedule(
 
 `maybe_run_storage_maintenance()` observes
 `maintenance_interval_seconds`; the default is 60 seconds. The work defaults
-to 500 rows per retention class and at most two full partition drops per pass.
-Both limits, and the 100 ms partition-DDL lock timeout, are configurable with
-`bursar.configure_storage()`.
+to 500 rows per non-partitioned retention class. That batch size and the 100 ms
+partition-DDL lock timeout are configurable with `bursar.configure_storage()`;
+partition retirement is delegated to pg_partman.
 
 Without `pg_cron`, run the due-check frequently and both partition-maintenance
 calls daily from a single application background timer or an existing worker.

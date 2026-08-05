@@ -15,7 +15,8 @@ and wire Bursar to meter completions, hold balances, and charge users.
 
 - Python 3.12+ with `pip install bursar[postgres]`, or Node.js 22+ with
   `npm install @zonastery/bursar`
-- PostgreSQL 16 reachable from `DATABASE_URL`
+- PostgreSQL 16 reachable from `DATABASE_URL`, with pg_partman 5.x available
+  to the migration role (Bursar installs it in the `partman` schema)
 
 ## 1. Install the schema
 

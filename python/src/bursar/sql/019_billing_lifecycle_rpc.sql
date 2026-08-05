@@ -47,15 +47,6 @@ BEGIN
 
     v_digest:=extensions.digest(convert_to(v_envelope::text,'UTF8'),'sha256');
 
-    -- Establish the payload partition only when PostgreSQL owns raw billing
-    -- envelopes. S3 mode stages the envelope in the transactional outbox.
-    IF bursar.current_billing_payload_backend() = 'postgres' THEN
-        PERFORM bursar.ensure_storage_partition(
-            'billing_event_payloads',
-            v_received_at
-        );
-    END IF;
-
     INSERT INTO bursar.billing_events(
         provider,provider_environment,provider_event_id,event_type,
         envelope_digest,payload_received_at,status,claim_token,claim_expires_at

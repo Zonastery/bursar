@@ -1,7 +1,8 @@
 """Fixtures for integration tests — one canonical Postgres source.
 
 The ``pg_database_url`` fixture resolves a connection string to a **real
-Postgres 16** from a single, consistent mechanism (resolution order):
+Postgres 16 with pg_partman 5** from a single, consistent mechanism
+(resolution order):
 
 1. ``DATABASE_URL`` — the env var CI and the JS (vitest) suite already use
    (see ``.github/workflows/ci.yml`` and ``javascript/tests/store-integration.test.ts``).
@@ -10,27 +11,28 @@ Postgres 16** from a single, consistent mechanism (resolution order):
        DATABASE_URL=postgres://bursar:bursar@localhost:5432/bursar_test uv run pytest
 
 2. ``BURSAR_TEST_PG_URL`` — legacy override for an already-running Postgres
-   (e.g. a ``postgres:16`` Docker container on a non-default port). Folded in
-   here so there is one mechanism; ``DATABASE_URL`` wins when both are set::
+   (for example, a pg_partman-enabled container on a non-default port). Folded
+   in here so there is one mechanism; ``DATABASE_URL`` wins when both are set::
 
        docker run -d --name bursar-pg-test -e POSTGRES_PASSWORD=bursar \
-           -e POSTGRES_DB=bursar -p 55432:5432 postgres:16
+           -e POSTGRES_DB=bursar -p 55432:5432 \
+           ghcr.io/dbsystel/postgresql-partman:16-5
        BURSAR_TEST_PG_URL=postgresql://postgres:bursar@localhost:55432/bursar uv run pytest
 
-3. **testcontainers** — a disposable ``postgres:16`` container, started once
-   per test session (requires only a reachable Docker daemon; no manual setup,
-   no ``ephemeralpg``/``pg_tmp`` install). This is the default local path: a
-   bare ``pytest`` run with Docker available exercises the real SQL RPCs
-   instead of silently skipping them, so a green run without a DB is no longer
-   possible when Docker is present.
+3. **testcontainers** — a disposable Postgres 16 + pg_partman 5 container,
+   started once per test session (requires only a reachable Docker daemon; no
+   manual setup, no ``ephemeralpg``/``pg_tmp`` install). This is the default
+   local path: a bare ``pytest`` run with Docker available exercises the real
+   SQL RPCs instead of silently skipping them, so a green run without a DB is
+   no longer possible when Docker is present.
 
 Only if Docker itself is unreachable do the Postgres/Supabase-setup tests
 **skip** with a visible reason.
 
 For every source the fixture bootstraps the Supabase ``auth`` schema stubs +
-standard roles so bursar's bundled SQL migrations apply cleanly on a bare
-``postgres:16`` (migrations themselves are applied by ``run_migrations()`` in the
-per-store fixtures). Every test gets a clean slate: bursar's tables are
+standard roles so bursar's bundled SQL migrations apply cleanly (migrations
+themselves are applied by ``run_migrations()`` in the per-store fixtures).
+Every test gets a clean slate: bursar's tables are
 TRUNCATEd before each test so cross-test state never bleeds, whether the
 underlying Postgres is a persistent DB or the session-scoped container.
 """
@@ -51,6 +53,7 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 
 TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
+DEFAULT_POSTGRES_IMAGE = "ghcr.io/dbsystel/postgresql-partman:16-5"
 
 
 def _pg2_conn(dsn: str) -> Generator[Any, None, None]:
@@ -307,7 +310,7 @@ _container_dsn: str | object | None = None
 
 
 def _testcontainers_dsn() -> str | None:
-    """Return a DSN for a session-scoped ``postgres:16`` testcontainer.
+    """Return a DSN for a Postgres 16 + pg_partman 5 testcontainer.
 
     Returns ``None`` if Docker itself is unavailable (e.g. no daemon
     reachable) so the caller can skip with a clear reason instead of erroring.
@@ -324,12 +327,13 @@ def _testcontainers_dsn() -> str | None:
         _container_dsn = _UNAVAILABLE
         return None
 
+    image = os.environ.get("BURSAR_TEST_PG_IMAGE", DEFAULT_POSTGRES_IMAGE)
     try:
-        container = PostgresContainer("postgres:16", driver=None)
+        container = PostgresContainer(image, driver=None)
         container.start()
     except Exception as exc:  # Docker daemon unreachable, image pull failed, etc.
         warnings.warn(
-            f"testcontainers could not start postgres:16 ({exc}); "
+            f"testcontainers could not start {image} ({exc}); "
             "DB integration tests will skip. Set DATABASE_URL to point at an "
             "already-running Postgres instead.",
             stacklevel=2,
@@ -349,7 +353,7 @@ def pg_database_url() -> Iterator[str]:
     """Yield a connection URL to a real Postgres, or skip if none is available.
 
     Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` →
-    testcontainers-managed ``postgres:16`` → skip.
+    testcontainers-managed Postgres 16 + pg_partman 5 → skip.
     """
     # 1 & 2: a persistent, already-running Postgres (DATABASE_URL or legacy override).
     persistent = _resolve_persistent_dsn()
@@ -362,9 +366,9 @@ def pg_database_url() -> Iterator[str]:
         dsn = _testcontainers_dsn()
         if dsn is None:
             pytest.skip(
-                "No real Postgres available: set DATABASE_URL (e.g. postgres:16 "
-                "on localhost:5432, as CI and the JS suite use) or "
-                "BURSAR_TEST_PG_URL, or make Docker available for testcontainers."
+                "No real Postgres available: set DATABASE_URL or "
+                "BURSAR_TEST_PG_URL to a pg_partman 5-enabled database, or "
+                "make Docker available for testcontainers."
             )
 
     # Installation is a migration-runner responsibility, never a store method.
