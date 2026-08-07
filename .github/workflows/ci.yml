@@ -58,7 +58,7 @@ jobs:
     # python/src/bursar/sql/*.sql themselves. pg_partman 5 must be available.
     services:
       postgres:
-        image: ghcr.io/dbsystel/postgresql-partman:16-5
+        image: ghcr.io/dbsystel/postgresql-partman:17-5
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -117,7 +117,7 @@ jobs:
     # 9fa7d72) — that's what eliminated the exhaustion, not raising the ceiling.
     services:
       postgres:
-        image: ghcr.io/dbsystel/postgresql-partman:16-5
+        image: ghcr.io/dbsystel/postgresql-partman:17-5
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -155,7 +155,7 @@ jobs:
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
-          postgres_container=$(docker ps --filter 'ancestor=ghcr.io/dbsystel/postgresql-partman:16-5' --format '{{.ID}}' | head -1)
+          postgres_container=$(docker ps --filter 'ancestor=ghcr.io/dbsystel/postgresql-partman:17-5' --format '{{.ID}}' | head -1)
           docker exec "$postgres_container" psql -U postgres -d bursar -c "ALTER SYSTEM SET max_connections = 500"
           docker restart "$postgres_container"
           for attempt in $(seq 1 30); do
