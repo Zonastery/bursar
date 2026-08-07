@@ -1,64 +1,215 @@
 #!/usr/bin/env python3
-"""Convert Jupyter notebooks to Docusaurus MDX files with frontmatter."""
+"""Render validated Bursar notebooks as Docusaurus tutorial pages."""
+
+from __future__ import annotations
+
+import json
 import re
-import subprocess
 import sys
 from pathlib import Path
+from typing import Any
+
+import nbformat
+from nbconvert import MarkdownExporter
 
 REPO_DIR = Path(__file__).resolve().parents[2]
-NB_DIR = REPO_DIR / "samples" / "python" / "notebooks"
-OUT_DIR = REPO_DIR / "docs" / "docs" / "notebooks"
+NOTEBOOK_DIR = REPO_DIR / "samples" / "python" / "notebooks"
+OUTPUT_DIR = REPO_DIR / "docs" / "docs" / "notebooks"
 
-_ACRONYMS = {"CLI", "API"}
-_LOWER_WORDS = {"and", "of", "to"}
+REPOSITORY_URL = "https://github.com/zonastery/bursar"
+NOTEBOOK_PATTERN = re.compile(r"^(?P<position>\d{2})_(?P<slug>[a-z0-9_]+)$")
+
+SECTIONS = {
+    "foundations": {
+        "label": "Foundations",
+        "position": 1,
+        "title": "Build a Bursar foundation",
+        "description": "Configure pricing, evaluate usage, and understand the expression language before persisting account state.",
+    },
+    "credits-and-controls": {
+        "label": "Credits and Controls",
+        "position": 2,
+        "title": "Operate credits and account controls",
+        "description": "Work with balances, allowances, quotas, expiry, leases, teams, analytics, and lifecycle events.",
+    },
+    "billing-and-operations": {
+        "label": "Billing and Operations",
+        "position": 3,
+        "title": "Connect billing and operate Bursar",
+        "description": "Integrate subscriptions, deploy configuration, evaluate custom stores, and inspect the full schema.",
+    },
+}
 
 
-def notebook_title(name: str) -> str:
-    """Title-case a notebook stem: capitalize each word, lowercase
-    ``and``/``of``/``to`` mid-title, and keep known acronyms uppercase
-    (``00_why_bursar_and_setup`` → ``Why Bursar and Setup``,
-    ``13_cli_and_deployment`` → ``CLI and Deployment``)."""
-    words = re.sub(r"^0?\d+_", "", name).replace("_", " ").split()
-    out = []
-    for i, word in enumerate(words):
-        if word.upper() in _ACRONYMS:
-            out.append(word.upper())
-        elif i > 0 and word.lower() in _LOWER_WORDS:
-            out.append(word.lower())
-        else:
-            out.append(word.capitalize())
-    return " ".join(out)
+class NotebookError(ValueError):
+    """Report a notebook that cannot be published as documentation."""
+
+
+def _metadata(notebook: nbformat.NotebookNode, path: Path) -> dict[str, Any]:
+    metadata = notebook.metadata.get("bursar_docs")
+    if not isinstance(metadata, dict):
+        raise NotebookError(f"{path.name}: metadata.bursar_docs is required")
+
+    required = ("title", "sidebar_label", "description", "section")
+    missing = [key for key in required if not metadata.get(key)]
+    if missing:
+        raise NotebookError(
+            f"{path.name}: missing bursar_docs fields: {', '.join(missing)}"
+        )
+    if metadata["section"] not in SECTIONS:
+        choices = ", ".join(SECTIONS)
+        raise NotebookError(
+            f"{path.name}: unknown section {metadata['section']!r}; use {choices}"
+        )
+    return metadata
+
+
+def _validate_notebook(
+    notebook: nbformat.NotebookNode, path: Path, metadata: dict[str, Any]
+) -> None:
+    nbformat.validate(notebook)
+
+    if not notebook.cells or notebook.cells[0].cell_type != "markdown":
+        raise NotebookError(f"{path.name}: first cell must be Markdown")
+
+    markdown = "\n".join(
+        str(cell.source) for cell in notebook.cells if cell.cell_type == "markdown"
+    )
+    expected_title = f"# {metadata['title']}"
+    if not str(notebook.cells[0].source).startswith(expected_title):
+        raise NotebookError(f"{path.name}: first heading must be {expected_title!r}")
+    for heading in ("## Learning objectives", "## Prerequisites"):
+        if heading not in markdown:
+            raise NotebookError(f"{path.name}: missing {heading!r}")
+
+    dirty_cells = [
+        index
+        for index, cell in enumerate(notebook.cells, start=1)
+        if cell.cell_type == "code"
+        and (cell.get("execution_count") is not None or cell.get("outputs"))
+    ]
+    if dirty_cells:
+        positions = ", ".join(map(str, dirty_cells))
+        raise NotebookError(
+            f"{path.name}: clear outputs and execution counts in cells {positions}"
+        )
+
+
+def _frontmatter(
+    *, metadata: dict[str, Any], slug: str, position: int, source_name: str
+) -> str:
+    fields = [
+        "---",
+        f"title: {json.dumps(metadata['title'])}",
+        f"sidebar_label: {json.dumps(metadata['sidebar_label'])}",
+        f"sidebar_position: {position + 1}",
+        f"description: {json.dumps(metadata['description'])}",
+        f"slug: /notebooks/{slug}",
+        "keywords:",
+        "  - Bursar tutorial",
+        "  - Jupyter notebook",
+    ]
+    for keyword in metadata.get("keywords", []):
+        fields.append(f"  - {keyword}")
+    fields.extend(
+        [
+            "custom_edit_url: "
+            f"{REPOSITORY_URL}/edit/main/samples/python/notebooks/{source_name}",
+            "---",
+        ]
+    )
+    return "\n".join(fields)
+
+
+def _source_notice(source_name: str) -> str:
+    source_url = f"{REPOSITORY_URL}/blob/main/samples/python/notebooks/{source_name}"
+    colab_url = (
+        "https://colab.research.google.com/github/zonastery/bursar/blob/main/"
+        f"samples/python/notebooks/{source_name}"
+    )
+    return (
+        "<!-- Generated by scripts/gen-notebook-docs.py; edit the source notebook. -->\n\n"
+        ":::info Executable tutorial\n\n"
+        f"This page is generated from a tested Jupyter notebook. "
+        f"[Open it in Google Colab]({colab_url}) or "
+        f"[view the source notebook]({source_url}).\n\n"
+        ":::\n"
+    )
+
+
+def _write_categories() -> None:
+    for section, values in SECTIONS.items():
+        section_dir = OUTPUT_DIR / section
+        section_dir.mkdir(parents=True, exist_ok=True)
+        category = {
+            "label": values["label"],
+            "position": values["position"],
+            "link": {
+                "type": "generated-index",
+                "title": values["title"],
+                "description": values["description"],
+            },
+        }
+        (section_dir / "_category_.json").write_text(
+            json.dumps(category, indent=2) + "\n", encoding="utf-8"
+        )
+
+
+def _clean_generated_files() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    for path in OUTPUT_DIR.rglob("*"):
+        if path.is_file() and (path.suffix == ".mdx" or path.name == "_category_.json"):
+            path.unlink()
+    for path in sorted(OUTPUT_DIR.iterdir()):
+        if path.is_dir() and path.name not in SECTIONS and not any(path.iterdir()):
+            path.rmdir()
 
 
 def main() -> int:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    _clean_generated_files()
+    _write_categories()
 
-    notebooks = sorted(NB_DIR.glob("[0-9]*.ipynb"))
-    current_stems = {nb.stem for nb in notebooks}
+    exporter = MarkdownExporter()
+    notebooks = sorted(NOTEBOOK_DIR.glob("[0-9][0-9]_*.ipynb"))
+    if not notebooks:
+        raise NotebookError(f"No tutorial notebooks found in {NOTEBOOK_DIR}")
 
-    # Delete stale generated pages so removed notebooks don't leave orphans.
-    for stale in OUT_DIR.glob("*.mdx"):
-        if stale.stem not in current_stems:
-            stale.unlink()
-            print(f"  removed {stale.name} (no matching notebook)")
+    for path in notebooks:
+        match = NOTEBOOK_PATTERN.fullmatch(path.stem)
+        if match is None:
+            raise NotebookError(f"{path.name}: expected NN_snake_case.ipynb")
 
-    for nb in notebooks:
-        name = nb.stem
-        title = notebook_title(name)
-        pos = int(name.split("_")[0]) + 1
+        notebook = nbformat.read(path, as_version=4)
+        metadata = _metadata(notebook, path)
+        _validate_notebook(notebook, path, metadata)
 
-        md = subprocess.run(
-            [sys.executable, "-m", "jupyter", "nbconvert", "--to", "markdown", str(nb), "--stdout"],
-            capture_output=True, text=True, check=True,
-        ).stdout
+        body, _resources = exporter.from_notebook_node(notebook)
+        slug = match.group("slug")
+        position = int(match.group("position"))
+        output = OUTPUT_DIR / metadata["section"] / f"{slug}.mdx"
+        output.write_text(
+            _frontmatter(
+                metadata=metadata,
+                slug=slug,
+                position=position,
+                source_name=path.name,
+            )
+            + "\n\n"
+            + _source_notice(path.name)
+            + "\n"
+            + body.strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"  {path.name} -> {output.relative_to(REPO_DIR)}")
 
-        out = OUT_DIR / f"{name}.mdx"
-        out.write_text(f"---\ntitle: {title}\nsidebar_position: {pos}\n---\n\n{md}")
-        print(f"  {name} → notebooks/{name}.mdx")
-
-    print(f"--- Done: {len(notebooks)} notebooks converted ---")
+    print(f"Generated {len(notebooks)} validated notebook tutorials")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except NotebookError as error:
+        print(f"gen-notebook-docs: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

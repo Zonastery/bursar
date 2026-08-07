@@ -28,7 +28,7 @@ import type {
   GrantProgramAwardResult,
   LedgerEntry,
   LedgerPage,
-  LeaseResult,
+  LeaseSuccess,
   ListLedgerEntriesOptions,
   ListQuotaEventsOptions,
   ListUsageChargesOptions,
@@ -37,7 +37,7 @@ import type {
   PlanMigrationStartResult,
   QuotaEvent,
   QuotaState,
-  RefundResult,
+  RefundSuccess,
   ReleaseResult,
   SpendByModelRow,
   SpendByUserRow,
@@ -606,7 +606,7 @@ export class CreditsService {
     userId: string,
     metricsOrAmount: MetricsOrAmount,
     options?: ReserveOptions,
-  ): Promise<LeaseResult> {
+  ): Promise<LeaseSuccess> {
     return this.leases.reserve(userId, metricsOrAmount, options);
   }
 
@@ -623,7 +623,7 @@ export class CreditsService {
     return this.leases.release(userId, leaseId);
   }
 
-  async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseResult> {
+  async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseSuccess> {
     return this.leases.renew(userId, leaseId, ttl);
   }
 
@@ -792,7 +792,7 @@ export class CreditsService {
       dimensions: { ...(metrics.dimensions ?? {}) },
       metadata: meta as CreditMetadata,
     });
-    if (result.error) {
+    if (result.error !== null) {
       throw new StoreError(`Usage record failed: ${result.error}`);
     }
     return result;
@@ -815,7 +815,7 @@ export class CreditsService {
     return this.deduct(userId, { operation: jobName, measures: { jobs: 1 } }, options);
   }
 
-  async refundCredits(entryId: string, options?: RefundCreditsOptions): Promise<RefundResult> {
+  async refundCredits(entryId: string, options?: RefundCreditsOptions): Promise<RefundSuccess> {
     const refundAmount =
       options?.amount != null ? positiveAmount(options.amount, "refundCredits") : undefined;
     this.logger.info("[CreditsService] refundCredits", {
@@ -836,11 +836,13 @@ export class CreditsService {
         entryId,
         error: result.error,
       });
-      this.emit("credits.refund_failed", result.userId, {
-        entryId,
-        error: result.error,
-        reason: options?.reason ?? null,
-      });
+      if (result.userId !== null) {
+        this.emit("credits.refund_failed", result.userId, {
+          entryId,
+          error: result.error,
+          reason: options?.reason ?? null,
+        });
+      }
       throw new RefundError(`Refund rejected: ${result.error}`);
     }
 

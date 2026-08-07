@@ -463,6 +463,7 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
             ),
         ),
     )
+    assert deduction.entry_id is not None
     refund = service.refund_credits(
         deduction.entry_id,
         reason="integration_test",

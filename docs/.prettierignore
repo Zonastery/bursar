@@ -1,0 +1,8 @@
+.docusaurus/
+build/
+docs/javascript-api/reference/
+docs/notebooks/
+docs/python-api/reference/
+docs/concepts/database-schema.md
+package-lock.json
+pricing-config.schema.json

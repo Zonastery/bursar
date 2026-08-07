@@ -3,10 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "prebuild": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh && python3 scripts/gen-llms-files.py",
+    "generate": "npm run generate:api && npm run generate:notebooks && npm run generate:erd",
+    "generate:api": "bash scripts/gen-api-docs.sh",
+    "generate:notebooks": "python3 scripts/gen-notebook-docs.py",
     "generate:erd": "bash scripts/generate_erd_docs.sh",
-    "generate:llms": "python3 scripts/gen-llms-files.py",
-    "prestart": "bash scripts/gen-api-docs.sh && python3 scripts/gen-notebook-docs.py && bash scripts/generate_erd_docs.sh && python3 scripts/gen-llms-files.py",
+    "prebuild": "npm run generate",
+    "prestart": "npm run generate",
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
     "build": "docusaurus build",
@@ -16,7 +18,10 @@
     "serve": "docusaurus serve",
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "format": "prettier --write \"**/*.{css,json,md,mdx,ts,tsx,yaml,yml}\"",
+    "format:check": "prettier --check \"**/*.{css,json,md,mdx,ts,tsx,yaml,yml}\"",
+    "check": "npm run format:check && npm run typecheck && npm run build"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.1",

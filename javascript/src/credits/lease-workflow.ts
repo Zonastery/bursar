@@ -26,7 +26,7 @@ import type {
   CreditMetadata,
   DeductionResult,
   DeductionSuccess,
-  LeaseResult,
+  LeaseSuccess,
   ReleaseResult,
 } from "./types/index.js";
 
@@ -110,7 +110,7 @@ export class CreditLeaseWorkflow {
     userId: string,
     metricsOrAmount: MetricsOrAmount,
     options?: ReserveOptions,
-  ): Promise<LeaseResult> {
+  ): Promise<LeaseSuccess> {
     await this.maybeLazyExpire(userId);
     this.logger.debug("[CreditsService] reserve", {
       feature: options?.feature,
@@ -147,7 +147,7 @@ export class CreditLeaseWorkflow {
       dimensions,
     });
 
-    if (result.error) {
+    if (result.error !== null) {
       if (result.error === "quota_exceeded") {
         await this.emitQuotaEvents(userId, leaseIdempotencyKey);
       }
@@ -283,11 +283,11 @@ export class CreditLeaseWorkflow {
   }
 
   /** Extend an active lease's expiry without changing its captured policy. */
-  async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseResult> {
+  async renew(userId: string, leaseId: string, ttl?: number | null): Promise<LeaseSuccess> {
     const ttlSeconds = ttl ?? this.defaultTtl;
     this.logger.debug("[CreditsService] renew", { leaseId, ttlSeconds });
     const result = await this.store.renewLease(userId, leaseId, ttlSeconds);
-    if (result.error) {
+    if (result.error !== null) {
       if (result.error === "expired_lease") {
         this.emit("credits.lease_expired", userId, { leaseId });
       }
