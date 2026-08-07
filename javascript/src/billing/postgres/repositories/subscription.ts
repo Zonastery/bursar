@@ -3,52 +3,73 @@ import type { BillingSubscriptionState } from "../../types/subscriptions.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
 import { StoreError } from "../../../errors.js";
 import {
+  optionalRecordRow,
   pgBoolean,
   postgresUuid,
   requireResultField,
   safeParse,
 } from "../../../shared/postgres-validation.js";
 
+const timestamp = z
+  .union([
+    z.date().refine((value) => !Number.isNaN(value.getTime())),
+    z.string().datetime({ offset: true }),
+  ])
+  .transform((value) => (value instanceof Date ? value : new Date(value)).toISOString());
+const SubscriptionStatusSchema = z.enum([
+  "incomplete",
+  "incomplete_expired",
+  "trialing",
+  "active",
+  "past_due",
+  "canceled",
+  "unpaid",
+  "paused",
+  "expired",
+]);
+
 const SubscriptionRowSchema = z
   .object({
-    user_id: z.string().optional(),
-    subject_id: z.string().optional(),
-    provider: z.string(),
-    provider_subscription_id: z.string(),
-    provider_customer_id: z.string().nullable().optional(),
-    offer_id: z.string().nullable().optional(),
-    status: z.string().optional(),
-    current_period_start: z.unknown().optional(),
-    current_period_end: z.unknown().optional(),
-    trial_end: z.unknown().optional(),
-    cancel_at: z.unknown().optional(),
-    ended_at: z.unknown().optional(),
-    grace_ends_at: z.unknown().optional(),
-    grace_expired_at: z.unknown().optional(),
-    provider_updated_at: z.unknown().optional(),
-    cancel_at_period_end: pgBoolean.nullable().optional(),
-    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+    id: postgresUuid,
+    user_id: postgresUuid,
+    provider: z.string().min(1),
+    provider_subscription_id: z.string().min(1),
+    provider_customer_id: z.string().min(1).nullable(),
+    offer_id: postgresUuid,
+    offer_key: z.string().min(1),
+    plan_id: postgresUuid,
+    plan: z.string().min(1),
+    status: SubscriptionStatusSchema,
+    current_period_start: timestamp.nullable(),
+    current_period_end: timestamp.nullable(),
+    trial_end: timestamp.nullable(),
+    cancel_at: timestamp.nullable(),
+    ended_at: timestamp.nullable(),
+    grace_ends_at: timestamp.nullable(),
+    grace_expired_at: timestamp.nullable(),
+    provider_updated_at: timestamp,
+    cancel_at_period_end: pgBoolean,
+    interval: z.enum(["day", "week", "month", "year"]),
+    interval_count: z.number().int().positive(),
+    metadata: z.record(z.string(), z.unknown()),
   })
   .passthrough();
 
-function timestampValue(value: unknown): number | null {
-  if (value instanceof Date) {
-    const timestamp = value.getTime();
-    return Number.isNaN(timestamp) ? null : timestamp;
-  }
-  const timestamp = Date.parse(String(value ?? ""));
-  return Number.isNaN(timestamp) ? null : timestamp;
+function providerTimestampValue(row: Record<string, unknown>): number {
+  return Date.parse(
+    safeParse(
+      timestamp,
+      row.provider_updated_at,
+      "BillingSubscriptionRepository.providerUpdatedAt",
+    ),
+  );
 }
 
 function compareProviderTimestampsDescending(
   left: Record<string, unknown>,
   right: Record<string, unknown>,
 ): number {
-  const leftTimestamp = timestampValue(left.provider_updated_at);
-  const rightTimestamp = timestampValue(right.provider_updated_at);
-  if (leftTimestamp === null) return rightTimestamp === null ? 0 : 1;
-  if (rightTimestamp === null) return -1;
-  return rightTimestamp - leftTimestamp;
+  return providerTimestampValue(right) - providerTimestampValue(left);
 }
 export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 
@@ -72,7 +93,8 @@ export class BillingSubscriptionRepository {
       `SELECT * FROM bursar.get_billing_subscription_by_provider($1, $2)`,
       [provider, providerSubscriptionId],
     );
-    const existingRow = existing[0] as Record<string, unknown> | undefined;
+    const existingRow =
+      optionalRecordRow(existing, "BillingSubscriptionRepository.upsert.existing") ?? undefined;
     if (!userId && existingRow?.subject_id != null) userId = String(existingRow.subject_id);
     if (providerCustomerId == null && existingRow?.provider_customer_id != null) {
       providerCustomerId = String(existingRow.provider_customer_id);
@@ -84,7 +106,8 @@ export class BillingSubscriptionRepository {
       const offerRows = await this.query(`SELECT * FROM bursar.resolve_active_catalog_offer($1)`, [
         offerKey,
       ]);
-      const offerRow = offerRows[0] as Record<string, unknown> | undefined;
+      const offerRow =
+        optionalRecordRow(offerRows, "BillingSubscriptionRepository.upsert.offer") ?? undefined;
       if (offerRow?.id != null) offerId = String(offerRow.id);
     }
 
@@ -93,6 +116,11 @@ export class BillingSubscriptionRepository {
         "subscription.upsert: subject, provider, subscription, and offer are required",
       );
     }
+    const providerUpdatedAt = safeParse(
+      timestamp,
+      state.providerUpdatedAt,
+      "BillingSubscriptionRepository.upsert.providerUpdatedAt",
+    );
 
     const rows = await this.query(
       "SELECT bursar.upsert_billing_subscription($1::uuid,$2,$3,$4,$5::uuid,$6::bursar.billing_subscription_status,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15) AS id",
@@ -102,24 +130,23 @@ export class BillingSubscriptionRepository {
         providerSubscriptionId,
         providerCustomerId,
         offerId,
-        state.status ?? "incomplete",
+        state.status,
         state.currentPeriodStart ?? null,
         state.currentPeriodEnd ?? null,
-        state.cancelAtPeriodEnd ?? false,
+        state.cancelAtPeriodEnd,
         JSON.stringify(state.metadata ?? {}),
         state.trialEnd ?? null,
         state.cancelAt ?? null,
         state.endedAt ?? null,
-        state.providerUpdatedAt ?? new Date().toISOString(),
+        providerUpdatedAt,
         state.graceEndsAt ?? null,
       ],
     );
     requireResultField(rows, "id", postgresUuid, "BillingSubscriptionRepository.upsert");
   }
 
-  private map(row: unknown): SubscriptionRow | null {
+  private map(row: unknown): SubscriptionRow {
     const r = row as Record<string, unknown>;
-    if (r.subject_id == null && r.provider == null) return null;
     return safeParse(
       SubscriptionRowSchema,
       { ...r, user_id: r.subject_id },
@@ -129,12 +156,15 @@ export class BillingSubscriptionRepository {
 
   private async withOfferContext(row: unknown): Promise<Record<string, unknown>> {
     const value = row as Record<string, unknown>;
-    if (value.offer_id == null || value.catalog_revision_id == null) return value;
+    if (value.offer_id == null || value.catalog_revision_id == null) {
+      throw new StoreError("Billing subscription is missing its catalog reference");
+    }
     const contextRows = await this.query(
       `SELECT * FROM bursar.get_catalog_offer_context($1::uuid, $2::uuid)`,
       [value.offer_id, value.catalog_revision_id],
     );
-    const context = contextRows[0] as Record<string, unknown> | undefined;
+    const context =
+      optionalRecordRow(contextRows, "BillingSubscriptionRepository.withOfferContext") ?? undefined;
     if (context?.offer_key == null) {
       throw new StoreError("Billing subscription offer context is missing", {
         details: {
@@ -157,7 +187,8 @@ export class BillingSubscriptionRepository {
       `SELECT * FROM bursar.get_billing_subscription_by_provider($1, $2)`,
       [provider, providerSubscriptionId],
     );
-    return rows[0] ? this.map(await this.withOfferContext(rows[0])) : null;
+    const row = optionalRecordRow(rows, "BillingSubscriptionRepository.get");
+    return row === null ? null : this.map(await this.withOfferContext(row));
   }
   async getUserSubscription(userId: string, statuses?: string[]): Promise<SubscriptionRow | null> {
     const rows = await this.query(`SELECT * FROM bursar.list_billing_subscriptions($1::uuid)`, [
@@ -174,9 +205,7 @@ export class BillingSubscriptionRepository {
       userId,
     ]);
     const enriched = await Promise.all(rows.map((row) => this.withOfferContext(row)));
-    return enriched
-      .map((row) => this.map(row))
-      .filter((row): row is SubscriptionRow => row !== null);
+    return enriched.map((row) => this.map(row));
   }
 
   async listExpiredGraceSubscriptions(now: string, limit = 100): Promise<SubscriptionRow[]> {
@@ -185,9 +214,7 @@ export class BillingSubscriptionRepository {
       limit,
     ]);
     const enriched = await Promise.all(rows.map((row) => this.withOfferContext(row)));
-    return enriched
-      .map((row) => this.map(row))
-      .filter((row): row is SubscriptionRow => row !== null);
+    return enriched.map((row) => this.map(row));
   }
 
   async markGraceExpired(

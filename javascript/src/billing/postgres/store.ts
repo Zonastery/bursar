@@ -13,7 +13,6 @@ import type {
   BillingSubscriptionChangeInput,
   BillingSubscriptionOfferContext,
   BillingSubscriptionState,
-  BillingSubscriptionStatus,
   CheckoutIntent,
   BillingTopupResult,
 } from "../types/index.js";
@@ -52,7 +51,10 @@ import {
 import { BillingOfferRepository, type BillingOfferRow } from "./repositories/offer.js";
 import { BillingTopupRepository, type BillingTopupRow } from "./repositories/topup.js";
 import { BillingCustomerRepository } from "./repositories/customer.js";
-import { BillingSubscriptionRepository } from "./repositories/subscription.js";
+import {
+  BillingSubscriptionRepository,
+  type SubscriptionRow,
+} from "./repositories/subscription.js";
 import { BillingEventRepository } from "./repositories/event.js";
 import { BillingPaymentRepository } from "./repositories/payment.js";
 import { BillingRefundRepository } from "./repositories/refund.js";
@@ -820,32 +822,30 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  private rowToSubscriptionState(r: Record<string, unknown>): BillingSubscriptionState {
+  private rowToSubscriptionState(r: SubscriptionRow): BillingSubscriptionState {
     return {
-      subscriptionId: r.id ? String(r.id) : null,
-      userId: String(r.user_id),
-      provider: String(r.provider),
-      providerSubscriptionId: String(r.provider_subscription_id),
-      providerCustomerId: r.provider_customer_id ? String(r.provider_customer_id) : null,
-      offerId: r.offer_id ? String(r.offer_id) : null,
-      offerKey: r.offer_key ? String(r.offer_key) : null,
-      plan: r.plan ? String(r.plan) : null,
-      status: (r.status ? String(r.status) : "incomplete") as BillingSubscriptionStatus,
-      currentPeriodStart: toIso(r.current_period_start),
-      currentPeriodEnd: toIso(r.current_period_end),
-      trialEnd: toIso(r.trial_end),
-      cancelAt: toIso(r.cancel_at),
-      endedAt: toIso(r.ended_at),
-      graceEndsAt: toIso(r.grace_ends_at),
-      graceExpiredAt: toIso(r.grace_expired_at),
-      providerUpdatedAt: toIso(r.provider_updated_at),
-      cancelAtPeriodEnd: Boolean(r.cancel_at_period_end),
-      interval: r.interval ? String(r.interval) : null,
-      intervalCount: r.interval_count ? Number(r.interval_count) : null,
-      metadata:
-        r.metadata && typeof r.metadata === "object"
-          ? (r.metadata as Record<string, unknown>)
-          : null,
+      subscriptionId: r.id,
+      userId: r.user_id,
+      provider: r.provider,
+      providerSubscriptionId: r.provider_subscription_id,
+      providerCustomerId: r.provider_customer_id,
+      offerId: r.offer_id,
+      offerKey: r.offer_key,
+      planId: r.plan_id,
+      plan: r.plan,
+      status: r.status,
+      currentPeriodStart: r.current_period_start,
+      currentPeriodEnd: r.current_period_end,
+      trialEnd: r.trial_end,
+      cancelAt: r.cancel_at,
+      endedAt: r.ended_at,
+      graceEndsAt: r.grace_ends_at,
+      graceExpiredAt: r.grace_expired_at,
+      providerUpdatedAt: r.provider_updated_at,
+      cancelAtPeriodEnd: r.cancel_at_period_end,
+      interval: r.interval,
+      intervalCount: r.interval_count,
+      metadata: r.metadata,
     };
   }
 

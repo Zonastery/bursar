@@ -59,15 +59,15 @@ CREATE FUNCTION bursar.upsert_billing_subscription(
     p_provider_customer_id text,
     p_offer_id uuid,
     p_status bursar.billing_subscription_status,
-    p_current_period_start timestamptz DEFAULT NULL,
-    p_current_period_end timestamptz DEFAULT NULL,
-    p_cancel_at_period_end boolean DEFAULT FALSE,
-    p_metadata jsonb DEFAULT '{}'::jsonb,
-    p_trial_end timestamptz DEFAULT NULL,
-    p_cancel_at timestamptz DEFAULT NULL,
-    p_ended_at timestamptz DEFAULT NULL,
-    p_provider_updated_at timestamptz DEFAULT now(),
-    p_grace_ends_at timestamptz DEFAULT NULL
+    p_current_period_start timestamptz,
+    p_current_period_end timestamptz,
+    p_cancel_at_period_end boolean,
+    p_metadata jsonb,
+    p_trial_end timestamptz,
+    p_cancel_at timestamptz,
+    p_ended_at timestamptz,
+    p_provider_updated_at timestamptz,
+    p_grace_ends_at timestamptz
 )
 RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$

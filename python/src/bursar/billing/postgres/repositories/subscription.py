@@ -11,8 +11,8 @@ from bursar.credits.postgres.repositories.schemas import SubscriptionRow
 from bursar.errors import StoreError
 
 
-def provider_timestamp_sort_key(row: dict[str, Any]) -> tuple[bool, float]:
-    """Rank valid provider timestamps above invalid values, with newer timestamps greater."""
+def provider_timestamp_sort_key(row: dict[str, Any]) -> float:
+    """Return the provider timestamp used for deterministic newest-first ordering."""
     value = row.get("provider_updated_at")
     try:
         if isinstance(value, datetime):
@@ -20,12 +20,12 @@ def provider_timestamp_sort_key(row: dict[str, Any]) -> tuple[bool, float]:
         elif isinstance(value, str):
             parsed = datetime.fromisoformat(value)
         else:
-            return False, float("-inf")
+            raise ValueError("provider_updated_at is required")
         if parsed.tzinfo is None:
-            return False, float("-inf")
-        return True, parsed.timestamp()
-    except (OverflowError, TypeError, ValueError):
-        return False, float("-inf")
+            raise ValueError("provider_updated_at must include a timezone")
+        return parsed.timestamp()
+    except (OverflowError, TypeError, ValueError) as error:
+        raise StoreError("billing subscription has an invalid provider_updated_at", cause=error) from error
 
 
 class BillingSubscriptionRepository:
