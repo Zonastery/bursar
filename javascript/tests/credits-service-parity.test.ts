@@ -53,9 +53,11 @@ describe("CreditsService mirror regressions", () => {
       userId: "user-1",
       amount: new Decimal(10),
       available: new Decimal(90),
+      reservedTotal: new Decimal(10),
       minimumBalance: new Decimal(0),
       billingMode: "strict",
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      error: null,
     });
     const settleLease = vi.fn().mockResolvedValue({
       entryId: "entry-1",

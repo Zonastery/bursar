@@ -1052,7 +1052,7 @@ class CreditsService:
             ),
         )
 
-        if result.error:
+        if result.error is not None:
             self._emit(
                 "credits.deduct_failed",
                 user_id,
@@ -1066,6 +1066,14 @@ class CreditsService:
             if result.error == "quota_exceeded":
                 self._emit_quota_events(user_id, lease_idempotency_key)
             self._raise_lease_error(result.error, user_id, amount)
+
+        if (
+            result.lease_id is None
+            or result.amount is None
+            or result.minimum_balance is None
+            or result.expires_at is None
+        ):
+            raise StoreError("successful lease result is missing committed fields")
 
         self._emit(
             "credits.reserved",
@@ -1371,6 +1379,8 @@ class CreditsService:
                 idempotency_key=f"{options.operation_key}:reserve",
             ),
         )
+        if lease.lease_id is None:
+            raise StoreError("successful lease result is missing lease_id")
         return BilledOperation(
             _service=self,
             user_id=user_id,
@@ -1596,7 +1606,7 @@ class CreditsService:
 
         # 4) Error path: emit a failure event and raise the typed exception.
         #    Never emit a success event here.
-        if result.error:
+        if result.error is not None:
             if result.error == "quota_exceeded":
                 self._emit_quota_events(user_id, effective_idempotency_key)
             self._raise_deduct_error(result.error, user_id, cost, metrics, feature)
@@ -1665,8 +1675,10 @@ class CreditsService:
             dimensions=dict(metrics.dimensions),
             metadata=tx_meta,
         )
-        if result.error:
+        if result.error is not None:
             raise StoreError(f"Usage record failed: {result.error}")
+        if result.usage_id is None:
+            raise StoreError("successful usage record is missing usage_id")
         return result
 
     def deduct_flat_job(
@@ -1725,17 +1737,26 @@ class CreditsService:
 
         # Check the error before emitting: a failed, duplicate, or over-refund
         # must never fire a success event.
-        if result.error:
-            self._emit(
-                "credits.refund_failed",
-                result.user_id,
-                {
-                    "entry_id": entry_id,
-                    "error": result.error,
-                    "reason": reason,
-                },
-            )
+        if result.error is not None:
+            if result.user_id is not None:
+                self._emit(
+                    "credits.refund_failed",
+                    result.user_id,
+                    {
+                        "entry_id": entry_id,
+                        "error": result.error,
+                        "reason": reason,
+                    },
+                )
             raise RefundError(f"Refund rejected: {result.error}")
+
+        if (
+            result.user_id is None
+            or result.refund_entry_id is None
+            or result.amount is None
+            or result.new_balance is None
+        ):
+            raise StoreError("successful refund result is missing committed fields")
 
         self._emit(
             "credits.refunded",
