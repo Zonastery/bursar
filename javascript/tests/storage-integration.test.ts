@@ -3,17 +3,13 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from "vitest";
+import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresClient } from "../src/shared/postgres-client.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
 import { PostgresStorageRepository } from "../src/storage/postgres-repository.js";
 import type { BillingEventPayloadExport, UsageChargeExport } from "../src/storage/ports.js";
-import {
-  BOOTSTRAP_SQL,
-  TEST_TENANT_ID,
-  applyMigrations,
-  truncateBursarTables,
-} from "./helpers/bootstrap.js";
+import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
@@ -87,17 +83,19 @@ async function seedStorageRows(pool: pg.Pool): Promise<{
   }
 }
 
-describe.runIf(DATABASE_URL)("PostgresStorageRepository integration (real Postgres 16)", () => {
+describe.runIf(DATABASE_URL)("PostgresStorageRepository integration", () => {
   let pool: pg.Pool;
   let postgres: PostgresClient;
   let repository: PostgresStorageRepository;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
     await truncateBursarTables(pool);
-    postgres = new PostgresClient(pool, { tenantId: TEST_TENANT_ID });
+    postgres = new PostgresClient(pool, {
+      tenantId: TEST_TENANT_ID,
+      accessRole: "bursar_operator",
+    });
     repository = new PostgresStorageRepository(postgres.query, TEST_TENANT_ID);
   }, 60000);
 
@@ -149,7 +147,6 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration (real Postgr
         billingEventId,
         "billing/stripe/evt-storage-repo-1.json",
         "version-1",
-        true,
       ),
     ).resolves.toBe(true);
     await expect(repository.getBillingEventPayload(billingEventId)).resolves.toMatchObject({
@@ -190,10 +187,15 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration (real Postgr
       spendByModel: async () => [],
       topUsers: async () => [],
       dailySpend: async () => [],
-      aggregateStats: async () => ({ totalSpend: "0", entryCount: 0 }),
+      aggregateStats: async () => ({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
     };
     const s3 = {
-      purgePostgresPayload: true,
       archive: async (event: BillingEventPayloadExport) => {
         archivedBillingEvents.push(event);
         return {
@@ -214,7 +216,7 @@ describe.runIf(DATABASE_URL)("PostgresStorageRepository integration (real Postgr
     });
     try {
       expect(runtime.health()).toMatchObject({ started: false, closed: false });
-      await runtime.start();
+      await runtime.start({ loadCatalog: false });
       expect(initialized).toBe(true);
       const result = await runtime.flush();
       expect(result).toEqual({ claimed: 2, delivered: 2, failed: 0 });

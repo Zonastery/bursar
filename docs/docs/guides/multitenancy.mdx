@@ -82,7 +82,7 @@ package top level; the optional runtime composition root lives in
   import { PostgresStore } from "@zonastery/bursar";
   import { createBursarRuntime } from "@zonastery/bursar/node";
 
-  const store = new PostgresStore(databaseUrl, tenantId);
+  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
 
   const runtime = await createBursarRuntime({
     postgres: databaseUrl,

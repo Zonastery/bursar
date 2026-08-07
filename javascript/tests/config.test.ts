@@ -140,9 +140,9 @@ describe("typed v1 config", () => {
 
   it("accepts and canonicalizes the typed catalog", () => {
     const parsed = loadConfigFromDict(baseConfig());
-    expect(parsed.plans.pro.creditAllowance?.amount.toString()).toBe("10");
-    expect(parsed.plans.pro.creditAllowance?.priority).toBe(15);
-    expect(parsed.plans.pro.evolution.defaultRollout).toBe("immediate");
+    expect(parsed.plans.pro!.creditAllowance?.amount.toString()).toBe("10");
+    expect(parsed.plans.pro!.creditAllowance?.priority).toBe(15);
+    expect(parsed.plans.pro!.evolution.defaultRollout).toBe("immediate");
     const canonical = canonicalBursarConfigDict(baseConfig());
     expect(
       ((canonical.credits as Record<string, unknown>).policies as Record<string, unknown>).invoice,
@@ -155,7 +155,7 @@ describe("typed v1 config", () => {
       evolution: { default_rollout: "new_assignments_only" },
     });
     const parsed = loadConfigFromDict(config);
-    expect(parsed.plans.pro.evolution.defaultRollout).toBe("new_assignments_only");
+    expect(parsed.plans.pro!.evolution.defaultRollout).toBe("new_assignments_only");
 
     const rollout = loadCatalogRollout({
       plans: { pro: { effective: "immediate", include_pinned: true } },
@@ -191,7 +191,7 @@ describe("typed v1 config", () => {
       scale: 6,
       rounding: "half_up",
     });
-    expect(parsed.plans.pro.rank).toBe(0);
+    expect(parsed.plans.pro!.rank).toBe(0);
   });
 
   it("projects public plans and prices without provider identifiers", () => {
@@ -233,7 +233,7 @@ describe("typed v1 config", () => {
 
   it("allows partial rate cards for unused operations", () => {
     const parsed = loadConfigFromDict(baseConfig());
-    expect(parsed.pricing?.rateCards.standard.operations.image).toBeUndefined();
+    expect(parsed.pricing?.rateCards.standard!.operations.image).toBeUndefined();
   });
 
   it("requires pricing for every operation enabled by a plan", () => {
@@ -298,11 +298,15 @@ describe("typed v1 config", () => {
     expect(() => loadConfigFromDict(priorityConflict)).toThrow(
       /credit_allowance.priority conflicts/,
     );
+
+    const missingPriority = baseConfig();
+    delete (missingPriority.plans.pro.credit_allowance as Partial<{ priority: number }>).priority;
+    expect(() => loadConfigFromDict(missingPriority)).toThrow(/priority/);
   });
 
   it("requires matcher operators to match their dimension type", () => {
     const config = baseConfig();
-    const when = config.pricing.rate_cards.standard.operations.completion.rules[0].when as Record<
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!.when as Record<
       string,
       unknown
     >;
@@ -316,14 +320,14 @@ describe("typed v1 config", () => {
   it("normalizes exact decimal strings for number-dimension matchers", () => {
     const config = baseConfig();
     config.pricing.operations.completion.dimensions.model.type = "number";
-    const when = config.pricing.rate_cards.standard.operations.completion.rules[0].when as Record<
+    const when = config.pricing.rate_cards.standard.operations.completion.rules[0]!.when as Record<
       string,
       unknown
     >;
     when.model = { op: "eq", value: "1.5" };
 
     const parsed = loadConfigFromDict(config);
-    const matcher = parsed.pricing?.rateCards.standard.operations.completion.rules[0].when.model;
+    const matcher = parsed.pricing?.rateCards.standard!.operations.completion!.rules[0]!.when.model;
 
     expect(matcher?.op).toBe("eq");
     if (matcher?.op === "eq") expect(matcher.value.toString()).toBe("1.5");

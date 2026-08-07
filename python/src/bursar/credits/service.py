@@ -3,11 +3,12 @@
 Orchestrates the credit lifecycle. The hot "calculate cost then charge now"
 path is a single atomic, idempotency-keyed store transaction
 (``deduct_with_allowance``) — allowance, entitlement, quota, and debit all
-commit (or roll back) together inside the store (contract §2, C1).
+commit or roll back together inside the store.
 
 Example::
 
-    from bursar import CreditsService, PostgresStore, UsageMetrics
+    from bursar import PostgresStore, UsageMetrics
+    from bursar.credits import CreditsService
 
     store = PostgresStore(database_url, tenant_id=tenant_id)
     manager = CreditsService(store=store)
@@ -15,8 +16,8 @@ Example::
     # One-time setup (creates tables + RPCs)
     # Apply database migrations with the CLI before constructing the service.
 
-    # Load pricing from store (bursar_config table)
-    manager.load_pricing_from_store()
+    # Load the active catalog revision.
+    manager.load_catalog_from_store()
 
     # Deduct credits for a usage event
     result = manager.deduct(
@@ -54,7 +55,6 @@ from bursar.credits.service_types import (
     CanAffordOptions,
     CreditsServiceOptions,
     GrantSubscriptionCycleOptions,
-    LowBalanceConfig,
     MetricsOrAmount,
     PostDeductionContext,
     PostDeductionSource,
@@ -79,8 +79,8 @@ from bursar.credits.types import (
     BalanceResult,
     BillingMode,
     BucketBalancesResult,
-    BursarConfigResult,
     CanAffordResult,
+    CatalogRevision,
     CheckFeatureResult,
     CreditMetadata,
     DailySpendRow,
@@ -107,14 +107,13 @@ from bursar.credits.types import (
     SweepResult,
     TeamDeductionResult,
     TopUserRow,
-    UsageAnalyticsStore,
     UsageChargeCursor,
     UsageChargePage,
-    UsageChargeStore,
     UsageRecordResult,
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
+    CatalogNotLoadedError,
     ConcurrencyLimitError,
     CreditError,
     FeatureNotEntitledError,
@@ -122,18 +121,17 @@ from bursar.errors import (
     LeaseExpiredError,
     LeaseNotFoundError,
     OperationNotAllowedError,
-    PricingNotLoadedError,
     QuotaExceededError,
 )
 from bursar.metrics import UsageMetrics
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
-#: Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
+#: Default lease TTL (seconds) for ``reserve`` and ``run_billed``.
 #: Long batch/agentic jobs call :meth:`CreditsService.renew` before this elapses.
 DEFAULT_LEASE_TTL_SECONDS = 600
 
-#: Built-in financial-safety presets (interface plan §2). ``strict_prepaid`` keeps
+#: Built-in financial-safety presets. ``strict_prepaid`` keeps
 #: the floor ``>= 0`` (structural zero debt); ``overdraft`` permits a negative floor
 #: and bills the full actual cost at settle.
 POLICY_PRESETS = frozenset({"strict_prepaid", "overdraft"})
@@ -188,52 +186,33 @@ class CreditsService:
     Args:
         store: A ``CreditStore`` adapter (e.g. ``PostgresStore``).
         engine: An optional pre-configured ``PricingEngine``. If omitted,
-            call ``load_pricing_from_store()`` or ``publish_pricing_from_dict()``
+            call ``load_catalog_from_store()`` or ``publish_and_activate_catalog()``
             before ``deduct()``.
         emitter: An optional ``CreditEventEmitter`` for lifecycle events.
-        low_balance: An optional :class:`LowBalanceConfig` configuring the
-            ``credits.low_balance`` signal (contract §6 / M18 / WS7). When
-            ``None`` (the default), no explicit thresholds are configured and
-            the threshold defaults to zero.
-
-        pricing_ttl: Milliseconds after which the cached ``PricingEngine`` is
-            considered stale and the next call to ``refresh_if_stale()`` will
-            reload it from the store. Set to ``0`` to disable auto-reload (the
-            consumer must call ``load_pricing_from_store()`` manually).
-            Default ``300000`` (5 minutes). Concurrent calls to
-            ``refresh_if_stale()`` are safe (the underlying store cache has its
-            own stampede protection).
+        options: Typed policy, catalog-cache, analytics, low-balance, and
+            post-deduction configuration. ``catalog_cache_ttl_ms`` is expressed in
+            milliseconds and defaults to five minutes.
     """
 
     def __init__(
         self,
         store: CreditStore,
+        *,
         engine: PricingEngine | None = None,
         emitter: CreditEventEmitter | None = None,
         options: CreditsServiceOptions | None = None,
-        *,
-        policy: str | None = None,
-        overdraft_floor: Decimal | None = None,
-        max_concurrent: int | None = None,
-        low_balance: LowBalanceConfig | None = None,
-        default_ttl_seconds: int | None = None,
-        pricing_ttl: int | None = None,
-        analytics: UsageAnalyticsStore | None = None,
-        usage_store: UsageChargeStore | None = None,
-        lazy_expiry: bool | None = None,
-        post_deduction: (Callable[[PostDeductionContext], None | Awaitable[None]] | None) = None,
     ) -> None:
         options = options or CreditsServiceOptions()
-        policy = policy if policy is not None else options.policy
-        overdraft_floor = overdraft_floor if overdraft_floor is not None else options.overdraft_floor
-        max_concurrent = max_concurrent if max_concurrent is not None else options.max_concurrent
-        low_balance = low_balance if low_balance is not None else options.low_balance
-        default_ttl_seconds = default_ttl_seconds if default_ttl_seconds is not None else options.default_ttl_seconds
-        pricing_ttl = pricing_ttl if pricing_ttl is not None else options.pricing_ttl
-        analytics = analytics if analytics is not None else options.analytics
-        usage_store = usage_store if usage_store is not None else options.usage_store
-        lazy_expiry = lazy_expiry if lazy_expiry is not None else options.lazy_expiry
-        post_deduction = post_deduction if post_deduction is not None else options.post_deduction
+        policy = options.policy
+        overdraft_floor = options.overdraft_floor
+        max_concurrent = options.max_concurrent
+        low_balance = options.low_balance
+        default_ttl_seconds = options.default_ttl_seconds
+        catalog_cache_ttl_ms = options.catalog_cache_ttl_ms
+        analytics = options.analytics
+        usage_store = options.usage_store
+        lazy_expiry = options.lazy_expiry
+        post_deduction = options.post_deduction
         if policy not in POLICY_PRESETS:
             raise ValueError(f"unknown policy preset {policy!r}; expected one of {sorted(POLICY_PRESETS)}")
         self._store = store
@@ -242,13 +221,13 @@ class CreditsService:
         self._engine = engine
         self._emitter = emitter
         self._logger: NormalizedLogger = normalize_logger(options.logger)
-        # Financial-safety policy (interface plan §1/§2). ``policy`` is the preset
+        # Financial-safety policy. ``policy`` is the preset
         # default used for planless users; per-plan / per-call policy layers on top.
         self._policy = policy
         self._overdraft_floor = Decimal(overdraft_floor) if overdraft_floor is not None else None
         self._default_max_concurrent = max_concurrent
         self._default_ttl = default_ttl_seconds
-        # Multi-level low_balance thresholds (interface plan §6 / WS7), sorted
+        # Multi-level low-balance thresholds, sorted
         # high→low. None when no LowBalanceConfig (or an empty thresholds list)
         # was supplied -- the threshold is then derived lazily at deduct time.
         self._low_balance_thresholds = (
@@ -262,15 +241,15 @@ class CreditsService:
         self._lb_below: OrderedDict[str, set[Decimal]] = OrderedDict()
         self._lb_max_tracked_users = low_balance.max_tracked_users if low_balance is not None else 100_000
         self._lb_lock = threading.RLock()
-        # Pricing-engine staleness tracking. ``load_pricing_from_store`` /
-        # ``publish_pricing`` / ``publish_pricing_from_dict`` bump the timestamp.
-        self._pricing_ttl = pricing_ttl / 1_000
+        # Catalog staleness tracking. Public options use milliseconds while
+        # monotonic timestamps use seconds internally.
+        self._catalog_cache_ttl_seconds = catalog_cache_ttl_ms / 1_000
         self._lazy_expiry = lazy_expiry
-        self._last_loaded: float = 0.0
-        # Guards refresh_if_stale() so only one thread calls load_pricing_from_store
+        self._catalog_loaded_at: float = 0.0
+        # Guards refresh_catalog_if_stale() so only one thread loads the catalog
         # at a time. Double-checked locking (the time check runs before AND after
         # acquiring the lock) prevents stampede when the TTL expires concurrently.
-        self._pricing_refresh_lock = threading.Lock()
+        self._catalog_refresh_lock = threading.Lock()
         self._version_engines: dict[int, PricingEngine] = {}
         self._post_deduction_hooks: set[Callable[[PostDeductionContext], None | Awaitable[None]]] = set()
         if post_deduction is not None:
@@ -345,9 +324,9 @@ class CreditsService:
         if cached is not None:
             return cached
 
-        cfg = self._store.get_bursar_config(catalog_version)
+        cfg = self._store.get_catalog_revision(catalog_version)
         if cfg is None or cfg.config is None:
-            raise PricingNotLoadedError(f"No pricing config for pinned catalog version {catalog_version}")
+            raise CatalogNotLoadedError(f"Catalog revision {catalog_version} is unavailable for the pinned plan")
 
         engine = PricingEngine.from_dict(cfg.config if isinstance(cfg.config, dict) else {})
         self._version_engines[catalog_version] = engine
@@ -357,18 +336,18 @@ class CreditsService:
         """Return the pricing engine pinned to the user's catalog version."""
         if user_id is None:
             if not self._engine:
-                raise PricingNotLoadedError(
-                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
+                raise CatalogNotLoadedError(
+                    "Catalog is not loaded; call catalog.load() or catalog.publish_and_activate() first."
                 )
             return self._engine
 
         plan = self._store.get_user_plan(user_id)
         catalog_version = plan.catalog_version
         if catalog_version is None:
-            self.refresh_if_stale()
+            self.refresh_catalog_if_stale()
             if not self._engine:
-                raise PricingNotLoadedError(
-                    "PricingEngine not loaded. Call publish_pricing_from_dict() or load_pricing_from_store() first."
+                raise CatalogNotLoadedError(
+                    "Catalog is not loaded; call catalog.load() or catalog.publish_and_activate() first."
                 )
             return self._engine
 
@@ -406,123 +385,128 @@ class CreditsService:
                 self._emit("credits.quota_threshold", user_id, data)
 
     @staticmethod
-    def _to_decimal(value: Decimal | int | float | str) -> Decimal:
-        """Safely coerce a value to Decimal, avoiding float precision loss."""
+    def _to_decimal(value: Decimal | int) -> Decimal:
+        """Coerce the public numeric input without treating booleans as credits."""
         if isinstance(value, Decimal):
             return value
-        if isinstance(value, float):
-            return Decimal(str(value))
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("amount must be a Decimal or integer")
         return Decimal(value)
+
+    @classmethod
+    def _positive_amount(cls, value: Decimal | int, operation: str) -> Decimal:
+        amount = cls._to_decimal(value)
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError(f"{operation} amount must be finite and greater than zero")
+        return amount
+
+    @classmethod
+    def _non_negative_amount(cls, value: Decimal | int) -> Decimal:
+        amount = cls._to_decimal(value)
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("amount must be finite and non-negative")
+        return amount
 
     def _resolve_low_balance_threshold(self) -> Decimal:
         """Return the zero default used when no explicit threshold is configured."""
         return Decimal(0)
 
-    # -- Pricing configuration -------------------------------------------
+    # -- Catalog configuration -------------------------------------------
 
-    def publish_pricing_from_dict(self, data: dict[str, Any]) -> None:
-        """Load pricing from a raw dict and sync it."""
-        from bursar.config import canonical_bursar_config_dict
-
-        canonical = canonical_bursar_config_dict(data)
-        engine = PricingEngine.from_dict(canonical)
-        self._engine = engine
-        self._version_engines.clear()
-        self._last_loaded = time.monotonic()
-        self._store.set_active_pricing(canonical)
-
-    def load_pricing_from_store(self) -> None:
-        """Load the active pricing config from the store."""
-        active = self._store.get_active_pricing()
+    def load_catalog_from_store(self) -> None:
+        """Load the active catalog revision from the store."""
+        active = self._store.get_active_catalog()
         if active is None:
-            raise PricingNotLoadedError(
-                "No active pricing config found in the store. "
-                "Call publish_pricing_from_dict() or set_active_pricing() first."
-            )
+            raise CatalogNotLoadedError("No active catalog revision is available")
         engine_dict = active.config if isinstance(active.config, dict) else {}
         self._engine = PricingEngine.from_dict(engine_dict)
         self._version_engines.clear()
-        self._last_loaded = time.monotonic()
+        self._catalog_loaded_at = time.monotonic()
 
-    def publish_pricing(
+    def publish_and_activate_catalog(
         self,
         config: dict[str, Any],
         label: str | None = None,
         rollout: dict[str, Any] | None = None,
-    ) -> None:
-        """Publish new pricing and update the engine in one call."""
+    ) -> str:
+        """Publish and activate a catalog revision, then update the local engine."""
         from bursar.config import canonical_bursar_config_dict
 
         canonical = canonical_bursar_config_dict(config)
-        self._engine = PricingEngine.from_dict(canonical)
+        next_engine = PricingEngine.from_dict(canonical)
+        revision_id = (
+            self._store.publish_and_activate_catalog(canonical, label)
+            if rollout is None
+            else self._store.publish_and_activate_catalog(canonical, label, rollout)
+        )
+        self._engine = next_engine
         self._version_engines.clear()
-        self._last_loaded = time.monotonic()
-        if rollout is None:
-            self._store.set_active_pricing(canonical, label)
-        else:
-            self._store.set_active_pricing(canonical, label, rollout)
+        self._catalog_loaded_at = time.monotonic()
+        return revision_id
 
-    def publish_pricing_draft(
+    def publish_catalog_draft(
         self,
         config: dict[str, Any],
         label: str | None = None,
     ) -> str:
-        """Publish an inactive pricing draft without mutating the live catalog."""
+        """Publish an inactive catalog draft without mutating the live catalog."""
         from bursar.config import canonical_bursar_config_dict
 
         canonical = canonical_bursar_config_dict(config)
-        return self._store.publish_pricing(canonical, label)
+        return self._store.publish_catalog_draft(canonical, label)
 
-    def activate_pricing(
+    def activate_catalog_revision(
         self,
         version: int,
         rollout: dict[str, Any] | None = None,
     ) -> str:
         """Activate a previously published catalog version and reload it."""
         result = (
-            self._store.activate_pricing(version) if rollout is None else self._store.activate_pricing(version, rollout)
+            self._store.activate_catalog_revision(version)
+            if rollout is None
+            else self._store.activate_catalog_revision(version, rollout)
         )
-        self.load_pricing_from_store()
+        self.load_catalog_from_store()
         return result
 
-    def refresh_if_stale(self) -> None:
+    def refresh_catalog_if_stale(self) -> None:
         """If the cached ``PricingEngine`` is stale (TTL expired), reload it
-        from the store. When ``pricing_ttl`` is ``0`` this is a no-op.
+        from the store. When ``catalog_cache_ttl_ms`` is ``0`` this is a no-op.
 
         Double-checked locking prevents stampede when multiple threads observe
         the TTL expiring concurrently — only the first thread past the lock
-        calls ``load_pricing_from_store()``; the rest see the updated timestamp
+        calls ``load_catalog_from_store()``; the rest see the updated timestamp
         on re-check and skip.
         """
-        if self._pricing_ttl == 0:
+        if self._catalog_cache_ttl_seconds == 0:
             return
         now = time.monotonic()
-        if self._last_loaded > 0 and now - self._last_loaded < self._pricing_ttl:
+        if self._catalog_loaded_at > 0 and now - self._catalog_loaded_at < self._catalog_cache_ttl_seconds:
             return
-        with self._pricing_refresh_lock:
+        with self._catalog_refresh_lock:
             now = time.monotonic()
-            if self._last_loaded > 0 and now - self._last_loaded < self._pricing_ttl:
+            if self._catalog_loaded_at > 0 and now - self._catalog_loaded_at < self._catalog_cache_ttl_seconds:
                 return
-            self.load_pricing_from_store()
+            self.load_catalog_from_store()
 
-    def invalidate_pricing(self) -> None:
-        """Force the next ``refresh_if_stale()`` call to reload from the store."""
-        self._last_loaded = 0.0
+    def invalidate_catalog(self) -> None:
+        """Force the next ``refresh_catalog_if_stale()`` call to reload from the store."""
+        self._catalog_loaded_at = 0.0
 
     @property
     def pricing_engine(self) -> PricingEngine | None:
         """The current PricingEngine, or None if not loaded."""
         return self._engine
 
-    def get_active_pricing(self) -> BursarConfigResult | None:
-        """Fetch the active pricing config directly from the store.
+    def get_active_catalog(self) -> CatalogRevision | None:
+        """Fetch the active catalog revision directly from the store.
 
-        Unlike load_pricing_from_store (which loads into the engine),
-        this returns the raw BursarConfigResult without updating engine state.
+        Unlike load_catalog_from_store (which loads into the engine),
+        this returns the raw CatalogRevision without updating engine state.
         Callers that need the engine should use the engine property or
-        load_pricing_from_store.
+        load_catalog_from_store.
         """
-        return self._store.get_active_pricing()
+        return self._store.get_active_catalog()
 
     # -- Credit operations -----------------------------------------------
 
@@ -546,6 +530,7 @@ class CreditsService:
         self,
         user_id: str,
         amount: Decimal | int,
+        *,
         entry_type: str = "adjustment",
         metadata: CreditMetadata | None = None,
         expires_at: datetime | None = None,
@@ -560,7 +545,7 @@ class CreditsService:
         """
         result = self._store.add_credits(
             user_id,
-            self._to_decimal(amount),
+            self._positive_amount(amount, "add_credits"),
             entry_type,
             metadata,
             expires_at,
@@ -575,10 +560,11 @@ class CreditsService:
                 "amount": result.amount,
                 "new_balance": result.new_balance,
                 "type": entry_type,
+                "idempotent": result.idempotent,
             },
         )
         # Re-arm multi-level low_balance: any level the topped-up balance is now back
-        # above can fire again on the next descent (interface plan §6).
+        # above can fire again on the next descent.
         if self._low_balance_thresholds:
             with self._lb_lock:
                 below = self._low_balance_state(user_id)
@@ -610,10 +596,11 @@ class CreditsService:
                 in the SQL allow-list for negative amounts (currently ``adjustment``, ``refund``).
             bucket: The bucket to deduct from.
             metadata: Extra metadata (Pydantic model, passed through to the store).
+            idempotency_key: Stable replay key for the ledger mutation.
         """
         result = self._store.add_credits(
             user_id,
-            -self._to_decimal(amount),
+            -self._positive_amount(amount, "deduct_credits"),
             entry_type,
             metadata,
             None,
@@ -628,20 +615,22 @@ class CreditsService:
                 "amount": result.amount,
                 "new_balance": result.new_balance,
                 "entry_type": entry_type,
+                "idempotent": result.idempotent,
             },
         )
-        self._after_deduction(
-            user_id,
-            "raw",
-            DeductionResult(
-                entry_id=result.entry_id,
-                user_id=user_id,
-                amount=abs(result.amount),
-                allowance_consumed=Decimal(0),
-                balance_after=result.new_balance,
-                idempotent=result.idempotent,
-            ),
-        )
+        if not result.idempotent:
+            self._after_deduction(
+                user_id,
+                "raw",
+                DeductionResult(
+                    entry_id=result.entry_id,
+                    user_id=user_id,
+                    amount=abs(result.amount),
+                    allowance_consumed=Decimal(0),
+                    balance_after=result.new_balance,
+                    idempotent=False,
+                ),
+            )
         return result
 
     def grant_subscription_cycle(
@@ -660,17 +649,15 @@ class CreditsService:
             user_id: The user whose subscription cycle is renewing.
             amount: The cycle's credit grant (coerced to ``Decimal``).
             options: Typed grant configuration. ``bucket`` is the credit bucket
-                to grant into (and, when ``replace_prior`` is enabled,
-                to zero out first). Requires a store with that bucket configured
+                to grant into. Requires a store with that bucket configured
                 (see :meth:`get_bucket_balances`) — this is deliberate: buckets are
                 what let a subscription grant coexist with, and not clobber,
                 credits from other sources (purchases, gifts, ...).
                 ``expires_at`` is mutually exclusive
                 with ``ttl_days``.
-                When ``replace_prior`` is true (the default), any leftover balance in
-                ``bucket`` from a prior cycle is expired immediately before the
-                new grant lands — a renewal replaces the unused balance rather
-                than stacking on top of it.
+                Existing bucket credits are never removed here. Subscription
+                renewal policies that replace prior lots run atomically through
+                the billing service.
                 When ``plan_key`` is given, the service also calls
                 :meth:`set_user_plan`; this
                 intentionally re-anchors the allowance window, which is correct
@@ -692,15 +679,7 @@ class CreditsService:
         if options.ttl_days is not None:
             expires_at = datetime.now(UTC) + timedelta(days=options.ttl_days)
 
-        amount_dec = self._to_decimal(amount)
-
-        prior_leftover = Decimal(0)
-        if options.replace_prior:
-            buckets_before = self.get_bucket_balances(user_id)
-            for tb in buckets_before.buckets:
-                if tb.bucket_key == options.bucket:
-                    prior_leftover = tb.balance
-                    break
+        amount_dec = self._positive_amount(amount, "grant_subscription_cycle")
 
         result = self._store.add_credits(
             user_id,
@@ -713,20 +692,12 @@ class CreditsService:
         )
 
         is_fresh_grant = not result.idempotent
-        if options.replace_prior and is_fresh_grant and prior_leftover > 0:
-            replace_meta: dict[str, Any] = {"reason": "cycle_replaced"}
-            self._store.add_credits(
-                user_id,
-                -prior_leftover,
-                type="adjustment",
-                bucket=options.bucket,
-                metadata=CreditMetadata(**replace_meta),
-            )
-            # Reflect the post-replace balance so the returned result is accurate
-            # (the grant call above only knows the pre-replace balance).
-            result = result.model_copy(update={"new_balance": self.get_balance(user_id).balance})
-
-        if options.plan_key is not None:
+        # Fresh renewals intentionally re-anchor assignment windows. A replay
+        # only repairs an interrupted grant->assignment saga; it must not move
+        # an already-committed window anchor again.
+        if options.plan_key is not None and (
+            is_fresh_grant or self.get_user_plan(user_id).plan_key != options.plan_key
+        ):
             self.set_user_plan(user_id, options.plan_key)
 
         self._emit(
@@ -739,6 +710,7 @@ class CreditsService:
                 "bucket": options.bucket,
                 "plan_key": options.plan_key,
                 "idempotency_key": options.idempotency_key,
+                "idempotent": result.idempotent,
             },
         )
         return result
@@ -749,6 +721,7 @@ class CreditsService:
         self,
         user_id: str,
         plan_key: str,
+        *,
         plan_assigned_at: datetime | None = None,
     ) -> SetUserPlanResult:
         """Assign a plan to a user and emit a ``credits.plan_changed`` event.
@@ -845,7 +818,7 @@ class CreditsService:
         Convenience wrapper around the store's ``check_feature()`` — inspect the
         features dict on a user's plan to gate functionality.
 
-        Presence is distinguished from truthiness (contract §5, M6): a feature is
+        Presence is distinguished from truthiness: a feature is
         present when its key exists and the value is not ``None``/``False``.
         Numeric ``0`` and empty string ``""`` are therefore *present*.
         - absent / ``None`` / ``False`` => ``has_feature=False``
@@ -884,7 +857,7 @@ class CreditsService:
         """Execute an application-driven catalog grant program."""
         return self._store.execute_grant_program(request)
 
-    # ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
+    # ── Lease lifecycle: atomic admission ───────────────────────────────
 
     def _preset_policy(self) -> OperationPolicy:
         """The default :class:`OperationPolicy` from the constructor preset (§2)."""
@@ -909,7 +882,7 @@ class CreditsService:
         """Resolve the effective policy: explicit arg → catalog plan → preset (§1).
 
         A **planless** user (``plan_id`` is ``None``) always gets the constructor
-        preset, never silently unlimited (resolves M1). A user *with* a plan gets
+        preset, never silently unlimited. A user *with* a plan gets
         its canonical credit and admission policies, then the explicit per-call
         ``billing_mode``.
         """
@@ -918,7 +891,7 @@ class CreditsService:
         # Intentionally not catching exceptions: a store outage at plan-fetch time
         # must surface to the caller rather than silently demoting the user to the
         # constructor preset (which can flip a paid/overdraft user to strict_prepaid
-        # and block legitimate requests without any signal — Fix 4).
+        # and block legitimate requests without any signal.
         plan = self._store.get_user_plan(user_id)
 
         if plan is not None and plan.plan_id:
@@ -967,7 +940,7 @@ class CreditsService:
     ) -> tuple[Decimal, str | None]:
         """Compute a credit cost, pinning leased work to its admission catalog."""
         if not isinstance(metrics_or_amount, UsageMetrics):
-            return Decimal(metrics_or_amount), None
+            return self._non_negative_amount(metrics_or_amount), None
 
         pricing_context: LeasePricingContext | None = None
         if lease_id is not None:
@@ -989,7 +962,7 @@ class CreditsService:
         return breakdown.total, str(model) if model is not None else None
 
     def _raise_lease_error(self, error: str, user_id: str, amount: Decimal) -> None:
-        """Map a store business code to the coherent typed exception (M2)."""
+        """Map a store business code to the corresponding typed exception."""
         if error in ("concurrency_limit", "max_concurrent_reached"):
             raise ConcurrencyLimitError(f"Concurrency limit reached. User={user_id}")
         if error == "quota_exceeded":
@@ -1018,7 +991,7 @@ class CreditsService:
         metrics_or_amount: MetricsOrAmount,
         options: ReserveOptions | None = None,
     ) -> LeaseResult:
-        """Atomically acquire a lease — the only admission control (D4).
+        """Atomically acquire a lease — the only authoritative admission control.
 
         Resolves the effective policy, enforces ``feature``, sizes the hold
         from ``metrics_or_amount`` (worst-case in strict, estimate in overdraft — the
@@ -1026,11 +999,11 @@ class CreditsService:
 
         The store's ``create_lease`` is allowance-aware: remaining free allowance is
         added to the effective headroom so free-tier users are not falsely rejected
-        for worst-case holds they can cover with allowance (Fix 1 / D4).
+        for worst-case holds they can cover with allowance.
 
         ``model`` is inferred from ``UsageMetrics`` when passed; for raw
         ``Decimal``/``int`` amounts use ``options.model`` so quota checks and
-        analytics remain accurate (Fix 5).
+        analytics remain accurate.
 
         ``feature`` is the canonical entitlement key checked at admission.
 
@@ -1116,7 +1089,7 @@ class CreditsService:
         metrics_or_amount: MetricsOrAmount,
         options: SettleOptions | None = None,
     ) -> DeductionResult:
-        """Charge the ACTUAL cost against a lease and finalize it (D5).
+        """Charge the actual cost against a lease and finalize it.
 
         De-clamped: bills the full actual cost even if it exceeds the lease hold
         (overdraft). Emits ``credits.deducted``, then low-balance and overdraft
@@ -1194,7 +1167,7 @@ class CreditsService:
         return result
 
     def release(self, user_id: str, lease_id: str) -> ReleaseResult:
-        """Release a lease without charging (work failed/aborted) — idempotent (H1)."""
+        """Release a lease without charging; safe to repeat after failed or aborted work."""
         result = self._store.release_lease(user_id, lease_id)
         if result.released:
             self._emit(
@@ -1222,13 +1195,13 @@ class CreditsService:
         metrics_or_amount: MetricsOrAmount,
         options: CanAffordOptions | None = None,
     ) -> CanAffordResult:
-        """Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+        """Advisory affordability check — UI only, non-locking, and potentially stale.
 
         ``spendable`` in the result reflects the user's effective spending power:
         ``balance − active holds + allowance_remaining − protected_floor``.
         This matches the headroom
         ``reserve`` uses so the Send-button check agrees with the admission gate
-        (Fix 1). Never use this as an admission gate; only ``reserve`` is authoritative.
+        Never use this as an admission gate; only ``reserve`` is authoritative.
         """
         options = options or CanAffordOptions()
         feature = options.feature
@@ -1254,7 +1227,7 @@ class CreditsService:
         floor = self._resolve_floor(policy)
 
         # Include remaining free allowance in the effective spendable amount so the
-        # advisory check agrees with what create_lease will actually admit (Fix 1).
+        # advisory check agrees with what create_lease will actually admit.
         allowance_credit = Decimal(0)
         try:
             ar = self._store.check_allowance(user_id)
@@ -1286,7 +1259,7 @@ class CreditsService:
         )
 
     def get_available(self, user_id: str) -> AvailableResult:
-        """Advisory ``available = balance − Σ active holds`` read (UI only, D4/H3)."""
+        """Return advisory ``available = balance − Σ active holds`` for UI display."""
         return self._store.get_available(user_id)
 
     def get_bucket_balances(self, user_id: str) -> BucketBalancesResult:
@@ -1303,7 +1276,7 @@ class CreditsService:
         user_id: str,
         options: RunBilledOptions,
     ) -> RunBilledResult:
-        """One-call shortcut wiring reserve → do_work → settle (interface plan §4).
+        """One-call shortcut wiring reserve → do_work → settle.
 
         ``options.do_work`` runs the operation and returns ``(result, actual)`` where
         ``actual`` is the real usage metrics (or amount) to settle. On any exception
@@ -1350,7 +1323,8 @@ class CreditsService:
         """Async counterpart to :meth:`run_billed`."""
 
         operation_key = options.operation_key or f"billed:{uuid4()}"
-        operation = self.begin_billed_operation(
+        operation = await asyncio.to_thread(
+            self.begin_billed_operation,
             user_id,
             BeginBilledOperationOptions(
                 estimate=options.estimate,
@@ -1365,9 +1339,10 @@ class CreditsService:
         try:
             work_result, actual = await options.do_work()
         except Exception:
-            operation.release()
+            await asyncio.to_thread(operation.release)
             raise
-        deduction = retry_bursar_operation(
+        deduction = await asyncio.to_thread(
+            retry_bursar_operation,
             operation.settle,
             actual,
             retry_options=BursarRetryOptions(max_attempts=options.settlement_attempts),
@@ -1424,7 +1399,7 @@ class CreditsService:
             metadata=metadata,
         )
 
-    # ── Low-balance / overdraft signals (interface plan §6) ─────────────
+    # ── Low-balance and overdraft signals ───────────────────────────────
 
     def _post_charge_signals(self, user_id: str, result: DeductionResult) -> None:
         """Emit overdraft, floor-breach, and multi-level low_balance after a charge.
@@ -1434,7 +1409,7 @@ class CreditsService:
 
         Idempotent replays are skipped entirely at the top: re-emitting overdraft
         or floor_breach with the *original* balance figures against the *current*
-        live balance would produce spurious duplicate events (Fix 2/#2).
+        live balance would produce spurious duplicate events.
         """
         if result.idempotent:
             return
@@ -1484,7 +1459,7 @@ class CreditsService:
                 result = self._on_low_balance(event)
                 if inspect.isawaitable(result):
                     self._wait_for_hook(result)
-            except Exception as exc:  # never block/break the op on a handler failure (§6/H4)
+            except Exception as exc:  # never fail a committed operation because of a handler
                 self._logger.error(
                     "on_low_balance handler failed",
                     {"user_id": user_id, "error": str(exc)},
@@ -1500,13 +1475,13 @@ class CreditsService:
         """Build ledger metadata: caller fields first, system fields last.
 
         System-owned keys (``idempotency_key``, ``model``, ``breakdown_total``)
-        are applied after caller metadata so they always win (contract §5, M7).
+        are applied after caller metadata so they always win.
         """
         base: dict[str, Any] = {}
         # Caller metadata first — system fields below overwrite any collisions.
         if metadata:
             base.update(metadata.model_dump(exclude_none=True))
-        # System fields last (M7): these must not be overwritten by the caller.
+        # Protected system fields come last so callers cannot overwrite them.
         base["operation"] = metrics.operation
         base["measures"] = {key: str(value) for key, value in metrics.measures.items()}
         base["dimensions"] = dict(metrics.dimensions)
@@ -1551,9 +1526,9 @@ class CreditsService:
         self,
         user_id: str,
         metrics: UsageMetrics,
+        *,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
-        *,
         feature: str | None = None,
     ) -> DeductionResult:
         """Calculate the cost and charge it in one atomic store transaction.
@@ -1563,7 +1538,7 @@ class CreditsService:
         truncation) → ``store.deduct_with_allowance(...)``. Usage recording,
         allowance consumption,
         entitlement, quota enforcement, and the debit all commit (or
-        roll back) together inside the store (contract §2, C1). The manager only
+        roll back) together inside the store. The manager only
         maps the returned ``error`` code to a typed exception and emits events.
 
         Args:
@@ -1578,11 +1553,11 @@ class CreditsService:
             the balance after free allowance.
 
         Raises:
-            PricingNotLoadedError: If pricing hasn't been loaded.
+            CatalogNotLoadedError: If the catalog has not been loaded.
             InsufficientCreditsError: If the balance floor would be breached.
         """
         self._maybe_lazy_expire(user_id)
-        # 1) Calculate cost — exact Decimal, NO truncation (H1).
+        # 1) Calculate cost as an exact Decimal with no truncation.
         engine = self._engine_for_user(user_id)
         plan = self._store.get_user_plan(user_id)
         breakdown = engine.calculate(metrics, rate_card=plan.rate_card)
@@ -1634,7 +1609,7 @@ class CreditsService:
             },
         )
 
-        # Edge-triggered low_balance (M18): multi-level if configured (WS7), else
+        # Edge-triggered low balance: multi-level if configured, otherwise
         # single-threshold — see _emit_low_balance for the shared logic used by
         # both the direct-deduct path and the lease/settle path.
         if not result.idempotent:
@@ -1649,6 +1624,7 @@ class CreditsService:
         self,
         user_id: str,
         metrics: UsageMetrics,
+        *,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> UsageRecordResult:
@@ -1688,6 +1664,7 @@ class CreditsService:
         self,
         user_id: str,
         job_name: str,
+        *,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
         feature: str | None = None,
@@ -1696,14 +1673,15 @@ class CreditsService:
         return self.deduct(
             user_id,
             UsageMetrics(operation=job_name, measures={"jobs": Decimal(1)}),
-            idempotency_key,
-            metadata,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
             feature=feature,
         )
 
     def refund_credits(
         self,
         entry_id: str,
+        *,
         amount: Decimal | int | None = None,
         reason: str | None = None,
         metadata: CreditMetadata | None = None,
@@ -1727,7 +1705,7 @@ class CreditsService:
                 failures. ``credits.refund_failed`` is emitted and no success
                 event fires.
         """
-        refund_amount = self._to_decimal(amount) if amount is not None else None
+        refund_amount = self._positive_amount(amount, "refund_credits") if amount is not None else None
         result = self._store.refund_credits(
             entry_id,
             refund_amount,
@@ -1736,7 +1714,7 @@ class CreditsService:
             idempotency_key,
         )
 
-        # Check the error BEFORE emitting (H3): a failed/duplicate/over-refund
+        # Check the error before emitting: a failed, duplicate, or over-refund
         # must never fire a success event.
         if result.error:
             self._emit(
@@ -1768,6 +1746,7 @@ class CreditsService:
         team_id: str,
         user_id: str,
         metrics: UsageMetrics,
+        *,
         idempotency_key: str | None = None,
         metadata: CreditMetadata | None = None,
     ) -> TeamDeductionResult:
@@ -1789,7 +1768,7 @@ class CreditsService:
         engine = self._engine_for_user(user_id)
         plan = self._store.get_user_plan(user_id)
         breakdown = engine.calculate(metrics, rate_card=plan.rate_card)
-        cost = breakdown.total  # exact Decimal, no truncation (H1)
+        cost = breakdown.total  # exact Decimal, no truncation
 
         if cost <= 0:
             team_bal = self._store.get_team_balance(team_id)
@@ -1819,7 +1798,7 @@ class CreditsService:
             idempotency_key=idempotency_key,
         )
 
-        # Consistent with deduct() (H3): on error emit a failure event and raise
+        # Consistent with deduct(): on error emit a failure event and raise
         # rather than returning a silent error result.
         if result.error:
             self._emit(
@@ -1896,6 +1875,7 @@ class CreditsService:
     def list_ledger_entries(
         self,
         user_id: str,
+        *,
         entry_types: list[str] | None = None,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
@@ -1908,6 +1888,7 @@ class CreditsService:
     def list_usage_entries(
         self,
         user_id: str,
+        *,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,
@@ -1919,6 +1900,7 @@ class CreditsService:
     def list_usage_charges(
         self,
         user_id: str,
+        *,
         from_date: datetime | None = None,
         to_date: datetime | None = None,
         limit: int = 50,

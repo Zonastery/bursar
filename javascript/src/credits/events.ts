@@ -20,7 +20,7 @@
  *
  * Success events (``credits.deducted``/``credits.refunded``/…) are emitted by
  * ``CreditsService`` only after the underlying store operation committed without
- * an ``error`` (contract §6). Failure events (``credits.deduct_failed`` /
+ * an ``error``. Failure events (``credits.deduct_failed`` /
  * ``credits.refund_failed``) carry the store's business-error code in
  * ``data.error`` for observability/fraud monitoring.
  */
@@ -46,7 +46,7 @@ export type CreditEventType =
  *
  * Money values inside ``data`` (``amount``, ``balanceAfter``,
  * ``allowanceConsumed``, ``threshold``, …) are exact `Decimal` instances
- * (contract §1/§6), never binary `number`.
+ * and never binary `number`.
  */
 export interface CreditEvent {
   type: CreditEventType;
@@ -80,7 +80,7 @@ export class CreditEventEmitter {
    * Each handler is isolated: a synchronous throw (or a rejected promise from an
    * async handler) is caught and logged, never propagated. This guarantees a
    * misbehaving listener can never break the manager's main flow and never
-   * produces an unhandled promise rejection (contract §6).
+   * produces an unhandled promise rejection.
    */
   emit(event: CreditEvent): void {
     const handlers = this.listeners.get(event.type);

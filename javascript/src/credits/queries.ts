@@ -2,7 +2,7 @@ import type { CreditStore } from "./store.js";
 import type {
   AggregateStats,
   AvailableResult,
-  BursarConfigResult,
+  CatalogRevision,
   CheckFeatureResult,
   DailySpendRow,
   GetUserPlanResult,
@@ -25,9 +25,9 @@ import type {
 } from "./types/index.js";
 
 /**
- * Stable read/catalog facade over CreditStore.
+ * Stable read facade over CreditStore.
  *
- * CreditsService adds pricing, eventing, expiry, and charging workflows on top;
+ * CreditsService adds catalog-aware pricing, eventing, expiry, and charging workflows on top;
  * methods here intentionally contain no additional business behavior.
  */
 export class CreditQueries {
@@ -37,8 +37,8 @@ export class CreditQueries {
     private readonly usageStore: UsageChargeStore = store,
   ) {}
 
-  async getActivePricing(): Promise<BursarConfigResult | null> {
-    return this.store.getActivePricing();
+  async getActiveCatalog(): Promise<CatalogRevision | null> {
+    return this.store.getActiveCatalog();
   }
 
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {

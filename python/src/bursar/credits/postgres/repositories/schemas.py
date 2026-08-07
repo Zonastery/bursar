@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Self
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BalanceRow(BaseModel):
@@ -115,14 +116,14 @@ class ReleaseRow(BaseModel):
     reason: str | None = None
 
 
-class ActivePricingRow(BaseModel):
+class CatalogRevisionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    config: dict[str, Any] | None = None
-    version: int = 0
+    id: str
+    config: dict[str, Any]
+    version: int
     label: str | None = None
-    active: bool = False
-    created_at: str | datetime = ""
+    active: bool
+    created_at: str | datetime
     error: str | None = None
 
 
@@ -350,33 +351,49 @@ class QuotaEventRow(BaseModel):
 
 
 class BillingOfferRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    plan_id: str | None = None
-    offer_key: str = ""
-    plan: str | None = None
-    interval: str = ""
-    interval_count: int = 0
-    grant_mode: str | None = None
-    grant_credits: str | Decimal | None = None
-    grant_bucket: str | None = None
-    grant_replace_prior: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    plan_id: UUID
+    offer_key: str = Field(min_length=1)
+    plan: str = Field(min_length=1)
+    interval: Literal["day", "week", "month", "year"]
+    interval_count: int = Field(gt=0)
+    grant_mode: Literal["cycle_grant"] | None
+    grant_credits: Decimal | None = Field(gt=0)
+    grant_bucket: str | None = Field(min_length=1)
+    grant_replace_prior: bool
+
+    @model_validator(mode="after")
+    def validate_cycle_grant(self) -> Self:
+        grant_fields = (self.grant_mode, self.grant_credits, self.grant_bucket)
+        if any(value is None for value in grant_fields) != all(value is None for value in grant_fields):
+            raise ValueError("cycle grant fields must either all be set or all be null")
+        if self.grant_mode is None and self.grant_replace_prior:
+            raise ValueError("grant_replace_prior requires a cycle grant")
+        return self
 
 
 class BillingTopupRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    topup_key: str = ""
-    credits_per_unit: str | Decimal | None = None
-    credits_per_major_unit: str | Decimal | None = None
-    tier: str = ""
-    deposit_to: str = ""
-    bucket_key: str | None = None
-    amount_minor: int | str | None = None
-    currency: str | None = None
-    min_quantity: int | None = None
-    max_quantity: int | None = None
-    default_quantity: int | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    topup_key: str = Field(min_length=1)
+    credits_per_unit: Decimal = Field(gt=0)
+    bucket_key: str = Field(min_length=1)
+    amount_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    min_quantity: int = Field(gt=0)
+    max_quantity: int = Field(gt=0)
+    default_quantity: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_quantity_bounds(self) -> Self:
+        if self.max_quantity < self.min_quantity:
+            raise ValueError("max_quantity is below min_quantity")
+        if not self.min_quantity <= self.default_quantity <= self.max_quantity:
+            raise ValueError("default_quantity is outside the configured range")
+        return self
 
 
 class SubscriptionRow(BaseModel):
@@ -408,27 +425,32 @@ class SubscriptionRow(BaseModel):
 
 class BillingEventRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    event_id: str = ""
-    provider: str = ""
-    status: str = "retry"
+    event_id: str | None
+    status: Literal[
+        "claimed",
+        "duplicate",
+        "busy",
+        "invalid_request",
+        "idempotency_conflict",
+        "max_retries_exceeded",
+    ]
     claim_token: str | None = None
 
 
 class BillingPaymentRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    provider: str = ""
-    provider_payment_id: str = ""
-    user_id: str | None = None
-    amount_minor: int = 0
-    tax_minor: int | None = None
-    currency: str = "USD"
-    purpose: str | None = None
-    metadata: dict[str, Any] | None = None
-    created_at: str | datetime | None = None
-    updated_at: str | datetime | None = None
-    credits_per_unit: str | Decimal | None = None
-    credits_per_major_unit: str | Decimal | None = None
+    id: UUID
+    provider: str = Field(min_length=1)
+    provider_payment_id: str = Field(min_length=1)
+    provider_invoice_id: str | None
+    subject_id: UUID
+    amount_minor: int = Field(ge=0)
+    tax_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    purpose: Literal["subscription", "credit_topup"]
+    status: Literal["pending", "succeeded", "failed", "canceled"]
+    provider_updated_at: datetime
+    metadata: dict[str, Any]
 
 
 class UnsetUserPlanRow(BaseModel):
@@ -437,13 +459,13 @@ class UnsetUserPlanRow(BaseModel):
     plan_key: str | None = None
 
 
-class BursarConfigHistoryItemRow(BaseModel):
+class CatalogRevisionSummaryRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    version: int = 0
+    id: str
+    version: int
     label: str | None = None
-    active: bool = False
-    created_at: str | datetime = ""
+    active: bool
+    created_at: str | datetime
 
 
 class DeductParams(BaseModel):

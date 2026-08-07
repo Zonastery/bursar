@@ -2,15 +2,17 @@ import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingCustomerRecord,
+  BillingCreditPostingResult,
   BillingEventClaim,
   BillingOfferResult,
+  BillingPaymentRecord,
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
   BillingSubscriptionState,
   CheckoutIntent,
   BillingTopupResult,
-  BillingInvoiceInfo,
+  BillingInvoiceRecord,
 } from "./types/index.js";
 import type {
   AutoRechargeAttemptClaim,
@@ -26,6 +28,7 @@ import type {
   CheckoutIntentCreate,
   CheckoutIntentUpdate,
 } from "./contracts.js";
+import type Decimal from "decimal.js";
 
 /**
  * Abstract billing store — provider-agnostic persistence layer for
@@ -130,23 +133,23 @@ export abstract class BillingStore {
   abstract computeTopupCredits(
     amountMinor: number,
     topupConfig: BillingTopupResult,
-  ): Promise<number>;
+  ): Promise<Decimal>;
 
   abstract upsertBillingPayment(options: BillingPaymentUpsert): Promise<string>;
   abstract createBillingCreditGrant(input: BillingCreditGrantCreate): Promise<string>;
   abstract grantBillingCredit(
     grantId: string,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<BillingCreditPostingResult>;
   abstract getBillingCreditGrantByPayment(paymentId: string): Promise<string | null>;
   abstract postBillingRefund(
     refundId: string,
     grantId: string,
     amountMinor: number,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>>;
+  ): Promise<BillingCreditPostingResult>;
 
-  abstract listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
+  abstract listBillingInvoices(userId: string): Promise<BillingInvoiceRecord[]>;
 
   abstract upsertBillingRefund(options: BillingRefundUpsert): Promise<string>;
 
@@ -157,9 +160,9 @@ export abstract class BillingStore {
   abstract getBillingPayment(
     provider: string,
     providerPaymentId: string,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<BillingPaymentRecord | null>;
 
-  abstract getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
+  abstract getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
 
   abstract pseudonymizeFinancialSubject(userId: string): Promise<boolean>;
 

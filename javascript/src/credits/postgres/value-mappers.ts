@@ -2,7 +2,7 @@ import Decimal from "decimal.js";
 
 import { StoreError } from "../../errors.js";
 import type { LedgerEntryRow, UsageChargeRow } from "./repositories/analytics.js";
-import type { BursarConfigResult, LedgerEntry, UsageCharge } from "../types/index.js";
+import type { CatalogRevision, LedgerEntry, UsageCharge } from "../types/index.js";
 
 export const ZERO = new Decimal(0);
 
@@ -70,10 +70,10 @@ export function parseAdmissionOperations(
   );
 }
 
-export function normalizeBursarConfig(
+export function normalizeCatalogRevision(
   row: Record<string, unknown>,
   defaultVersion: number,
-): BursarConfigResult {
+): CatalogRevision {
   const config = row.config as Record<string, unknown> | undefined;
   return {
     id: String(row.id ?? ""),

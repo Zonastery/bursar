@@ -231,7 +231,6 @@ class PostgresStorageRepository:
         event_id: str,
         object_key: str,
         object_version: str | None,
-        purge_postgres_payload: bool,
     ) -> bool:
         return _scalar_boolean(
             self._query(
@@ -239,10 +238,9 @@ class PostgresStorageRepository:
                 SELECT bursar.archive_billing_event_payload(
                     %s::uuid,
                     %s::text,
-                    %s::text,
-                    %s::boolean
+                    %s::text
                 )
                 """,
-                [event_id, object_key, object_version, purge_postgres_payload],
+                [event_id, object_key, object_version],
             )
         )

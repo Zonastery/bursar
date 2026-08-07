@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ActiveSubscriptionError,
   BursarError,
+  CapabilityNotConfiguredError,
   CapabilityNotSupportedError,
   CapReachedError,
   CheckoutCompletedError,
@@ -21,10 +22,10 @@ import {
   InvalidOfferQuantityError,
   LeaseExpiredError,
   LeaseNotFoundError,
-  MissingPaymentMethodError,
   MissingPlanChangePolicyError,
   OperationNotAllowedError,
-  PricingNotLoadedError,
+  PaymentMethodRequiredError,
+  CatalogNotLoadedError,
   ProviderCapabilityNotSupportedError,
   ProviderSelectionError,
   QuotaExceededError,
@@ -67,8 +68,8 @@ const ERROR_CASES: ErrorCase[] = [
     status: 402,
   },
   {
-    error: new PricingNotLoadedError("failure"),
-    code: "PRICING_NOT_LOADED",
+    error: new CatalogNotLoadedError("failure"),
+    code: "CATALOG_NOT_LOADED",
     category: "unavailable",
     status: 503,
   },
@@ -159,6 +160,12 @@ const ERROR_CASES: ErrorCase[] = [
     status: 503,
   },
   {
+    error: new CapabilityNotConfiguredError("billing"),
+    code: "CAPABILITY_NOT_CONFIGURED",
+    category: "unavailable",
+    status: 503,
+  },
+  {
     error: new CommerceError("failure", "COMMERCE_ERROR"),
     code: "COMMERCE_ERROR",
     category: "internal",
@@ -225,7 +232,7 @@ const ERROR_CASES: ErrorCase[] = [
     status: 409,
   },
   {
-    error: new MissingPaymentMethodError(),
+    error: new PaymentMethodRequiredError(),
     code: "PAYMENT_METHOD_REQUIRED",
     category: "payment_required",
     status: 402,

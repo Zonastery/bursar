@@ -23,7 +23,7 @@ COMMENT ON TABLE bursar.catalog_admission_operation_policies IS 'Operation-level
 COMMENT ON TABLE bursar.catalog_entitlement_features IS 'Typed entitlement feature definitions and defaults.';
 COMMENT ON TABLE bursar.catalog_plans IS 'Plan projections and policy defaults for a catalog revision.';
 COMMENT ON COLUMN bursar.catalog_plans.credit_allowance_priority IS
-'Optional spend priority shared with credit lots; null preserves legacy allowance-first ordering.';
+'Required spend priority for plan allowances, shared with credit-lot priorities.';
 COMMENT ON TABLE bursar.catalog_plan_features IS 'Typed feature values granted by a plan.';
 COMMENT ON TABLE bursar.catalog_plan_quotas IS 'Plan-level numeric usage quota policies.';
 COMMENT ON TABLE bursar.catalog_grant_programs IS 'Promotional, referral, manual, and account-creation grant programs.';

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from bursar.billing.types import BillingEvent, BillingEventResult
+from bursar.billing.types import BillingEvent, BillingEventResult, BillingEventType, BillingInvoiceInfo
 from bursar.providers._shared import call_billing_event_sink
 from bursar.providers.dodo.provider import DodoProvider
 from bursar.providers.mock.provider import MockPaymentProvider
@@ -61,14 +62,27 @@ def test_billing_sink_retries_a_busy_claim() -> None:
             BillingEventResult(handled=True, action="duplicate"),
         ]
     )
-    sink = SimpleNamespace(ingest_billing_event=lambda _event: next(results))
+
+    class BusySink:
+        def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
+            del event
+            return next(results)
+
+    sink = BusySink()
     result = call_billing_event_sink(
         sink,
         BillingEvent(
             provider="stripe",
             event_id="evt_busy",
-            event_type="invoice.paid",
+            event_type=BillingEventType.invoice_paid,
             occurred_at="2026-07-29T12:00:00+00:00",
+            invoice=BillingInvoiceInfo(
+                provider_invoice_id="in_busy",
+                status="paid",
+                amount_paid_minor=0,
+                amount_due_minor=0,
+                currency="USD",
+            ),
         ),
     )
 
@@ -84,9 +98,14 @@ class DodoClient:
         self.payments = self
         self.webhooks = self
 
-    async def create(self, **kwargs: Any) -> dict[str, Any]:
+    async def create(self, **kwargs: Any) -> SimpleNamespace:
         self.calls.append(("create", kwargs))
-        return {"checkout_url": "https://checkout.test", "session_id": "sess_1", "customer_id": "cus_1"}
+        return SimpleNamespace(
+            checkout_url="https://checkout.test",
+            session_id="sess_1",
+            customer_id="cus_1",
+            payment_id=None,
+        )
 
     async def customer_portal(self, *_args: Any, **_kwargs: Any) -> dict[str, str]:
         return {"link": "https://portal.test"}
@@ -94,34 +113,61 @@ class DodoClient:
     async def update(self, subscription_id: str, **kwargs: Any) -> None:
         self.calls.append((subscription_id, kwargs))
 
-    async def retrieve_payment_methods(self, _customer_id: str) -> dict[str, Any]:
-        return {
-            "items": [
-                {
-                    "payment_method": "card",
-                    "payment_method_id": "pm_1",
-                    "card": {
-                        "recurring_enabled": True,
-                        "last4_digits": "4242",
-                        "card_network": "visa",
-                        "expiry_month": 1,
-                        "expiry_year": 2030,
-                    },
-                },
-                {"payment_method": "paypal", "payment_method_id": "pm_2"},
+    async def retrieve_payment_methods(self, _customer_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    payment_method="card",
+                    payment_method_id="pm_1",
+                    recurring_enabled=True,
+                    card=SimpleNamespace(
+                        last4_digits="4242",
+                        card_network="visa",
+                        expiry_month="1",
+                        expiry_year="2030",
+                    ),
+                ),
+                SimpleNamespace(
+                    payment_method="paypal",
+                    payment_method_id="pm_2",
+                    recurring_enabled=False,
+                    card=None,
+                ),
             ]
-        }
+        )
 
     async def change_plan(self, subscription_id: str, **kwargs: Any) -> None:
         self.calls.append((subscription_id, kwargs))
 
-    async def preview_change_plan(self, _subscription_id: str, **_kwargs: Any) -> dict[str, Any]:
-        return {
-            "immediate_charge": {"summary": {"total_amount": 12, "settlement_amount": 10, "settlement_currency": "USD"}}
-        }
+    async def preview_change_plan(self, _subscription_id: str, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            immediate_charge=SimpleNamespace(
+                effective_at=datetime(2026, 8, 7, tzinfo=UTC),
+                line_items=[],
+                summary=SimpleNamespace(
+                    total_amount=12,
+                    settlement_amount=10,
+                    settlement_currency="USD",
+                    settlement_tax=None,
+                    tax=None,
+                    customer_credits=0,
+                ),
+            ),
+            new_plan=SimpleNamespace(
+                recurring_pre_tax_amount=12,
+                currency="USD",
+                next_billing_date=datetime(2026, 9, 7, tzinfo=UTC),
+            ),
+        )
 
-    async def retrieve(self, _payment_id: str) -> dict[str, str]:
-        return {"payment_link": "https://invoice.test"}
+    async def retrieve(self, payment_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            payment_id=payment_id,
+            payment_link="https://invoice.test",
+            status="succeeded",
+            total_amount=12,
+            currency="USD",
+        )
 
     async def customers_create(self, **_kwargs: Any) -> dict[str, str]:
         return {"customer_id": "cus_2"}
@@ -140,7 +186,12 @@ def test_custom_provider_only_requires_the_js_core_contract() -> None:
 
 def test_dodo_adapter_maps_requests_and_responses() -> None:
     client = DodoClient()
-    provider = DodoProvider(lambda: client, {"setup_product_id": "prod_setup"}, Sink())
+    provider = DodoProvider(
+        get_client=lambda: client,
+        webhook_key="test_webhook_key",
+        event_sink=Sink(),
+        setup_product_id="prod_setup",
+    )
 
     checkout = run(
         provider.create_checkout_session(
@@ -200,11 +251,11 @@ def test_dodo_webhook_failures_are_classified_without_network() -> None:
     class Broken:
         class webhooks:
             @staticmethod
-            async def unwrap(*_args: Any, **_kwargs: Any) -> None:
+            def unwrap(*_args: Any, **_kwargs: Any) -> None:
                 raise TimeoutError("timeout")
 
     result = run(
-        DodoProvider(lambda: Broken(), {"webhook_key": "k"}, Sink()).handle_webhook(
+        DodoProvider(get_client=lambda: Broken(), webhook_key="k", event_sink=Sink()).handle_webhook(
             WebhookRequest(raw_body="{}", headers={})
         )
     )
@@ -231,7 +282,11 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
         checkout=SimpleNamespace(Session=Checkout()),
         Webhook=SimpleNamespace(construct_event=lambda *_args: None),
     )
-    provider = StripeProvider(Sink(), get_stripe=lambda: fake)
+    provider = StripeProvider(
+        event_sink=Sink(),
+        webhook_secret="test_webhook_secret",
+        get_client=lambda: fake,
+    )
     result = run(
         provider.create_checkout_session(
             CheckoutParams(
@@ -255,7 +310,7 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
 
 
 def test_mock_provider_is_a_complete_deterministic_test_double() -> None:
-    provider = MockPaymentProvider(Sink())
+    provider = MockPaymentProvider(event_sink=Sink())
     customer = run(provider.create_customer(CreateCustomerParams(email="", name="", metadata={})))
     assert customer.customer_id.startswith("mock_cus_")
     checkout = run(

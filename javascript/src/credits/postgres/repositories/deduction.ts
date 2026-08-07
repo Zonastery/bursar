@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
 export const DeductionRowSchema = z
   .object({
@@ -110,7 +110,10 @@ export class DeductionRepository {
       params.measures,
       params.dimensions,
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "DeductionRepository.deductWithAllowance") as Record<
+      string,
+      unknown
+    >;
     const details =
       row.error_code != null
         ? undefined
@@ -152,7 +155,11 @@ export class DeductionRepository {
       params.measures,
       params.dimensions,
     ]);
-    return safeParse(UsageRecordRowSchema, rows?.[0] ?? {}, "DeductionRepository.recordUsage");
+    return safeParse(
+      UsageRecordRowSchema,
+      requireRow(rows, "DeductionRepository.recordUsage"),
+      "DeductionRepository.recordUsage",
+    );
   }
 
   /** Refund a previous credit deduction. */
@@ -170,7 +177,7 @@ export class DeductionRepository {
       reason,
       metadata,
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "DeductionRepository.refundCredits") as Record<string, unknown>;
     return safeParse(
       RefundRowSchema,
       {
@@ -187,7 +194,10 @@ export class DeductionRepository {
   /** Revoke credits by transaction type. */
   async revokeCreditsByEntryType(userId: string, entryType: string): Promise<RevokeRow> {
     const rows = await this.callproc("revoke_subject_credits_by_operation", [userId, entryType]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "DeductionRepository.revokeCreditsByEntryType") as Record<
+      string,
+      unknown
+    >;
     return safeParse(
       RevokeRowSchema,
       {

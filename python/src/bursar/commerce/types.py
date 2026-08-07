@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 from bursar.billing.contracts import BillingEventSink
 from bursar.billing.types import (
     BillingAutoRechargeStatus,
-    BillingInvoiceInfo,
+    BillingInvoiceRecord,
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionState,
@@ -247,7 +247,7 @@ class CreditSpendSource(_CommerceModel):
     type: Literal["allowance", "bucket"]
     key: str
     label: str
-    priority: int | None
+    priority: int
 
 
 class AccountCreditOverview(_CommerceModel):
@@ -271,7 +271,7 @@ class AccountCommerceOverview(_CommerceModel):
     preferences: BillingPreferences
     payment_methods: list[PaymentMethodInfo]
     documents: list[BillingDocumentRef]
-    provider_invoices: list[BillingInvoiceInfo]
+    provider_invoices: list[BillingInvoiceRecord]
     transactions: list[LedgerEntry]
     usage: list[UsageCharge]
     auto_recharge: BillingAutoRechargeStatus | None

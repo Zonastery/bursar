@@ -57,10 +57,10 @@ options when an application needs subscriptions, top-ups, or auto-recharge:
   import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
   import { StripeProvider } from "@zonastery/bursar/providers";
 
-  const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+  const billingStore = new PostgresBillingStore({ postgres: databaseUrl, tenantId });
 
   const bursar = new Bursar({
-    creditStore: new PostgresStore(databaseUrl, tenantId),
+    creditStore: new PostgresStore({ postgres: databaseUrl, tenantId }),
     billingStore,
     commerceOptions: {
       defaultProvider: "stripe",

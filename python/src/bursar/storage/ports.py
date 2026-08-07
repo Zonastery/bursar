@@ -101,7 +101,4 @@ class BillingPayloadArchiveResult(_StorageModel):
 
 
 class BillingPayloadArchive(Protocol):
-    @property
-    def purge_postgres_payload(self) -> bool: ...
-
     def archive(self, event: BillingEventPayloadExport) -> BillingPayloadArchiveResult: ...

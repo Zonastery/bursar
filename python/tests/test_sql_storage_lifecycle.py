@@ -599,8 +599,7 @@ def test_billing_claim_stores_bounded_payload_separately(
             SELECT bursar.archive_billing_event_payload(
                 %s::uuid,
                 'billing/stripe/evt-bounded-1.json',
-                'version-1',
-                true
+                'version-1'
             )
             """,
             (event_id,),

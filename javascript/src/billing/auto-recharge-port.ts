@@ -7,7 +7,7 @@ import type {
 
 /** Narrow billing capability required by AutoRechargeService. */
 export interface AutoRechargeBillingPort {
-  getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
+  getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
   resolveTopup(
     provider: string,
     productId?: string | null,

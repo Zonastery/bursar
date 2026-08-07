@@ -24,8 +24,8 @@ from bursar.credits.types import (
     BalanceResult,
     BillingMode,
     BucketBalancesResult,
-    BursarConfigHistoryItem,
-    BursarConfigResult,
+    CatalogRevision,
+    CatalogRevisionSummary,
     CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
@@ -189,7 +189,7 @@ class CreditStore(ABC):
         2. Honors ``idempotency_key`` (user-scoped) — a replay returns the
             original result with ``idempotent=True``. The replayed
             ``balance_after`` is the balance at the time of the *original* call,
-            not the current balance (Fix 8).
+            not the current balance.
         3. Consumes free allowance first (``allowance_consumed`` on the result),
             charging only the net remainder to the balance.
         4. Enforces the canonical plan credit policy and quotas server-side.
@@ -220,7 +220,7 @@ class CreditStore(ABC):
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
     #
-    # The lease is the canonical admission primitive (interface plan §3/D4).
+    # The lease is the canonical admission primitive.
     # ``reserve``/``settle``/``release``/``renew`` on the manager map onto these.
     # Leases reuse the credit_reservations table/records extended with a status
     # (active → settled | released | expired), a billing mode, and an overdraft
@@ -234,7 +234,7 @@ class CreditStore(ABC):
         operation_type: str,
         options: CreateLeaseOptions | None = None,
     ) -> LeaseResult:
-        """Atomically acquire a lease (hold) — the only admission control (D4).
+        """Atomically acquire a lease (hold) — the only authoritative admission control.
 
         Under one lock the store: (1) ensures the balance row exists; (2) enforces
         ``max_concurrent`` by **counting active leases** for ``(user_id,
@@ -258,7 +258,7 @@ class CreditStore(ABC):
         amount: Decimal,
         options: SettleLeaseOptions | None = None,
     ) -> DeductionResult:
-        """Charge the **actual** cost against a lease, then mark it settled (D5).
+        """Charge the actual cost against a lease, then mark it settled.
 
         De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft),
         never clamps to the lease amount.
@@ -288,7 +288,7 @@ class CreditStore(ABC):
     def release_lease(self, user_id: str, lease_id: str) -> ReleaseResult:
         """Release a lease without charging (work failed/aborted).
 
-        Idempotent and safe on missing/already-finalized leases (resolves H1):
+        Idempotent and safe on missing or already-finalized leases:
         transitions an ``active``/``expired`` lease to ``released`` and reports
         ``released=True``; otherwise reports ``released=False`` with a ``reason``.
         """
@@ -307,7 +307,7 @@ class CreditStore(ABC):
     def get_available(self, user_id: str) -> AvailableResult:
         """Advisory, non-locking read of ``available = balance − Σ active holds``.
 
-        For UI only — never an admission gate (D4/H3); the value may be stale the
+        For UI only — never an admission gate; the value may be stale the
         instant it is read.
         """
         ...
@@ -329,21 +329,21 @@ class CreditStore(ABC):
         """Execute one configured grant-program event."""
         raise CapabilityNotSupportedError("execute_grant_program is not supported by this store")
 
-    # ── Pricing configuration ──────────────────────────────────────────
+    # ── Catalog configuration ──────────────────────────────────────────
 
     @abstractmethod
-    def get_active_pricing(self) -> BursarConfigResult | None:
-        """Fetch the active pricing configuration from the store."""
+    def get_active_catalog(self) -> CatalogRevision | None:
+        """Fetch the active catalog revision from the store."""
         ...
 
     @abstractmethod
-    def set_active_pricing(
+    def publish_and_activate_catalog(
         self,
         config: dict[str, Any],
         label: str | None = None,
         rollout: CatalogRollout | dict[str, Any] | None = None,
     ) -> str:
-        """Publish a new pricing configuration.
+        """Publish and activate a catalog revision.
 
         Deactivates the previous active config and inserts a new one.
         Returns the new config id.
@@ -351,22 +351,22 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def get_pricing_history(self) -> list[BursarConfigHistoryItem]:
-        """List all pricing config versions (newest first)."""
+    def get_catalog_history(self) -> list[CatalogRevisionSummary]:
+        """List catalog revisions, newest first."""
         ...
 
     @abstractmethod
-    def get_bursar_config(self, version: int) -> BursarConfigResult | None:
-        """Fetch a specific pricing config by version number."""
+    def get_catalog_revision(self, version: int) -> CatalogRevision | None:
+        """Fetch a catalog revision by version number."""
         ...
 
     @abstractmethod
-    def activate_pricing(
+    def activate_catalog_revision(
         self,
         version: int,
         rollout: CatalogRollout | dict[str, Any] | None = None,
     ) -> str:
-        """Activate a specific pricing version (deactivates all others).
+        """Activate a catalog revision (deactivates all others).
 
         Args:
             version: The version number to activate.
@@ -377,12 +377,12 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def publish_pricing(
+    def publish_catalog_draft(
         self,
         config: dict[str, Any],
         label: str | None = None,
     ) -> str:
-        """Publish an inactive pricing draft without changing the live catalog."""
+        """Publish an inactive catalog draft without changing the live catalog."""
         ...
 
     # ── Plan management ────────────────────────────────────────────────
@@ -399,7 +399,7 @@ class CreditStore(ABC):
         and inspects the ``features`` dict. Override in custom stores for
         optimized queries.
 
-        Feature presence is distinguished from truthiness (contract §5, M6):
+        Feature presence is distinguished from truthiness:
         the feature is considered present when the key exists and its value is
         not ``None``/``False``. Numeric ``0`` and empty string ``""`` are
         therefore *present* (``has_feature=True``).
@@ -409,7 +409,7 @@ class CreditStore(ABC):
         Note: identity checks (``is None``/``is False``) are used rather than the
         contract's literal ``not in (None, False)``, because ``0 == False`` /
         ``0.0 == False`` in Python would otherwise mis-classify numeric ``0`` as
-        absent — defeating the very M6 intent ("numeric ``0``/``""`` ⇒ present").
+        absent even though numeric ``0`` and ``""`` are present values.
         """
         plan = self.get_user_plan(user_id)
         entitlement = plan.entitlements.get(feature)
@@ -544,7 +544,7 @@ class CreditStore(ABC):
         """
         ...
 
-    # ── Usage analytics (optional capability — WS8) ──────────────────────
+    # ── Usage analytics (optional capability) ────────────────────────────
     #
     # These methods have a default implementation that raises
     # CapabilityNotSupportedError. Override them to support usage analytics;
@@ -670,7 +670,7 @@ class CreditStore(ABC):
         """Return one ledger entry when it belongs to the user account."""
         raise CapabilityNotSupportedError("get_ledger_entry not supported by this store")
 
-    # ── Team/shared balance pools (optional capability — WS8) ──────────────
+    # ── Team/shared balance pools (optional capability) ───────────────────
 
     def create_team(
         self,
@@ -753,7 +753,7 @@ class CreditStore(ABC):
             metadata: Extra metadata.
             idempotency_key: Optional replay key. A retried team deduction with
                 the same key returns the original result rather than charging
-                the shared pool again (contract §2/H12).
+                the shared pool again.
 
         Returns:
             ``TeamDeductionResult`` with ledger entry details.

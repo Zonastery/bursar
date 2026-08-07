@@ -24,19 +24,27 @@ import type {
 import type { BillingEventSink } from "../../bursar.js";
 import { handleStripeWebhook } from "./event-mapper.js";
 
+export interface StripeProviderOptions {
+  getClient: () => Stripe;
+  webhookSecret: string;
+  eventSink: BillingEventSink;
+  logger?: ProviderLogger | null;
+}
+
 export class StripeProvider implements PaymentProvider {
   readonly provider = "stripe" as const;
+  private readonly getStripe: () => Stripe;
+  private readonly sink: BillingEventSink;
+  private readonly webhookSecret: string;
+  private readonly logger: ReturnType<typeof normalizeProviderLogger>;
 
-  constructor(
-    private getStripe: () => Stripe,
-    private sink: BillingEventSink,
-    private webhookSecret: string,
-    logger?: ProviderLogger | null,
-  ) {
-    this.logger = normalizeProviderLogger(logger);
+  constructor(options: StripeProviderOptions) {
+    if (!options.webhookSecret.trim()) throw new TypeError("webhookSecret must not be empty");
+    this.getStripe = options.getClient;
+    this.sink = options.eventSink;
+    this.webhookSecret = options.webhookSecret;
+    this.logger = normalizeProviderLogger(options.logger);
   }
-
-  private logger: ReturnType<typeof normalizeProviderLogger>;
 
   async createCheckoutSession(
     params: CheckoutParams,
@@ -201,10 +209,16 @@ export class StripeProvider implements PaymentProvider {
 
   async listPaymentMethods(customerId: string): Promise<PaymentMethodInfo[]> {
     const stripe = this.getStripe();
-    const methods = await stripe.paymentMethods.list({
-      customer: customerId,
-      type: "card",
-    });
+    const [customer, methods] = await Promise.all([
+      stripe.customers.retrieve(customerId),
+      stripe.paymentMethods.list({ customer: customerId, type: "card" }),
+    ]);
+    if (customer.deleted) return [];
+    const defaultPaymentMethod = customer.invoice_settings.default_payment_method;
+    const defaultId =
+      typeof defaultPaymentMethod === "string"
+        ? defaultPaymentMethod
+        : (defaultPaymentMethod?.id ?? null);
     return deduplicatePaymentMethods(
       methods.data.map((pm) => ({
         id: pm.id,
@@ -212,20 +226,8 @@ export class StripeProvider implements PaymentProvider {
         brand: pm.card?.brand ?? "unknown",
         expiryMonth: pm.card?.exp_month ?? 0,
         expiryYear: pm.card?.exp_year ?? 0,
+        isDefault: pm.id === defaultId,
       })),
-    );
-  }
-
-  async getDefaultPaymentMethod(customerId: string): Promise<PaymentMethodInfo | null> {
-    const customer = await this.getStripe().customers.retrieve(customerId);
-    if (customer.deleted) return null;
-    const defaultId =
-      typeof customer.invoice_settings.default_payment_method === "string"
-        ? customer.invoice_settings.default_payment_method
-        : customer.invoice_settings.default_payment_method?.id;
-    if (!defaultId) return null;
-    return (
-      (await this.listPaymentMethods(customerId)).find((method) => method.id === defaultId) ?? null
     );
   }
 

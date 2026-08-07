@@ -2,7 +2,7 @@ import type { NormalizedLogger } from "../shared/logger.js";
 import { normalizeLogger } from "../shared/logger.js";
 import type { BillingStore } from "./billing-store.js";
 import type { BillingEvent, BillingEventHandler, BillingEventResult } from "./types/index.js";
-import { BillingEventType } from "./types/index.js";
+import { assertBillingEvent, BillingEventType } from "./types/index.js";
 import { BillingEventHandlers } from "./event-handlers.js";
 import type { BillingServiceOptions } from "./service-types.js";
 import { boundedDiagnosticMessage } from "../shared/diagnostics.js";
@@ -35,6 +35,7 @@ export class BillingEventProcessor {
   }
 
   async ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult> {
+    assertBillingEvent(event);
     this.logger.debug("[BillingService] ingestBillingEvent", {
       eventId: event.eventId,
       provider: event.provider,

@@ -42,8 +42,8 @@ import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
 import { StripeProvider } from "@zonastery/bursar/providers";
 
 const bursar = new Bursar({
-  creditStore: new PostgresStore(databaseUrl, tenantId),
-  billingStore: new PostgresBillingStore(databaseUrl, tenantId),
+  creditStore: new PostgresStore({ postgres: databaseUrl, tenantId }),
+  billingStore: new PostgresBillingStore({ postgres: databaseUrl, tenantId }),
   commerceOptions: {
     defaultProvider: "stripe",
     providers: {

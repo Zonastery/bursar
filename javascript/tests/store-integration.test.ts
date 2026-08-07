@@ -8,12 +8,7 @@ import {
   QuotaExceededError,
 } from "../src/errors.js";
 import { PostgresStore } from "../src/credits/postgres/store.js";
-import {
-  BOOTSTRAP_SQL,
-  TEST_TENANT_ID,
-  applyMigrations,
-  truncateBursarTables,
-} from "./helpers/bootstrap.js";
+import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 const USER_ID = "00000000-0000-0000-0000-000000000902";
@@ -123,15 +118,10 @@ const CONFIG = {
 
 describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration", () => {
   const pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 2 });
-  const store = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool);
+  const store = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
 
   beforeAll(async () => {
-    await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
-    await pool.query("INSERT INTO auth.users (id) VALUES ($1) ON CONFLICT DO NOTHING", [USER_ID]);
-    await pool.query('INSERT INTO public."user" (id) VALUES ($1) ON CONFLICT DO NOTHING', [
-      USER_ID,
-    ]);
     await truncateBursarTables(pool);
   }, 60_000);
   afterAll(async () => pool.end());
@@ -139,7 +129,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
   it("publishes the public config, charges a generic operation, and preserves bucket order", async () => {
     const startedAt = new Date(Date.now() - 1_000);
     const service = new CreditsService(store);
-    await service.publishPricingFromDict(CONFIG);
+    await service.publishAndActivateCatalog(CONFIG);
     await service.setUserPlan(USER_ID, "pro");
     await service.setUserPlan(REPLAY_USER_ID, "pro");
     const first = await service.addCredits(REPLAY_USER_ID, new Decimal(25), {
@@ -172,22 +162,20 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
         measures: { input_tokens: 2, output_tokens: 4 },
         dimensions: { model: "premium-x" },
       },
-      "public-config-charge-1",
-      undefined,
-      "premium_tools",
+      { idempotencyKey: "public-config-charge-1", feature: "premium_tools" },
     );
     expect(result.amount.toString()).toBe("16");
     const freeResult = await service.deduct(
       USER_ID,
       { operation: "free_export", measures: { calls: 1 }, dimensions: {} },
-      "public-config-free-usage",
+      { idempotencyKey: "public-config-free-usage" },
     );
     expect(freeResult.amount.toString()).toBe("0");
     await expect(
       service.deduct(
         USER_ID,
         { operation: "internal_free", measures: { calls: 1 }, dimensions: {} },
-        "public-config-free-not-allowed",
+        { idempotencyKey: "public-config-free-not-allowed" },
       ),
     ).rejects.toBeInstanceOf(OperationNotAllowedError);
     const persistedUsage = await pool.query(
@@ -215,7 +203,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
           measures: { input_tokens: 2, output_tokens: 0 },
           dimensions: { model: "premium-x" },
         },
-        "public-config-charge-quota-block",
+        { idempotencyKey: "public-config-charge-quota-block" },
       ),
     ).rejects.toBeInstanceOf(QuotaExceededError);
     await expect(
@@ -226,9 +214,10 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
           measures: { input_tokens: 0, output_tokens: 0 },
           dimensions: { model: "premium-x" },
         },
-        "public-config-charge-entitlement-block",
-        undefined,
-        "missing_feature",
+        {
+          idempotencyKey: "public-config-charge-entitlement-block",
+          feature: "missing_feature",
+        },
       ),
     ).rejects.toBeInstanceOf(FeatureNotEntitledError);
     const quotaState = await service.getQuotaState(USER_ID, "input_budget");
@@ -406,25 +395,25 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
     expect(preview.expiredAmount.toString()).toBe("3");
     const swept = await store.sweepExpiredCredits(false, USER_ID);
     expect(swept).toMatchObject({ expiredCount: 1, dryRun: false });
-    expect(swept.expiredByBucket?.grant.toString()).toBe("3");
+    expect(swept.expiredByBucket?.grant?.toString()).toBe("3");
 
-    const activeBeforeDraft = await store.getActivePricing();
+    const activeBeforeDraft = await store.getActiveCatalog();
     const draftConfig = structuredClone(CONFIG);
     draftConfig.plans.pro.display_name = "Pro v2";
-    const draftId = await service.publishPricingDraft(draftConfig, "Pro v2 draft");
+    const draftId = await service.publishCatalogDraft(draftConfig, "Pro v2 draft");
     expect(draftId).not.toBe("");
-    expect((await store.getActivePricing())?.version).toBe(activeBeforeDraft?.version);
-    const history = await store.getPricingHistory();
+    expect((await store.getActiveCatalog())?.version).toBe(activeBeforeDraft?.version);
+    const history = await store.getCatalogHistory();
     const draft = history.find((revision) => revision.id === draftId);
     expect(draft?.active).toBe(false);
     expect(history.some((revision) => revision.active)).toBe(true);
-    expect((await store.getBursarConfig(draft!.version))?.config).toMatchObject({
+    expect((await store.getCatalogRevision(draft!.version))?.config).toMatchObject({
       plans: { pro: { display_name: "Pro v2" } },
     });
     const sourcePlanId = (await store.getUserPlan(USER_ID)).planId;
     expect(sourcePlanId).not.toBeNull();
-    await service.activatePricing(draft!.version);
-    expect((await store.getActivePricing())?.version).toBe(draft!.version);
+    await service.activateCatalogRevision(draft!.version);
+    expect((await store.getActiveCatalog())?.version).toBe(draft!.version);
     const targetPlanResult = await pool.query<{ id: string }>(
       `SELECT plan.id
        FROM bursar.catalog_plans AS plan

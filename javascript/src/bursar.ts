@@ -10,27 +10,86 @@ import {
 import type { CreditStore } from "./credits/store.js";
 import type { CreditEventEmitter } from "./credits/events.js";
 import type { BillingEvent, BillingEventResult } from "./billing/types/index.js";
-import type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+import type { BillingCapability, BillingEventSink } from "./billing/contracts.js";
 import { CommerceService as CommerceServiceImpl } from "./commerce/service.js";
 import { CommerceNotConfiguredError } from "./commerce/errors.js";
 import type { CommerceOptions } from "./commerce/types.js";
 import { loadConfigFromDict } from "./config.js";
 import type { CatalogRollout, ParsedBursarConfig } from "./config/types.js";
-import { ConfigError, PricingNotLoadedError } from "./errors.js";
+import { CapabilityNotConfiguredError, ConfigError, CatalogNotLoadedError } from "./errors.js";
 import { projectPublicCatalog, type PublicCatalog } from "./catalog.js";
 import type { CreditMetadata, GrantProgramAwardResult } from "./credits/types/index.js";
 import { retryBursarOperation } from "./retry.js";
-export type { BillingCapability as BillingService, BillingEventSink } from "./billing/contracts.js";
+export type { BillingCapability, BillingEventSink } from "./billing/contracts.js";
 export type { CommerceOptions } from "./commerce/types.js";
 
-/** Public credit capability. The implementation remains package-private. */
-export type CreditsService = Pick<CreditsServiceImpl, keyof CreditsServiceImpl>;
+/**
+ * Stable public credit capability exposed by {@link Bursar}.
+ *
+ * The explicit method list prevents implementation helpers added to
+ * `CreditsServiceImpl` from silently becoming public API.
+ */
+export type CreditsService = Pick<
+  CreditsServiceImpl,
+  | "getUserPlan"
+  | "checkFeature"
+  | "getQuotaState"
+  | "listQuotaEvents"
+  | "startPlanMigration"
+  | "migratePlanBatch"
+  | "revokeCreditsByEntryType"
+  | "executeGrantProgram"
+  | "getLedgerEntry"
+  | "getAvailable"
+  | "aggregateStats"
+  | "spendByUser"
+  | "spendByModel"
+  | "listLedgerEntries"
+  | "listUsageEntries"
+  | "listUsageCharges"
+  | "topUsers"
+  | "dailySpend"
+  | "setUserPlan"
+  | "unsetUserPlan"
+  | "getBalance"
+  | "addCredits"
+  | "deductCredits"
+  | "grantSubscriptionCycle"
+  | "reserve"
+  | "settle"
+  | "release"
+  | "renew"
+  | "canAfford"
+  | "getBucketBalances"
+  | "checkAllowance"
+  | "runBilled"
+  | "beginBilledOperation"
+  | "deduct"
+  | "recordUsage"
+  | "deductFlatJob"
+  | "refundCredits"
+  | "deductTeam"
+  | "sweepExpiredCredits"
+>;
+
+type CatalogCreditsService = Pick<
+  CreditsServiceImpl,
+  | "getActiveCatalog"
+  | "loadCatalogFromStore"
+  | "refreshCatalogIfStale"
+  | "invalidateCatalog"
+  | "publishAndActivateCatalog"
+  | "publishCatalogDraft"
+  | "activateCatalogRevision"
+  | "pricingEngine"
+  | "setPlanRevisionPin"
+  | "applyDuePlanChanges"
+>;
 
 /** Options for constructing the single application-facing Bursar service. */
 export interface BursarOptions {
   creditStore: CreditStore;
   billingStore?: BillingStore | null;
-  credits?: CreditsService | null;
   creditsOptions?: CreditsServiceOptions | null;
   billingOptions?: BillingServiceOptions | null;
   commerceOptions?: CommerceOptions | null;
@@ -39,15 +98,36 @@ export interface BursarOptions {
 
 /** Catalog operations. Configuration writes live here, never in BillingService. */
 export class CatalogService {
-  constructor(private readonly credits: CreditsService) {}
+  constructor(private readonly credits: CatalogCreditsService) {}
 
-  get active() {
-    return this.credits.getActivePricing();
+  /** Return the active persisted catalog revision, if one exists. */
+  getActive() {
+    return this.credits.getActiveCatalog();
+  }
+
+  /** Whether this process currently has a pricing engine loaded. */
+  get isLoaded(): boolean {
+    return this.credits.pricingEngine !== null;
+  }
+
+  /** Load the active persisted catalog into this process. */
+  load(): Promise<void> {
+    return this.credits.loadCatalogFromStore();
+  }
+
+  /** Block until a stale in-process catalog has been refreshed. */
+  refresh(): Promise<void> {
+    return this.credits.refreshCatalogIfStale();
+  }
+
+  /** Force the next refresh to reload the active catalog. */
+  invalidate(): void {
+    this.credits.invalidateCatalog();
   }
 
   async getConfig(): Promise<ParsedBursarConfig> {
-    const active = await this.active;
-    if (!active) throw new PricingNotLoadedError("No active Bursar catalog is available");
+    const active = await this.getActive();
+    if (!active) throw new CatalogNotLoadedError("No active Bursar catalog is available");
     return loadConfigFromDict(active.config);
   }
 
@@ -56,22 +136,22 @@ export class CatalogService {
   }
 
   publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
-    return this.credits.publishPricingDraft(config, label);
+    return this.credits.publishCatalogDraft(config, label);
   }
 
   activate(
     version: number,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string> {
-    return this.credits.activatePricing(version, rollout);
+    return this.credits.activateCatalogRevision(version, rollout);
   }
 
   publishAndActivate(
     config: Record<string, unknown>,
     label?: string | null,
     rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<void> {
-    return this.credits.publishPricing(config, label, rollout);
+  ): Promise<string> {
+    return this.credits.publishAndActivateCatalog(config, label, rollout);
   }
 
   /** Pin or unpin one current assignment from automatic catalog rollout. */
@@ -158,35 +238,34 @@ export class AccountService {
  */
 export class Bursar implements BillingEventSink {
   readonly credits: CreditsService;
-  readonly billing: BillingService | null;
+  readonly billing: BillingCapability | null;
   readonly commerce: CommerceServiceImpl | null;
   readonly catalog: CatalogService;
   readonly accounts: AccountService;
 
   constructor(options: BursarOptions) {
-    this.credits =
-      options.credits ??
-      new CreditsServiceImpl(
-        options.creditStore,
-        undefined,
-        options.emitter ?? undefined,
-        options.creditsOptions ?? undefined,
-      );
-    this.catalog = new CatalogService(this.credits);
-    this.accounts = new AccountService(this.credits, this.catalog);
+    const credits = new CreditsServiceImpl(
+      options.creditStore,
+      undefined,
+      options.emitter ?? undefined,
+      options.creditsOptions ?? undefined,
+    );
+    this.credits = credits;
+    this.catalog = new CatalogService(credits);
+    this.accounts = new AccountService(credits, this.catalog);
 
     this.billing = options.billingStore
       ? new BillingEventService(options.billingStore, {
           ...(options.billingOptions ?? {}),
-          provisioning: this.credits,
+          provisioning: credits,
         })
       : null;
     this.commerce =
       this.billing && options.commerceOptions
-        ? new CommerceServiceImpl(this.billing, this.credits, this, options.commerceOptions)
+        ? new CommerceServiceImpl(this.billing, credits, this, options.commerceOptions)
         : null;
     if (this.commerce) {
-      this.credits.addPostDeductionHook(async ({ userId }) => {
+      credits.addPostDeductionHook(async ({ userId }) => {
         await this.commerce!.autoRecharge.processIfNeeded({ accountId: userId });
       });
     }
@@ -194,7 +273,23 @@ export class Bursar implements BillingEventSink {
 
   /** Load the active catalog into the pricing engine. */
   async loadCatalog(): Promise<void> {
-    await this.credits.loadPricingFromStore();
+    await this.catalog.load();
+  }
+
+  /** Return billing or raise the SDK's typed configuration error. */
+  requireBilling(): BillingCapability {
+    if (!this.billing) {
+      throw new CapabilityNotConfiguredError("billing");
+    }
+    return this.billing;
+  }
+
+  /** Return commerce or raise the SDK's typed configuration error. */
+  requireCommerce(): CommerceServiceImpl {
+    if (!this.commerce) {
+      throw new CommerceNotConfiguredError("Bursar commerce capability is not configured");
+    }
+    return this.commerce;
   }
 
   /**
@@ -202,8 +297,6 @@ export class Bursar implements BillingEventSink {
    * lifecycle. Providers must not depend on BillingService directly.
    */
   async ingestBillingEvent(event: BillingEvent): Promise<BillingEventResult> {
-    if (!this.billing)
-      throw new CommerceNotConfiguredError("Bursar billing capability is not configured");
-    return this.billing.ingestBillingEvent(event);
+    return this.requireBilling().ingestBillingEvent(event);
   }
 }

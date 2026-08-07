@@ -44,8 +44,8 @@ import type {
   LedgerPage,
   UsageChargePage,
   UsageRecordResult,
-  BursarConfigHistoryItem,
-  BursarConfigResult,
+  CatalogRevisionSummary,
+  CatalogRevision,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -65,7 +65,7 @@ import type { CreateLeaseOptions, SettleLeaseOptions } from "../store.js";
 import { BalanceRepository } from "./repositories/balance.js";
 import { DeductionRepository } from "./repositories/deduction.js";
 import { LeaseRepository } from "./repositories/lease.js";
-import { PricingRepository } from "./repositories/pricing.js";
+import { CatalogRepository } from "./repositories/catalog.js";
 import { PlanRepository } from "./repositories/plan.js";
 import { AnalyticsRepository } from "./repositories/analytics.js";
 import { TeamRepository } from "./repositories/team.js";
@@ -77,7 +77,7 @@ import {
   decimalValue as dec,
   mapLedgerEntry,
   mapUsageCharge,
-  normalizeBursarConfig,
+  normalizeCatalogRevision,
   parseAdmissionOperations,
   parseEntitlements,
 } from "./value-mappers.js";
@@ -86,10 +86,24 @@ const DEFAULT_LEASE_TTL_SECONDS = 600;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 
+function requireText(value: unknown, context: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new StoreError(`${context} returned a missing or invalid identifier`);
+  }
+  return value;
+}
+
 export type PgPool = PostgresPool;
 export type PgPoolConstructor = PostgresPoolConstructor;
 
+/** Construction options for the PostgreSQL credit store. */
 export interface PostgresStoreOptions extends PostgresConnectionOptions {
+  /** PostgreSQL connection string or an application-owned pool. */
+  postgres: string | PgPool;
+  /** Tenant UUID bound to every store transaction. */
+  tenantId: string;
+  /** Injectable `pg.Pool` constructor for custom runtimes and tests. */
+  poolConstructor?: PgPoolConstructor;
   usageBackend?: "postgres" | "clickhouse";
 }
 
@@ -99,7 +113,7 @@ export class PostgresStore extends CreditStore {
   private _balanceRepo: BalanceRepository | null = null;
   private _deductionRepo: DeductionRepository | null = null;
   private _leaseRepo: LeaseRepository | null = null;
-  private _pricingRepo: PricingRepository | null = null;
+  private _catalogRepo: CatalogRepository | null = null;
   private _planRepo: PlanRepository | null = null;
   private _analyticsRepo: AnalyticsRepository | null = null;
   private _teamRepo: TeamRepository | null = null;
@@ -126,11 +140,11 @@ export class PostgresStore extends CreditStore {
     return this._leaseRepo;
   }
 
-  private get pricingRepo(): PricingRepository {
-    if (!this._pricingRepo) {
-      this._pricingRepo = new PricingRepository(this.callproc.bind(this));
+  private get catalogRepo(): CatalogRepository {
+    if (!this._catalogRepo) {
+      this._catalogRepo = new CatalogRepository(this.callproc.bind(this));
     }
-    return this._pricingRepo;
+    return this._catalogRepo;
   }
 
   private get planRepo(): PlanRepository {
@@ -161,52 +175,27 @@ export class PostgresStore extends CreditStore {
     return this._bucketRepo;
   }
 
-  constructor(
-    databaseUrl: string,
-    tenantId: string,
-    poolOrCtorOrOptions?: PgPool | PgPoolConstructor | PostgresStoreOptions,
-    storageOptions?: PostgresStoreOptions,
-  ) {
+  constructor(options: PostgresStoreOptions) {
     super();
-    const isPool =
-      typeof poolOrCtorOrOptions === "object" &&
-      poolOrCtorOrOptions !== null &&
-      typeof (poolOrCtorOrOptions as PgPool).query === "function";
-    const isPoolConstructor = typeof poolOrCtorOrOptions === "function";
-    const poolOrCtor =
-      isPool || isPoolConstructor ? (poolOrCtorOrOptions as PgPool | PgPoolConstructor) : undefined;
-    const options =
-      poolOrCtorOrOptions && !isPool && !isPoolConstructor
-        ? (poolOrCtorOrOptions as PostgresStoreOptions)
-        : storageOptions;
-    if (poolOrCtor && typeof (poolOrCtor as PgPool).query === "function") {
-      this.postgres = new PostgresClient(poolOrCtor as PgPool, {
-        tenantId,
-        usageBackend: options?.usageBackend,
-        connectionTimeoutMs: options?.connectionTimeoutMs,
-        statementTimeoutMs: options?.statementTimeoutMs,
-        idleTransactionTimeoutMs: options?.idleTransactionTimeoutMs,
-        idleTimeoutMs: options?.idleTimeoutMs,
-        maxConnections: options?.maxConnections,
-        applicationName: options?.applicationName,
-        onPoolError: options?.onPoolError,
-        closedError: () => new StoreClosedError("Credit store has been closed"),
-      });
-    } else {
-      this.postgres = new PostgresClient(databaseUrl, {
-        tenantId,
-        usageBackend: options?.usageBackend,
-        poolConstructor: poolOrCtor as PgPoolConstructor | undefined,
-        connectionTimeoutMs: options?.connectionTimeoutMs,
-        statementTimeoutMs: options?.statementTimeoutMs,
-        idleTransactionTimeoutMs: options?.idleTransactionTimeoutMs,
-        idleTimeoutMs: options?.idleTimeoutMs,
-        maxConnections: options?.maxConnections,
-        applicationName: options?.applicationName,
-        onPoolError: options?.onPoolError,
-        closedError: () => new StoreClosedError("Credit store has been closed"),
-      });
+    if (typeof options !== "object" || options === null) {
+      throw new TypeError("PostgresStore options are required");
     }
+    if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
+      throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
+    }
+    this.postgres = new PostgresClient(options.postgres, {
+      tenantId: options.tenantId,
+      usageBackend: options.usageBackend,
+      poolConstructor: options.poolConstructor,
+      connectionTimeoutMs: options.connectionTimeoutMs,
+      statementTimeoutMs: options.statementTimeoutMs,
+      idleTransactionTimeoutMs: options.idleTransactionTimeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+      maxConnections: options.maxConnections,
+      applicationName: options.applicationName,
+      onPoolError: options.onPoolError,
+      closedError: () => new StoreClosedError("Credit store has been closed"),
+    });
   }
 
   private async query(text: string, params?: unknown[]): Promise<unknown[]> {
@@ -219,9 +208,11 @@ export class PostgresStore extends CreditStore {
 
   private static readonly RPC_NAME_RE = /^[a-z_][a-z0-9_]*$/;
   private static readonly SCALAR_RPC_NAMES = new Set([
+    "apply_due_plan_assignment_changes",
     "assign_plan",
     "release_lease",
     "remove_team_member",
+    "set_plan_revision_pin",
     "set_team_member",
     "start_plan_migration",
     "unassign_plan",
@@ -236,8 +227,9 @@ export class PostgresStore extends CreditStore {
     if (PostgresStore.SCALAR_RPC_NAMES.has(name) && rows.length === 1) {
       const row = rows[0] as Record<string, unknown>;
       const keys = Object.keys(row);
-      if (keys.length === 1) {
-        return [row[keys[0]]];
+      const key = keys[0];
+      if (keys.length === 1 && key !== undefined) {
+        return [row[key]];
       }
     }
     return rows;
@@ -281,7 +273,7 @@ export class PostgresStore extends CreditStore {
       throw new StoreError(`post_credit: ${String(row.error)}`);
     }
     return {
-      entryId: String(row.entry_id ?? ""),
+      entryId: requireText(row.entry_id, "post_credit"),
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount, amount),
       newBalance: dec(row.new_balance),
@@ -335,7 +327,7 @@ export class PostgresStore extends CreditStore {
 
     return {
       entryId: String(row.entry_id ?? ""),
-      usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
+      usageChargeId: requireText(row.charge_id, "charge_usage_for_operation"),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
@@ -364,17 +356,12 @@ export class PostgresStore extends CreditStore {
       dimensions: JSON.stringify(options?.dimensions ?? {}),
       metadata: JSON.stringify(options?.metadata ?? {}),
     });
-    if (row.charge_id == null && row.error_code == null) {
-      return {
-        usageId: "",
-        userId,
-        requested: ZERO,
-        idempotent: false,
-        error: "no result",
-      };
-    }
+    const usageId =
+      row.error_code == null
+        ? requireText(row.charge_id, "record_usage")
+        : String(row.charge_id ?? "");
     return {
-      usageId: String(row.charge_id ?? ""),
+      usageId,
       userId,
       requested: dec(row.requested),
       idempotent: Boolean(row.replayed),
@@ -402,19 +389,6 @@ export class PostgresStore extends CreditStore {
       maxConcurrent: options?.maxConcurrent ?? null,
     });
 
-    if (!row || Object.keys(row).length === 0) {
-      return {
-        leaseId: "",
-        userId,
-        amount: ZERO,
-        available: ZERO,
-        reservedTotal: ZERO,
-        minimumBalance: ZERO,
-        billingMode: options?.billingMode ?? "strict",
-        expiresAt: "",
-        error: "no result",
-      };
-    }
     const availability = await this.getAvailable(userId);
     if ("error" in row && row.error) {
       return {
@@ -430,14 +404,14 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      leaseId: String(row.lease_id ?? ""),
+      leaseId: requireText(row.lease_id, "create_lease_for_operation"),
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount),
       available: availability.available,
       reservedTotal: availability.reserved,
       minimumBalance: dec(row.minimum_balance),
       billingMode: dec(row.minimum_balance).lt(0) ? "overdraft" : "strict",
-      expiresAt: String(row.expires_at ?? ""),
+      expiresAt: requireText(row.expires_at, "create_lease_for_operation"),
     };
   }
 
@@ -460,18 +434,6 @@ export class PostgresStore extends CreditStore {
       metadata: JSON.stringify(options?.metadata ?? {}),
     });
 
-    if (!row || Object.keys(row).length === 0) {
-      return {
-        entryId: "",
-        usageChargeId: null,
-        userId,
-        amount: ZERO,
-        allowanceConsumed: ZERO,
-        balanceAfter: ZERO,
-        idempotent: false,
-        error: "no result",
-      };
-    }
     if ("error" in row && row.error) {
       return {
         entryId: "",
@@ -486,7 +448,7 @@ export class PostgresStore extends CreditStore {
     }
     return {
       entryId: String(row.entry_id ?? ""),
-      usageChargeId: row.charge_id != null ? String(row.charge_id) : null,
+      usageChargeId: requireText(row.charge_id, "settle_lease"),
       userId,
       amount: dec(row.amount),
       allowanceConsumed: dec(row.allowance_consumed),
@@ -528,14 +490,14 @@ export class PostgresStore extends CreditStore {
     const availability = await this.getAvailable(userId);
     const minimumBalance = dec(row.minimum_balance);
     return {
-      leaseId: String(row.lease_id ?? leaseId),
+      leaseId: requireText(row.lease_id, "renew_lease"),
       userId,
       amount: dec(row.amount),
       available: availability.available,
       reservedTotal: availability.reserved,
       minimumBalance,
       billingMode: minimumBalance.lt(0) ? "overdraft" : "strict",
-      expiresAt: String(row.expires_at ?? ""),
+      expiresAt: requireText(row.expires_at, "renew_lease"),
       error: row.error != null ? String(row.error) : null,
     };
   }
@@ -557,17 +519,17 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async getActivePricing(): Promise<BursarConfigResult | null> {
-    return this._loadActivePricing();
+  async getActiveCatalog(): Promise<CatalogRevision | null> {
+    return this.loadActiveCatalog();
   }
 
-  private async _loadActivePricing(): Promise<BursarConfigResult | null> {
-    const row = await this.pricingRepo.getActivePricing();
+  private async loadActiveCatalog(): Promise<CatalogRevision | null> {
+    const row = await this.catalogRepo.getActiveCatalog();
     if (!row || !row.config) return null;
-    return normalizeBursarConfig(row, 0);
+    return normalizeCatalogRevision(row, 0);
   }
 
-  async setActivePricing(
+  async publishAndActivateCatalog(
     config: Record<string, unknown>,
     label?: string | null,
     rollout?: CatalogRollout | Record<string, unknown> | null,
@@ -577,22 +539,28 @@ export class PostgresStore extends CreditStore {
     const rolloutDocument = canonicalCatalogRolloutDict(
       validateCatalogRollout(parsed, loadCatalogRollout(rollout ?? {})),
     );
-    const row = await this.pricingRepo.setActivePricing(
+    const row = await this.catalogRepo.publishAndActivateCatalog(
       JSON.stringify(canonical),
       label ?? null,
       rolloutDocument,
     );
-    return String(row.id ?? "");
+    return row.id;
   }
 
-  async publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string> {
+  async publishCatalogDraft(
+    config: Record<string, unknown>,
+    label?: string | null,
+  ): Promise<string> {
     const canonical = canonicalBursarConfigDict(config);
-    const row = await this.pricingRepo.publishPricing(JSON.stringify(canonical), label ?? null);
-    return String(row.id ?? "");
+    const row = await this.catalogRepo.publishCatalogDraft(
+      JSON.stringify(canonical),
+      label ?? null,
+    );
+    return row.id;
   }
 
-  async getPricingHistory(): Promise<BursarConfigHistoryItem[]> {
-    const rows = await this.pricingRepo.getPricingHistory();
+  async getCatalogHistory(): Promise<CatalogRevisionSummary[]> {
+    const rows = await this.catalogRepo.getCatalogHistory();
     if (!rows) return [];
     return (rows as Record<string, unknown>[]).map((r) => ({
       id: String(r.id ?? ""),
@@ -603,17 +571,17 @@ export class PostgresStore extends CreditStore {
     }));
   }
 
-  async getBursarConfig(version: number): Promise<BursarConfigResult | null> {
-    const row = await this.pricingRepo.getBursarConfig(version);
+  async getCatalogRevision(version: number): Promise<CatalogRevision | null> {
+    const row = await this.catalogRepo.getCatalogRevision(version);
     if (!row || !row.config) return null;
-    return normalizeBursarConfig(row, version);
+    return normalizeCatalogRevision(row, version);
   }
 
-  async activatePricing(
+  async activateCatalogRevision(
     version: number,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string> {
-    const target = await this.getBursarConfig(version);
+    const target = await this.getCatalogRevision(version);
     const parsedRollout = loadCatalogRollout(rollout ?? {});
     if (target != null) {
       validateCatalogRollout(
@@ -621,11 +589,11 @@ export class PostgresStore extends CreditStore {
         parsedRollout,
       );
     }
-    const row = await this.pricingRepo.activatePricing(
+    const row = await this.catalogRepo.activateCatalogRevision(
       version,
       canonicalCatalogRolloutDict(parsedRollout),
     );
-    return String(row.id ?? "");
+    return row.id;
   }
 
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
@@ -644,39 +612,38 @@ export class PostgresStore extends CreditStore {
         catalogRevisionPinned: false,
       };
     }
-    const allowanceAmount = dec(row.credit_allowance_amount);
+    let allowance: GetUserPlanResult["allowance"] = null;
+    if (row.credit_allowance_amount != null) {
+      const priority = row.credit_allowance_priority;
+      const resetUnit = row.credit_allowance_reset_unit;
+      const resetCount = row.credit_allowance_reset_count;
+      const resetAnchor = row.credit_allowance_reset_anchor;
+      const resetTimezone = row.credit_allowance_reset_timezone;
+      if (
+        priority == null ||
+        resetUnit == null ||
+        resetCount == null ||
+        resetAnchor == null ||
+        resetTimezone == null
+      ) {
+        throw new StoreError("get_user_plan returned an incomplete allowance policy");
+      }
+      allowance = {
+        amount: dec(row.credit_allowance_amount),
+        priority: Number(priority),
+        resetUnit: String(resetUnit),
+        resetCount: Number(resetCount),
+        resetAnchor: String(resetAnchor),
+        resetTimezone: String(resetTimezone),
+      };
+    }
     const admissionOperations = parseAdmissionOperations(row.operation_admission);
     return {
       userId: String(row.user_id ?? userId),
       planId: (row.plan_id as string) ?? null,
       planKey: (row.plan_key as string) ?? null,
       planLabel: (row.plan_label as string) ?? null,
-      allowance:
-        row.credit_allowance_amount == null
-          ? null
-          : {
-              amount: allowanceAmount,
-              priority:
-                row.credit_allowance_priority == null
-                  ? null
-                  : Number(row.credit_allowance_priority),
-              resetUnit:
-                row.credit_allowance_reset_unit == null
-                  ? null
-                  : String(row.credit_allowance_reset_unit),
-              resetCount:
-                row.credit_allowance_reset_count == null
-                  ? null
-                  : Number(row.credit_allowance_reset_count),
-              resetAnchor:
-                row.credit_allowance_reset_anchor == null
-                  ? null
-                  : String(row.credit_allowance_reset_anchor),
-              resetTimezone:
-                row.credit_allowance_reset_timezone == null
-                  ? null
-                  : String(row.credit_allowance_reset_timezone),
-            },
+      allowance,
       entitlements: parseEntitlements(row.entitlements),
       rateCard: row.rate_card != null ? String(row.rate_card) : null,
       creditPolicy:
@@ -730,7 +697,7 @@ export class PostgresStore extends CreditStore {
     );
     return {
       userId: String(row.user_id ?? userId),
-      planId: String(row.plan_id),
+      planId: requireText(row.plan_id, "assign_plan"),
       planAssignedAt: row.plan_assigned_at != null ? String(row.plan_assigned_at) : null,
     };
   }
@@ -864,7 +831,7 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      refundEntryId: String(row.refund_entry_id ?? ""),
+      refundEntryId: requireText(row.refund_entry_id, "refund_credit_by_entry"),
       originalEntryId: entryId,
       userId: String(row.user_id ?? ""),
       amount: dec(row.amount),
@@ -1003,7 +970,7 @@ export class PostgresStore extends CreditStore {
     const row = await this.teamRepo.createTeam(ownerSubjectId, name, decParam(initialBalance));
     if (row.error_code) throw new StoreError(String(row.error_code));
     return {
-      teamId: String(row.team_id ?? ""),
+      teamId: requireText(row.team_id, "create_team"),
       name: String(row.name ?? name),
     };
   }
@@ -1090,7 +1057,7 @@ export class PostgresStore extends CreditStore {
       };
     }
     return {
-      entryId: String(row.entry_id ?? ""),
+      entryId: requireText(row.entry_id, "deduct_team"),
       teamId: String(row.team_id ?? teamId),
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount, amount),

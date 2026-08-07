@@ -6,16 +6,17 @@
  * ``@zonastery/bursar/node`` subpath when you need Node-specific behaviour:
  *
  * ```ts
- * import { loadPricingFile } from "@zonastery/bursar/node";
+ * import { loadConfigFile } from "@zonastery/bursar/node";
  * ```
  */
 
-export { loadPricingFile } from "./load-pricing-file.js";
+export { loadConfigFile } from "./load-config-file.js";
 
 // Optional high-volume storage infrastructure. These adapters are Node-only;
 // the main package remains the PostgreSQL-first application API.
 export { BursarRuntime, createBursarRuntime } from "./storage/runtime.js";
 export type {
+  BursarRuntimeBursarOptions,
   BursarRuntimeHealth,
   BursarRuntimeOptions,
   BursarRuntimeStartOptions,

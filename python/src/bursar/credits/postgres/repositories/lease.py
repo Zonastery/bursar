@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_amount, validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_row, validate_amount, validate_non_empty
 from bursar.credits.postgres.repositories.schemas import (
     CreateLeaseParams,
     DeductionRow,
@@ -116,7 +116,8 @@ class LeaseRepository:
         validate_non_empty(user_id, "user_id")
         validate_non_empty(lease_id, "lease_id")
         rows = self._callproc("release_lease", [user_id, lease_id]) or []
-        return ReleaseRow.model_validate({"released": bool(rows and (rows[0] == "released" or rows[0] is True))})
+        result = require_row(rows, "LeaseRepository.release_lease")
+        return ReleaseRow.model_validate({"released": result == "released" or result is True})
 
     def renew_lease(self, user_id: str, lease_id: str, ttl_seconds: int) -> LeaseRow | None:
         validate_non_empty(user_id, "user_id")
@@ -147,4 +148,4 @@ class LeaseRepository:
     def expire_leases(self, limit: int) -> int:
         """Expire a bounded lease batch and release its reservations."""
         rows = self._callproc("expire_leases", [limit]) or []
-        return int(rows[0]) if rows else 0
+        return int(require_row(rows, "LeaseRepository.expire_leases"))

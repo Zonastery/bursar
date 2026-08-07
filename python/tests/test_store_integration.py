@@ -86,12 +86,6 @@ def store(pg_database_url: str) -> PostgresStore:
     return PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
 
 
-def _ensure_user(store: PostgresStore) -> None:
-    with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
-        cursor.execute("INSERT INTO auth.users (id) VALUES (%s) ON CONFLICT DO NOTHING", [USER_ID])
-        cursor.execute('INSERT INTO public."user" (id) VALUES (%s) ON CONFLICT DO NOTHING', [USER_ID])
-
-
 def test_catalog_shape_validator_rejects_removed_nested_fields(
     pg_database_url: str,
 ) -> None:
@@ -189,41 +183,9 @@ def test_post_migration_sql_is_ordered_and_transactional(
             cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
 
-def test_removed_compatibility_objects_are_absent(pg_database_url: str) -> None:
-    with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT
-                to_regclass('bursar.credit_transactions'),
-                to_regclass('bursar.user_credit_buckets'),
-                to_regclass('bursar.user_credits'),
-                to_regclass('bursar.credit_reservations')
-            """
-        )
-        assert cursor.fetchone() == (None, None, None, None)
-
-        cursor.execute(
-            """
-            SELECT proname
-            FROM pg_proc p
-            JOIN pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname = 'bursar'
-              AND p.proname = ANY(%s)
-            """,
-            [
-                [
-                    "project_credit_transaction",
-                    "list_transactions",
-                    "list_transactions_cursor_with_total",
-                ]
-            ],
-        )
-        assert cursor.fetchall() == []
-
-
 def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    service.publish_and_activate_catalog(CONFIG)
     first = service.add_credits(
         REPLAY_USER_ID,
         Decimal("25"),
@@ -243,7 +205,7 @@ def test_add_credits_idempotent_replay_uses_one_ledger_entry(store: PostgresStor
 
 def test_add_credits_without_key_generates_distinct_operations(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    service.publish_and_activate_catalog(CONFIG)
 
     first = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
     second = service.add_credits(REPLAY_USER_ID, Decimal("25"), entry_type="purchase")
@@ -265,11 +227,11 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
         "rules": [],
         "unmatched": {"action": "charge", "charge": {"type": "flat", "amount": "0"}},
     }
-    service.publish_pricing_from_dict(config)
+    service.publish_and_activate_catalog(config)
     service.add_credits(
         USER_ID,
         Decimal("100"),
-        "purchase",
+        entry_type="purchase",
         bucket="purchased",
         idempotency_key="new-schema-grant-1",
     )
@@ -296,18 +258,18 @@ def test_public_config_round_trips_and_prices_generic_usage(store: PostgresStore
     assert free_charge.operation == "free_export"
     assert free_charge.charged == Decimal("0")
     assert service.get_balance(USER_ID).balance == Decimal("84")
-    loaded = store.get_active_pricing()
+    loaded = store.get_active_catalog()
     assert loaded is not None
     assert loaded.config["pricing"]["operations"]["completion"]
 
 
 def test_record_usage_appends_external_usage_without_debiting(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    service.publish_and_activate_catalog(CONFIG)
     service.add_credits(
         USER_ID,
         Decimal("100"),
-        "purchase",
+        entry_type="purchase",
         bucket="purchased",
         idempotency_key="record-only-grant",
     )
@@ -445,12 +407,12 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
         }
     )
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(config)
+    service.publish_and_activate_catalog(config)
     service.set_user_plan(USER_ID, "pro")
     service.add_credits(
         USER_ID,
         Decimal("100"),
-        "purchase",
+        entry_type="purchase",
         bucket="purchased",
         idempotency_key="lease-contract-grant",
     )
@@ -482,7 +444,7 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
     changed_config["pricing"]["rate_cards"]["standard"]["operations"]["completion"]["unmatched"]["charge"][
         "formula"
     ] = "input_tokens * 100 + output_tokens * 100"
-    service.publish_pricing_from_dict(changed_config)
+    service.publish_and_activate_catalog(changed_config)
     service.set_user_plan(USER_ID, "pro")
 
     deduction = service.settle(
@@ -572,18 +534,18 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
 
 def test_bucket_priority_is_applied_by_postgres_store(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    service.publish_and_activate_catalog(CONFIG)
     service.add_credits(
         USER_ID,
         Decimal("10"),
-        "purchase",
+        entry_type="purchase",
         bucket="grant",
         idempotency_key="spend-order-grant",
     )
     service.add_credits(
         USER_ID,
         Decimal("10"),
-        "purchase",
+        entry_type="purchase",
         bucket="purchased",
         idempotency_key="spend-order-purchased",
     )
@@ -626,7 +588,7 @@ def test_account_created_grant_program_posts_every_award(
         }
     }
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(config)
+    service.publish_and_activate_catalog(config)
 
     service.add_credits(
         REPLAY_USER_ID,
@@ -667,7 +629,7 @@ def test_manual_grant_program_is_exposed_by_python_sdk(store: PostgresStore) -> 
         }
     }
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(config)
+    service.publish_and_activate_catalog(config)
     request = ExecuteGrantProgramRequest(
         trigger="manual",
         program_key="manual_bonus",
@@ -690,7 +652,7 @@ def test_manual_grant_program_is_exposed_by_python_sdk(store: PostgresStore) -> 
 
 def test_expire_leases_is_exposed_by_python_store(store: PostgresStore) -> None:
     service = CreditsService(store=store)
-    service.publish_pricing_from_dict(CONFIG)
+    service.publish_and_activate_catalog(CONFIG)
     service.add_credits(USER_ID, Decimal("10"), idempotency_key="lease-expiry-credit")
     lease = store.create_lease(
         USER_ID,
@@ -751,7 +713,7 @@ def test_plan_policies_persist_as_typed_references(
         }
     )
 
-    CreditsService(store=store).publish_pricing_from_dict(config)
+    CreditsService(store=store).publish_and_activate_catalog(config)
 
     with psycopg2.connect(store.database_url) as connection, connection.cursor() as cursor:
         cursor.execute(

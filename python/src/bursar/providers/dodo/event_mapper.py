@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from bursar.billing.types import (
     BillingCustomerInfo,
@@ -15,10 +15,32 @@ from bursar.billing.types import (
     ProviderRef,
 )
 from bursar.bursar import BillingEventSink
-from bursar.providers._shared import call_billing_event_sink, parse_status
+from bursar.providers._shared import (
+    call_billing_event_sink,
+    parse_status,
+    require_currency,
+    require_minor_units,
+    require_provider_string,
+)
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 _log = StdlibProviderLogger(logging.getLogger(__name__))
+
+
+def _dispute_status(
+    event_type: str,
+) -> Literal["needs_response", "under_review", "won", "lost", "closed"]:
+    match event_type:
+        case "dispute.opened":
+            return "needs_response"
+        case "dispute.challenged":
+            return "under_review"
+        case "dispute.won":
+            return "won"
+        case "dispute.lost" | "dispute.accepted":
+            return "lost"
+        case _:
+            return "closed"
 
 
 def _get_nested(data: dict, *keys: str) -> Any:
@@ -43,7 +65,10 @@ def _normalize_date(raw: Any) -> str | None:
         return None
     s = str(raw)
     try:
-        return datetime.fromisoformat(s).astimezone(UTC).isoformat()
+        parsed = datetime.fromisoformat(s)
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(UTC).isoformat()
     except (ValueError, TypeError):
         pass
     try:
@@ -57,18 +82,47 @@ def _normalize_date(raw: Any) -> str | None:
         if parsed and parsed.tzinfo:
             return parsed.astimezone(UTC).isoformat()
         if parsed:
-            return parsed.isoformat()
+            return None
     except Exception:
         pass
     return None
 
 
+def _nonempty_string(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _product_id(data: dict[str, Any]) -> str | None:
+    direct = _nonempty_string(data.get("product_id"))
+    if direct:
+        return direct
+    product_cart = data.get("product_cart")
+    if not isinstance(product_cart, list):
+        return None
+    for item in product_cart:
+        if isinstance(item, dict):
+            product_id = _nonempty_string(item.get("product_id"))
+            if product_id:
+                return product_id
+    return None
+
+
 def _subscription_refs(data: dict[str, Any], metadata: dict[str, str]) -> ProviderRef | None:
-    product_id = str(data.get("product_id") or "").strip()
+    product_id = _product_id(data)
     if product_id:
         return ProviderRef(product_id=product_id)
     lookup_key = str(metadata.get("plan_slug") or "").strip()
     return ProviderRef(lookup_key=lookup_key) if lookup_key else None
+
+
+def _subscription_id(data: dict[str, Any]) -> str:
+    return require_provider_string(
+        data.get("subscription_id"),
+        "Dodo subscription.subscription_id",
+    )
 
 
 def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
@@ -97,34 +151,55 @@ def _subscription_fields(data: dict[str, Any], metadata: dict[str, str]) -> dict
 
 
 def _make_customer_info(data: dict[str, Any]) -> BillingCustomerInfo | None:
-    cust_id = str(data.get("customer_id", ""))
-    if cust_id:
-        return BillingCustomerInfo(
-            provider_customer_id=cust_id,
-            email=_get_nested(data, "customer", "email"),
-        )
-    return None
+    customer = data.get("customer")
+    nested_customer = customer if isinstance(customer, dict) else {}
+    customer_id = _nonempty_string(data.get("customer_id")) or _nonempty_string(nested_customer.get("customer_id"))
+    if customer_id is None:
+        return None
+    return BillingCustomerInfo(
+        provider_customer_id=customer_id,
+        email=_nonempty_string(nested_customer.get("email")),
+    )
+
+
+def dodo_billing_event_id(
+    event_type: str,
+    data: dict[str, Any],
+    event_timestamp: object,
+) -> str:
+    resource_key = (
+        "payment_id"
+        if event_type.startswith("payment.")
+        else "subscription_id"
+        if event_type.startswith("subscription.")
+        else "refund_id"
+        if event_type.startswith("refund.")
+        else "dispute_id"
+        if event_type.startswith("dispute.")
+        else "id"
+    )
+    source_id = data.get(resource_key) or data.get("id")
+    object_id = require_provider_string(source_id, "Dodo webhook object identifier")
+    occurred_at = _normalize_date(event_timestamp)
+    if occurred_at is None:
+        raise ValueError("Dodo webhook timestamp must be a valid instant")
+    return f"dodo:{event_type}:{object_id}:{occurred_at}"
 
 
 def _base_event(
     data: dict[str, Any],
     customer_info: BillingCustomerInfo | None,
-    event_type: str | None = None,
+    event_type: str,
+    event_timestamp: object,
     metadata: dict[str, str] | None = None,
 ) -> dict:
-    source_id = data.get("id") or data.get("refund_id") or data.get("payment_id")
-    if source_id:
-        raw_id = str(source_id)
-    else:
-        sub_or_cust = data.get("subscription_id") or data.get("customer_id") or ""
-        raw_id = f"dodo:{event_type or ''}:{sub_or_cust}"
+    occurred_at = _normalize_date(event_timestamp)
+    if occurred_at is None:
+        raise ValueError("Dodo webhook timestamp must be a valid instant")
     result: dict[str, Any] = {
         "provider": "dodo",
-        "event_id": raw_id,
-        "occurred_at": (
-            _normalize_date(data.get("updated_at") or data.get("created_at") or data.get("timestamp"))
-            or datetime.now(UTC).isoformat()
-        ),
+        "event_id": dodo_billing_event_id(event_type, data, event_timestamp),
+        "occurred_at": occurred_at,
         "customer": customer_info,
     }
     if metadata:
@@ -143,6 +218,7 @@ async def _handle_subscription_active(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
@@ -150,11 +226,11 @@ async def _handle_subscription_active(
         logger.error("Dodo subscription event: no userId", {"event": event_type})
         return
 
-    sub_id = str(data.get("subscription_id", ""))
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
 
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_created,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -167,27 +243,12 @@ async def _handle_subscription_active(
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
-async def _handle_checkout_expired(
-    event_type: str,
-    data: dict[str, Any],
-    user_id: str | None,
-    metadata: dict[str, str],
-    sink: BillingEventSink,
-    logger: ProviderLogger,
-) -> None:
-    del logger
-    kw = {
-        **_base_event(data, _make_customer_info(data), event_type, metadata),
-        "event_type": BillingEventType.checkout_expired,
-    }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
-
-
 async def _handle_subscription_renewed(
     event_type: str,
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
@@ -195,11 +256,11 @@ async def _handle_subscription_renewed(
         logger.error("Dodo subscription event: no userId", {"event": event_type})
         return
 
-    sub_id = str(data.get("subscription_id", ""))
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
 
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_renewed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -217,15 +278,14 @@ async def _handle_subscription_cancelled(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_canceled,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -242,15 +302,14 @@ async def _handle_subscription_expired(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_expired,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -267,15 +326,14 @@ async def _handle_subscription_failed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -292,15 +350,14 @@ async def _handle_subscription_on_hold(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -317,16 +374,15 @@ async def _handle_subscription_updated_event(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     sub_status = str(data.get("status", "")) or None
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_updated,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -339,70 +395,19 @@ async def _handle_subscription_updated_event(
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
-async def _handle_subscription_cancellation_scheduled(
-    event_type: str,
-    data: dict[str, Any],
-    user_id: str | None,
-    metadata: dict[str, str],
-    sink: BillingEventSink,
-    logger: ProviderLogger,
-) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
-    customer_info = _make_customer_info(data)
-    kw = {
-        **_base_event(data, customer_info, event_type, metadata),
-        "event_type": BillingEventType.subscription_cancellation_scheduled,
-        "subscription": BillingSubscriptionInfo(
-            provider_subscription_id=sub_id,
-            cancel_at_period_end=True,
-            refs=_subscription_refs(data, metadata),
-            **_subscription_fields(data, metadata),
-        ),
-    }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
-
-
-async def _handle_subscription_cancellation_unscheduled(
-    event_type: str,
-    data: dict[str, Any],
-    user_id: str | None,
-    metadata: dict[str, str],
-    sink: BillingEventSink,
-    logger: ProviderLogger,
-) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
-    customer_info = _make_customer_info(data)
-    kw = {
-        **_base_event(data, customer_info, event_type, metadata),
-        "event_type": BillingEventType.subscription_cancellation_unscheduled,
-        "subscription": BillingSubscriptionInfo(
-            provider_subscription_id=sub_id,
-            cancel_at_period_end=False,
-            refs=_subscription_refs(data, metadata),
-            **_subscription_fields(data, metadata),
-        ),
-    }
-    call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
-
-
 async def _handle_subscription_plan_changed(
     event_type: str,
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
-    sub_id = str(data.get("subscription_id", ""))
-    if not sub_id:
-        return
+    sub_id = _subscription_id(data)
     customer_info = _make_customer_info(data)
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.subscription_plan_changed,
         "subscription": BillingSubscriptionInfo(
             provider_subscription_id=sub_id,
@@ -419,30 +424,37 @@ async def _handle_payment_succeeded(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    raw_id = str(data.get("id", data.get("payment_id", "")))
-    payment_id = str(data.get("payment_id", ""))
-    subscription_id = str(data.get("subscription_id", ""))
-    refs = None
-    product_id = data.get("product_id")
-    if product_id:
-        refs = ProviderRef(product_id=str(product_id))
+    payment_id = require_provider_string(data.get("payment_id"), "Dodo payment.payment_id")
+    subscription_id = _nonempty_string(data.get("subscription_id"))
+    product_id = _product_id(data)
+    refs = ProviderRef(product_id=product_id) if product_id else None
 
     payment_info = BillingPaymentInfo(
-        provider_payment_id=payment_id or raw_id,
-        amount_minor=int(data.get("settlement_amount", data.get("amount", 0))),
-        tax_minor=int(data["settlement_tax"]) if data.get("settlement_tax") is not None else None,
-        currency=str(data.get("settlement_currency", data.get("currency", "USD"))).upper(),
+        provider_payment_id=payment_id,
+        amount_minor=require_minor_units(
+            data.get("settlement_amount"),
+            "Dodo payment.settlement_amount",
+        ),
+        tax_minor=require_minor_units(
+            data.get("settlement_tax") or 0,
+            "Dodo payment.settlement_tax",
+        ),
+        currency=require_currency(
+            data.get("settlement_currency"),
+            "Dodo payment.settlement_currency",
+        ),
         purpose="subscription" if subscription_id else "credit_topup",
         status="succeeded",
         refs=refs,
     )
 
     kw: dict[str, Any] = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.payment_succeeded,
         "payment": payment_info,
     }
@@ -461,61 +473,76 @@ async def _handle_payment_failed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    raw_id = str(data.get("id", data.get("payment_id", "")))
-    payment_id = str(data.get("payment_id", ""))
-    subscription_id = str(data.get("subscription_id", ""))
+    payment_id = require_provider_string(data.get("payment_id"), "Dodo payment.payment_id")
+    subscription_id = _nonempty_string(data.get("subscription_id"))
 
     kw: dict[str, Any] = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.payment_failed,
     }
     if subscription_id:
         kw["subscription"] = BillingSubscriptionInfo(
             provider_subscription_id=subscription_id,
         )
-    if payment_id or data.get("settlement_amount"):
-        product_id = data.get("product_id")
-        kw["payment"] = BillingPaymentInfo(
-            provider_payment_id=payment_id or raw_id,
-            amount_minor=int(data.get("settlement_amount", data.get("amount", 0))),
-            tax_minor=(int(data["settlement_tax"]) if data.get("settlement_tax") is not None else None),
-            currency=str(data.get("settlement_currency", data.get("currency", "USD"))).upper(),
-            purpose="subscription",
-            status="failed",
-            refs=ProviderRef(product_id=str(product_id)) if product_id else None,
-        )
+    product_id = _product_id(data)
+    kw["payment"] = BillingPaymentInfo(
+        provider_payment_id=payment_id,
+        amount_minor=require_minor_units(
+            data.get("total_amount"),
+            "Dodo payment.total_amount",
+        ),
+        tax_minor=require_minor_units(
+            data.get("tax") or 0,
+            "Dodo payment.tax",
+        ),
+        currency=require_currency(
+            data.get("currency"),
+            "Dodo payment.currency",
+        ),
+        purpose="subscription" if subscription_id else "credit_topup",
+        status="failed",
+        refs=ProviderRef(product_id=product_id) if product_id else None,
+    )
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
 
 
-async def _handle_refund_succeeded(
+async def _handle_refund(
     event_type: str,
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    refund_id = str(data.get("refund_id") or data.get("id") or "")
-    payment_id = str(data.get("payment_id") or "") or None
+    refund_id = require_provider_string(data.get("refund_id") or data.get("id"), "Dodo refund.refund_id")
+    payment_id = require_provider_string(data.get("payment_id"), "Dodo refund.payment_id")
     reason = data.get("reason")
 
     refund_info = BillingRefundInfo(
         provider_refund_id=refund_id,
         provider_payment_id=payment_id,
-        amount_minor=int(data.get("refund_amount", data.get("amount", 0))),
-        currency=str(data.get("currency", "USD")).upper(),
+        amount_minor=require_minor_units(
+            data.get("refund_amount", data.get("amount")),
+            "Dodo refund.amount",
+            positive=True,
+        ),
+        currency=require_currency(data.get("currency"), "Dodo refund.currency"),
         reason=str(reason) if reason is not None else None,
-        status="succeeded",
+        status="succeeded" if event_type == "refund.succeeded" else "failed",
     )
 
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
-        "event_type": BillingEventType.refund_created,
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
+        "event_type": (
+            BillingEventType.refund_created if event_type == "refund.succeeded" else BillingEventType.refund_failed
+        ),
         "refund": refund_info,
     }
     call_billing_event_sink(sink, BillingEvent(**_with_user(kw, user_id)))
@@ -526,22 +553,27 @@ async def _handle_dispute_created(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = str(data.get("dispute_id") or data.get("id") or "")
-    payment_id = str(data.get("payment_id") or "") or None
+    dispute_id = require_provider_string(
+        data.get("dispute_id") or data.get("id"),
+        "Dodo dispute.dispute_id",
+    )
+    payment_id = require_provider_string(data.get("payment_id"), "Dodo dispute.payment_id")
     reason = data.get("reason")
 
     dispute_info = BillingDisputeInfo(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
+        status=_dispute_status(event_type),
         reason=str(reason) if reason is not None else None,
     )
 
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.dispute_created,
         "dispute": dispute_info,
     }
@@ -553,22 +585,27 @@ async def _handle_dispute_closed(
     data: dict[str, Any],
     user_id: str | None,
     metadata: dict[str, str],
+    event_timestamp: object,
     sink: BillingEventSink,
     logger: ProviderLogger,
 ) -> None:
     customer_info = _make_customer_info(data)
-    dispute_id = str(data.get("dispute_id") or data.get("id") or "")
-    payment_id = str(data.get("payment_id") or "") or None
+    dispute_id = require_provider_string(
+        data.get("dispute_id") or data.get("id"),
+        "Dodo dispute.dispute_id",
+    )
+    payment_id = require_provider_string(data.get("payment_id"), "Dodo dispute.payment_id")
     reason = data.get("reason")
 
     dispute_info = BillingDisputeInfo(
         provider_dispute_id=dispute_id,
         provider_payment_id=payment_id,
+        status=_dispute_status(event_type),
         reason=str(reason) if reason is not None else None,
     )
 
     kw = {
-        **_base_event(data, customer_info, event_type, metadata),
+        **_base_event(data, customer_info, event_type, event_timestamp, metadata),
         "event_type": BillingEventType.dispute_closed,
         "dispute": dispute_info,
     }
@@ -576,7 +613,6 @@ async def _handle_dispute_closed(
 
 
 _EVENT_HANDLERS: dict[str, Any] = {
-    "checkout.expired": _handle_checkout_expired,
     "subscription.active": _handle_subscription_active,
     "subscription.renewed": _handle_subscription_renewed,
     "subscription.cancelled": _handle_subscription_cancelled,
@@ -584,26 +620,27 @@ _EVENT_HANDLERS: dict[str, Any] = {
     "subscription.failed": _handle_subscription_failed,
     "subscription.on_hold": _handle_subscription_on_hold,
     "subscription.updated": _handle_subscription_updated_event,
-    "subscription.cancellation_scheduled": _handle_subscription_cancellation_scheduled,
-    "subscription.cancellation_unscheduled": _handle_subscription_cancellation_unscheduled,
     "subscription.plan_changed": _handle_subscription_plan_changed,
     "payment.succeeded": _handle_payment_succeeded,
     "payment.failed": _handle_payment_failed,
-    "refund.succeeded": _handle_refund_succeeded,
-    "dispute.created": _handle_dispute_created,
+    "refund.succeeded": _handle_refund,
+    "refund.failed": _handle_refund,
+    "dispute.opened": _handle_dispute_created,
     "dispute.closed": _handle_dispute_closed,
     "dispute.won": _handle_dispute_closed,
     "dispute.lost": _handle_dispute_closed,
     "dispute.accepted": _handle_dispute_closed,
     "dispute.cancelled": _handle_dispute_closed,
-    "dispute.challenged": _handle_dispute_closed,
+    "dispute.challenged": _handle_dispute_created,
     "dispute.expired": _handle_dispute_closed,
 }
 
 
 async def handle_dodo_billing_event(
+    *,
     event_type: str,
     data: dict[str, Any],
+    event_timestamp: object,
     user_id: str | None,
     metadata: dict[str, str],
     sink: BillingEventSink,
@@ -617,4 +654,4 @@ async def handle_dodo_billing_event(
         logger.debug("Unhandled Dodo webhook event type", {"type": event_type})
         return
 
-    await handler(event_type, data, user_id, metadata, sink, logger)
+    await handler(event_type, data, user_id, metadata, event_timestamp, sink, logger)

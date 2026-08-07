@@ -18,9 +18,11 @@ from bursar.billing.postgres.repositories.subscription import BillingSubscriptio
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.types import (
     BillingAutoRechargeProfile,
+    BillingCustomerInfo,
     BillingEvent,
     BillingEventClaim,
     BillingEventType,
+    BillingInvoiceInfo,
     BillingOfferResult,
     BillingSubscriptionChangeInput,
     BillingSubscriptionInfo,
@@ -28,6 +30,7 @@ from bursar.billing.types import (
     BillingSubscriptionStatus,
     ProviderRef,
 )
+from bursar.errors import StoreError
 
 
 def _subscription(status: BillingSubscriptionStatus, subscription_id: str) -> BillingSubscriptionState:
@@ -125,6 +128,7 @@ def test_async_billing_event_handler_is_awaited() -> None:
         event_id="evt_async",
         event_type=BillingEventType.customer_created,
         occurred_at="2026-07-29T00:00:00Z",
+        customer=BillingCustomerInfo(provider_customer_id="cus_async"),
     )
 
     service._fire_event_handlers(
@@ -146,9 +150,11 @@ def test_unknown_cancellation_with_offer_refs_persists_tombstone() -> None:
     store.resolve_billing_offer.return_value = BillingOfferResult(
         offer_id="00000000-0000-0000-0000-000000000010",
         offer_key="pro_monthly",
+        plan_id="00000000-0000-0000-0000-000000000020",
         plan="pro",
         interval="month",
         interval_count=1,
+        grant=None,
     )
     service = BillingService(store)
 
@@ -208,6 +214,9 @@ def test_subscription_provisioning_uses_public_plan_key_not_internal_plan_id() -
         offer_key="pro_monthly",
         plan_id="00000000-0000-0000-0000-000000000020",
         plan="pro",
+        interval="month",
+        interval_count=1,
+        grant=None,
     )
 
     service._provision_subscription(user_id, offer, event)
@@ -300,7 +309,7 @@ def test_subscription_change_uses_current_rpc_and_offer_context_shape() -> None:
     store = object.__new__(PostgresBillingStore)
     subscription_repo = MagicMock()
     subscription_repo.get.return_value = SimpleNamespace(id="00000000-0000-0000-0000-000000000011")
-    store._subscription_repo_cache = subscription_repo
+    vars(store)["_subscription_repo"] = subscription_repo
     change_id = "12"
     from_offer_id = "00000000-0000-0000-0000-000000000013"
     to_offer_id = "00000000-0000-0000-0000-000000000014"
@@ -405,7 +414,7 @@ def test_checkout_intent_updates_only_through_transition_rpc() -> None:
     assert "UPDATE bursar.billing_checkout_intents" not in sql
 
     store._execute.return_value = [{"advanced": False}]
-    with pytest.raises(RuntimeError, match="checkout intent update rejected"):
+    with pytest.raises(StoreError, match="checkout intent update rejected"):
         store.update_checkout_intent(
             "00000000-0000-0000-0000-000000000011",
             CheckoutIntentUpdate(status="failed"),
@@ -414,7 +423,8 @@ def test_checkout_intent_updates_only_through_transition_rpc() -> None:
 
 def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
     store = object.__new__(PostgresBillingStore)
-    store._execute = MagicMock(return_value=[{"profile_updated": True}])
+    execute = MagicMock(return_value=[{"updated": True}])
+    store._execute = execute
     profile = BillingAutoRechargeProfile(
         user_id="00000000-0000-0000-0000-000000000001",
         enabled=True,
@@ -432,15 +442,32 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
 
     store.upsert_auto_recharge_profile(profile)
 
-    assert "bursar.upsert_auto_recharge_profile" in store._execute.call_args.args[0]
-    assert store._execute.call_args.args[1][-3:] == [True, "active", False]
-    store._execute = MagicMock(
-        side_effect=[
-            [{"state": "claimed"}],
-            [{"advanced": True}],
-            [{"advanced": True}],
-        ]
-    )
+    assert "bursar.upsert_auto_recharge_profile" in execute.call_args.args[0]
+    assert execute.call_args.args[1][-3:] == [True, "active", False]
+    attempt_row = {
+        "id": "00000000-0000-0000-0000-000000000003",
+        "subject_id": "00000000-0000-0000-0000-000000000001",
+        "provider": "stripe",
+        "idempotency_key": "auto-recharge:test",
+        "provider_attempt_id": None,
+        "topup_id": "00000000-0000-0000-0000-000000000002",
+        "quantity": 2,
+        "window_start": datetime(2025, 1, 1, tzinfo=UTC),
+        "window_end": datetime(2025, 2, 1, tzinfo=UTC),
+        "quoted_amount_minor": None,
+        "currency": None,
+        "failure_code": None,
+        "failure_message": None,
+        "metadata": {},
+        "created_at": datetime(2025, 1, 1, tzinfo=UTC),
+        "updated_at": datetime(2025, 1, 1, tzinfo=UTC),
+    }
+    execute.reset_mock()
+    execute.side_effect = [
+        [{**attempt_row, "state": "claimed"}],
+        [{"advanced": True}],
+        [{"advanced": True}],
+    ]
     store.update_auto_recharge_attempt(
         AutoRechargeAttemptUpdate(
             id="00000000-0000-0000-0000-000000000003",
@@ -448,10 +475,11 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
             provider_attempt_id="pay_1",
         )
     )
-    assert "bursar.get_auto_recharge_attempt" in store._execute.call_args_list[0].args[0]
-    assert all("bursar.advance_auto_recharge_attempt" in call.args[0] for call in store._execute.call_args_list[1:])
+    assert "bursar.get_auto_recharge_attempt" in execute.call_args_list[0].args[0]
+    assert all("bursar.advance_auto_recharge_attempt" in call.args[0] for call in execute.call_args_list[1:])
 
-    store._execute = MagicMock(side_effect=[[{"state": "action_required"}], [{"advanced": True}]])
+    execute.reset_mock()
+    execute.side_effect = [[{**attempt_row, "state": "action_required"}], [{"advanced": True}]]
     store.update_auto_recharge_attempt(
         AutoRechargeAttemptUpdate(
             id="00000000-0000-0000-0000-000000000003",
@@ -459,7 +487,7 @@ def test_auto_recharge_profile_and_attempt_use_current_rpcs() -> None:
             provider_attempt_id="pay_1",
         )
     )
-    assert len(store._execute.call_args_list) == 2
+    assert len(execute.call_args_list) == 2
 
 
 def test_plan_change_advances_before_subscription_upsert() -> None:
@@ -478,9 +506,11 @@ def test_plan_change_advances_before_subscription_upsert() -> None:
     store.resolve_billing_offer.return_value = BillingOfferResult(
         offer_id="00000000-0000-0000-0000-000000000013",
         offer_key="sage_monthly",
+        plan_id="00000000-0000-0000-0000-000000000014",
         plan="sage",
         interval="month",
         interval_count=1,
+        grant=None,
     )
     store.get_open_billing_subscription_change.return_value = SimpleNamespace(id="change_1")
     service = BillingService(store)
@@ -546,6 +576,13 @@ def test_busy_billing_claim_is_retryable_by_provider_adapter() -> None:
         event_id="evt_busy",
         event_type=BillingEventType.invoice_paid,
         occurred_at="2026-07-29T00:00:00Z",
+        invoice=BillingInvoiceInfo(
+            provider_invoice_id="in_busy",
+            status="paid",
+            amount_paid_minor=0,
+            amount_due_minor=0,
+            currency="USD",
+        ),
     )
 
     result = service.ingest_billing_event(event)
@@ -565,7 +602,7 @@ def test_subscription_repository_uses_current_catalog_and_lifecycle_rpc_shape() 
                 }
             ],
             [{"id": "00000000-0000-0000-0000-000000000002"}],
-            [],
+            [{"id": "00000000-0000-0000-0000-000000000003"}],
         ]
     )
     repository = BillingSubscriptionRepository(execute)

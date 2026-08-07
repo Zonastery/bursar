@@ -1,5 +1,6 @@
-"""bursar — declarative credit calculation engine for AI SaaS platforms."""
+"""Bursar SDK for metering, credits, subscriptions, and payments."""
 
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,7 @@ from bursar.billing import (
     BillingAutoRechargeProfile,
     BillingAutoRechargeState,
     BillingAutoRechargeStatus,
-    BillingCreditTopup,
+    BillingCreditPostingResult,
     BillingCustomerInfo,
     BillingCustomerRecord,
     BillingDisputeInfo,
@@ -30,9 +31,10 @@ from bursar.billing import (
     BillingEventResult,
     BillingEventType,
     BillingInvoiceInfo,
-    BillingOffer,
+    BillingInvoiceRecord,
     BillingOfferInterval,
     BillingPaymentInfo,
+    BillingPaymentRecord,
     BillingPreferences,
     BillingProvider,
     BillingRefundInfo,
@@ -51,17 +53,29 @@ from bursar.billing import (
     SubscriptionGrant,
 )
 from bursar.billing.billing_service import BillingProvisioningPort
+from bursar.billing.service_types import BillingServiceOptions
 from bursar.breakdown import CostBreakdown, make_cost_breakdown
 from bursar.bursar import (
+    AccountCreatedResult,
     AccountService,
+    BillingCapability,
     BillingEventSink,
-    BillingService,
     Bursar,
-    BursarOptions,
     CatalogService,
-    CreditsService,
 )
-from bursar.catalog import project_public_catalog
+from bursar.catalog import (
+    PublicCatalog,
+    PublicCatalogAllowance,
+    PublicCatalogDisplay,
+    PublicCatalogInterval,
+    PublicCatalogOffer,
+    PublicCatalogPlan,
+    PublicCatalogPrice,
+    PublicCatalogQuantity,
+    PublicCatalogQuota,
+    PublicCatalogWindow,
+    project_public_catalog,
+)
 from bursar.commerce import (
     AccountAllowanceOverview,
     AccountCommerceOverview,
@@ -104,7 +118,6 @@ from bursar.commerce import (
     CreditSpendSource,
     GetInvoiceLinkInput,
     InvalidOfferQuantityError,
-    MissingPaymentMethodError,
     MissingPlanChangePolicyError,
     NormalizedPendingPlanChange,
     PlanChangeClassification,
@@ -112,7 +125,6 @@ from bursar.commerce import (
     PortalSessionInput,
     PreferencePatch,
     PreviewPlanChangeInput,
-    ProviderCapabilityNotSupportedError,
     ProviderSelectionError,
     QuoteChangedError,
     SubscriptionCommandResult,
@@ -147,15 +159,29 @@ from bursar.config import (
 )
 from bursar.credits.events import CreditEvent, CreditEventEmitter
 from bursar.credits.service import (
+    CatalogNotLoadedError,
     ConcurrencyLimitError,
     CreditError,
+    CreditsService,
     FeatureNotEntitledError,
     InsufficientCreditsError,
     LeaseExpiredError,
     LeaseNotFoundError,
     OperationNotAllowedError,
-    PricingNotLoadedError,
     QuotaExceededError,
+)
+from bursar.credits.service_types import (
+    BeginBilledOperationOptions,
+    CanAffordOptions,
+    CreditsServiceOptions,
+    GrantSubscriptionCycleOptions,
+    LowBalanceConfig,
+    MetricsOrAmount,
+    PostDeductionContext,
+    ReserveOptions,
+    RunBilledAsyncOptions,
+    RunBilledOptions,
+    SettleOptions,
 )
 from bursar.credits.store import (
     CapabilityNotSupportedError,
@@ -176,9 +202,9 @@ from bursar.credits.types import (
     BucketBalance,
     BucketBalancesResult,
     BucketDefinition,
-    BursarConfigHistoryItem,
-    BursarConfigResult,
     CanAffordResult,
+    CatalogRevision,
+    CatalogRevisionSummary,
     CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
@@ -225,9 +251,15 @@ from bursar.credits.types import (
 )
 from bursar.engine import PricingEngine
 from bursar.errors import (
+    AutoRechargeDisabledError,
+    AutoRechargeNotConfiguredError,
+    BillingError,
     BursarError,
     BursarErrorCategory,
     BursarImportError,
+    CapabilityNotConfiguredError,
+    PaymentMethodRequiredError,
+    ProviderCapabilityNotSupportedError,
     StoreClosedError,
     StoreTimeoutError,
     StoreUnavailableError,
@@ -237,6 +269,7 @@ from bursar.errors import (
     is_retryable_bursar_error,
 )
 from bursar.expr import ExpressionError, evaluate_expression, quantize_money, validate_expression
+from bursar.load_config_file import load_config_file
 from bursar.metrics import UsageMetrics
 from bursar.providers.types import (
     CheckoutParams,
@@ -255,26 +288,27 @@ from bursar.retry import (
     retry_bursar_operation_async,
 )
 
+_LAZY_EXPORTS = {
+    "PostgresBillingStore": ("bursar.billing", "PostgresBillingStore"),
+    "PostgresStore": ("bursar.credits.postgres.store", "PostgresStore"),
+    "PostgresConnectionOptions": ("bursar.shared.postgres_client", "PostgresConnectionOptions"),
+}
 
-def __getattr__(name: str):
+
+def __getattr__(name: str) -> object:
     """Lazy-import Postgres stores — they require the optional psycopg2 extra."""
-    if name == "PostgresBillingStore":
-        from bursar.billing import PostgresBillingStore  # pyright: ignore[reportUnsupportedDunderAll]
-
-        return PostgresBillingStore
-    if name == "PostgresStore":
-        from bursar.credits.postgres.store import PostgresStore
-
-        return PostgresStore
-    if name == "PostgresConnectionOptions":
-        from bursar.shared.postgres_client import PostgresConnectionOptions
-
-        return PostgresConnectionOptions
+    target = _LAZY_EXPORTS.get(name)
+    if target is not None:
+        module_name, attribute_name = target
+        value = getattr(import_module(module_name), attribute_name)
+        globals()[name] = value
+        return value
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 
 
 __all__ = [
+    "AccountCreatedResult",
     "BillingAutoRechargeAttempt",
     "BillingAutoRechargeProfile",
     "BillingAutoRechargeStatus",
@@ -292,7 +326,7 @@ __all__ = [
     "AllowanceResult",
     "AvailableResult",
     "BalanceResult",
-    "BillingCreditTopup",
+    "BillingCreditPostingResult",
     "BillingCustomerInfo",
     "BillingCustomerRecord",
     "BillingDisputeInfo",
@@ -302,16 +336,20 @@ __all__ = [
     "BillingEventResult",
     "BillingEventType",
     "BillingInvoiceInfo",
-    "BillingOffer",
+    "BillingInvoiceRecord",
     "BillingOfferInterval",
     "BillingPaymentInfo",
+    "BillingPaymentRecord",
     "BillingPreferences",
     "BillingProvider",
     "BillingRefundInfo",
     "BillingStore",
     "BillingProvisioningPort",
+    "BillingServiceOptions",
+    "BillingError",
+    "AutoRechargeDisabledError",
+    "AutoRechargeNotConfiguredError",
     "Bursar",
-    "BursarOptions",
     "BursarError",
     "BursarErrorCategory",
     "BursarImportError",
@@ -326,7 +364,7 @@ __all__ = [
     "retry_bursar_operation",
     "retry_bursar_operation_async",
     "BillingEventSink",
-    "BillingService",
+    "BillingCapability",
     "CatalogService",
     "CommerceService",
     "CommerceAutoRecharge",
@@ -348,12 +386,22 @@ __all__ = [
     "ProviderSelectionError",
     "ProviderCapabilityNotSupportedError",
     "QuoteChangedError",
-    "MissingPaymentMethodError",
     "MissingPlanChangePolicyError",
+    "PaymentMethodRequiredError",
     "CoreBillingDataUnavailableError",
     "CreditSpendSource",
     "AccountCommerceOverview",
     "AccountService",
+    "PublicCatalog",
+    "PublicCatalogAllowance",
+    "PublicCatalogDisplay",
+    "PublicCatalogInterval",
+    "PublicCatalogOffer",
+    "PublicCatalogPlan",
+    "PublicCatalogPrice",
+    "PublicCatalogQuantity",
+    "PublicCatalogQuota",
+    "PublicCatalogWindow",
     "AutoRechargeInput",
     "AutoRechargeProcessResultLike",
     "BillingDocumentInvoiceLocator",
@@ -393,6 +441,7 @@ __all__ = [
     "BucketDefinition",
     "CanAffordResult",
     "CapReachedError",
+    "CapabilityNotConfiguredError",
     "CapabilityNotSupportedError",
     "CheckFeatureResult",
     "CheckoutParams",
@@ -400,6 +449,17 @@ __all__ = [
     "ConfigError",
     "CostBreakdown",
     "CreditsService",
+    "CreditsServiceOptions",
+    "BeginBilledOperationOptions",
+    "CanAffordOptions",
+    "GrantSubscriptionCycleOptions",
+    "LowBalanceConfig",
+    "MetricsOrAmount",
+    "PostDeductionContext",
+    "ReserveOptions",
+    "RunBilledAsyncOptions",
+    "RunBilledOptions",
+    "SettleOptions",
     "CreateCustomerParams",
     "CreateLeaseOptions",
     "CreateTeamResult",
@@ -434,6 +494,7 @@ __all__ = [
     "ListUsageEntriesOptions",
     "make_cost_breakdown",
     "load_catalog_rollout",
+    "load_config_file",
     "validate_catalog_rollout",
     "OperationNotAllowedError",
     "OperationPolicy",
@@ -454,12 +515,12 @@ __all__ = [
     "PostgresStore",
     "PostgresConnectionOptions",
     "BursarConfig",
-    "BursarConfigResult",
-    "BursarConfigHistoryItem",
+    "CatalogRevision",
+    "CatalogRevisionSummary",
     "CatalogRollout",
     "canonical_catalog_rollout_dict",
     "PricingEngine",
-    "PricingNotLoadedError",
+    "CatalogNotLoadedError",
     "quantize_money",
     "QuotaEvent",
     "QuotaExceededError",

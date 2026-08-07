@@ -11,6 +11,7 @@ import type {
 } from "./types/index.js";
 import { BillingEventType } from "./types/index.js";
 import { BillingFinancialEventHandlers } from "./financial-event-handlers.js";
+import { StoreError } from "../errors.js";
 import type {
   BillingProvisioningPort,
   BillingServiceOptions,
@@ -280,7 +281,7 @@ export class BillingEventHandlers {
     },
   ): BillingSubscriptionState {
     if (!event.subscription) {
-      throw new Error("no_subscription_data");
+      throw new TypeError("billing subscription event requires subscription data");
     }
     const sub = event.subscription;
     const status = overrides?.status ?? sub.status ?? existing?.status ?? "incomplete";
@@ -637,8 +638,15 @@ export class BillingEventHandlers {
     const existing = await this.getExistingSubscription(event);
     const resolved = existing ? null : await this.resolveOfferAndKeys(event);
     if (!existing && !resolved?.offerId) {
-      throw new Error(
+      throw new StoreError(
         `cannot persist cancellation for unknown subscription ${event.provider}/${event.subscription.providerSubscriptionId}: offer could not be resolved`,
+        {
+          retryable: true,
+          details: {
+            provider: event.provider,
+            providerSubscriptionId: event.subscription.providerSubscriptionId,
+          },
+        },
       );
     }
     await this.store.upsertBillingSubscription(
@@ -786,14 +794,20 @@ export class BillingEventHandlers {
     offer: BillingOfferResult | null,
   ): Promise<void> {
     const credits = offer?.grant?.mode === "cycle_grant" ? offer.grant.credits : null;
-    if (!credits || credits <= 0 || !event.billingEventId || !event.subscription) return;
+    if (!credits || credits.lte(0) || !event.billingEventId || !event.subscription) return;
 
     const subscription = await this.store.getBillingSubscription(
       event.provider,
       event.subscription.providerSubscriptionId,
     );
     if (!subscription?.subscriptionId) {
-      throw new Error("subscription cycle grant requires a persisted subscription");
+      throw new StoreError("subscription cycle grant requires a persisted subscription", {
+        indeterminate: true,
+        details: {
+          provider: event.provider,
+          providerSubscriptionId: event.subscription.providerSubscriptionId,
+        },
+      });
     }
     const payment =
       event.payment?.providerPaymentId != null

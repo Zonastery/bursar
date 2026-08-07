@@ -1,30 +1,29 @@
 """Vanilla PostgreSQL-backed credit store adapter.
 
-Connects directly via ``psycopg2``. No Supabase dependency — works with any
-Postgres database that has the bursar schema installed.
+Connects directly via ``psycopg2`` to any compatible PostgreSQL database with
+the Bursar schema installed.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from functools import cached_property
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import psycopg2
-import psycopg2.pool
 
 from bursar.credits.postgres.repositories.analytics import AnalyticsRepository
 from bursar.credits.postgres.repositories.balance import BalanceRepository
 from bursar.credits.postgres.repositories.bucket import BucketRepository
+from bursar.credits.postgres.repositories.catalog import CatalogRepository
 from bursar.credits.postgres.repositories.deduction import DeductionRepository
 from bursar.credits.postgres.repositories.lease import LeaseRepository
 from bursar.credits.postgres.repositories.plan import PlanRepository
-from bursar.credits.postgres.repositories.pricing import PricingRepository
 from bursar.credits.postgres.repositories.schemas import (
     CreateLeaseParams,
     DeductParams,
@@ -46,8 +45,8 @@ from bursar.credits.types import (
     BalanceResult,
     BucketBalance,
     BucketBalancesResult,
-    BursarConfigHistoryItem,
-    BursarConfigResult,
+    CatalogRevision,
+    CatalogRevisionSummary,
     CheckFeatureResult,
     CreateTeamResult,
     CreditMetadata,
@@ -85,12 +84,13 @@ from bursar.credits.types import (
     UsageChargePage,
     UsageRecordResult,
 )
-from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions
+from bursar.errors import BursarError
+from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool
 from bursar.sql import _get_sql_files
 
 
 def _dec(value: Any, default: Decimal = Decimal(0)) -> Decimal:
-    """Coerce a NUMERIC/JSON value to ``Decimal`` (contract §1).
+    """Coerce a NUMERIC or JSON value to ``Decimal``.
 
     psycopg2 already returns NUMERIC columns as ``Decimal``; this guards the
     ``None``/``int``/``str`` cases (and a stray ``float``, routed through ``str``
@@ -118,8 +118,15 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _require_text(value: Any, context: str) -> str:
+    text = _text(value)
+    if not text:
+        raise StoreError(f"{context} returned a missing or invalid identifier")
+    return text
+
+
 def _dec_map(value: Any) -> dict[str, Decimal] | None:
-    """Coerce a ``{bucket_key: amount}`` JSONB object into ``dict[str, Decimal]`` (023).
+    """Coerce a ``{bucket_key: amount}`` JSONB object into ``dict[str, Decimal]``.
 
     Used for ``bucket_breakdown``/``expired_by_bucket`` fields, which come back from
     RPCs as a JSON object of tier key -> NUMERIC amount. Returns ``None`` for a
@@ -150,22 +157,28 @@ class PostgresStore(CreditStore):
 
     def __init__(
         self,
-        database_url: str,
+        database_url: str | None = None,
         *,
-        tenant_id: str | UUID | None,
+        tenant_id: str | UUID,
         max_pool_size: int = 20,
-        pool: psycopg2.pool.ThreadedConnectionPool | None = None,
+        pool: PostgresPool | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
         connection_timeout_seconds: float = 10.0,
         statement_timeout_ms: int = 30_000,
         idle_transaction_timeout_ms: int = 30_000,
         application_name: str = "bursar-python",
-        on_pool_error: Any | None = None,
+        on_pool_error: Callable[[BursarError], None] | None = None,
         postgres_options: PostgresConnectionOptions | None = None,
     ) -> None:
         super().__init__()
+        if pool is None and (not isinstance(database_url, str) or not database_url.strip()):
+            raise ValueError("database_url is required when pool is not provided")
+        if pool is not None and database_url is not None:
+            raise ValueError("provide either database_url or pool, not both")
+        if pool is None:
+            assert database_url is not None
         self._database_url = database_url
-        self._tenant_id = str(UUID(str(tenant_id))) if tenant_id is not None else None
+        self._tenant_id = str(UUID(str(tenant_id)))
         self._usage_backend = usage_backend
         self._client = (
             PostgresClient.from_pool(
@@ -181,7 +194,7 @@ class PostgresStore(CreditStore):
             )
             if pool is not None
             else PostgresClient(
-                database_url,
+                cast(str, database_url),
                 max_connections=max_pool_size,
                 tenant_id=self._tenant_id,
                 usage_backend=usage_backend,
@@ -197,13 +210,13 @@ class PostgresStore(CreditStore):
     @property
     def database_url(self) -> str:
         """Postgres connection string for this store (read-only)."""
+        if self._database_url is None:
+            raise RuntimeError("this PostgresStore uses an application-owned pool")
         return self._database_url
 
     @property
     def tenant_id(self) -> str:
         """Tenant UUID bound to every store transaction."""
-        if self._tenant_id is None:
-            raise RuntimeError("this PostgresStore is only configured for migrations")
         return self._tenant_id
 
     def _bind_tenant(self, cursor: Any) -> None:
@@ -219,63 +232,47 @@ class PostgresStore(CreditStore):
         )
 
     # ── Repository getters ─────────────────────────────────────────────
-    @property
+    @cached_property
     def _balance_repo(self) -> BalanceRepository:
-        if not hasattr(self, "_balance_repo_cache"):
-            self._balance_repo_cache = BalanceRepository(self._callproc)
-        return self._balance_repo_cache
+        return BalanceRepository(self._callproc)
 
-    @property
+    @cached_property
     def _deduction_repo(self) -> DeductionRepository:
-        if not hasattr(self, "_deduction_repo_cache"):
-            self._deduction_repo_cache = DeductionRepository(self._callproc, self._query)
-        return self._deduction_repo_cache
+        return DeductionRepository(self._callproc, self._query)
 
-    @property
+    @cached_property
     def _lease_repo(self) -> LeaseRepository:
-        if not hasattr(self, "_lease_repo_cache"):
-            self._lease_repo_cache = LeaseRepository(self._callproc)
-        return self._lease_repo_cache
+        return LeaseRepository(self._callproc)
 
-    @property
-    def _pricing_repo(self) -> PricingRepository:
-        if not hasattr(self, "_pricing_repo_cache"):
-            self._pricing_repo_cache = PricingRepository(self._callproc)
-        return self._pricing_repo_cache
+    @cached_property
+    def _catalog_repo(self) -> CatalogRepository:
+        return CatalogRepository(self._callproc)
 
-    @property
+    @cached_property
     def _plan_repo(self) -> PlanRepository:
-        if not hasattr(self, "_plan_repo_cache"):
-            self._plan_repo_cache = PlanRepository(self._callproc)
-        return self._plan_repo_cache
+        return PlanRepository(self._callproc)
 
-    @property
+    @cached_property
     def _analytics_repo(self) -> AnalyticsRepository:
-        if not hasattr(self, "_analytics_repo_cache"):
-            self._analytics_repo_cache = AnalyticsRepository(self._callproc)
-        return self._analytics_repo_cache
+        return AnalyticsRepository(self._callproc)
 
-    @property
+    @cached_property
     def _team_repo(self) -> TeamRepository:
-        if not hasattr(self, "_team_repo_cache"):
-            self._team_repo_cache = TeamRepository(self._callproc)
-        return self._team_repo_cache
+        return TeamRepository(self._callproc)
 
-    @property
+    @cached_property
     def _bucket_repo(self) -> BucketRepository:
-        if not hasattr(self, "_bucket_repo_cache"):
-            self._bucket_repo_cache = BucketRepository(self._callproc)
-        return self._bucket_repo_cache
+        return BucketRepository(self._callproc)
 
     def close(self) -> None:
         """Close all connections in the pool."""
         self._client.close()
 
-    def __del__(self) -> None:
-        client = getattr(self, "_client", None)
-        if client is not None:
-            with suppress(BaseException):
-                client.close()
+    def __enter__(self) -> PostgresStore:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
     # ── RPC dispatcher ─────────────────────────────────────────────────
 
@@ -286,40 +283,35 @@ class PostgresStore(CreditStore):
         to its scalar value. Multi-column TABLE functions are returned as
         dictionaries keyed by their declared column names.
         """
-        if self._tenant_id is None:
-            raise RuntimeError("tenant_id is required for Bursar store operations")
         return self._client.callproc(name, params)
 
     def _query(self, sql: str, params: list[Any]) -> list[Any]:
-        if self._tenant_id is None:
-            raise RuntimeError("tenant_id is required for Bursar store operations")
         return self._client.query(sql, params)
-
-    def _conn(self):
-        """Create a dedicated connection for one-time operations (e.g. setup)."""
-        try:
-            return psycopg2.connect(self._database_url, **self._client.connection_kwargs)
-        except psycopg2.Error as e:
-            raise StoreError(f"database connection failed: {e}") from e
 
     # ── Schema management ──────────────────────────────────────────────
 
+    @staticmethod
     def _migrate(
-        self,
+        database_url: str,
         *,
         post_migration_sql: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Apply bundled migrations exactly once, transactionally.
 
-        The old implementation replayed every SQL file and accumulated errors,
-        which could leave a partially upgraded database looking successful to
-        callers.  A small ledger records the filename and SHA-256 checksum;
-        an advisory transaction lock serializes concurrent deploys and any
-        failed migration aborts the whole setup transaction. Trusted host SQL
-        runs after the bundled files, in the supplied order and in the same
+        A migration ledger records each filename and SHA-256 checksum. An
+        advisory transaction lock serializes concurrent deploys, and any
+        failed migration aborts the setup transaction. Trusted host SQL runs
+        after the bundled files, in the supplied order and in the same
         transaction, but is not recorded in Bursar's migration ledger.
         """
-        conn = self._conn()
+        try:
+            conn = psycopg2.connect(
+                database_url,
+                connect_timeout=10,
+                application_name="bursar-python",
+            )
+        except psycopg2.Error as error:
+            raise StoreError(f"database connection failed: {error}") from error
         try:
             conn.autocommit = False
             with conn.cursor() as cur:
@@ -332,20 +324,6 @@ class PostgresStore(CreditStore):
                     )
                 """)
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("bursar:migrations",))
-                # Bursar consumes auth.uid()/auth.role() supplied by the host;
-                # it never creates Supabase schemas, users, or JWT roles.
-                cur.execute("""
-                    SELECT to_regnamespace('auth'), to_regprocedure('auth.uid()'), to_regprocedure('auth.role()')
-                """)
-                auth_row = cur.fetchone()
-                if auth_row is None:
-                    raise StoreError("auth namespace query returned no rows")
-                auth_schema, auth_uid, auth_role = auth_row
-                if auth_schema is None or auth_uid is None or auth_role is None:
-                    raise StoreError(
-                        "Bursar requires configured auth.uid()/auth.role(); refusing to bootstrap auth objects"
-                    )
-
                 sql_files = _get_sql_files()
 
                 for sql_file in sql_files:
@@ -444,7 +422,7 @@ class PostgresStore(CreditStore):
         if result.error is not None:
             raise StoreError(f"post_credit failed: {result.error}")
         return AddCreditsResult(
-            entry_id=str(result.entry_id),
+            entry_id=_require_text(result.entry_id, "post_credit"),
             user_id=str(getattr(result, "user_id", user_id)),
             amount=_dec(result.amount, amount),
             new_balance=_dec(result.new_balance),
@@ -487,15 +465,7 @@ class PostgresStore(CreditStore):
         result = self._deduction_repo.deduct_with_allowance(params)
 
         if result is None:
-            return DeductionResult(
-                entry_id="",
-                user_id=user_id,
-                amount=Decimal(0),
-                allowance_consumed=Decimal(0),
-                balance_after=Decimal(0),
-                idempotent=False,
-                error="no result",
-            )
+            raise StoreError("charge_usage_for_operation returned no result")
         if result.error is not None:
             return DeductionResult(
                 entry_id="",
@@ -509,7 +479,7 @@ class PostgresStore(CreditStore):
 
         return DeductionResult(
             entry_id=str(result.entry_id or ""),
-            usage_charge_id=result.charge_id,
+            usage_charge_id=_require_text(result.charge_id, "charge_usage_for_operation"),
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
@@ -551,16 +521,13 @@ class PostgresStore(CreditStore):
             ),
         )
         result = self._deduction_repo.record_usage(params)
-        if result is None or (result.charge_id is None and result.error_code is None):
-            return UsageRecordResult(
-                usage_id="",
-                user_id=user_id,
-                requested=Decimal(0),
-                idempotent=False,
-                error="no result",
-            )
+        if result is None:
+            raise StoreError("record_usage returned no result")
+        usage_id = (
+            _require_text(result.charge_id, "record_usage") if result.error_code is None else _text(result.charge_id)
+        )
         return UsageRecordResult(
-            usage_id=str(result.charge_id or ""),
+            usage_id=usage_id,
             user_id=user_id,
             requested=_dec(result.requested, requested),
             idempotent=bool(result.replayed),
@@ -625,20 +592,9 @@ class PostgresStore(CreditStore):
             max_concurrent=options.max_concurrent,
         )
         result = self._lease_repo.create_lease(params)
-        availability = self.get_available(user_id)
-
         if result is None:
-            return LeaseResult(
-                lease_id="",
-                user_id=user_id,
-                amount=Decimal(0),
-                available=Decimal(0),
-                reserved_total=Decimal(0),
-                minimum_balance=Decimal(0),
-                billing_mode=options.billing_mode,
-                expires_at="",
-                error="no result",
-            )
+            raise StoreError("create_lease_for_operation returned no result")
+        availability = self.get_available(user_id)
         if result.error is not None:
             return LeaseResult(
                 lease_id="",
@@ -653,14 +609,14 @@ class PostgresStore(CreditStore):
             )
         minimum_balance = _dec(result.minimum_balance, floor)
         return LeaseResult(
-            lease_id=str(getattr(result, "lease_id", "")),
+            lease_id=_require_text(result.lease_id, "create_lease_for_operation"),
             user_id=user_id,
             amount=_dec(result.amount),
             available=availability.available,
             reserved_total=availability.reserved,
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
-            expires_at=_text(getattr(result, "expires_at", None)),
+            expires_at=_require_text(result.expires_at, "create_lease_for_operation"),
         )
 
     def settle_lease(
@@ -712,15 +668,7 @@ class PostgresStore(CreditStore):
         result = self._lease_repo.settle_lease(params)
 
         if result is None:
-            return DeductionResult(
-                entry_id="",
-                user_id=user_id,
-                amount=Decimal(0),
-                allowance_consumed=Decimal(0),
-                balance_after=Decimal(0),
-                idempotent=False,
-                error="no result",
-            )
+            raise StoreError("settle_lease returned no result")
         if result.error is not None:
             return DeductionResult(
                 entry_id="",
@@ -733,7 +681,7 @@ class PostgresStore(CreditStore):
             )
         return DeductionResult(
             entry_id=str(getattr(result, "entry_id", "")),
-            usage_charge_id=result.charge_id,
+            usage_charge_id=_require_text(result.charge_id, "settle_lease"),
             user_id=user_id,
             amount=_dec(result.amount),
             allowance_consumed=_dec(result.allowance_consumed),
@@ -766,7 +714,7 @@ class PostgresStore(CreditStore):
         """
         result = self._lease_repo.release_lease(user_id, lease_id)
         if result is None:
-            return ReleaseResult(lease_id=lease_id, user_id=user_id, released=False)
+            raise StoreError("release_lease returned no result")
         return ReleaseResult(
             lease_id=lease_id,
             user_id=user_id,
@@ -779,27 +727,19 @@ class PostgresStore(CreditStore):
         result = self._lease_repo.renew_lease(user_id, lease_id, ttl_seconds)
         availability = self.get_available(user_id)
         if result is None:
-            return LeaseResult(
-                lease_id=lease_id,
-                user_id=user_id,
-                amount=Decimal(0),
-                available=availability.available,
-                reserved_total=availability.reserved,
-                minimum_balance=Decimal(0),
-                billing_mode="strict",
-                expires_at="",
-                error="no result",
-            )
+            raise StoreError("renew_lease returned no result")
         minimum_balance = _dec(result.minimum_balance)
         return LeaseResult(
-            lease_id=str(result.lease_id or lease_id),
+            lease_id=(_require_text(result.lease_id, "renew_lease") if result.error is None else lease_id),
             user_id=user_id,
             amount=_dec(result.amount),
             available=availability.available,
             reserved_total=availability.reserved,
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
-            expires_at=_text(result.expires_at),
+            expires_at=(
+                _require_text(result.expires_at, "renew_lease") if result.error is None else _text(result.expires_at)
+            ),
             error=result.error,
         )
 
@@ -828,34 +768,34 @@ class PostgresStore(CreditStore):
             available=_dec(result.available),
         )
 
-    # ── Pricing configuration ──────────────────────────────────────────
+    # ── Catalog configuration ──────────────────────────────────────────
 
-    def get_active_pricing(self) -> BursarConfigResult | None:
-        return self._load_active_pricing()
+    def get_active_catalog(self) -> CatalogRevision | None:
+        return self._load_active_catalog()
 
-    def _normalize_bursar_config(self, result: Any) -> BursarConfigResult | None:
-        """Normalize a raw pricing config DB result into BursarConfigResult."""
+    def _normalize_catalog_revision(self, result: Any) -> CatalogRevision | None:
+        """Normalize a raw catalog revision into CatalogRevision."""
         if result is None:
             return None
-        return BursarConfigResult.model_validate(result.model_dump())
+        return CatalogRevision.model_validate(result.model_dump())
 
-    def _load_active_pricing(self) -> BursarConfigResult | None:
-        return self._normalize_bursar_config(self._pricing_repo.get_active_pricing())
+    def _load_active_catalog(self) -> CatalogRevision | None:
+        return self._normalize_catalog_revision(self._catalog_repo.get_active_catalog())
 
-    def set_active_pricing(
+    def publish_and_activate_catalog(
         self,
         config: dict[str, Any],
         label: str | None = None,
         rollout: Any | None = None,
     ) -> str:
-        """Set a new active pricing configuration.
+        """Publish and activate a catalog revision.
 
         Args:
-            config: The pricing configuration dict.
+            config: The Bursar configuration document.
             label: Optional human-readable label.
 
         Returns:
-            The ID of the newly activated pricing config.
+            The ID of the newly activated catalog revision.
 
         Raises:
             StoreError: If the RPC returns no result.
@@ -870,24 +810,24 @@ class PostgresStore(CreditStore):
         canonical = canonical_bursar_config_dict(config)
         parsed = load_config_from_dict(canonical)
         rollout_document = canonical_catalog_rollout_dict(rollout, parsed)
-        result = self._pricing_repo.set_active_pricing(
+        result = self._catalog_repo.publish_and_activate_catalog(
             json.dumps(canonical, cls=DecimalEncoder),
             label,
             rollout_document,
         )
         if result is None:
-            raise StoreError("set_active_pricing returned no result")
-        return str(getattr(result, "id", ""))
+            raise StoreError("publish_and_activate_catalog returned no result")
+        return result.id
 
-    def get_pricing_history(self) -> list[BursarConfigHistoryItem]:
-        """Get all pricing configuration versions.
+    def get_catalog_history(self) -> list[CatalogRevisionSummary]:
+        """Get all catalog revisions.
 
         Returns:
-            List of BursarConfigHistoryItem (may be empty).
+            List of CatalogRevisionSummary (may be empty).
         """
-        rows = self._pricing_repo.get_pricing_history()
+        rows = self._catalog_repo.get_catalog_history()
         return [
-            BursarConfigHistoryItem(
+            CatalogRevisionSummary(
                 id=str(r.id),
                 version=r.version,
                 label=r.label,
@@ -897,19 +837,19 @@ class PostgresStore(CreditStore):
             for r in rows
         ]
 
-    def get_bursar_config(self, version: int) -> BursarConfigResult | None:
-        """Get a specific pricing configuration by version number.
+    def get_catalog_revision(self, version: int) -> CatalogRevision | None:
+        """Get a catalog revision by version number.
 
         Args:
             version: The version number to retrieve.
 
         Returns:
-            BursarConfigResult if found, None otherwise.
+            CatalogRevision if found, None otherwise.
         """
-        return self._normalize_bursar_config(self._pricing_repo.get_bursar_config(version))
+        return self._normalize_catalog_revision(self._catalog_repo.get_catalog_revision(version))
 
-    def activate_pricing(self, version: int, rollout: Any | None = None) -> str:
-        """Activate a specific pricing configuration version.
+    def activate_catalog_revision(self, version: int, rollout: Any | None = None) -> str:
+        """Activate a catalog revision.
 
         Args:
             version: The version number to activate.
@@ -925,34 +865,34 @@ class PostgresStore(CreditStore):
             load_config_from_dict,
         )
 
-        target = self.get_bursar_config(version)
+        target = self.get_catalog_revision(version)
         target_config = load_config_from_dict(target.config) if target is not None else None
         rollout_document = canonical_catalog_rollout_dict(
             rollout,
             target_config,
         )
-        result = self._pricing_repo.activate_pricing(
+        result = self._catalog_repo.activate_catalog_revision(
             version,
             rollout_document,
         )
         if result is None:
             msg = f"Version {version} not found"
             raise StoreError(msg)
-        return str(getattr(result, "id", ""))
+        return result.id
 
-    def publish_pricing(
+    def publish_catalog_draft(
         self,
         config: dict[str, Any],
         label: str | None = None,
     ) -> str:
-        """Publish an inactive pricing configuration draft."""
+        """Publish an inactive catalog draft."""
         from bursar.config import canonical_bursar_config_dict
 
         canonical = canonical_bursar_config_dict(config)
-        result = self._pricing_repo.publish_pricing(json.dumps(canonical, cls=DecimalEncoder), label)
+        result = self._catalog_repo.publish_catalog_draft(json.dumps(canonical, cls=DecimalEncoder), label)
         if result is None:
-            raise StoreError("publish_pricing returned no result")
-        return str(getattr(result, "id", ""))
+            raise StoreError("publish_catalog_draft returned no result")
+        return result.id
 
     # ── Plan management ────────────────────────────────────────────────
 
@@ -978,7 +918,24 @@ class PostgresStore(CreditStore):
                 admission=None,
                 allowed_operations=[],
             )
-        allowance_amount = _dec(result.credit_allowance_amount)
+        allowance = None
+        if result.credit_allowance_amount is not None:
+            if (
+                result.credit_allowance_priority is None
+                or result.credit_allowance_reset_unit is None
+                or result.credit_allowance_reset_count is None
+                or result.credit_allowance_reset_anchor is None
+                or result.credit_allowance_reset_timezone is None
+            ):
+                raise StoreError("get_user_plan returned an incomplete allowance policy")
+            allowance = PlanAllowancePolicy(
+                amount=_dec(result.credit_allowance_amount),
+                priority=result.credit_allowance_priority,
+                reset_unit=result.credit_allowance_reset_unit,
+                reset_count=result.credit_allowance_reset_count,
+                reset_anchor=result.credit_allowance_reset_anchor,
+                reset_timezone=result.credit_allowance_reset_timezone,
+            )
         admission_operations = {
             str(operation): {"max_in_flight": policy.get("max_in_flight") if isinstance(policy, dict) else None}
             for operation, policy in (result.operation_admission or {}).items()
@@ -991,18 +948,7 @@ class PostgresStore(CreditStore):
             plan_id=result.plan_id or None,
             plan_key=result.plan_key or None,
             plan_label=result.plan_label or None,
-            allowance=(
-                PlanAllowancePolicy(
-                    amount=allowance_amount,
-                    priority=result.credit_allowance_priority,
-                    reset_unit=result.credit_allowance_reset_unit,
-                    reset_count=result.credit_allowance_reset_count,
-                    reset_anchor=result.credit_allowance_reset_anchor,
-                    reset_timezone=result.credit_allowance_reset_timezone,
-                )
-                if result.credit_allowance_amount is not None
-                else None
-            ),
+            allowance=allowance,
             entitlements={k: Entitlement.model_validate(v) for k, v in (result.entitlements or {}).items()},
             rate_card=result.rate_card,
             credit_policy=(
@@ -1231,14 +1177,7 @@ class PostgresStore(CreditStore):
             ),
         )
         if result is None:
-            return RefundResult(
-                refund_entry_id="",
-                original_entry_id=entry_id,
-                user_id="",
-                amount=Decimal(0),
-                new_balance=Decimal(0),
-                error="no result",
-            )
+            raise StoreError("refund_credit_by_entry returned no result")
         if result.error is not None:
             return RefundResult(
                 refund_entry_id="",
@@ -1249,7 +1188,7 @@ class PostgresStore(CreditStore):
                 error=str(result.error),
             )
         return RefundResult(
-            refund_entry_id=str(getattr(result, "refund_entry_id", "")),
+            refund_entry_id=_require_text(result.refund_entry_id, "refund_credit_by_entry"),
             original_entry_id=entry_id,
             user_id=str(getattr(result, "user_id", "")),
             amount=_dec(result.amount),
@@ -1269,7 +1208,7 @@ class PostgresStore(CreditStore):
         """
         result = self._deduction_repo.revoke_credits_by_entry_type(user_id, entry_type)
         if result is None:
-            return {"user_id": user_id, "amount": 0, "new_balance": "", "bucket": None}
+            raise StoreError("revoke_subject_credits_by_operation returned no result")
         return {
             "user_id": str(getattr(result, "user_id", user_id)),
             "amount": str(_dec(getattr(result, "amount", 0))),
@@ -1524,7 +1463,7 @@ class PostgresStore(CreditStore):
         if result.error_code is not None:
             raise StoreError(result.error_code)
         return CreateTeamResult(
-            team_id=str(getattr(result, "team_id", "")),
+            team_id=_require_text(result.team_id, "create_team"),
             name=name,
         )
 
@@ -1660,7 +1599,7 @@ class PostgresStore(CreditStore):
                 error=str(result.error),
             )
         return TeamDeductionResult(
-            entry_id=str(getattr(result, "entry_id", "")),
+            entry_id=_require_text(result.entry_id, "deduct_team"),
             team_id=str(getattr(result, "team_id", team_id)),
             user_id=str(getattr(result, "user_id", user_id)),
             amount=_dec(result.amount, -amount),
@@ -1754,8 +1693,6 @@ def run_migrations(
     after Bursar's migrations, in order and in the same transaction. This is
     the host-integration hook used by the CLI's ``--post-migrate-sql`` option.
     """
-    store = PostgresStore(database_url, tenant_id=None)
-    try:
-        store._migrate(post_migration_sql=post_migration_sql)
-    finally:
-        store.close()
+    if not isinstance(database_url, str) or not database_url.strip():
+        raise ValueError("database_url must not be empty")
+    PostgresStore._migrate(database_url, post_migration_sql=post_migration_sql)

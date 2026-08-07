@@ -74,6 +74,57 @@ export class CreditError extends BursarError {
   override readonly code: string = "CREDIT_ERROR";
 }
 
+/** Base error for billing and payment orchestration failures. */
+export class BillingError extends BursarError {
+  override readonly name: string = "BillingError";
+  override readonly code: string = "BILLING_ERROR";
+}
+
+export class AutoRechargeNotConfiguredError extends BillingError {
+  override readonly name = "AutoRechargeNotConfiguredError";
+  override readonly code = "AUTO_RECHARGE_NOT_CONFIGURED";
+  override readonly category = "unavailable" as const;
+
+  constructor() {
+    super("Auto-recharge is not configured for this catalog");
+  }
+}
+
+export class AutoRechargeDisabledError extends BillingError {
+  override readonly name = "AutoRechargeDisabledError";
+  override readonly code = "AUTO_RECHARGE_DISABLED";
+  override readonly category = "conflict" as const;
+
+  constructor() {
+    super("Auto-recharge is disabled for this account");
+  }
+}
+
+export class PaymentMethodRequiredError extends BillingError {
+  override readonly name = "PaymentMethodRequiredError";
+  override readonly code = "PAYMENT_METHOD_REQUIRED";
+  override readonly category = "payment_required" as const;
+
+  constructor() {
+    super("A saved payment method is required");
+  }
+}
+
+export class ProviderCapabilityNotSupportedError extends BillingError {
+  override readonly name = "ProviderCapabilityNotSupportedError";
+  override readonly code = "PROVIDER_CAPABILITY_NOT_SUPPORTED";
+  override readonly category = "unavailable" as const;
+
+  constructor(
+    readonly provider: string,
+    readonly capability: string,
+  ) {
+    super(`Payment provider '${provider}' does not support '${capability}'`, {
+      details: { provider, capability },
+    });
+  }
+}
+
 export class ConfigError extends BursarError {
   override readonly name = "ConfigError";
   override readonly code = "CONFIG_ERROR";
@@ -98,9 +149,9 @@ export class InsufficientCreditsError extends CreditError {
   override readonly category = "payment_required" as const;
 }
 
-export class PricingNotLoadedError extends CreditError {
-  override readonly name = "PricingNotLoadedError";
-  override readonly code = "PRICING_NOT_LOADED";
+export class CatalogNotLoadedError extends CreditError {
+  override readonly name = "CatalogNotLoadedError";
+  override readonly code = "CATALOG_NOT_LOADED";
   override readonly category = "unavailable" as const;
 }
 
@@ -206,13 +257,26 @@ export class LeaseNotFoundError extends CreditError {
 
 /**
  * Thrown by the default (concrete) implementation of an optional `CreditStore`
- * capability (analytics, ledger listing, teams — WS8) when a custom store
+ * capability (such as analytics, ledger listing, or teams) when a custom store
  * subclass does not override it.
  */
 export class CapabilityNotSupportedError extends StoreError {
   override readonly name = "CapabilityNotSupportedError";
   override readonly code = "CAPABILITY_NOT_SUPPORTED";
   override readonly retryable = false;
+}
+
+/** A facade capability was intentionally omitted from SDK composition. */
+export class CapabilityNotConfiguredError extends BursarError {
+  override readonly name = "CapabilityNotConfiguredError";
+  override readonly code = "CAPABILITY_NOT_CONFIGURED";
+  override readonly category = "unavailable" as const;
+
+  constructor(readonly capability: string) {
+    super(`Bursar ${capability} capability is not configured`, {
+      details: { capability },
+    });
+  }
 }
 
 /**

@@ -66,9 +66,9 @@ describe("credit lease workflow", () => {
         measures: { calls: 1 },
         dimensions: { model: "linkup" },
       },
-      "external:usage:1",
       {
-        providerRequestId: "request-1",
+        idempotencyKey: "external:usage:1",
+        metadata: { providerRequestId: "request-1" },
       },
     );
 
@@ -219,7 +219,7 @@ describe("credit lease workflow", () => {
           rateCard: null,
           planKey: null,
         }),
-        getBursarConfig: vi.fn().mockResolvedValue({ config }),
+        getCatalogRevision: vi.fn().mockResolvedValue({ config }),
         settleLease,
         listQuotaEvents: vi.fn().mockResolvedValue([]),
       } as unknown as CreditStore,

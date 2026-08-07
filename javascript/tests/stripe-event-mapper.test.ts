@@ -1,18 +1,21 @@
 import { describe, expect, it } from "vitest";
+import type Stripe from "stripe";
+import type { BillingEventSink } from "../src/billing/contracts.js";
+import type { BillingEvent } from "../src/billing/types/index.js";
 import { handleStripeWebhook } from "../src/providers/stripe/event-mapper.js";
 
-const fakeStripe: any = {
+const fakeStripe = {
   checkout: { sessions: { retrieve: async () => ({ line_items: { data: [] } }) } },
   subscriptions: {
     retrieve: async () => ({ id: "sub_1", status: "active", metadata: { userId: "u1" } }),
   },
-};
+} as unknown as Stripe;
 
-function sink() {
-  const events: any[] = [];
+function sink(): BillingEventSink & { events: BillingEvent[] } {
+  const events: BillingEvent[] = [];
   return {
     events,
-    ingestBillingEvent: (event: any) => {
+    ingestBillingEvent: async (event: BillingEvent) => {
       events.push(event);
       return { handled: true };
     },
@@ -20,7 +23,12 @@ function sink() {
 }
 
 const event = (type: string, object: unknown) =>
-  ({ id: `evt_${type}`, type, data: { object } }) as any;
+  ({
+    id: `evt_${type}`,
+    type,
+    created: 1_767_225_600,
+    data: { object },
+  }) as unknown as Stripe.Event;
 
 describe("Stripe webhook mapper", () => {
   it("maps subscription update, cancellation, and invoice events", async () => {
@@ -82,6 +90,6 @@ describe("Stripe webhook mapper", () => {
     );
     await handleStripeWebhook(event("charge.succeeded", {}), target, fakeStripe);
     expect(target.events).toHaveLength(1);
-    expect(target.events[0].eventType).toBe("checkout.completed");
+    expect(target.events[0]!.eventType).toBe("checkout.completed");
   });
 });

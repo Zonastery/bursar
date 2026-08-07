@@ -12,6 +12,7 @@ import type {
   UsageChargeStore,
 } from "../../credits/types/index.js";
 import type { UsageChargeExport, UsageEventSink } from "../ports.js";
+import { normalizeTenantId } from "../../shared/postgres-client.js";
 
 export interface ClickHouseQueryResult {
   json<T>(): Promise<T>;
@@ -120,7 +121,7 @@ export class ClickHouseUsageStore implements UsageEventSink, UsageAnalyticsStore
 
   constructor(options: ClickHouseUsageStoreOptions) {
     this.client = options.client;
-    this.tenantId = options.tenantId;
+    this.tenantId = normalizeTenantId(options.tenantId);
     this.table = validateTableName(options.table ?? "bursar_usage_events");
     this.quotedTable = quoteTable(this.table);
     this.createTable = options.createTable ?? true;

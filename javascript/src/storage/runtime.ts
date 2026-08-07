@@ -1,16 +1,21 @@
-import { Bursar, type BursarOptions } from "../bursar.js";
+import { Bursar } from "../bursar.js";
 import {
+  ConfigError,
   ImportError as BursarImportError,
   isRetryableBursarError,
-  PricingNotLoadedError,
+  CatalogNotLoadedError,
   StoreClosedError,
 } from "../errors.js";
 import { retryBursarOperation } from "../retry.js";
 import { PostgresBillingStore } from "../billing/postgres/store.js";
+import type { BillingServiceOptions } from "../billing/billing-service.js";
 import { PostgresStore } from "../credits/postgres/store.js";
 import type { CreditsServiceOptions } from "../credits/service.js";
+import type { CreditEventEmitter } from "../credits/events.js";
+import type { CommerceOptions } from "../commerce/types.js";
 import type { UsageAnalyticsStore, UsageChargeStore } from "../credits/types/index.js";
 import {
+  normalizeTenantId,
   PostgresClient,
   postgresPoolConfig,
   type PostgresConnectionOptions,
@@ -29,18 +34,24 @@ import type {
 } from "./ports.js";
 import { PostgresStorageRepository } from "./postgres-repository.js";
 
-type RuntimeBursarOptions = Omit<
-  BursarOptions,
-  "creditStore" | "billingStore" | "credits" | "creditsOptions"
-> & {
+/** Facade configuration accepted by the composed Node.js runtime. */
+export interface BursarRuntimeBursarOptions {
   creditsOptions?: Omit<CreditsServiceOptions, "analytics"> | null;
-};
+  billingOptions?: BillingServiceOptions | null;
+  commerceOptions?: CommerceOptions | null;
+  emitter?: CreditEventEmitter | null;
+}
 
 export interface BursarRuntimeOptions {
   postgres: string | PostgresPool;
   /** Applied to SDK-owned pools and per-transaction statement deadlines. */
   postgresOptions?: PostgresConnectionOptions;
   tenantId: string;
+  /**
+   * Optional provisioned tenant slug. When supplied, startup verifies that it
+   * resolves to `tenantId` before any worker or catalog lifecycle begins.
+   */
+  tenantSlug?: string;
   s3?: BillingPayloadArchive | S3BillingArchiveOptions | null;
   clickhouse?: (UsageEventSink & UsageAnalyticsStore) | ClickHouseUsageStoreOptions | null;
   /**
@@ -48,7 +59,7 @@ export interface BursarRuntimeOptions {
    * consumes Bursar's outbox.
    */
   outbox?: OutboxWorkerOptions | false;
-  bursar?: RuntimeBursarOptions;
+  bursar?: BursarRuntimeBursarOptions;
 }
 
 export interface BursarRuntimeStartOptions {
@@ -88,29 +99,67 @@ export class BursarRuntime {
 
   private readonly pool: PostgresPool;
   private readonly ownsPool: boolean;
+  private readonly postgres: PostgresClient;
+  private readonly query: QueryFn;
+  private readonly tenantId: string;
+  private readonly tenantSlug: string | null;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
   private started = false;
   private closed = false;
 
-  constructor(
+  /** Construct a runtime while keeping pool ownership inside the SDK. */
+  static async create(options: BursarRuntimeOptions): Promise<BursarRuntime> {
+    if (typeof options.postgres !== "string") {
+      return new BursarRuntime(options.postgres, false, options);
+    }
+    if (!options.postgres.trim()) {
+      throw new TypeError("postgres connection string must not be empty");
+    }
+    let pg: typeof import("pg");
+    try {
+      pg = await import("pg");
+    } catch (cause) {
+      throw new BursarImportError("pg is required for the Bursar runtime: npm install pg", {
+        cause,
+      });
+    }
+    const pool = new pg.Pool(
+      postgresPoolConfig(options.postgres, options.postgresOptions),
+    ) as PostgresPool;
+    try {
+      return new BursarRuntime(pool, true, options);
+    } catch (error) {
+      try {
+        await pool.end();
+      } catch {
+        // Preserve the composition error; no runtime exists to report cleanup.
+      }
+      throw error;
+    }
+  }
+
+  private constructor(
     pool: PostgresPool,
     ownsPool: boolean,
     options: Omit<BursarRuntimeOptions, "postgres">,
   ) {
     this.pool = pool;
     this.ownsPool = ownsPool;
+    this.tenantId = normalizeTenantId(options.tenantId);
+    this.tenantSlug =
+      options.tenantSlug === undefined ? null : normalizeTenantSlug(options.tenantSlug);
     if (
       options.clickhouse &&
       !("writeUsage" in options.clickhouse) &&
-      options.clickhouse.tenantId !== options.tenantId
+      normalizeTenantId(options.clickhouse.tenantId) !== this.tenantId
     ) {
       throw new TypeError("ClickHouse tenantId must match runtime tenantId");
     }
     this.clickhouse = options.clickhouse
       ? "writeUsage" in options.clickhouse
         ? options.clickhouse
-        : new ClickHouseUsageStore(options.clickhouse)
+        : new ClickHouseUsageStore({ ...options.clickhouse, tenantId: this.tenantId })
       : null;
     this.s3 = options.s3
       ? "archive" in options.s3
@@ -118,11 +167,15 @@ export class BursarRuntime {
         : new S3BillingArchive(options.s3)
       : null;
 
-    this.creditStore = new PostgresStore("", options.tenantId, pool, {
+    this.creditStore = new PostgresStore({
+      postgres: pool,
+      tenantId: this.tenantId,
       ...(options.postgresOptions ?? {}),
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
     });
-    this.billingStore = new PostgresBillingStore(pool, options.tenantId, {
+    this.billingStore = new PostgresBillingStore({
+      postgres: pool,
+      tenantId: this.tenantId,
       ...(options.postgresOptions ?? {}),
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
     });
@@ -130,7 +183,7 @@ export class BursarRuntime {
     const commerceOptions = bursarOptions.commerceOptions
       ? {
           ...bursarOptions.commerceOptions,
-          tenantId: options.tenantId,
+          tenantId: this.tenantId,
         }
       : undefined;
     this.bursar = new Bursar({
@@ -148,13 +201,15 @@ export class BursarRuntime {
       },
     });
 
-    const query: QueryFn = new PostgresClient(pool, {
+    this.postgres = new PostgresClient(pool, {
       ...(options.postgresOptions ?? {}),
-      tenantId: options.tenantId,
+      tenantId: this.tenantId,
+      accessRole: "bursar_operator",
       usageBackend: this.clickhouse ? "clickhouse" : "postgres",
       billingPayloadBackend: this.s3 ? "s3" : "postgres",
-    }).query;
-    const repository = new PostgresStorageRepository(query, options.tenantId);
+    });
+    this.query = this.postgres.query;
+    const repository = new PostgresStorageRepository(this.query, this.tenantId);
     const handlers = this.createHandlers(repository);
     this.worker =
       handlers.length > 0 && options.outbox !== false
@@ -163,10 +218,10 @@ export class BursarRuntime {
   }
 
   start(options: BursarRuntimeStartOptions = {}): Promise<void> {
-    if (this.started) return Promise.resolve();
     if (this.closed) {
       return Promise.reject(new StoreClosedError("BursarRuntime has been closed"));
     }
+    if (this.started) return Promise.resolve();
     if (!this.startPromise) {
       this.startPromise = this.startRuntime(options).catch((error: unknown) => {
         this.startPromise = null;
@@ -177,12 +232,13 @@ export class BursarRuntime {
   }
 
   private async startRuntime(options: BursarRuntimeStartOptions): Promise<void> {
-    if (options.loadCatalog) {
+    if (this.tenantSlug) await this.verifyTenantIdentity();
+    if (options.loadCatalog ?? true) {
       const maxAttempts = options.maxAttempts ?? 1;
       const shouldRetry =
         options.shouldRetry ??
         ((error: unknown) =>
-          error instanceof PricingNotLoadedError || isRetryableBursarError(error));
+          error instanceof CatalogNotLoadedError || isRetryableBursarError(error));
       await retryBursarOperation(() => this.bursar.loadCatalog(), {
         maxAttempts,
         baseDelayMs: options.retryDelayMs ?? 250,
@@ -198,7 +254,7 @@ export class BursarRuntime {
   }
 
   health(): BursarRuntimeHealth {
-    const catalogLoaded = this.bursar.credits.pricingEngine != null;
+    const catalogLoaded = this.bursar.catalog.isLoaded;
     return {
       ready: this.started && !this.closed && catalogLoaded,
       started: this.started,
@@ -240,6 +296,7 @@ export class BursarRuntime {
       Promise.resolve().then(() => this.s3?.close?.()),
       Promise.resolve().then(() => this.creditStore.close()),
       Promise.resolve().then(() => this.billingStore.close()),
+      Promise.resolve().then(() => this.postgres.close()),
     ]);
     for (const result of resources) {
       if (result.status === "rejected") failures.push(result.reason);
@@ -315,7 +372,6 @@ export class BursarRuntime {
             event.eventId,
             archived.key,
             archived.versionId,
-            this.s3?.purgePostgresPayload ?? true,
           );
           if (!recorded) {
             throw new Error(`Could not record archive pointer for billing event ${event.eventId}`);
@@ -325,23 +381,41 @@ export class BursarRuntime {
     }
     return handlers;
   }
+
+  private async verifyTenantIdentity(): Promise<void> {
+    if (!this.tenantSlug) return;
+    const rows = await this.query(
+      "SELECT bursar.resolve_active_tenant_for_trigger($1)::text AS tenant_id",
+      [this.tenantSlug],
+    );
+    const resolved = rows[0];
+    const tenantId =
+      resolved && typeof resolved === "object" && "tenant_id" in resolved
+        ? (resolved as { tenant_id?: unknown }).tenant_id
+        : undefined;
+    if (tenantId !== this.tenantId) {
+      throw new ConfigError(
+        `Bursar tenant slug '${this.tenantSlug}' resolves to a different tenant ID`,
+      );
+    }
+  }
 }
 
 export async function createBursarRuntime(options: BursarRuntimeOptions): Promise<BursarRuntime> {
-  if (typeof options.postgres !== "string") {
-    return new BursarRuntime(options.postgres, false, options);
+  return BursarRuntime.create(options);
+}
+
+function normalizeTenantSlug(value: string): string {
+  if (typeof value !== "string") throw new TypeError("tenantSlug must be a string");
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized.length < 1 ||
+    normalized.length > 100 ||
+    !/^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$/.test(normalized)
+  ) {
+    throw new TypeError("tenantSlug must be a valid Bursar tenant slug");
   }
-  if (!options.postgres.trim()) throw new TypeError("postgres connection string must not be empty");
-  let pg: typeof import("pg");
-  try {
-    pg = await import("pg");
-  } catch (cause) {
-    throw new BursarImportError("pg is required for the Bursar runtime: npm install pg", { cause });
-  }
-  const pool = new pg.Pool(
-    postgresPoolConfig(options.postgres, options.postgresOptions),
-  ) as unknown as PostgresPool;
-  return new BursarRuntime(pool, true, options);
+  return normalized;
 }
 
 function usageExportFromOutbox(payload: Record<string, unknown>): UsageChargeExport | null {

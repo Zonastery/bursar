@@ -1,3 +1,5 @@
+import type Decimal from "decimal.js";
+
 export const AUTO_RECHARGE_STATES = ["disabled", "active", "paused"] as const;
 export type BillingAutoRechargeState = (typeof AUTO_RECHARGE_STATES)[number];
 
@@ -9,11 +11,11 @@ export interface BillingAutoRechargeProfile {
   provider: string | null;
   topupId: string | null;
   quantity: number;
-  threshold: number;
+  threshold: Decimal;
   maxChargesPerWindow: number | null;
   windowUnit: "second" | "minute" | "hour" | "day" | "week" | "month" | "year";
   windowCount: number;
-  windowAnchor: "calendar" | "plan_assignment" | "rolling";
+  windowAnchor: "calendar" | "rolling";
   windowTimezone: string;
   updatedAt?: string | null;
 }
@@ -27,7 +29,13 @@ export interface BillingAutoRechargeAttempt {
   topupId: string;
   quantity: number;
   state:
-    "claimed" | "submitted" | "processing" | "unknown" | "succeeded" | "failed" | "action_required";
+    | "claimed"
+    | "submitted"
+    | "processing"
+    | "unknown"
+    | "succeeded"
+    | "failed"
+    | "action_required";
   windowStart: string;
   windowEnd: string;
   quotedAmountMinor: number | null;
@@ -42,7 +50,7 @@ export interface BillingAutoRechargeAttempt {
 export interface BillingAutoRechargeStatus {
   enabled: boolean;
   state: BillingAutoRechargeState;
-  thresholdCredits: number;
+  thresholdCredits: Decimal;
   topupKey: string;
   quantity: number;
   maxRecharges: number;

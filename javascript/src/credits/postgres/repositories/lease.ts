@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
 import { DeductionRowSchema } from "./deduction.js";
 import type { DeductionRow } from "./deduction.js";
-import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
 const LeaseRowSchema = z
   .object({
@@ -83,12 +83,13 @@ export class LeaseRepository {
       params.minimumBalance,
       params.maxConcurrent,
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "LeaseRepository.createLease") as Record<string, unknown>;
     const lease =
       row.lease_id == null
         ? null
         : ((await this.callproc("get_credit_lease", [params.userId, row.lease_id]))[0] as
-            Record<string, unknown> | undefined);
+            | Record<string, unknown>
+            | undefined);
     return safeParse(
       LeaseRowSchema,
       {
@@ -128,7 +129,7 @@ export class LeaseRepository {
       params.dimensions,
       params.metadata,
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "LeaseRepository.settleLease") as Record<string, unknown>;
     const charge = (
       await this.callproc("get_credit_operation_details", [
         params.userId,
@@ -161,9 +162,9 @@ export class LeaseRepository {
   /** Release a lease without charging — idempotent. */
   async releaseLease(userId: string, leaseId: string): Promise<ReleaseRow> {
     const rows = await this.callproc("release_lease", [userId, leaseId]);
-    const result = rows?.[0] as { released?: boolean } | undefined;
-    const reason =
-      typeof rows?.[0] === "string" ? rows[0] : result?.released === true ? "released" : null;
+    const value = requireRow(rows, "LeaseRepository.releaseLease");
+    const result = value as { released?: boolean };
+    const reason = typeof value === "string" ? value : result.released === true ? "released" : null;
     return safeParse(
       ReleaseRowSchema,
       {
@@ -177,11 +178,12 @@ export class LeaseRepository {
   /** Extend an active lease without changing its captured policy snapshot. */
   async renewLease(userId: string, leaseId: string, ttlSeconds: number): Promise<LeaseRow> {
     const rows = await this.callproc("renew_lease", [userId, leaseId, `${ttlSeconds} seconds`]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "LeaseRepository.renewLease") as Record<string, unknown>;
     const lease =
       row.error_code == null && row.lease_id != null
         ? ((await this.callproc("get_credit_lease", [userId, row.lease_id]))[0] as
-            Record<string, unknown> | undefined)
+            | Record<string, unknown>
+            | undefined)
         : undefined;
     return safeParse(
       LeaseRowSchema,
@@ -199,7 +201,7 @@ export class LeaseRepository {
   /** Expire a bounded batch of leases and release their reservations. */
   async expireLeases(limit: number): Promise<number> {
     const rows = await this.callproc("expire_leases", [limit]);
-    const row = rows?.[0] as Record<string, unknown> | undefined;
-    return Number(row?.expired ?? 0);
+    const row = requireRow(rows, "LeaseRepository.expireLeases") as Record<string, unknown>;
+    return Number(row.expired ?? 0);
   }
 }

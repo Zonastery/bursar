@@ -160,7 +160,10 @@ bursar = Bursar.create(credit_store=store)
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+const store = new PostgresStore({
+  postgres: process.env.DATABASE_URL!,
+  tenantId,
+});
 const bursar = new Bursar({ creditStore: store });
 ```
 

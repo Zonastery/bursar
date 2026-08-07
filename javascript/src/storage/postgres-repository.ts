@@ -176,12 +176,11 @@ export class PostgresStorageRepository implements OutboxStore {
     eventId: string,
     objectKey: string,
     objectVersion: string | null,
-    purgePostgresPayload: boolean,
   ): Promise<boolean> {
     return scalarBoolean(
       await this.query(
-        "SELECT bursar.archive_billing_event_payload($1::uuid, $2::text, $3::text, $4::boolean)",
-        [eventId, objectKey, objectVersion, purgePostgresPayload],
+        "SELECT bursar.archive_billing_event_payload($1::uuid, $2::text, $3::text)",
+        [eventId, objectKey, objectVersion],
       ),
     );
   }

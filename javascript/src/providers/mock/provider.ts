@@ -1,5 +1,4 @@
 import type { PaymentProvider, ResolveUserCallback } from "../types.js";
-import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
 import type {
   CheckoutParams,
   PortalParams,
@@ -17,7 +16,12 @@ import type {
   WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
-import { handleDodoBillingEvent } from "../dodo/event-mapper.js";
+import { assertBillingEvent, type BillingEvent } from "../../billing/types/index.js";
+
+export interface MockPaymentProviderOptions {
+  eventSink: BillingEventSink;
+  resolveUser?: ResolveUserCallback;
+}
 
 function mockIdentityInput(
   providerEventType: string,
@@ -52,16 +56,13 @@ function mockIdentityInput(
 
 export class MockPaymentProvider implements PaymentProvider {
   readonly provider = "mock" as const;
+  private readonly sink: BillingEventSink;
+  private readonly resolveUser?: ResolveUserCallback;
 
-  constructor(
-    private sink: BillingEventSink,
-    private resolveUser?: ResolveUserCallback,
-    logger?: ProviderLogger | null,
-  ) {
-    this.logger = normalizeProviderLogger(logger);
+  constructor(options: MockPaymentProviderOptions) {
+    this.sink = options.eventSink;
+    this.resolveUser = options.resolveUser;
   }
-
-  private logger: ReturnType<typeof normalizeProviderLogger>;
 
   async createCheckoutSession(
     params: CheckoutParams,
@@ -97,10 +98,6 @@ export class MockPaymentProvider implements PaymentProvider {
 
   async listPaymentMethods(_customerId: string): Promise<PaymentMethodInfo[]> {
     return [];
-  }
-
-  async getDefaultPaymentMethod(customerId: string): Promise<PaymentMethodInfo | null> {
-    return (await this.listPaymentMethods(customerId))[0] ?? null;
   }
 
   async previewSavedPaymentCharge(
@@ -151,33 +148,43 @@ export class MockPaymentProvider implements PaymentProvider {
       };
     }
 
-    const data = (payload.data ?? {}) as Record<string, unknown>;
-    const metadata = (data.metadata ?? {}) as Record<string, string>;
-    let userId: string | null = metadata.userId ?? null;
+    const event = { ...payload, provider: this.provider } as unknown as BillingEvent;
+    assertBillingEvent(event);
+    let userId: string | null = event.userId ?? null;
 
     if (!userId && this.resolveUser) {
+      const metadata = Object.fromEntries(
+        Object.entries(event.metadata ?? {}).map(([key, value]) => {
+          if (typeof value !== "string") {
+            throw new TypeError(`mock billing event metadata.${key} must be a string`);
+          }
+          return [key, value];
+        }),
+      );
       userId = await this.resolveUser(
-        mockIdentityInput(String(payload.type ?? ""), data, metadata),
+        mockIdentityInput(
+          event.eventType,
+          {
+            customer_id: event.customer?.providerCustomerId,
+            customer: event.customer
+              ? {
+                  customer_id: event.customer.providerCustomerId,
+                  email: event.customer.email,
+                }
+              : undefined,
+          },
+          metadata,
+        ),
       );
     }
 
-    await handleDodoBillingEvent(
-      String(payload.type),
-      data,
-      userId,
-      metadata,
-      this.sink,
-      this.logger,
-    );
-
-    const rawEventId =
-      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
+    await this.sink.ingestBillingEvent({ ...event, ...(userId ? { userId } : {}) });
     return {
       received: true,
       retryable: false,
       provider: this.provider,
-      eventId: rawEventId == null ? null : String(rawEventId),
-      eventType: typeof payload.type === "string" ? payload.type : null,
+      eventId: event.eventId,
+      eventType: event.eventType,
     };
   }
 

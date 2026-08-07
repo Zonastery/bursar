@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import Decimal from "decimal.js";
 import type { PostgresPool } from "../src/shared/postgres-client.js";
 import { ClickHouseUsageStore, type ClickHouseClient } from "../src/storage/adapters/clickhouse.js";
 import { S3BillingArchive } from "../src/storage/adapters/s3.js";
 import { OutboxWorker } from "../src/storage/outbox-worker.js";
 import type { OutboxEvent, OutboxStore, UsageChargeExport } from "../src/storage/ports.js";
 import { createBursarRuntime } from "../src/storage/runtime.js";
-import { PricingNotLoadedError, StoreClosedError } from "../src/errors.js";
+import { CatalogNotLoadedError, StoreClosedError } from "../src/errors.js";
 
 const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -451,7 +452,7 @@ describe("BursarRuntime", () => {
     });
     const loadCatalog = vi
       .spyOn(runtime.bursar, "loadCatalog")
-      .mockRejectedValueOnce(new PricingNotLoadedError("catalog pending"))
+      .mockRejectedValueOnce(new CatalogNotLoadedError("catalog pending"))
       .mockResolvedValue(undefined);
 
     await runtime.start({ loadCatalog: true, maxAttempts: 2, retryDelayMs: 0 });
@@ -475,7 +476,7 @@ describe("BursarRuntime", () => {
     expect(runtime.worker).toBeNull();
     expect(runtime.clickhouse).toBeNull();
     expect(runtime.s3).toBeNull();
-    await runtime.start();
+    await runtime.start({ loadCatalog: false });
     await expect(runtime.flush()).resolves.toEqual({ claimed: 0, delivered: 0, failed: 0 });
     await runtime.close();
     expect(pool.end).not.toHaveBeenCalled();
@@ -547,6 +548,56 @@ describe("BursarRuntime", () => {
     ).rejects.toThrow(TypeError);
   });
 
+  it("verifies and normalizes a configured tenant slug during startup", async () => {
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes("resolve_active_tenant_for_trigger")
+        ? [{ tenant_id: TEST_TENANT_ID }]
+        : [],
+    }));
+    const client = { query, release: vi.fn() };
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn().mockResolvedValue(client),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+      tenantSlug: " Zonastery ",
+    });
+
+    await runtime.start({ loadCatalog: false });
+
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("resolve_active_tenant_for_trigger"),
+      ["zonastery"],
+    );
+    await runtime.close();
+  });
+
+  it("fails startup when a tenant slug resolves to another tenant", async () => {
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes("resolve_active_tenant_for_trigger")
+        ? [{ tenant_id: "00000000-0000-0000-0000-000000000002" }]
+        : [],
+    }));
+    const pool: PostgresPool = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime = await createBursarRuntime({
+      postgres: pool,
+      tenantId: TEST_TENANT_ID,
+      tenantSlug: "zonastery",
+    });
+
+    await expect(runtime.start({ loadCatalog: false })).rejects.toThrow(
+      "resolves to a different tenant ID",
+    );
+    await runtime.close();
+  });
+
   it("guards against reuse after close and double start", async () => {
     const pool: PostgresPool = {
       query: vi.fn().mockResolvedValue({ rows: [] }),
@@ -557,7 +608,7 @@ describe("BursarRuntime", () => {
       postgres: pool,
       tenantId: TEST_TENANT_ID,
     });
-    await runtime.start();
+    await runtime.start({ loadCatalog: false });
     await runtime.start();
     expect(runtime.health()).toMatchObject({ started: true });
 
@@ -565,7 +616,7 @@ describe("BursarRuntime", () => {
     await runtime.close();
     expect(runtime.health()).toMatchObject({ closed: true, ready: false });
     await expect(runtime.flush()).rejects.toThrow("BursarRuntime has been closed");
-    await expect(runtime.start()).resolves.toBeUndefined();
+    await expect(runtime.start()).rejects.toThrow("BursarRuntime has been closed");
   });
 
   it("coalesces concurrent lifecycle calls and completes cleanup after a close failure", async () => {
@@ -580,6 +631,16 @@ describe("BursarRuntime", () => {
       initialize: vi.fn(() => initializing.promise),
       writeUsage: vi.fn().mockResolvedValue(undefined),
       spendByUser: vi.fn().mockResolvedValue([]),
+      spendByModel: vi.fn().mockResolvedValue([]),
+      topUsers: vi.fn().mockResolvedValue([]),
+      dailySpend: vi.fn().mockResolvedValue([]),
+      aggregateStats: vi.fn().mockResolvedValue({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
     };
     const s3 = {
       archive: vi.fn().mockResolvedValue({ key: "k", versionId: "v1" }),
@@ -593,7 +654,7 @@ describe("BursarRuntime", () => {
       outbox: false,
     });
 
-    const firstStart = runtime.start();
+    const firstStart = runtime.start({ loadCatalog: false });
     const secondStart = runtime.start();
     expect(secondStart).toBe(firstStart);
     expect(clickhouse.initialize).toHaveBeenCalledOnce();
@@ -689,6 +750,16 @@ describe("BursarRuntime", () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       writeUsage: vi.fn().mockResolvedValue(undefined),
       spendByUser: vi.fn().mockResolvedValue([]),
+      spendByModel: vi.fn().mockResolvedValue([]),
+      topUsers: vi.fn().mockResolvedValue([]),
+      dailySpend: vi.fn().mockResolvedValue([]),
+      aggregateStats: vi.fn().mockResolvedValue({
+        totalCreditsConsumed: new Decimal(0),
+        activeUsers: 0,
+        avgDailySpend: new Decimal(0),
+        topModel: "",
+        topUser: "",
+      }),
     };
     const s3 = {
       archive: vi.fn().mockResolvedValue({ key: "k", versionId: "v1" }),
@@ -706,7 +777,7 @@ describe("BursarRuntime", () => {
     expect(runtime.clickhouse).toBe(clickhouse);
     expect(runtime.s3).toBe(s3);
     expect(runtime.worker).not.toBeNull();
-    await runtime.start();
+    await runtime.start({ loadCatalog: false });
     expect(runtime.health()).toMatchObject({ started: true });
     await runtime.close();
     expect(clickhouse.initialize).toHaveBeenCalled();

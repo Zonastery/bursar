@@ -1,6 +1,13 @@
 import { z } from "zod";
+import type { BillingSubscriptionState } from "../../types/subscriptions.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+import { StoreError } from "../../../errors.js";
+import {
+  pgBoolean,
+  postgresUuid,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
 
 const SubscriptionRowSchema = z
   .object({
@@ -48,15 +55,15 @@ export type SubscriptionRow = z.infer<typeof SubscriptionRowSchema>;
 export class BillingSubscriptionRepository {
   constructor(private query: QueryFn) {}
 
-  async upsert(state: Record<string, unknown>): Promise<void> {
-    const provider = String(state.provider ?? "");
-    const providerSubscriptionId = String(state.providerSubscriptionId ?? "");
-    let userId = String(state.userId ?? state.subjectId ?? "");
+  async upsert(state: BillingSubscriptionState): Promise<void> {
+    const provider = state.provider;
+    const providerSubscriptionId = state.providerSubscriptionId;
+    let userId = state.userId;
     let providerCustomerId = state.providerCustomerId ?? null;
-    let offerId = String(state.offerId ?? state.offer_id ?? "");
+    let offerId = state.offerId ?? "";
 
     if (!provider || !providerSubscriptionId) {
-      throw new Error(
+      throw new TypeError(
         "subscription.upsert: subject, provider, subscription, and offer are required",
       );
     }
@@ -72,7 +79,7 @@ export class BillingSubscriptionRepository {
     }
     if (!offerId && existingRow?.offer_id != null) offerId = String(existingRow.offer_id);
 
-    const offerKey = String(state.offerKey ?? state.offer_key ?? "");
+    const offerKey = state.offerKey ?? "";
     if (!offerId && offerKey) {
       const offerRows = await this.query(`SELECT * FROM bursar.resolve_active_catalog_offer($1)`, [
         offerKey,
@@ -82,13 +89,13 @@ export class BillingSubscriptionRepository {
     }
 
     if (!userId || !offerId) {
-      throw new Error(
+      throw new TypeError(
         "subscription.upsert: subject, provider, subscription, and offer are required",
       );
     }
 
-    await this.query(
-      "SELECT bursar.upsert_billing_subscription($1::uuid,$2,$3,$4,$5::uuid,$6::bursar.billing_subscription_status,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15)",
+    const rows = await this.query(
+      "SELECT bursar.upsert_billing_subscription($1::uuid,$2,$3,$4,$5::uuid,$6::bursar.billing_subscription_status,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15) AS id",
       [
         userId,
         provider,
@@ -107,6 +114,7 @@ export class BillingSubscriptionRepository {
         state.graceEndsAt ?? null,
       ],
     );
+    requireResultField(rows, "id", postgresUuid, "BillingSubscriptionRepository.upsert");
   }
 
   private map(row: unknown): SubscriptionRow | null {
@@ -126,7 +134,15 @@ export class BillingSubscriptionRepository {
       `SELECT * FROM bursar.get_catalog_offer_context($1::uuid, $2::uuid)`,
       [value.offer_id, value.catalog_revision_id],
     );
-    const context = (contextRows[0] as Record<string, unknown> | undefined) ?? {};
+    const context = contextRows[0] as Record<string, unknown> | undefined;
+    if (context?.offer_key == null) {
+      throw new StoreError("Billing subscription offer context is missing", {
+        details: {
+          offerId: value.offer_id,
+          catalogRevisionId: value.catalog_revision_id,
+        },
+      });
+    }
     return {
       ...value,
       ...context,
@@ -183,7 +199,12 @@ export class BillingSubscriptionRepository {
       `SELECT bursar.mark_subscription_grace_expired($1::uuid, $2, $3) AS marked`,
       [subscriptionId, expectedGraceEndsAt, expiredAt],
     );
-    return (rows[0] as Record<string, unknown> | undefined)?.marked === true;
+    return requireResultField(
+      rows,
+      "marked",
+      pgBoolean,
+      "BillingSubscriptionRepository.markGraceExpired",
+    );
   }
 
   async recordConflict(input: {
@@ -207,9 +228,12 @@ export class BillingSubscriptionRepository {
         JSON.stringify(input.metadata ?? {}),
       ],
     );
-    const id = (rows[0] as Record<string, unknown> | undefined)?.id;
-    if (id == null) throw new Error("subscription conflict audit returned no ID");
-    return String(id);
+    return requireResultField(
+      rows,
+      "id",
+      z.union([z.string().min(1), z.number().int()]).transform(String),
+      "BillingSubscriptionRepository.recordConflict",
+    );
   }
 
   /** Select a provider subscription without modifying provider-reported state. */
@@ -237,8 +261,15 @@ export class BillingSubscriptionRepository {
       `SELECT bursar.select_entitlement_source($1::uuid, $2::uuid) AS selected`,
       [userId, replacement.id],
     );
-    if ((selectedRows[0] as Record<string, unknown> | undefined)?.selected !== true) {
-      throw new Error("subscription entitlement source selection was rejected");
+    if (
+      !requireResultField(
+        selectedRows,
+        "selected",
+        pgBoolean,
+        "BillingSubscriptionRepository.selectEntitlementSource",
+      )
+    ) {
+      throw new StoreError("subscription entitlement source selection was rejected");
     }
 
     return true;

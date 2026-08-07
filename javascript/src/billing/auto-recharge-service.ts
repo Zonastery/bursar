@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
+import Decimal from "decimal.js";
 import { loadConfigFromDict } from "../config.js";
+import {
+  AutoRechargeDisabledError,
+  AutoRechargeNotConfiguredError,
+  PaymentMethodRequiredError,
+  ProviderCapabilityNotSupportedError,
+} from "../errors.js";
 import type { BillingAutoRechargeProfile, BillingAutoRechargeStatus } from "./types/index.js";
 import type {
   PaymentMethodInfo,
@@ -27,14 +34,14 @@ export interface AutoRechargeProcessResult {
 
 interface ResolvedAutoRechargePolicy {
   enabled: true;
-  threshold: number;
+  threshold: Decimal;
   topupKey: string;
   topupId: string;
   quantity: number;
   maxChargesPerWindow: number;
   windowUnit: "second" | "minute" | "hour" | "day" | "week" | "month" | "year";
   windowCount: number;
-  windowAnchor: "calendar" | "plan_assignment" | "rolling";
+  windowAnchor: "calendar" | "rolling";
   windowTimezone: string;
   windowStart: string;
   windowEnd: string;
@@ -45,13 +52,14 @@ export class AutoRechargeService {
   constructor(private readonly billing: AutoRechargeBillingPort) {}
 
   private async policy(provider: PaymentProvider): Promise<ResolvedAutoRechargePolicy | null> {
-    const raw = await this.billing.getActiveBursarConfig();
+    const raw = await this.billing.getActiveCatalogDocument();
     if (!raw) return null;
     const config = loadConfigFromDict(raw);
     const auto = config.commerce.autoRecharge;
     if (!auto) return null;
 
     const topupKey = auto.eligibleTopups[0];
+    if (topupKey === undefined) return null;
     const topup = config.commerce.offers[topupKey];
     if (!topup || topup.type !== "topup") return null;
     const reference = topup.providers[provider.provider];
@@ -74,7 +82,7 @@ export class AutoRechargeService {
     const period = resolveAutoRechargeWindow(auto.limits.window);
     return {
       enabled: true,
-      threshold: Number(auto.balanceBelow.default),
+      threshold: auto.balanceBelow.default,
       topupKey,
       topupId: resolvedTopup.topupId,
       quantity: auto.quantity.default,
@@ -96,25 +104,22 @@ export class AutoRechargeService {
     const customer = await this.billing.getCustomerByUserId(userId, provider.provider);
     if (!customer) return null;
     if (!provider.listPaymentMethods) {
-      throw new Error(`provider_capability_not_supported:listPaymentMethods:${provider.provider}`);
+      throw new ProviderCapabilityNotSupportedError(provider.provider, "listPaymentMethods");
     }
     const methods = await provider.listPaymentMethods(customer.providerCustomerId);
     const method =
-      (await provider.getDefaultPaymentMethod?.(customer.providerCustomerId)) ??
       methods.find((candidate) => candidate.isDefault) ??
       (methods.length === 1 ? methods[0] : null);
     return method ? { customerId: customer.providerCustomerId, method } : null;
   }
 
-  async quote(input: {
-    userId: string;
-    provider: PaymentProvider;
-  }): Promise<SavedPaymentChargeQuote | null> {
-    const policy = await this.policy(input.provider);
-    if (!policy || !input.provider.previewSavedPaymentCharge) return null;
-    const payment = await this.paymentMethod(input.userId, input.provider);
-    if (!payment) return null;
-    return input.provider.previewSavedPaymentCharge({
+  private preview(
+    provider: PaymentProvider,
+    policy: ResolvedAutoRechargePolicy,
+    payment: { customerId: string; method: PaymentMethodInfo },
+  ): Promise<SavedPaymentChargeQuote> | null {
+    if (!provider.previewSavedPaymentCharge) return null;
+    return provider.previewSavedPaymentCharge({
       customerId: payment.customerId,
       paymentMethodId: payment.method.id,
       productId: policy.productId,
@@ -122,6 +127,17 @@ export class AutoRechargeService {
       metadata: {},
       idempotencyKey: "auto-recharge-preview",
     });
+  }
+
+  async quote(input: {
+    userId: string;
+    provider: PaymentProvider;
+  }): Promise<SavedPaymentChargeQuote | null> {
+    const policy = await this.policy(input.provider);
+    if (!policy) return null;
+    const payment = await this.paymentMethod(input.userId, input.provider);
+    if (!payment) return null;
+    return this.preview(input.provider, policy, payment);
   }
 
   async getStatus(input: {
@@ -134,7 +150,7 @@ export class AutoRechargeService {
     const payment = profile?.enabled
       ? await this.paymentMethod(input.userId, input.provider)
       : null;
-    const quote = await this.quote(input);
+    const quote = payment ? await this.preview(input.provider, policy, payment) : null;
     return {
       enabled: Boolean(profile?.enabled),
       state: profile?.enabled ? profile.state : "disabled",
@@ -161,14 +177,13 @@ export class AutoRechargeService {
   async enable(input: {
     userId: string;
     provider: PaymentProvider;
-    balance: number;
+    balance: Decimal;
     returnUrl?: string;
-    consentReference?: string;
   }): Promise<BillingAutoRechargeStatus | null> {
     const policy = await this.policy(input.provider);
-    if (!policy) throw new Error("auto_recharge_not_configured");
+    if (!policy) throw new AutoRechargeNotConfiguredError();
     const payment = await this.paymentMethod(input.userId, input.provider);
-    if (!payment) throw new Error("payment_method_required");
+    if (!payment) throw new PaymentMethodRequiredError();
 
     const profile: BillingAutoRechargeProfile = {
       userId: input.userId,
@@ -204,11 +219,11 @@ export class AutoRechargeService {
   async retry(input: {
     userId: string;
     provider: PaymentProvider;
-    balance: number;
+    balance: Decimal;
     returnUrl?: string;
   }): Promise<AutoRechargeProcessResult> {
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
-    if (!profile?.enabled) throw new Error("auto_recharge_disabled");
+    if (!profile?.enabled) throw new AutoRechargeDisabledError();
     await this.billing.upsertAutoRechargeProfile(
       {
         ...profile,
@@ -223,43 +238,59 @@ export class AutoRechargeService {
   async processIfNeeded(input: {
     userId: string;
     provider: PaymentProvider;
-    balance: number;
+    balance: Decimal;
     returnUrl?: string;
   }): Promise<AutoRechargeProcessResult> {
     const policy = await this.policy(input.provider);
     if (!policy) return { outcome: "not_configured" };
     const profile = await this.billing.getAutoRechargeProfile(input.userId);
     if (!profile?.enabled || profile.state !== "active") return { outcome: "disabled" };
-    if (input.balance >= policy.threshold) {
+    if (input.balance.gte(policy.threshold)) {
       return { outcome: "above_threshold" };
     }
 
     const payment = await this.paymentMethod(input.userId, input.provider);
     if (!payment) return { outcome: "failed" };
-    const attempt = await this.billing.claimAutoRechargeAttempt({
-      userId: input.userId,
-      idempotencyKey: `auto-recharge:${input.userId}:${randomUUID()}`,
-    });
-    if (!attempt) return { outcome: "limit_reached" };
-
     if (!input.provider.chargeSavedPaymentMethod) {
-      throw new Error(
-        `provider_capability_not_supported:chargeSavedPaymentMethod:${input.provider.provider}`,
+      throw new ProviderCapabilityNotSupportedError(
+        input.provider.provider,
+        "chargeSavedPaymentMethod",
       );
     }
-    const charge = await input.provider.chargeSavedPaymentMethod({
-      customerId: payment.customerId,
-      paymentMethodId: payment.method.id,
-      productId: policy.productId,
-      quantity: policy.quantity,
-      returnUrl: input.returnUrl,
-      idempotencyKey: attempt.idempotencyKey,
-      metadata: {
-        auto_recharge_attempt_id: attempt.id,
-        purpose: "credit_topup",
-        userId: input.userId,
-      },
+    const idempotencyKey = `auto-recharge:${input.userId}:${randomUUID()}`;
+    const attempt = await this.billing.claimAutoRechargeAttempt({
+      userId: input.userId,
+      idempotencyKey,
     });
+    if (!attempt) return { outcome: "limit_reached" };
+    if (attempt.idempotencyKey !== idempotencyKey) {
+      return { outcome: "already_processing" };
+    }
+
+    let charge: SavedPaymentChargeResult;
+    try {
+      charge = await input.provider.chargeSavedPaymentMethod({
+        customerId: payment.customerId,
+        paymentMethodId: payment.method.id,
+        productId: policy.productId,
+        quantity: policy.quantity,
+        returnUrl: input.returnUrl,
+        idempotencyKey: attempt.idempotencyKey,
+        metadata: {
+          auto_recharge_attempt_id: attempt.id,
+          purpose: "credit_topup",
+          userId: input.userId,
+        },
+      });
+    } catch (error) {
+      await this.billing.updateAutoRechargeAttempt({
+        id: attempt.id,
+        state: "unknown",
+        failureCode: "provider_request_failed",
+        failureMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     if (charge.status === "requires_customer_action") {
       await this.billing.updateAutoRechargeAttempt({
         id: attempt.id,

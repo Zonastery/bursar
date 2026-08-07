@@ -9,6 +9,7 @@ import { BillingEventProcessor } from "../src/billing/event-processor.js";
 import { BillingEventRepository } from "../src/billing/postgres/repositories/event.js";
 import type { BillingEvent } from "../src/billing/types/index.js";
 import { BillingEventType } from "../src/billing/types/index.js";
+import { StoreError } from "../src/errors.js";
 
 const CLAIM_TOKEN = "00000000-0000-0000-0000-000000000003";
 const BILLING_EVENT_ID = "00000000-0000-0000-0000-000000000004";
@@ -41,9 +42,16 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     store.completeBillingEvent.mockResolvedValue(false);
     const processor = new BillingEventProcessor(store as unknown as BillingStore);
 
-    const result = await processor.ingestBillingEvent(
-      event("evt_completion_rejected", BillingEventType.INVOICE_UPCOMING),
-    );
+    const result = await processor.ingestBillingEvent({
+      ...event("evt_completion_rejected", BillingEventType.INVOICE_UPCOMING),
+      invoice: {
+        providerInvoiceId: "invoice-upcoming",
+        status: "draft",
+        amountPaidMinor: 0,
+        amountDueMinor: 1000,
+        currency: "USD",
+      },
+    });
 
     expect(result).toEqual({ handled: false, error: "billing_event_completion_rejected" });
     expect(store.failBillingEvent).toHaveBeenCalledWith(
@@ -59,8 +67,14 @@ describe("BillingEventProcessor lifecycle acknowledgements", () => {
     const processor = new BillingEventProcessor(store as unknown as BillingStore);
 
     const result = await processor.ingestBillingEvent({
-      ...event("evt_unhandled", BillingEventType.INVOICE_UPCOMING),
-      eventType: "provider.unknown" as BillingEventType,
+      ...event("evt_unhandled", BillingEventType.INVOICE_CREATED),
+      invoice: {
+        providerInvoiceId: "invoice-created",
+        status: "draft",
+        amountPaidMinor: 0,
+        amountDueMinor: 1000,
+        currency: "USD",
+      },
     });
 
     expect(result).toEqual({ handled: false, error: "unhandled_event_type" });
@@ -114,6 +128,21 @@ describe("billing diagnostic and repository boundaries", () => {
     await expect(repository.fail("stripe", "evt_repository", CLAIM_TOKEN, "failed")).resolves.toBe(
       false,
     );
+  });
+
+  it("fails closed when a lifecycle mutation returns no result", async () => {
+    const repository = new BillingEventRepository(vi.fn().mockResolvedValue([]));
+
+    await expect(
+      repository.claim("stripe", "evt_missing", "invoice.paid", "{}"),
+    ).rejects.toMatchObject({
+      name: StoreError.name,
+      indeterminate: true,
+    });
+    await expect(repository.complete("stripe", "evt_missing", CLAIM_TOKEN)).rejects.toMatchObject({
+      name: StoreError.name,
+      indeterminate: true,
+    });
   });
 });
 

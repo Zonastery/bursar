@@ -1,4 +1,5 @@
 import type { AutoRechargeService } from "./auto-recharge-service.js";
+import type Decimal from "decimal.js";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
@@ -7,6 +8,7 @@ import type {
   BillingEvent,
   BillingEventResult,
   BillingInvoiceInfo,
+  BillingInvoiceRecord,
   BillingOfferResult,
   BillingPaymentInfo,
   BillingPreferences,
@@ -52,13 +54,13 @@ export interface BillingPaymentUpsert {
   provider: string;
   providerPaymentId: string;
   providerInvoiceId?: string | null;
-  userId?: string | null;
-  amountMinor?: number;
-  taxMinor?: number | null;
-  currency?: string | null;
-  purpose?: string;
-  status?: "pending" | "succeeded" | "failed" | "canceled";
-  providerUpdatedAt?: string;
+  userId: string;
+  amountMinor: number;
+  taxMinor: number;
+  currency: string;
+  purpose: "subscription" | "credit_topup";
+  status: "pending" | "succeeded" | "failed" | "canceled";
+  providerUpdatedAt: string;
   metadata?: Record<string, unknown> | null;
 }
 
@@ -66,21 +68,21 @@ export interface BillingCreditGrantCreate {
   paymentId?: string | null;
   subscriptionId?: string | null;
   topupId?: string | null;
-  configuredCredits: number;
-  quantity?: number;
+  configuredCredits: Decimal;
+  quantity: number;
   billingEventId?: string | null;
 }
 
 export interface BillingRefundUpsert {
   provider: string;
   providerRefundId: string;
-  providerPaymentId?: string | null;
-  userId?: string | null;
-  amountMinor?: number;
-  currency?: string | null;
+  providerPaymentId: string;
+  userId: string;
+  amountMinor: number;
+  currency: string;
   reason?: string | null;
-  status?: "pending" | "succeeded" | "failed" | "canceled";
-  providerUpdatedAt?: string;
+  status: "pending" | "succeeded" | "failed" | "canceled";
+  providerUpdatedAt: string;
   metadata?: Record<string, unknown> | null;
 }
 
@@ -88,26 +90,25 @@ export interface BillingInvoiceUpsert {
   provider: string;
   providerInvoiceId: string;
   providerSubscriptionId?: string | null;
-  userId?: string | null;
-  status?: string | null;
-  amountPaidMinor?: number | null;
-  amountDueMinor?: number | null;
-  currency?: string | null;
+  userId: string;
+  status: "draft" | "open" | "paid" | "void" | "uncollectible";
+  amountPaidMinor: number;
+  amountDueMinor: number;
+  currency: string;
   periodStart?: string | null;
   periodEnd?: string | null;
   metadata?: Record<string, unknown> | null;
-  providerUpdatedAt?: string;
+  providerUpdatedAt: string;
 }
 
 export interface BillingDisputeUpsert {
   provider: string;
   providerDisputeId: string;
-  providerPaymentId?: string | null;
-  userId?: string | null;
-  status?: string;
+  providerPaymentId: string;
+  status: "needs_response" | "under_review" | "won" | "lost" | "closed";
   reason?: string | null;
   metadata?: Record<string, unknown> | null;
-  providerUpdatedAt?: string;
+  providerUpdatedAt: string;
 }
 
 export interface AutoRechargeAttemptClaim {
@@ -148,10 +149,10 @@ export interface BillingCapability extends BillingEventSink {
   getActiveSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getBlockingSubscription(userId: string): Promise<BillingSubscriptionState | null>;
   getUserPreferences(userId: string): Promise<BillingPreferences | null>;
-  getActiveBursarConfig(): Promise<Record<string, unknown> | null>;
+  getActiveCatalogDocument(): Promise<Record<string, unknown> | null>;
   listCancellableProviderSubscriptionIds(userId: string): Promise<string[]>;
   listCancellableSubscriptions(userId: string): Promise<BillingSubscriptionState[]>;
-  listBillingInvoices(userId: string): Promise<BillingInvoiceInfo[]>;
+  listBillingInvoices(userId: string): Promise<BillingInvoiceRecord[]>;
   createBillingSubscriptionChange(
     input: BillingSubscriptionChangeInput,
   ): Promise<BillingSubscriptionChange>;
@@ -208,4 +209,10 @@ export interface BillingCapability extends BillingEventSink {
 
 // Keep document-record types reachable from the contract module for store
 // implementers without forcing them to import the broad billing type barrel.
-export type { BillingDisputeInfo, BillingInvoiceInfo, BillingPaymentInfo, BillingRefundInfo };
+export type {
+  BillingDisputeInfo,
+  BillingInvoiceInfo,
+  BillingInvoiceRecord,
+  BillingPaymentInfo,
+  BillingRefundInfo,
+};

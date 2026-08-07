@@ -11,30 +11,16 @@ consistent mechanism
 
        DATABASE_URL=postgres://bursar:bursar@localhost:5432/bursar_test uv run pytest
 
-2. ``BURSAR_TEST_PG_URL`` — legacy override for an already-running Postgres
-   (for example, a pg_partman-enabled container on a non-default port). Folded
-   in here so there is one mechanism; ``DATABASE_URL`` wins when both are set::
-
-       docker run -d --name bursar-pg-test -e POSTGRES_PASSWORD=bursar \
-           -e POSTGRES_DB=bursar -p 55432:5432 \
-           public.ecr.aws/supabase/postgres:17.6.1.156
-       BURSAR_TEST_PG_URL=postgresql://postgres:bursar@localhost:55432/bursar uv run pytest
-
-3. **testcontainers** — disposable PostgreSQL 17 with pg_partman 5 and
-   pg_jsonschema 0.3,
+2. **testcontainers** — a disposable, provider-neutral PostgreSQL 17 image
+   with pg_partman 5 and pg_jsonschema 0.3,
    started once per test session (requires only a reachable Docker daemon; no
    manual setup, no ``ephemeralpg``/``pg_tmp`` install). This is the default
    local path: a bare ``pytest`` run with Docker available exercises the real
    SQL RPCs instead of silently skipping them, so a green run without a DB is
    no longer possible when Docker is present.
 
-Only if Docker itself is unreachable do the Postgres/Supabase-setup tests
-**skip** with a visible reason.
-
-For every source the fixture bootstraps the Supabase ``auth`` schema stubs +
-standard roles so bursar's bundled SQL migrations apply cleanly (migrations
-themselves are applied by ``run_migrations()`` in the per-store fixtures).
-Every test gets a clean slate: bursar's tables are
+Only if Docker itself is unreachable do the PostgreSQL integration tests
+**skip** with a visible reason. Every test gets a clean slate: Bursar's tables are
 TRUNCATEd before each test so cross-test state never bleeds, whether the
 underlying Postgres is a persistent DB or the session-scoped container.
 """
@@ -46,6 +32,7 @@ import os
 import time
 import warnings
 from collections.abc import Generator, Iterator
+from pathlib import Path
 from typing import Any
 
 import psycopg2
@@ -55,7 +42,8 @@ from bursar.credits.postgres.store import PostgresStore, run_migrations
 
 TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 TEST_TENANT_SLUG = "bursar-tests"
-DEFAULT_POSTGRES_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.156"
+DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.10-pg-jsonschema-0.3.4"
+POSTGRES_BUILD_CONTEXT = Path(__file__).resolve().parents[2] / "tests" / "postgres"
 
 
 def _pg2_conn(dsn: str) -> Generator[Any, None, None]:
@@ -75,153 +63,6 @@ def _insert_deny_cap(conn: Any, user_id: str, limit: int) -> None:
             "VALUES (%s, 'daily', %s, 'deny')",
             (user_id, limit),
         )
-
-
-def _preseed_supabase_objects(dsn: str) -> None:
-    """Create minimal Supabase objects (auth schema, roles, functions) in a
-    plain Postgres so bursar's bundled SQL migrations can run without error.
-
-    This mirrors what Supabase provides automatically in its hosted Postgres:
-    the ``auth`` schema with ``uid()``/``role()`` (role defaults to
-    ``service_role`` so RPCs pass their guard), a minimal ``auth.users`` table
-    for the signup-bonus trigger, and the standard roles. Idempotent.
-    """
-    import psycopg2
-
-    conn = psycopg2.connect(dsn)
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            # 1. auth schema + core uid/role functions
-            cur.execute("CREATE SCHEMA IF NOT EXISTS auth")
-            for func in [
-                """
-                CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-                LANGUAGE sql STABLE
-                AS $$ SELECT coalesce(
-                    nullif(current_setting('request.jwt.claim.sub', true), ''),
-                    current_setting('request.jwt.claims', true)::jsonb ->> 'sub'
-                )::uuid $$;
-                """,
-                """
-                CREATE OR REPLACE FUNCTION auth.role() RETURNS text
-                LANGUAGE sql STABLE
-                AS $$ SELECT coalesce(
-                    nullif(current_setting('request.jwt.claim.role', true), ''),
-                    'service_role'
-                ) $$;
-                """,
-            ]:
-                try:
-                    cur.execute(func)
-                except Exception:
-                    conn.rollback()
-                else:
-                    conn.commit()
-
-            # 2. Minimal Supabase auth.users table.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS auth.users (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    email TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-                """
-            )
-
-            # 2b. Minimal Better Auth user table matching the host application.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS public."user" (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    email TEXT,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE OR REPLACE FUNCTION public.handle_updated_at() RETURNS trigger
-                LANGUAGE plpgsql AS $$
-                BEGIN
-                    NEW.updated_at = now();
-                    RETURN NEW;
-                END;
-                $$;
-                """
-            )
-            # Seed host-owned users used by integration fixtures;
-            # the range covers the deterministic UUIDs used by the suite.
-            # covering the fixed IDs (1–17, 99) plus the dynamic _new_uuid
-            # range used across test_store_integration (9000–9514).
-            cur.execute(
-                """
-                INSERT INTO public."user" (id)
-                SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
-                FROM generate_series(1, 200) AS s
-                ON CONFLICT (id) DO NOTHING
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO public."user" (id)
-                SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
-                FROM generate_series(9000, 9514) AS s
-                ON CONFLICT (id) DO NOTHING
-                """
-            )
-
-            # 3. Standard Supabase roles
-            for role in ("anon", "authenticated", "service_role"):
-                try:
-                    cur.execute(f"CREATE ROLE {role}")
-                except Exception:
-                    conn.rollback()
-                else:
-                    conn.commit()
-
-            # 4. Platform-level privilege defaults a real hosted Supabase project
-            # grants automatically (via its own bootstrap migrations, not
-            # bursar's). Bursar's SQL only ever REVOKEs from PUBLIC/anon/
-            # authenticated on individual RPCs (see e.g. 002_credit_rpcs.sql) —
-            # it never explicitly re-GRANTs to service_role, because on real
-            # Supabase service_role already has broad schema-wide access and
-            # BYPASSRLS. Without reproducing that here, `SET ROLE service_role`
-            # would (correctly, but misleadingly) fail on every RPC — not
-            # because bursar's lockdown is broken, but because this bare
-            # Postgres never gave service_role the platform privileges it has
-            # in production. anon/authenticated get the same broad table
-            # access Supabase grants them by default; bursar's RLS policies
-            # (not the absence of a GRANT) are what's supposed to restrict
-            # their rows to `auth.uid() = user_id`.
-            cur.execute("SELECT rolbypassrls FROM pg_roles WHERE rolname = 'service_role'")
-            service_role = cur.fetchone()
-            if service_role is None or service_role[0] is not True:
-                cur.execute("ALTER ROLE service_role BYPASSRLS")
-            cur.execute("GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role")
-            # Real Supabase also grants schema access on `auth` to these roles
-            # (app/RPC code calls `auth.uid()`/`auth.jwt()` directly, not just
-            # from within RLS policy predicates — those are resolved at
-            # policy-definition time and don't need this, but a direct
-            # `SELECT auth.uid()` from application code does).
-            cur.execute("GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role")
-            cur.execute(
-                "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated"
-            )
-            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role")
-            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role")
-            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role")
-            # Also apply to any tables/functions that already exist (a persistent
-            # DATABASE_URL may already have bursar's schema from a prior run;
-            # ALTER DEFAULT PRIVILEGES only covers objects created afterwards).
-            cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated")
-            cur.execute("GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role")
-            cur.execute("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role")
-            cur.execute("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role")
-    finally:
-        conn.close()
 
 
 def _truncate_bursar_tables(dsn: str) -> None:
@@ -298,11 +139,8 @@ def _wait_until_ready(dsn: str, timeout: float = 30.0) -> None:
 
 
 def _resolve_persistent_dsn() -> str | None:
-    """Return the already-running-Postgres DSN, preferring DATABASE_URL.
-
-    DATABASE_URL (CI / JS suite) → BURSAR_TEST_PG_URL (legacy override) → None.
-    """
-    return os.environ.get("DATABASE_URL") or os.environ.get("BURSAR_TEST_PG_URL")
+    """Return the already-running-Postgres DSN from DATABASE_URL."""
+    return os.environ.get("DATABASE_URL")
 
 
 # Session-scoped testcontainers Postgres, started lazily on first use and
@@ -323,17 +161,27 @@ def _testcontainers_dsn() -> str | None:
     global _container_dsn
     if _container_dsn is _UNAVAILABLE:
         return None
-    if _container_dsn is not None:
-        return _container_dsn  # type: ignore[return-value]
+    if isinstance(_container_dsn, str):
+        return _container_dsn
 
     try:
-        from testcontainers.postgres import PostgresContainer
+        from testcontainers.community.postgres import PostgresContainer
     except ModuleNotFoundError:
         _container_dsn = _UNAVAILABLE
         return None
 
-    image = os.environ.get("BURSAR_TEST_PG_IMAGE", DEFAULT_POSTGRES_IMAGE)
+    image = os.environ.get("BURSAR_TEST_PG_IMAGE")
     try:
+        if image is None:
+            from testcontainers.core.image import DockerImage
+
+            built_image = DockerImage(
+                path=POSTGRES_BUILD_CONTEXT,
+                tag=DEFAULT_POSTGRES_IMAGE,
+                clean_up=False,
+            ).build()
+            built_image.get_docker_client().client.close()
+            image = DEFAULT_POSTGRES_IMAGE
         container = PostgresContainer(image, driver=None)
         container.start()
     except Exception as exc:  # Docker daemon unreachable, image pull failed, etc.
@@ -348,7 +196,6 @@ def _testcontainers_dsn() -> str | None:
 
     atexit.register(container.stop)
     dsn = container.get_connection_url()
-    _preseed_supabase_objects(dsn)
     _container_dsn = dsn
     return dsn
 
@@ -357,22 +204,21 @@ def _testcontainers_dsn() -> str | None:
 def pg_database_url() -> Iterator[str]:
     """Yield a connection URL to a real Postgres, or skip if none is available.
 
-    Resolution order: ``DATABASE_URL`` → ``BURSAR_TEST_PG_URL`` →
-    testcontainers-managed PostgreSQL with pg_partman and pg_jsonschema → skip.
+    Resolution order: ``DATABASE_URL`` → testcontainers-managed PostgreSQL
+    with pg_partman and pg_jsonschema → skip.
     """
-    # 1 & 2: a persistent, already-running Postgres (DATABASE_URL or legacy override).
+    # 1: a persistent, already-running Postgres.
     persistent = _resolve_persistent_dsn()
     dsn = persistent
     if dsn:
         _wait_until_ready(dsn)
-        _preseed_supabase_objects(dsn)
     else:
-        # 3: disposable Postgres via testcontainers (session-scoped, lazy).
+        # 2: disposable Postgres via testcontainers (session-scoped, lazy).
         dsn = _testcontainers_dsn()
         if dsn is None:
             pytest.skip(
-                "No real Postgres available: set DATABASE_URL or "
-                "BURSAR_TEST_PG_URL to a pg_partman 5 and pg_jsonschema-enabled database, or "
+                "No real Postgres available: set DATABASE_URL to a pg_partman 5 and "
+                "pg_jsonschema-enabled database, or "
                 "make Docker available for testcontainers."
             )
 

@@ -5,18 +5,18 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, inject } from "vitest";
+import Decimal from "decimal.js";
 import pg from "pg";
 import { PostgresStore } from "../src/credits/postgres/store.js";
 import { CreditsService } from "../src/credits/service.js";
 import { PostgresBillingStore, BillingService, BillingEventType } from "../src/billing/index.js";
-import type { BillingPreferences, BillingSubscriptionState } from "../src/billing/index.js";
-import {
-  BOOTSTRAP_SQL,
-  TEST_TENANT_ID,
-  applyMigrations,
-  truncateBursarTables,
-} from "./helpers/bootstrap.js";
-import { handleDodoBillingEvent } from "../src/providers/dodo/event-mapper.js";
+import type {
+  BillingEvent,
+  BillingPreferences,
+  BillingSubscriptionState,
+} from "../src/billing/index.js";
+import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
+import { mapDodoEvent } from "./helpers/dodo-fixtures.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
@@ -34,6 +34,7 @@ const PRODUCT_ID = "prod_monthly";
 const PRICE_ID = "price_monthly_1000";
 const PRICE_ID_TOPUP = "price_topup_credits";
 const EVENT_ID = "evt_test_001";
+const TEST_INSTANT = "2025-01-01T00:00:00.000Z";
 
 const PRICING_DICT = {
   version: 1,
@@ -79,6 +80,7 @@ const PRICING_DICT = {
       rate_card: "standard",
       credit_allowance: {
         amount: "1000",
+        priority: 5,
         window: {
           type: "calendar",
           unit: "month",
@@ -93,6 +95,7 @@ const PRICING_DICT = {
       rate_card: "standard",
       credit_allowance: {
         amount: "100000",
+        priority: 5,
         window: {
           type: "calendar",
           unit: "month",
@@ -107,6 +110,7 @@ const PRICING_DICT = {
       rate_card: "standard",
       credit_allowance: {
         amount: "1000000",
+        priority: 5,
         window: {
           type: "calendar",
           unit: "month",
@@ -190,34 +194,22 @@ const PRICING_DICT = {
 };
 
 async function makePgComponents(pool: pg.Pool) {
-  const cs = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool);
+  const cs = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
   const cm = new CreditsService(cs);
-  await cm.publishPricingFromDict(PRICING_DICT);
-  const bs = new PostgresBillingStore(pool, TEST_TENANT_ID);
+  await cm.publishAndActivateCatalog(PRICING_DICT);
+  const bs = new PostgresBillingStore({ postgres: pool, tenantId: TEST_TENANT_ID });
   const bm = new BillingService(bs, { provisioning: cm });
   return { cs, cm, bs, bm };
 }
 
 // ── PostgresBillingStore (requires real Postgres) ────────────────────────
 
-describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16)", () => {
+describe.runIf(DATABASE_URL)("PostgresBillingStore integration", () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
-    await pool.query(
-      "INSERT INTO auth.users (id) VALUES ($1), ($2), ($3), ($4), ($5) ON CONFLICT DO NOTHING",
-      [USER_ID, USER_ID2, USER_ID3, USER_ID4, USER_ID5],
-    );
     await applyMigrations(pool);
-    // Seed host-owned users used by integration fixtures.
-    await pool.query(
-      `INSERT INTO public."user" (id)
-       SELECT ('00000000-0000-0000-0000-' || LPAD(s::text, 12, '0'))::uuid
-       FROM generate_series(1, 100) AS s
-       ON CONFLICT (id) DO NOTHING`,
-    );
     await truncateBursarTables(pool);
   }, 60000);
 
@@ -251,7 +243,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     const topup = await bs.resolveCreditTopup(PROVIDER, null, PRICE_ID_TOPUP);
     expect(topup).not.toBeNull();
     expect(topup!.topupKey).toBe("standard_topup");
-    expect(topup!.creditsPerUnit).toBe(1000);
+    expect(topup!.creditsPerUnit.toString()).toBe("1000");
   });
 
   it("unresolved offer returns null", async () => {
@@ -347,13 +339,14 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Event idempotency ────────────────────────────────────────────────
 
   it("event idempotency", async () => {
-    const { bs, bm } = await makePgComponents(pool);
-    const event = {
+    const { bm } = await makePgComponents(pool);
+    const event: BillingEvent = {
       provider: PROVIDER,
       eventId: EVENT_ID,
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
       userId: USER_ID,
+      customer: { providerCustomerId: "cus_event_idempotency" },
     };
     const r1 = await bm.ingestBillingEvent(event);
     expect(r1.handled).toBe(true);
@@ -387,7 +380,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     try {
       const claims = await Promise.all(
         workers.map(async (worker, i) => {
-          const local = new PostgresBillingStore(worker, TEST_TENANT_ID);
+          const local = new PostgresBillingStore({ postgres: worker, tenantId: TEST_TENANT_ID });
           ready.add(i);
           if (ready.size === workers.length) release();
           await start;
@@ -421,26 +414,38 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("compute topup credits", async () => {
     const { bs } = await makePgComponents(pool);
-    expect(
-      await bs.computeTopupCredits(2000, {
-        amountMinor: 1000,
-        creditsPerUnit: 1000,
-        minQuantity: 1,
-        maxQuantity: 100,
-      }),
-    ).toBe(2000);
+    const credits = await bs.computeTopupCredits(2000, {
+      topupId: "topup-compute",
+      topupKey: "compute",
+      amountMinor: 1000,
+      creditsPerUnit: new Decimal(1000),
+      depositTo: "purchased",
+      currency: "USD",
+      minQuantity: 1,
+      maxQuantity: 100,
+      defaultQuantity: 1,
+      minAmountMinor: 1000,
+      maxAmountMinor: 100_000,
+    });
+    expect(credits.toString()).toBe("2000");
   });
 
   it("rejects a topup amount that is not an exact catalog quantity", async () => {
     const { bs } = await makePgComponents(pool);
-    expect(
-      await bs.computeTopupCredits(1999, {
-        amountMinor: 1000,
-        creditsPerUnit: 1000,
-        minQuantity: 1,
-        maxQuantity: 100,
-      }),
-    ).toBe(0);
+    const credits = await bs.computeTopupCredits(1999, {
+      topupId: "topup-reject",
+      topupKey: "reject",
+      amountMinor: 1000,
+      creditsPerUnit: new Decimal(1000),
+      depositTo: "purchased",
+      currency: "USD",
+      minQuantity: 1,
+      maxQuantity: 100,
+      defaultQuantity: 1,
+      minAmountMinor: 1000,
+      maxAmountMinor: 100_000,
+    });
+    expect(credits.toString()).toBe("0");
   });
 
   // ── BillingService lifecycle ─────────────────────────────────────────
@@ -453,6 +458,13 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       eventType: "customer.created",
       occurredAt: new Date().toISOString(),
       userId: USER_ID,
+      invoice: {
+        providerInvoiceId: "in_unhandled",
+        status: "draft",
+        amountPaidMinor: 0,
+        amountDueMinor: 0,
+        currency: "USD",
+      },
       customer: { providerCustomerId: CUSTOMER_ID },
     });
     await bm.ingestBillingEvent({
@@ -639,8 +651,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "pay_checkout_failed",
         amountMinor: 1900,
+        taxMinor: 0,
         currency: "USD",
         purpose: "subscription",
+        status: "failed",
       },
     });
 
@@ -673,7 +687,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("topup credit grant", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_customer_2",
@@ -692,9 +706,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "py_test456",
         amountMinor: 2000,
+        taxMinor: 0,
         currency: "USD",
         refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
         purpose: "credit_topup",
+        status: "succeeded",
       },
     });
     const balance = await cm.getBalance(USER_ID2);
@@ -713,9 +729,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "py_metadata_credits",
         amountMinor: 2000,
+        taxMinor: 0,
         currency: "USD",
         refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
         purpose: "credit_topup",
+        status: "succeeded",
       },
     });
 
@@ -724,7 +742,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("subscription pause resume", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_pause",
@@ -775,14 +793,21 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     expect((await cm.getUserPlan(USER_ID2)).planId).not.toBeNull();
   });
 
-  it("unknown event type is ignored", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+  it("fails a valid event type without a registered handler", async () => {
+    const { bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
-      eventId: "evt_unknown",
-      eventType: "some.unknown.event",
+      eventId: "evt_unhandled",
+      eventType: "invoice.created",
       occurredAt: new Date().toISOString(),
       userId: USER_ID,
+      invoice: {
+        providerInvoiceId: "in_unhandled",
+        status: "draft",
+        amountPaidMinor: 0,
+        amountDueMinor: 0,
+        currency: "USD",
+      },
     });
     expect(result.handled).toBe(false);
     expect(result.error).toBe("unhandled_event_type");
@@ -839,7 +864,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
     // Step 2: subscription.active → subscription.created via Dodo mapper
     // Payload has no data.id and JS toString dates — realistic Dodo payload
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       {
         subscription_id: "sub_dodo_lifecycle",
@@ -852,7 +877,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       },
       USER_ID5,
       {},
-      { ingestBillingEvent: (e: any) => bm.ingestBillingEvent(e) } as any,
+      bm,
     );
 
     // Verify subscription was created
@@ -874,7 +899,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("dodo: subscription.active provisions a plan while the provider is trialing", async () => {
     const { cm, bm, bs } = await makePgComponents(pool);
 
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       {
         subscription_id: "sub_dodo_trialing",
@@ -887,7 +912,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       },
       USER_ID5,
       {},
-      { ingestBillingEvent: (event: any) => bm.ingestBillingEvent(event) } as any,
+      bm,
     );
 
     const subscription = await bs.getBillingSubscription("dodo", "sub_dodo_trialing");
@@ -898,25 +923,23 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("dodo: duplicate event ID returns duplicate via event mapper (regression: no rawId collision)", async () => {
     const { bs, bm } = await makePgComponents(pool);
 
-    const ingest = (e: any) => bm.ingestBillingEvent(e);
-
     // First call — should succeed
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
       USER_ID5,
       {},
-      { ingestBillingEvent: ingest } as any,
+      bm,
     );
     expect((await bs.getBillingSubscription("dodo", "sub_dodo_dup"))?.status).toBe("active");
 
     // Second call with same payload — should be handled as duplicate (not error)
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { subscription_id: "sub_dodo_dup", status: "active", product_id: dodoProductId },
       USER_ID5,
       {},
-      { ingestBillingEvent: ingest } as any,
+      bm,
     );
 
     // Subscription should still be active (not overwritten by duplicate)
@@ -936,29 +959,27 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       customer: { providerCustomerId: "cus_dodo_multi" },
     });
 
-    const ingest = (e: any) => bm.ingestBillingEvent(e);
-
     // Three different subscription events — each should produce a unique event ID
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
       USER_ID5,
       {},
-      { ingestBillingEvent: ingest } as any,
+      bm,
     );
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.renewed",
       { subscription_id: "sub_dodo_multi_1", status: "active", product_id: dodoProductId },
       USER_ID5,
       {},
-      { ingestBillingEvent: ingest } as any,
+      bm,
     );
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.updated",
       { subscription_id: "sub_dodo_multi_1", status: "active" },
       USER_ID5,
       {},
-      { ingestBillingEvent: ingest } as any,
+      bm,
     );
 
     // All three should have created billing_events entries without collisions
@@ -982,7 +1003,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     const jsDate = new Date().toString();
     const jsDateFuture = new Date(Date.now() + 86400000 * 30).toString();
 
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       {
         subscription_id: "sub_dodo_date",
@@ -993,7 +1014,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       },
       USER_ID5,
       {},
-      { ingestBillingEvent: (e: any) => bm.ingestBillingEvent(e) } as any,
+      bm,
     );
 
     const sub = await bs.getBillingSubscription("dodo", "sub_dodo_date");
@@ -1008,7 +1029,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("sync offers adds new", async () => {
     const { bs, cm } = await makePgComponents(pool);
-    await cm.publishPricingFromDict({
+    await cm.publishAndActivateCatalog({
       ...PRICING_DICT,
       commerce: {
         ...PRICING_DICT.commerce,
@@ -1036,7 +1057,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("cycle grant credits granted", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_cg1",
@@ -1067,7 +1088,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("refund clawback deducts credits", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     const uid = "00000000-0000-0000-0000-000000000005";
     const paymentId = "py_refund_clawback";
     await bm.ingestBillingEvent({
@@ -1088,9 +1109,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: paymentId,
         amountMinor: 2000,
+        taxMinor: 0,
         currency: "USD",
         refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
         purpose: "credit_topup",
+        status: "succeeded",
       },
     });
     const balanceAfterGrant = await cm.getBalance(uid);
@@ -1125,7 +1148,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("cycle grant replace prior", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_cg2",
@@ -1180,14 +1203,24 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("invoice upsert and dispute upsert", async () => {
     const { bs } = await makePgComponents(pool);
+    await bs.upsertBillingSubscription({
+      userId: USER_ID,
+      provider: PROVIDER,
+      providerSubscriptionId: SUB_ID,
+      offerKey: "pro_monthly",
+      status: "active",
+    });
     await bs.upsertBillingPayment({
       provider: PROVIDER,
       providerPaymentId: "py_001",
       providerInvoiceId: "in_001",
       userId: USER_ID,
       amountMinor: 1000,
+      taxMinor: 0,
       currency: "USD",
       purpose: "subscription",
+      status: "succeeded",
+      providerUpdatedAt: TEST_INSTANT,
       metadata: { reconciliation_source: "invoice_test" },
     });
     await bs.upsertBillingInvoice({
@@ -1201,14 +1234,15 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       currency: "USD",
       periodStart: "2025-06-01T00:00:00Z",
       periodEnd: "2025-07-01T00:00:00Z",
+      providerUpdatedAt: TEST_INSTANT,
     });
     await bs.upsertBillingDispute({
       provider: PROVIDER,
       providerDisputeId: "dp_001",
       providerPaymentId: "py_001",
-      userId: USER_ID,
       status: "needs_response",
       reason: "fraudulent",
+      providerUpdatedAt: TEST_INSTANT,
     });
     const payResult = await bs.getBillingPayment(PROVIDER, "py_001");
     expect(payResult).not.toBeNull();
@@ -1235,7 +1269,6 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       emailNotifications: false,
       usageAlerts: true,
       invoiceReminders: false,
-      usageLimitAlerts: true,
     };
     await bs.upsertBillingPreferences(prefs);
     const got = await bs.getBillingPreferences(USER_ID);
@@ -1286,7 +1319,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
 
   it("get active pricing config", async () => {
     const { bs } = await makePgComponents(pool);
-    const config = await bs.getActiveBursarConfig();
+    const config = await bs.getActiveCatalogDocument();
     expect(config).not.toBeNull();
     expect((config as Record<string, unknown>)?.version).toBe(1);
   });
@@ -1294,7 +1327,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Manager public API ──────────────────────────────────────────────────
 
   it("manager resolve offer and topup", async () => {
-    const { bs, bm } = await makePgComponents(pool);
+    const { bm } = await makePgComponents(pool);
     const offer = await bm.resolveOffer(PROVIDER, null, PRICE_ID);
     expect(offer).not.toBeNull();
     expect(offer!.offerKey).toBe("pro_monthly");
@@ -1315,7 +1348,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Customer deleted ────────────────────────────────────────────────────
 
   it("customer deleted revokes plan", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cus_del_1",
@@ -1352,7 +1385,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Checkout completed ──────────────────────────────────────────────────
 
   it("checkout completed creates subscription", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_chk_1",
@@ -1372,7 +1405,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("checkout completed without subscription", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+    const { bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_chk_2",
@@ -1387,7 +1420,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Subscription activated ──────────────────────────────────────────────
 
   it("subscription activated provisions plan", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_act_1",
@@ -1452,7 +1485,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   });
 
   it("subscription cancellation scheduled and unscheduled", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+    const { bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_cs_1",
@@ -1489,7 +1522,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Subscription expired ────────────────────────────────────────────────
 
   it("subscription expired revokes plan", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_exp_1",
@@ -1544,8 +1577,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "py_pf",
         amountMinor: 1000,
+        taxMinor: 0,
         currency: "USD",
         purpose: "subscription",
+        status: "failed",
       },
       subscription: { providerSubscriptionId: "sub_pf_test" },
     });
@@ -1571,8 +1606,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       providerPaymentId: "py_pseudonymize",
       userId: USER_ID4,
       amountMinor: 1000,
+      taxMinor: 0,
       currency: "USD",
       purpose: "subscription",
+      status: "succeeded",
+      providerUpdatedAt: TEST_INSTANT,
       metadata: { email: "pii@example.com" },
     });
     const tenantClient = await pool.connect();
@@ -1605,8 +1643,10 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       providerPaymentId: "py_pseudonymize",
       userId: USER_ID4,
       amountMinor: 1000,
+      taxMinor: 0,
       currency: "USD",
       purpose: "subscription",
+      status: "succeeded",
       metadata: { email: "reintroduced@example.com" },
       providerUpdatedAt: new Date(Date.now() + 1_000).toISOString(),
     });
@@ -1644,8 +1684,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       providerPaymentId: "py_disp",
       userId: USER_ID,
       amountMinor: 1000,
+      taxMinor: 0,
       currency: "USD",
       purpose: "subscription",
+      status: "succeeded",
+      providerUpdatedAt: TEST_INSTANT,
     });
     const created = await bm.ingestBillingEvent({
       provider: PROVIDER,
@@ -1657,6 +1700,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       dispute: {
         providerDisputeId: "dp_cycle",
         providerPaymentId: "py_disp",
+        status: "needs_response",
         reason: "fraudulent",
       },
     });
@@ -1671,6 +1715,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       dispute: {
         providerDisputeId: "dp_cycle",
         providerPaymentId: "py_disp",
+        status: "won",
         reason: "won",
       },
     });
@@ -1680,7 +1725,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Invoice.paid ────────────────────────────────────────────────────────
 
   it("invoice paid records invoice and renews subscription", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_ip_1",
@@ -1738,11 +1783,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("subscription trial will end callback", async () => {
     let called = false;
     const pool2 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    const cs2 = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID);
+    const cs2 = new PostgresStore({ postgres: DATABASE_URL!, tenantId: TEST_TENANT_ID });
     try {
       const cm2 = new CreditsService(cs2);
-      await cm2.publishPricingFromDict(PRICING_DICT);
-      const bs2 = new PostgresBillingStore(pool2, TEST_TENANT_ID);
+      await cm2.publishAndActivateCatalog(PRICING_DICT);
+      const bs2 = new PostgresBillingStore({ postgres: pool2, tenantId: TEST_TENANT_ID });
       const bm2 = new BillingService(bs2, {
         provisioning: cm2,
         eventHandlers: {
@@ -1757,6 +1802,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
         eventType: "subscription.trial_will_end",
         occurredAt: new Date().toISOString(),
         userId: USER_ID,
+        subscription: { providerSubscriptionId: "sub_trial_will_end" },
       });
       expect(result.handled).toBe(true);
       expect(called).toBe(true);
@@ -1801,7 +1847,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Subscription plan changed ───────────────────────────────────────────
 
   it("subscription plan changed", async () => {
-    const { cm, bm, bs } = await makePgComponents(pool);
+    const { cm, bm } = await makePgComponents(pool);
     await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_pc_1",
@@ -1834,7 +1880,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Ignored event types ─────────────────────────────────────────────────
 
   it("checkout.expired is ignored", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+    const { bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_ign_1",
@@ -1849,7 +1895,7 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   // ── Payment edge cases ──────────────────────────────────────────────────
 
   it("payment succeeded without refs", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+    const { bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_pay_norefs",
@@ -1859,16 +1905,18 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "py_norefs",
         amountMinor: 500,
+        taxMinor: 0,
         currency: "USD",
         purpose: "subscription",
+        status: "succeeded",
       },
     });
     expect(result.handled).toBe(true);
     expect(result.action).toBe("payment_succeeded");
   });
 
-  it("payment succeeds without legacy topup caps", async () => {
-    const { bm, bs } = await makePgComponents(pool);
+  it("payment succeeds without removed topup caps", async () => {
+    const { bm } = await makePgComponents(pool);
     const result = await bm.ingestBillingEvent({
       provider: PROVIDER,
       eventId: "evt_pay_cap",
@@ -1879,9 +1927,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
       payment: {
         providerPaymentId: "py_cap",
         amountMinor: 99999,
+        taxMinor: 0,
         currency: "USD",
         refs: { productId: "prod_topup", priceId: PRICE_ID_TOPUP },
         purpose: "credit_topup",
+        status: "succeeded",
       },
     });
     expect(result.action).toBe("payment_succeeded");
@@ -1892,11 +1942,11 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
   it("subscription created without credit manager", async () => {
     const pool3 = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
     try {
-      const bs3 = new PostgresBillingStore(pool3, TEST_TENANT_ID);
+      const bs3 = new PostgresBillingStore({ postgres: pool3, tenantId: TEST_TENANT_ID });
       const bm3 = new BillingService(bs3);
-      const cs3 = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool3);
+      const cs3 = new PostgresStore({ postgres: pool3, tenantId: TEST_TENANT_ID });
       const cm3 = new CreditsService(cs3);
-      await cm3.publishPricingFromDict(PRICING_DICT);
+      await cm3.publishAndActivateCatalog(PRICING_DICT);
       const result = await bm3.ingestBillingEvent({
         provider: PROVIDER,
         eventId: "evt_nocm_1",
@@ -1915,21 +1965,22 @@ describe.runIf(DATABASE_URL)("PostgresBillingStore integration (real Postgres 16
     }
   });
 
-  it("dispute created without dispute data", async () => {
-    const { bm, bs } = await makePgComponents(pool);
-    const result = await bm.ingestBillingEvent({
-      provider: PROVIDER,
-      eventId: "evt_disp_noop",
-      eventType: "dispute.created",
-      occurredAt: new Date().toISOString(),
-      userId: USER_ID,
-    });
-    expect(result.action).toBe("dispute_recorded");
+  it("rejects dispute created without dispute data", async () => {
+    const { bm } = await makePgComponents(pool);
+    await expect(
+      bm.ingestBillingEvent({
+        provider: PROVIDER,
+        eventId: "evt_disp_noop",
+        eventType: "dispute.created",
+        occurredAt: new Date().toISOString(),
+        userId: USER_ID,
+      }),
+    ).rejects.toThrow("dispute.created requires dispute data");
   });
 
   // ── Resolve offer by lookup key ─────────────────────────────────────────
 
-  it("legacy lookup keys are not accepted by the typed catalog", async () => {
+  it("noncanonical lookup keys are not accepted by the typed catalog", async () => {
     const { bs } = await makePgComponents(pool);
     const offer = await bs.resolveBillingOfferByLookup(PROVIDER, "pro_monthly_lookup");
     expect(offer).toBeNull();

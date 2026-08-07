@@ -3,7 +3,6 @@
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
 
 from bursar.config import (
     ConfigError,
@@ -123,7 +122,7 @@ def test_catalog_config_is_the_canonical_public_document() -> None:
 
 
 def test_usage_metrics_require_an_operation() -> None:
-    with pytest.raises(ValidationError, match="Field required"):
+    with pytest.raises(TypeError, match="required keyword-only argument: 'operation'"):
         UsageMetrics()  # type: ignore[call-arg]
 
 

@@ -60,7 +60,7 @@ second positional argument.
   <TabItem value="ts" label="TypeScript">
 
   ```ts
-  const store = new PostgresStore(databaseUrl, tenantId);
+  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
   ```
 
   </TabItem>

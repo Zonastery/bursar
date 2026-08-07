@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Success events fire only after the underlying store operation committed; the
 # failure events (``credits.deduct_failed``/``credits.refund_failed``) fire on a
 # business error so a billing system can observe denials/over-refunds (contract
-# §6, H3). Event payload money is ``Decimal``.
+# Event payload money is ``Decimal``.
 CREDIT_EVENT_TYPES = frozenset(
     {
         "credits.deducted",
@@ -42,7 +42,7 @@ CREDIT_EVENT_TYPES = frozenset(
         "credits.expired",
         "credits.low_balance",
         "credits.plan_changed",
-        # Lease lifecycle (interface plan §3/M4): make admission, release, expiry
+        # Lease lifecycle: admission, release, and expiry
         # and overdraft observable end-to-end.
         "credits.reserved",
         "credits.reservation_released",

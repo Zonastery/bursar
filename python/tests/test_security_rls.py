@@ -12,4 +12,5 @@ def test_config_catalog_is_available_after_migrations(pg_database_url: str) -> N
     store = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
     # The catalog is intentionally private to Bursar's server-side store API;
     # this call proves the security-definer RPC path remains usable.
-    assert store.get_active_pricing() is None or store.get_active_pricing().config is not None
+    active_pricing = store.get_active_catalog()
+    assert active_pricing is None or active_pricing.config is not None

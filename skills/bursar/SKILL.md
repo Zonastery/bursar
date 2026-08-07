@@ -170,7 +170,10 @@ credit and billing services together independently.
    ```ts
    import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-   const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+   const store = new PostgresStore({
+     postgres: process.env.DATABASE_URL!,
+     tenantId,
+   });
    const bursar = new Bursar({ creditStore: store });
    ```
 
@@ -221,7 +224,7 @@ credit and billing services together independently.
        measures: { input_tokens: 800 },
        dimensions: { model: "gpt-4o" },
      },
-     "turn_12345",
+     { idempotencyKey: "turn_12345" },
    );
    console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
    ```
@@ -289,7 +292,7 @@ const charge = await bursar.credits.deduct(
     },
     dimensions: { model: "gpt-4o-mini" },
   },
-  "chat:turn:42",
+  { idempotencyKey: "chat:turn:42" },
 );
 console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
 ```
@@ -373,7 +376,7 @@ raises and is never authoritative. The ledger is auditable via
 `listLedgerEntries(userId, { limit: 50, cursor })` (stable pages, cursor
 pagination only); `list_usage_charges` lists metered charges. Refunds and
 expiry: `refund_credits(entry_id, amount=None, reason=None, ...)` /
-`refundCredits(entryId, amount?, reason?, ...)`,
+`refundCredits(entryId, { amount?, reason?, ... })`,
 `sweep_expired_credits(dry_run=True)` / `sweepExpiredCredits(true)`, and
 `revoke_credits_by_entry_type(user_id, "purchase")` /
 `revokeCreditsByEntryType(userId, "purchase")`.

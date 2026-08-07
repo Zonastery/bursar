@@ -5,7 +5,7 @@ import { retryBursarOperation } from "../retry.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditEventType } from "./events.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
-import { isAmount, PricingRuntime } from "./pricing-runtime.js";
+import { isAmount, CatalogRuntime } from "./catalog-runtime.js";
 import { raiseLeaseError } from "./service-errors.js";
 import type {
   CanAffordOptions,
@@ -32,7 +32,7 @@ import type {
 export class CreditLeaseWorkflow {
   constructor(
     private readonly store: CreditStore,
-    private readonly pricing: PricingRuntime,
+    private readonly catalogRuntime: CatalogRuntime,
     private readonly logger: NormalizedLogger,
     private readonly balanceMonitor: LowBalanceMonitor,
     private readonly policy: PolicyPreset,
@@ -96,11 +96,11 @@ export class CreditLeaseWorkflow {
     userId?: string | null,
     leaseId?: string | null,
   ): Promise<{ amount: Decimal; model: string | null }> {
-    return this.pricing.costOf(metricsOrAmount, userId, leaseId);
+    return this.catalogRuntime.costOf(metricsOrAmount, userId, leaseId);
   }
 
   /**
-   * Atomically acquire a lease — the only admission control (D4).
+   * Atomically acquire a lease — the only authoritative admission control.
    *
    * Prices the estimate and delegates entitlement, quota, allowance, credit
    * policy, and concurrency enforcement to the database in one atomic call.
@@ -177,7 +177,7 @@ export class CreditLeaseWorkflow {
   }
 
   /**
-   * Charge the ACTUAL cost against a lease and finalize it (D5).
+   * Charge the actual cost against a lease and finalize it.
    *
    * De-clamped: bills the full actual cost even if it exceeds the lease hold
    * (overdraft). Emits ``credits.deducted``, then low-balance and overdraft
@@ -198,7 +198,7 @@ export class CreditLeaseWorkflow {
     const dimensions = isAmount(metricsOrAmount) ? {} : { ...(metricsOrAmount.dimensions ?? {}) };
     const region = typeof dimensions.region === "string" ? dimensions.region : null;
 
-    // Build ledger metadata: caller fields first, system fields last (M7).
+    // Build ledger metadata with caller fields first and protected system fields last.
     const txMeta: Record<string, unknown> = {};
     if (isAmount(metricsOrAmount)) {
       if (options?.metadata) {
@@ -267,7 +267,7 @@ export class CreditLeaseWorkflow {
     return result;
   }
 
-  /** Release a lease without charging (work failed/aborted) — idempotent (H1). */
+  /** Release a lease without charging; safe to repeat after failed or aborted work. */
   async release(userId: string, leaseId: string): Promise<ReleaseResult> {
     this.logger.debug("[CreditsService] release", { leaseId });
     const result = await this.store.releaseLease(userId, leaseId);
@@ -296,7 +296,7 @@ export class CreditLeaseWorkflow {
   }
 
   /**
-   * Advisory affordability check — UI only, non-locking, may be stale (D4/H3).
+   * Advisory affordability check — UI only, non-locking, and potentially stale.
    *
    * Never use this as an admission gate; only ``reserve`` is authoritative.
    */
@@ -372,7 +372,7 @@ export class CreditLeaseWorkflow {
   }
 
   /**
-   * One-call shortcut wiring reserve → doWork → settle (interface plan §4).
+   * One-call shortcut wiring reserve → doWork → settle.
    *
    * ``doWork`` runs the operation and returns ``{ result, actual }`` where
    * ``actual`` is the real usage metrics (or amount) to settle. On any exception

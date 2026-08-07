@@ -8,13 +8,13 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 
-class BursarConfigResult(BaseModel):
+class CatalogRevision(BaseModel):
     id: str
     config: dict[str, Any]
     version: int
 
 
-class BursarConfigHistoryItem(BaseModel):
+class CatalogRevisionSummary(BaseModel):
     id: str
     version: int
     label: str | None
@@ -23,12 +23,12 @@ class BursarConfigHistoryItem(BaseModel):
 
 
 class PlanAllowancePolicy(BaseModel):
-    amount: Decimal | None
-    priority: int | None = None
-    reset_unit: str | None
-    reset_count: int | None
-    reset_anchor: str | None
-    reset_timezone: str | None
+    amount: Decimal
+    priority: int
+    reset_unit: str
+    reset_count: int
+    reset_anchor: str
+    reset_timezone: str
 
 
 class PlanCreditPolicy(BaseModel):

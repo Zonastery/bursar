@@ -53,30 +53,9 @@ jobs:
       matrix:
         # Supported Python runtimes.
         python-version: ["3.12", "3.13"]
-    # Real Postgres so the store/manager/SQL integration tests RUN (not skip).
-    # The conftest.py fixtures bootstrap the `auth` stubs/roles and apply
-    # python/src/bursar/sql/*.sql themselves. pg_partman 5 must be available.
-    services:
-      postgres:
-        image: public.ecr.aws/supabase/postgres:17.6.1.156
-        env:
-          POSTGRES_USER: supabase_admin
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: bursar
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U supabase_admin -d bursar"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      # conftest.py resolves a real Postgres from DATABASE_URL first, then the
-      # legacy BURSAR_TEST_PG_URL. Setting it makes the integration tests
-      # (concurrency / double-spend / idempotency / migration idempotency)
-      # FAIL rather than skip when something regresses (acceptance §8).
-      DATABASE_URL: postgresql://supabase_admin:postgres@localhost:5432/bursar
-      BURSAR_TEST_PG_URL: postgresql://supabase_admin:postgres@localhost:5432/bursar
+    # The fixture builds Bursar's upstream-PostgreSQL test image and starts it
+    # through testcontainers, so integration tests run against the same
+    # extension set locally and in CI.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -85,8 +64,8 @@ jobs:
           cache: pip
           cache-dependency-path: python/pyproject.toml
       - run: pip install -e "python/[test,postgres]"
-      # Loads tests/parity/expression_cases.json (parity gate, §7) AND runs the
-      # real-Postgres concurrency/double-spend suite via the DATABASE_URL above.
+      # Loads tests/parity/expression_cases.json (parity gate, §7) and runs the
+      # real-Postgres concurrency/double-spend suite through testcontainers.
       # --cov-fail-under is the floor in pyproject.toml (ratchet up, never down).
       - working-directory: python
         run: pytest --cov=bursar --cov-branch --cov-report=term-missing --cov-report=xml
@@ -107,34 +86,8 @@ jobs:
       matrix:
         # Supported Node.js LTS/current runtimes.
         node-version: ["22", "24"]
-    # GitHub Actions `services:` manages the container lifecycle, health gate
-    # (pg_isready), and tear-down — no manual `docker run`/`docker stop` needed.
-    # Default `max_connections=100` is ample: store-integration.test.ts uses a
-    # SINGLE module-level `pg.Pool` with `max: 1` (see efeca43) and billing/
-    # rls suites cap at `max: 3`, and `vitest.config.ts` forces `singleFork: true`
-    # + `fileParallelism: false` so files run strictly sequentially. The real
-    # leak was a missing `cs2.close()` in billing-integration.test.ts (fixed
-    # 9fa7d72) — that's what eliminated the exhaustion, not raising the ceiling.
-    services:
-      postgres:
-        image: public.ecr.aws/supabase/postgres:17.6.1.156
-        env:
-          POSTGRES_USER: supabase_admin
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: bursar
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U supabase_admin -d bursar"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      # store-integration.test.ts runs under describe.runIf(DATABASE_URL); with
-      # this set the PostgresStore integration + concurrency tests RUN, not skip.
-      # 127.0.0.1 rather than `localhost` to avoid a dual-stack DNS issue on
-      # Node 20 where the IPv6 ::1 resolution sometimes fails (10bb89d).
-      DATABASE_URL: postgresql://supabase_admin:postgres@127.0.0.1:5432/bursar
+    # Vitest global setup builds Bursar's upstream-PostgreSQL image and manages
+    # its container lifecycle through testcontainers.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -155,13 +108,6 @@ jobs:
       - working-directory: javascript
         run: |
           bun ci --ignore-scripts
-          postgres_container=$(docker ps --filter 'ancestor=public.ecr.aws/supabase/postgres:17.6.1.156' --format '{{.ID}}' | head -1)
-          docker exec "$postgres_container" psql -U supabase_admin -d bursar -c "ALTER SYSTEM SET max_connections = 500"
-          docker restart "$postgres_container"
-          for attempt in $(seq 1 30); do
-            if docker exec "$postgres_container" pg_isready -U supabase_admin -d bursar >/dev/null 2>&1; then break; fi
-            sleep 1
-          done
           bunx --no-install vitest run --coverage --pool=forks --no-file-parallelism --maxWorkers=1 --minWorkers=1
           bunx --no-install vitest --config vitest.providers.config.ts run --coverage
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -12,11 +12,12 @@ endif
 .ONESHELL:
 SHELL := /bin/bash
 
-.PHONY: help test test-python test-js test-pg-up test-pg-down test-integration
+.PHONY: help test test-python test-js test-pg-build test-pg-up test-pg-down test-integration
 .DEFAULT_GOAL := help
 
 TEST_PG_NAME ?= bursar-test-pg
-TEST_PG_IMAGE ?= public.ecr.aws/supabase/postgres:17.6.1.156
+TEST_PG_IMAGE ?= bursar/postgres-test:17.10-pg-jsonschema-0.3.4
+TEST_PG_BUILD_CONTEXT ?= tests/postgres
 TEST_PG_PORT ?= 55432
 TEST_PG_DATABASE ?= bursar
 TEST_PG_USER ?= postgres
@@ -39,7 +40,10 @@ install-hooks:                       ## Install lefthook git hooks (requires Bun
 
 test: test-integration               ## All tests (Python + JS, incl. real-Postgres integration)
 
-test-pg-up:                         ## Start an isolated Postgres database for integration tests
+test-pg-build:                      ## Build PostgreSQL with Bursar's required extensions
+	docker build -t $(TEST_PG_IMAGE) $(TEST_PG_BUILD_CONTEXT)
+
+test-pg-up: test-pg-build           ## Start an isolated Postgres database for integration tests
 	docker rm -f $(TEST_PG_NAME) >/dev/null 2>&1 || true
 	docker run -d --name $(TEST_PG_NAME) \
 	  -e POSTGRES_USER=$(TEST_PG_USER) \
@@ -72,7 +76,7 @@ test-integration:                  ## Run Python and JS tests against an isolate
 # container orchestration needed; see python/tests/conftest.py and
 # javascript/tests/global-setup.ts.
 test-python:                         ## Python tests (mock + postgres via DATABASE_URL/testcontainers)
-	cd python && pytest
+	cd python && uv run pytest
 
 test-js:                             ## JS tests (mock + postgres via DATABASE_URL/testcontainers)
 	cd javascript && bun run test

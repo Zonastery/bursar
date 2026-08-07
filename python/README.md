@@ -24,7 +24,8 @@ pip install bursar[postgres]
 ```
 
 Extras: `postgres` (default recommended), `providers` (Stripe, Dodo),
-`s3` (optional billing archive), and `test` (dev/test tooling).
+`s3` (optional billing archive), `google-adk` (model-call admission and
+settlement plugin), and `test` (dev/test tooling).
 
 Apply the SQL baseline before starting an application:
 
@@ -45,19 +46,13 @@ from bursar import Bursar, PostgresStore
 store = PostgresStore(database_url, tenant_id=tenant_id)
 bursar = Bursar.create(credit_store=store)
 
-grant = bursar.credits.add_credits(
-    user_id, 500, entry_type="purchase", idempotency_key="checkout:42"
-)
-charge = bursar.credits.deduct_credits(
-    user_id, 20, idempotency_key="job:42"
-)
+grant = bursar.credits.add_credits(user_id, 500, entry_type="purchase", idempotency_key="checkout:42")
+charge = bursar.credits.deduct_credits(user_id, 20, idempotency_key="job:42")
 refund = bursar.credits.refund_credits(charge.entry_id)
 
 page = bursar.credits.list_ledger_entries(user_id, limit=25)
 while page.next_cursor is not None:
-    page = bursar.credits.list_ledger_entries(
-        user_id, limit=25, cursor=page.next_cursor
-    )
+    page = bursar.credits.list_ledger_entries(user_id, limit=25, cursor=page.next_cursor)
 ```
 
 `LedgerEntry`, `LedgerCursor`, and `LedgerPage` are exported from `bursar`;

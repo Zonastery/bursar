@@ -1,9 +1,18 @@
 import Decimal from "decimal.js";
 import { describe, expect, it } from "vitest";
 
+import type { BursarConfigData } from "../src/config.js";
 import { PricingEngine } from "../src/engine.js";
 import { ConfigError } from "../src/errors.js";
 import { baseConfig } from "./config.test.js";
+
+function mutableConfig(): BursarConfigData {
+  return structuredClone(baseConfig()) as unknown as BursarConfigData;
+}
+
+function completionPricing(config: BursarConfigData) {
+  return config.pricing!.rate_cards.standard!.operations!.completion!;
+}
 
 describe("typed pricing engine", () => {
   it("serializes its parsed configuration without re-validating camelCase fields", () => {
@@ -35,8 +44,8 @@ describe("typed pricing engine", () => {
   });
 
   it("rejects unmatched dimensions when configured", () => {
-    const config = baseConfig();
-    config.pricing.rate_cards.standard.operations.completion.unmatched = {
+    const config = mutableConfig();
+    completionPricing(config).unmatched = {
       action: "reject",
     };
     const engine = PricingEngine.fromDict(config);
@@ -50,9 +59,10 @@ describe("typed pricing engine", () => {
   });
 
   it("calculates graduated pricing", () => {
-    const config = baseConfig();
-    config.pricing.rate_cards.standard.operations.completion.rules = [];
-    config.pricing.rate_cards.standard.operations.completion.unmatched = {
+    const config = mutableConfig();
+    const completion = completionPricing(config);
+    completion.rules = [];
+    completion.unmatched = {
       action: "charge",
       charge: {
         type: "graduated",
@@ -154,8 +164,8 @@ describe("typed pricing engine", () => {
   });
 
   it("requires a rate card when more than one is configured", () => {
-    const config = baseConfig();
-    config.pricing.rate_cards.enterprise = {
+    const config = mutableConfig();
+    config.pricing!.rate_cards.enterprise = {
       extends: "standard",
       operations: {},
     };
@@ -191,8 +201,8 @@ describe("typed pricing engine", () => {
   });
 
   it("fails when a rate card lacks the operation and cannot extend", () => {
-    const config = baseConfig();
-    config.pricing.rate_cards.isolated = { operations: {} };
+    const config = mutableConfig();
+    config.pricing!.rate_cards.isolated = { operations: {} };
     const pricing = PricingEngine.fromDict(config);
     expect(() =>
       pricing.calculate(
@@ -207,12 +217,14 @@ describe("typed pricing engine", () => {
   });
 
   it("rejects a charge that evaluates negative", () => {
-    const config = baseConfig();
-    config.pricing.rate_cards.standard.operations.completion.rules.push({
+    const config = mutableConfig();
+    const completion = completionPricing(config);
+    completion.rules ??= [];
+    completion.rules.push({
       when: { model: { op: "eq", value: "negative" } },
       charge: { type: "expression", formula: "input_tokens * -1" },
     });
-    config.pricing.rate_cards.standard.operations.completion.unmatched = {
+    completion.unmatched = {
       action: "reject",
     };
     expect(() =>
@@ -225,8 +237,8 @@ describe("typed pricing engine", () => {
   });
 
   it("evaluates flat, package, volume, expression, and sum charges", () => {
-    const config = baseConfig();
-    const completion = config.pricing.rate_cards.standard.operations.completion;
+    const config = mutableConfig();
+    const completion = completionPricing(config);
     completion.rules = [
       {
         when: { model: { op: "eq", value: "flat" } },

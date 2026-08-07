@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import { requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import { StoreError } from "../../../errors.js";
 
 const CreateTeamRowSchema = z
   .object({
@@ -86,7 +87,11 @@ export class TeamRepository {
     initialBalance: string,
   ): Promise<CreateTeamRow> {
     const rows = await this.callproc("create_team", [ownerSubjectId, name, initialBalance]);
-    return safeParse(CreateTeamRowSchema, rows?.[0] ?? {}, "TeamRepository.createTeam");
+    return safeParse(
+      CreateTeamRowSchema,
+      requireRow(rows, "TeamRepository.createTeam"),
+      "TeamRepository.createTeam",
+    );
   }
 
   /** Fetch a team's balance and member count. Returns null if the team does not exist. */
@@ -104,8 +109,8 @@ export class TeamRepository {
     spendCap: string | null,
   ): Promise<AddTeamMemberRow> {
     const rows = await this.callproc("set_team_member", [teamId, userId, role, spendCap]);
-    if (rows?.[0] !== true) {
-      throw new Error("TeamRepository.addTeamMember: set_team_member returned false");
+    if (requireRow(rows, "TeamRepository.addTeamMember") !== true) {
+      throw new StoreError("TeamRepository.addTeamMember: set_team_member returned false");
     }
     return safeParse(
       AddTeamMemberRowSchema,
@@ -125,7 +130,7 @@ export class TeamRepository {
   /** Remove a team member, returning false when absent or the final owner. */
   async removeTeamMember(teamId: string, userId: string): Promise<boolean> {
     const rows = await this.callproc("remove_team_member", [teamId, userId]);
-    return rows?.[0] === true;
+    return requireRow(rows, "TeamRepository.removeTeamMember") === true;
   }
 
   /** Deduct credits from a team's balance on behalf of a user. */
@@ -145,7 +150,7 @@ export class TeamRepository {
       operation,
       metadata,
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "TeamRepository.deductTeam") as Record<string, unknown>;
     return safeParse(
       TeamDeductionRowSchema,
       {

@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from bursar.errors import BursarError, BursarErrorCategory
+from bursar.errors import (
+    BursarError,
+    BursarErrorCategory,
+)
+from bursar.errors import (
+    PaymentMethodRequiredError as PaymentMethodRequiredError,
+)
+from bursar.errors import (
+    ProviderCapabilityNotSupportedError as ProviderCapabilityNotSupportedError,
+)
 
 
 class CommerceError(BursarError):
@@ -65,16 +74,6 @@ class ProviderSelectionError(CommerceError):
     category: BursarErrorCategory = "unavailable"
 
 
-class ProviderCapabilityNotSupportedError(CommerceError):
-    code = "PROVIDER_CAPABILITY_NOT_SUPPORTED"
-    category: BursarErrorCategory = "unavailable"
-
-    def __init__(self, provider: str, capability: str) -> None:
-        super().__init__(f"Provider {provider!r} does not support {capability}")
-        self.provider = provider
-        self.capability = capability
-
-
 class QuoteChangedError(CommerceError):
     code = "QUOTE_CHANGED"
     category: BursarErrorCategory = "conflict"
@@ -82,11 +81,6 @@ class QuoteChangedError(CommerceError):
     def __init__(self, preview: Any) -> None:
         super().__init__("The financial preview changed")
         self.preview = preview
-
-
-class MissingPaymentMethodError(CommerceError):
-    code = "PAYMENT_METHOD_REQUIRED"
-    category: BursarErrorCategory = "payment_required"
 
 
 class MissingPlanChangePolicyError(CommerceError):

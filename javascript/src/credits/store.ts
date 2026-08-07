@@ -31,8 +31,8 @@ import type {
   LedgerPage,
   UsageChargePage,
   UsageRecordResult,
-  BursarConfigHistoryItem,
-  BursarConfigResult,
+  CatalogRevisionSummary,
+  CatalogRevision,
   RefundResult,
   ReleaseResult,
   SetUserPlanResult,
@@ -56,7 +56,7 @@ export interface OperationUsageOptions {
   dimensions?: Record<string, unknown> | null;
 }
 
-/** Options for atomically acquiring a lease (interface plan §3 / D4). */
+/** Options for atomically acquiring a lease. */
 export interface CreateLeaseOptions extends OperationUsageOptions {
   /**
    * Replay-safe acquisition key. Supplying the same key with the same request
@@ -71,14 +71,14 @@ export interface CreateLeaseOptions extends OperationUsageOptions {
   metadata?: CreditMetadata | null;
 }
 
-/** Options for charging the actual cost against a lease (interface plan §3 / D5). */
+/** Options for charging the actual cost against a lease. */
 export interface SettleLeaseOptions extends OperationUsageOptions {
   idempotencyKey?: string | null;
   metadata?: CreditMetadata | null;
 }
 
 /**
- * Abstract base for credit storage backends (WS8).
+ * Abstract base for credit storage backends.
  *
  * Split into two tiers:
  *  - **Core** (abstract, must be implemented): balance/credit ops, the atomic
@@ -111,7 +111,7 @@ export abstract class CreditStore {
   /**
    * Atomically calculate-and-charge in one server-side transaction:
    * consume free allowance, enforce plan policy and quotas, and debit the net
-   * amount — idempotency-keyed end-to-end. See contract §2.
+   * amount, idempotency-keyed end-to-end.
    */
   abstract deductWithAllowance(
     userId: string,
@@ -121,14 +121,14 @@ export abstract class CreditStore {
 
   // ── Lease lifecycle (atomic admission) ─────────────────────────────
   //
-  // The lease is the canonical admission primitive (interface plan §3/D4).
+  // The lease is the canonical admission primitive.
   // ``reserve``/``settle``/``release`` on the manager map onto these.
   // Leases reuse the credit_reservations table/records extended with a status
   // (active → settled | released | expired), a billing mode, and an overdraft
   // floor. ``available = balance − Σ(amount WHERE status='active' AND unexpired)``.
 
   /**
-   * Atomically acquire a lease (hold) — the only admission control (D4).
+   * Atomically acquire a lease (hold) — the only authoritative admission control.
    *
    * Under one critical section the store: (1) ensures the balance row exists;
    * (2) enforces ``maxConcurrent`` by counting active leases for ``(userId,
@@ -146,7 +146,7 @@ export abstract class CreditStore {
   ): Promise<LeaseResult>;
 
   /**
-   * Charge the actual cost against a lease, then mark it settled (D5).
+   * Charge the actual cost against a lease, then mark it settled.
    *
    * De-clamped: charges ``amount`` even if it exceeds the lease hold (overdraft)
    * and never clamps to the reserved ceiling. The balance may go negative in
@@ -168,7 +168,7 @@ export abstract class CreditStore {
   ): Promise<LeasePricingContext | null>;
 
   /**
-   * Release a lease without charging (work failed/aborted) — idempotent (H1).
+   * Release a lease without charging; safe to repeat after failed or aborted work.
    *
    * Transitions an ``active``/``expired`` lease to ``released`` and reports
    * ``released=true``; otherwise reports ``released=false`` with a ``reason``.
@@ -191,23 +191,26 @@ export abstract class CreditStore {
   /**
    * Advisory, non-locking read of ``available = balance − Σ active holds``.
    *
-   * For UI only — never an admission gate (D4/H3); may be stale the instant read.
+   * For UI only — never an admission gate; may be stale the instant it is read.
    */
 
   abstract getAvailable(userId: string): Promise<AvailableResult>;
 
-  abstract getActivePricing(): Promise<BursarConfigResult | null>;
-  abstract setActivePricing(
+  abstract getActiveCatalog(): Promise<CatalogRevision | null>;
+  abstract publishAndActivateCatalog(
     config: Record<string, unknown>,
     label?: string | null,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string>;
-  abstract publishPricing(config: Record<string, unknown>, label?: string | null): Promise<string>;
+  abstract publishCatalogDraft(
+    config: Record<string, unknown>,
+    label?: string | null,
+  ): Promise<string>;
 
-  // H8: pricing history / activation — parity with Python base.py:293-312.
-  abstract getPricingHistory(): Promise<BursarConfigHistoryItem[]>;
-  abstract getBursarConfig(version: number): Promise<BursarConfigResult | null>;
-  abstract activatePricing(
+  // Catalog revision history and activation.
+  abstract getCatalogHistory(): Promise<CatalogRevisionSummary[]>;
+  abstract getCatalogRevision(version: number): Promise<CatalogRevision | null>;
+  abstract activateCatalogRevision(
     version: number,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string>;
@@ -281,7 +284,7 @@ export abstract class CreditStore {
     throw new CapabilityNotSupportedError("executeGrantProgram is not supported by this store");
   }
 
-  // ── Usage analytics (optional capability — WS8) ──────────────────────
+  // ── Usage analytics (optional capability) ────────────────────────────
   async spendByUser(_start: Date, _end: Date): Promise<SpendByUserRow[]> {
     throw new CapabilityNotSupportedError("spendByUser is not supported by this store");
   }
@@ -298,7 +301,7 @@ export abstract class CreditStore {
     throw new CapabilityNotSupportedError("aggregateStats is not supported by this store");
   }
 
-  // ── Transaction listing (optional capability — WS8) ──────────────────
+  // ── Transaction listing (optional capability) ────────────────────────
   async listLedgerEntries(
     _userId: string,
     _options?: ListLedgerEntriesOptions,
@@ -325,7 +328,7 @@ export abstract class CreditStore {
     throw new CapabilityNotSupportedError("recordUsage is not supported by this store");
   }
 
-  // ── Single transaction lookup (optional capability — WS8) ────────────
+  // ── Single transaction lookup (optional capability) ──────────────────
   /**
    * Fetch a single transaction by ID. Returns `null` when the transaction
    * does not exist or belongs to a different user.
@@ -334,7 +337,7 @@ export abstract class CreditStore {
     throw new CapabilityNotSupportedError("getLedgerEntry is not supported by this store");
   }
 
-  // ── Team/shared balance pools (optional capability — WS8) ────────────
+  // ── Team/shared balance pools (optional capability) ──────────────────
   async createTeam(
     _ownerSubjectId: string,
     _name: string,

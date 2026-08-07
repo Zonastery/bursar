@@ -1,0 +1,139 @@
+---
+title: Google ADK model billing
+description: Add replay-safe credit admission and settlement to every Google ADK model call without mixing billing into agent callbacks.
+---
+
+# Google ADK model billing
+
+Use Bursar's Google ADK plugin when each model call is a dynamically priced
+operation. The plugin reserves an estimated amount before provider transport,
+settles the lease from final usage, and releases the hold when a call fails
+before the provider completes it.
+
+Operational observability stays in ADK's OpenTelemetry pipeline. Export those
+spans to Langfuse or another tracing backend for latency, retries, prompts,
+responses, and errors. Bursar stores only the financial usage, price-selection
+dimensions, provider request ID, and trace correlation needed for accounting.
+
+## Install
+
+```bash
+pip install "bursar[google-adk,postgres]"
+```
+
+The integration is tested against Google ADK 2.5. It is an optional extra, so
+applications that do not use ADK do not install ADK transitively.
+
+## Register the plugin
+
+Declare the largest usage you are willing to admit for one model call. The
+measure and dimension names also form an allow-list: undeclared provider
+telemetry is not copied into financial records.
+
+```python
+from bursar import UsageMetrics
+from bursar.integrations.google_adk import BursarPlugin
+from google.adk.apps import App
+
+estimate = UsageMetrics(
+    operation="completion",
+    measures={
+        "calls": 1,
+        "input_tokens": 8_000,
+        "output_tokens": 4_096,
+        "total_tokens": 12_096,
+        "cache_read_tokens": 0,
+        "reasoning_tokens": 0,
+        "tool_calls": 0,
+    },
+    dimensions={"model": "configured-model", "provider": "openrouter"},
+)
+
+app = App(
+    name="support_agent",
+    root_agent=root_agent,
+    plugins=[
+        BursarPlugin(
+            bursar.credits,
+            estimate=estimate,
+            operation_type="completion",
+            feature="agent_chat",
+            provider="openrouter",
+            reference_type="chat",
+            operation_key_prefix="chat",
+            state_namespace="support",
+        )
+    ],
+)
+```
+
+Export `app` from the ADK agent module (for example, `support_agent/agent.py`).
+ADK's loader prefers it over a bare `root_agent`, which keeps the financial
+lifecycle at the application boundary instead of duplicating it in every
+agent.
+
+Register the Bursar plugin before plugins that may short-circuit a model call.
+This makes credit admission the first gate. Its run and agent error hooks clean
+up a reservation if a later plugin or agent callback exits early.
+
+## Subject and invocation attribution
+
+By default, the account is ADK's `user_id`. Override `subject_resolver` when
+your Bursar account identifier comes from another trusted context field.
+
+ADK supplies the invocation ID; callers do not need to create a job ID. Bursar
+uses that invocation as the financial reference and creates a distinct,
+idempotent operation key for every model call. A tool-using turn with several
+model calls therefore produces several independently replayable usage charges
+under one ADK invocation.
+
+The plugin keeps unresolved lease state in ADK's durable session state. Its
+keys start with `_bursar_model_leases:` and should remain server-managed rather
+than being accepted from or returned to an untrusted client.
+
+## Authoritative provider receipts
+
+ADK's normalized `usage_metadata` is the default source for token counts. Some
+routers expose additional accounting fields—such as authoritative cost,
+cache-write tokens, or a generation ID—only on the provider SDK response. Pass
+a framework-neutral `ProviderReceiptSource` when those fields affect pricing:
+
+```python
+from bursar.integrations import ProviderReceipt, ProviderReceiptSource
+
+class RouterReceiptSource(ProviderReceiptSource):
+    def begin(self) -> None:
+        # Start request-local capture through the provider SDK's supported hook.
+        ...
+
+    def finish(self) -> ProviderReceipt | None:
+        # Return normalized UsageMetrics plus optional CreditMetadata.
+        ...
+
+plugin = BursarPlugin(
+    bursar.credits,
+    estimate=estimate,
+    receipt_source=RouterReceiptSource(),
+)
+```
+
+Use the provider SDK's official callback or middleware surface. Do not parse
+logs or put unbounded response payloads in Bursar metadata. Fields absent from
+the estimate are intentionally discarded; they belong in OpenTelemetry.
+
+## Fixed-price parent jobs
+
+Do not attach child model charges merely because a fixed-price batch workflow
+uses ADK internally. Bill the parent job explicitly with
+`run_billed_async`/`begin_billed_operation`, and let ADK telemetry describe its
+internal calls. Enable this plugin for those child calls only when your product
+actually prices both the parent and the inferences.
+
+## Other agent frameworks
+
+The financial lifecycle is not coupled to Google ADK. `ProviderReceipt` and
+`ProviderReceiptSource` live in `bursar.integrations`, while reservation,
+settlement, and replay live in `CreditsService`. An adapter for another agent
+framework only needs to map that framework's before/after/error hooks onto the
+same contracts. Installing `bursar[google-adk]` is therefore an adapter choice,
+not a requirement for Bursar itself.

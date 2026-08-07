@@ -1,4 +1,5 @@
 import { BursarError, type BursarErrorCategory, type BursarErrorOptions } from "../errors.js";
+export { PaymentMethodRequiredError, ProviderCapabilityNotSupportedError } from "../errors.js";
 
 /** Base class for stable, transport-independent commerce failures. */
 export class CommerceError extends BursarError {
@@ -83,21 +84,6 @@ export class ProviderSelectionError extends CommerceError {
   }
 }
 
-export class ProviderCapabilityNotSupportedError extends CommerceError {
-  override readonly name = "ProviderCapabilityNotSupportedError";
-
-  constructor(
-    readonly provider: string,
-    readonly capability: string,
-  ) {
-    super(
-      `Payment provider '${provider}' does not support '${capability}'`,
-      "PROVIDER_CAPABILITY_NOT_SUPPORTED",
-      "unavailable",
-    );
-  }
-}
-
 export class QuoteChangedError<TPreview = unknown> extends CommerceError {
   override readonly name = "QuoteChangedError";
 
@@ -107,14 +93,6 @@ export class QuoteChangedError<TPreview = unknown> extends CommerceError {
       "QUOTE_CHANGED",
       "conflict",
     );
-  }
-}
-
-export class MissingPaymentMethodError extends CommerceError {
-  override readonly name = "MissingPaymentMethodError";
-
-  constructor(message = "A saved payment method is required") {
-    super(message, "PAYMENT_METHOD_REQUIRED", "payment_required");
   }
 }
 

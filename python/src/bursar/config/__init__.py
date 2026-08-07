@@ -162,9 +162,7 @@ def validate_bursar_config(config: BursarConfig) -> BursarConfig:  # noqa: C901
             if config.credits.default_bucket is None:
                 raise ValueError(f"plans.{plan_key}.credit_allowance requires credits.default_bucket")
             allowance_priority = plan.credit_allowance.priority
-            if allowance_priority is not None and any(
-                bucket.priority == allowance_priority for bucket in config.credits.buckets.values()
-            ):
+            if any(bucket.priority == allowance_priority for bucket in config.credits.buckets.values()):
                 raise ValueError(
                     f"plans.{plan_key}.credit_allowance.priority conflicts with "
                     f"credit bucket priority {allowance_priority}"

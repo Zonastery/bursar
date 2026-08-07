@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from "fs";
+import { extname } from "path";
 import { ConfigError, ImportError } from "./errors.js";
 
 /** Minimal shape of the `js-yaml` module we rely on (loaded on demand). */
@@ -26,7 +27,7 @@ function asYamlModule(mod: unknown): YamlModule {
 /**
  * Read a file's contents, converting missing-file/directory/permission
  * failures into a clean {@link ConfigError} instead of a raw Node `fs` error
- * (mirrors the Python CLI's `_load_pricing_file`, `__main__.py:162-198`).
+ * (mirrors the Python CLI's `_load_config_file`).
  */
 function readFileClean(filepath: string): string {
   let stat: ReturnType<typeof statSync> | undefined;
@@ -34,7 +35,7 @@ function readFileClean(filepath: string): string {
     stat = statSync(filepath);
   } catch (cause) {
     const code = (cause as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") throw new ConfigError(`File not found: ${filepath}`);
+    if (code === "ENOENT") throw new ConfigError(`Config file not found: ${filepath}`);
     if (code === "EACCES") throw new ConfigError(`Permission denied: ${filepath}`);
     throw new ConfigError(`Could not read ${filepath}: ${(cause as Error).message}`, [], { cause });
   }
@@ -51,31 +52,38 @@ function readFileClean(filepath: string): string {
 /** Guard against an empty file or a non-object parse result (e.g. an empty YAML document). */
 function assertNonEmptyObject(data: unknown, filepath: string): Record<string, unknown> {
   if (data == null) {
-    throw new ConfigError(`Pricing config is empty: ${filepath}`);
+    throw new ConfigError(`Bursar config is empty: ${filepath}`);
   }
   if (typeof data !== "object" || Array.isArray(data)) {
     throw new ConfigError(
-      `Pricing config must be a JSON/YAML object, got ${typeof data}: ${filepath}`,
+      `Bursar config must be a JSON/YAML object, got ${typeof data}: ${filepath}`,
     );
   }
   if (Object.keys(data).length === 0) {
-    throw new ConfigError(`Pricing config is empty: ${filepath}`);
+    throw new ConfigError(`Bursar config is empty: ${filepath}`);
   }
   return data as Record<string, unknown>;
 }
 
 /**
- * Read a JSON or YAML pricing config file from disk.
+ * Read a JSON or YAML Bursar config file from disk.
  *
  * Returns the raw parsed dict (suitable for ``loadConfigFromDict`` or
  * ``PricingEngine.fromDict``).
  *
  * For YAML files the optional peer dep ``js-yaml`` is loaded on demand. If it
  * is not installed, an {@link ImportError} is thrown so callers get a clear,
- * typed message (contract §4 / L4).
+ * typed message.
  */
-export async function loadPricingFile(filepath: string): Promise<Record<string, unknown>> {
-  if (filepath.endsWith(".yaml") || filepath.endsWith(".yml")) {
+export async function loadConfigFile(filepath: string): Promise<Record<string, unknown>> {
+  const extension = extname(filepath).toLowerCase();
+  if (!new Set([".json", ".yaml", ".yml"]).has(extension)) {
+    throw new ConfigError(
+      `Unsupported config file format: ${extension || "<none>"}. Expected .json, .yaml, or .yml`,
+    );
+  }
+
+  if (extension === ".yaml" || extension === ".yml") {
     let mod: unknown;
     try {
       mod = await import("js-yaml");

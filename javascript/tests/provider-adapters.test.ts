@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { NotFoundError } from "dodopayments";
+import type Stripe from "stripe";
 import { callBillingEventSink } from "../src/providers/_shared.js";
+import type { BillingEventSink } from "../src/billing/contracts.js";
+import type { DodoClient } from "../src/providers/dodo/client-contract.js";
 import { DodoProvider } from "../src/providers/dodo/provider.js";
 import { MockPaymentProvider } from "../src/providers/mock/provider.js";
 import { StripeProvider } from "../src/providers/stripe/provider.js";
 
-const sink = { ingestBillingEvent: () => ({ handled: true, action: "ok" }) };
+const sink = {
+  ingestBillingEvent: async () => ({ handled: true, action: "ok" }),
+} satisfies BillingEventSink;
 
 describe("payment provider adapter contracts", () => {
   it("retries an in-flight duplicate before returning its result", async () => {
@@ -37,7 +42,10 @@ describe("payment provider adapter contracts", () => {
 
   it("maps Dodo requests, idempotency, and response DTOs", async () => {
     const calls: unknown[][] = [];
-    const client: any = {
+    const client = {
+      webhooks: {
+        unwrap: () => ({ type: "payment.succeeded", data: {} }),
+      },
       checkoutSessions: {
         create: async (...args: unknown[]) => {
           calls.push(args);
@@ -96,17 +104,21 @@ describe("payment provider adapter contracts", () => {
           },
         }),
       },
-    };
-    const provider = new DodoProvider(
-      () => client,
-      { webhookKey: "k", setupProductId: "setup" },
-      sink,
-    );
+    } as unknown as DodoClient;
+    const provider = new DodoProvider({
+      getClient: () => client,
+      webhookKey: "k",
+      setupProductId: "setup",
+      eventSink: sink,
+    });
     await expect(
       provider.createCheckoutSession({
         productId: "prod_1",
+        type: "credit_pack",
         returnUrl: "https://return",
+        cancelUrl: "https://cancel",
         quantity: 2,
+        metadata: {},
         idempotencyKey: "idem_1",
       }),
     ).resolves.toEqual({ url: "https://checkout.test", providerSessionId: "sess_1" });
@@ -115,8 +127,8 @@ describe("payment provider adapter contracts", () => {
         product_cart: [{ product_id: "prod_1", quantity: 2 }],
         customer: undefined,
         return_url: "https://return",
-        cancel_url: undefined,
-        metadata: undefined,
+        cancel_url: "https://cancel",
+        metadata: {},
       },
       { idempotencyKey: "idem_1" },
     ]);
@@ -133,6 +145,7 @@ describe("payment provider adapter contracts", () => {
         brand: "visa",
         expiryMonth: 1,
         expiryYear: 2030,
+        isDefault: true,
       },
     ]);
     await expect(
@@ -147,19 +160,27 @@ describe("payment provider adapter contracts", () => {
     ).resolves.toMatchObject({ providerPaymentId: "pay_auto", status: "succeeded" });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({ url: "https://invoice.test" });
     await expect(
-      provider.previewChangePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
+      provider.previewChangePlan({
+        providerSubscriptionId: "sub_1",
+        productId: "prod_2",
+        prorationBillingMode: "prorated_immediately",
+      }),
     ).resolves.toMatchObject({ totalAmount: 12, settlementAmount: 10 });
   });
 
   it("maps Stripe checkout calls and rejects missing webhook signatures", async () => {
     const calls: Record<string, unknown>[] = [];
     const checkoutCalls: unknown[][] = [];
-    const stripe: any = {
+    const stripe = {
       customers: {
         create: async (args: Record<string, unknown>) => {
           calls.push(args);
           return { id: "cus_1" };
         },
+        retrieve: async () => ({
+          deleted: false,
+          invoice_settings: { default_payment_method: "pm_1" },
+        }),
       },
       checkout: {
         sessions: {
@@ -192,14 +213,20 @@ describe("payment provider adapter contracts", () => {
       invoices: { retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }) },
       subscriptions: { update: async (...args: unknown[]) => calls.push({ args }) },
       webhooks: { constructEvent: () => ({}) },
-    };
-    const provider = new StripeProvider(() => stripe, sink, "secret");
+    } as unknown as Stripe;
+    const provider = new StripeProvider({
+      getClient: () => stripe,
+      webhookSecret: "secret",
+      eventSink: sink,
+    });
     await expect(
       provider.createCheckoutSession({
         userId: "u1",
         productId: "price_1",
+        type: "subscription",
         returnUrl: "https://ok",
         cancelUrl: "https://cancel",
+        metadata: {},
         idempotencyKey: "idem_1",
       }),
     ).resolves.toEqual({ url: "https://checkout.test", customerId: "cus_1" });
@@ -233,54 +260,82 @@ describe("payment provider adapter contracts", () => {
 
   it("uses the Dodo SDK's typed not-found error", async () => {
     const client = {
+      webhooks: {
+        unwrap: () => ({ type: "payment.succeeded", data: {} }),
+      },
       checkoutSessions: {
         retrieve: async () => {
           throw new NotFoundError(404, {}, "missing", new Headers());
         },
       },
-    } as any;
-    const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
+    } as unknown as DodoClient;
+    const provider = new DodoProvider({
+      getClient: () => client,
+      webhookKey: "k",
+      eventSink: sink,
+    });
     await expect(provider.getCheckoutSessionStatus("missing")).resolves.toBeNull();
   });
 
   it("does not reinterpret arbitrary provider error shapes", async () => {
     const error = { statusCode: 404 };
     const client = {
+      webhooks: {
+        unwrap: () => ({ type: "payment.succeeded", data: {} }),
+      },
       checkoutSessions: {
         retrieve: async () => {
           throw error;
         },
       },
-    } as any;
-    const provider = new DodoProvider(() => client, { webhookKey: "k" }, sink);
+    } as unknown as DodoClient;
+    const provider = new DodoProvider({
+      getClient: () => client,
+      webhookKey: "k",
+      eventSink: sink,
+    });
     await expect(provider.getCheckoutSessionStatus("missing")).rejects.toBe(error);
   });
 
   it("keeps the mock provider deterministic and complete", async () => {
-    const provider = new MockPaymentProvider(sink);
-    await expect(provider.createCheckoutSession({ returnUrl: "https://return" })).resolves.toEqual({
-      url: "https://return",
-    });
+    const provider = new MockPaymentProvider({ eventSink: sink });
     await expect(
-      provider.createCustomerPortalSession({ returnUrl: "https://portal" }),
+      provider.createCheckoutSession({
+        productId: "product-1",
+        type: "credit_pack",
+        returnUrl: "https://return",
+        cancelUrl: "https://cancel",
+        metadata: {},
+      }),
+    ).resolves.toEqual({ url: "https://return" });
+    await expect(
+      provider.createCustomerPortalSession({ customerId: "cus_1", returnUrl: "https://portal" }),
     ).resolves.toEqual({ url: "https://portal" });
     await expect(
-      provider.createUpdatePaymentMethodSession({ returnUrl: "https://update" }),
+      provider.createUpdatePaymentMethodSession({
+        customerId: "cus_1",
+        subscriptionId: "sub_1",
+        returnUrl: "https://update",
+      }),
     ).resolves.toEqual({ url: "https://update" });
     await expect(
-      provider.createPaymentMethodSetupSession({ returnUrl: "https://setup" }),
+      provider.createPaymentMethodSetupSession({
+        customerId: "cus_1",
+        returnUrl: "https://setup",
+      }),
     ).resolves.toEqual({ url: "https://setup" });
     await expect(provider.getInvoiceUrl("pay_1")).resolves.toEqual({
       url: "https://example.com/invoice",
     });
     await expect(provider.listPaymentMethods("cus_1")).resolves.toEqual([]);
-    await expect(provider.getDefaultPaymentMethod("cus_1")).resolves.toBeNull();
     await expect(
       provider.previewSavedPaymentCharge({
         customerId: "cus_1",
         paymentMethodId: "pm_1",
         productId: "prod_1",
         quantity: 1,
+        metadata: {},
+        idempotencyKey: "preview_1",
       }),
     ).resolves.toEqual({ amountMinor: 0, currency: "USD" });
     await expect(
@@ -289,17 +344,26 @@ describe("payment provider adapter contracts", () => {
         paymentMethodId: "pm_1",
         productId: "prod_1",
         quantity: 1,
+        metadata: {},
         idempotencyKey: "topup_1",
       }),
     ).resolves.toMatchObject({ providerPaymentId: "mock_pay_topup_1", status: "succeeded" });
     await expect(
-      provider.createCustomer({ userId: "u1", email: "u1@example.com" }),
+      provider.createCustomer({ email: "u1@example.com", name: "User One", metadata: {} }),
     ).resolves.toMatchObject({ customerId: expect.stringMatching(/^mock_cus_/) });
     await expect(
-      provider.changePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
+      provider.changePlan({
+        providerSubscriptionId: "sub_1",
+        productId: "prod_2",
+        prorationBillingMode: "prorated_immediately",
+      }),
     ).resolves.toBeUndefined();
     await expect(
-      provider.previewChangePlan({ providerSubscriptionId: "sub_1", productId: "prod_2" }),
+      provider.previewChangePlan({
+        providerSubscriptionId: "sub_1",
+        productId: "prod_2",
+        prorationBillingMode: "prorated_immediately",
+      }),
     ).resolves.toMatchObject({ totalAmount: 0, settlementAmount: 0, currency: "USD" });
     await expect(provider.cancelSubscription("sub_1")).resolves.toBeUndefined();
     await expect(provider.reactivateSubscription("sub_1")).resolves.toBeUndefined();

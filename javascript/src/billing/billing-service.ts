@@ -108,8 +108,8 @@ export class BillingService {
     return this.management.getAutoRechargeProfile(userId);
   }
 
-  async getActiveBursarConfig(): Promise<Record<string, unknown> | null> {
-    return this.management.getActiveBursarConfig();
+  async getActiveCatalogDocument(): Promise<Record<string, unknown> | null> {
+    return this.management.getActiveCatalogDocument();
   }
 
   async listCancellableProviderSubscriptionIds(userId: string): Promise<string[]> {

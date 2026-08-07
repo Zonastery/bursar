@@ -32,7 +32,11 @@ export type {
   PublicCatalogWindow,
 } from "./catalog.js";
 export {
+  AutoRechargeDisabledError,
+  AutoRechargeNotConfiguredError,
+  BillingError,
   BursarError,
+  CapabilityNotConfiguredError,
   CapabilityNotSupportedError,
   CapReachedError,
   ConcurrencyLimitError,
@@ -45,7 +49,9 @@ export {
   LeaseExpiredError,
   LeaseNotFoundError,
   OperationNotAllowedError,
-  PricingNotLoadedError,
+  PaymentMethodRequiredError,
+  ProviderCapabilityNotSupportedError,
+  CatalogNotLoadedError,
   RefundError,
   QuotaExceededError,
   StoreError,
@@ -74,8 +80,8 @@ export type {
   AccountCreatedInput,
   AccountCreatedResult,
   BursarOptions,
+  BillingCapability,
   BillingEventSink,
-  BillingService,
   CommerceOptions,
   CreditsService,
 } from "./bursar.js";
@@ -90,8 +96,8 @@ export type {
   AvailableResult,
   BalanceResult,
   BillingMode,
-  BursarConfigHistoryItem,
-  BursarConfigResult,
+  CatalogRevisionSummary,
+  CatalogRevision,
   BucketBalance,
   BucketBalancesResult,
   BucketDefinition,
@@ -142,6 +148,25 @@ export type {
 
 // Store options
 export type { CreateLeaseOptions, SettleLeaseOptions } from "./credits/store.js";
+export type {
+  AddCreditsOptions,
+  BeginBilledOperationOptions,
+  CanAffordOptions,
+  CreditsServiceOptions,
+  DeductCreditsOptions,
+  DeductFlatJobOptions,
+  DeductOptions,
+  DeductTeamOptions,
+  GrantSubscriptionCycleOptions,
+  LowBalanceConfig,
+  MetricsOrAmount,
+  PostDeductionContext,
+  RecordUsageOptions,
+  RefundCreditsOptions,
+  ReserveOptions,
+  RunBilledOptions,
+  SettleOptions,
+} from "./credits/service-types.js";
 
 // Stores
 export { CreditStore } from "./credits/store.js";
@@ -156,13 +181,14 @@ export { CreditEventEmitter } from "./credits/events.js";
 // Billing
 export { BillingStore, PostgresBillingStore } from "./billing/index.js";
 export { AUTO_RECHARGE_STATES, BillingEventType } from "./billing/index.js";
+export type { BillingServiceOptions } from "./billing/billing-service.js";
 
 export type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
   BillingAutoRechargeStatus,
   BillingProvisioningPort,
-  BillingCreditTopup,
+  BillingCreditPostingResult,
   BillingCustomerInfo,
   BillingCustomerRecord,
   BillingDisputeInfo,
@@ -171,9 +197,10 @@ export type {
   BillingEventHandler,
   BillingEventResult,
   BillingInvoiceInfo,
-  BillingOffer,
+  BillingInvoiceRecord,
   BillingOfferInterval,
   BillingPaymentInfo,
+  BillingPaymentRecord,
   BillingPreferences,
   BillingProvider,
   PostgresBillingStoreOptions,

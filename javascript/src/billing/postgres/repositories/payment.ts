@@ -1,32 +1,35 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import {
+  optionalRecordRow,
+  postgresUuid,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
+
+const PgSafeMinorUnitsSchema = z.union([
+  z.string().regex(/^\d+$/),
+  z.number().int().nonnegative().safe(),
+]);
 
 const BillingPaymentRowSchema = z
   .object({
-    provider: z.string().optional(),
-    provider_payment_id: z.string().optional(),
-    subject_id: z.string().nullable().optional(),
-    user_id: z.string().nullable().optional(),
-    amount_minor: z.union([z.string(), z.number()]).optional(),
-    tax_minor: z.union([z.string(), z.number()]).nullable().optional(),
-    currency: z.string().optional(),
-    purpose: z.string().nullable().optional(),
-    status: z.string().optional(),
-    provider_updated_at: z.unknown().optional(),
-    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
-  })
-  .passthrough();
-const ForRefundRowSchema = z
-  .object({
-    credits_per_unit: z.union([z.string(), z.number()]).nullable().optional(),
-    credits_per_major_unit: z.union([z.string(), z.number()]).nullable().optional(),
-    tier: z.string().optional(),
-    deposit_to: z.string().optional(),
+    id: postgresUuid,
+    provider: z.string().min(1),
+    provider_payment_id: z.string().min(1),
+    provider_invoice_id: z.string().nullable(),
+    subject_id: postgresUuid,
+    amount_minor: PgSafeMinorUnitsSchema,
+    tax_minor: PgSafeMinorUnitsSchema,
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    purpose: z.enum(["subscription", "credit_topup"]),
+    status: z.enum(["pending", "succeeded", "failed", "canceled"]),
+    provider_updated_at: z.union([z.string().datetime({ offset: true }), z.date()]),
+    metadata: z.record(z.string(), z.unknown()),
   })
   .passthrough();
 export type BillingPaymentRow = z.infer<typeof BillingPaymentRowSchema>;
-export type ForRefundRow = z.infer<typeof ForRefundRowSchema>;
+export type ForRefundRow = BillingPaymentRow;
 
 export class BillingPaymentRepository {
   constructor(private query: QueryFn) {}
@@ -34,29 +37,29 @@ export class BillingPaymentRepository {
     provider: string,
     providerPaymentId: string,
     providerInvoiceId: string | null,
-    userId: string | null,
+    userId: string,
     amountMinor: number,
-    taxMinor: number | null,
+    taxMinor: number,
     currency: string,
-    purpose: string | null,
+    purpose: "subscription" | "credit_topup",
     metadata: string | null,
-    status: string,
+    status: "pending" | "succeeded" | "failed" | "canceled",
     providerUpdatedAt: string,
   ): Promise<string> {
-    if (!userId) throw new Error("billing payment requires a subject");
+    if (!userId) throw new TypeError("billing payment requires a subject");
     if (purpose !== "subscription" && purpose !== "credit_topup") {
-      throw new Error("billing payment requires a known purpose");
+      throw new TypeError("billing payment requires a known purpose");
     }
     const rows = await this.query(
       `SELECT bursar.upsert_billing_payment(
          $1::uuid,$2,$3,$4,$5,$6,$7,$8::bursar.billing_payment_status,$9,$10,$11::jsonb
-       )`,
+       ) AS id`,
       [
         userId,
         provider,
         providerPaymentId,
         amountMinor,
-        taxMinor ?? 0,
+        taxMinor,
         currency,
         purpose,
         status,
@@ -65,27 +68,25 @@ export class BillingPaymentRepository {
         metadata ?? "{}",
       ],
     );
-    const id = (rows[0] as Record<string, unknown> | undefined)?.upsert_billing_payment;
-    if (!id) throw new Error("billing payment upsert returned no ID");
-    return String(id);
+    return requireResultField(rows, "id", postgresUuid, "BillingPaymentRepository.upsert");
   }
   async getForRefund(provider: string, providerPaymentId: string): Promise<ForRefundRow | null> {
     const rows = await this.query("SELECT * FROM bursar.get_billing_payment_by_provider($1,$2)", [
       provider,
       providerPaymentId,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.id == null
+    const row = optionalRecordRow(rows, "BillingPaymentRepository.getForRefund");
+    return row === null
       ? null
-      : safeParse(ForRefundRowSchema, row, "BillingPaymentRepository.getForRefund");
+      : safeParse(BillingPaymentRowSchema, row, "BillingPaymentRepository.getForRefund");
   }
   async getDirect(provider: string, providerPaymentId: string): Promise<BillingPaymentRow | null> {
     const rows = await this.query("SELECT * FROM bursar.get_billing_payment_by_provider($1,$2)", [
       provider,
       providerPaymentId,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.id == null
+    const row = optionalRecordRow(rows, "BillingPaymentRepository.getDirect");
+    return row === null
       ? null
       : safeParse(BillingPaymentRowSchema, row, "BillingPaymentRepository.getDirect");
   }

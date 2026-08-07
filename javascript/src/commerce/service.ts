@@ -11,8 +11,18 @@ import type {
   SubscriptionChangePolicy,
   SubscriptionOffer,
 } from "../config/types.js";
-import type { CreditsService as CreditsServiceImpl } from "../credits/service.js";
-import type { LedgerEntry } from "../credits/types/index.js";
+import type {
+  AllowanceResult,
+  AvailableResult,
+  BalanceResult,
+  BucketBalancesResult,
+  GetUserPlanResult,
+  LedgerEntry,
+  LedgerPage,
+  ListLedgerEntriesOptions,
+  ListUsageChargesOptions,
+  UsageChargePage,
+} from "../credits/types/index.js";
 import { ConfigError } from "../errors.js";
 import type {
   ChangePlanPreview,
@@ -28,7 +38,6 @@ import {
   CommerceResourceNotFoundError,
   CoreBillingDataUnavailableError,
   InvalidOfferQuantityError,
-  MissingPaymentMethodError,
   ProviderCapabilityNotSupportedError,
   QuoteChangedError,
   UnknownOfferError,
@@ -148,8 +157,23 @@ interface PlanChangeContext {
   policy?: SubscriptionChangePolicy;
 }
 
+/** Minimal credit boundary required by commerce orchestration. */
+export interface CommerceCredits {
+  getBalance(accountId: string): Promise<BalanceResult>;
+  getAvailable(accountId: string): Promise<AvailableResult>;
+  getBucketBalances(accountId: string): Promise<BucketBalancesResult>;
+  getUserPlan(accountId: string): Promise<GetUserPlanResult>;
+  checkAllowance(accountId: string): Promise<AllowanceResult>;
+  listLedgerEntries(accountId: string, options: ListLedgerEntriesOptions): Promise<LedgerPage>;
+  listUsageCharges(accountId: string, options: ListUsageChargesOptions): Promise<UsageChargePage>;
+  getLedgerEntry(accountId: string, entryId: string): Promise<LedgerEntry | null>;
+}
+
 class CommerceAutoRechargeService implements CommerceAutoRecharge {
-  constructor(private readonly commerce: CommerceService) {}
+  constructor(
+    private readonly commerce: CommerceService,
+    private readonly providerByName: (name: string) => Promise<PaymentProvider>,
+  ) {}
 
   async getStatus(input: Pick<AutoRechargeInput, "accountId">) {
     const provider = await this.commerce.providerForAccount(input.accountId);
@@ -164,19 +188,12 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
       this.commerce.providerForAccount(input.accountId),
       this.commerce.credits.getBalance(input.accountId),
     ]);
-    try {
-      return await this.commerce.billing.autoRecharge.enable({
-        userId: input.accountId,
-        provider,
-        balance: Number(balance.balance),
-        returnUrl: input.returnUrl,
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("payment_method")) {
-        throw new MissingPaymentMethodError();
-      }
-      throw error;
-    }
+    return this.commerce.billing.autoRecharge.enable({
+      userId: input.accountId,
+      provider,
+      balance: balance.balance,
+      returnUrl: input.returnUrl,
+    });
   }
 
   async disable(input: Pick<AutoRechargeInput, "accountId">): Promise<void> {
@@ -188,23 +205,16 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
       this.commerce.providerForAccount(input.accountId),
       this.commerce.credits.getBalance(input.accountId),
     ]);
-    try {
-      await this.commerce.billing.autoRecharge.retry({
-        userId: input.accountId,
-        provider,
-        balance: Number(balance.balance),
-        returnUrl: input.returnUrl,
-      });
-      return this.commerce.billing.autoRecharge.getStatus({
-        userId: input.accountId,
-        provider,
-      });
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("payment_method")) {
-        throw new MissingPaymentMethodError();
-      }
-      throw error;
-    }
+    await this.commerce.billing.autoRecharge.retry({
+      userId: input.accountId,
+      provider,
+      balance: balance.balance,
+      returnUrl: input.returnUrl,
+    });
+    return this.commerce.billing.autoRecharge.getStatus({
+      userId: input.accountId,
+      provider,
+    });
   }
 
   async processIfNeeded(input: AutoRechargeInput) {
@@ -214,14 +224,14 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
     }
     const [provider, balance] = await Promise.all([
       profile.provider
-        ? this.commerce.providers.get(profile.provider)
+        ? this.providerByName(profile.provider)
         : this.commerce.providerForAccount(input.accountId),
       this.commerce.credits.getBalance(input.accountId),
     ]);
     return this.commerce.billing.autoRecharge.processIfNeeded({
       userId: input.accountId,
       provider,
-      balance: Number(balance.balance),
+      balance: balance.balance,
       returnUrl: input.returnUrl,
     });
   }
@@ -230,12 +240,12 @@ class CommerceAutoRechargeService implements CommerceAutoRecharge {
 /** Framework-independent catalog, billing-state, and provider coordinator. */
 export class CommerceService {
   readonly autoRecharge: CommerceAutoRecharge;
-  readonly providers: CommerceProviderRegistry;
+  private readonly providers: CommerceProviderRegistry;
   readonly logger: ReturnType<typeof normalizeLogger>;
 
   constructor(
     readonly billing: BillingCapability,
-    readonly credits: Pick<CreditsServiceImpl, keyof CreditsServiceImpl>,
+    readonly credits: CommerceCredits,
     eventSink: BillingEventSink,
     readonly options: CommerceOptions,
   ) {
@@ -259,12 +269,7 @@ export class CommerceService {
       eventSink,
       identityResolver,
     });
-    this.autoRecharge = new CommerceAutoRechargeService(this);
-  }
-
-  /** Exposed for application composition and compatibility, not provider selection policy. */
-  getProvider(providerName: string): Promise<PaymentProvider> {
-    return this.providers.get(providerName);
+    this.autoRecharge = new CommerceAutoRechargeService(this, (name) => this.providers.get(name));
   }
 
   clearProviderCache(): void {
@@ -272,7 +277,7 @@ export class CommerceService {
   }
 
   private async activeConfig(): Promise<ParsedBursarConfig> {
-    const raw = await this.billing.getActiveBursarConfig();
+    const raw = await this.billing.getActiveCatalogDocument();
     if (!raw) {
       throw new CoreBillingDataUnavailableError("The active commerce catalog is unavailable");
     }
@@ -614,7 +619,7 @@ export class CommerceService {
   private accountSubscriptionSummary(
     accountId: string,
     subscription: Awaited<ReturnType<BillingCapability["getUserSubscription"]>>,
-    entitlement: Awaited<ReturnType<CreditsServiceImpl["getUserPlan"]>>,
+    entitlement: Awaited<ReturnType<CommerceCredits["getUserPlan"]>>,
     config: ParsedBursarConfig,
     pending: Awaited<ReturnType<BillingCapability["getOpenBillingSubscriptionChange"]>>,
   ): AccountSubscriptionSummary {
@@ -1080,22 +1085,19 @@ export class CommerceService {
     const invoices = invoicesResult.status === "fulfilled" ? invoicesResult.value : [];
     const documents: BillingDocumentRef[] = [
       ...invoices.flatMap((invoice) => {
-        const provider = invoice.provider ?? core.subscription?.provider;
-        return provider
-          ? [
-              {
-                kind: "provider_invoice" as const,
-                provider,
-                providerDocumentId: invoice.providerInvoiceId,
-                status: invoice.status,
-                amountPaidMinor: invoice.amountPaidMinor,
-                amountDueMinor: invoice.amountDueMinor,
-                currency: invoice.currency,
-                periodStart: invoice.periodStart,
-                periodEnd: invoice.periodEnd,
-              },
-            ]
-          : [];
+        return [
+          {
+            kind: "provider_invoice" as const,
+            provider: invoice.provider,
+            providerDocumentId: invoice.providerInvoiceId,
+            status: invoice.status,
+            amountPaidMinor: invoice.amountPaidMinor,
+            amountDueMinor: invoice.amountDueMinor,
+            currency: invoice.currency,
+            periodStart: invoice.periodStart,
+            periodEnd: invoice.periodEnd,
+          },
+        ];
       }),
       ...transactions.flatMap((entry) => {
         const document = this.ledgerDocument(entry);
@@ -1152,7 +1154,7 @@ export class CommerceService {
               type: "allowance" as const,
               key: "allowance",
               label: "Plan allowance",
-              priority: core.entitlement.allowance.priority ?? null,
+              priority: core.entitlement.allowance.priority,
             },
           ]
         : []),
@@ -1163,7 +1165,7 @@ export class CommerceService {
         priority: bucket.priority,
       })),
     ].sort((left, right) => {
-      const priority = (left.priority ?? -1) - (right.priority ?? -1);
+      const priority = left.priority - right.priority;
       if (priority !== 0) return priority;
       if (left.type !== right.type) return left.type === "allowance" ? -1 : 1;
       return left.key.localeCompare(right.key);
@@ -1219,7 +1221,7 @@ export class CommerceService {
       const document = input.document;
       const owned = (await this.billing.listBillingInvoices(input.accountId)).find(
         (invoice) =>
-          (invoice.provider ?? document.provider) === document.provider &&
+          invoice.provider === document.provider &&
           invoice.providerInvoiceId === document.providerDocumentId,
       );
       if (!owned) throw new CommerceResourceNotFoundError("Invoice not found");

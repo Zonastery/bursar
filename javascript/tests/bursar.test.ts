@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { AccountService, Bursar } from "../src/bursar.js";
 import type { BillingStore } from "../src/billing/billing-store.js";
 import type { CreditStore } from "../src/credits/store.js";
-import { CommerceNotConfiguredError, ConfigError, PricingNotLoadedError } from "../src/index.js";
+import {
+  CapabilityNotConfiguredError,
+  CommerceNotConfiguredError,
+  ConfigError,
+  CatalogNotLoadedError,
+} from "../src/index.js";
 
 describe("Bursar facade", () => {
   it("initializes a default plan and all account-created grants idempotently", async () => {
@@ -42,23 +47,22 @@ describe("Bursar facade", () => {
   });
 
   it("owns one credit service and exposes catalog operations", async () => {
-    const creditStore = {} as CreditStore;
+    const active = { version: 3 };
+    const getActiveCatalog = vi.fn().mockResolvedValue(active);
+    const applyDuePlanChanges = vi.fn().mockResolvedValue(2);
+    const creditStore = { getActiveCatalog, applyDuePlanChanges } as unknown as CreditStore;
     const bursar = new Bursar({ creditStore });
 
     expect(bursar.billing).toBeNull();
     expect(bursar.catalog).toBeDefined();
-    const active = { version: 3 };
-    vi.spyOn(bursar.credits, "getActivePricing").mockReturnValue(active as never);
-    expect(bursar.catalog.active).toBe(active);
-    const applyDue = vi.spyOn(bursar.credits, "applyDuePlanChanges").mockResolvedValue(2);
+    await expect(bursar.catalog.getActive()).resolves.toBe(active);
     await expect(bursar.catalog.applyDueChanges(25)).resolves.toBe(2);
-    expect(applyDue).toHaveBeenCalledWith(25);
+    expect(applyDuePlanChanges).toHaveBeenCalledWith(25);
   });
 
   it("configures billing with the facade-owned credit provisioning capability", () => {
-    const credits = {} as ConstructorParameters<typeof Bursar>[0]["credits"];
     const billingStore = {} as BillingStore;
-    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore, credits });
+    const bursar = new Bursar({ creditStore: {} as CreditStore, billingStore });
 
     expect(bursar.billing).not.toBeNull();
     expect(bursar.billing?.hasProvisioning).toBe(true);
@@ -83,13 +87,17 @@ describe("Bursar facade", () => {
   });
 
   it("emits typed errors from public facade operations", async () => {
-    const bursar = new Bursar({ creditStore: {} as CreditStore });
-    vi.spyOn(bursar.credits, "getActivePricing").mockReturnValue(null);
+    const creditStore = {
+      getActiveCatalog: vi.fn().mockResolvedValue(null),
+    } as unknown as CreditStore;
+    const bursar = new Bursar({ creditStore });
 
-    await expect(bursar.catalog.getConfig()).rejects.toBeInstanceOf(PricingNotLoadedError);
+    await expect(bursar.catalog.getConfig()).rejects.toBeInstanceOf(CatalogNotLoadedError);
     await expect(bursar.ingestBillingEvent({} as never)).rejects.toBeInstanceOf(
-      CommerceNotConfiguredError,
+      CapabilityNotConfiguredError,
     );
+    expect(() => bursar.requireBilling()).toThrow(CapabilityNotConfiguredError);
+    expect(() => bursar.requireCommerce()).toThrow(CommerceNotConfiguredError);
 
     const accounts = new AccountService(
       {

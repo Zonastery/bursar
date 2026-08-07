@@ -15,7 +15,7 @@ import {
 } from "../src/errors.js";
 
 describe("raiseLeaseError", () => {
-  const cases: Array<[string, typeof Error]> = [
+  const cases = [
     ["max_concurrent_reached", ConcurrencyLimitError],
     ["quota_exceeded", QuotaExceededError],
     ["feature_not_entitled", FeatureNotEntitledError],
@@ -30,7 +30,7 @@ describe("raiseLeaseError", () => {
     ["invalid_measure", ConfigError],
     ["invalid_request", RangeError],
     ["unexpected_store_code", StoreError],
-  ];
+  ] as const;
 
   it.each(cases)("maps store code %s", (code, type) => {
     expect(() => raiseLeaseError(code, "user-1", new Decimal(5))).toThrow(type);
@@ -44,7 +44,7 @@ describe("raiseLeaseError", () => {
 });
 
 describe("raiseDeductError", () => {
-  const cases: Array<[string, typeof Error]> = [
+  const cases = [
     ["quota_exceeded", QuotaExceededError],
     ["feature_not_entitled", FeatureNotEntitledError],
     ["operation_not_allowed", OperationNotAllowedError],
@@ -55,7 +55,7 @@ describe("raiseDeductError", () => {
     ["invalid_amount", RangeError],
     ["invalid_request", RangeError],
     ["unexpected_store_code", StoreError],
-  ];
+  ] as const;
 
   it.each(cases)("maps store code %s", (code, type) => {
     expect(() => raiseDeductError(code, "user-1", new Decimal(1))).toThrow(type);

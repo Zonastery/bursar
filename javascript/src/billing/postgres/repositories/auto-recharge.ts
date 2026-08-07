@@ -1,53 +1,126 @@
+import { z } from "zod";
+import Decimal from "decimal.js";
+import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
 import type { BillingAutoRechargeAttempt, BillingAutoRechargeProfile } from "../../types/index.js";
 import { optionalBoundedDiagnosticMessage } from "../../../shared/diagnostics.js";
+import {
+  optionalRecordRow,
+  pgBoolean,
+  postgresUuid,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
 
-function iso(value: unknown): string {
-  return new Date(String(value)).toISOString();
-}
+const safeNonnegativeInteger = z
+  .union([z.number(), z.string().regex(/^\d+$/)])
+  .transform(Number)
+  .pipe(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER));
+const positiveInteger = safeNonnegativeInteger.pipe(z.number().positive());
+const timestamp = z
+  .union([
+    z.date().refine((value) => !Number.isNaN(value.getTime())),
+    z.string().datetime({ offset: true }),
+  ])
+  .transform((value) => (value instanceof Date ? value : new Date(value)).toISOString());
+const decimal = z
+  .union([z.instanceof(Decimal), z.string().min(1), z.number().finite()])
+  .transform((value) => new Decimal(value))
+  .refine((value) => value.isFinite() && !value.isNegative(), "expected a non-negative decimal");
+
+const ProfileRowSchema = z
+  .object({
+    subject_id: postgresUuid,
+    enabled: pgBoolean,
+    armed: pgBoolean,
+    state: z.enum(["disabled", "active", "paused"]),
+    provider: z.string().min(1).nullable(),
+    topup_id: postgresUuid.nullable(),
+    quantity: positiveInteger,
+    threshold: decimal,
+    max_charges_per_window: positiveInteger.nullable(),
+    window_unit: z.enum(["second", "minute", "hour", "day", "week", "month", "year"]),
+    window_count: positiveInteger,
+    window_anchor: z.enum(["calendar", "rolling"]),
+    window_timezone: z.string().min(1),
+    updated_at: timestamp,
+  })
+  .passthrough();
+
+const AttemptStateSchema = z.enum([
+  "claimed",
+  "submitted",
+  "processing",
+  "unknown",
+  "succeeded",
+  "failed",
+  "action_required",
+]);
+const AttemptRowSchema = z
+  .object({
+    id: postgresUuid,
+    subject_id: postgresUuid,
+    provider: z.string().min(1),
+    idempotency_key: z.string().min(1),
+    provider_attempt_id: z.string().min(1).nullable(),
+    topup_id: postgresUuid,
+    quantity: positiveInteger,
+    state: AttemptStateSchema,
+    window_start: timestamp,
+    window_end: timestamp,
+    quoted_amount_minor: safeNonnegativeInteger.nullable(),
+    currency: z
+      .string()
+      .regex(/^[A-Z]{3}$/)
+      .nullable(),
+    failure_code: z.string().min(1).nullable(),
+    failure_message: z.string().min(1).nullable(),
+    metadata: z.record(z.string(), z.unknown()),
+    created_at: timestamp,
+    updated_at: timestamp,
+  })
+  .passthrough();
 
 function profileFromRow(row: Record<string, unknown>): BillingAutoRechargeProfile {
+  const parsed = safeParse(ProfileRowSchema, row, "BillingAutoRechargeRepository.profile");
   return {
-    userId: String(row.subject_id),
-    enabled: Boolean(row.enabled),
-    armed: Boolean(row.armed),
-    state: String(row.state) as BillingAutoRechargeProfile["state"],
-    provider: row.provider == null ? null : String(row.provider),
-    topupId: row.topup_id == null ? null : String(row.topup_id),
-    quantity: Number(row.quantity),
-    threshold: Number(row.threshold),
-    maxChargesPerWindow:
-      row.max_charges_per_window == null ? null : Number(row.max_charges_per_window),
-    windowUnit: String(row.window_unit) as BillingAutoRechargeProfile["windowUnit"],
-    windowCount: Number(row.window_count),
-    windowAnchor: String(row.window_anchor) as BillingAutoRechargeProfile["windowAnchor"],
-    windowTimezone: String(row.window_timezone),
-    updatedAt: row.updated_at == null ? null : iso(row.updated_at),
+    userId: parsed.subject_id,
+    enabled: parsed.enabled,
+    armed: parsed.armed,
+    state: parsed.state,
+    provider: parsed.provider,
+    topupId: parsed.topup_id,
+    quantity: parsed.quantity,
+    threshold: parsed.threshold,
+    maxChargesPerWindow: parsed.max_charges_per_window,
+    windowUnit: parsed.window_unit,
+    windowCount: parsed.window_count,
+    windowAnchor: parsed.window_anchor,
+    windowTimezone: parsed.window_timezone,
+    updatedAt: parsed.updated_at,
   };
 }
 
 function attemptFromRow(row: Record<string, unknown>): BillingAutoRechargeAttempt {
+  const parsed = safeParse(AttemptRowSchema, row, "BillingAutoRechargeRepository.attempt");
   return {
-    id: String(row.id),
-    userId: String(row.subject_id),
-    provider: String(row.provider),
-    idempotencyKey: String(row.idempotency_key),
-    providerAttemptId: row.provider_attempt_id == null ? null : String(row.provider_attempt_id),
-    topupId: String(row.topup_id),
-    quantity: Number(row.quantity),
-    state: String(row.state) as BillingAutoRechargeAttempt["state"],
-    windowStart: iso(row.window_start),
-    windowEnd: iso(row.window_end),
-    quotedAmountMinor: row.quoted_amount_minor == null ? null : Number(row.quoted_amount_minor),
-    currency: row.currency == null ? null : String(row.currency),
-    failureCode: row.failure_code == null ? null : String(row.failure_code),
-    failureMessage: row.failure_message == null ? null : String(row.failure_message),
-    metadata:
-      row.metadata != null && typeof row.metadata === "object" && !Array.isArray(row.metadata)
-        ? (row.metadata as Record<string, unknown>)
-        : {},
-    createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
+    id: parsed.id,
+    userId: parsed.subject_id,
+    provider: parsed.provider,
+    idempotencyKey: parsed.idempotency_key,
+    providerAttemptId: parsed.provider_attempt_id,
+    topupId: parsed.topup_id,
+    quantity: parsed.quantity,
+    state: parsed.state,
+    windowStart: parsed.window_start,
+    windowEnd: parsed.window_end,
+    quotedAmountMinor: parsed.quoted_amount_minor,
+    currency: parsed.currency,
+    failureCode: parsed.failure_code,
+    failureMessage: parsed.failure_message,
+    metadata: parsed.metadata,
+    createdAt: parsed.created_at,
+    updatedAt: parsed.updated_at,
   };
 }
 
@@ -58,8 +131,8 @@ export class BillingAutoRechargeRepository {
     const rows = await this.query("SELECT * FROM bursar.get_auto_recharge_profile($1::uuid)", [
       userId,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.subject_id == null ? null : profileFromRow(row);
+    const row = optionalRecordRow(rows, "BillingAutoRechargeRepository.getProfile");
+    return row === null ? null : profileFromRow(row);
   }
 
   async upsertProfile(
@@ -87,8 +160,10 @@ export class BillingAutoRechargeRepository {
         options.resetCooldown ?? false,
       ],
     );
-    if (!(rows[0] as Record<string, unknown> | undefined)?.updated) {
-      throw new Error(`auto-recharge profile update rejected: ${profile.userId}`);
+    if (
+      !requireResultField(rows, "updated", pgBoolean, "BillingAutoRechargeRepository.upsertProfile")
+    ) {
+      throw new StoreError(`auto-recharge profile update rejected: ${profile.userId}`);
     }
   }
 
@@ -100,8 +175,8 @@ export class BillingAutoRechargeRepository {
       "SELECT * FROM bursar.claim_auto_recharge_attempt($1::uuid, $2)",
       [input.userId, input.idempotencyKey],
     );
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.id == null ? null : attemptFromRow(row);
+    const row = optionalRecordRow(rows, "BillingAutoRechargeRepository.claimAttempt");
+    return row === null ? null : attemptFromRow(row);
   }
 
   private async advanceAttempt(input: {
@@ -117,7 +192,20 @@ export class BillingAutoRechargeRepository {
       "SELECT * FROM bursar.get_auto_recharge_attempt($1::uuid)",
       [input.id],
     );
-    const current = String((currentRows[0] as Record<string, unknown> | undefined)?.state ?? "");
+    const currentRow = optionalRecordRow(
+      currentRows,
+      "BillingAutoRechargeRepository.advanceAttempt.current",
+    );
+    if (currentRow === null) {
+      throw new StoreError(`auto-recharge attempt not found: ${input.id}`, {
+        details: { attemptId: input.id },
+      });
+    }
+    const current = safeParse(
+      AttemptStateSchema,
+      currentRow.state,
+      "BillingAutoRechargeRepository.advanceAttempt.current.state",
+    );
     const paths: Record<string, Record<string, string[]>> = {
       claimed: {
         submitted: ["submitted"],
@@ -158,7 +246,9 @@ export class BillingAutoRechargeRepository {
     };
     const path = paths[current]?.[input.state];
     if (!path) {
-      throw new Error(`auto-recharge attempt transition rejected: ${input.id}`);
+      throw new StoreError(`auto-recharge attempt transition rejected: ${input.id}`, {
+        details: { attemptId: input.id, currentState: current, requestedState: input.state },
+      });
     }
     for (const state of path) {
       const rows = await this.query(
@@ -179,8 +269,17 @@ export class BillingAutoRechargeRepository {
           JSON.stringify(input.metadata ?? {}),
         ],
       );
-      if (!(rows[0] as Record<string, unknown> | undefined)?.advanced) {
-        throw new Error(`auto-recharge attempt transition rejected: ${input.id}`);
+      if (
+        !requireResultField(
+          rows,
+          "advanced",
+          pgBoolean,
+          "BillingAutoRechargeRepository.advanceAttempt",
+        )
+      ) {
+        throw new StoreError(`auto-recharge attempt transition rejected: ${input.id}`, {
+          details: { attemptId: input.id, requestedState: state },
+        });
       }
     }
   }
@@ -230,6 +329,11 @@ export class BillingAutoRechargeRepository {
       `SELECT bursar.count_auto_recharge_attempts($1::uuid, $2::timestamptz) AS count`,
       [userId, sinceDate.toISOString()],
     );
-    return Number((rows[0] as Record<string, unknown> | undefined)?.count ?? 0);
+    return requireResultField(
+      rows,
+      "count",
+      z.union([z.number(), z.string()]).transform(Number).pipe(z.number().int().nonnegative()),
+      "BillingAutoRechargeRepository.countAttempts",
+    );
   }
 }

@@ -1,4 +1,20 @@
+import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import {
+  optionalRecordRow,
+  postgresUuid,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
+
+const CustomerRowSchema = z.object({
+  subject_id: postgresUuid,
+});
+
+const CustomerByUserRowSchema = z.object({
+  provider: z.string().min(1),
+  provider_customer_id: z.string().min(1),
+});
 
 export class BillingCustomerRepository {
   constructor(private query: QueryFn) {}
@@ -9,12 +25,11 @@ export class BillingCustomerRepository {
     userId: string,
     email: string | null,
   ): Promise<void> {
-    await this.query("SELECT bursar.upsert_billing_customer($1::uuid, $2, $3, $4)", [
-      userId,
-      provider,
-      providerCustomerId,
-      email,
-    ]);
+    const rows = await this.query(
+      "SELECT bursar.upsert_billing_customer($1::uuid, $2, $3, $4) AS id",
+      [userId, provider, providerCustomerId, email],
+    );
+    requireResultField(rows, "id", postgresUuid, "BillingCustomerRepository.upsert");
   }
 
   async get(provider: string, providerCustomerId: string): Promise<string | null> {
@@ -22,8 +37,10 @@ export class BillingCustomerRepository {
       provider,
       providerCustomerId,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.subject_id == null ? null : String(row.subject_id);
+    const row = optionalRecordRow(rows, "BillingCustomerRepository.get");
+    return row === null
+      ? null
+      : safeParse(CustomerRowSchema, row, "BillingCustomerRepository.get").subject_id;
   }
 
   async getByUserId(
@@ -34,8 +51,9 @@ export class BillingCustomerRepository {
       userId,
       provider ?? null,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    if (!row) return null;
-    return { provider: String(row.provider), providerCustomerId: String(row.provider_customer_id) };
+    const row = optionalRecordRow(rows, "BillingCustomerRepository.getByUserId");
+    if (row === null) return null;
+    const parsed = safeParse(CustomerByUserRowSchema, row, "BillingCustomerRepository.getByUserId");
+    return { provider: parsed.provider, providerCustomerId: parsed.provider_customer_id };
   }
 }

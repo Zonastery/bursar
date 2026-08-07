@@ -1,9 +1,13 @@
+import Decimal from "decimal.js";
+import { z } from "zod";
 import type {
   BillingAutoRechargeAttempt,
   BillingAutoRechargeProfile,
+  BillingCreditPostingResult,
   BillingCustomerRecord,
   BillingEventClaim,
   BillingOfferResult,
+  BillingPaymentRecord,
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionChangeInput,
@@ -33,11 +37,20 @@ import {
   PostgresClient,
   type PostgresConnectionOptions,
   type PostgresPool,
+  type PostgresPoolConstructor,
 } from "../../shared/postgres-client.js";
-import { StoreClosedError } from "../../errors.js";
+import { StoreClosedError, StoreError } from "../../errors.js";
 import { optionalBoundedDiagnosticMessage } from "../../shared/diagnostics.js";
-import { BillingOfferRepository } from "./repositories/offer.js";
-import { BillingTopupRepository } from "./repositories/topup.js";
+import {
+  optionalRecordRow,
+  pgBoolean,
+  postgresUuid,
+  requireRecordRow,
+  requireResultField,
+  safeParse,
+} from "../../shared/postgres-validation.js";
+import { BillingOfferRepository, type BillingOfferRow } from "./repositories/offer.js";
+import { BillingTopupRepository, type BillingTopupRow } from "./repositories/topup.js";
 import { BillingCustomerRepository } from "./repositories/customer.js";
 import { BillingSubscriptionRepository } from "./repositories/subscription.js";
 import { BillingEventRepository } from "./repositories/event.js";
@@ -47,6 +60,61 @@ import { BillingInvoiceRepository } from "./repositories/invoice.js";
 import { BillingDisputeRepository } from "./repositories/dispute.js";
 import { BillingPreferencesRepository } from "./repositories/preferences.js";
 import { BillingAutoRechargeRepository } from "./repositories/auto-recharge.js";
+
+const PgSafeMinorUnitsSchema = z
+  .union([z.string().regex(/^\d+$/), z.number().int().nonnegative().safe()])
+  .transform(Number)
+  .refine(Number.isSafeInteger, "minor-unit amount exceeds JavaScript's safe integer range");
+
+const BillingCreditPostingRowSchema = z
+  .object({
+    ledger_entry_id: postgresUuid.nullable(),
+    balance_after: z
+      .union([z.string(), z.number(), z.instanceof(Decimal)])
+      .nullable()
+      .transform((value) => (value === null ? null : new Decimal(value))),
+    replayed: pgBoolean,
+    error_code: z.string().min(1).nullable(),
+  })
+  .passthrough()
+  .superRefine((row, ctx) => {
+    if (row.error_code === null && (row.ledger_entry_id === null || row.balance_after === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "successful posting requires ledger_entry_id and balance_after",
+      });
+    }
+  });
+
+const CheckoutIntentRowSchema = z
+  .object({
+    id: postgresUuid,
+    subject_id: postgresUuid,
+    provider: z.string().min(1),
+    checkout_kind: z.enum(["subscription", "credit_topup"]),
+    product_key: z.string().min(1),
+    request_digest: z.instanceof(Uint8Array).refine((value) => value.byteLength === 32),
+    status: z.enum(["open", "completed", "failed", "expired"]),
+    provider_session_id: z.string().min(1).nullable(),
+    checkout_url: z.string().min(1).nullable(),
+    expires_at: z.union([z.string().datetime({ offset: true }), z.date()]),
+  })
+  .passthrough();
+
+function billingCreditPostingResult(
+  rows: readonly unknown[] | null | undefined,
+  context: string,
+): BillingCreditPostingResult {
+  const row = safeParse(BillingCreditPostingRowSchema, requireRecordRow(rows, context), context, {
+    indeterminate: true,
+  });
+  return {
+    ledgerEntryId: row.ledger_entry_id,
+    balanceAfter: row.balance_after,
+    replayed: row.replayed,
+    errorCode: row.error_code,
+  };
+}
 
 function toIso(value: unknown): string | null {
   if (!value) return null;
@@ -59,6 +127,12 @@ function toIso(value: unknown): string | null {
 }
 
 export interface PostgresBillingStoreOptions extends PostgresConnectionOptions {
+  /** PostgreSQL connection string or an application-owned pool. */
+  postgres: PostgresPool | string;
+  /** Tenant UUID bound to every store transaction. */
+  tenantId: string;
+  /** Injectable `pg.Pool` constructor for custom runtimes and tests. */
+  poolConstructor?: PostgresPoolConstructor;
   billingPayloadBackend?: "postgres" | "s3";
 }
 
@@ -76,22 +150,25 @@ export class PostgresBillingStore extends BillingStore {
   private _dispute: BillingDisputeRepository | null = null;
   private _preferences: BillingPreferencesRepository | null = null;
   private _autoRecharge: BillingAutoRechargeRepository | null = null;
-  constructor(
-    poolOrUrl: PostgresPool | string,
-    tenantId: string,
-    storageOptions?: PostgresBillingStoreOptions,
-  ) {
+  constructor(options: PostgresBillingStoreOptions) {
     super();
-    this.postgres = new PostgresClient(poolOrUrl, {
-      tenantId,
-      billingPayloadBackend: storageOptions?.billingPayloadBackend,
-      connectionTimeoutMs: storageOptions?.connectionTimeoutMs,
-      statementTimeoutMs: storageOptions?.statementTimeoutMs,
-      idleTransactionTimeoutMs: storageOptions?.idleTransactionTimeoutMs,
-      idleTimeoutMs: storageOptions?.idleTimeoutMs,
-      maxConnections: storageOptions?.maxConnections,
-      applicationName: storageOptions?.applicationName,
-      onPoolError: storageOptions?.onPoolError,
+    if (typeof options !== "object" || options === null) {
+      throw new TypeError("PostgresBillingStore options are required");
+    }
+    if (typeof options.postgres !== "string" && options.poolConstructor !== undefined) {
+      throw new TypeError("poolConstructor cannot be used with an existing PostgreSQL pool");
+    }
+    this.postgres = new PostgresClient(options.postgres, {
+      tenantId: options.tenantId,
+      poolConstructor: options.poolConstructor,
+      billingPayloadBackend: options.billingPayloadBackend,
+      connectionTimeoutMs: options.connectionTimeoutMs,
+      statementTimeoutMs: options.statementTimeoutMs,
+      idleTransactionTimeoutMs: options.idleTransactionTimeoutMs,
+      idleTimeoutMs: options.idleTimeoutMs,
+      maxConnections: options.maxConnections,
+      applicationName: options.applicationName,
+      onPoolError: options.onPoolError,
       closedError: () => new StoreClosedError("Billing store has been closed"),
     });
   }
@@ -161,7 +238,7 @@ export class PostgresBillingStore extends BillingStore {
 
   async createOrGetCheckoutIntent(input: CheckoutIntentCreate): Promise<CheckoutIntent> {
     if (!/^[0-9a-fA-F]{64}$/.test(input.requestDigest)) {
-      throw new Error("requestDigest must be a 32-byte hex string");
+      throw new TypeError("requestDigest must be a 32-byte hex string");
     }
     const rows = await this.queryFn(
       `SELECT bursar.create_checkout_intent($1::uuid, $2, $3, $4, decode($5, 'hex'), $6::timestamptz) AS id`,
@@ -174,10 +251,19 @@ export class PostgresBillingStore extends BillingStore {
         input.expiresAt,
       ],
     );
-    const id = (rows[0] as Record<string, unknown> | undefined)?.id;
-    if (!id) throw new Error("checkout intent creation returned no ID");
-    const intent = await this.getCheckoutIntent(String(id), input.subjectId);
-    if (!intent) throw new Error("checkout intent creation returned no row");
+    const id = requireResultField(
+      rows,
+      "id",
+      postgresUuid,
+      "PostgresBillingStore.createOrGetCheckoutIntent",
+    );
+    const intent = await this.getCheckoutIntent(id, input.subjectId);
+    if (!intent) {
+      throw new StoreError("checkout intent could not be read after creation", {
+        indeterminate: true,
+        details: { checkoutIntentId: id },
+      });
+    }
     return intent;
   }
 
@@ -186,8 +272,12 @@ export class PostgresBillingStore extends BillingStore {
       `SELECT bursar.advance_checkout_intent($1::uuid, $2, $3, $4) AS advanced`,
       [id, update.status ?? null, update.providerSessionId ?? null, update.checkoutUrl ?? null],
     );
-    if (!(rows[0] as Record<string, unknown> | undefined)?.advanced) {
-      throw new Error(`checkout intent transition rejected: ${id}`);
+    if (
+      !requireResultField(rows, "advanced", pgBoolean, "PostgresBillingStore.updateCheckoutIntent")
+    ) {
+      throw new StoreError(`checkout intent transition rejected: ${id}`, {
+        details: { checkoutIntentId: id },
+      });
     }
   }
 
@@ -196,40 +286,50 @@ export class PostgresBillingStore extends BillingStore {
       `SELECT * FROM bursar.get_checkout_intent($1::uuid, $2::uuid)`,
       [id, subjectId],
     );
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row?.id == null ? null : this.rowToCheckoutIntent(row);
+    if (rows.length === 0) return null;
+    if (rows.length !== 1) {
+      throw new StoreError("getCheckoutIntent: expected at most one row", {
+        details: { rowCount: rows.length, checkoutIntentId: id },
+      });
+    }
+    return this.rowToCheckoutIntent(
+      safeParse(CheckoutIntentRowSchema, rows[0], "PostgresBillingStore.getCheckoutIntent"),
+    );
   }
 
-  private rowToCheckoutIntent(row: Record<string, unknown>): CheckoutIntent {
+  private rowToCheckoutIntent(row: z.infer<typeof CheckoutIntentRowSchema>): CheckoutIntent {
     return {
-      id: String(row.id),
-      subjectId: String(row.subject_id),
-      provider: String(row.provider),
-      checkoutKind: row.checkout_kind as CheckoutIntent["checkoutKind"],
-      productKey: String(row.product_key),
-      requestDigest: Buffer.from(row.request_digest as Uint8Array).toString("hex"),
-      status: row.status as CheckoutIntent["status"],
-      providerSessionId: row.provider_session_id == null ? null : String(row.provider_session_id),
-      checkoutUrl: row.checkout_url == null ? null : String(row.checkout_url),
-      expiresAt: toIso(row.expires_at) ?? new Date(0).toISOString(),
+      id: row.id,
+      subjectId: row.subject_id,
+      provider: row.provider,
+      checkoutKind: row.checkout_kind,
+      productKey: row.product_key,
+      requestDigest: Buffer.from(row.request_digest).toString("hex"),
+      status: row.status,
+      providerSessionId: row.provider_session_id,
+      checkoutUrl: row.checkout_url,
+      expiresAt: row.expires_at instanceof Date ? row.expires_at.toISOString() : row.expires_at,
     };
   }
 
-  private rowToOffer(row: Record<string, unknown> | null): BillingOfferResult | null {
-    if (!row?.offer_key || !row.id) return null;
+  private rowToOffer(row: BillingOfferRow | null): BillingOfferResult | null {
+    if (!row) return null;
     return {
-      offerId: String(row.id),
-      offerKey: String(row.offer_key),
-      planId: row.plan_id == null ? null : String(row.plan_id),
-      plan: row.plan == null ? null : String(row.plan),
-      interval: row.interval == null ? "month" : String(row.interval),
-      intervalCount: Number(row.interval_count ?? 1),
-      grant: {
-        mode: row.grant_mode == null ? undefined : String(row.grant_mode),
-        credits: row.grant_credits == null ? null : Number(row.grant_credits),
-        bucket: row.grant_bucket == null ? undefined : String(row.grant_bucket),
-        replacePrior: row.grant_replace_prior === true,
-      },
+      offerId: row.id,
+      offerKey: row.offerKey,
+      planId: row.planId,
+      plan: row.plan,
+      interval: row.interval,
+      intervalCount: row.intervalCount,
+      grant:
+        row.grantCredits === null
+          ? null
+          : {
+              mode: "cycle_grant",
+              credits: row.grantCredits,
+              bucket: row.grantBucket,
+              replacePrior: row.grantReplacePrior,
+            },
     };
   }
 
@@ -239,7 +339,7 @@ export class PostgresBillingStore extends BillingStore {
     priceId?: string | null,
   ): Promise<BillingOfferResult | null> {
     const r = await this.billingOffer.resolveByPrice(provider, priceId ?? null, productId ?? null);
-    return this.rowToOffer(r as Record<string, unknown>);
+    return this.rowToOffer(r);
   }
 
   async resolveBillingOfferByLookup(
@@ -247,7 +347,7 @@ export class PostgresBillingStore extends BillingStore {
     lookupKey: string,
   ): Promise<BillingOfferResult | null> {
     const r = await this.billingOffer.resolveByLookup(provider, lookupKey);
-    return this.rowToOffer(r as Record<string, unknown>);
+    return this.rowToOffer(r);
   }
 
   async claimBillingEvent(
@@ -262,10 +362,14 @@ export class PostgresBillingStore extends BillingStore {
       eventType,
       JSON.stringify(envelope ?? { eventType }),
     );
-    if (!result) return { status: "retry" as const };
     const r = result as Record<string, unknown>;
     const s = r.status as string;
-    if (s === "claimed" && typeof r.claim_token === "string" && typeof r.event_id === "string") {
+    if (s === "claimed") {
+      if (typeof r.claim_token !== "string" || typeof r.event_id !== "string") {
+        throw new StoreError("Billing event claim returned no claim identifiers", {
+          details: { provider, eventId },
+        });
+      }
       return {
         status: "claimed" as const,
         claimToken: r.claim_token,
@@ -274,7 +378,12 @@ export class PostgresBillingStore extends BillingStore {
     }
     if (s === "duplicate") return { status: "duplicate" as const };
     if (s === "busy") return { status: "busy" as const };
-    return { status: "retry" as const };
+    if (s === "invalid_request" || s === "idempotency_conflict" || s === "max_retries_exceeded") {
+      return { status: "retry" as const };
+    }
+    throw new StoreError("Billing event claim returned an unsupported status", {
+      details: { provider, eventId, status: s },
+    });
   }
 
   async completeBillingEvent(
@@ -309,7 +418,7 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async upsertBillingSubscription(state: BillingSubscriptionState): Promise<void> {
-    await this.billingSubscription.upsert(state as unknown as Record<string, unknown>);
+    await this.billingSubscription.upsert(state);
   }
 
   async getBillingCustomer(provider: string, providerCustomerId: string): Promise<string | null> {
@@ -332,7 +441,15 @@ export class PostgresBillingStore extends BillingStore {
       input.provider,
       input.providerSubscriptionId,
     );
-    if (!subscription?.id) throw new Error("subscription change requires a persisted subscription");
+    if (!subscription?.id) {
+      throw new StoreError("subscription change requires a persisted subscription", {
+        retryable: true,
+        details: {
+          provider: input.provider,
+          providerSubscriptionId: input.providerSubscriptionId,
+        },
+      });
+    }
     const rows = await this.queryFn(
       `SELECT * FROM bursar.open_subscription_change(
          $1::uuid, $2::uuid, $3::timestamptz, $4, $5, $6
@@ -346,14 +463,27 @@ export class PostgresBillingStore extends BillingStore {
         input.prorationBehavior ?? "provider_default",
       ],
     );
-    const result = (rows[0] as Record<string, unknown> | undefined) ?? {};
-    if (result.error_code) throw new Error(`subscription change: ${String(result.error_code)}`);
+    const result = requireRecordRow(rows, "PostgresBillingStore.createBillingSubscriptionChange");
+    if (result.error_code) {
+      throw new StoreError(`subscription change: ${String(result.error_code)}`, {
+        details: { errorCode: String(result.error_code) },
+      });
+    }
+    const changeId = safeParse(
+      z.union([z.string().min(1), z.number().int()]).transform(String),
+      result.change_id,
+      "PostgresBillingStore.createBillingSubscriptionChange.change_id",
+      { indeterminate: true },
+    );
     const changeRows = await this.queryFn(
       `SELECT * FROM bursar.get_billing_subscription_change($1::bigint)`,
-      [result.change_id],
+      [changeId],
     );
     if ((changeRows[0] as Record<string, unknown> | undefined)?.id == null) {
-      throw new Error("subscription change creation returned no row");
+      throw new StoreError("subscription change creation returned no row", {
+        indeterminate: true,
+        details: { changeId },
+      });
     }
     return this.rowToSubscriptionChange(changeRows[0] as Record<string, unknown>);
   }
@@ -404,8 +534,17 @@ export class PostgresBillingStore extends BillingStore {
         optionalBoundedDiagnosticMessage(update.errorMessage),
       ],
     );
-    if (!(rows[0] as Record<string, unknown> | undefined)?.advanced) {
-      throw new Error(`subscription change transition rejected: ${id}`);
+    if (
+      !requireResultField(
+        rows,
+        "advanced",
+        pgBoolean,
+        "PostgresBillingStore.updateBillingSubscriptionChange",
+      )
+    ) {
+      throw new StoreError(`subscription change transition rejected: ${id}`, {
+        details: { subscriptionChangeId: id },
+      });
     }
   }
 
@@ -439,22 +578,30 @@ export class PostgresBillingStore extends BillingStore {
     );
   }
 
-  private rowToTopup(r: Record<string, unknown>): BillingTopupResult | null {
-    if (!r?.topup_key || !r.id) return null;
+  private rowToTopup(r: BillingTopupRow | null): BillingTopupResult | null {
+    if (!r) return null;
+    const minAmountMinor = safeParse(
+      PgSafeMinorUnitsSchema,
+      r.amount_minor * r.min_quantity,
+      "PostgresBillingStore.rowToTopup.minAmountMinor",
+    );
+    const maxAmountMinor = safeParse(
+      PgSafeMinorUnitsSchema,
+      r.amount_minor * r.max_quantity,
+      "PostgresBillingStore.rowToTopup.maxAmountMinor",
+    );
     return {
-      topupId: String(r.id),
-      topupKey: r.topup_key as string,
-      creditsPerUnit: Number(r.credits_per_unit ?? r.credits_per_major_unit ?? 1000),
-      depositTo: (r.bucket_key as string | undefined) || "purchased",
-      amountMinor: r.amount_minor == null ? undefined : Number(r.amount_minor),
-      currency: r.currency == null ? undefined : String(r.currency),
-      minQuantity: r.min_quantity == null ? undefined : Number(r.min_quantity),
-      maxQuantity: r.max_quantity == null ? undefined : Number(r.max_quantity),
-      defaultQuantity: r.default_quantity == null ? undefined : Number(r.default_quantity),
-      minAmountMinor:
-        r.amount_minor == null ? undefined : Number(r.amount_minor) * Number(r.min_quantity ?? 1),
-      maxAmountMinor:
-        r.amount_minor == null ? undefined : Number(r.amount_minor) * Number(r.max_quantity ?? 1),
+      topupId: r.id,
+      topupKey: r.topup_key,
+      creditsPerUnit: r.credits_per_unit,
+      depositTo: r.bucket_key,
+      amountMinor: r.amount_minor,
+      currency: r.currency,
+      minQuantity: r.min_quantity,
+      maxQuantity: r.max_quantity,
+      defaultQuantity: r.default_quantity,
+      minAmountMinor,
+      maxAmountMinor,
     };
   }
 
@@ -464,7 +611,7 @@ export class PostgresBillingStore extends BillingStore {
     priceId?: string | null,
   ): Promise<BillingTopupResult | null> {
     const r = await this.billingTopup.resolveByPrice(provider, priceId ?? null, productId ?? null);
-    return this.rowToTopup(r as Record<string, unknown>);
+    return this.rowToTopup(r);
   }
 
   async resolveCreditTopupByLookup(
@@ -472,18 +619,23 @@ export class PostgresBillingStore extends BillingStore {
     lookupKey: string,
   ): Promise<BillingTopupResult | null> {
     const r = await this.billingTopup.resolveByLookup(provider, lookupKey);
-    return this.rowToTopup(r as Record<string, unknown>);
+    return this.rowToTopup(r);
   }
 
-  async computeTopupCredits(amountMinor: number, topupConfig: BillingTopupResult): Promise<number> {
-    const unitAmount = topupConfig.amountMinor;
-    const creditsPer = topupConfig.creditsPerUnit ?? 0;
-    if (!unitAmount || amountMinor % unitAmount !== 0) return 0;
-    const quantity = amountMinor / unitAmount;
-    if (quantity < (topupConfig.minQuantity ?? 1) || quantity > (topupConfig.maxQuantity ?? 1)) {
-      return 0;
+  async computeTopupCredits(
+    amountMinor: number,
+    topupConfig: BillingTopupResult,
+  ): Promise<Decimal> {
+    if (!Number.isSafeInteger(amountMinor) || amountMinor < 0) {
+      throw new TypeError("amountMinor must be a non-negative safe integer");
     }
-    return quantity * creditsPer;
+    const unitAmount = topupConfig.amountMinor;
+    if (unitAmount <= 0 || amountMinor % unitAmount !== 0) return new Decimal(0);
+    const quantity = amountMinor / unitAmount;
+    if (quantity < topupConfig.minQuantity || quantity > topupConfig.maxQuantity) {
+      return new Decimal(0);
+    }
+    return topupConfig.creditsPerUnit.mul(quantity);
   }
 
   async upsertBillingPayment(options: BillingPaymentUpsert): Promise<string> {
@@ -491,14 +643,14 @@ export class PostgresBillingStore extends BillingStore {
       options.provider,
       options.providerPaymentId,
       options.providerInvoiceId ?? null,
-      options.userId ?? null,
-      options.amountMinor ?? 0,
-      options.taxMinor ?? null,
-      options.currency ?? "USD",
-      options.purpose ?? null,
+      options.userId,
+      options.amountMinor,
+      options.taxMinor,
+      options.currency,
+      options.purpose,
       options.metadata ? JSON.stringify(options.metadata) : null,
-      options.status ?? "succeeded",
-      options.providerUpdatedAt ?? new Date().toISOString(),
+      options.status,
+      options.providerUpdatedAt,
     );
   }
 
@@ -509,25 +661,28 @@ export class PostgresBillingStore extends BillingStore {
         input.paymentId ?? null,
         input.subscriptionId ?? null,
         input.topupId ?? null,
-        input.configuredCredits,
-        input.quantity ?? 1,
+        input.configuredCredits.toString(),
+        input.quantity,
         input.billingEventId ?? null,
       ],
     );
-    const id = (rows[0] as Record<string, unknown> | undefined)?.id;
-    if (!id) throw new Error("billing credit grant creation returned no ID");
-    return String(id);
+    return requireResultField(
+      rows,
+      "id",
+      postgresUuid,
+      "PostgresBillingStore.createBillingCreditGrant",
+    );
   }
 
   async grantBillingCredit(
     grantId: string,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<BillingCreditPostingResult> {
     const rows = await this.queryFn("SELECT * FROM bursar.grant_billing_credit($1::uuid, $2)", [
       grantId,
       idempotencyKey,
     ]);
-    return (rows[0] as Record<string, unknown> | undefined) ?? {};
+    return billingCreditPostingResult(rows, "PostgresBillingStore.grantBillingCredit");
   }
 
   async getBillingCreditGrantByPayment(paymentId: string): Promise<string | null> {
@@ -535,8 +690,10 @@ export class PostgresBillingStore extends BillingStore {
       `SELECT * FROM bursar.get_billing_credit_grant_by_payment($1::uuid)`,
       [paymentId],
     );
-    const id = (rows[0] as Record<string, unknown> | undefined)?.id;
-    return id ? String(id) : null;
+    const row = optionalRecordRow(rows, "PostgresBillingStore.getBillingCreditGrantByPayment");
+    return row === null
+      ? null
+      : safeParse(postgresUuid, row.id, "PostgresBillingStore.getBillingCreditGrantByPayment.id");
   }
 
   async postBillingRefund(
@@ -544,26 +701,26 @@ export class PostgresBillingStore extends BillingStore {
     grantId: string,
     amountMinor: number,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<BillingCreditPostingResult> {
     const rows = await this.queryFn(
       "SELECT * FROM bursar.post_billing_refund($1::uuid, $2::uuid, $3, $4)",
       [refundId, grantId, amountMinor, idempotencyKey],
     );
-    return (rows[0] as Record<string, unknown> | undefined) ?? {};
+    return billingCreditPostingResult(rows, "PostgresBillingStore.postBillingRefund");
   }
 
   async upsertBillingRefund(options: BillingRefundUpsert): Promise<string> {
     return this.billingRefund.upsert(
       options.provider,
       options.providerRefundId,
-      options.providerPaymentId ?? null,
-      options.userId ?? null,
-      options.amountMinor ?? 0,
-      options.currency ?? "USD",
+      options.providerPaymentId,
+      options.userId,
+      options.amountMinor,
+      options.currency,
       options.reason ?? null,
       options.metadata ? JSON.stringify(options.metadata) : null,
-      options.status ?? "pending",
-      options.providerUpdatedAt ?? new Date().toISOString(),
+      options.status,
+      options.providerUpdatedAt,
     );
   }
 
@@ -571,22 +728,29 @@ export class PostgresBillingStore extends BillingStore {
     const subscription = options.providerSubscriptionId
       ? await this.billingSubscription.get(options.provider, options.providerSubscriptionId)
       : null;
-    const subjectId =
-      options.userId ?? (subscription?.subject_id ? String(subscription.subject_id) : null);
-    if (!subjectId) throw new Error("invoice subject is required");
+    if (options.providerSubscriptionId && !subscription) {
+      throw new StoreError("invoice subscription is not available", {
+        retryable: true,
+        details: {
+          provider: options.provider,
+          providerInvoiceId: options.providerInvoiceId,
+          providerSubscriptionId: options.providerSubscriptionId ?? null,
+        },
+      });
+    }
     await this.billingInvoice.upsert(
-      subjectId,
+      options.userId,
       options.provider,
       options.providerInvoiceId,
       subscription?.id ? String(subscription.id) : null,
-      options.status ?? null,
-      options.amountDueMinor ?? null,
-      options.amountPaidMinor ?? null,
-      options.currency ?? "USD",
+      options.status,
+      options.amountDueMinor,
+      options.amountPaidMinor,
+      options.currency,
       options.periodStart ?? null,
       options.periodEnd ?? null,
       options.metadata ?? {},
-      options.providerUpdatedAt ?? new Date().toISOString(),
+      options.providerUpdatedAt,
     );
   }
 
@@ -595,40 +759,63 @@ export class PostgresBillingStore extends BillingStore {
   }
 
   async upsertBillingDispute(options: BillingDisputeUpsert): Promise<void> {
-    const payment = options.providerPaymentId
-      ? await this.billingPayment.getForRefund(options.provider, options.providerPaymentId)
-      : null;
-    if (!payment?.id) throw new Error("dispute payment is required");
+    const payment = await this.billingPayment.getForRefund(
+      options.provider,
+      options.providerPaymentId,
+    );
+    if (!payment?.id) {
+      throw new StoreError("dispute payment is required", {
+        retryable: true,
+        details: {
+          provider: options.provider,
+          providerDisputeId: options.providerDisputeId,
+          providerPaymentId: options.providerPaymentId ?? null,
+        },
+      });
+    }
     await this.billingDispute.upsert(
       options.provider,
       options.providerDisputeId,
       String(payment.id),
-      options.status ?? "needs_response",
+      options.status,
       options.reason ?? null,
       options.metadata ?? {},
-      options.providerUpdatedAt ?? new Date().toISOString(),
+      options.providerUpdatedAt,
     );
   }
 
   async getBillingPayment(
     provider: string,
     providerPaymentId: string,
-  ): Promise<Record<string, unknown> | null> {
-    const result = await this.billingPayment.getForRefund(provider, providerPaymentId);
-    if (!result) return null;
-    const row = result as Record<string, unknown>;
+  ): Promise<BillingPaymentRecord | null> {
+    const row = await this.billingPayment.getForRefund(provider, providerPaymentId);
+    if (!row) return null;
+    const providerUpdatedAt = toIso(row.provider_updated_at);
+    if (!providerUpdatedAt) {
+      throw new StoreError("billing payment has no provider update timestamp", {
+        details: { provider, providerPaymentId },
+      });
+    }
     return {
       id: row.id,
       provider: row.provider,
       providerPaymentId: row.provider_payment_id,
       providerInvoiceId: row.provider_invoice_id,
       userId: row.subject_id,
-      amountMinor: row.amount_minor == null ? null : Number(row.amount_minor),
-      taxMinor: row.tax_minor == null ? null : Number(row.tax_minor),
+      amountMinor: safeParse(
+        PgSafeMinorUnitsSchema,
+        row.amount_minor,
+        "PostgresBillingStore.getBillingPayment.amountMinor",
+      ),
+      taxMinor: safeParse(
+        PgSafeMinorUnitsSchema,
+        row.tax_minor,
+        "PostgresBillingStore.getBillingPayment.taxMinor",
+      ),
       currency: row.currency,
       purpose: row.purpose,
       status: row.status,
-      providerUpdatedAt: toIso(row.provider_updated_at),
+      providerUpdatedAt,
       metadata: row.metadata,
     };
   }
@@ -688,7 +875,9 @@ export class PostgresBillingStore extends BillingStore {
     const mapContext = (side: "from" | "to"): BillingSubscriptionOfferContext => {
       const context = bySide.get(side);
       if (context?.offer_key == null) {
-        throw new Error(`subscription change ${side}-offer context not found`);
+        throw new StoreError(`subscription change ${side}-offer context not found`, {
+          details: { subscriptionChangeId: r.id, side },
+        });
       }
       return {
         offerId: String(context.offer_id),
@@ -725,12 +914,18 @@ export class PostgresBillingStore extends BillingStore {
     };
   }
 
-  async getActiveBursarConfig(): Promise<Record<string, unknown> | null> {
+  async getActiveCatalogDocument(): Promise<Record<string, unknown> | null> {
     const rows = await this.queryFn("SELECT * FROM bursar.active_catalog_revision()", []);
-    if (!rows || rows.length === 0) return null;
-    return (
-      ((rows[0] as Record<string, unknown>)?.source_document as Record<string, unknown> | null) ??
-      null
+    if (rows.length === 0) return null;
+    if (rows.length !== 1 || typeof rows[0] !== "object" || rows[0] === null) {
+      throw new StoreError("active catalog revision returned a malformed row", {
+        details: { rowCount: rows.length },
+      });
+    }
+    return safeParse(
+      z.record(z.string(), z.unknown()),
+      (rows[0] as Record<string, unknown>).source_document,
+      "PostgresBillingStore.getActiveCatalogDocument",
     );
   }
 
@@ -739,31 +934,20 @@ export class PostgresBillingStore extends BillingStore {
       `SELECT bursar.pseudonymize_financial_subject($1::uuid) AS pseudonymized`,
       [userId],
     );
-    return (rows[0] as Record<string, unknown> | undefined)?.pseudonymized === true;
+    return requireResultField(
+      rows,
+      "pseudonymized",
+      pgBoolean,
+      "PostgresBillingStore.pseudonymizeFinancialSubject",
+    );
   }
 
   async getBillingPreferences(userId: string): Promise<BillingPreferences | null> {
-    const row = await this.billingPreferences.get(userId);
-    if (!row || row.subject_id == null) return null;
-    return {
-      userId: String(row.subject_id),
-      autoRecharge: Boolean(row.auto_recharge),
-      overageProtection: Boolean(row.overage_protection),
-      emailNotifications: Boolean(row.email_notifications),
-      usageAlerts: Boolean(row.usage_alerts),
-      invoiceReminders: Boolean(row.invoice_reminders),
-    };
+    return this.billingPreferences.get(userId);
   }
 
   async upsertBillingPreferences(prefs: BillingPreferences): Promise<void> {
-    await this.billingPreferences.upsert({
-      userId: prefs.userId,
-      autoRecharge: prefs.autoRecharge,
-      overageProtection: prefs.overageProtection,
-      emailNotifications: prefs.emailNotifications,
-      usageAlerts: prefs.usageAlerts,
-      invoiceReminders: prefs.invoiceReminders,
-    });
+    await this.billingPreferences.upsert(prefs);
   }
 
   async getAutoRechargeProfile(userId: string): Promise<BillingAutoRechargeProfile | null> {

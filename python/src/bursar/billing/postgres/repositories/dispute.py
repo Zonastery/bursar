@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_identifier_result, validate_non_empty
 
 
 class BillingDisputeRepository:
@@ -37,8 +37,8 @@ class BillingDisputeRepository:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_dispute_id, "provider_dispute_id")
         validate_non_empty(payment_id, "payment_id")
-        self._execute(
-            "SELECT bursar.upsert_billing_dispute(%s,%s,%s::uuid,%s,%s,%s::jsonb,%s)",
+        rows = self._execute(
+            "SELECT bursar.upsert_billing_dispute(%s,%s,%s::uuid,%s,%s,%s::jsonb,%s) AS id",
             [
                 provider,
                 provider_dispute_id,
@@ -49,3 +49,4 @@ class BillingDisputeRepository:
                 provider_updated_at,
             ],
         )
+        require_identifier_result(rows, "id", "BillingDisputeRepository.upsert")

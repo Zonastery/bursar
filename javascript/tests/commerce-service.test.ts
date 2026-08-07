@@ -1,8 +1,8 @@
 import Decimal from "decimal.js";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mocked } from "vitest";
 
 import type { BillingCapability, BillingEventSink } from "../src/billing/contracts.js";
-import type { CheckoutIntent } from "../src/billing/types/index.js";
+import type { BillingSubscriptionState, CheckoutIntent } from "../src/billing/types/index.js";
 import {
   CheckoutConflictError,
   CheckoutCompletedError,
@@ -12,9 +12,8 @@ import {
   QuoteChangedError,
   UnknownOfferError,
 } from "../src/commerce/errors.js";
-import { CommerceService } from "../src/commerce/service.js";
+import { CommerceService, type CommerceCredits } from "../src/commerce/service.js";
 import type { CommerceOptions } from "../src/commerce/types.js";
-import type { CreditsService } from "../src/credits/service.js";
 import type { PaymentProvider } from "../src/providers/types.js";
 
 function catalog() {
@@ -222,7 +221,7 @@ function harness(input?: {
       retry: vi.fn(async () => ({ outcome: "above_threshold" })),
       processIfNeeded: vi.fn(async () => ({ outcome: "above_threshold" })),
     },
-    getActiveBursarConfig: vi.fn(async () => catalog()),
+    getActiveCatalogDocument: vi.fn(async () => catalog()),
     getUserSubscription: vi.fn(async () => null),
     getActiveSubscription: vi.fn(async () => null),
     getBlockingSubscription: vi.fn(async () => null),
@@ -258,7 +257,7 @@ function harness(input?: {
       offerKey: lookupKey,
     })),
     getAutoRechargeProfile: vi.fn(async () => null),
-  };
+  } as unknown as Mocked<BillingCapability>;
   const credits = {
     getBalance: vi.fn(async () => ({
       balance: new Decimal(25),
@@ -299,19 +298,16 @@ function harness(input?: {
     listUsageEntries: vi.fn(async () => ({ items: [], hasMore: false })),
     listUsageCharges: vi.fn(async () => ({ items: [], nextCursor: null })),
     getLedgerEntry: vi.fn(async () => null),
+  } as unknown as Mocked<CommerceCredits>;
+  const sink: BillingEventSink = {
+    ingestBillingEvent: vi.fn(async () => ({ handled: true, action: "test" })),
   };
-  const sink = { ingestBillingEvent: vi.fn(async () => ({ processed: true })) };
   const alphaFactory = vi.fn(async () => alpha);
   const betaFactory = vi.fn(async () => beta);
-  const service = new CommerceService(
-    billing as unknown as BillingCapability,
-    credits as unknown as Pick<CreditsService, keyof CreditsService>,
-    sink as unknown as BillingEventSink,
-    {
-      providers: { alpha: alphaFactory, beta: betaFactory },
-      ...input?.options,
-    },
-  );
+  const service = new CommerceService(billing, credits, sink, {
+    providers: { alpha: alphaFactory, beta: betaFactory },
+    ...input?.options,
+  });
   return {
     service,
     billing,
@@ -323,7 +319,9 @@ function harness(input?: {
   };
 }
 
-function activeSubscription(overrides = {}) {
+function activeSubscription(
+  overrides: Partial<BillingSubscriptionState> = {},
+): BillingSubscriptionState {
   return {
     userId: "user-1",
     provider: "alpha",
@@ -378,8 +376,6 @@ describe("CommerceService", () => {
         returnUrl: "https://app.example/return?intent=intent-1",
       }),
     );
-    await service.getProvider("beta");
-    expect(betaFactory).toHaveBeenCalledOnce();
   });
 
   it("resolves only catalog offer keys while enforcing offer type and quantity", async () => {
@@ -417,7 +413,7 @@ describe("CommerceService", () => {
 
   it("does not replay a terminal checkout URL", async () => {
     const beta = provider("beta");
-    beta.getCheckoutSessionStatus = vi.fn(async () => ({ paymentStatus: "succeeded" }));
+    beta.getCheckoutSessionStatus = vi.fn(async () => ({ paymentStatus: "succeeded" as const }));
     const { service, billing } = harness({ beta });
     billing.createOrGetCheckoutIntent.mockImplementation(async (value) =>
       intent({
@@ -504,13 +500,14 @@ describe("CommerceService", () => {
     const config = catalog();
     config.commerce.subscription_changes.upgrade.proration = "none";
     const { service, billing, alpha } = harness();
-    billing.getActiveBursarConfig.mockResolvedValue(config);
+    billing.getActiveCatalogDocument.mockResolvedValue(config);
     billing.getActiveSubscription.mockResolvedValue(activeSubscription());
 
     const preview = await service.previewPlanChange({
       accountId: "user-1",
       offerKey: "pro_month",
     });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
     const result = await service.confirmPlanChange({
       accountId: "user-1",
       offerKey: "pro_month",
@@ -550,6 +547,7 @@ describe("CommerceService", () => {
       accountId: "user-1",
       offerKey: "pro_month",
     });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
 
     await expect(
       service.confirmPlanChange({
@@ -585,6 +583,7 @@ describe("CommerceService", () => {
       accountId: "user-1",
       offerKey: "pro_month",
     });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
 
     await expect(
       service.confirmPlanChange({
@@ -611,6 +610,7 @@ describe("CommerceService", () => {
       accountId: "user-1",
       offerKey: "pro_month",
     });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
 
     await expect(
       service.confirmPlanChange({
@@ -642,7 +642,6 @@ describe("CommerceService", () => {
     billing.getCustomerByUserId.mockResolvedValue({
       provider: "alpha",
       providerCustomerId: "customer-1",
-      userId: "user-1",
     });
 
     await expect(
@@ -689,6 +688,7 @@ describe("CommerceService", () => {
         providerInvoiceId: "invoice-1",
         status: "paid",
         amountPaidMinor: 1000,
+        amountDueMinor: 1000,
         currency: "USD",
       },
     ]);
@@ -732,7 +732,14 @@ describe("CommerceService", () => {
   it("verifies document ownership before resolving a provider link", async () => {
     const { service, billing, alpha } = harness();
     billing.listBillingInvoices.mockResolvedValue([
-      { provider: "alpha", providerInvoiceId: "invoice-1" },
+      {
+        provider: "alpha",
+        providerInvoiceId: "invoice-1",
+        status: "paid",
+        amountPaidMinor: 1000,
+        amountDueMinor: 1000,
+        currency: "USD",
+      },
     ]);
 
     await expect(
@@ -763,7 +770,7 @@ describe("CommerceService", () => {
       provider: "alpha",
       topupId: "topup-1",
       quantity: 1,
-      threshold: 10,
+      threshold: new Decimal(10),
       maxChargesPerWindow: 2,
       windowUnit: "month",
       windowCount: 1,

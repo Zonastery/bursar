@@ -3,21 +3,33 @@ import { LRUCache } from "lru-cache";
 import { canonicalBursarConfigDict, type CatalogRollout } from "../config.js";
 import type { PricingEngine } from "../engine.js";
 import { PricingEngine as PricingEngineClass } from "../engine.js";
-import { LeaseNotFoundError, PricingNotLoadedError } from "../errors.js";
+import { LeaseNotFoundError, CatalogNotLoadedError } from "../errors.js";
 import type { NormalizedLogger } from "../shared/logger.js";
 import type { CreditStore } from "./store.js";
 import type { MetricsOrAmount } from "./service-types.js";
 
 export function toDecimal(value: Decimal | number): Decimal {
-  return value instanceof Decimal ? value : new Decimal(value);
+  if (value instanceof Decimal) return value;
+  if (typeof value !== "number") {
+    throw new TypeError("amount must be a Decimal or number");
+  }
+  return new Decimal(value);
+}
+
+function toNonNegativeAmount(value: Decimal | number): Decimal {
+  const amount = toDecimal(value);
+  if (!amount.isFinite() || amount.isNegative()) {
+    throw new RangeError("amount must be finite and non-negative");
+  }
+  return amount;
 }
 
 export function isAmount(value: MetricsOrAmount): value is Decimal | number {
   return value instanceof Decimal || typeof value === "number";
 }
 
-/** Owns pricing publication, cache refresh, and catalog-version pinning. */
-export class PricingRuntime {
+/** Owns catalog publication, cache refresh, and revision-aware pricing engines. */
+export class CatalogRuntime {
   private engine: PricingEngine | null;
   private readonly cache: LRUCache<string, PricingEngine>;
   private readonly versionEngines = new Map<number, PricingEngine>();
@@ -26,70 +38,78 @@ export class PricingRuntime {
     private readonly store: CreditStore,
     engine: PricingEngine | null,
     private readonly logger: NormalizedLogger,
-    private readonly ttl: number,
+    private readonly cacheTtlMs: number,
   ) {
     this.engine = engine;
     this.cache = new LRUCache<string, PricingEngine>({
       max: 1,
-      ttl,
-      allowStale: true,
+      ttl: cacheTtlMs,
+      // Consumers must never proceed against a known-stale catalog. The cache
+      // still deduplicates concurrent refreshes, but every caller awaits the
+      // same fresh value just like the Python SDK's refresh lock.
+      allowStale: false,
       fetchMethod: async () => {
-        await this.loadFromStore();
-        return this.engine!;
+        const engine = await this.fetchEngineFromStore();
+        // `lru-cache` installs the returned value when the fetch completes.
+        // Calling cache.set() from inside fetchMethod aborts the in-flight
+        // refresh with a "replaced" error.
+        this.engine = engine;
+        this.versionEngines.clear();
+        return engine;
       },
     });
-    if (engine) this.cache.set("pricing", engine);
+    if (engine) this.cache.set("catalog", engine);
   }
 
   get currentEngine(): PricingEngine | null {
     return this.engine;
   }
 
-  async publishFromDict(data: Record<string, unknown>): Promise<void> {
-    const canonical = canonicalBursarConfigDict(data);
-    this.setEngine(PricingEngineClass.fromDict(canonical));
-    await this.store.setActivePricing(canonical);
+  async loadFromStore(): Promise<void> {
+    this.setEngine(await this.fetchEngineFromStore());
   }
 
-  async loadFromStore(): Promise<void> {
-    this.logger.info("[CreditsService] loading pricing from store");
-    const active = await this.store.getActivePricing();
+  private async fetchEngineFromStore(): Promise<PricingEngine> {
+    this.logger.info("[CatalogService] loading active catalog");
+    const active = await this.store.getActiveCatalog();
     if (!active) {
-      this.logger.warn("[CreditsService] no active pricing config in store");
-      throw new PricingNotLoadedError("no active pricing config in store");
+      this.logger.warn("[CatalogService] no active catalog revision in store");
+      throw new CatalogNotLoadedError("No active catalog revision is available");
     }
-    this.setEngine(PricingEngineClass.fromDict(active.config as Record<string, unknown>));
+    return PricingEngineClass.fromDict(active.config as Record<string, unknown>);
   }
 
   async refreshIfStale(): Promise<void> {
-    if (this.ttl === 0) return;
-    await this.cache.fetch("pricing");
+    if (this.cacheTtlMs === 0) return;
+    await this.cache.fetch("catalog");
   }
 
   invalidate(): void {
-    this.cache.delete("pricing");
+    this.cache.delete("catalog");
   }
 
-  async publish(
+  async publishAndActivate(
     config: Record<string, unknown>,
     label?: string | null,
     rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<void> {
-    this.logger.info("[CreditsService] publishPricing", { label });
+  ): Promise<string> {
+    this.logger.info("[CatalogService] publishing and activating catalog", { label });
     const canonical = canonicalBursarConfigDict(config);
-    this.setEngine(PricingEngineClass.fromDict(canonical));
-    await this.store.setActivePricing(canonical, label, rollout);
+    const nextEngine = PricingEngineClass.fromDict(canonical);
+    const revisionId = await this.store.publishAndActivateCatalog(canonical, label, rollout);
+    this.setEngine(nextEngine);
+    return revisionId;
   }
 
   async publishDraft(config: Record<string, unknown>, label?: string | null): Promise<string> {
-    return this.store.publishPricing(canonicalBursarConfigDict(config), label);
+    return this.store.publishCatalogDraft(canonicalBursarConfigDict(config), label);
   }
 
-  async activate(
+  async activateRevision(
     version: number,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string> {
-    const id = await this.store.activatePricing(version, rollout);
+    const id = await this.store.activateCatalogRevision(version, rollout);
     await this.loadFromStore();
     return id;
   }
@@ -100,7 +120,7 @@ export class PricingRuntime {
     leaseId?: string | null,
   ): Promise<{ amount: Decimal; model: string | null }> {
     if (isAmount(metricsOrAmount)) {
-      return { amount: toDecimal(metricsOrAmount), model: null };
+      return { amount: toNonNegativeAmount(metricsOrAmount), model: null };
     }
     let engine: PricingEngine;
     let rateCard: string | undefined;
@@ -130,7 +150,7 @@ export class PricingRuntime {
   private setEngine(engine: PricingEngine): void {
     this.engine = engine;
     this.versionEngines.clear();
-    this.cache.set("pricing", engine);
+    this.cache.set("catalog", engine);
   }
 
   async engineForUser(userId: string | null): Promise<PricingEngine> {
@@ -150,10 +170,10 @@ export class PricingRuntime {
     const cached = this.versionEngines.get(catalogVersion);
     if (cached) return cached;
 
-    const config = await this.store.getBursarConfig(catalogVersion);
+    const config = await this.store.getCatalogRevision(catalogVersion);
     if (!config?.config) {
-      throw new PricingNotLoadedError(
-        `no pricing config for pinned catalog version ${catalogVersion}`,
+      throw new CatalogNotLoadedError(
+        `Catalog revision ${catalogVersion} is unavailable for the pinned plan`,
       );
     }
 
@@ -164,8 +184,8 @@ export class PricingRuntime {
 
   private requireEngine(): PricingEngine {
     if (!this.engine) {
-      throw new PricingNotLoadedError(
-        "pricing not loaded: call loadPricingFromStore or publishPricing first",
+      throw new CatalogNotLoadedError(
+        "Catalog is not loaded; call catalog.load() or catalog.publishAndActivate() first",
       );
     }
     return this.engine;

@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_row, validate_non_empty
 from bursar.credits.postgres.repositories.schemas import BucketEnvelopeRow, SweepRow
 
 
@@ -54,9 +54,7 @@ class BucketRepository:
         if limit < 1:
             raise ValueError("limit must be positive")
         rows = self._callproc("sweep_expired_lots", [limit, user_id, dry_run])
-        if not rows:
-            return SweepRow(expired_count=0)
-        row = rows[0]
+        row = require_row(rows, "BucketRepository.sweep_expired_credits")
         if isinstance(row, int):
             return SweepRow(expired_count=row)
         return SweepRow(

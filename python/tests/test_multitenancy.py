@@ -1,6 +1,5 @@
 """End-to-end shared-table tenant isolation regressions."""
 
-import json
 from copy import deepcopy
 from decimal import Decimal
 
@@ -31,7 +30,7 @@ OPERATOR_FUNCTIONS = (
     "bursar.export_usage_charge(uuid)",
     "bursar.export_billing_event_payload(uuid)",
     "bursar.complete_outbox_event(bigint,uuid)",
-    "bursar.archive_billing_event_payload(uuid,text,text,boolean)",
+    "bursar.archive_billing_event_payload(uuid,text,text)",
     "bursar.fail_outbox_event(bigint,uuid,text,integer,integer)",
     "bursar.run_storage_partition_maintenance(text,timestamptz)",
     "bursar.run_storage_maintenance(timestamptz)",
@@ -67,7 +66,7 @@ def test_tenant_provisioning_rejects_slug_reuse_with_another_id(
         )
 
 
-def test_runtime_role_is_fail_closed(pg_database_url: str) -> None:
+def test_bursar_roles_are_fail_closed(pg_database_url: str) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -80,10 +79,19 @@ def test_runtime_role_is_fail_closed(pg_database_url: str) -> None:
                 rolreplication,
                 rolbypassrls
             FROM pg_roles
-            WHERE rolname = 'bursar_runtime'
+            WHERE rolname IN (
+                'bursar_runtime',
+                'bursar_client',
+                'bursar_operator'
+            )
+            ORDER BY rolname
             """
         )
-        assert cursor.fetchone() == (False, False, False, False, False, False, False)
+        assert cursor.fetchall() == [
+            (False, False, False, False, False, False, False),
+            (False, False, False, False, False, False, False),
+            (False, False, False, False, False, False, False),
+        ]
 
         cursor.execute(
             """
@@ -91,10 +99,37 @@ def test_runtime_role_is_fail_closed(pg_database_url: str) -> None:
             FROM pg_auth_members AS membership
             JOIN pg_roles AS member_role
               ON member_role.oid = membership.member
-            WHERE member_role.rolname = 'bursar_runtime'
+            WHERE member_role.rolname IN (
+                'bursar_runtime',
+                'bursar_client',
+                'bursar_operator'
+            )
             """
         )
         assert cursor.fetchone() == (0,)
+
+        cursor.execute(
+            """
+            SELECT granted_role.rolname, membership.inherit_option, membership.set_option
+            FROM pg_auth_members AS membership
+            JOIN pg_roles AS granted_role
+              ON granted_role.oid = membership.roleid
+            JOIN pg_roles AS member_role
+              ON member_role.oid = membership.member
+            WHERE member_role.rolname = current_user
+              AND granted_role.rolname IN (
+                  'bursar_runtime',
+                  'bursar_client',
+                  'bursar_operator'
+              )
+            ORDER BY granted_role.rolname
+            """
+        )
+        assert cursor.fetchall() == [
+            ("bursar_client", False, True),
+            ("bursar_operator", False, True),
+            ("bursar_runtime", False, True),
+        ]
 
 
 def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
@@ -119,7 +154,7 @@ def test_tenant_aware_host_trigger_assigns_default_plan_and_signup_grants(
     }
     store = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
     try:
-        store.set_active_pricing(config, "host-trigger")
+        store.publish_and_activate_catalog(config, "host-trigger")
     finally:
         store.close()
 
@@ -217,13 +252,13 @@ def test_tenants_isolate_catalog_credit_and_provider_idempotency(
         tenant_id=SECOND_TENANT_ID,
     )
     try:
-        first_catalog_id = first.set_active_pricing(CONFIG, "first")
-        assert second.get_active_pricing() is None
-        second_catalog_id = second.set_active_pricing(CONFIG, "second")
+        first_catalog_id = first.publish_and_activate_catalog(CONFIG, "first")
+        assert second.get_active_catalog() is None
+        second_catalog_id = second.publish_and_activate_catalog(CONFIG, "second")
 
         assert first_catalog_id != second_catalog_id
-        first_active = first.get_active_pricing()
-        second_active = second.get_active_pricing()
+        first_active = first.get_active_catalog()
+        second_active = second.get_active_catalog()
         assert first_active is not None
         assert second_active is not None
         assert first_active.version == 1
@@ -283,7 +318,7 @@ def test_tenants_isolate_catalog_credit_and_provider_idempotency(
 
 def test_tenant_rpc_fails_closed_without_context(pg_database_url: str) -> None:
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        cursor.execute("SET ROLE service_role")
+        cursor.execute("SET ROLE bursar_client")
         with pytest.raises(psycopg2.Error) as exc_info:
             cursor.execute(
                 """
@@ -363,7 +398,7 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
                 (tenant_id, f"tenant-test-{suffix}"),
             )
 
-        cursor.execute("SET ROLE service_role")
+        cursor.execute("SET ROLE bursar_operator")
         cursor.execute(
             """
             SELECT event_id, tenant_id, claim_token
@@ -419,7 +454,7 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
         assert exported[0]["envelope"]["tenant"] == "first"
 
         cursor.execute(
-            "SELECT bursar.archive_billing_event_payload(%s, %s, %s, false)",
+            "SELECT bursar.archive_billing_event_payload(%s, %s, %s)",
             (
                 first_event.billing_event_id,
                 "tenants/first/billing-events/storage-first.json",
@@ -432,68 +467,64 @@ def test_tenant_outbox_claim_does_not_take_other_tenant_work(
     second_billing.close()
 
 
-def test_service_role_and_jwt_context_preserve_tenant_isolation(
+def test_only_explicit_bursar_context_selects_a_tenant(
     pg_database_url: str,
 ) -> None:
     _ensure_second_tenant(pg_database_url)
     first = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
     second = PostgresStore(pg_database_url, tenant_id=SECOND_TENANT_ID)
     try:
-        first.set_active_pricing(CONFIG, "jwt-first")
-        second.set_active_pricing(CONFIG, "jwt-second")
+        first.publish_and_activate_catalog(CONFIG, "context-first")
+        second.publish_and_activate_catalog(CONFIG, "context-second")
         first.add_credits(
             SHARED_SUBJECT_ID,
             Decimal("10"),
-            idempotency_key="jwt-first",
+            idempotency_key="context-first",
         )
         second.add_credits(
             SHARED_SUBJECT_ID,
             Decimal("20"),
-            idempotency_key="jwt-second",
+            idempotency_key="context-second",
         )
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-            cursor.execute("SELECT set_config('bursar.tenant_id', '', true)")
             cursor.execute(
-                "SELECT set_config('request.jwt.claims', %s, true)",
-                (
-                    json.dumps(
-                        {
-                            "app_metadata": {"tenant_id": TEST_TENANT_ID},
-                            "user_metadata": {"tenant_id": SECOND_TENANT_ID},
-                        }
-                    ),
-                ),
+                "SELECT set_config('host.tenant_id', %s, true)",
+                (SECOND_TENANT_ID,),
+            )
+            cursor.execute(
+                "SELECT set_config('bursar.tenant_id', %s, true)",
+                (TEST_TENANT_ID,),
             )
             cursor.execute("SELECT bursar.current_tenant_id()")
             assert str(cursor.fetchone()[0]) == TEST_TENANT_ID  # type: ignore[reportOptionalSubscript]
 
-            cursor.execute("SET ROLE service_role")
+            cursor.execute("SET ROLE bursar_client")
             cursor.execute(
                 "SELECT balance FROM bursar.get_credit_state(%s)",
                 (SHARED_SUBJECT_ID,),
             )
-            assert cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript] == Decimal("10")
+            assert cursor.fetchone() == (Decimal("10"),)
 
             cursor.execute(
-                "SELECT set_config('request.jwt.claims', %s, true)",
-                (json.dumps({"app_metadata": {"tenant_id": SECOND_TENANT_ID}}),),
+                "SELECT set_config('bursar.tenant_id', %s, true)",
+                (SECOND_TENANT_ID,),
             )
             cursor.execute(
                 "SELECT balance FROM bursar.get_credit_state(%s)",
                 (SHARED_SUBJECT_ID,),
             )
-            assert cursor.fetchone()[0]  # type: ignore[reportOptionalSubscript] == Decimal("20")
+            assert cursor.fetchone() == (Decimal("20"),)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT set_config('bursar.tenant_id', '', true)")
             cursor.execute(
-                "SELECT set_config('request.jwt.claims', %s, true)",
-                (json.dumps({"user_metadata": {"tenant_id": SECOND_TENANT_ID}}),),
+                "SELECT set_config('host.tenant_id', %s, true)",
+                (SECOND_TENANT_ID,),
             )
             cursor.execute("SELECT bursar.current_tenant_id()")
             assert cursor.fetchone() == (None,)
-            cursor.execute("SET ROLE service_role")
+            cursor.execute("SET ROLE bursar_client")
             cursor.execute(
                 "SELECT balance FROM bursar.get_credit_state(%s)",
                 (SHARED_SUBJECT_ID,),
@@ -506,8 +537,8 @@ def test_service_role_and_jwt_context_preserve_tenant_isolation(
                         %s,
                         'adjustment',
                         1,
-                        'user-metadata-is-not-authority',
-                        'user-metadata-is-not-authority'
+                        'host-context-is-not-authority',
+                        'host-context-is-not-authority'
                     )
                     """,
                     (SHARED_SUBJECT_ID,),
@@ -566,12 +597,12 @@ def test_runtime_role_cannot_execute_operator_functions(
                     'USAGE'
                 ),
                 has_schema_privilege(
-                    'service_role',
+                    'bursar_operator',
                     'partman',
                     'USAGE'
                 ),
                 has_function_privilege(
-                    'service_role',
+                    'bursar_operator',
                     'partman.run_maintenance(text,boolean,boolean)',
                     'EXECUTE'
                 )
@@ -590,7 +621,7 @@ def test_runtime_role_cannot_execute_operator_functions(
                     'EXECUTE'
                 ),
                 has_function_privilege(
-                    'service_role',
+                    'bursar_client',
                     trigger_hook.oid,
                     'EXECUTE'
                 )
@@ -605,7 +636,7 @@ def test_runtime_role_cannot_execute_operator_functions(
         assert cursor.fetchone() == (True, True, True, False)
 
 
-def test_partition_children_are_forced_rls_and_not_service_accessible(
+def test_partition_children_are_forced_rls_and_not_client_accessible(
     pg_database_url: str,
 ) -> None:
     billing = PostgresBillingStore(
@@ -656,7 +687,7 @@ def test_partition_children_are_forced_rls_and_not_service_accessible(
         )
         assert cursor.fetchone() == (True, True, True)
 
-        cursor.execute("SET ROLE service_role")
+        cursor.execute("SET ROLE bursar_client")
         with pytest.raises(psycopg2.Error) as exc_info:
             cursor.execute(
                 sql.SQL("SELECT count(*) FROM {}.{}").format(
@@ -674,8 +705,8 @@ def test_catalog_activation_and_plan_migration_are_tenant_scoped(
     first = PostgresStore(pg_database_url, tenant_id=TEST_TENANT_ID)
     second = PostgresStore(pg_database_url, tenant_id=SECOND_TENANT_ID)
     try:
-        first.set_active_pricing(CONFIG, "lock-first")
-        second.set_active_pricing(CONFIG, "lock-second")
+        first.publish_and_activate_catalog(CONFIG, "lock-first")
+        second.publish_and_activate_catalog(CONFIG, "lock-second")
     finally:
         first.close()
         second.close()

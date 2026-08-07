@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import datetime
+from typing import Literal
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    optional_mapping_row,
+    require_identifier_result,
+    validate_non_empty,
+)
 from bursar.credits.postgres.repositories.schemas import BillingPaymentRow
+from bursar.errors import StoreError
 
 
 class BillingPaymentRepository:
@@ -16,45 +21,57 @@ class BillingPaymentRepository:
         provider: str,
         provider_payment_id: str,
         provider_invoice_id: str | None,
-        user_id: str | None,
+        user_id: str,
         amount_minor: int,
-        tax_minor: int | None,
+        tax_minor: int,
         currency: str,
-        purpose: str | None,
+        purpose: Literal["subscription", "credit_topup"],
         metadata: str | None,
-        status: str = "succeeded",
-        provider_updated_at: str | None = None,
+        status: Literal["pending", "succeeded", "failed", "canceled"],
+        provider_updated_at: str,
     ) -> str:
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_payment_id, "provider_payment_id")
+        if not user_id:
+            raise ValueError("billing payment requires a subject")
+        if purpose not in {"subscription", "credit_topup"}:
+            raise ValueError("billing payment requires a known purpose")
         rows = self._execute(
             "SELECT bursar.upsert_billing_payment("
             "%s::uuid,%s,%s,%s,%s,%s,%s,%s::bursar.billing_payment_status,%s,%s,%s::jsonb"
-            ")",
+            ") AS id",
             [
                 user_id,
                 provider,
                 provider_payment_id,
                 amount_minor,
-                tax_minor or 0,
+                tax_minor,
                 currency,
-                purpose or "unknown",
+                purpose,
                 status,
-                provider_updated_at or datetime.datetime.now(datetime.UTC).isoformat(),
+                provider_updated_at,
                 provider_invoice_id,
                 metadata or "{}",
             ],
         )
-        if not rows or not isinstance(rows[0], dict):
-            raise ValueError("billing payment upsert returned no ID")
-        return str(next(iter(rows[0].values())))
+        return require_identifier_result(rows, "id", "BillingPaymentRepository.upsert")
 
     def get_for_refund(self, provider: str, provider_payment_id: str) -> BillingPaymentRow | None:
         rows = self._execute(
             "SELECT * FROM bursar.get_billing_payment_by_provider(%s,%s)",
             [provider, provider_payment_id],
         )
-        return BillingPaymentRow.model_validate(rows[0]) if rows and isinstance(rows[0], dict) else None
+        row = optional_mapping_row(rows, "BillingPaymentRepository.get_for_refund")
+        if row is None:
+            return None
+        try:
+            return BillingPaymentRow.model_validate(row)
+        except ValueError as exc:
+            raise StoreError(
+                "BillingPaymentRepository.get_for_refund: payment row validation failed",
+                cause=exc,
+                details={"provider": provider, "provider_payment_id": provider_payment_id},
+            ) from exc
 
     def get_direct(self, provider: str, provider_payment_id: str) -> BillingPaymentRow | None:
         return self.get_for_refund(provider, provider_payment_id)

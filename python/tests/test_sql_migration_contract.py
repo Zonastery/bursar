@@ -24,20 +24,90 @@ def test_migration_files_are_contiguous_and_self_contained() -> None:
         assert content.endswith("\n"), path
 
 
-def test_service_role_allowlist_is_granted_and_public_execution_is_revoked(
+def test_bursar_caller_roles_are_least_privilege_and_public_is_revoked(
     pg_database_url: str,
 ) -> None:
-    privilege_sql = (SQL_DIR / "026_privileges.sql").read_text(encoding="utf-8")
-    signatures = sorted(set(re.findall(r"'(bursar\.[^']+\([^']*\))'", privilege_sql)))
-    assert signatures
+    security_sql = (SQL_DIR / "031_multitenancy_security.sql").read_text(encoding="utf-8")
+    client_block = re.search(
+        r"v_client_functions constant text\[\] := ARRAY\[(.*?)\n\s*\];",
+        security_sql,
+        re.DOTALL,
+    )
+    assert client_block is not None
+    client_signatures = sorted(set(re.findall(r"'(bursar\.[^']+\([^']*\))'", client_block.group(1))))
+    assert client_signatures
+
+    operator_signatures = (
+        "bursar.get_storage_settings()",
+        (
+            "bursar.configure_storage(integer,integer,integer,integer,integer,"
+            "integer,integer,integer,integer,integer,integer,integer,integer,integer)"
+        ),
+        "bursar.claim_outbox_events(integer,integer,text[])",
+        "bursar.claim_outbox_events(uuid,integer,integer,text[])",
+        "bursar.export_usage_charge(uuid)",
+        "bursar.export_billing_event_payload(uuid)",
+        "bursar.complete_outbox_event(bigint,uuid)",
+        "bursar.archive_billing_event_payload(uuid,text,text)",
+        "bursar.fail_outbox_event(bigint,uuid,text,integer,integer)",
+        "bursar.run_storage_partition_maintenance(text,timestamptz)",
+        "bursar.run_storage_maintenance(timestamptz)",
+        "bursar.maybe_run_storage_maintenance(timestamptz)",
+        "bursar.create_tenant(uuid,text,text)",
+        "bursar.set_tenant_status(uuid,text)",
+    )
 
     with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
-        for signature in signatures:
+        for signature in client_signatures:
             cursor.execute(
-                "SELECT has_function_privilege('service_role', %s, 'EXECUTE')",
+                "SELECT has_function_privilege('bursar_client', %s, 'EXECUTE')",
                 (signature,),
             )
             assert cursor.fetchone() == (True,), signature
+
+        for signature in operator_signatures:
+            cursor.execute(
+                """
+                SELECT
+                    has_function_privilege('bursar_operator', %s, 'EXECUTE'),
+                    has_function_privilege('bursar_client', %s, 'EXECUTE'),
+                    has_function_privilege('bursar_runtime', %s, 'EXECUTE')
+                """,
+                (signature, signature, signature),
+            )
+            assert cursor.fetchone() == (True, False, False), signature
+
+        trigger_tenant_resolver = "bursar.resolve_active_tenant_for_trigger(text)"
+        cursor.execute(
+            """
+            SELECT
+                has_function_privilege('bursar_operator', %s, 'EXECUTE'),
+                has_function_privilege('bursar_client', %s, 'EXECUTE'),
+                has_function_privilege('bursar_runtime', %s, 'EXECUTE')
+            """,
+            (
+                trigger_tenant_resolver,
+                trigger_tenant_resolver,
+                trigger_tenant_resolver,
+            ),
+        )
+        assert cursor.fetchone() == (True, False, True)
+
+        for signature in (
+            "bursar.require_internal_mutation()",
+            "bursar.bucket_expiry_at(uuid,uuid,text)",
+            "bursar.provision_subject_account_on_insert()",
+            "bursar.secure_tenant_partition(regclass)",
+        ):
+            cursor.execute(
+                """
+                SELECT
+                    has_function_privilege('bursar_client', %s, 'EXECUTE'),
+                    has_function_privilege('bursar_operator', %s, 'EXECUTE')
+                """,
+                (signature, signature),
+            )
+            assert cursor.fetchone() == (False, False), signature
 
         cursor.execute(
             """
@@ -61,7 +131,7 @@ def test_service_role_allowlist_is_granted_and_public_execution_is_revoked(
             ) AS privileges
             WHERE n.nspname = 'bursar'
               AND c.relkind IN ('r', 'p')
-              AND r.rolname IN ('anon', 'authenticated')
+              AND r.rolname IN ('bursar_client', 'bursar_operator')
               AND has_table_privilege(r.rolname, c.oid, privileges.privilege_type)
             """
         )

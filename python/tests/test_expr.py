@@ -16,7 +16,15 @@ from pathlib import Path
 import pytest
 
 from bursar.engine import _q
-from bursar.expr import ExpressionError, evaluate_expression, validate_expression
+from bursar.expr import ExpressionError, evaluate_expression
+from bursar.expr import validate_expression as validate_sdk_expression
+
+_TEST_VARIABLES = {"input_tokens", "output_tokens", "tool_calls", "x"}
+
+
+def validate_expression(expr: str, known_variables: set[str] | None = None) -> None:
+    validate_sdk_expression(expr, known_variables if known_variables is not None else _TEST_VARIABLES)
+
 
 # ── Parity fixture ─────────────────────────────────────────────────────────
 
@@ -171,9 +179,9 @@ class TestVariableValidation:
     def test_known_variable_accepted(self) -> None:
         validate_expression("input_tokens * 0.001", known_variables={"input_tokens"})
 
-    def test_no_set_means_no_name_check(self) -> None:
-        # Backwards compatible: without a known set, any identifier validates.
-        validate_expression("anything * 2")
+    def test_unknown_variable_is_always_rejected(self) -> None:
+        with pytest.raises(ExpressionError, match="unknown variable"):
+            validate_sdk_expression("anything * 2", {"input_tokens"})
 
     def test_undefined_variable_at_eval(self) -> None:
         with pytest.raises(ExpressionError, match="undefined variable"):
@@ -279,6 +287,10 @@ class TestValidateExpression:
 
     def test_valid_with_conditional(self) -> None:
         validate_expression("x if x > 0 else 0")
+
+    def test_rejects_expression_without_metrics(self) -> None:
+        with pytest.raises(ExpressionError, match="references no variables"):
+            validate_expression("2 + 2")
 
     def test_rejects_lambda(self) -> None:
         with pytest.raises(ExpressionError, match="disallowed node"):

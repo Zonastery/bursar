@@ -55,7 +55,7 @@ class CreditsServiceOptions(_CreditsServiceModel):
     low_balance: LowBalanceConfig | None = None
     default_ttl_seconds: int = Field(default=600, ge=1)
     lazy_expiry: bool = False
-    pricing_ttl: int = Field(default=300_000, ge=0)
+    catalog_cache_ttl_ms: int = Field(default=300_000, ge=0)
     post_deduction: Callable[[PostDeductionContext], None | Awaitable[None]] | None = None
 
 
@@ -85,7 +85,6 @@ class GrantSubscriptionCycleOptions(_CreditsServiceModel):
     bucket: str = "subscription"
     expires_at: datetime | None = None
     ttl_days: int | None = Field(default=None, ge=1)
-    replace_prior: bool = True
     plan_key: str | None = None
     idempotency_key: str | None = None
     metadata: CreditMetadata | None = None

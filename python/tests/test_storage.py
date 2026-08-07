@@ -14,7 +14,7 @@ from uuid import UUID
 
 import pytest
 
-from bursar import PricingNotLoadedError
+from bursar import CatalogNotLoadedError
 from bursar.storage import (
     BillingEventPayloadExport,
     BursarRuntimeOptions,
@@ -139,8 +139,8 @@ class FakePool:
         msg = "PostgreSQL should not be queried in this test"
         raise AssertionError(msg)
 
-    def putconn(self, conn: Any) -> None:
-        del conn
+    def putconn(self, conn: Any = None, key: Any = None, close: bool = False) -> None:
+        del conn, key, close
         return None
 
 
@@ -394,7 +394,7 @@ def test_runtime_postgres_only_has_no_worker_or_external_dependency() -> None:
     assert runtime.worker is None
     assert runtime.clickhouse is None
     assert runtime.s3 is None
-    runtime.start()
+    runtime.start(BursarRuntimeStartOptions(load_catalog=False))
     assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
     runtime.close()
     pool.closeall.assert_not_called()
@@ -408,7 +408,7 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
             tenant_id=UUID(TENANT_ID),
         )
     )
-    load_catalog = Mock(side_effect=[PricingNotLoadedError("catalog pending"), None])
+    load_catalog = Mock(side_effect=[CatalogNotLoadedError("catalog pending"), None])
     runtime.bursar.load_catalog = load_catalog
 
     runtime.start(
@@ -421,6 +421,53 @@ def test_runtime_retries_a_catalog_that_has_not_been_published_yet() -> None:
 
     assert load_catalog.call_count == 2
     assert runtime.health().started is True
+    runtime.close()
+
+
+def test_runtime_loads_catalog_by_default() -> None:
+    pool = FakePool()
+    runtime = create_bursar_runtime(BursarRuntimeOptions(postgres=pool, tenant_id=UUID(TENANT_ID)))
+    runtime.bursar.load_catalog = Mock()
+
+    runtime.start()
+
+    runtime.bursar.load_catalog.assert_called_once_with()
+    runtime.close()
+
+
+def test_runtime_verifies_normalized_tenant_slug() -> None:
+    pool = FakePool()
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pool,
+            tenant_id=UUID(TENANT_ID),
+            tenant_slug=" Zonastery ",
+        )
+    )
+    runtime._query = Mock(return_value=[{"tenant_id": TENANT_ID}])
+
+    runtime.start(BursarRuntimeStartOptions(load_catalog=False))
+
+    runtime._query.assert_called_once_with(
+        "SELECT bursar.resolve_active_tenant_for_trigger(%s)::text AS tenant_id",
+        ["zonastery"],
+    )
+    runtime.close()
+
+
+def test_runtime_rejects_tenant_slug_mismatch() -> None:
+    pool = FakePool()
+    runtime = create_bursar_runtime(
+        BursarRuntimeOptions(
+            postgres=pool,
+            tenant_id=UUID(TENANT_ID),
+            tenant_slug="zonastery",
+        )
+    )
+    runtime._query = Mock(return_value=[{"tenant_id": "00000000-0000-0000-0000-000000000002"}])
+
+    with pytest.raises(Exception, match="resolves to a different tenant ID"):
+        runtime.start(BursarRuntimeStartOptions(load_catalog=False))
     runtime.close()
 
 

@@ -12,7 +12,9 @@ from bursar.billing.types import (
     BillingEvent,
     BillingEventClaim,
     BillingEventType,
+    BillingInvoiceInfo,
 )
+from bursar.errors import StoreError
 from bursar.shared.diagnostics import bounded_diagnostic_message, optional_bounded_diagnostic_message
 
 USER_ID = "00000000-0000-0000-0000-000000000001"
@@ -32,11 +34,27 @@ def _claimed_store() -> MagicMock:
 
 
 def _event(event_id: str, event_type: BillingEventType) -> BillingEvent:
+    invoice = (
+        BillingInvoiceInfo(
+            provider_invoice_id=f"in_{event_id}",
+            status="open",
+            amount_paid_minor=0,
+            amount_due_minor=0,
+            currency="USD",
+        )
+        if event_type.value.startswith("invoice.")
+        else None
+    )
+    customer = (
+        BillingCustomerInfo(provider_customer_id="cus_fixture") if event_type.value.startswith("customer.") else None
+    )
     return BillingEvent(
         provider="stripe",
         event_id=event_id,
         event_type=event_type,
         occurred_at="2026-08-05T00:00:00Z",
+        invoice=invoice,
+        customer=customer,
     )
 
 
@@ -60,12 +78,7 @@ def test_rejected_completion_is_reported_and_requeued() -> None:
 def test_unhandled_event_is_failed_instead_of_completed() -> None:
     store = _claimed_store()
     service = BillingService(store)
-    event = BillingEvent.model_construct(
-        provider="stripe",
-        event_id="evt_unhandled",
-        event_type="provider.unknown",
-        occurred_at="2026-08-05T00:00:00Z",
-    )
+    event = _event("evt_unhandled", BillingEventType.invoice_created)
 
     result = service.ingest_billing_event(event)
 
@@ -124,3 +137,15 @@ def test_billing_event_repository_returns_rpc_acknowledgements() -> None:
 
     assert repository.complete("stripe", "evt_repository", EVENT_ROW_ID) is True
     assert repository.fail("stripe", "evt_repository", EVENT_ROW_ID, "failed") is False
+
+
+def test_billing_event_repository_fails_closed_without_mutation_result() -> None:
+    repository = BillingEventRepository(MagicMock(return_value=[]))
+
+    with pytest.raises(StoreError) as claim_error:
+        repository.claim("stripe", "evt_missing", "invoice.paid", "{}")
+    assert claim_error.value.indeterminate is True
+
+    with pytest.raises(StoreError) as completion_error:
+        repository.complete("stripe", "evt_missing", EVENT_ROW_ID)
+    assert completion_error.value.indeterminate is True

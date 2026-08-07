@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +24,28 @@ class UsageMetrics(BaseModel):
     measures: dict[str, Decimal] = Field(default_factory=dict)
     dimensions: dict[str, str | Decimal | bool] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        measures: Mapping[str, Decimal | int | float | str] | None = None,
+        dimensions: Mapping[str, str | Decimal | int | float | bool] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Create normalized metrics from ordinary Python numeric inputs.
+
+        Pydantic stores measures and numeric dimensions as ``Decimal``.  The
+        explicit input signature reflects the values the model has always
+        accepted at runtime, so callers do not need type-checker-only
+        ``Decimal`` wrappers around token counts and other integer measures.
+        """
+        super().__init__(
+            operation=operation,
+            measures=dict(measures or {}),
+            dimensions=dict(dimensions or {}),
+            metadata=dict(metadata or {}),
+        )
 
     @field_validator("operation")
     @classmethod

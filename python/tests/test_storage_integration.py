@@ -23,6 +23,7 @@ from bursar.storage import (
     BillingEventPayloadExport,
     BillingPayloadArchiveResult,
     BursarRuntimeOptions,
+    BursarRuntimeStartOptions,
     OutboxRunResult,
     OutboxWorkerOptions,
     UsageChargeExport,
@@ -73,8 +74,6 @@ class RecordingUsageSink:
 
 
 class RecordingBillingArchive:
-    purge_postgres_payload = True
-
     def __init__(self) -> None:
         self.events: list[BillingEventPayloadExport] = []
         self.closed = False
@@ -161,7 +160,12 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
     pg_database_url: str,
 ) -> None:
     charge_id, billing_event_id = _seed_storage_rows(pg_database_url)
-    client = PostgresClient(pg_database_url, tenant_id=TEST_TENANT_ID, max_connections=2)
+    client = PostgresClient(
+        pg_database_url,
+        tenant_id=TEST_TENANT_ID,
+        access_role="bursar_operator",
+        max_connections=2,
+    )
     repository = PostgresStorageRepository(client.query, TEST_TENANT_ID)
     try:
         usage = repository.get_usage_charge(charge_id)
@@ -172,10 +176,16 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
         assert usage.region == "in"
         assert usage.dimensions["tenant_tier"] == "starter"
         assert usage.metadata == {"trace_id": "trace-1"}
-        usage_outbox = client.query(
-            "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = %s::uuid",
-            [charge_id],
-        )[0]["payload"]
+        # Inspect the private outbox as the migration owner. The operator-facing
+        # repository intentionally exposes RPCs, not direct table access.
+        with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT payload FROM bursar.event_outbox WHERE aggregate_id = %s::uuid",
+                (charge_id,),
+            )
+            usage_outbox_row = cursor.fetchone()
+        assert usage_outbox_row is not None
+        usage_outbox = usage_outbox_row[0]
         assert usage_outbox == {
             "delivery_required": False,
             "tenant_id": TEST_TENANT_ID,
@@ -199,7 +209,6 @@ def test_postgres_storage_repository_exports_archives_and_acknowledges_outbox(
             billing_event_id,
             "billing/stripe/evt-storage-repo-1.json",
             "version-1",
-            True,
         )
         archived = repository.get_billing_event_payload(billing_event_id)
         assert archived is not None
@@ -245,7 +254,12 @@ def test_bursar_runtime_flushes_usage_and_billing_outbox_handlers(
         assert clickhouse.writes[0][0].operation == "completion"
         assert archive.events[0].event_id == billing_event_id
 
-        client = PostgresClient(pg_database_url, tenant_id=TEST_TENANT_ID, max_connections=2)
+        client = PostgresClient(
+            pg_database_url,
+            tenant_id=TEST_TENANT_ID,
+            access_role="bursar_operator",
+            max_connections=2,
+        )
         try:
             repository = PostgresStorageRepository(client.query, TEST_TENANT_ID)
             archived = repository.get_billing_event_payload(billing_event_id)
@@ -275,7 +289,7 @@ def test_bursar_runtime_start_health_and_no_worker_flush(
         )
     )
     try:
-        runtime.start()
+        runtime.start(BursarRuntimeStartOptions(load_catalog=False))
         assert clickhouse.initialized is True
         assert runtime.health().started is True
         assert runtime.flush() == OutboxRunResult(claimed=0, delivered=0, failed=0)
@@ -301,7 +315,9 @@ def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
             SELECT subject_id FROM account
             """
         )
-        subject_id = cursor.fetchone()[0]
+        subject_row = cursor.fetchone()
+        assert subject_row is not None
+        subject_id = subject_row[0]
         cursor.execute(
             """
             SELECT charge_id, error_code
@@ -314,13 +330,17 @@ def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
             """,
             (subject_id,),
         )
-        charge_id, error_code = cursor.fetchone()
+        charge_row = cursor.fetchone()
+        assert charge_row is not None
+        charge_id, error_code = charge_row
         assert error_code is None
         cursor.execute(
             "SELECT count(*) FROM bursar.usage_charge_payloads WHERE charge_id = %s",
             (charge_id,),
         )
-        assert cursor.fetchone()[0] == 0
+        payload_count = cursor.fetchone()
+        assert payload_count is not None
+        assert payload_count[0] == 0
         cursor.execute(
             """
             SELECT count(*)
@@ -333,7 +353,9 @@ def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
             """,
             (charge_id,),
         )
-        assert cursor.fetchone()[0] == 0
+        rollup_count = cursor.fetchone()
+        assert rollup_count is not None
+        assert rollup_count[0] == 0
         cursor.execute(
             """
             SELECT payload->'metadata'->>'trace_id', payload->'dimensions'
@@ -343,6 +365,7 @@ def test_clickhouse_usage_mode_keeps_only_receipt_and_outbox_payload(
             (charge_id,),
         )
         payload = cursor.fetchone()
+        assert payload is not None
         assert payload[0] == "trace-ch"
         assert "workspace" in payload[1]
 
@@ -362,13 +385,17 @@ def test_s3_billing_mode_keeps_envelope_only_in_outbox(
             )
             """
         )
-        result, event_id = cursor.fetchone()
+        event_row = cursor.fetchone()
+        assert event_row is not None
+        result, event_id = event_row
         assert result == "claimed"
         cursor.execute(
             "SELECT count(*) FROM bursar.billing_event_payloads WHERE event_id = %s",
             (event_id,),
         )
-        assert cursor.fetchone()[0] == 0
+        payload_count = cursor.fetchone()
+        assert payload_count is not None
+        assert payload_count[0] == 0
         cursor.execute(
             """
             SELECT payload->'envelope'->>'id'
@@ -377,7 +404,9 @@ def test_s3_billing_mode_keeps_envelope_only_in_outbox(
             """,
             (event_id,),
         )
-        assert cursor.fetchone()[0] == "evt-storage-s3-mode-1"
+        envelope_row = cursor.fetchone()
+        assert envelope_row is not None
+        assert envelope_row[0] == "evt-storage-s3-mode-1"
 
 
 def test_s3_runtime_archives_received_outbox_payload(

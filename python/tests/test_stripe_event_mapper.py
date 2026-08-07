@@ -10,6 +10,8 @@ import pytest
 from bursar.billing.types import BillingEventResult
 from bursar.providers.stripe.event_mapper import handle_stripe_billing_event
 
+STRIPE_EVENT_CREATED = 1_767_225_600
+
 
 @pytest.fixture
 def sink() -> MagicMock:
@@ -58,7 +60,16 @@ async def test_supported_stripe_routes_emit_canonical_events(
             retrieve_async=AsyncMock(return_value={"metadata": {"userId": "u1"}, "status": "active"})
         ),
     )
-    await handle_stripe_billing_event(event_type, f"evt_{event_type}", data, None, {}, sink, stripe)
+    await handle_stripe_billing_event(
+        event_type,
+        f"evt_{event_type}",
+        data,
+        None,
+        {},
+        sink,
+        stripe,
+        event_created=STRIPE_EVENT_CREATED,
+    )
     assert sink.ingest_billing_event.call_args is not None
     assert sink.ingest_billing_event.call_args.args[0].event_type == expected
 
@@ -82,7 +93,16 @@ async def test_checkout_subscription_emits_checkout_completed(sink: MagicMock) -
         "customer": "cus_1",
         "metadata": {"plan_slug": "pro"},
     }
-    await handle_stripe_billing_event("checkout.session.completed", "evt_checkout", data, "u1", {}, sink, stripe)
+    await handle_stripe_billing_event(
+        "checkout.session.completed",
+        "evt_checkout",
+        data,
+        "u1",
+        {},
+        sink,
+        stripe,
+        event_created=STRIPE_EVENT_CREATED,
+    )
     assert [call.args[0].event_type for call in sink.ingest_billing_event.call_args_list] == ["checkout.completed"]
 
 
@@ -119,6 +139,7 @@ async def test_payment_intent_event_uses_webhook_type_for_outcome(
         {},
         sink,
         SimpleNamespace(),
+        event_created=STRIPE_EVENT_CREATED,
     )
     event = sink.ingest_billing_event.call_args.args[0]
     assert event.event_type == expected_event
@@ -159,6 +180,7 @@ async def test_refund_event_preserves_lifecycle_state(
         {},
         sink,
         SimpleNamespace(),
+        event_created=STRIPE_EVENT_CREATED,
     )
     event = sink.ingest_billing_event.call_args.args[0]
     assert event.event_type == expected_event
@@ -168,5 +190,14 @@ async def test_refund_event_preserves_lifecycle_state(
 
 @pytest.mark.asyncio
 async def test_unknown_stripe_event_is_ignored(sink: MagicMock) -> None:
-    await handle_stripe_billing_event("charge.succeeded", "evt_unknown", {}, None, {}, sink, SimpleNamespace())
+    await handle_stripe_billing_event(
+        "charge.succeeded",
+        "evt_unknown",
+        {},
+        None,
+        {},
+        sink,
+        SimpleNamespace(),
+        event_created=STRIPE_EVENT_CREATED,
+    )
     sink.ingest_billing_event.assert_not_called()

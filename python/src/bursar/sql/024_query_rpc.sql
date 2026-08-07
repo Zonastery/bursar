@@ -566,7 +566,7 @@ CREATE FUNCTION bursar.get_billing_customer_by_provider(
     p_provider text,
     p_provider_customer_id text
 )
-RETURNS bursar.billing_customers
+RETURNS SETOF bursar.billing_customers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_customers
@@ -579,7 +579,7 @@ CREATE FUNCTION bursar.get_billing_subscription_by_provider(
     p_provider text,
     p_provider_subscription_id text
 )
-RETURNS bursar.billing_subscriptions
+RETURNS SETOF bursar.billing_subscriptions
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_subscriptions
@@ -604,7 +604,7 @@ CREATE FUNCTION bursar.get_billing_payment_by_provider(
     p_provider text,
     p_provider_payment_id text
 )
-RETURNS bursar.billing_payments
+RETURNS SETOF bursar.billing_payments
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_payments
@@ -616,7 +616,7 @@ $$;
 CREATE FUNCTION bursar.get_billing_preferences(
     p_subject_id uuid
 )
-RETURNS bursar.billing_preferences
+RETURNS SETOF bursar.billing_preferences
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_preferences
@@ -626,7 +626,7 @@ $$;
 CREATE FUNCTION bursar.get_auto_recharge_profile(
     p_subject_id uuid
 )
-RETURNS bursar.billing_auto_recharge_profiles
+RETURNS SETOF bursar.billing_auto_recharge_profiles
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_auto_recharge_profiles
@@ -637,7 +637,7 @@ $$;
 CREATE FUNCTION bursar.get_auto_recharge_attempt(
     p_attempt_id uuid
 )
-RETURNS bursar.billing_auto_recharge_attempts
+RETURNS SETOF bursar.billing_auto_recharge_attempts
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT *
  FROM bursar.billing_auto_recharge_attempts
@@ -649,7 +649,7 @@ CREATE FUNCTION bursar.resolve_catalog_offer(
     p_lookup_type text,
     p_lookup_value text
 )
-RETURNS bursar.catalog_offers
+RETURNS SETOF bursar.catalog_offers
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT o.*
  FROM bursar.catalog_provider_refs r
@@ -673,7 +673,7 @@ CREATE FUNCTION bursar.resolve_catalog_topup(
     p_lookup_type text,
     p_lookup_value text
 )
-RETURNS bursar.catalog_topups
+RETURNS SETOF bursar.catalog_topups
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
  SELECT t.*
  FROM bursar.catalog_provider_refs r
@@ -892,7 +892,7 @@ $$;
 CREATE FUNCTION bursar.resolve_active_plan(
     p_plan_reference text
 )
-RETURNS bursar.catalog_plans
+RETURNS SETOF bursar.catalog_plans
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1324,7 +1324,7 @@ CREATE FUNCTION bursar.get_checkout_intent(
     p_intent_id uuid,
     p_subject_id uuid
 )
-RETURNS bursar.billing_checkout_intents
+RETURNS SETOF bursar.billing_checkout_intents
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1340,7 +1340,7 @@ $$;
 CREATE FUNCTION bursar.resolve_active_catalog_offer(
     p_offer_key text
 )
-RETURNS bursar.catalog_offers
+RETURNS SETOF bursar.catalog_offers
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1390,7 +1390,7 @@ CREATE FUNCTION bursar.get_open_billing_subscription_change(
     p_provider text,
     p_provider_subscription_id text
 )
-RETURNS bursar.billing_subscription_changes
+RETURNS SETOF bursar.billing_subscription_changes
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1413,7 +1413,7 @@ $$;
 CREATE FUNCTION bursar.get_billing_subscription_change(
     p_change_id bigint
 )
-RETURNS bursar.billing_subscription_changes
+RETURNS SETOF bursar.billing_subscription_changes
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1427,7 +1427,7 @@ $$;
 CREATE FUNCTION bursar.get_billing_credit_grant_by_payment(
     p_payment_id uuid
 )
-RETURNS bursar.billing_credit_grants
+RETURNS SETOF bursar.billing_credit_grants
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
@@ -1512,7 +1512,7 @@ CREATE FUNCTION bursar.get_auto_recharge_attempt_by_provider(
     p_provider text,
     p_provider_attempt_id text
 )
-RETURNS bursar.billing_auto_recharge_attempts
+RETURNS SETOF bursar.billing_auto_recharge_attempts
 LANGUAGE sql
 STABLE
 SECURITY DEFINER

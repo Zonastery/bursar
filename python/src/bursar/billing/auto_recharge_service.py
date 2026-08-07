@@ -29,6 +29,12 @@ from bursar.config import (
     TopupOffer,
     load_config_from_dict,
 )
+from bursar.errors import (
+    AutoRechargeDisabledError,
+    AutoRechargeNotConfiguredError,
+    PaymentMethodRequiredError,
+    ProviderCapabilityNotSupportedError,
+)
 from bursar.providers.types import (
     PaymentMethodInfo,
     PaymentProvider,
@@ -59,7 +65,7 @@ class AutoRechargeProcessResult(BaseModel):
 class AutoRechargeBillingPort(Protocol):
     """Narrow billing capability required by ``AutoRechargeService``."""
 
-    def get_active_bursar_config(self) -> dict[str, object] | None: ...
+    def get_active_catalog_document(self) -> dict[str, object] | None: ...
 
     def resolve_topup(
         self,
@@ -130,7 +136,7 @@ class AutoRechargeService:
         self._billing = billing
 
     def _policy(self, provider: PaymentProvider) -> _ResolvedAutoRechargePolicy | None:
-        raw = self._billing.get_active_bursar_config()
+        raw = self._billing.get_active_catalog_document()
         if raw is None:
             return None
         config = load_config_from_dict(raw)
@@ -185,10 +191,11 @@ class AutoRechargeService:
         customer = self._billing.get_customer_by_user_id(user_id, provider.provider)
         if customer is None:
             return None
-        methods = await provider.list_payment_methods(customer.provider_customer_id)
-        method = await provider.get_default_payment_method(customer.provider_customer_id)
-        if method is None:
-            method = next((candidate for candidate in methods if candidate.is_default), None)
+        try:
+            methods = await provider.list_payment_methods(customer.provider_customer_id)
+        except NotImplementedError as error:
+            raise ProviderCapabilityNotSupportedError(provider.provider, "list_payment_methods") from error
+        method = next((candidate for candidate in methods if candidate.is_default), None)
         if method is None and len(methods) == 1:
             method = methods[0]
         return (customer.provider_customer_id, method) if method is not None else None
@@ -204,6 +211,14 @@ class AutoRechargeService:
         payment = await self._payment_method(user_id, provider)
         if payment is None:
             return None
+        return await self._preview(policy, payment, provider)
+
+    @staticmethod
+    async def _preview(
+        policy: _ResolvedAutoRechargePolicy,
+        payment: tuple[str, PaymentMethodInfo],
+        provider: PaymentProvider,
+    ) -> SavedPaymentChargeQuote | None:
         customer_id, method = payment
         try:
             return await provider.preview_saved_payment_charge(
@@ -229,7 +244,7 @@ class AutoRechargeService:
             return None
         profile = self._billing.get_auto_recharge_profile(user_id)
         payment = await self._payment_method(user_id, provider) if profile is not None and profile.enabled else None
-        quote = await self.quote(user_id, provider)
+        quote = await self._preview(policy, payment, provider) if payment is not None else None
         method = payment[1] if payment is not None else None
         return BillingAutoRechargeStatus(
             enabled=bool(profile and profile.enabled),
@@ -260,14 +275,13 @@ class AutoRechargeService:
         *,
         balance: Decimal | int,
         return_url: str | None,
-        consent_reference: str | None = None,
     ) -> BillingAutoRechargeStatus | None:
         policy = self._policy(provider)
         if policy is None:
-            raise ValueError("auto_recharge_not_configured")
+            raise AutoRechargeNotConfiguredError
         payment = await self._payment_method(user_id, provider)
         if payment is None:
-            raise ValueError("payment_method_required")
+            raise PaymentMethodRequiredError
 
         self._billing.upsert_auto_recharge_profile(
             BillingAutoRechargeProfile(
@@ -318,7 +332,7 @@ class AutoRechargeService:
     ) -> AutoRechargeProcessResult:
         profile = self._billing.get_auto_recharge_profile(user_id)
         if profile is None or not profile.enabled:
-            raise ValueError("auto_recharge_disabled")
+            raise AutoRechargeDisabledError
         self._billing.upsert_auto_recharge_profile(
             profile.model_copy(update={"state": "active", "armed": True}),
             reset_cooldown=True,
@@ -351,30 +365,53 @@ class AutoRechargeService:
         if payment is None:
             return AutoRechargeProcessResult(outcome="failed")
         customer_id, method = payment
+        idempotency_key = f"auto-recharge:{user_id}:{uuid4()}"
         attempt = self._billing.claim_auto_recharge_attempt(
             AutoRechargeAttemptClaim(
                 user_id=user_id,
-                idempotency_key=f"auto-recharge:{user_id}:{uuid4()}",
+                idempotency_key=idempotency_key,
             )
         )
         if attempt is None:
             return AutoRechargeProcessResult(outcome="limit_reached")
+        if attempt.idempotency_key != idempotency_key:
+            return AutoRechargeProcessResult(outcome="already_processing")
 
-        charge = await provider.charge_saved_payment_method(
-            SavedPaymentChargeParams(
-                customer_id=customer_id,
-                payment_method_id=method.id,
-                product_id=policy.product_id,
-                quantity=policy.quantity,
-                return_url=return_url,
-                idempotency_key=attempt.idempotency_key,
-                metadata={
-                    "auto_recharge_attempt_id": attempt.id,
-                    "purpose": "credit_topup",
-                    "userId": user_id,
-                },
+        try:
+            charge = await provider.charge_saved_payment_method(
+                SavedPaymentChargeParams(
+                    customer_id=customer_id,
+                    payment_method_id=method.id,
+                    product_id=policy.product_id,
+                    quantity=policy.quantity,
+                    return_url=return_url,
+                    idempotency_key=attempt.idempotency_key,
+                    metadata={
+                        "auto_recharge_attempt_id": attempt.id,
+                        "purpose": "credit_topup",
+                        "userId": user_id,
+                    },
+                )
             )
-        )
+        except NotImplementedError as error:
+            self._billing.update_auto_recharge_attempt(
+                AutoRechargeAttemptUpdate(
+                    id=attempt.id,
+                    state="failed",
+                    failure_code="provider_capability_not_supported",
+                )
+            )
+            raise ProviderCapabilityNotSupportedError(provider.provider, "charge_saved_payment_method") from error
+        except Exception as error:
+            self._billing.update_auto_recharge_attempt(
+                AutoRechargeAttemptUpdate(
+                    id=attempt.id,
+                    state="unknown",
+                    failure_code="provider_request_failed",
+                    failure_message=str(error),
+                )
+            )
+            raise
         if charge.status == "requires_customer_action":
             self._billing.update_auto_recharge_attempt(
                 AutoRechargeAttemptUpdate(

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
 const BalanceRowSchema = z
   .object({
@@ -75,10 +75,8 @@ export type GrantProgramAwardRow = z.infer<typeof GrantProgramAwardRowSchema>;
  *
  * All methods call Postgres RPCs via the callproc function.
  *
- * NOTE: getBalance returns null when no row exists (new user), while
- * addCredits and getAvailable always return a parsed object (empty object
- * fallback). This inconsistency is intentional: balance queries distinguish
- * "no data" from "zeroed data" whereas mutation reads always produce a result.
+ * Reads may return no row for a new account. Mutations require the database's
+ * single-row result envelope and fail closed when that contract is violated.
  */
 export class BalanceRepository {
   constructor(private callproc: CallProc) {}
@@ -120,16 +118,18 @@ export class BalanceRepository {
       expiresAt,
       "0",
     ]);
-    const row = (rows?.[0] ?? {}) as Record<string, unknown>;
+    const row = requireRow(rows, "BalanceRepository.addCredits") as Record<string, unknown>;
     const state =
       row.error_code == null
         ? ((await this.callproc("get_credit_state", [userId]))[0] as
-            Record<string, unknown> | undefined)
+            | Record<string, unknown>
+            | undefined)
         : undefined;
     const grant =
       row.error_code == null && decimalAmount.isPositive() && row.entry_id != null
         ? ((await this.callproc("get_credit_grant_details", [userId, row.entry_id]))[0] as
-            Record<string, unknown> | undefined)
+            | Record<string, unknown>
+            | undefined)
         : undefined;
     return safeParse(
       AddCreditsRowSchema,

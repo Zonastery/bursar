@@ -1313,18 +1313,16 @@ BEGIN
     END IF;
 
     IF v_plan_id IS NOT NULL AND v_allowance_reserved > 0 THEN
-        IF v_plan.credit_allowance_priority IS NOT NULL THEN
-            v_allowance_reserved := least(
-                v_allowance_reserved,
-                greatest(
-                    p_estimate - bursar.available_credit_before_priority(
-                        v_account,
-                        v_plan.credit_allowance_priority
-                    ),
-                    0
-                )
-            );
-        END IF;
+        v_allowance_reserved := least(
+            v_allowance_reserved,
+            greatest(
+                p_estimate - bursar.available_credit_before_priority(
+                    v_account,
+                    v_plan.credit_allowance_priority
+                ),
+                0
+            )
+        );
     END IF;
 
     IF v_plan_id IS NULL
@@ -1481,6 +1479,7 @@ CREATE FUNCTION bursar.settle_lease(
 )
 RETURNS TABLE (
     ledger_entry_id uuid,
+    charge_id uuid,
     settled_amount numeric,
     replayed boolean,
     error_code text
@@ -1537,7 +1536,7 @@ BEGIN
        )
     THEN
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, 'invalid_request';
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'invalid_request';
         RETURN;
     END IF;
 
@@ -1557,7 +1556,7 @@ BEGIN
 
     IF NOT FOUND THEN
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, 'missing_lease';
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'missing_lease';
         RETURN;
     END IF;
 
@@ -1588,13 +1587,14 @@ BEGIN
            IS DISTINCT FROM v_settlement_digest
         THEN
             RETURN QUERY
-            SELECT NULL::uuid, 0::numeric, false, 'settlement_conflict';
+            SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'settlement_conflict';
             RETURN;
         END IF;
 
         RETURN QUERY
         SELECT
             v_lease.ledger_entry_id,
+            v_lease.usage_charge_id,
             COALESCE(v_lease.settled_amount, 0),
             true,
             NULL::text;
@@ -1603,13 +1603,13 @@ BEGIN
 
     IF v_lease.status = 'released' THEN
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, 'released_lease';
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'released_lease';
         RETURN;
     END IF;
 
     IF v_lease.status = 'settling' THEN
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, 'lease_in_progress';
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'lease_in_progress';
         RETURN;
     END IF;
 
@@ -1638,7 +1638,7 @@ BEGIN
           AND status = 'active';
 
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, 'expired_lease';
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, 'expired_lease';
         RETURN;
     END IF;
 
@@ -1725,19 +1725,17 @@ BEGIN
     END IF;
 
     IF v_lease.plan_id IS NOT NULL AND v_allowance > 0 THEN
-        IF v_plan.credit_allowance_priority IS NOT NULL THEN
-            v_allowance := least(
-                v_allowance,
-                greatest(
-                    p_actual - bursar.available_credit_before_priority(
-                        v_account,
-                        v_plan.credit_allowance_priority,
-                        v_lease.id
-                    ),
-                    0
-                )
-            );
-        END IF;
+        v_allowance := least(
+            v_allowance,
+            greatest(
+                p_actual - bursar.available_credit_before_priority(
+                    v_account,
+                    v_plan.credit_allowance_priority,
+                    v_lease.id
+                ),
+                0
+            )
+        );
     END IF;
 
     v_quota_error := bursar.check_operation_quotas(
@@ -1752,7 +1750,7 @@ BEGIN
     );
     IF v_quota_error IS NOT NULL THEN
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, v_quota_error;
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, v_quota_error;
         RETURN;
     END IF;
 
@@ -1791,7 +1789,7 @@ BEGIN
         WHERE id = v_lease.id;
 
         RETURN QUERY
-        SELECT NULL::uuid, 0::numeric, false, v_post.error_code;
+        SELECT NULL::uuid, NULL::uuid, 0::numeric, false, v_post.error_code;
         RETURN;
     END IF;
 
@@ -1836,11 +1834,12 @@ BEGIN
         settled_amount = p_actual,
         settlement_idempotency_key = p_idempotency_key,
         settlement_request_digest = v_settlement_digest,
-        ledger_entry_id = v_ledger_entry
+        ledger_entry_id = v_ledger_entry,
+        usage_charge_id = v_post.charge_id
     WHERE id = v_lease.id;
 
     RETURN QUERY
-    SELECT v_ledger_entry, p_actual, false, NULL::text;
+    SELECT v_ledger_entry, v_post.charge_id, p_actual, false, NULL::text;
 END
 $$;
 

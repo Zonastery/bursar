@@ -101,7 +101,12 @@ function parseTiers(value: unknown): GraduatedTier[] {
     semanticError("graduated and volume tiers must end with exactly one open-ended tier");
   }
   const finite = tiers.flatMap((tier) => (tier.upTo == null ? [] : [tier.upTo]));
-  if (finite.some((bound, index) => index > 0 && bound.lte(finite[index - 1]))) {
+  if (
+    finite.some((bound, index) => {
+      const previous = finite[index - 1];
+      return index > 0 && previous !== undefined && bound.lte(previous);
+    })
+  ) {
     semanticError("graduated and volume tier bounds must be strictly increasing");
   }
   return tiers;
@@ -266,14 +271,22 @@ export function parsePricing(value: unknown): PricingConfig {
         validateCharge(parsedCharge, definition, operationKey);
         return {
           when: Object.fromEntries(
-            Object.entries(whenRaw).map(([key, item]) => [
-              key,
-              parseMatcher(
-                item,
-                definition.dimensions[key],
-                `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].when.${key}`,
-              ),
-            ]),
+            Object.entries(whenRaw).map(([key, item]) => {
+              const dimension = definition.dimensions[key];
+              if (!dimension) {
+                semanticError(
+                  `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}] matches undeclared dimension '${key}'`,
+                );
+              }
+              return [
+                key,
+                parseMatcher(
+                  item,
+                  dimension,
+                  `pricing.rate_cards.${cardKey}.operations.${operationKey}.rules[${index}].when.${key}`,
+                ),
+              ];
+            }),
           ),
           charge: parsedCharge,
         };
@@ -304,6 +317,7 @@ export function resolvesOperation(
   operation: string,
 ): boolean {
   const card = pricing.rateCards[cardKey];
+  if (!card) return false;
   return (
     Object.prototype.hasOwnProperty.call(card.operations, operation) ||
     (card.extends != null && resolvesOperation(pricing, card.extends, operation))

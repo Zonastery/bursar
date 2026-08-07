@@ -33,8 +33,8 @@ from bursar.credits.types.analytics import (
     UsageChargeStore,
 )
 from bursar.credits.types.catalog import (
-    BursarConfigHistoryItem,
-    BursarConfigResult,
+    CatalogRevision,
+    CatalogRevisionSummary,
     PlanAdmissionPolicy,
     PlanAllowancePolicy,
     PlanCreditPolicy,
@@ -86,8 +86,8 @@ __all__ = [
     "BucketBalance",
     "BucketBalancesResult",
     "BucketDefinition",
-    "BursarConfigHistoryItem",
-    "BursarConfigResult",
+    "CatalogRevisionSummary",
+    "CatalogRevision",
     "CanAffordResult",
     "CheckFeatureResult",
     "CreateTeamResult",

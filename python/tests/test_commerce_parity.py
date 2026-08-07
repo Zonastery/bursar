@@ -65,7 +65,7 @@ async def test_provider_registry_validates_default_and_deduplicates_loading() ->
     ):
         CommerceProviderRegistry(
             CommerceOptions(
-                providers={"mock": lambda context: MockPaymentProvider(context.event_sink)},
+                providers={"mock": lambda context: MockPaymentProvider(event_sink=context.event_sink)},
                 default_provider="missing",
             ),
             CommerceProviderFactoryContext(event_sink=object()),  # type: ignore[reportArgumentType]
@@ -77,7 +77,7 @@ async def test_provider_registry_validates_default_and_deduplicates_loading() ->
         nonlocal calls
         calls += 1
         await asyncio.sleep(0)
-        return MockPaymentProvider(_context.event_sink)
+        return MockPaymentProvider(event_sink=_context.event_sink)
 
     registry = CommerceProviderRegistry(
         CommerceOptions(providers={"mock": factory}),

@@ -30,6 +30,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'guides/credit-lifecycle',
         'guides/financial-safety',
+        'guides/google-adk',
         'guides/multitenancy',
         'guides/subscription-integration',
         'guides/storage-backends',

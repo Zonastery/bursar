@@ -28,9 +28,9 @@ function parseExpression(source: string, trailingTokenMessage: string): Node {
 
 /**
  * Validate that an expression is safe, syntactically valid, and refers only
- * to the optional set of known metric variables.
+ * to the supplied set of known metric variables.
  */
-export function validateExpression(expression: string, knownVariables?: Iterable<string>): void {
+export function validateExpression(expression: string, knownVariables: Iterable<string>): void {
   try {
     const node = parseExpression(expression, "unexpected token after expression: '{token}'");
     validateCalls(node);
@@ -40,11 +40,9 @@ export function validateExpression(expression: string, knownVariables?: Iterable
         "expression references no variables -- must use at least one metric",
       );
     }
-    if (knownVariables !== undefined) {
-      const known = knownVariables instanceof Set ? knownVariables : new Set(knownVariables);
-      for (const name of variables) {
-        if (!known.has(name)) throw new ExpressionError(`unknown variable: '${name}'`);
-      }
+    const known = knownVariables instanceof Set ? knownVariables : new Set(knownVariables);
+    for (const name of variables) {
+      if (!known.has(name)) throw new ExpressionError(`unknown variable: '${name}'`);
     }
   } catch (error) {
     if (error instanceof ExpressionError) throw error;

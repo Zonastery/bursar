@@ -20,12 +20,7 @@ import type {
   WebhookRequest,
   WebhookResult,
 } from "../src/providers/types.js";
-import {
-  BOOTSTRAP_SQL,
-  TEST_TENANT_ID,
-  applyMigrations,
-  truncateBursarTables,
-} from "./helpers/bootstrap.js";
+import { TEST_TENANT_ID, applyMigrations, truncateBursarTables } from "./helpers/bootstrap.js";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? inject("DATABASE_URL");
 
@@ -254,8 +249,8 @@ async function makeBursar(
   pool: pg.Pool,
   provider = new IntegrationProvider(),
 ): Promise<{ bursar: Bursar; billingStore: PostgresBillingStore; provider: IntegrationProvider }> {
-  const creditStore = new PostgresStore(DATABASE_URL!, TEST_TENANT_ID, pool);
-  const billingStore = new PostgresBillingStore(pool, TEST_TENANT_ID);
+  const creditStore = new PostgresStore({ postgres: pool, tenantId: TEST_TENANT_ID });
+  const billingStore = new PostgresBillingStore({ postgres: pool, tenantId: TEST_TENANT_ID });
   const bursar = new Bursar({
     creditStore,
     billingStore,
@@ -265,26 +260,16 @@ async function makeBursar(
       },
     },
   });
-  await bursar.credits.publishPricingFromDict(CONFIG);
+  await bursar.catalog.publishAndActivate(CONFIG);
   return { bursar, billingStore, provider };
 }
 
-describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
+describe.runIf(DATABASE_URL)("Commerce integration", () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: DATABASE_URL!, max: 1 });
-    await pool.query(BOOTSTRAP_SQL);
     await applyMigrations(pool);
-    await pool.query(`INSERT INTO auth.users (id) VALUES ($1), ($2), ($3) ON CONFLICT DO NOTHING`, [
-      USER_ID,
-      USER_ID2,
-      USER_ID3,
-    ]);
-    await pool.query(
-      `INSERT INTO public."user" (id) VALUES ($1), ($2), ($3) ON CONFLICT DO NOTHING`,
-      [USER_ID, USER_ID2, USER_ID3],
-    );
     await truncateBursarTables(pool);
   }, 60000);
 
@@ -325,6 +310,7 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
       payment: {
         providerPaymentId: "pay_commerce_topup_1",
         amountMinor: 500,
+        taxMinor: 0,
         currency: "USD",
         refs: { priceId: "price_topup_500" },
         purpose: "credit_topup",
@@ -379,6 +365,7 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
       accountId: USER_ID,
       offerKey: "starter_month",
     });
+    if (preview.unchanged) throw new Error("Expected a plan-change quote");
     expect(preview.scheduled).toBe(true);
     expect(preview.quoteFingerprint).toBeTruthy();
 
@@ -386,7 +373,7 @@ describe.runIf(DATABASE_URL)("Commerce integration (real Postgres 16)", () => {
       accountId: USER_ID,
       operationKey: "downgrade-1",
       offerKey: "starter_month",
-      quoteFingerprint: preview.quoteFingerprint!,
+      quoteFingerprint: preview.quoteFingerprint,
     });
     expect(confirmed.scheduled).toBe(true);
     expect(confirmed.effectiveAt).toBe("2026-09-01T00:00:00.000Z");

@@ -299,18 +299,16 @@ BEGIN
     END IF;
 
     IF v_has_assignment AND v_free > 0 THEN
-        IF v_assignment.credit_allowance_priority IS NOT NULL THEN
-            v_free := least(
-                v_free,
-                greatest(
-                    p_requested - bursar.available_credit_before_priority(
-                        v_account,
-                        v_assignment.credit_allowance_priority
-                    ),
-                    0
-                )
-            );
-        END IF;
+        v_free := least(
+            v_free,
+            greatest(
+                p_requested - bursar.available_credit_before_priority(
+                    v_account,
+                    v_assignment.credit_allowance_priority
+                ),
+                0
+            )
+        );
     END IF;
 
     IF v_free > 0 THEN

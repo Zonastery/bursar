@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import (
+    require_boolean_result,
+    require_mapping_row,
+    validate_non_empty,
+)
 from bursar.credits.postgres.repositories.schemas import BillingEventRow
+from bursar.errors import StoreError
 
 
 class BillingEventRepository:
     """Repository for billing event lifecycle operations.
 
     All methods call Postgres via raw SQL queries through the query function.
-    Returns None when the query returns no rows.
+    Mutation RPCs are fail-closed: a missing or malformed result raises
+    :class:`~bursar.errors.StoreError`.
     """
 
     def __init__(self, execute: DbQuery) -> None:
@@ -21,7 +27,7 @@ class BillingEventRepository:
         event_id: str,
         event_type: str,
         metadata: str,
-    ) -> BillingEventRow | None:
+    ) -> BillingEventRow:
         """Claim a billing event for processing (idempotent).
 
         Args:
@@ -31,7 +37,7 @@ class BillingEventRepository:
             metadata: JSON metadata string.
 
         Returns:
-            BillingEventRow if claimed successfully, None if already claimed.
+            The explicit lifecycle result returned by Postgres.
         """
         validate_non_empty(provider, "provider")
         validate_non_empty(event_id, "event_id")
@@ -39,19 +45,21 @@ class BillingEventRepository:
             "SELECT * FROM bursar.claim_billing_event(%s, %s, %s, %s::jsonb)",
             [provider, event_id, event_type, metadata],
         )
-        if not rows:
-            return None
-        row = rows[0]
-        if not isinstance(row, dict):
-            return None
-        return BillingEventRow.model_validate(
-            {
-                "event_id": row.get("event_id"),
-                "status": row.get("result", "retry"),
-                "claim_token": row.get("claim_token"),
-                "provider": provider,
-            }
-        )
+        row = require_mapping_row(rows, "BillingEventRepository.claim")
+        try:
+            return BillingEventRow.model_validate(
+                {
+                    "event_id": row.get("event_id"),
+                    "status": row.get("result"),
+                    "claim_token": row.get("claim_token"),
+                }
+            )
+        except ValueError as exc:
+            raise StoreError(
+                "BillingEventRepository.claim: result schema validation failed",
+                cause=exc,
+                indeterminate=True,
+            ) from exc
 
     def complete(self, provider: str, event_id: str, claim_token: str) -> bool:
         """Mark a billing event as completed.
@@ -64,7 +72,7 @@ class BillingEventRepository:
             "SELECT bursar.complete_billing_event(%s, %s, %s::uuid) AS completed",
             [provider, event_id, claim_token],
         )
-        return bool(rows and isinstance(rows[0], dict) and rows[0].get("completed") is True)
+        return require_boolean_result(rows, "completed", "BillingEventRepository.complete")
 
     def fail(self, provider: str, event_id: str, claim_token: str, error: str | None = None) -> bool:
         """Mark a billing event as failed.
@@ -77,4 +85,4 @@ class BillingEventRepository:
             "SELECT bursar.fail_billing_event(%s, %s, %s::uuid, %s) AS failed",
             [provider, event_id, claim_token, error],
         )
-        return bool(rows and isinstance(rows[0], dict) and rows[0].get("failed") is True)
+        return require_boolean_result(rows, "failed", "BillingEventRepository.fail")

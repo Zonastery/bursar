@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 
+from pydantic import ValidationError
+
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories.schemas import ActivePricingRow, BursarConfigHistoryItemRow
+from bursar.credits.postgres.repositories.schemas import CatalogRevisionRow, CatalogRevisionSummaryRow
+from bursar.errors import StoreError
 
 
-class PricingRepository:
+class CatalogRepository:
     def __init__(self, callproc: DbQuery) -> None:
         self._callproc = callproc
 
     @staticmethod
-    def _parse_revision(row: dict[str, object]) -> ActivePricingRow:
+    def _parse_revision(row: dict[str, object]) -> CatalogRevisionRow:
         parsed = dict(row)
         if parsed.get("id") is not None:
             parsed["id"] = str(parsed["id"])
@@ -22,9 +25,12 @@ class PricingRepository:
                 "active": parsed.get("status") == "active",
             }
         )
-        return ActivePricingRow.model_validate(parsed)
+        try:
+            return CatalogRevisionRow.model_validate(parsed)
+        except ValidationError as error:
+            raise StoreError("CatalogRepository returned an invalid catalog revision") from error
 
-    def get_active_pricing(self) -> ActivePricingRow | None:
+    def get_active_catalog(self) -> CatalogRevisionRow | None:
         rows = self._callproc("active_catalog_revision", []) or []
         if not rows or not isinstance(rows[0], dict):
             return None
@@ -33,25 +39,25 @@ class PricingRepository:
             return None
         return self._parse_revision(row)
 
-    def set_active_pricing(
+    def publish_and_activate_catalog(
         self,
         config: str,
         label: str | None,
         rollout: dict[str, object],
-    ) -> ActivePricingRow | None:
-        return self._publish_pricing(config, label, rollout, activate=True)
+    ) -> CatalogRevisionRow | None:
+        return self._publish_revision(config, label, rollout, activate=True)
 
-    def publish_pricing(self, config: str, label: str | None) -> ActivePricingRow | None:
-        return self._publish_pricing(config, label, {"plans": {}}, activate=False)
+    def publish_catalog_draft(self, config: str, label: str | None) -> CatalogRevisionRow | None:
+        return self._publish_revision(config, label, {"plans": {}}, activate=False)
 
-    def _publish_pricing(
+    def _publish_revision(
         self,
         config: str,
         label: str | None,
         rollout: dict[str, object],
         *,
         activate: bool,
-    ) -> ActivePricingRow | None:
+    ) -> CatalogRevisionRow | None:
         rows = (
             self._callproc(
                 "publish_and_activate_catalog",
@@ -61,17 +67,17 @@ class PricingRepository:
         )
         if not rows or not isinstance(rows[0], dict) or rows[0].get("revision_no") is None:
             return None
-        return self.get_bursar_config(int(rows[0]["revision_no"]))
+        return self.get_catalog_revision(int(rows[0]["revision_no"]))
 
-    def get_pricing_history(self) -> list[BursarConfigHistoryItemRow]:
+    def get_catalog_history(self) -> list[CatalogRevisionSummaryRow]:
         rows = self._callproc("list_catalog_revisions", [500]) or []
         return [
-            BursarConfigHistoryItemRow.model_validate(self._parse_revision(dict(row)).model_dump())
+            CatalogRevisionSummaryRow.model_validate(self._parse_revision(dict(row)).model_dump())
             for row in rows
             if isinstance(row, dict)
         ]
 
-    def get_bursar_config(self, version: int) -> ActivePricingRow | None:
+    def get_catalog_revision(self, version: int) -> CatalogRevisionRow | None:
         rows = self._callproc("catalog_revision_by_number", [version]) or []
         if not rows or not isinstance(rows[0], dict):
             return None
@@ -80,11 +86,11 @@ class PricingRepository:
             return None
         return self._parse_revision(row)
 
-    def activate_pricing(
+    def activate_catalog_revision(
         self,
         version: int,
         rollout: dict[str, object],
-    ) -> ActivePricingRow | None:
+    ) -> CatalogRevisionRow | None:
         rows = self._callproc("activate_catalog_revision", [version, rollout]) or []
         if not rows or not isinstance(rows[0], dict):
             return None

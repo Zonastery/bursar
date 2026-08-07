@@ -1,13 +1,30 @@
 import { z } from "zod";
 import { StoreError } from "../errors.js";
 
-/** Parse pg boolean values that may arrive as string/boolean/number. */
-export const pgBoolean = z.union([z.boolean(), z.string(), z.number()]).transform((v) => {
-  if (typeof v === "boolean") return v;
-  if (typeof v === "string") return v === "true" || v === "t" || v === "1";
-  if (typeof v === "number") return v !== 0;
-  return false;
-});
+/** PostgreSQL accepts any 128-bit UUID value, including non-RFC version bits. */
+export const postgresUuid = z
+  .string()
+  .regex(/^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/);
+
+/** Parse only PostgreSQL's documented boolean representations. */
+export const pgBoolean = z
+  .union([
+    z.boolean(),
+    z.literal("true"),
+    z.literal("false"),
+    z.literal("t"),
+    z.literal("f"),
+    z.literal("1"),
+    z.literal("0"),
+    z.literal(1),
+    z.literal(0),
+  ])
+  .transform((v) => {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") return v === "true" || v === "t" || v === "1";
+    if (typeof v === "number") return v !== 0;
+    return false;
+  });
 
 /** Unwrap a single-key JSONB result row. Matches Python _unwrap_jsonb behavior. */
 export function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
@@ -16,8 +33,9 @@ export function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
   if (row === null || typeof row !== "object" || Array.isArray(row)) return null;
   const r = row as Record<string, unknown>;
   const keys = Object.keys(r);
-  if (keys.length === 1) {
-    const v = r[keys[0]];
+  const key = keys[0];
+  if (keys.length === 1 && key !== undefined) {
+    const v = r[key];
     if (v === null) return null;
     if (typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
   }
@@ -25,13 +43,82 @@ export function unwrapJsonb(rows: unknown[]): Record<string, unknown> | null {
 }
 
 /** Parse a Zod schema, converting validation errors to StoreError. */
-export function safeParse<T>(schema: z.ZodType<T>, data: unknown, context: string): T {
+export function safeParse<T>(
+  schema: z.ZodType<T>,
+  data: unknown,
+  context: string,
+  options: { indeterminate?: boolean } = {},
+): T {
   try {
     return schema.parse(data);
   } catch (e) {
     throw new StoreError(
       `${context}: schema validation failed — ${e instanceof Error ? e.message : String(e)}`,
-      { cause: e, details: { context } },
+      {
+        cause: e,
+        details: { context },
+        indeterminate: options.indeterminate ?? false,
+      },
     );
   }
+}
+
+/** Require the single-row envelope promised by a scalar or mutation RPC. */
+export function requireRow(rows: readonly unknown[] | null | undefined, context: string): unknown {
+  if (rows?.length !== 1 || rows[0] == null) {
+    throw new StoreError(
+      `${context}: expected exactly one result row, received ${rows?.length ?? 0}`,
+      {
+        details: { context, rowCount: rows?.length ?? 0 },
+        indeterminate: true,
+      },
+    );
+  }
+  return rows[0];
+}
+
+/** Require a single object result from a scalar or mutation RPC. */
+export function requireRecordRow(
+  rows: readonly unknown[] | null | undefined,
+  context: string,
+): Record<string, unknown> {
+  const row = requireRow(rows, context);
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new StoreError(`${context}: expected an object result`, {
+      details: { context },
+      indeterminate: true,
+    });
+  }
+  return row as Record<string, unknown>;
+}
+
+/** Return an optional singleton query row and reject ambiguous/malformed results. */
+export function optionalRecordRow(
+  rows: readonly unknown[] | null | undefined,
+  context: string,
+): Record<string, unknown> | null {
+  if (!rows?.length) return null;
+  if (rows.length !== 1) {
+    throw new StoreError(`${context}: expected at most one result row, received ${rows.length}`, {
+      details: { context, rowCount: rows.length },
+    });
+  }
+  const row = rows[0];
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new StoreError(`${context}: expected an object result`, {
+      details: { context },
+    });
+  }
+  return row as Record<string, unknown>;
+}
+
+/** Require and validate one named field from a mutation result row. */
+export function requireResultField<T>(
+  rows: readonly unknown[] | null | undefined,
+  key: string,
+  schema: z.ZodType<T>,
+  context: string,
+): T {
+  const row = requireRecordRow(rows, context);
+  return safeParse(schema, row[key], `${context}.${key}`, { indeterminate: true });
 }

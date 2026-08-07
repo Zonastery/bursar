@@ -32,7 +32,6 @@ class S3BillingArchiveOptions(_S3Model):
     endpoint: str | None = None
     force_path_style: bool = False
     prefix: str = "bursar"
-    purge_postgres_payload: bool = True
 
 
 def _require_nonempty(value: str, name: str) -> str:
@@ -61,13 +60,8 @@ class S3BillingArchive:
         self._endpoint = _require_nonempty(options.endpoint, "S3 endpoint") if options.endpoint else None
         self._force_path_style = options.force_path_style
         self._prefix = options.prefix.strip("/")
-        self._purge_postgres_payload = options.purge_postgres_payload
         self._client: Any | None = None
         self._client_lock = threading.Lock()
-
-    @property
-    def purge_postgres_payload(self) -> bool:
-        return self._purge_postgres_payload
 
     def archive(self, event: BillingEventPayloadExport) -> BillingPayloadArchiveResult:
         if event.envelope is None:

@@ -1,4 +1,6 @@
+import { StoreError } from "../../../errors.js";
 import type { QueryFn } from "../../../shared/postgres-types.js";
+import { postgresUuid, requireResultField } from "../../../shared/postgres-validation.js";
 
 export class BillingRefundRepository {
   constructor(private query: QueryFn) {}
@@ -6,8 +8,8 @@ export class BillingRefundRepository {
   async upsert(
     provider: string,
     providerRefundId: string,
-    providerPaymentId: string | null,
-    userId: string | null,
+    providerPaymentId: string,
+    userId: string,
     amountMinor: number,
     currency: string,
     reason: string | null,
@@ -15,17 +17,22 @@ export class BillingRefundRepository {
     status: string,
     providerUpdatedAt: string,
   ): Promise<string> {
-    if (!providerPaymentId) throw new Error("refund requires providerPaymentId");
+    if (!providerPaymentId) throw new TypeError("refund requires providerPaymentId");
     const payments = await this.query(
       "SELECT * FROM bursar.get_billing_payment_by_provider($1, $2)",
       [provider, providerPaymentId],
     );
     const paymentId = (payments[0] as Record<string, unknown> | undefined)?.id;
-    if (!paymentId) throw new Error("refund payment not found");
+    if (!paymentId) {
+      throw new StoreError("refund payment not found", {
+        retryable: true,
+        details: { provider, providerPaymentId },
+      });
+    }
     const rows = await this.query(
       `SELECT bursar.upsert_billing_refund(
          $1::uuid, $2, $3, $4, $5, $6, $7::uuid, $8::char(3), $9::jsonb
-       )`,
+       ) AS id`,
       [
         paymentId,
         providerRefundId,
@@ -38,8 +45,6 @@ export class BillingRefundRepository {
         metadata ?? "{}",
       ],
     );
-    const refundId = (rows[0] as Record<string, unknown> | undefined)?.upsert_billing_refund;
-    if (!refundId) throw new Error("billing refund upsert returned no ID");
-    return String(refundId);
+    return requireResultField(rows, "id", postgresUuid, "BillingRefundRepository.upsert");
   }
 }

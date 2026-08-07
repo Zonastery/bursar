@@ -10,13 +10,17 @@ const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 class PostgresStore extends BasePostgresStore {
   constructor(databaseUrl: string, poolOrCtor?: PgPool | PgPoolConstructor) {
-    super(databaseUrl, TEST_TENANT_ID, poolOrCtor);
+    super({
+      postgres: typeof poolOrCtor === "object" ? poolOrCtor : databaseUrl,
+      tenantId: TEST_TENANT_ID,
+      poolConstructor: typeof poolOrCtor === "function" ? poolOrCtor : undefined,
+    });
   }
 }
 
 class PostgresBillingStore extends BasePostgresBillingStore {
   constructor(poolOrUrl: import("pg").Pool | string) {
-    super(poolOrUrl, TEST_TENANT_ID);
+    super({ postgres: poolOrUrl, tenantId: TEST_TENANT_ID });
   }
 }
 
@@ -53,6 +57,7 @@ function makeRecordingPool(rows: unknown[]): {
       text === "BEGIN" ||
       text === "COMMIT" ||
       text === "ROLLBACK" ||
+      text.startsWith("SET LOCAL ROLE") ||
       text.startsWith("SELECT set_config(")
     ) {
       return Promise.resolve({ rows: [] });
@@ -105,6 +110,10 @@ describe("PostgresStore", () => {
           plan_key: "pro",
           credit_allowance_amount: "100",
           credit_allowance_priority: "20",
+          credit_allowance_reset_unit: "month",
+          credit_allowance_reset_count: 1,
+          credit_allowance_reset_anchor: "calendar",
+          credit_allowance_reset_timezone: "UTC",
         },
       ]),
     );
@@ -115,11 +124,11 @@ describe("PostgresStore", () => {
     expect(result.allowance?.priority).toBe(20);
   });
 
-  it("addCredits returns default Decimals for empty results", async () => {
+  it("addCredits fails closed for an empty mutation result", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    const result = await store.addCredits("user-1", D(100));
-    expect(result.entryId).toBe("");
-    expect(result.newBalance.toString()).toBe("0");
+    await expect(store.addCredits("user-1", D(100))).rejects.toThrow(
+      /expected exactly one result row/,
+    );
   });
 
   it("addCredits parses row result and sends amount as a decimal string", async () => {
@@ -136,8 +145,8 @@ describe("PostgresStore", () => {
     expect(result.entryId).toBe("tx-1");
     expect(result.newBalance.toString()).toBe("200");
     // amount param serialized as a decimal string (no binary float).
-    expect(calls[0].text).toContain("post_credit");
-    expect(calls[0].params[2]).toBe("100.5");
+    expect(calls[0]!.text).toContain("post_credit");
+    expect(calls[0]!.params[2]!).toBe("100.5");
   });
 
   it("executes application-driven grant programs and maps every award", async () => {
@@ -173,8 +182,8 @@ describe("PostgresStore", () => {
       metadata: { campaign: "summer" },
     });
 
-    expect(calls[0].text).toContain("execute_grant_program");
-    expect(calls[0].params).toEqual([
+    expect(calls[0]!.text).toContain("execute_grant_program");
+    expect(calls[0]!.params).toEqual([
       "referral_completed",
       "referral_bonus",
       "user-1",
@@ -184,7 +193,7 @@ describe("PostgresStore", () => {
       JSON.stringify({ campaign: "summer" }),
     ]);
     expect(result).toHaveLength(2);
-    expect(result[0]).toMatchObject({
+    expect(result[0]!).toMatchObject({
       grantEventId: "event-1",
       recipientSubjectId: "user-1",
       replayed: false,
@@ -209,8 +218,8 @@ describe("PostgresStore", () => {
       planKey: "pro",
       rateCard: "premium",
     });
-    expect(calls[0].text).toContain("get_credit_lease_pricing_context");
-    expect(calls[0].params).toEqual(["user-1", "lease-1"]);
+    expect(calls[0]!.text).toContain("get_credit_lease_pricing_context");
+    expect(calls[0]!.params).toEqual(["user-1", "lease-1"]);
   });
 
   it("expires a bounded lease batch", async () => {
@@ -218,8 +227,8 @@ describe("PostgresStore", () => {
     const store = new PostgresStore("postgresql://localhost/db", ctor);
 
     await expect(store.expireLeases(25)).resolves.toBe(3);
-    expect(calls[0].text).toContain("expire_leases");
-    expect(calls[0].params).toEqual([25]);
+    expect(calls[0]!.text).toContain("expire_leases");
+    expect(calls[0]!.params).toEqual([25]);
     await expect(store.expireLeases(0)).rejects.toThrow(
       "lease expiry limit must be an integer between 1 and 1000",
     );
@@ -230,8 +239,8 @@ describe("PostgresStore", () => {
     const store = new PostgresStore("postgresql://localhost/db", ctor);
 
     await expect(store.removeTeamMember("team-1", "user-1")).resolves.toBe(true);
-    expect(calls[0].text).toContain("remove_team_member");
-    expect(calls[0].params).toEqual(["team-1", "user-1"]);
+    expect(calls[0]!.text).toContain("remove_team_member");
+    expect(calls[0]!.params).toEqual(["team-1", "user-1"]);
   });
 
   // ── Credit tiers ─────────────────────────────────────────────────────
@@ -247,9 +256,9 @@ describe("PostgresStore", () => {
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
       const result = await store.addCredits("user-1", D(20), "adjustment", null, null, "gifted");
-      expect(calls[0].text).toContain("post_credit");
-      expect(calls[0].params.slice(0, 4)).toEqual(["user-1", "grant", "20", "adjustment"]);
-      expect(calls[0].params[6]).toBe("gifted");
+      expect(calls[0]!.text).toContain("post_credit");
+      expect(calls[0]!.params.slice(0, 4)).toEqual(["user-1", "grant", "20", "adjustment"]);
+      expect(calls[0]!.params[6]!).toBe("gifted");
       expect(result.bucket).toBe("gifted");
     });
 
@@ -264,7 +273,7 @@ describe("PostgresStore", () => {
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
       const result = await store.addCredits("user-1", D(10));
-      expect(calls[0].params[6]).toBeNull();
+      expect(calls[0]!.params[6]!).toBeNull();
       // Row omitted `tier` entirely (e.g. a no-tiers-configured deployment) —
       // the store falls back to "default" rather than surfacing `undefined`.
       expect(result.bucket).toBe("default");
@@ -275,6 +284,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: "usage-1",
             ledger_entry_id: "tx-1",
             charged: "15.0000",
             allowance_covered: "0.0000",
@@ -287,8 +297,8 @@ describe("PostgresStore", () => {
       const result = await store.deductWithAllowance("user-1", D(15));
       expect(result.bucketBreakdown).not.toBeNull();
       expect(result.bucketBreakdown!.gifted).toBeInstanceOf(Decimal);
-      expect(result.bucketBreakdown!.gifted.toString()).toBe("10");
-      expect(result.bucketBreakdown!.purchased.toString()).toBe("5");
+      expect(result.bucketBreakdown!.gifted?.toString()).toBe("10");
+      expect(result.bucketBreakdown!.purchased?.toString()).toBe("5");
     });
 
     it("addCredits surfaces the post_credit error envelope", async () => {
@@ -306,6 +316,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: "usage-2",
             ledger_entry_id: "tx-1",
             charged: "15.0000",
             allowance_covered: "0.0000",
@@ -332,7 +343,7 @@ describe("PostgresStore", () => {
       const result = await store.sweepExpiredCredits();
       expect(result.expiredCount).toBe(2);
       expect(result.expiredAmount.eq("12.5")).toBe(true);
-      expect(result.expiredByBucket?.gifted.eq("12.5")).toBe(true);
+      expect(result.expiredByBucket?.gifted?.eq("12.5")).toBe(true);
       expect(result.dryRun).toBe(false);
     });
 
@@ -353,14 +364,14 @@ describe("PostgresStore", () => {
       const result = await store.getBucketBalances("user-1");
       expect(result.userId).toBe("user-1");
       expect(result.buckets).toHaveLength(2);
-      expect(result.buckets[0]).toMatchObject({
+      expect(result.buckets[0]!).toMatchObject({
         bucketKey: "gifted",
         label: "",
         priority: 0,
         expires: false,
       });
-      expect(result.buckets[0].balance.toString()).toBe("20");
-      expect(result.buckets[1].balance.toString()).toBe("10");
+      expect(result.buckets[0]!.balance.toString()).toBe("20");
+      expect(result.buckets[1]!.balance.toString()).toBe("10");
       expect(result.totalBalance).toBeInstanceOf(Decimal);
       expect(result.totalBalance.toString()).toBe("30");
     });
@@ -378,6 +389,7 @@ describe("PostgresStore", () => {
     it("calls charge_usage_for_operation with the normalized contract", async () => {
       const { ctor, calls } = makeRecordingPool([
         {
+          charge_id: "usage-3",
           ledger_entry_id: "tx-1",
           charged: "2.5000",
           allowance_covered: "0.0000",
@@ -395,8 +407,8 @@ describe("PostgresStore", () => {
         dimensions: { model: "gpt-4", region: "us-east" },
         metadata: { foo: "bar" },
       });
-      expect(calls[0].text).toContain("charge_usage_for_operation");
-      expect(calls[0].params).toEqual([
+      expect(calls[0]!.text).toContain("charge_usage_for_operation");
+      expect(calls[0]!.params).toEqual([
         "user-1",
         "completion",
         "2.5",
@@ -420,6 +432,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: "usage-4",
             ledger_entry_id: "tx-2",
             charged: "15.0000",
             allowance_covered: "10.0000",
@@ -457,6 +470,7 @@ describe("PostgresStore", () => {
         "postgresql://localhost/db",
         makeMockPool([
           {
+            charge_id: "usage-replay",
             ledger_entry_id: "tx-orig",
             charged: "10.0000",
             allowance_covered: "0.0000",
@@ -491,8 +505,8 @@ describe("PostgresStore", () => {
         metadata: { workflowStep: "outline" },
       });
 
-      expect(calls[0].text).toContain("record_usage");
-      expect(calls[0].params).toEqual([
+      expect(calls[0]!.text).toContain("record_usage");
+      expect(calls[0]!.params).toEqual([
         "user-1",
         "roadmap_generation",
         "12.5",
@@ -516,12 +530,8 @@ describe("PostgresStore", () => {
     it("fails closed when the RPC returns no result envelope", async () => {
       const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
 
-      await expect(store.recordUsage("user-1", "roadmap_generation", D(12))).resolves.toMatchObject(
-        {
-          usageId: "",
-          requested: D(0),
-          error: "no result",
-        },
+      await expect(store.recordUsage("user-1", "roadmap_generation", D(12))).rejects.toThrow(
+        /expected exactly one result row/,
       );
     });
   });
@@ -538,7 +548,7 @@ describe("PostgresStore", () => {
       );
       const rows = await store.spendByUser(new Date(), new Date());
       expect(rows).toHaveLength(3);
-      expect(rows[2].totalSpend.toString()).toBe("30");
+      expect(rows[2]!.totalSpend.toString()).toBe("30");
     });
 
     it("normalized bucket rows are not mistaken for scalar RPC results", async () => {
@@ -582,8 +592,8 @@ describe("PostgresStore", () => {
       includeRecordOnly: false,
     });
 
-    expect(calls[0].text).toContain("list_usage_charges");
-    expect(calls[0].params).toEqual([
+    expect(calls[0]!.text).toContain("list_usage_charges");
+    expect(calls[0]!.params).toEqual([
       "user-1",
       eventAt.toISOString(),
       "usage-cursor",
@@ -593,7 +603,7 @@ describe("PostgresStore", () => {
       false,
     ]);
     expect(page.nextCursor).toBeNull();
-    expect(page.items[0]).toMatchObject({
+    expect(page.items[0]!).toMatchObject({
       usageId: "usage-1",
       operation: "completion",
       billingDisposition: "billable",
@@ -604,9 +614,9 @@ describe("PostgresStore", () => {
     expect(page.items[0]?.allowanceCovered.toString()).toBe("7.5");
   });
 
-  it("getActivePricing returns null for empty results", async () => {
+  it("getActiveCatalog returns null for empty results", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    const result = await store.getActivePricing();
+    const result = await store.getActiveCatalog();
     expect(result).toBeNull();
   });
 
@@ -628,10 +638,11 @@ describe("PostgresStore", () => {
           revision_no: 1,
           source_document: config,
           status: "active",
+          created_at: "2026-01-01T00:00:00.000Z",
         },
       ]),
     );
-    const result = await store.getActivePricing();
+    const result = await store.getActiveCatalog();
     expect(result?.config).toEqual(config);
   });
 
@@ -639,10 +650,17 @@ describe("PostgresStore", () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
         {
-          id: "pay_1",
+          id: "00000000-0000-0000-0000-000000000010",
+          provider: "stripe",
+          provider_payment_id: "pay_1",
+          provider_invoice_id: null,
+          subject_id: "00000000-0000-0000-0000-000000000001",
           purpose: "credit_topup",
           amount_minor: 1000,
+          tax_minor: 0,
           currency: "USD",
+          status: "succeeded",
+          provider_updated_at: "2026-08-01T00:00:00.000Z",
           metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
         },
       ],
@@ -656,6 +674,71 @@ describe("PostgresStore", () => {
     await expect(store.getBillingPayment("stripe", "pay_1")).resolves.toMatchObject({
       purpose: "credit_topup",
       metadata: { credits_per_unit: 1000, user_defined_key: "unchanged" },
+    });
+  });
+
+  it("maps billing credit RPC rows to the public typed result", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          ledger_entry_id: "00000000-0000-0000-0000-000000000020",
+          balance_after: "123.4500",
+          replayed: "t",
+          error_code: null,
+        },
+      ],
+    });
+    const pool = {
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+    const store = new PostgresBillingStore(pool);
+
+    const result = await store.grantBillingCredit(
+      "00000000-0000-0000-0000-000000000010",
+      "billing:test:topup",
+    );
+
+    expect(result).toMatchObject({
+      ledgerEntryId: "00000000-0000-0000-0000-000000000020",
+      replayed: true,
+      errorCode: null,
+    });
+    expect(result.balanceAfter).toBeInstanceOf(Decimal);
+    expect(result.balanceAfter?.toString()).toBe("123.45");
+  });
+
+  it("preserves billing credit RPC error envelopes", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          ledger_entry_id: null,
+          balance_after: null,
+          replayed: false,
+          error_code: "grant_not_posted",
+        },
+      ],
+    });
+    const pool = {
+      query,
+      connect: vi.fn().mockResolvedValue(mockTransactionClient(query)),
+      end: vi.fn().mockResolvedValue(undefined),
+    } as unknown as import("pg").Pool;
+    const store = new PostgresBillingStore(pool);
+
+    await expect(
+      store.postBillingRefund(
+        "00000000-0000-0000-0000-000000000030",
+        "00000000-0000-0000-0000-000000000010",
+        500,
+        "billing:test:refund",
+      ),
+    ).resolves.toEqual({
+      ledgerEntryId: null,
+      balanceAfter: null,
+      replayed: false,
+      errorCode: "grant_not_posted",
     });
   });
 
@@ -719,11 +802,12 @@ describe("PostgresStore", () => {
         });
       }
       if (text.includes("get_catalog_offer_context")) {
+        if (!params) throw new Error("Expected catalog-offer query parameters");
         return Promise.resolve({
           rows: [
             {
               side: "from",
-              offer_id: params?.[0],
+              offer_id: params[0]!,
               offer_key: "monk_monthly",
               plan_id: "plan-old",
               plan_key: "monk",
@@ -732,7 +816,7 @@ describe("PostgresStore", () => {
             },
             {
               side: "to",
-              offer_id: params?.[2],
+              offer_id: params[2]!,
               offer_key: "sage_yearly",
               plan_id: "plan-new",
               plan_key: "sage",
@@ -774,15 +858,16 @@ describe("PostgresStore", () => {
     });
   });
 
-  it("setActivePricing returns empty id for empty results", async () => {
+  it("publishAndActivateCatalog rejects an empty database result", async () => {
     const store = new PostgresStore("postgresql://localhost/db", makeMockPool([]));
-    const result = await store.setActivePricing({
-      version: 1,
-      credits: {
-        accounting: { unit: "credit", scale: 6, rounding: "half_up" },
-      },
-    });
-    expect(result).toBe("");
+    await expect(
+      store.publishAndActivateCatalog({
+        version: 1,
+        credits: {
+          accounting: { unit: "credit", scale: 6, rounding: "half_up" },
+        },
+      }),
+    ).rejects.toThrow(/schema validation failed/);
   });
 
   it("checkFeature treats numeric 0 as present (M6)", async () => {
@@ -847,9 +932,9 @@ describe("PostgresStore", () => {
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     await store.addCredits("user-1", D("0.0001"), "purchase");
-    expect(calls[0].text).toContain("post_credit");
+    expect(calls[0]!.text).toContain("post_credit");
     // Must arrive as the string "0.0001", not a binary float like 0.00010000000000000002.
-    expect(calls[0].params[2]).toBe("0.0001");
+    expect(calls[0]!.params[2]!).toBe("0.0001");
   });
 
   // PG4 — expiresAt serialized as ISO string, not a Date object
@@ -866,11 +951,11 @@ describe("PostgresStore", () => {
     const store = new PostgresStore("postgresql://localhost/db", ctor);
     const expiresAt = new Date("2024-01-15T00:00:00.000Z");
     await store.addCredits("user-1", D(50), "purchase", null, expiresAt);
-    // params[5] is p_request; p_expires_at is also passed explicitly at params[8].
-    const meta = JSON.parse(calls[0].params[5] as string) as Record<string, unknown>;
+    // params[5]! is p_request; p_expires_at is also passed explicitly at params[8]!.
+    const meta = JSON.parse(calls[0]!.params[5]! as string) as Record<string, unknown>;
     expect(typeof meta.expires_at).toBe("string");
     expect(meta.expires_at).toBe("2024-01-15T00:00:00.000Z");
-    expect(calls[0].params[8]).toBe("2024-01-15T00:00:00.000Z");
+    expect(calls[0]!.params[8]!).toBe("2024-01-15T00:00:00.000Z");
   });
 
   // PG5 — Unknown RPC error code → surfaces as result.error (not thrown, not silent ok)

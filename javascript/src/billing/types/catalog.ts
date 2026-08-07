@@ -1,51 +1,32 @@
-import type { BillingOfferInterval, ProviderRef, SubscriptionGrant } from "./common.js";
+import type Decimal from "decimal.js";
 
 export interface BillingGrantResult {
-  mode?: string;
-  credits?: number | null;
-  bucket?: string;
-  replacePrior?: boolean;
+  mode: "cycle_grant";
+  credits: Decimal;
+  bucket: string;
+  replacePrior: boolean;
 }
 
 export interface BillingOfferResult {
   offerId: string;
   offerKey: string;
-  planId?: string | null;
-  plan?: string | null;
-  interval?: string;
-  intervalCount?: number;
-  grant?: BillingGrantResult;
+  planId: string;
+  plan: string;
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
+  grant: BillingGrantResult | null;
 }
 
 export interface BillingTopupResult {
   topupId: string;
   topupKey: string;
-  creditsPerUnit?: number;
-  depositTo?: string;
-  amountMinor?: number;
-  currency?: string;
-  minQuantity?: number;
-  maxQuantity?: number;
-  defaultQuantity?: number;
-  minAmountMinor?: number;
-  maxAmountMinor?: number;
-}
-
-export interface BillingOffer {
-  plan: string;
-  interval?: BillingOfferInterval;
-  intervalCount?: number;
-  grant?: SubscriptionGrant;
-  providers?: Record<string, ProviderRef>;
-  validFrom?: string | null;
-  validTo?: string | null;
-}
-
-export interface BillingCreditTopup {
+  creditsPerUnit: Decimal;
   depositTo: string;
-  creditsPerUnit?: number;
-  minAmountMinor?: number;
-  maxAmountMinor?: number;
-  taxBehavior?: "exclude_tax" | "include_tax";
-  providers?: Record<string, ProviderRef>;
+  amountMinor: number;
+  currency: string;
+  minQuantity: number;
+  maxQuantity: number;
+  defaultQuantity: number;
+  minAmountMinor: number;
+  maxAmountMinor: number;
 }

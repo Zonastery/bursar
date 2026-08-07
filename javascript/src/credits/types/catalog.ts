@@ -1,12 +1,12 @@
 import type { Decimal } from "decimal.js";
 
-export interface BursarConfigResult {
+export interface CatalogRevision {
   id: string;
   config: Record<string, unknown>;
   version: number;
 }
 
-export interface BursarConfigHistoryItem {
+export interface CatalogRevisionSummary {
   id: string;
   version: number;
   label: string | null;
@@ -15,13 +15,12 @@ export interface BursarConfigHistoryItem {
 }
 
 export interface PlanAllowancePolicy {
-  amount: Decimal | null;
-  /** Shared with bucket priorities; null means legacy allowance-first ordering. */
-  priority?: number | null;
-  resetUnit: string | null;
-  resetCount: number | null;
-  resetAnchor: string | null;
-  resetTimezone: string | null;
+  amount: Decimal;
+  priority: number;
+  resetUnit: string;
+  resetCount: number;
+  resetAnchor: string;
+  resetTimezone: string;
 }
 
 export interface PlanCreditPolicy {

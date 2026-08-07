@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, SkipValidation
+from pydantic import BaseModel
 
 from bursar.billing.auto_recharge_service import AutoRechargeService
 from bursar.billing.billing_service import BillingService as BillingEventService
@@ -25,7 +25,7 @@ from bursar.billing.types import (
     BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
-    BillingInvoiceInfo,
+    BillingInvoiceRecord,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
@@ -34,14 +34,17 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
 )
+from bursar.catalog import PublicCatalog, project_public_catalog
 from bursar.commerce.errors import CommerceNotConfiguredError
 from bursar.commerce.service import CommerceService
 from bursar.commerce.types import AutoRechargeInput, CommerceOptions
+from bursar.config import CatalogRollout, ParsedBursarConfig, load_config_from_dict
 from bursar.credits.events import CreditEventEmitter
 from bursar.credits.service import CreditsService as CreditsServiceImpl
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.store import CreditStore
-from bursar.errors import ConfigError, PricingNotLoadedError
+from bursar.credits.types import CatalogRevision, CreditMetadata, GrantProgramAwardResult
+from bursar.errors import CapabilityNotConfiguredError, CatalogNotLoadedError, ConfigError
 from bursar.retry import retry_bursar_operation
 
 
@@ -78,9 +81,9 @@ class BillingCapability(BillingEventSink, Protocol):
 
     def get_user_preferences(self, user_id: str) -> BillingPreferences | None: ...
 
-    def get_active_bursar_config(self) -> dict[str, Any] | None: ...
+    def get_active_catalog_document(self) -> dict[str, Any] | None: ...
 
-    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]: ...
+    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceRecord]: ...
 
     def create_billing_subscription_change(
         self,
@@ -174,55 +177,65 @@ class BillingCapability(BillingEventSink, Protocol):
     def invalidate_offer_cache(self) -> None: ...
 
 
-BillingService = BillingCapability
-CreditsService = CreditsServiceImpl
-
-
 class CatalogService:
     """Catalog operations; billing never owns configuration writes."""
 
-    def __init__(self, credits: CreditsService) -> None:
+    def __init__(self, credits: CreditsServiceImpl) -> None:
         self._credits = credits
 
+    def get_active(self) -> CatalogRevision | None:
+        """Return the active persisted catalog revision, if one exists."""
+        return self._credits.get_active_catalog()
+
     @property
-    def active(self):
-        return self._credits.get_active_pricing()
+    def is_loaded(self) -> bool:
+        """Whether this process currently has a pricing engine loaded."""
+        return self._credits.pricing_engine is not None
 
-    def get_config(self):
-        from bursar.config import load_config_from_dict
+    def load(self) -> None:
+        """Load the active persisted catalog into this process."""
+        self._credits.load_catalog_from_store()
 
-        active = self.active
+    def refresh(self) -> None:
+        """Block until a stale in-process catalog has been refreshed."""
+        self._credits.refresh_catalog_if_stale()
+
+    def invalidate(self) -> None:
+        """Force the next refresh to reload the active catalog."""
+        self._credits.invalidate_catalog()
+
+    def get_config(self) -> ParsedBursarConfig:
+        active = self.get_active()
         if active is None:
-            raise PricingNotLoadedError("No active Bursar catalog is available")
+            raise CatalogNotLoadedError("No active Bursar catalog is available")
         return load_config_from_dict(active.config)
 
-    def public_view(self) -> dict[str, Any]:
-        from bursar.catalog import project_public_catalog
-
+    def public_view(self) -> PublicCatalog:
         return project_public_catalog(self.get_config())
 
-    def publish_draft(self, config: dict, label: str | None = None) -> str:
-        return self._credits.publish_pricing_draft(config, label)
+    def publish_draft(self, config: dict[str, Any], label: str | None = None) -> str:
+        return self._credits.publish_catalog_draft(config, label)
 
     def activate(
         self,
         version: int,
-        rollout: dict[str, Any] | None = None,
+        rollout: CatalogRollout | dict[str, Any] | None = None,
     ) -> str:
         if rollout is None:
-            return self._credits.activate_pricing(version)
-        return self._credits.activate_pricing(version, rollout)
+            return self._credits.activate_catalog_revision(version)
+        rollout_data = rollout.model_dump(mode="json") if isinstance(rollout, CatalogRollout) else rollout
+        return self._credits.activate_catalog_revision(version, rollout_data)
 
     def publish_and_activate(
         self,
-        config: dict,
+        config: dict[str, Any],
         label: str | None = None,
-        rollout: dict[str, Any] | None = None,
-    ) -> None:
+        rollout: CatalogRollout | dict[str, Any] | None = None,
+    ) -> str:
         if rollout is None:
-            self._credits.publish_pricing(config, label)
-        else:
-            self._credits.publish_pricing(config, label, rollout)
+            return self._credits.publish_and_activate_catalog(config, label)
+        rollout_data = rollout.model_dump(mode="json") if isinstance(rollout, CatalogRollout) else rollout
+        return self._credits.publish_and_activate_catalog(config, label, rollout_data)
 
     def set_revision_pin(self, user_id: str, pinned: bool) -> bool:
         """Pin or unpin one current assignment from automatic catalog rollout."""
@@ -236,7 +249,7 @@ class CatalogService:
 class AccountService:
     """Generic financial lifecycle operations for SaaS accounts."""
 
-    def __init__(self, credits: CreditsService, catalog: CatalogService) -> None:
+    def __init__(self, credits: CreditsServiceImpl, catalog: CatalogService) -> None:
         self._credits = credits
         self._catalog = catalog
 
@@ -246,8 +259,8 @@ class AccountService:
         event_key: str,
         *,
         region: str | None = None,
-        metadata=None,
-    ) -> dict[str, Any]:
+        metadata: CreditMetadata | None = None,
+    ) -> AccountCreatedResult:
         from bursar.credits.types import ExecuteGrantProgramRequest
 
         if not event_key.strip():
@@ -278,26 +291,21 @@ class AccountService:
                     ),
                 )
             )
-        return {
-            "account_id": account_id,
-            "plan_key": current.plan_key or plan_key,
-            "plan_assigned": plan_assigned,
-            "grants": grants,
-        }
+        return AccountCreatedResult(
+            account_id=account_id,
+            plan_key=current.plan_key or plan_key,
+            plan_assigned=plan_assigned,
+            grants=grants,
+        )
 
 
-class BursarOptions(BaseModel):
-    """Typed construction options mirroring the JavaScript ``BursarOptions``."""
+class AccountCreatedResult(BaseModel):
+    """Result of applying the account-created lifecycle exactly once."""
 
-    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-
-    credit_store: SkipValidation[CreditStore]
-    billing_store: SkipValidation[BillingStore] | None = None
-    credits: SkipValidation[CreditsService] | None = None
-    credits_options: CreditsServiceOptions | None = None
-    billing_options: BillingServiceOptions | None = None
-    commerce_options: CommerceOptions | None = None
-    emitter: SkipValidation[CreditEventEmitter] | None = None
+    account_id: str
+    plan_key: str
+    plan_assigned: bool
+    grants: list[GrantProgramAwardResult]
 
 
 class Bursar:
@@ -309,44 +317,35 @@ class Bursar:
     rather than constructing lifecycle services independently.
     """
 
-    credits: CreditsService
+    credits: CreditsServiceImpl
     catalog: CatalogService
     accounts: AccountService
-    billing: BillingService | None
+    billing: BillingCapability | None
     commerce: CommerceService | None
 
     def __init__(
         self,
-        options: BursarOptions | None = None,
         *,
-        credits: CreditsService | None = None,
-        catalog: CatalogService | None = None,
-        billing: BillingService | None = None,
-        commerce: CommerceService | None = None,
+        credit_store: CreditStore,
+        billing_store: BillingStore | None = None,
+        credits_options: CreditsServiceOptions | None = None,
+        billing_options: BillingServiceOptions | None = None,
+        commerce_options: CommerceOptions | None = None,
+        emitter: CreditEventEmitter | None = None,
     ) -> None:
-        if options is None:
-            if credits is None:
-                raise TypeError("Bursar requires BursarOptions or a credits service")
-            self.credits = credits
-            self.catalog = catalog or CatalogService(credits)
-            self.accounts = AccountService(self.credits, self.catalog)
-            self.billing = billing
-            self.commerce = commerce
-            return
-
-        self.credits = options.credits or CreditsServiceImpl(
-            store=options.credit_store,
-            emitter=options.emitter,
-            options=options.credits_options,
+        self.credits = CreditsServiceImpl(
+            store=credit_store,
+            emitter=emitter,
+            options=credits_options,
         )
         self.catalog = CatalogService(self.credits)
         self.accounts = AccountService(self.credits, self.catalog)
         self.billing = (
             BillingEventService(
-                options.billing_store,
-                (options.billing_options or BillingServiceOptions()).model_copy(update={"provisioning": self.credits}),
+                billing_store,
+                (billing_options or BillingServiceOptions()).model_copy(update={"provisioning": self.credits}),
             )
-            if options.billing_store is not None
+            if billing_store is not None
             else None
         )
         self.commerce = (
@@ -354,56 +353,35 @@ class Bursar:
                 self.billing,
                 self.credits,
                 self,
-                options.commerce_options,
+                commerce_options,
             )
-            if self.billing is not None and options.commerce_options is not None
+            if self.billing is not None and commerce_options is not None
             else None
         )
-        if self.commerce is not None:
+        commerce = self.commerce
+        if commerce is not None:
 
             async def process_auto_recharge(context) -> None:
-                await self.commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
+                await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id=context.user_id))
 
             self.credits.add_post_deduction_hook(process_auto_recharge)
 
-    @classmethod
-    def create(
-        cls,
-        *,
-        credit_store: CreditStore,
-        billing_store: BillingStore | None = None,
-        credits: CreditsService | None = None,
-        credits_options: CreditsServiceOptions | dict[str, Any] | None = None,
-        billing_options: BillingServiceOptions | dict[str, Any] | None = None,
-        commerce_options: CommerceOptions | None = None,
-        emitter: CreditEventEmitter | None = None,
-    ) -> Bursar:
-        return cls(
-            BursarOptions(
-                credit_store=credit_store,
-                billing_store=billing_store,
-                credits=credits,
-                credits_options=(
-                    CreditsServiceOptions.model_validate(credits_options)
-                    if isinstance(credits_options, dict)
-                    else credits_options
-                ),
-                billing_options=(
-                    BillingServiceOptions.model_validate(billing_options)
-                    if isinstance(billing_options, dict)
-                    else billing_options
-                ),
-                commerce_options=commerce_options,
-                emitter=emitter,
-            )
-        )
-
     def load_catalog(self) -> None:
         """Load the active catalog into the pricing engine."""
-        self.credits.load_pricing_from_store()
+        self.catalog.load()
+
+    def require_billing(self) -> BillingCapability:
+        """Return billing or raise the SDK's typed configuration error."""
+        if self.billing is None:
+            raise CapabilityNotConfiguredError("billing")
+        return self.billing
+
+    def require_commerce(self) -> CommerceService:
+        """Return commerce or raise the SDK's typed configuration error."""
+        if self.commerce is None:
+            raise CommerceNotConfiguredError("Bursar commerce capability is not configured")
+        return self.commerce
 
     def ingest_billing_event(self, event: BillingEvent) -> BillingEventResult:
         """Submit a normalized provider event through the facade."""
-        if self.billing is None:
-            raise CommerceNotConfiguredError("Bursar billing capability is not configured")
-        return self.billing.ingest_billing_event(event)
+        return self.require_billing().ingest_billing_event(event)

@@ -20,10 +20,12 @@ from bursar.billing.contracts import (
 from bursar.billing.types import (
     BillingAutoRechargeAttempt,
     BillingAutoRechargeProfile,
+    BillingCreditPostingResult,
     BillingCustomerRecord,
     BillingEventClaim,
-    BillingInvoiceInfo,
+    BillingInvoiceRecord,
     BillingOfferResult,
+    BillingPaymentRecord,
     BillingPreferences,
     BillingSubscriptionChange,
     BillingSubscriptionChangeInput,
@@ -35,7 +37,7 @@ from bursar.billing.types import (
 
 class BillingStore(ABC):
     @abstractmethod
-    def get_active_bursar_config(self) -> dict[str, Any] | None: ...
+    def get_active_catalog_document(self) -> dict[str, Any] | None: ...
     @abstractmethod
     def create_or_get_checkout_intent(
         self,
@@ -56,13 +58,19 @@ class BillingStore(ABC):
     ) -> str: ...
 
     @abstractmethod
-    def grant_billing_credit(self, grant_id: str, idempotency_key: str) -> dict: ...
+    def grant_billing_credit(self, grant_id: str, idempotency_key: str) -> BillingCreditPostingResult: ...
 
     @abstractmethod
     def get_billing_credit_grant_by_payment(self, payment_id: str) -> str | None: ...
 
     @abstractmethod
-    def post_billing_refund(self, refund_id: str, grant_id: str, amount_minor: int, idempotency_key: str) -> dict: ...
+    def post_billing_refund(
+        self,
+        refund_id: str,
+        grant_id: str,
+        amount_minor: int,
+        idempotency_key: str,
+    ) -> BillingCreditPostingResult: ...
 
     @abstractmethod
     def resolve_billing_offer(
@@ -94,7 +102,7 @@ class BillingStore(ABC):
         provider_customer_id: str,
         user_id: str,
         email: str | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> None: ...
 
     @abstractmethod
     def upsert_billing_subscription(
@@ -184,7 +192,7 @@ class BillingStore(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]: ...
+    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceRecord]: ...
 
     @abstractmethod
     def upsert_billing_dispute(
@@ -197,7 +205,7 @@ class BillingStore(ABC):
         self,
         provider: str,
         provider_payment_id: str,
-    ) -> dict | None: ...
+    ) -> BillingPaymentRecord | None: ...
 
     @abstractmethod
     def get_user_subscriptions(self, user_id: str) -> list[BillingSubscriptionState]: ...

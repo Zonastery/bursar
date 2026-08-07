@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleDodoBillingEvent, normalizeDate } from "../src/providers/dodo/event-mapper.js";
+import { normalizeDate } from "../src/providers/dodo/event-mapper.js";
 import type { BillingEventSink } from "../src/bursar.js";
 import {
   DODO_JS_DATE,
@@ -13,22 +13,22 @@ import {
   DODO_SUBSCRIPTION_EXPIRED,
   DODO_SUBSCRIPTION_FAILED,
   DODO_SUBSCRIPTION_ON_HOLD,
-  DODO_SUBSCRIPTION_CANCELLATION_SCHEDULED,
-  DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED,
   DODO_SUBSCRIPTION_PLAN_CHANGED,
   DODO_PAYMENT_SUCCEEDED,
   DODO_PAYMENT_FAILED,
-  DODO_CHECKOUT_EXPIRED,
   DODO_REFUND_SUCCEEDED,
-  DODO_DISPUTE_CREATED,
+  DODO_DISPUTE_OPENED,
   DODO_DISPUTE_WON_CLOSED,
+  dodoEventId,
+  mapDodoEvent,
 } from "./helpers/dodo-fixtures.js";
 
 /** Shared mock sink. Each test that needs one calls makeSink(). */
 function makeSink() {
-  return {
-    ingestBillingEvent: vi.fn().mockResolvedValue({ handled: true }),
-  } as unknown as BillingEventSink;
+  const ingestBillingEvent = vi
+    .fn<BillingEventSink["ingestBillingEvent"]>()
+    .mockResolvedValue({ handled: true });
+  return { ingestBillingEvent } satisfies BillingEventSink;
 }
 
 // ── normalizeDate unit tests ──────────────────────────────────────────
@@ -68,69 +68,59 @@ describe("normalizeDate", () => {
   });
 });
 
-// ── RawId fallback (Bug 1 regression tests) ─────────────────────────
+// ── Canonical event IDs ─────────────────────────────────────────────
 
-describe("rawId fallback", () => {
-  it("uses data.id when present (payment events)", async () => {
+describe("canonical event IDs", () => {
+  it("includes provider type, object ID, and occurrence time for payment events", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("payment.succeeded", DODO_PAYMENT_SUCCEEDED, "user_1", {}, sink);
+    await mapDodoEvent("payment.succeeded", DODO_PAYMENT_SUCCEEDED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "pay_dodo_success_001" }),
+      expect.objectContaining({
+        eventId: dodoEventId("payment.succeeded", "pay_dodo_success_001"),
+      }),
     );
   });
 
-  it("falls back to dodo:{type}:{subscription_id} when data.id is absent (subscription.active)", async () => {
+  it("uses the subscription ID for subscription.active", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.active",
-      DODO_SUBSCRIPTION_ACTIVE,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "dodo:subscription.active:sub_dodo_active_001" }),
+      expect.objectContaining({
+        eventId: dodoEventId("subscription.active", "sub_dodo_active_001"),
+      }),
     );
   });
 
-  it("falls back to dodo:{type}:{subscription_id} (subscription.renewed)", async () => {
+  it("uses the subscription ID for subscription.renewed", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.renewed",
-      DODO_SUBSCRIPTION_RENEWED,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "dodo:subscription.renewed:sub_dodo_renewed_001" }),
+      expect.objectContaining({
+        eventId: dodoEventId("subscription.renewed", "sub_dodo_renewed_001"),
+      }),
     );
   });
 
-  it("falls back to dodo:{type}:{subscription_id} (subscription.updated)", async () => {
+  it("uses the subscription ID for subscription.updated", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.updated",
-      DODO_SUBSCRIPTION_UPDATED,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.updated", DODO_SUBSCRIPTION_UPDATED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "dodo:subscription.updated:sub_dodo_updated_001" }),
+      expect.objectContaining({
+        eventId: dodoEventId("subscription.updated", "sub_dodo_updated_001"),
+      }),
     );
   });
 
   it("produces unique rawIds for different subscriptions of the same event type", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { ...DODO_SUBSCRIPTION_ACTIVE, subscription_id: "sub_alpha" },
       "user_1",
       {},
       sink,
     );
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { ...DODO_SUBSCRIPTION_ACTIVE, subscription_id: "sub_beta" },
       "user_1",
@@ -139,27 +129,27 @@ describe("rawId fallback", () => {
     );
     const calls = sink.ingestBillingEvent.mock.calls;
     expect(calls).toHaveLength(2);
-    expect(calls[0][0].eventId).toBe("dodo:subscription.active:sub_alpha");
-    expect(calls[1][0].eventId).toBe("dodo:subscription.active:sub_beta");
+    expect(calls[0]![0]!.eventId).toBe(dodoEventId("subscription.active", "sub_alpha"));
+    expect(calls[1]![0]!.eventId).toBe(dodoEventId("subscription.active", "sub_beta"));
   });
 
-  it("falls back to dodo:{type}:{customer_id} when subscription_id is also absent", async () => {
+  it("rejects a customer ID as the subscription identifier", async () => {
     const sink = makeSink();
     // subscription.active doesn't guard on subscription_id — the rawId fallback
     // to customer_id is exercised when both data.id and data.subscription_id are absent.
     const payload = { customer_id: "cus_dodo_001", status: "active" };
-    await handleDodoBillingEvent("subscription.active", payload, "user_1", {}, sink);
-    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "dodo:subscription.active:cus_dodo_001" }),
+    await expect(mapDodoEvent("subscription.active", payload, "user_1", {}, sink)).rejects.toThrow(
+      "subscription_id",
     );
+    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
-  it("produces dodo:{type}: (empty suffix) when both subscription_id and customer_id are absent", async () => {
+  it("rejects a missing subscription identifier", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.active", {}, "user_1", {}, sink);
-    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: "dodo:subscription.active:" }),
+    await expect(mapDodoEvent("subscription.active", {}, "user_1", {}, sink)).rejects.toThrow(
+      "subscription_id",
     );
+    expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 });
 
@@ -168,14 +158,9 @@ describe("rawId fallback", () => {
 describe("date normalization through event mapper", () => {
   it("converts JS Date.toString() dates to ISO 8601 for subscription.active → subscription.created", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.active",
-      DODO_SUBSCRIPTION_ACTIVE,
-      "user_1",
-      {},
-      sink,
-    );
-    const call = sink.ingestBillingEvent.mock.calls[0][0];
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", {}, sink);
+    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.periodStart).toBe(DODO_ISO_DATE);
     // next_billing_date in fixture is August — verify it's different from periodStart
     expect(call.subscription.periodEnd).toBe("2026-08-18T05:15:24.000Z");
@@ -183,13 +168,7 @@ describe("date normalization through event mapper", () => {
 
   it("converts JS Date.toString() dates to ISO 8601 for subscription.renewed → subscription.activated", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.renewed",
-      DODO_SUBSCRIPTION_RENEWED,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         subscription: expect.objectContaining({
@@ -202,13 +181,7 @@ describe("date normalization through event mapper", () => {
 
   it("converts JS Date.toString() dates to ISO 8601 for subscription.updated", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.updated",
-      DODO_SUBSCRIPTION_UPDATED,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.updated", DODO_SUBSCRIPTION_UPDATED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         subscription: expect.objectContaining({ periodEnd: DODO_ISO_DATE }),
@@ -218,14 +191,15 @@ describe("date normalization through event mapper", () => {
 
   it("omits periodStart/periodEnd when dates are absent", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       DODO_SUBSCRIPTION_ACTIVE_NO_DATES,
       "user_1",
       {},
       sink,
     );
-    const call = sink.ingestBillingEvent.mock.calls[0][0];
+    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.periodStart).toBeUndefined();
     // periodEnd is passed explicitly — check it's null
     expect(call.subscription.periodEnd).toBeNull();
@@ -237,13 +211,7 @@ describe("date normalization through event mapper", () => {
 describe("event type routing", () => {
   it("subscription.active → subscription.created", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.active",
-      DODO_SUBSCRIPTION_ACTIVE,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "subscription.created" }),
     );
@@ -251,13 +219,7 @@ describe("event type routing", () => {
 
   it("subscription.renewed → subscription.renewed", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.renewed",
-      DODO_SUBSCRIPTION_RENEWED,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "subscription.renewed" }),
     );
@@ -265,13 +227,7 @@ describe("event type routing", () => {
 
   it("subscription.cancelled → subscription.canceled", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.cancelled",
-      DODO_SUBSCRIPTION_CANCELLED,
-      null,
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.cancelled", DODO_SUBSCRIPTION_CANCELLED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.canceled",
@@ -286,7 +242,7 @@ describe("event type routing", () => {
 
   it("subscription.expired → subscription.expired", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.expired", DODO_SUBSCRIPTION_EXPIRED, null, {}, sink);
+    await mapDodoEvent("subscription.expired", DODO_SUBSCRIPTION_EXPIRED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.expired",
@@ -297,7 +253,7 @@ describe("event type routing", () => {
 
   it("subscription.failed → subscription.updated with past_due status", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.failed", DODO_SUBSCRIPTION_FAILED, null, {}, sink);
+    await mapDodoEvent("subscription.failed", DODO_SUBSCRIPTION_FAILED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.updated",
@@ -308,7 +264,7 @@ describe("event type routing", () => {
 
   it("subscription.on_hold → subscription.updated with past_due status", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.on_hold", DODO_SUBSCRIPTION_ON_HOLD, null, {}, sink);
+    await mapDodoEvent("subscription.on_hold", DODO_SUBSCRIPTION_ON_HOLD, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "subscription.updated",
@@ -317,49 +273,9 @@ describe("event type routing", () => {
     );
   });
 
-  it("subscription.cancellation_scheduled → subscription.cancellation_scheduled", async () => {
-    const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.cancellation_scheduled",
-      DODO_SUBSCRIPTION_CANCELLATION_SCHEDULED,
-      null,
-      {},
-      sink,
-    );
-    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "subscription.cancellation_scheduled",
-        subscription: {
-          providerSubscriptionId: "sub_dodo_cancel_sched_001",
-          cancelAtPeriodEnd: true,
-        },
-      }),
-    );
-  });
-
-  it("subscription.cancellation_unscheduled → subscription.cancellation_unscheduled", async () => {
-    const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.cancellation_unscheduled",
-      DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED,
-      null,
-      {},
-      sink,
-    );
-    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "subscription.cancellation_unscheduled",
-        subscription: {
-          providerSubscriptionId: "sub_dodo_cancel_unsched_001",
-          cancelAtPeriodEnd: false,
-        },
-      }),
-    );
-  });
-
   it("subscription.plan_changed → subscription.plan_changed with product_id refs", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.plan_changed",
       DODO_SUBSCRIPTION_PLAN_CHANGED,
       "user_1",
@@ -379,7 +295,7 @@ describe("event type routing", () => {
 
   it("payment.succeeded → payment.succeeded", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("payment.succeeded", DODO_PAYMENT_SUCCEEDED, null, {}, sink);
+    await mapDodoEvent("payment.succeeded", DODO_PAYMENT_SUCCEEDED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "payment.succeeded",
@@ -399,7 +315,7 @@ describe("event type routing", () => {
 
   it("payment.failed → payment.failed", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("payment.failed", DODO_PAYMENT_FAILED, "user_1", {}, sink);
+    await mapDodoEvent("payment.failed", DODO_PAYMENT_FAILED, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "payment.failed",
@@ -408,17 +324,9 @@ describe("event type routing", () => {
     );
   });
 
-  it("checkout.expired → checkout.expired", async () => {
-    const sink = makeSink();
-    await handleDodoBillingEvent("checkout.expired", DODO_CHECKOUT_EXPIRED, null, {}, sink);
-    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
-      expect.objectContaining({ eventType: "checkout.expired" }),
-    );
-  });
-
   it("refund.succeeded → refund.created", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("refund.succeeded", DODO_REFUND_SUCCEEDED, null, {}, sink);
+    await mapDodoEvent("refund.succeeded", DODO_REFUND_SUCCEEDED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "refund.created",
@@ -434,7 +342,7 @@ describe("event type routing", () => {
 
   it("uses refund_id as the event id when Dodo omits data.id", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "refund.succeeded",
       {
         refund_id: "refund_dodo_without_id",
@@ -449,15 +357,15 @@ describe("event type routing", () => {
 
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        eventId: "refund_dodo_without_id",
+        eventId: dodoEventId("refund.succeeded", "refund_dodo_without_id"),
         eventType: "refund.created",
       }),
     );
   });
 
-  it("dispute.* → dispute.created for open dispute types", async () => {
+  it("dispute.opened → dispute.created", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("dispute.created", DODO_DISPUTE_CREATED, null, {}, sink);
+    await mapDodoEvent("dispute.opened", DODO_DISPUTE_OPENED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         eventType: "dispute.created",
@@ -471,7 +379,7 @@ describe("event type routing", () => {
 
   it("dispute.won/lost/accepted/cancelled/challenged/expired → dispute.closed", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("dispute.won", DODO_DISPUTE_WON_CLOSED, null, {}, sink);
+    await mapDodoEvent("dispute.won", DODO_DISPUTE_WON_CLOSED, null, {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventType: "dispute.closed" }),
     );
@@ -479,20 +387,14 @@ describe("event type routing", () => {
 
   it("does not call sink for unknown event types", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("unknown.event.type", {}, null, {}, sink);
+    await mapDodoEvent("unknown.event.type", {}, null, {}, sink);
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
   it("passes metadata through to the sink event", async () => {
     const sink = makeSink();
     const metadata = { userId: "user_1", plan_slug: "monk", billing_interval: "month" };
-    await handleDodoBillingEvent(
-      "subscription.active",
-      DODO_SUBSCRIPTION_ACTIVE,
-      "user_1",
-      metadata,
-      sink,
-    );
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", metadata, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(expect.objectContaining({ metadata }));
   });
 });
@@ -502,13 +404,7 @@ describe("event type routing", () => {
 describe("ref resolution", () => {
   it("uses data.product_id for refs when present", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
-      "subscription.active",
-      DODO_SUBSCRIPTION_ACTIVE,
-      "user_1",
-      {},
-      sink,
-    );
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, "user_1", {}, sink);
     expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         subscription: expect.objectContaining({ refs: { productId: "prod_monk" } }),
@@ -518,7 +414,7 @@ describe("ref resolution", () => {
 
   it("falls back to metadata.plan_slug when data.product_id is absent", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       DODO_SUBSCRIPTION_ACTIVE_PLAN_SLUG,
       "user_1",
@@ -532,11 +428,64 @@ describe("ref resolution", () => {
     );
   });
 
+  it("uses the official payment product_cart for refs", async () => {
+    const sink = makeSink();
+    const payment: Record<string, unknown> = { ...DODO_PAYMENT_SUCCEEDED };
+    delete payment.product_id;
+    delete payment.subscription_id;
+    await mapDodoEvent(
+      "payment.succeeded",
+      {
+        ...payment,
+        product_cart: [{ product_id: "prod_credit_pack", quantity: 2 }],
+      },
+      "user_1",
+      {},
+      sink,
+    );
+
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payment: expect.objectContaining({
+          purpose: "credit_topup",
+          refs: { productId: "prod_credit_pack" },
+        }),
+      }),
+    );
+  });
+
+  it("uses the official nested customer identity", async () => {
+    const sink = makeSink();
+    await mapDodoEvent(
+      "subscription.active",
+      {
+        ...DODO_SUBSCRIPTION_ACTIVE,
+        customer: {
+          customer_id: "cus_official_001",
+          email: "learner@example.com",
+        },
+      },
+      "user_1",
+      {},
+      sink,
+    );
+
+    expect(sink.ingestBillingEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customer: {
+          providerCustomerId: "cus_official_001",
+          email: "learner@example.com",
+        },
+      }),
+    );
+  });
+
   it("sets refs to undefined when neither product_id nor plan_slug are present", async () => {
     const sink = makeSink();
     const payload = { subscription_id: "sub_no_refs", status: "active" };
-    await handleDodoBillingEvent("subscription.active", payload, "user_1", {}, sink);
-    const call = sink.ingestBillingEvent.mock.calls[0][0];
+    await mapDodoEvent("subscription.active", payload, "user_1", {}, sink);
+    const call = sink.ingestBillingEvent.mock.calls[0]![0]!;
+    if (!call.subscription) throw new Error("Expected subscription event data");
     expect(call.subscription.refs).toBeUndefined();
   });
 });
@@ -544,33 +493,37 @@ describe("ref resolution", () => {
 // ── Edge cases ──────────────────────────────────────────────────────
 
 describe("edge cases", () => {
-  it("skips subscription.cancelled when subscription_id is missing", async () => {
+  it("rejects subscription.cancelled when subscription_id is missing", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.cancelled", {}, null, {}, sink);
+    await expect(mapDodoEvent("subscription.cancelled", {}, null, {}, sink)).rejects.toThrow(
+      "subscription_id",
+    );
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
-  it("skips subscription.expired when subscription_id is missing", async () => {
+  it("rejects subscription.expired when subscription_id is missing", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.expired", {}, null, {}, sink);
+    await expect(mapDodoEvent("subscription.expired", {}, null, {}, sink)).rejects.toThrow(
+      "subscription_id",
+    );
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
   it("skips subscription.active when userId is missing (logs error)", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, null, {}, sink);
+    await mapDodoEvent("subscription.active", DODO_SUBSCRIPTION_ACTIVE, null, {}, sink);
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
   it("skips subscription.renewed when userId is missing (logs error)", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, null, {}, sink);
+    await mapDodoEvent("subscription.renewed", DODO_SUBSCRIPTION_RENEWED, null, {}, sink);
     expect(sink.ingestBillingEvent).not.toHaveBeenCalled();
   });
 
   it("normalizes cadence fields (yearly interval)", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       {
         subscription_id: "sub_cadence",
@@ -592,7 +545,7 @@ describe("edge cases", () => {
 
   it("falls back to metadata.billing_interval when payment_frequency_interval is absent", async () => {
     const sink = makeSink();
-    await handleDodoBillingEvent(
+    await mapDodoEvent(
       "subscription.active",
       { subscription_id: "sub_meta_interval", status: "active", product_id: "prod_monthly" },
       "user_1",

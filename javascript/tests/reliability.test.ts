@@ -18,7 +18,12 @@ const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 function transactionPool(queryError?: Error, rollbackError?: Error) {
   const release = vi.fn();
   const query = vi.fn(async (text: string) => {
-    if (text === "BEGIN" || text === "COMMIT" || text.startsWith("SELECT set_config(")) {
+    if (
+      text === "BEGIN" ||
+      text === "COMMIT" ||
+      text.startsWith("SET LOCAL ROLE") ||
+      text.startsWith("SELECT set_config(")
+    ) {
       return { rows: [] };
     }
     if (text === "ROLLBACK") {
@@ -149,6 +154,9 @@ describe("Postgres reliability boundary", () => {
     expect(() => new PostgresClient(pool, { usageBackend: "redis" as never })).toThrow(
       "usageBackend must be 'postgres' or 'clickhouse'",
     );
+    expect(() => new PostgresClient(pool, { accessRole: "owner" as never })).toThrow(
+      "accessRole must be 'bursar_client' or 'bursar_operator'",
+    );
   });
 
   it.each([
@@ -213,12 +221,13 @@ describe("Postgres reliability boundary", () => {
         },
       });
       expect(query).toHaveBeenCalledWith(expect.stringContaining("statement_timeout"), [
+        "1234",
+        "30000",
         TENANT_ID,
         "postgres",
         "postgres",
-        "1234",
-        "30000",
       ]);
+      expect(query).toHaveBeenCalledWith("SET LOCAL ROLE bursar_client");
       expect(query).toHaveBeenCalledWith("ROLLBACK");
       expect(release).toHaveBeenCalledWith(undefined);
     },

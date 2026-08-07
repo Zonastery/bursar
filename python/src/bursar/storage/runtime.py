@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Literal, Protocol, TypeGuard, cast
+from typing import Literal, Protocol, TypeGuard
 from uuid import UUID
 
-import psycopg2.pool
-from pydantic import BaseModel, ConfigDict, SkipValidation, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation, field_validator, model_validator
 
 from bursar.billing.postgres.store import PostgresBillingStore
 from bursar.billing.service_types import BillingServiceOptions
@@ -21,9 +21,9 @@ from bursar.credits.events import CreditEventEmitter
 from bursar.credits.postgres.store import PostgresStore
 from bursar.credits.service_types import CreditsServiceOptions
 from bursar.credits.types import UsageAnalyticsStore
-from bursar.errors import PricingNotLoadedError, StoreClosedError, is_retryable_bursar_error
+from bursar.errors import CatalogNotLoadedError, ConfigError, StoreClosedError, is_retryable_bursar_error
 from bursar.retry import BursarRetryOptions, retry_bursar_operation
-from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, create_pool
+from bursar.shared.postgres_client import PostgresClient, PostgresConnectionOptions, PostgresPool, create_pool
 from bursar.storage.adapters.clickhouse import (
     ClickHouseUsageStore,
     ClickHouseUsageStoreOptions,
@@ -48,14 +48,6 @@ class UsageAnalyticsSink(UsageEventSink, UsageAnalyticsStore, Protocol):
     """Combined ClickHouse write and analytics read port."""
 
 
-class PostgresPool(Protocol):
-    def getconn(self) -> Any: ...
-
-    def putconn(self, conn: Any) -> None: ...
-
-    def closeall(self) -> None: ...
-
-
 def _is_usage_analytics_sink(value: object) -> TypeGuard[UsageAnalyticsSink]:
     return all(
         hasattr(value, method)
@@ -71,7 +63,7 @@ def _is_usage_analytics_sink(value: object) -> TypeGuard[UsageAnalyticsSink]:
 
 
 def _is_billing_payload_archive(value: object) -> TypeGuard[BillingPayloadArchive]:
-    return hasattr(value, "archive") and hasattr(value, "purge_postgres_payload")
+    return hasattr(value, "archive")
 
 
 def _is_usage_charge_store(value: object) -> bool:
@@ -92,11 +84,22 @@ class BursarRuntimeBursarOptions(_RuntimeModel):
 class BursarRuntimeOptions(_RuntimeModel):
     postgres: str | SkipValidation[PostgresPool]
     tenant_id: UUID
-    postgres_options: PostgresConnectionOptions = PostgresConnectionOptions()
+    tenant_slug: str | None = None
+    postgres_options: PostgresConnectionOptions = Field(default_factory=PostgresConnectionOptions)
     s3: SkipValidation[BillingPayloadArchive] | S3BillingArchiveOptions | None = None
     clickhouse: SkipValidation[UsageAnalyticsSink] | ClickHouseUsageStoreOptions | None = None
     outbox: OutboxWorkerOptions | Literal[False] | None = None
-    bursar: BursarRuntimeBursarOptions = BursarRuntimeBursarOptions()
+    bursar: BursarRuntimeBursarOptions = Field(default_factory=BursarRuntimeBursarOptions)
+
+    @field_validator("tenant_slug")
+    @classmethod
+    def validate_tenant_slug(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not 1 <= len(normalized) <= 100 or re.fullmatch(r"[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?", normalized) is None:
+            raise ValueError("tenant_slug must be a valid Bursar tenant slug")
+        return normalized
 
     @model_validator(mode="after")
     def validate_outbox(self) -> BursarRuntimeOptions:
@@ -107,7 +110,7 @@ class BursarRuntimeOptions(_RuntimeModel):
 
 
 class BursarRuntimeStartOptions(_RuntimeModel):
-    load_catalog: bool = False
+    load_catalog: bool = True
     max_attempts: int = 1
     retry_delay_seconds: float = 0.25
     max_elapsed_seconds: float = 30.0
@@ -150,7 +153,38 @@ class BursarRuntime:
     clickhouse: UsageAnalyticsSink | None
     s3: BillingPayloadArchive | None
 
-    def __init__(
+    def __init__(self, options: BursarRuntimeOptions) -> None:
+        """Construct a runtime while keeping pool ownership inside the SDK."""
+        if isinstance(options.postgres, str):
+            if not options.postgres.strip():
+                msg = "postgres connection string must not be empty"
+                raise ValueError(msg)
+            pool: PostgresPool = create_pool(
+                options.postgres,
+                postgres_options=options.postgres_options,
+            )
+            owns_pool = True
+        else:
+            pool = options.postgres
+            owns_pool = False
+
+        try:
+            self._initialize(pool, owns_pool, options)
+        except BaseException:
+            # Release any partially-composed adapters without closing a pool
+            # supplied by the caller.
+            for name in ("s3", "credit_store", "billing_store", "_postgres"):
+                resource = getattr(self, name, None)
+                close = getattr(resource, "close", None)
+                if callable(close):
+                    with suppress(BaseException):
+                        close()
+            if owns_pool:
+                with suppress(BaseException):
+                    pool.closeall()
+            raise
+
+    def _initialize(
         self,
         pool: PostgresPool,
         owns_pool: bool,
@@ -182,18 +216,15 @@ class BursarRuntime:
             msg = "s3 must implement the billing payload archive port"
             raise TypeError(msg)
 
-        psycopg_pool = cast(psycopg2.pool.ThreadedConnectionPool, pool)
         self.credit_store = PostgresStore(
-            "",
             tenant_id=options.tenant_id,
-            pool=psycopg_pool,
+            pool=pool,
             usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
             postgres_options=options.postgres_options,
         )
         self.billing_store = PostgresBillingStore(
-            "",
             tenant_id=options.tenant_id,
-            pool=psycopg_pool,
+            pool=pool,
             billing_payload_backend="s3" if self.s3 is not None else "postgres",
             postgres_options=options.postgres_options,
         )
@@ -208,7 +239,7 @@ class BursarRuntime:
         commerce_options = options.bursar.commerce_options
         if commerce_options is not None:
             commerce_options = commerce_options.model_copy(update={"tenant_id": str(options.tenant_id)})
-        self.bursar = Bursar.create(
+        self.bursar = Bursar(
             credit_store=self.credit_store,
             billing_store=self.billing_store,
             credits_options=credits_options,
@@ -217,14 +248,19 @@ class BursarRuntime:
             emitter=options.bursar.emitter,
         )
 
+        self._postgres = PostgresClient.from_pool(
+            pool,
+            tenant_id=options.tenant_id,
+            access_role="bursar_operator",
+            usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
+            billing_payload_backend="s3" if self.s3 is not None else "postgres",
+            postgres_options=options.postgres_options,
+        )
+        self._query = self._postgres.query
+        self._tenant_id = str(options.tenant_id)
+        self._tenant_slug = options.tenant_slug
         repository = PostgresStorageRepository(
-            PostgresClient.from_pool(
-                psycopg_pool,
-                tenant_id=options.tenant_id,
-                usage_backend="clickhouse" if self.clickhouse is not None else "postgres",
-                billing_payload_backend="s3" if self.s3 is not None else "postgres",
-                postgres_options=options.postgres_options,
-            ).query,
+            self._query,
             options.tenant_id,
         )
         handlers = self._create_handlers(repository)
@@ -239,12 +275,13 @@ class BursarRuntime:
 
     def start(self, options: BursarRuntimeStartOptions | None = None) -> None:
         with self._lifecycle_lock:
-            if self._started:
-                return
             if self._closed:
                 msg = "BursarRuntime has been closed"
                 raise StoreClosedError(msg)
+            if self._started:
+                return
             start_options = options or BursarRuntimeStartOptions()
+            self._verify_tenant_identity()
             if start_options.load_catalog:
                 retry_bursar_operation(
                     self.bursar.load_catalog,
@@ -254,7 +291,7 @@ class BursarRuntime:
                         max_delay_seconds=5.0,
                         max_elapsed_seconds=start_options.max_elapsed_seconds,
                         should_retry=start_options.should_retry
-                        or (lambda error: isinstance(error, PricingNotLoadedError) or is_retryable_bursar_error(error)),
+                        or (lambda error: isinstance(error, CatalogNotLoadedError) or is_retryable_bursar_error(error)),
                     ),
                 )
             if self.clickhouse is not None:
@@ -267,7 +304,7 @@ class BursarRuntime:
 
     def health(self) -> BursarRuntimeHealth:
         with self._lifecycle_lock:
-            catalog_loaded = self.bursar.credits.pricing_engine is not None
+            catalog_loaded = self.bursar.catalog.is_loaded
             return BursarRuntimeHealth(
                 ready=self._started and not self._closed and catalog_loaded,
                 started=self._started,
@@ -300,7 +337,7 @@ class BursarRuntime:
                 close = getattr(self.s3, "close", None)
                 if callable(close):
                     resources.append(close)
-            resources.extend((self.credit_store.close, self.billing_store.close))
+            resources.extend((self.credit_store.close, self.billing_store.close, self._postgres.close))
             if self._owns_pool:
                 resources.append(self._pool.closeall)
 
@@ -325,6 +362,17 @@ class BursarRuntime:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+    def _verify_tenant_identity(self) -> None:
+        if self._tenant_slug is None:
+            return
+        rows = self._query(
+            "SELECT bursar.resolve_active_tenant_for_trigger(%s)::text AS tenant_id",
+            [self._tenant_slug],
+        )
+        resolved = rows[0].get("tenant_id") if rows else None
+        if resolved != self._tenant_id:
+            raise ConfigError(f"Bursar tenant slug '{self._tenant_slug}' resolves to a different tenant ID")
 
     def _create_handlers(
         self,
@@ -398,7 +446,6 @@ class BursarRuntime:
             event.event_id,
             archived.key,
             archived.version_id,
-            self.s3.purge_postgres_payload,
         )
         if not recorded:
             msg = f"Could not record archive pointer for billing event {event.event_id}"
@@ -406,16 +453,4 @@ class BursarRuntime:
 
 
 def create_bursar_runtime(options: BursarRuntimeOptions) -> BursarRuntime:
-    if isinstance(options.postgres, str):
-        if not options.postgres.strip():
-            msg = "postgres connection string must not be empty"
-            raise ValueError(msg)
-        pool = create_pool(options.postgres, postgres_options=options.postgres_options)
-        try:
-            return BursarRuntime(pool, True, options)
-        except BaseException:
-            # Do not leak an SDK-owned pool when composition/validation fails.
-            with suppress(BaseException):
-                pool.closeall()
-            raise
-    return BursarRuntime(options.postgres, False, options)
+    return BursarRuntime(options)

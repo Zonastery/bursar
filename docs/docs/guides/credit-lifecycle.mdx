@@ -47,7 +47,7 @@ Setup first: publish the canonical configuration (see
   import { USER_ADA, baseConfig, publishConfig } from "./shared";
 
   const bursar = await publishConfig(
-    new PostgresStore(databaseUrl, tenantId),
+    new PostgresStore({ postgres: databaseUrl, tenantId }),
     baseConfig(),
   );
   const userId = USER_ADA;
@@ -164,11 +164,15 @@ exact `Decimal`), then charges in one atomic transaction:
   <TabItem value="ts" label="TypeScript">
 
   ```ts
-  const charge = await bursar.credits.deduct(userId, {
-    operation: "completion",
-    measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
-    dimensions: { model: "gpt-4o-mini" },
-  }, "chat:turn:42");
+  const charge = await bursar.credits.deduct(
+    userId,
+    {
+      operation: "completion",
+      measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
+      dimensions: { model: "gpt-4o-mini" },
+    },
+    { idempotencyKey: "chat:turn:42" },
+  );
   console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
   ```
 
@@ -207,8 +211,10 @@ id; pass an `amount` for a partial refund:
   ```ts
   const refund = await bursar.credits.refundCredits(
     charge.entryId,
-    new Decimal("0.000030"),
-    "user_reported_bad_output",
+    {
+      amount: new Decimal("0.000030"),
+      reason: "user_reported_bad_output",
+    },
   );
   console.log(refund.refundEntryId, refund.newBalance);
   ```

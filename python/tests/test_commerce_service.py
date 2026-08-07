@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from bursar.billing.auto_recharge_service import AutoRechargeProcessResult
 from bursar.billing.contracts import CheckoutIntentCreate, CheckoutIntentUpdate
 from bursar.billing.types import (
     BillingAutoRechargeProfile,
@@ -18,7 +19,7 @@ from bursar.billing.types import (
     BillingCustomerRecord,
     BillingEvent,
     BillingEventResult,
-    BillingInvoiceInfo,
+    BillingInvoiceRecord,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
@@ -40,7 +41,7 @@ from bursar.commerce import (
     CoreBillingDataUnavailableError,
     CreateCheckoutInput,
     InvalidOfferQuantityError,
-    MissingPaymentMethodError,
+    PaymentMethodRequiredError,
     ProviderCapabilityNotSupportedError,
     QuoteChangedError,
     UnknownOfferError,
@@ -273,10 +274,11 @@ class FakeAutoRecharge:
         *,
         balance: Decimal,
         return_url: str | None = None,
-    ) -> None:
+    ) -> AutoRechargeProcessResult:
         self.calls.append(("retry", user_id, balance, return_url))
         if self.fail_payment_method:
             raise ValueError("payment_method_missing")
+        return AutoRechargeProcessResult(outcome="submitted")
 
     async def process_if_needed(
         self,
@@ -285,9 +287,9 @@ class FakeAutoRecharge:
         *,
         balance: Decimal,
         return_url: str | None = None,
-    ) -> dict[str, str]:
+    ) -> AutoRechargeProcessResult:
         self.calls.append(("process", user_id, balance, return_url))
-        return {"outcome": "charged"}
+        return AutoRechargeProcessResult(outcome="submitted")
 
 
 class FakeBilling:
@@ -306,13 +308,13 @@ class FakeBilling:
         self.events: list[BillingEvent] = []
         self.preferences: BillingPreferences | None = None
         self.saved_preferences: BillingPreferences | None = None
-        self.invoices: list[BillingInvoiceInfo] = []
+        self.invoices: list[BillingInvoiceRecord] = []
         self.open_change: BillingSubscriptionChange | None = None
         self.created_changes: list[Any] = []
         self.change_updates: list[tuple[str, dict[str, Any]]] = []
         self.auto_recharge_profile: BillingAutoRechargeProfile | None = None
 
-    def get_active_bursar_config(self) -> dict[str, Any]:
+    def get_active_catalog_document(self) -> dict[str, Any]:
         return self.catalog
 
     def get_blocking_subscription(self, account_id: str | None) -> BillingSubscriptionState | None:
@@ -381,9 +383,11 @@ class FakeBilling:
         return BillingOfferResult(
             offer_id="offer-pro",
             offer_key="pro_month",
+            plan_id="plan-pro",
             plan="pro",
             interval="month",
             interval_count=1,
+            grant=None,
         )
 
     def resolve_offer_by_lookup(self, provider: str, lookup_key: str) -> BillingOfferResult:
@@ -391,9 +395,11 @@ class FakeBilling:
         return BillingOfferResult(
             offer_id=f"offer-{lookup_key}",
             offer_key=lookup_key,
+            plan_id="plan-pro" if lookup_key == "alpha-pro-month" else "plan-starter",
             plan="pro" if lookup_key == "alpha-pro-month" else "starter",
             interval="year" if lookup_key.endswith("year") else "month",
             interval_count=1,
+            grant=None,
         )
 
     def get_open_billing_subscription_change(
@@ -442,7 +448,7 @@ class FakeBilling:
     def update_user_preferences(self, preferences: BillingPreferences) -> None:
         self.saved_preferences = preferences
 
-    def list_billing_invoices(self, account_id: str) -> list[BillingInvoiceInfo]:
+    def list_billing_invoices(self, account_id: str) -> list[BillingInvoiceRecord]:
         del account_id
         return self.invoices
 
@@ -788,13 +794,17 @@ async def test_subscription_commands_and_cancel_all_emit_provider_neutral_events
     result = await commerce.cancel_subscription("user-1", "cancel-1")
     assert result.pending is True
     assert provider.cancelled == [("subscription-1", "cancel-1")]
-    assert billing.events[-1].subscription.cancel_at_period_end is True
+    subscription = billing.events[-1].subscription
+    assert subscription is not None
+    assert subscription.cancel_at_period_end is True
 
     billing.subscription = active_subscription(cancel_at_period_end=True)
     result = await commerce.reactivate_subscription("user-1", "reactivate-1")
     assert result.pending is True
     assert provider.reactivated == [("subscription-1", "reactivate-1")]
-    assert billing.events[-1].subscription.cancel_at_period_end is False
+    subscription = billing.events[-1].subscription
+    assert subscription is not None
+    assert subscription.cancel_at_period_end is False
 
     billing.cancellable_subscriptions = [
         active_subscription(provider_subscription_id="subscription-1"),
@@ -933,11 +943,12 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
         invoice_reminders=True,
     )
     billing.invoices = [
-        BillingInvoiceInfo(
+        BillingInvoiceRecord(
             provider="alpha",
             provider_invoice_id="invoice-1",
             status="paid",
             amount_paid_minor=1000,
+            amount_due_minor=1000,
             currency="USD",
         )
     ]
@@ -963,7 +974,9 @@ async def test_overview_documents_payment_methods_preferences_and_optional_failu
     assert overview.credits.effective_spendable_balance == Decimal("35")
     assert [(source.type, source.key) for source in overview.credits.spend_order] == [("bucket", "general")]
     assert credits.include_record_only is False
-    assert overview.subscription_summary.pending_change.plan_key == "pro"
+    pending_change = overview.subscription_summary.pending_change
+    assert pending_change is not None
+    assert pending_change.plan_key == "pro"
     assert overview.payment_methods[0].last4 == "4242"
     assert {document.kind for document in overview.documents} == {"provider_invoice", "ledger_entry"}
     assert overview.availability.payment_methods is True
@@ -1026,7 +1039,16 @@ async def test_account_overview_interleaves_allowance_with_bucket_priorities() -
 async def test_invoice_links_are_authorized_for_invoice_and_ledger_documents() -> None:
     provider = RecordingProvider()
     commerce, billing, credits, _provider = make_harness(provider)
-    billing.invoices = [BillingInvoiceInfo(provider="alpha", provider_invoice_id="invoice-1")]
+    billing.invoices = [
+        BillingInvoiceRecord(
+            provider="alpha",
+            provider_invoice_id="invoice-1",
+            status="paid",
+            amount_paid_minor=0,
+            amount_due_minor=0,
+            currency="USD",
+        )
+    ]
     assert (
         await commerce.get_invoice_link(
             "user-1",
@@ -1097,19 +1119,19 @@ async def test_preferences_webhook_and_auto_recharge_workflows() -> None:
     assert provider.webhooks[0].headers == {"x-test": "1"}
 
     billing.customers[("user-1", None)] = BillingCustomerRecord(provider="alpha", provider_customer_id="customer-1")
-    assert (
-        await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1", return_url="https://return"))
-    ).enabled
-    assert (
-        await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1", return_url="https://return"))
-    ).enabled
+    enabled = await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    assert enabled is not None
+    assert enabled.enabled
+    retried = await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1", return_url="https://return"))
+    assert retried is not None
+    assert retried.enabled
     commerce.auto_recharge.disable("user-1")
     assert billing.auto_recharge.disabled == ["user-1"]
 
     billing.auto_recharge.fail_payment_method = True
-    with pytest.raises(MissingPaymentMethodError):
+    with pytest.raises(PaymentMethodRequiredError):
         await commerce.auto_recharge.enable(AutoRechargeInput(account_id="user-1"))
-    with pytest.raises(MissingPaymentMethodError):
+    with pytest.raises(PaymentMethodRequiredError):
         await commerce.auto_recharge.retry(AutoRechargeInput(account_id="user-1"))
 
     billing.auto_recharge.fail_payment_method = False
@@ -1130,9 +1152,8 @@ async def test_preferences_webhook_and_auto_recharge_workflows() -> None:
         window_anchor="calendar",
         window_timezone="UTC",
     )
-    assert (await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))) == {
-        "outcome": "charged"
-    }
+    result = await commerce.auto_recharge.process_if_needed(AutoRechargeInput(account_id="user-1"))
+    assert result.outcome == "submitted"
 
 
 def test_public_commerce_inputs_do_not_expose_provider_product_ids() -> None:

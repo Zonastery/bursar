@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { LeaseNotFoundError } from "../src/errors.js";
-import { PricingRuntime } from "../src/credits/pricing-runtime.js";
+import { CatalogRuntime } from "../src/credits/catalog-runtime.js";
+import { PricingEngine } from "../src/engine.js";
 import type { CreditStore } from "../src/credits/store.js";
 import { noopLogger } from "../src/shared/logger.js";
 
@@ -53,7 +54,55 @@ const CONFIG = {
   },
 };
 
-describe("PricingRuntime lease pricing", () => {
+describe("CatalogRuntime lease pricing", () => {
+  it("installs a published catalog only after persistence succeeds", async () => {
+    const original = PricingEngine.fromDict(CONFIG);
+    const publishAndActivateCatalog = vi.fn().mockResolvedValue("revision-2");
+    const store = { publishAndActivateCatalog } as unknown as CreditStore;
+    const runtime = new CatalogRuntime(store, original, noopLogger, 0);
+
+    await expect(runtime.publishAndActivate(CONFIG, "release-2")).resolves.toBe("revision-2");
+
+    expect(runtime.currentEngine).not.toBe(original);
+    expect(publishAndActivateCatalog).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the committed catalog when publication fails", async () => {
+    const original = PricingEngine.fromDict(CONFIG);
+    const store = {
+      publishAndActivateCatalog: vi.fn().mockRejectedValue(new Error("write failed")),
+    } as unknown as CreditStore;
+    const runtime = new CatalogRuntime(store, original, noopLogger, 0);
+
+    await expect(runtime.publishAndActivate(CONFIG)).rejects.toThrow("write failed");
+
+    expect(runtime.currentEngine).toBe(original);
+  });
+
+  it("blocks stale callers until the shared catalog refresh completes", async () => {
+    const response = Promise.withResolvers<{
+      id: string;
+      version: number;
+      config: typeof CONFIG;
+    }>();
+    const getActiveCatalog = vi.fn(() => response.promise);
+    const store = { getActiveCatalog } as unknown as CreditStore;
+    const runtime = new CatalogRuntime(store, PricingEngine.fromDict(CONFIG), noopLogger, 1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    let settled = false;
+    const first = runtime.refreshIfStale().then(() => {
+      settled = true;
+    });
+    const second = runtime.refreshIfStale();
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    expect(getActiveCatalog).toHaveBeenCalledOnce();
+    response.resolve({ id: "revision-2", version: 2, config: CONFIG });
+    await Promise.all([first, second]);
+  });
+
   it("uses the catalog and rate card captured at lease admission", async () => {
     const getLeasePricingContext = vi.fn().mockResolvedValue({
       catalogVersion: 7,
@@ -61,7 +110,7 @@ describe("PricingRuntime lease pricing", () => {
       planKey: "captured_plan",
       rateCard: "captured",
     });
-    const getBursarConfig = vi.fn().mockResolvedValue({
+    const getCatalogRevision = vi.fn().mockResolvedValue({
       id: "revision-7",
       version: 7,
       config: CONFIG,
@@ -69,10 +118,10 @@ describe("PricingRuntime lease pricing", () => {
     const getUserPlan = vi.fn().mockResolvedValue({ rateCard: "current" });
     const store = {
       getLeasePricingContext,
-      getBursarConfig,
+      getCatalogRevision,
       getUserPlan,
     } as unknown as CreditStore;
-    const runtime = new PricingRuntime(store, null, noopLogger, 0);
+    const runtime = new CatalogRuntime(store, null, noopLogger, 0);
 
     const result = await runtime.costOf(
       { operation: "completion", measures: { tokens: 3 } },
@@ -82,7 +131,7 @@ describe("PricingRuntime lease pricing", () => {
 
     expect(result.amount.toString()).toBe("6");
     expect(getLeasePricingContext).toHaveBeenCalledWith("user-1", "lease-1");
-    expect(getBursarConfig).toHaveBeenCalledWith(7);
+    expect(getCatalogRevision).toHaveBeenCalledWith(7);
     expect(getUserPlan).not.toHaveBeenCalled();
   });
 
@@ -90,7 +139,7 @@ describe("PricingRuntime lease pricing", () => {
     const store = {
       getLeasePricingContext: vi.fn().mockResolvedValue(null),
     } as unknown as CreditStore;
-    const runtime = new PricingRuntime(store, null, noopLogger, 0);
+    const runtime = new CatalogRuntime(store, null, noopLogger, 0);
 
     await expect(
       runtime.costOf(

@@ -129,7 +129,10 @@ export function parsePlans(
       const emitAtPercent = (quota.emit_at_percent ?? [100]) as number[];
       if (
         emitAtPercent.some((threshold) => threshold < 1 || threshold > 100) ||
-        emitAtPercent.some((threshold, index) => index > 0 && threshold <= emitAtPercent[index - 1])
+        emitAtPercent.some((threshold, index) => {
+          const previous = emitAtPercent[index - 1];
+          return index > 0 && previous !== undefined && threshold <= previous;
+        })
       ) {
         semanticError(
           `plans.${planKey}.quotas.${quotaKey}.emit_at_percent must be unique, increasing, and between 1 and 100`,
@@ -161,17 +164,23 @@ export function parsePlans(
     }
     const allowanceInput =
       plan.credit_allowance == null ? undefined : asObject(plan.credit_allowance);
-    const allowancePriority =
-      allowanceInput?.priority == null ? undefined : asInteger(allowanceInput.priority);
-    if (allowancePriority != null && allowancePriority < 0) {
+    const creditAllowance =
+      allowanceInput == null
+        ? undefined
+        : {
+            amount: asDecimal(allowanceInput.amount),
+            priority: asInteger(allowanceInput.priority),
+            window: parseWindow(allowanceInput.window, `plans.${planKey}.credit_allowance.window`),
+          };
+    if (creditAllowance != null && creditAllowance.priority < 0) {
       semanticError(`plans.${planKey}.credit_allowance.priority must be non-negative`);
     }
     if (
-      allowancePriority != null &&
-      Object.values(credits.buckets).some((bucket) => bucket.priority === allowancePriority)
+      creditAllowance != null &&
+      Object.values(credits.buckets).some((bucket) => bucket.priority === creditAllowance.priority)
     ) {
       semanticError(
-        `plans.${planKey}.credit_allowance.priority conflicts with credit bucket priority ${allowancePriority}`,
+        `plans.${planKey}.credit_allowance.priority conflicts with credit bucket priority ${creditAllowance.priority}`,
       );
     }
 
@@ -182,18 +191,7 @@ export function parsePlans(
       ...(rateCard == null ? {} : { rateCard }),
       allowedOperations,
       features,
-      ...(allowanceInput == null
-        ? {}
-        : {
-            creditAllowance: {
-              amount: asDecimal(allowanceInput.amount),
-              ...(allowancePriority == null ? {} : { priority: allowancePriority }),
-              window: parseWindow(
-                allowanceInput.window,
-                `plans.${planKey}.credit_allowance.window`,
-              ),
-            },
-          }),
+      ...(creditAllowance == null ? {} : { creditAllowance }),
       quotas,
       ...(creditPolicy == null ? {} : { creditPolicy }),
       ...(admissionPolicy == null ? {} : { admissionPolicy }),

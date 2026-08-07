@@ -48,8 +48,10 @@ describe("shared commerce parity fixture", () => {
   });
 
   it("keeps stable error codes and a provider-agnostic public contract", () => {
-    expect(new UnknownOfferError().code).toBe(fixture.error_codes.unknown_offer);
-    expect(new InvalidOfferQuantityError().code).toBe(fixture.error_codes.invalid_quantity);
+    expect(new UnknownOfferError("Unknown offer").code).toBe(fixture.error_codes.unknown_offer);
+    expect(new InvalidOfferQuantityError("Invalid offer quantity").code).toBe(
+      fixture.error_codes.invalid_quantity,
+    );
     expect(new QuoteChangedError({}).code).toBe(fixture.error_codes.quote_changed);
     expect(new ProviderCapabilityNotSupportedError("alpha", "portal").code).toBe(
       fixture.error_codes.provider_capability,

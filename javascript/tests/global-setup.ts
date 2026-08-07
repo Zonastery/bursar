@@ -1,6 +1,6 @@
 /**
- * Vitest global setup — starts disposable PostgreSQL 17 with pg_partman 5
- * and pg_jsonschema 0.3
+ * Vitest global setup — builds and starts Bursar's provider-neutral
+ * PostgreSQL 17 image with pg_partman 5 and pg_jsonschema 0.3
  * testcontainer when `DATABASE_URL` isn't already set, so `bun run test`
  * exercises the real PostgresStore integration/concurrency suite by default
  * (Docker permitting) instead of silently skipping it. CI sets `DATABASE_URL`
@@ -16,6 +16,8 @@
  */
 import type { TestProject } from "vitest/node";
 import type { StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 declare module "vitest" {
   export interface ProvidedContext {
@@ -24,7 +26,22 @@ declare module "vitest" {
 }
 
 let container: StartedPostgreSqlContainer | undefined;
-const DEFAULT_POSTGRES_IMAGE = "public.ecr.aws/supabase/postgres:17.6.1.156";
+const DEFAULT_POSTGRES_IMAGE = "bursar/postgres-test:17.10-pg-jsonschema-0.3.4";
+const POSTGRES_BUILD_CONTEXT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../tests/postgres",
+);
+
+async function resolvePostgresImage(): Promise<string> {
+  const configuredImage = process.env.BURSAR_TEST_PG_IMAGE;
+  if (configuredImage) return configuredImage;
+
+  const { GenericContainer } = await import("testcontainers");
+  await GenericContainer.fromDockerfile(POSTGRES_BUILD_CONTEXT).build(DEFAULT_POSTGRES_IMAGE, {
+    deleteOnExit: false,
+  });
+  return DEFAULT_POSTGRES_IMAGE;
+}
 
 export async function setup(project: TestProject): Promise<void> {
   if (process.env.DATABASE_URL) {
@@ -33,8 +50,9 @@ export async function setup(project: TestProject): Promise<void> {
   }
 
   const { PostgreSqlContainer } = await import("@testcontainers/postgresql");
-  const image = process.env.BURSAR_TEST_PG_IMAGE ?? DEFAULT_POSTGRES_IMAGE;
+  let image = process.env.BURSAR_TEST_PG_IMAGE ?? DEFAULT_POSTGRES_IMAGE;
   try {
+    image = await resolvePostgresImage();
     container = await new PostgreSqlContainer(image).start();
     project.provide("DATABASE_URL", container.getConnectionUri());
   } catch (err) {

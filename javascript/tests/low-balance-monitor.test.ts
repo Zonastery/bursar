@@ -10,7 +10,6 @@ describe("LowBalanceMonitor", () => {
     const monitor = new LowBalanceMonitor(
       { thresholds: [10], maxTrackedUsers: 2 },
       emit,
-      () => new Decimal(0),
       noopLogger,
     );
 
@@ -24,13 +23,7 @@ describe("LowBalanceMonitor", () => {
 
   it("rejects invalid cache capacities at construction", () => {
     expect(
-      () =>
-        new LowBalanceMonitor(
-          { thresholds: [10], maxTrackedUsers: 0 },
-          vi.fn(),
-          () => new Decimal(0),
-          noopLogger,
-        ),
+      () => new LowBalanceMonitor({ thresholds: [10], maxTrackedUsers: 0 }, vi.fn(), noopLogger),
     ).toThrow(/positive safe integer/);
   });
 });

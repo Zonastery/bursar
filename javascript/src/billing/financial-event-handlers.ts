@@ -44,28 +44,27 @@ export class BillingFinancialEventHandlers {
       eventId: event.eventId,
       invoiceId: event.invoice?.providerInvoiceId,
     });
+    if (!event.invoice) return { handled: false, error: "no_invoice_data" };
     const renewalResult = event.subscription
       ? await this.handleSubscriptionRenewed(event)
       : { handled: true, action: "invoice_paid" };
     if (!renewalResult.handled) return renewalResult;
-    if (event.invoice) {
-      const uid = await this.resolveUserId(event);
-      if (uid) {
-        await this.store.upsertBillingInvoice({
-          provider: event.provider,
-          providerInvoiceId: event.invoice.providerInvoiceId,
-          providerSubscriptionId: event.subscription?.providerSubscriptionId,
-          userId: uid,
-          status: event.invoice.status,
-          amountPaidMinor: event.invoice.amountPaidMinor,
-          amountDueMinor: event.invoice.amountDueMinor,
-          currency: event.invoice.currency,
-          periodStart: event.invoice.periodStart,
-          periodEnd: event.invoice.periodEnd,
-          metadata: event.metadata,
-          providerUpdatedAt: event.occurredAt,
-        });
-      }
+    const uid = await this.resolveUserId(event);
+    if (uid) {
+      await this.store.upsertBillingInvoice({
+        provider: event.provider,
+        providerInvoiceId: event.invoice.providerInvoiceId,
+        providerSubscriptionId: event.subscription?.providerSubscriptionId,
+        userId: uid,
+        status: event.invoice.status,
+        amountPaidMinor: event.invoice.amountPaidMinor,
+        amountDueMinor: event.invoice.amountDueMinor,
+        currency: event.invoice.currency,
+        periodStart: event.invoice.periodStart,
+        periodEnd: event.invoice.periodEnd,
+        metadata: event.metadata,
+        providerUpdatedAt: event.occurredAt,
+      });
     }
     return renewalResult;
   }
@@ -76,7 +75,7 @@ export class BillingFinancialEventHandlers {
       eventId: event.eventId,
       amountMinor: event.payment?.amountMinor,
     });
-    if (!event.payment) return { handled: true, action: "payment_succeeded" };
+    if (!event.payment) return { handled: false, error: "no_payment_data" };
 
     const uid = await this.resolveUserId(event);
     const refs = event.payment.refs;
@@ -93,7 +92,7 @@ export class BillingFinancialEventHandlers {
     if (uid) {
       const paymentMetadata: Record<string, unknown> | null =
         topupConfig && event.payment.purpose === "credit_topup"
-          ? { credits_per_unit: Number(topupConfig.creditsPerUnit ?? 1000) }
+          ? { credits_per_unit: topupConfig.creditsPerUnit.toString() }
           : null;
       paymentId = await this.store.upsertBillingPayment({
         provider: event.provider,
@@ -103,7 +102,7 @@ export class BillingFinancialEventHandlers {
         taxMinor: event.payment.taxMinor,
         currency: event.payment.currency,
         purpose: event.payment.purpose,
-        status: event.payment.status ?? "succeeded",
+        status: event.payment.status,
         providerUpdatedAt: event.occurredAt,
         metadata: paymentMetadata,
       });
@@ -133,10 +132,8 @@ export class BillingFinancialEventHandlers {
 
     if (topupConfig && event.payment.purpose === "credit_topup" && uid) {
       if (
-        (topupConfig.minAmountMinor != null &&
-          event.payment.amountMinor < topupConfig.minAmountMinor) ||
-        (topupConfig.maxAmountMinor != null &&
-          event.payment.amountMinor > topupConfig.maxAmountMinor)
+        event.payment.amountMinor < topupConfig.minAmountMinor ||
+        event.payment.amountMinor > topupConfig.maxAmountMinor
       ) {
         this.logger.warn(
           `[BillingService] topup amount ${event.payment.amountMinor} exceeds cap ${topupConfig.maxAmountMinor} for topup key ${topupConfig.topupKey} (user ${uid})`,
@@ -145,19 +142,17 @@ export class BillingFinancialEventHandlers {
       }
       const credits = await this.store.computeTopupCredits(event.payment.amountMinor, topupConfig);
       const quantity =
-        topupConfig.amountMinor == null || topupConfig.amountMinor <= 0
-          ? 0
-          : event.payment.amountMinor / topupConfig.amountMinor;
+        topupConfig.amountMinor <= 0 ? 0 : event.payment.amountMinor / topupConfig.amountMinor;
       if (
-        credits > 0 &&
+        credits.gt(0) &&
         paymentId &&
         Number.isSafeInteger(quantity) &&
-        (topupConfig.creditsPerUnit ?? 0) > 0
+        topupConfig.creditsPerUnit.gt(0)
       ) {
         const grantId = await this.store.createBillingCreditGrant({
           paymentId,
           topupId: topupConfig.topupId,
-          configuredCredits: topupConfig.creditsPerUnit!,
+          configuredCredits: topupConfig.creditsPerUnit,
           quantity,
         });
         await this.store.grantBillingCredit(grantId, `billing:${event.eventId}:topup`);
@@ -179,45 +174,48 @@ export class BillingFinancialEventHandlers {
       provider: event.provider,
       eventId: event.eventId,
     });
+    if (!event.payment) return { handled: false, error: "no_payment_data" };
     const uid = await this.resolveUserId(event);
-    if (uid && event.payment) {
+    if (uid) {
       await this.store.upsertBillingPayment({
         provider: event.provider,
         providerPaymentId: event.payment.providerPaymentId,
         userId: uid,
         amountMinor: event.payment.amountMinor,
+        taxMinor: event.payment.taxMinor,
         currency: event.payment.currency,
         purpose: event.payment.purpose,
-        status: event.payment.status ?? "failed",
+        status: event.payment.status,
         providerUpdatedAt: event.occurredAt,
       });
     }
     if (uid && event.subscription) {
       const existing = await this.getExistingSubscription(event);
       const occurredAt = new Date(event.occurredAt);
-      const graceBase = Number.isNaN(occurredAt.getTime()) ? new Date() : occurredAt;
+      if (Number.isNaN(occurredAt.getTime())) {
+        throw new TypeError("billing event occurredAt must be a valid instant");
+      }
       const pastDue = this.buildSubscriptionState(event, uid, existing, {
         status: "past_due",
-        graceEndsAt: new Date(graceBase.getTime() + this.pastDueGracePeriodMs).toISOString(),
+        graceEndsAt: new Date(occurredAt.getTime() + this.pastDueGracePeriodMs).toISOString(),
         graceExpiredAt: null,
       });
       await this.store.upsertBillingSubscription(pastDue);
     }
-    if (event.payment) {
-      await this.store.updateAutoRechargeAttemptByProviderPayment({
-        provider: event.provider,
-        providerPaymentId: event.payment.providerPaymentId,
-        state: "failed",
-        failureCode: "provider_payment_failed",
-      });
-    }
+    await this.store.updateAutoRechargeAttemptByProviderPayment({
+      provider: event.provider,
+      providerPaymentId: event.payment.providerPaymentId,
+      state: "failed",
+      failureCode: "provider_payment_failed",
+    });
     await this.updateCheckoutIntentFromEvent(event, "failed");
     return { handled: true, action: "payment_failed_recorded" };
   }
 
   async handleRefundCreated(event: BillingEvent): Promise<BillingEventResult> {
+    if (!event.refund) return { handled: false, error: "no_refund_data" };
     const uid = await this.resolveUserId(event);
-    if (uid && event.refund) {
+    if (uid) {
       const refundId = await this.store.upsertBillingRefund({
         provider: event.provider,
         providerRefundId: event.refund.providerRefundId,
@@ -226,11 +224,11 @@ export class BillingFinancialEventHandlers {
         amountMinor: event.refund.amountMinor,
         currency: event.refund.currency,
         reason: event.refund.reason,
-        status: event.refund.status ?? "pending",
+        status: event.refund.status,
         providerUpdatedAt: event.occurredAt,
         metadata: event.metadata,
       });
-      if ((event.refund.status ?? "pending") === "succeeded" && event.refund.providerPaymentId) {
+      if (event.refund.status === "succeeded") {
         const payment = await this.store.getBillingPayment(
           event.provider,
           event.refund.providerPaymentId,
@@ -245,7 +243,7 @@ export class BillingFinancialEventHandlers {
               event.refund.amountMinor,
               `billing:${event.eventId}:refund`,
             );
-            if (!result.error_code) return { handled: true, action: "refund_clawback" };
+            if (!result.errorCode) return { handled: true, action: "refund_clawback" };
           }
         }
       }
@@ -254,36 +252,30 @@ export class BillingFinancialEventHandlers {
   }
 
   async handleDisputeCreated(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (uid && event.dispute) {
-      await this.store.upsertBillingDispute({
-        provider: event.provider,
-        providerDisputeId: event.dispute.providerDisputeId,
-        providerPaymentId: event.dispute.providerPaymentId,
-        userId: uid,
-        status: "needs_response",
-        reason: event.dispute.reason,
-        metadata: event.metadata,
-        providerUpdatedAt: event.occurredAt,
-      });
-    }
+    if (!event.dispute) return { handled: false, error: "no_dispute_data" };
+    await this.store.upsertBillingDispute({
+      provider: event.provider,
+      providerDisputeId: event.dispute.providerDisputeId,
+      providerPaymentId: event.dispute.providerPaymentId,
+      status: event.dispute.status,
+      reason: event.dispute.reason,
+      metadata: event.metadata,
+      providerUpdatedAt: event.occurredAt,
+    });
     return { handled: true, action: "dispute_recorded" };
   }
 
   async handleDisputeClosed(event: BillingEvent): Promise<BillingEventResult> {
-    const uid = await this.resolveUserId(event);
-    if (uid && event.dispute) {
-      await this.store.upsertBillingDispute({
-        provider: event.provider,
-        providerDisputeId: event.dispute.providerDisputeId,
-        providerPaymentId: event.dispute.providerPaymentId,
-        userId: uid,
-        status: "closed",
-        reason: event.dispute.reason,
-        metadata: event.metadata,
-        providerUpdatedAt: event.occurredAt,
-      });
-    }
+    if (!event.dispute) return { handled: false, error: "no_dispute_data" };
+    await this.store.upsertBillingDispute({
+      provider: event.provider,
+      providerDisputeId: event.dispute.providerDisputeId,
+      providerPaymentId: event.dispute.providerPaymentId,
+      status: event.dispute.status,
+      reason: event.dispute.reason,
+      metadata: event.metadata,
+      providerUpdatedAt: event.occurredAt,
+    });
     return { handled: true, action: "dispute_closed" };
   }
 }

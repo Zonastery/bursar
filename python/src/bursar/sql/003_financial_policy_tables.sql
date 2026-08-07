@@ -800,6 +800,7 @@ CREATE TABLE bursar.credit_leases (
         OR octet_length(settlement_request_digest) = 32
     ),
     ledger_entry_id uuid REFERENCES bursar.credit_ledger_entries (id),
+    usage_charge_id uuid REFERENCES bursar.credit_usage_charges (id),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (account_id, idempotency_key),
@@ -815,6 +816,7 @@ CREATE TABLE bursar.credit_leases (
             AND settled_amount IS NOT NULL
             AND settlement_idempotency_key IS NOT NULL
             AND settlement_request_digest IS NOT NULL
+            AND usage_charge_id IS NOT NULL
         )
         OR (
             status <> 'settled'
@@ -822,6 +824,7 @@ CREATE TABLE bursar.credit_leases (
             AND settlement_idempotency_key IS NULL
             AND settlement_request_digest IS NULL
             AND ledger_entry_id IS NULL
+            AND usage_charge_id IS NULL
         )
     ),
     CHECK (

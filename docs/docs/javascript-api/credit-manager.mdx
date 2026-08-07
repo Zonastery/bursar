@@ -22,7 +22,7 @@ const grant = await bursar.credits.addCredits(userId, 100, {
 const charge = await bursar.credits.deductCredits(userId, 5, {
   entryType: "adjustment",
 });
-const refund = await bursar.credits.refundCredits(charge.entryId, undefined, "clawback");
+const refund = await bursar.credits.refundCredits(charge.entryId, { reason: "clawback" });
 ```
 
 `addCredits` and `deductCredits` move a raw amount; `refundCredits` reverses a
@@ -32,28 +32,22 @@ row (`entryId` for adjustments, `refundEntryId` for refunds). `getBalance`,
 
 ### Idempotency — read carefully
 
-`addCredits` and `refundCredits` accept an `idempotencyKey` for replay-safe
+All three adjustment methods accept an `idempotencyKey` for replay-safe
 retries: retrying with the same key replays the original result instead of
 double-applying.
-
-**`deductCredits` does not accept an `idempotencyKey`** — its options are
-`entryType`, `bucket`, and `metadata` only. It is an administrative adjustment
-(a refund clawback), not the metered path; do not build retries on it. For
-replay-safe charging, use `deduct(userId, metrics, idempotencyKey)` — the
-high-volume, idempotency-keyed path (see below).
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
 | `addCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { type?, metadata?, expiresAt?, bucket?, idempotencyKey? }` | `Promise<AddCreditsResult>` |
-| `deductCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { entryType?, bucket?, metadata? }` | `Promise<AddCreditsResult>` |
-| `refundCredits` | `entryId: string`, `amount?`, `reason?`, `metadata?`, `idempotencyKey?` | `Promise<RefundResult>` |
+| `deductCredits` | `userId: string`, `amount: Decimal \| number`, `options?: DeductCreditsOptions` | `Promise<AddCreditsResult>` |
+| `refundCredits` | `entryId: string`, `options?: RefundCreditsOptions` | `Promise<RefundResult>` |
 | `getBalance` | `userId: string` | `Promise<BalanceResult>` |
 | `getAvailable` | `userId: string` | `Promise<AvailableResult>` |
 | `getBucketBalances` | `userId: string` | `Promise<BucketBalancesResult>` |
 
 ## Metered charging
 
-`deduct(userId, metrics, idempotencyKey?, metadata?, feature?)` prices a
+`deduct(userId, metrics, options?)` prices a
 `UsageMetrics` event with the active pricing engine and charges the cost in
 one atomic, idempotency-keyed transaction. The idempotency key is **the**
 replay guard for metered usage: the same key returns the same
@@ -69,7 +63,7 @@ const result = await bursar.credits.deduct(
     measures: { input_tokens: 500, output_tokens: 200 },
     dimensions: { model: "gpt-4o" },
   },
-  "request:9f8c",
+  { idempotencyKey: "request:9f8c" },
 );
 ```
 
@@ -82,8 +76,8 @@ reverses every deduction of a given entry type, and
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
-| `deduct` | `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
-| `deductFlatJob` | `userId: string`, `jobName: string`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
+| `deduct` | `userId: string`, `metrics: UsageMetrics`, `options?: DeductOptions` | `Promise<DeductionResult>` |
+| `deductFlatJob` | `userId: string`, `jobName: string`, `options?: DeductFlatJobOptions` | `Promise<DeductionResult>` |
 | `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
 | `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
 
@@ -226,13 +220,13 @@ await bursar.credits.deductTeam(
     measures: { jobs: 1 },
     dimensions: { model: "gpt-4o" },
   },
-  "team:run:3",
+  { idempotencyKey: "team:run:3" },
 );
 ```
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
-| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?` | `Promise<TeamDeductionResult>` |
+| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `options?: DeductTeamOptions` | `Promise<TeamDeductionResult>` |
 
 See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
 model, and [Leases and financial safety](/docs/guides/financial-safety) for

@@ -91,36 +91,12 @@ class ResolveIdentityInput(_ProviderModel):
     checkout_kind: Literal["subscription", "credit_topup"] | None = None
 
 
-class _ProviderResultModel(_ProviderModel):
-    """Pydantic result with transitional mapping access for SDK internals."""
-
-    def _field_name(self, key: str) -> str:
-        if key in type(self).model_fields:
-            return key
-        for name, field in type(self).model_fields.items():
-            if field.alias == key:
-                return name
-            camel = name.split("_")[0] + "".join(part.title() for part in name.split("_")[1:])
-            if camel == key:
-                return name
-        raise KeyError(key)
-
-    def __getitem__(self, key: str) -> Any:
-        return getattr(self, self._field_name(key))
-
-    def get(self, key: str, default: Any = None) -> Any:
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
 class WebhookRequest(_ProviderModel):
     raw_body: str
     headers: dict[str, str]
 
 
-class WebhookResult(_ProviderResultModel):
+class WebhookResult(_ProviderModel):
     received: bool
     retryable: bool
     provider: str
@@ -156,25 +132,25 @@ CheckoutPaymentStatus = Literal[
 ]
 
 
-class CheckoutSessionStatus(_ProviderResultModel):
+class CheckoutSessionStatus(_ProviderModel):
     payment_status: CheckoutPaymentStatus | None
 
 
-class CheckoutSessionResult(_ProviderResultModel):
+class CheckoutSessionResult(_ProviderModel):
     url: str
     customer_id: str | None = None
     provider_session_id: str | None = None
 
 
-class ProviderUrlResult(_ProviderResultModel):
+class ProviderUrlResult(_ProviderModel):
     url: str
 
 
-class CreateCustomerResult(_ProviderResultModel):
+class CreateCustomerResult(_ProviderModel):
     customer_id: str
 
 
-class ChangePlanResult(_ProviderResultModel):
+class ChangePlanResult(_ProviderModel):
     provider_operation_id: str | None = None
 
 
@@ -243,7 +219,7 @@ SavedPaymentChargeStatus = Literal[
 ]
 
 
-class SavedPaymentChargeResult(_ProviderResultModel):
+class SavedPaymentChargeResult(_ProviderModel):
     """Validated provider charge result mirroring the JavaScript contract."""
 
     provider_payment_id: str | None = None
@@ -253,7 +229,7 @@ class SavedPaymentChargeResult(_ProviderResultModel):
     currency: str | None = None
 
 
-class SavedPaymentChargeQuote(_ProviderResultModel):
+class SavedPaymentChargeQuote(_ProviderModel):
     amount_minor: int
     currency: str
     tax_minor: int | None = None
@@ -294,7 +270,7 @@ class PreviewChangePlanParams(_ProviderModel):
     quantity: int = 1
 
 
-class ChangePlanLineItem(_ProviderResultModel):
+class ChangePlanLineItem(_ProviderModel):
     product_id: str
     name: str
     unit_price: int
@@ -305,7 +281,7 @@ class ChangePlanLineItem(_ProviderResultModel):
     subtotal: int
 
 
-class ChangePlanPreview(_ProviderResultModel):
+class ChangePlanPreview(_ProviderModel):
     total_amount: int
     settlement_amount: int
     currency: str
@@ -359,10 +335,6 @@ class PaymentProvider(ABC):
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         raise NotImplementedError("provider does not support list_payment_methods")
-
-    async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
-        methods = await self.list_payment_methods(customer_id)
-        return methods[0] if len(methods) == 1 else None
 
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
         raise NotImplementedError("provider does not support saved-payment previews")

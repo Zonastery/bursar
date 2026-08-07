@@ -8,6 +8,35 @@ class BillingClaimBusyError extends Error {
   override readonly name = "BillingClaimBusyError";
 }
 
+export function requireProviderString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new TypeError(`${field} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+export function requireMinorUnits(value: unknown, field: string, positive = false): number {
+  const amount =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isSafeInteger(amount) || amount < (positive ? 1 : 0)) {
+    throw new TypeError(
+      `${field} must be a ${positive ? "positive" : "non-negative"} safe integer`,
+    );
+  }
+  return amount;
+}
+
+export function requireCurrency(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z]{3}$/.test(value)) {
+    throw new TypeError(`${field} must be a three-letter currency code`);
+  }
+  return value.toUpperCase();
+}
+
 /**
  * Wrapper around the facade event sink that throws on unhandled results (except
  * "unhandled_event_type" which is a permanent no-op). Ensures the provider

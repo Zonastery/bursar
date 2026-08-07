@@ -4,7 +4,25 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel as PydanticBaseModel
+from pydantic import ConfigDict, Field, field_validator, model_validator
+
+
+class BaseModel(PydanticBaseModel):
+    """Strict base for public billing contracts."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+NonEmptyString = Annotated[str, Field(min_length=1)]
+CurrencyCode = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
+
+
+def _normalize_instant(value: str) -> str:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 class BillingProvider(StrEnum):
@@ -64,12 +82,10 @@ class BillingSubscriptionStatus(StrEnum):
 
 
 class ProviderRef(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    product_id: str | None = None
-    price_id: str | None = None
-    variant_id: str | None = None
-    lookup_key: str | None = None
+    product_id: NonEmptyString | None = None
+    price_id: NonEmptyString | None = None
+    variant_id: NonEmptyString | None = None
+    lookup_key: NonEmptyString | None = None
 
     @model_validator(mode="after")
     def validate_reference(self) -> "ProviderRef":
@@ -79,12 +95,18 @@ class ProviderRef(BaseModel):
 
 
 class BillingCustomerInfo(BaseModel):
-    provider_customer_id: str | None = None
-    email: str | None = None
+    provider_customer_id: NonEmptyString | None = None
+    email: NonEmptyString | None = None
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> "BillingCustomerInfo":
+        if self.provider_customer_id is None and self.email is None:
+            raise ValueError("billing customer requires provider_customer_id or email")
+        return self
 
 
 class BillingSubscriptionInfo(BaseModel):
-    provider_subscription_id: str
+    provider_subscription_id: NonEmptyString
     status: BillingSubscriptionStatus | None = None
     cancel_at_period_end: bool | None = None
     period_start: str | None = None
@@ -93,50 +115,101 @@ class BillingSubscriptionInfo(BaseModel):
     cancel_at: str | None = None
     ended_at: str | None = None
     refs: ProviderRef | None = None
-    interval: str | None = None
-    interval_count: int | None = None
+    interval: Literal["day", "week", "month", "year"] | None = None
+    interval_count: int | None = Field(default=None, gt=0)
+
+    @field_validator("period_start", "period_end", "trial_end", "cancel_at", "ended_at")
+    @classmethod
+    def normalize_optional_instant(cls, value: str | None) -> str | None:
+        return _normalize_instant(value) if value is not None else None
 
 
 class BillingInvoiceInfo(BaseModel):
-    provider: str | None = None
-    provider_invoice_id: str
-    status: str | None = None
-    amount_paid_minor: int | None = None
-    amount_due_minor: int | None = None
-    currency: str | None = None
+    provider_invoice_id: NonEmptyString
+    status: Literal["draft", "open", "paid", "void", "uncollectible"]
+    amount_paid_minor: int = Field(ge=0)
+    amount_due_minor: int = Field(ge=0)
+    currency: CurrencyCode
     period_start: str | None = None
     period_end: str | None = None
 
+    @field_validator("period_start", "period_end")
+    @classmethod
+    def normalize_optional_instant(cls, value: str | None) -> str | None:
+        return _normalize_instant(value) if value is not None else None
+
+
+class BillingInvoiceRecord(BillingInvoiceInfo):
+    """Persisted invoice document returned from account-level billing queries."""
+
+    provider: NonEmptyString
+
 
 class BillingPaymentInfo(BaseModel):
-    provider_payment_id: str
-    amount_minor: int
-    tax_minor: int | None = None
-    currency: str
+    provider_payment_id: NonEmptyString
+    amount_minor: int = Field(ge=0)
+    tax_minor: int = Field(ge=0)
+    currency: CurrencyCode
     refs: ProviderRef | None = None
-    purpose: Literal["subscription", "credit_topup", "unknown"]
-    status: Literal["pending", "succeeded", "failed", "canceled"] | None = None
+    purpose: Literal["subscription", "credit_topup"]
+    status: Literal["pending", "succeeded", "failed", "canceled"]
+
+
+class BillingPaymentRecord(BaseModel):
+    """Persisted payment state used by billing lifecycle handlers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    provider: str
+    provider_payment_id: str
+    provider_invoice_id: str | None = None
+    user_id: str
+    amount_minor: int
+    tax_minor: int
+    currency: str
+    purpose: Literal["subscription", "credit_topup"]
+    status: Literal["pending", "succeeded", "failed", "canceled"]
+    provider_updated_at: str
+    metadata: dict[str, Any]
+
+
+class BillingCreditPostingResult(BaseModel):
+    """Result of posting a billing grant or refund to the credit ledger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ledger_entry_id: str | None = None
+    balance_after: Decimal | None = None
+    replayed: bool = Field(strict=True)
+    error_code: str | None = None
+
+    @model_validator(mode="after")
+    def validate_success_result(self) -> "BillingCreditPostingResult":
+        if self.error_code is None and (self.ledger_entry_id is None or self.balance_after is None):
+            raise ValueError("successful billing credit posting requires ledger entry and balance")
+        return self
 
 
 class BillingRefundInfo(BaseModel):
-    provider_refund_id: str
-    provider_payment_id: str | None = None
-    amount_minor: int
-    currency: str
+    provider_refund_id: NonEmptyString
+    provider_payment_id: NonEmptyString
+    amount_minor: int = Field(gt=0)
+    currency: CurrencyCode
     reason: str | None = None
-    status: Literal["pending", "succeeded", "failed", "canceled"] | None = None
+    status: Literal["pending", "succeeded", "failed", "canceled"]
 
 
 class BillingDisputeInfo(BaseModel):
-    provider_dispute_id: str
-    provider_payment_id: str | None = None
-    status: str | None = None
+    provider_dispute_id: NonEmptyString
+    provider_payment_id: NonEmptyString
+    status: Literal["needs_response", "under_review", "won", "lost", "closed"]
     reason: str | None = None
 
 
 class BillingEvent(BaseModel):
-    provider: str
-    event_id: str
+    provider: NonEmptyString
+    event_id: NonEmptyString
     event_type: BillingEventType
     occurred_at: str
 
@@ -154,10 +227,24 @@ class BillingEvent(BaseModel):
     @field_validator("occurred_at")
     @classmethod
     def normalize_occurred_at(cls, value: str) -> str:
-        parsed = datetime.fromisoformat(value)
-        if parsed.tzinfo is None:
-            raise ValueError("occurred_at must include a timezone")
-        return parsed.astimezone(UTC).isoformat()
+        return _normalize_instant(value)
+
+    @model_validator(mode="after")
+    def validate_event_payload(self) -> "BillingEvent":
+        event_name = self.event_type.value
+        if event_name.startswith("customer.") and self.customer is None:
+            raise ValueError(f"{event_name} requires customer data")
+        if event_name.startswith("subscription.") and self.subscription is None:
+            raise ValueError(f"{event_name} requires subscription data")
+        if event_name.startswith("invoice.") and self.invoice is None:
+            raise ValueError(f"{event_name} requires invoice data")
+        if event_name.startswith("payment.") and self.payment is None:
+            raise ValueError(f"{event_name} requires payment data")
+        if event_name.startswith("refund.") and self.refund is None:
+            raise ValueError(f"{event_name} requires refund data")
+        if event_name.startswith("dispute.") and self.dispute is None:
+            raise ValueError(f"{event_name} requires dispute data")
+        return self
 
 
 class BillingEventResult(BaseModel):
@@ -208,49 +295,6 @@ class SubscriptionGrant(BaseModel):
     credits: Decimal | None = None
     bucket: str | None = None
     replace_prior: bool | None = None
-
-
-class BillingOffer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    plan: str
-    interval: BillingOfferInterval = BillingOfferInterval.month
-    interval_count: int = Field(default=1, ge=1)
-    grant: SubscriptionGrant = Field(default_factory=lambda: SubscriptionGrant(mode="allowance"))
-    providers: dict[str, ProviderRef] = Field(default_factory=dict)
-    valid_from: str | None = None
-    valid_to: str | None = None
-
-    @model_validator(mode="after")
-    def validate_validity_window(self) -> "BillingOffer":
-        if self.valid_from is not None and self.valid_to is not None:
-            try:
-                valid_from = datetime.fromisoformat(self.valid_from)
-                valid_to = datetime.fromisoformat(self.valid_to)
-            except ValueError as exc:
-                raise ValueError("valid_from and valid_to must be ISO-8601 timestamps") from exc
-            if valid_to <= valid_from:
-                raise ValueError("valid_to must be later than valid_from")
-        return self
-
-
-class BillingCreditTopup(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    deposit_to: str
-    credits_per_unit: Decimal = Field(default=Decimal("1000"), gt=0)
-    min_amount_minor: int = Field(default=500, ge=0)
-    max_amount_minor: int = Field(default=500000, ge=0)
-    tax_behavior: Literal["exclude_tax", "include_tax"] = "exclude_tax"
-    providers: dict[str, ProviderRef] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_amount_range(self) -> "BillingCreditTopup":
-        if self.max_amount_minor < self.min_amount_minor:
-            raise ValueError("max_amount_minor must be >= min_amount_minor")
-        if not self.credits_per_unit.is_finite():
-            raise ValueError("credits_per_unit must be finite")
-        return self
 
 
 class BillingEventClaim(BaseModel):
@@ -378,10 +422,10 @@ class BillingSubscriptionChangeInput(BaseModel):
 class BillingGrantResult(BaseModel):
     """Resolved grant info returned by resolve_billing_offer / resolve_billing_offer_by_lookup."""
 
-    mode: str | None = None
-    credits: str | Decimal | None = None
-    bucket: str | None = None
-    replace_prior: bool | None = None
+    mode: Literal["cycle_grant"]
+    credits: Decimal = Field(gt=0)
+    bucket: str = Field(min_length=1)
+    replace_prior: bool
 
 
 class BillingOfferResult(BaseModel):
@@ -389,11 +433,11 @@ class BillingOfferResult(BaseModel):
 
     offer_id: str
     offer_key: str
-    plan_id: str | None = None
-    plan: str | None = None
-    interval: str | None = None
-    interval_count: int | None = None
-    grant: BillingGrantResult | None = None
+    plan_id: str
+    plan: str
+    interval: Literal["day", "week", "month", "year"]
+    interval_count: int = Field(gt=0)
+    grant: BillingGrantResult | None
 
 
 class BillingTopupResult(BaseModel):
@@ -401,15 +445,15 @@ class BillingTopupResult(BaseModel):
 
     topup_id: str
     topup_key: str
-    credits_per_unit: Decimal | int | None = None
-    deposit_to: str | None = None
-    amount_minor: int | None = None
-    currency: str | None = None
-    min_quantity: int | None = None
-    max_quantity: int | None = None
-    default_quantity: int | None = None
-    min_amount_minor: int | None = None
-    max_amount_minor: int | None = None
+    credits_per_unit: Decimal = Field(gt=0)
+    deposit_to: str = Field(min_length=1)
+    amount_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    min_quantity: int = Field(gt=0)
+    max_quantity: int = Field(gt=0)
+    default_quantity: int = Field(gt=0)
+    min_amount_minor: int = Field(ge=0)
+    max_amount_minor: int = Field(ge=0)
 
 
 class BillingPreferences(BaseModel):
@@ -441,7 +485,7 @@ class BillingAutoRechargeProfile(BaseModel):
     max_charges_per_window: int | None
     window_unit: Literal["second", "minute", "hour", "day", "week", "month", "year"]
     window_count: int
-    window_anchor: Literal["calendar", "plan_assignment", "rolling"]
+    window_anchor: Literal["calendar", "rolling"]
     window_timezone: str
     updated_at: str | None = None
 

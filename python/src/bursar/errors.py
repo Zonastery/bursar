@@ -105,10 +105,53 @@ class CreditError(BursarError):
     code = "CREDIT_ERROR"
 
 
-class PricingNotLoadedError(CreditError):
-    """Raised when ``deduct()`` is called before pricing is loaded."""
+class BillingError(BursarError):
+    """Base for billing and payment orchestration failures."""
 
-    code = "PRICING_NOT_LOADED"
+    code = "BILLING_ERROR"
+
+
+class AutoRechargeNotConfiguredError(BillingError):
+    code = "AUTO_RECHARGE_NOT_CONFIGURED"
+    category: BursarErrorCategory = "unavailable"
+
+    def __init__(self) -> None:
+        super().__init__("Auto-recharge is not configured for this catalog")
+
+
+class AutoRechargeDisabledError(BillingError):
+    code = "AUTO_RECHARGE_DISABLED"
+    category: BursarErrorCategory = "conflict"
+
+    def __init__(self) -> None:
+        super().__init__("Auto-recharge is disabled for this account")
+
+
+class PaymentMethodRequiredError(BillingError):
+    code = "PAYMENT_METHOD_REQUIRED"
+    category: BursarErrorCategory = "payment_required"
+
+    def __init__(self) -> None:
+        super().__init__("A saved payment method is required")
+
+
+class ProviderCapabilityNotSupportedError(BillingError):
+    code = "PROVIDER_CAPABILITY_NOT_SUPPORTED"
+    category: BursarErrorCategory = "unavailable"
+
+    def __init__(self, provider: str, capability: str) -> None:
+        self.provider = provider
+        self.capability = capability
+        super().__init__(
+            f"Payment provider {provider!r} does not support {capability!r}",
+            details={"provider": provider, "capability": capability},
+        )
+
+
+class CatalogNotLoadedError(CreditError):
+    """Raised when an operation requires a catalog that is not loaded."""
+
+    code = "CATALOG_NOT_LOADED"
     category: BursarErrorCategory = "unavailable"
 
 
@@ -222,6 +265,20 @@ class CapabilityNotSupportedError(StoreError):
 
     code = "CAPABILITY_NOT_SUPPORTED"
     retryable = False
+
+
+class CapabilityNotConfiguredError(BursarError):
+    """A facade capability was intentionally omitted from SDK composition."""
+
+    code = "CAPABILITY_NOT_CONFIGURED"
+    category: BursarErrorCategory = "unavailable"
+
+    def __init__(self, capability: str) -> None:
+        self.capability = capability
+        super().__init__(
+            f"Bursar {capability} capability is not configured",
+            details={"capability": capability},
+        )
 
 
 class BursarImportError(BursarError):

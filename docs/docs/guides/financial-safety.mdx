@@ -185,7 +185,7 @@ id — so the audit trail always shows which charge a refund reverses.
 
   ```ts
   const charge = await bursar.credits.deductCredits(userId, 10);
-  const refund = await bursar.credits.refundCredits(charge.entryId, 5);
+  const refund = await bursar.credits.refundCredits(charge.entryId, { amount: 5 });
   console.log(refund.amount, refund.newBalance);
   ```
 

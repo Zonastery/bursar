@@ -65,7 +65,7 @@ def test_cli_manages_tenants_migrations_and_config_versions(
     yaml_config.write_text(first_config.read_text())
 
     cli.main(["config", "validate", str(first_config)])
-    assert capsys.readouterr().out == "Pricing config is valid.\n"
+    assert capsys.readouterr().out == "Bursar config is valid.\n"
     cli.main(["config", "validate", str(yaml_config), "--json"])
     assert json.loads(capsys.readouterr().out) == {"valid": True, "errors": []}
 
@@ -109,7 +109,7 @@ def test_cli_manages_tenants_migrations_and_config_versions(
     assert "Pro v2" in diff
 
     cli.main(["config", "activate", "1"])
-    assert capsys.readouterr().out == "Pricing v1 activated.\n"
+    assert capsys.readouterr().out == "Catalog revision 1 activated.\n"
 
     with pytest.raises(SystemExit) as missing_export:
         cli.main(["config", "export", "99"])

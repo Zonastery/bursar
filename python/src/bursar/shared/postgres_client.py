@@ -9,12 +9,20 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 import psycopg2
+import psycopg2.extensions
 import psycopg2.extras
 import psycopg2.pool
 from pydantic.json_schema import SkipJsonSchema
 
 from bursar.errors import BursarError, StoreClosedError
 from bursar.shared.postgres_errors import normalize_postgres_error
+
+PostgresAccessRole = Literal["bursar_client", "bursar_operator"]
+
+# Register only psycopg2's official write adapter. Registering the full UUID
+# codec also changes every UUID read into a stdlib UUID object, which would be a
+# breaking change to Bursar's established string-valued repository contract.
+psycopg2.extensions.register_adapter(UUID, psycopg2.extras.UUID_adapter)
 
 
 class PostgresPool(Protocol):
@@ -64,7 +72,7 @@ def _validate_timeout(value: float, name: str, *, allow_float: bool = False) -> 
 def _validate_pool(pool: object) -> PostgresPool:
     if not all(callable(getattr(pool, method, None)) for method in ("getconn", "putconn", "closeall")):
         raise TypeError("postgres pool must provide getconn(), putconn(), and closeall() methods")
-    return pool  # type: ignore[return-value]
+    return cast(PostgresPool, pool)
 
 
 class PostgresClient:
@@ -77,6 +85,7 @@ class PostgresClient:
         max_connections: int = 10,
         *,
         tenant_id: str | UUID | None = None,
+        access_role: PostgresAccessRole | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
         connection_timeout_seconds: float = 10.0,
@@ -104,6 +113,7 @@ class PostgresClient:
             on_pool_error=on_pool_error,
         )
         self._tenant_id = _normalize_tenant_id(tenant_id) if tenant_id is not None else None
+        self._access_role = _normalize_access_role(access_role, self._tenant_id)
         self._usage_backend = _normalize_backend(usage_backend, ("postgres", "clickhouse"), "usage_backend")
         self._billing_payload_backend = _normalize_backend(
             billing_payload_backend,
@@ -131,6 +141,7 @@ class PostgresClient:
         pool: PostgresPool,
         *,
         tenant_id: str | UUID | None = None,
+        access_role: PostgresAccessRole | None = None,
         usage_backend: Literal["postgres", "clickhouse"] = "postgres",
         billing_payload_backend: Literal["postgres", "s3"] = "postgres",
         connection_timeout_seconds: float = 10.0,
@@ -154,6 +165,7 @@ class PostgresClient:
             on_pool_error=on_pool_error,
         )
         instance._tenant_id = _normalize_tenant_id(tenant_id) if tenant_id is not None else None
+        instance._access_role = _normalize_access_role(access_role, instance._tenant_id)
         instance._usage_backend = _normalize_backend(usage_backend, ("postgres", "clickhouse"), "usage_backend")
         instance._billing_payload_backend = _normalize_backend(
             billing_payload_backend,
@@ -252,6 +264,8 @@ class PostgresClient:
                 )
 
     def _configure(self, cursor: Any) -> None:
+        if self._access_role is not None:
+            cursor.execute(f"SET LOCAL ROLE {self._access_role}")
         settings = [
             ("statement_timeout", str(self._options.statement_timeout_ms)),
             ("idle_in_transaction_session_timeout", str(self._options.idle_transaction_timeout_ms)),
@@ -303,6 +317,17 @@ def _normalize_tenant_id(tenant_id: str | UUID) -> str:
         return str(UUID(str(tenant_id)))
     except (ValueError, AttributeError, TypeError) as error:
         raise ValueError("tenant_id must be a UUID") from error
+
+
+def _normalize_access_role(
+    access_role: PostgresAccessRole | None,
+    tenant_id: str | None,
+) -> PostgresAccessRole | None:
+    if access_role is None:
+        return "bursar_client" if tenant_id is not None else None
+    if access_role not in {"bursar_client", "bursar_operator"}:
+        raise ValueError("access_role must be 'bursar_client' or 'bursar_operator'")
+    return access_role
 
 
 def _normalize_backend(value: str, choices: tuple[str, ...], name: str) -> str:

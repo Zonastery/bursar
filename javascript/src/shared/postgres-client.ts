@@ -71,9 +71,12 @@ export interface PostgresClientOptions extends PostgresConnectionOptions {
   poolConstructor?: PostgresPoolConstructor;
   closedError?: () => Error;
   tenantId?: string;
+  accessRole?: PostgresAccessRole;
   usageBackend?: "postgres" | "clickhouse";
   billingPayloadBackend?: "postgres" | "s3";
 }
+
+export type PostgresAccessRole = "bursar_client" | "bursar_operator";
 
 interface NormalizedPostgresConnectionOptions {
   connectionTimeoutMs: number;
@@ -224,6 +227,7 @@ export class PostgresClient {
   private readonly ownsPool: boolean;
   private readonly closedError: () => Error;
   private readonly tenantId: string | null;
+  private readonly accessRole: PostgresAccessRole | null;
   private readonly usageBackend: "postgres" | "clickhouse";
   private readonly billingPayloadBackend: "postgres" | "s3";
   private readonly connectionOptions: NormalizedPostgresConnectionOptions;
@@ -238,6 +242,13 @@ export class PostgresClient {
     }
     if (options.closedError !== undefined && typeof options.closedError !== "function") {
       throw new TypeError("closedError must be a function");
+    }
+    if (
+      options.accessRole !== undefined &&
+      options.accessRole !== "bursar_client" &&
+      options.accessRole !== "bursar_operator"
+    ) {
+      throw new TypeError("accessRole must be 'bursar_client' or 'bursar_operator'");
     }
     if (
       options.usageBackend !== undefined &&
@@ -264,6 +275,7 @@ export class PostgresClient {
     this.closedError =
       options.closedError ?? (() => new StoreClosedError("PostgreSQL client has been closed"));
     this.tenantId = options.tenantId === undefined ? null : normalizeTenantId(options.tenantId);
+    this.accessRole = options.accessRole ?? (this.tenantId ? "bursar_client" : null);
     this.usageBackend = options.usageBackend ?? "postgres";
     this.billingPayloadBackend = options.billingPayloadBackend ?? "postgres";
     if (this.pool) {
@@ -280,7 +292,7 @@ export class PostgresClient {
       throw normalizePostgresError(error, { operation: "query", phase: "connect" });
     }
 
-    if (!this.tenantId) {
+    if (!this.tenantId && !this.accessRole) {
       try {
         return (await pool.query(text, params)).rows;
       } catch (error) {
@@ -306,16 +318,24 @@ export class PostgresClient {
       await client.query("BEGIN");
       transactionStarted = true;
       phase = "configure";
-      await client.query(
-        `SELECT set_config('bursar.tenant_id', $1, true), set_config('bursar.usage_backend', $2, true), set_config('bursar.billing_payload_backend', $3, true), set_config('statement_timeout', $4, true), set_config('idle_in_transaction_session_timeout', $5, true)`,
-        [
-          this.tenantId,
-          this.usageBackend,
-          this.billingPayloadBackend,
-          String(this.connectionOptions.statementTimeoutMs),
-          String(this.connectionOptions.idleTransactionTimeoutMs),
-        ],
-      );
+      if (this.accessRole) await client.query(`SET LOCAL ROLE ${this.accessRole}`);
+      const settings = [
+        `set_config('statement_timeout', $1, true)`,
+        `set_config('idle_in_transaction_session_timeout', $2, true)`,
+      ];
+      const values: unknown[] = [
+        String(this.connectionOptions.statementTimeoutMs),
+        String(this.connectionOptions.idleTransactionTimeoutMs),
+      ];
+      if (this.tenantId) {
+        settings.push(
+          `set_config('bursar.tenant_id', $3, true)`,
+          `set_config('bursar.usage_backend', $4, true)`,
+          `set_config('bursar.billing_payload_backend', $5, true)`,
+        );
+        values.push(this.tenantId, this.usageBackend, this.billingPayloadBackend);
+      }
+      await client.query(`SELECT ${settings.join(", ")}`, values);
       phase = "query";
       const result = await client.query(text, params);
       phase = "commit";
@@ -416,12 +436,13 @@ export class PostgresClient {
         cause,
       });
     }
-    this.poolConstructor = pg.Pool as unknown as PostgresPoolConstructor;
+    this.poolConstructor = pg.Pool as PostgresPoolConstructor;
     return this.poolConstructor;
   }
 }
 
-function normalizeTenantId(tenantId: string): string {
+/** Normalize and validate a tenant UUID at SDK composition boundaries. */
+export function normalizeTenantId(tenantId: string): string {
   if (typeof tenantId !== "string") throw new TypeError("tenantId must be a UUID");
   const normalized = tenantId.trim().toLowerCase();
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(normalized)) {

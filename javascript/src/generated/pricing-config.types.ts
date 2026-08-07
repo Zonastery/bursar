@@ -190,9 +190,9 @@ export type RateCard1 = string | null;
 export type AllowedOperations = string[];
 export type Amount3 = string;
 /**
- * Spend priority shared with credit buckets. Lower values are used first; omitting priority preserves legacy allowance-first behavior.
+ * Spend priority shared with credit buckets. Lower values are used first.
  */
-export type Priority1 = number | null;
+export type Priority1 = number;
 export type Window1 = CalendarWindow | RollingWindow | PlanAssignmentWindow;
 export type Type21 = "rolling";
 export type Unit4 = "second" | "minute" | "hour" | "day" | "week";
@@ -581,7 +581,7 @@ export interface Features1 {
 }
 export interface CreditAllowance {
   amount: Amount3;
-  priority?: Priority1;
+  priority: Priority1;
   window: Window1;
 }
 export interface RollingWindow {

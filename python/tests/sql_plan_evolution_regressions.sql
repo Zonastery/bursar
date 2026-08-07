@@ -45,6 +45,7 @@ DECLARE
           "evolution": {"default_rollout": "new_assignments_only"},
           "credit_allowance": {
             "amount": "100",
+            "priority": 20,
             "window": {
               "type": "calendar",
               "unit": "month",

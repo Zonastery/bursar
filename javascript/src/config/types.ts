@@ -148,8 +148,8 @@ export interface AdmissionPolicy {
 
 export interface CreditAllowance {
   amount: Decimal;
-  /** Shared with bucket priorities. Omitted means legacy allowance-first ordering. */
-  priority?: number;
+  /** Shared with bucket priorities. Lower values are spent first. */
+  priority: number;
   window: Window;
 }
 

@@ -1,21 +1,32 @@
 import { z } from "zod";
 import type { QueryFn } from "../../../shared/postgres-types.js";
-import { pgBoolean, safeParse } from "../../../shared/postgres-validation.js";
+import {
+  pgBoolean,
+  postgresUuid,
+  requireRecordRow,
+  requireResultField,
+  safeParse,
+} from "../../../shared/postgres-validation.js";
 
 const BillingEventRowSchema = z
   .object({
-    status: z.string().optional(),
-    event_id: z.string().uuid().nullable().optional(),
-    claim_token: z.string().uuid().nullable().optional(),
+    status: z.enum([
+      "claimed",
+      "duplicate",
+      "busy",
+      "invalid_request",
+      "idempotency_conflict",
+      "max_retries_exceeded",
+    ]),
+    event_id: postgresUuid.nullable(),
+    claim_token: postgresUuid.nullable(),
   })
   .passthrough();
 
 export type BillingEventRow = z.infer<typeof BillingEventRowSchema>;
 
-function booleanResult(rows: unknown[], key: string): boolean {
-  const row = rows[0] as Record<string, unknown> | undefined;
-  const parsed = pgBoolean.safeParse(row?.[key]);
-  return parsed.success && parsed.data;
+function booleanResult(rows: unknown[], key: string, context: string): boolean {
+  return requireResultField(rows, key, pgBoolean, context);
 }
 
 /** Repository for billing event lifecycle operations. */
@@ -28,21 +39,20 @@ export class BillingEventRepository {
     eventId: string,
     eventType: string,
     metadata: string,
-  ): Promise<BillingEventRow | null> {
+  ): Promise<BillingEventRow> {
     const rows = await this.query("SELECT * FROM bursar.claim_billing_event($1, $2, $3, $4)", [
       provider,
       eventId,
       eventType,
       metadata,
     ]);
-    const row = rows[0] as Record<string, unknown> | undefined;
-    return row
-      ? safeParse(
-          BillingEventRowSchema,
-          { ...row, status: row.result, event_id: row.event_id },
-          "BillingEventRepository.claim",
-        )
-      : null;
+    const row = requireRecordRow(rows, "BillingEventRepository.claim");
+    return safeParse(
+      BillingEventRowSchema,
+      { ...row, status: row.result },
+      "BillingEventRepository.claim",
+      { indeterminate: true },
+    );
   }
 
   /** Mark a billing event as completed. */
@@ -51,7 +61,7 @@ export class BillingEventRepository {
       "SELECT bursar.complete_billing_event($1, $2, $3::uuid) AS completed",
       [provider, eventId, claimToken],
     );
-    return booleanResult(rows, "completed");
+    return booleanResult(rows, "completed", "BillingEventRepository.complete");
   }
 
   /** Mark a billing event as failed. */
@@ -65,6 +75,6 @@ export class BillingEventRepository {
       "SELECT bursar.fail_billing_event($1, $2, $3::uuid, $4) AS failed",
       [provider, eventId, claimToken, error ?? null],
     );
-    return booleanResult(rows, "failed");
+    return booleanResult(rows, "failed", "BillingEventRepository.fail");
   }
 }

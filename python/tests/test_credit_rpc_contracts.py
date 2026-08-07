@@ -16,10 +16,10 @@ from bursar import (
 )
 from bursar.credits.postgres.repositories.analytics import AnalyticsRepository
 from bursar.credits.postgres.repositories.balance import BalanceRepository
+from bursar.credits.postgres.repositories.catalog import CatalogRepository
 from bursar.credits.postgres.repositories.deduction import DeductionRepository
 from bursar.credits.postgres.repositories.lease import LeaseRepository
 from bursar.credits.postgres.repositories.plan import PlanRepository
-from bursar.credits.postgres.repositories.pricing import PricingRepository
 from bursar.credits.postgres.repositories.schemas import (
     CreateLeaseParams,
     DeductParams,
@@ -176,7 +176,15 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
         if name == "get_credit_lease":
             return [{"expires_at": expires_at, "minimum_balance": "0"}]
         if name == "settle_lease":
-            return [{"ledger_entry_id": ENTRY_ID, "settled_amount": "8", "replayed": False, "error_code": None}]
+            return [
+                {
+                    "ledger_entry_id": ENTRY_ID,
+                    "charge_id": USAGE_ID,
+                    "settled_amount": "8",
+                    "replayed": False,
+                    "error_code": None,
+                }
+            ]
         if name == "get_credit_operation_details":
             return [{"balance_after": "92", "allowance_covered": "2", "bucket_breakdown": {"purchased": "6"}}]
         raise AssertionError(f"unexpected RPC: {name}")
@@ -245,6 +253,7 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
     assert created is not None
     assert created.expires_at == expires_at
     assert settled is not None
+    assert settled.charge_id == USAGE_ID
     assert settled.balance_after == "92"
     assert settled.allowance_consumed == "2"
     assert settled.bucket_breakdown == {"purchased": "6"}
@@ -356,7 +365,7 @@ def test_lease_repository_reads_pinned_pricing_context_through_official_rpc() ->
     assert context.rate_card == "pro-rates"
 
 
-def test_pricing_repository_fetches_historical_revision_instead_of_active_revision() -> None:
+def test_catalog_repository_fetches_historical_revision_instead_of_active_revision() -> None:
     calls: list[tuple[str, list[object]]] = []
 
     def callproc(name: str, params: list[object]) -> list[object]:
@@ -368,10 +377,11 @@ def test_pricing_repository_fetches_historical_revision_instead_of_active_revisi
                 "revision_no": 2,
                 "status": "superseded",
                 "source_document": {"version": 1},
+                "created_at": "2030-01-01T00:00:00Z",
             }
         ]
 
-    revision = PricingRepository(callproc).get_bursar_config(2)
+    revision = CatalogRepository(callproc).get_catalog_revision(2)
 
     assert calls == [("catalog_revision_by_number", [2])]
     assert revision is not None
@@ -393,6 +403,10 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
                 "plan_label": "Pro",
                 "credit_allowance_amount": "100",
                 "credit_allowance_priority": 15,
+                "credit_allowance_reset_unit": "month",
+                "credit_allowance_reset_count": 1,
+                "credit_allowance_reset_anchor": "calendar",
+                "credit_allowance_reset_timezone": "UTC",
                 "credit_policy_type": "credit_line",
                 "credit_limit": "20",
                 "admission_max_in_flight": 3,
@@ -414,7 +428,7 @@ def test_plan_repository_uses_public_subject_plan_projection() -> None:
     assert plan.operation_admission == {"completion": {"max_in_flight": 1}}
 
     store = object.__new__(PostgresStore)
-    store._plan_repo_cache = repository
+    vars(store)["_plan_repo"] = repository
     public_plan = store.get_user_plan(USER_ID)
 
     assert public_plan.catalog_version == 4

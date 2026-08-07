@@ -176,12 +176,12 @@ def evaluate(expr: str, variables: dict[str, Any]) -> Decimal:
     return result
 
 
-def validate(expr: str, known_variables: set[str] | None = None) -> None:
+def validate(expr: str, known_variables: set[str]) -> None:
     """Validate that an expression string is safe and syntactically valid.
 
     Args:
         expr: Expression string to validate.
-        known_variables: Optional canonical set of allowed variable names.
+        known_variables: Canonical set of allowed variable names.
 
     Raises:
         ExpressionError: If the expression contains disallowed constructs.
@@ -193,8 +193,9 @@ def validate(expr: str, known_variables: set[str] | None = None) -> None:
         if isinstance(node, ast.Name) and node.id not in ALLOWED_FUNCTIONS | {"str", _DECIMAL_CTOR}:
             variables_seen.add(node.id)
 
-    if known_variables is not None:
-        unknown = variables_seen - known_variables
-        if unknown:
-            names = ", ".join(sorted(unknown))
-            raise ExpressionError(f"unknown variable(s): {names}")
+    if not variables_seen:
+        raise ExpressionError("expression references no variables -- must use at least one metric")
+    unknown = variables_seen - known_variables
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ExpressionError(f"unknown variable(s): {names}")

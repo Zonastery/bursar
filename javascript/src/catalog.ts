@@ -31,7 +31,7 @@ export interface PublicCatalogPlan {
   features: Record<string, FeatureValue>;
   allowance?: {
     amount: string;
-    priority: number | null;
+    priority: number;
     window: PublicCatalogWindow;
   };
   quotas: Record<
@@ -119,7 +119,7 @@ export function projectPublicCatalog(config: ParsedBursarConfig): PublicCatalog 
           ? {
               allowance: {
                 amount: plan.creditAllowance.amount.toString(),
-                priority: plan.creditAllowance.priority ?? null,
+                priority: plan.creditAllowance.priority,
                 window: publicWindow(plan.creditAllowance.window),
               },
             }

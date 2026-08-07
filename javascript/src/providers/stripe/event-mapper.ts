@@ -2,7 +2,12 @@ import Stripe from "stripe";
 import type { BillingEventSink } from "../../bursar.js";
 import type { BillingPaymentInfo, BillingSubscriptionStatus } from "../../billing/types/index.js";
 import { type ProviderLogger, normalizeProviderLogger } from "../types.js";
-import { callBillingEventSink } from "../_shared.js";
+import {
+  callBillingEventSink,
+  requireCurrency,
+  requireMinorUnits,
+  requireProviderString,
+} from "../_shared.js";
 
 const STRIPE_CHECKOUT_EXPAND = ["line_items"] as const;
 
@@ -30,15 +35,11 @@ function subscriptionRefs(subscription: Stripe.Subscription) {
 }
 
 function buildEndFromInvoice(invoice: Stripe.Invoice): string | null {
-  return invoice.period_end
-    ? new Date(invoice.period_end * 1000).toISOString()
-    : new Date().toISOString();
+  return invoice.period_end ? new Date(invoice.period_end * 1000).toISOString() : null;
 }
 
 function buildStartFromInvoice(invoice: Stripe.Invoice): string | null {
-  return invoice.period_start
-    ? new Date(invoice.period_start * 1000).toISOString()
-    : new Date().toISOString();
+  return invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : null;
 }
 
 function customerId(
@@ -55,10 +56,10 @@ export async function handleStripeWebhook(
   logger?: ProviderLogger | null,
 ): Promise<{ received: boolean }> {
   const log = normalizeProviderLogger(logger);
-  const occurredAt =
-    typeof event.created === "number" && Number.isFinite(event.created)
-      ? new Date(event.created * 1000).toISOString()
-      : new Date().toISOString();
+  if (!Number.isSafeInteger(event.created) || event.created < 0) {
+    throw new TypeError("Stripe event.created must be a non-negative Unix timestamp");
+  }
+  const occurredAt = new Date(event.created * 1000).toISOString();
   try {
     switch (event.type) {
       case "checkout.session.completed": {
@@ -128,12 +129,23 @@ export async function handleStripeWebhook(
         } else {
           const priceId = expandedSession.line_items?.data[0]?.price?.id;
           const productId = expandedSession.line_items?.data[0]?.price?.product;
+          const providerPaymentId =
+            typeof session.payment_intent === "string"
+              ? session.payment_intent
+              : session.payment_intent?.id;
           const payment: BillingPaymentInfo = {
-            providerPaymentId: String(session.payment_intent || session.id),
-            amountMinor: session.amount_total ?? 0,
-            taxMinor: null,
-            currency: (session.currency ?? "usd").toUpperCase(),
+            providerPaymentId: requireProviderString(
+              providerPaymentId,
+              "Stripe checkout session.payment_intent",
+            ),
+            amountMinor: requireMinorUnits(
+              session.amount_total,
+              "Stripe checkout session.amount_total",
+            ),
+            taxMinor: 0,
+            currency: requireCurrency(session.currency, "Stripe checkout session.currency"),
             purpose: "credit_topup",
+            status: "succeeded",
             refs: {
               productId: productId ? String(productId) : undefined,
               priceId: priceId ?? undefined,
@@ -227,9 +239,9 @@ export async function handleStripeWebhook(
         const succeeded = event.type === "payment_intent.succeeded";
         const payment: BillingPaymentInfo = {
           providerPaymentId: intent.id,
-          amountMinor: intent.amount,
-          taxMinor: null,
-          currency: intent.currency.toUpperCase(),
+          amountMinor: requireMinorUnits(intent.amount, "Stripe payment intent.amount"),
+          taxMinor: 0,
+          currency: requireCurrency(intent.currency, "Stripe payment intent.currency"),
           purpose: "credit_topup",
           status: succeeded ? "succeeded" : "failed",
           refs: {
@@ -313,10 +325,10 @@ export async function handleStripeWebhook(
           },
           invoice: {
             providerInvoiceId: invoice.id,
-            status: invoice.status ?? "open",
-            amountPaidMinor: invoice.amount_paid,
-            amountDueMinor: invoice.amount_due,
-            currency: invoice.currency?.toUpperCase() ?? "USD",
+            status: "paid",
+            amountPaidMinor: requireMinorUnits(invoice.amount_paid, "Stripe invoice.amount_paid"),
+            amountDueMinor: requireMinorUnits(invoice.amount_due, "Stripe invoice.amount_due"),
+            currency: requireCurrency(invoice.currency, "Stripe invoice.currency"),
             periodStart,
             periodEnd,
           },
@@ -334,6 +346,10 @@ export async function handleStripeWebhook(
           refund.status === "canceled"
             ? refund.status
             : "pending";
+        const providerPaymentId =
+          typeof refund.payment_intent === "string"
+            ? refund.payment_intent
+            : refund.payment_intent?.id;
         await callBillingEventSink(sink, {
           provider: "stripe",
           eventId: event.id,
@@ -347,12 +363,12 @@ export async function handleStripeWebhook(
           userId: refund.metadata?.userId,
           refund: {
             providerRefundId: refund.id,
-            providerPaymentId:
-              typeof refund.payment_intent === "string"
-                ? refund.payment_intent
-                : (refund.payment_intent?.id ?? null),
-            amountMinor: refund.amount,
-            currency: refund.currency.toUpperCase(),
+            providerPaymentId: requireProviderString(
+              providerPaymentId,
+              "Stripe refund.payment_intent",
+            ),
+            amountMinor: requireMinorUnits(refund.amount, "Stripe refund.amount", true),
+            currency: requireCurrency(refund.currency, "Stripe refund.currency"),
             reason: refund.reason,
             status,
           },

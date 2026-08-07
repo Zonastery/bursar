@@ -1,0 +1,45 @@
+{
+  "bursar": [
+    { "javascript": "loadCatalog", "python": "load_catalog" },
+    { "javascript": "requireBilling", "python": "require_billing" },
+    { "javascript": "requireCommerce", "python": "require_commerce" },
+    { "javascript": "ingestBillingEvent", "python": "ingest_billing_event" }
+  ],
+  "catalog": [
+    { "javascript": "getActive", "python": "get_active" },
+    { "javascript": "isLoaded", "python": "is_loaded" },
+    { "javascript": "load", "python": "load" },
+    { "javascript": "refresh", "python": "refresh" },
+    { "javascript": "invalidate", "python": "invalidate" },
+    { "javascript": "getConfig", "python": "get_config" },
+    { "javascript": "publicView", "python": "public_view" },
+    { "javascript": "publishDraft", "python": "publish_draft" },
+    { "javascript": "activate", "python": "activate" },
+    { "javascript": "publishAndActivate", "python": "publish_and_activate" },
+    { "javascript": "setRevisionPin", "python": "set_revision_pin" },
+    { "javascript": "applyDueChanges", "python": "apply_due_changes" }
+  ],
+  "accounts": [
+    { "javascript": "onAccountCreated", "python": "on_account_created" }
+  ],
+  "credits": [
+    { "javascript": "addCredits", "python": "add_credits" },
+    { "javascript": "deductCredits", "python": "deduct_credits" },
+    { "javascript": "deduct", "python": "deduct" },
+    { "javascript": "recordUsage", "python": "record_usage" },
+    { "javascript": "reserve", "python": "reserve" },
+    { "javascript": "settle", "python": "settle" },
+    { "javascript": "release", "python": "release" },
+    { "javascript": "renew", "python": "renew" },
+    { "javascript": "runBilled", "python": "run_billed" },
+    { "javascript": "beginBilledOperation", "python": "begin_billed_operation" },
+    { "javascript": "deductFlatJob", "python": "deduct_flat_job" },
+    { "javascript": "refundCredits", "python": "refund_credits" }
+  ],
+  "runtime": [
+    { "javascript": "start", "python": "start" },
+    { "javascript": "health", "python": "health" },
+    { "javascript": "flush", "python": "flush" },
+    { "javascript": "close", "python": "close" }
+  ]
+}

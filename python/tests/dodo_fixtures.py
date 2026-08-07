@@ -4,8 +4,35 @@ These match what Dodo actually sends — no ``data.id``/``data.payment_id`` on
 subscription events, and dates in JS ``Date.prototype.toString()`` format.
 """
 
+from typing import Any
+
+from bursar.billing.contracts import BillingEventSink
+from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
+
 DODO_JS_DATE = "Sat Jul 18 2026 05:15:24 GMT+0000 (Coordinated Universal Time)"
 DODO_ISO_DATE = "2026-07-18T05:15:24+00:00"
+
+
+def dodo_event_id(event_type: str, object_id: str) -> str:
+    return f"dodo:{event_type}:{object_id}:{DODO_ISO_DATE}"
+
+
+async def map_dodo_event(
+    event_type: str,
+    data: dict[str, Any],
+    user_id: str | None,
+    metadata: dict[str, str],
+    sink: BillingEventSink,
+) -> None:
+    await handle_dodo_billing_event(
+        event_type=event_type,
+        data=data,
+        event_timestamp=DODO_ISO_DATE,
+        user_id=user_id,
+        metadata=metadata,
+        sink=sink,
+    )
+
 
 DODO_SUBSCRIPTION_ACTIVE = {
     "subscription_id": "sub_dodo_active_001",
@@ -66,14 +93,6 @@ DODO_SUBSCRIPTION_ON_HOLD = {
     "subscription_id": "sub_dodo_on_hold_001",
 }
 
-DODO_SUBSCRIPTION_CANCELLATION_SCHEDULED = {
-    "subscription_id": "sub_dodo_cancel_sched_001",
-}
-
-DODO_SUBSCRIPTION_CANCELLATION_UNSCHEDULED = {
-    "subscription_id": "sub_dodo_cancel_unsched_001",
-}
-
 DODO_SUBSCRIPTION_PLAN_CHANGED = {
     "subscription_id": "sub_dodo_plan_change_001",
     "product_id": "prod_sage",
@@ -93,10 +112,9 @@ DODO_PAYMENT_FAILED = {
     "id": "pay_dodo_failed_001",
     "payment_id": "pay_dodo_failed_001",
     "subscription_id": "sub_dodo_active_001",
-}
-
-DODO_CHECKOUT_EXPIRED = {
-    "id": "checkout_dodo_expired_001",
+    "total_amount": 2999,
+    "currency": "USD",
+    "tax": 240,
 }
 
 DODO_REFUND_SUCCEEDED = {
@@ -107,7 +125,7 @@ DODO_REFUND_SUCCEEDED = {
     "reason": "Customer requested",
 }
 
-DODO_DISPUTE_CREATED = {
+DODO_DISPUTE_OPENED = {
     "id": "dispute_dodo_001",
     "payment_id": "pay_dodo_success_001",
     "reason": "fraudulent",

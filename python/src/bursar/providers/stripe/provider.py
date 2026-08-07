@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -59,14 +60,17 @@ class StripeProvider(PaymentProvider):
 
     def __init__(
         self,
-        sink: BillingEventSink,
-        webhook_secret: str = "",
-        get_stripe: Callable[[], Any] | None = None,
+        *,
+        event_sink: BillingEventSink,
+        webhook_secret: str,
+        get_client: Callable[[], Any] | None = None,
         logger: ProviderLogger | None = None,
     ) -> None:
-        self._sink = sink
+        if not webhook_secret.strip():
+            raise ValueError("webhook_secret must not be empty")
+        self._sink = event_sink
         self._webhook_secret = webhook_secret
-        self._get_stripe = get_stripe or (lambda: stripe_mod)
+        self._get_stripe = get_client or (lambda: stripe_mod)
         self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
@@ -171,7 +175,7 @@ class StripeProvider(PaymentProvider):
                 signature,
                 self._webhook_secret,
             )
-        except stripe_mod.error.SignatureVerificationError:  # type: ignore[attr-defined]
+        except stripe_mod.SignatureVerificationError:
             return WebhookResult(
                 received=False,
                 retryable=False,
@@ -179,7 +183,7 @@ class StripeProvider(PaymentProvider):
                 event_id=None,
                 event_type=None,
             )
-        except stripe_mod.error.APIError as e:  # type: ignore[attr-defined]
+        except stripe_mod.APIError as e:
             self._logger.error("Stripe webhook temporarily unavailable", {"error": str(e)})
             return WebhookResult(
                 received=False,
@@ -271,10 +275,14 @@ class StripeProvider(PaymentProvider):
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         stripe = self._get_stripe()
-        methods = await stripe.PaymentMethod.list_async(
-            customer=customer_id,
-            type="card",
+        customer, methods = await asyncio.gather(
+            stripe.Customer.retrieve_async(customer_id),
+            stripe.PaymentMethod.list_async(customer=customer_id, type="card"),
         )
+        if bool(_stripe_val(customer, "deleted", False)):
+            return []
+        default = _stripe_val(_stripe_val(customer, "invoice_settings", {}), "default_payment_method")
+        default_id = _stripe_val(default, "id", default) if default else None
         result: list[PaymentMethodInfo] = []
         for pm in _stripe_val(methods, "data", []):
             card = _stripe_val(pm, "card", {}) or {}
@@ -285,19 +293,10 @@ class StripeProvider(PaymentProvider):
                     brand=_stripe_val(card, "brand", "unknown"),
                     expiry_month=_stripe_val(card, "exp_month", 0),
                     expiry_year=_stripe_val(card, "exp_year", 0),
+                    is_default=pm["id"] == default_id,
                 )
             )
         return deduplicate_payment_methods(result)
-
-    async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
-        customer = await self._get_stripe().Customer.retrieve_async(customer_id)
-        default = _stripe_val(_stripe_val(customer, "invoice_settings", {}), "default_payment_method")
-        default_id = _stripe_val(default, "id", default) if default else None
-        if not default_id:
-            return None
-        return next(
-            (method for method in await self.list_payment_methods(customer_id) if method.id == default_id), None
-        )
 
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
         price = await self._get_stripe().Price.retrieve_async(params.product_id)

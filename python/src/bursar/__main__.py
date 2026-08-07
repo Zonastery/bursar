@@ -1,4 +1,4 @@
-"""bursar CLI — database migrations and pricing-version management.
+"""Bursar CLI for database migrations and catalog management.
 
 Built on :mod:`argparse` so flags, ``--help``, exit codes and type coercion are
 handled by the stdlib rather than hand-rolled ``argv`` slicing.
@@ -22,34 +22,23 @@ from bursar.retry import BursarRetryOptions, retry_bursar_operation
 
 if TYPE_CHECKING:
     from bursar.credits.store import CreditStore
-    from bursar.credits.types import BursarConfigResult
+    from bursar.credits.types import CatalogRevision
 
+load_dotenv: Callable[..., bool] | None
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv as _load_dotenv
 except ImportError:
-    load_dotenv = None  # type: ignore[assignment]
+    load_dotenv = None
+else:
+    load_dotenv = _load_dotenv
 
 
 # ── Retry tuning ────────────────────────────────────────────────────────────
-# A freshly-applied migration may not be visible to PostgREST until its schema
-# cache reloads. Only that *transient* condition is retried — never auth,
-# validation, or a write that may have already committed server-side.
+# Retry typed transient PostgreSQL failures, but never a mutation whose commit
+# outcome is indeterminate.
 _RETRY_INITIAL_DELAY = 1.0
 _RETRY_MAX_DELAY = 8.0
 _RETRIES = 5
-
-# Substrings that mark a transient PostgREST schema-cache / connectivity miss.
-# These are matched case-insensitively against the StoreError message.
-_TRANSIENT_MARKERS = (
-    "pgrst205",  # PostgREST: requested function not found in schema cache
-    "pgrst204",  # PostgREST: column not found in schema cache
-    "pgrst202",  # PostgREST: function signature not found in schema cache
-    "schema cache",
-    "could not find the function",
-    "timed out",
-    "request error",  # wrapped httpx.RequestError (connection refused/reset)
-    "connection",
-)
 
 
 def _load_env() -> None:
@@ -78,22 +67,19 @@ def _require_extra(extra: str) -> None:
             raise SystemExit(1) from None
 
 
-def _is_transient(exc: BaseException) -> bool:
-    """True only for the PostgREST schema-cache / connection errors worth retrying."""
-    from bursar.credits.store import StoreError
+def _is_safe_to_retry(exc: BaseException) -> bool:
+    """Return whether a typed transient failure is safe to replay."""
+    from bursar.errors import StoreError, is_retryable_bursar_error
 
-    if not isinstance(exc, StoreError):
-        return False
-    msg = str(exc).lower()
-    return any(marker in msg for marker in _TRANSIENT_MARKERS)
+    return is_retryable_bursar_error(exc) and not (isinstance(exc, StoreError) and exc.indeterminate)
 
 
-def _retry_transient[T](op: Callable[[], T], *, what: str) -> T:
-    """Run *op*, retrying ONLY transient PostgREST/connection errors (H7).
+def _retry_store_operation[T](op: Callable[[], T], *, what: str) -> T:
+    """Run *op*, retrying only replay-safe transient PostgreSQL failures.
 
     A non-transient error (auth, validation, a write that already committed)
-    is surfaced immediately so we never create a duplicate immutable pricing
-    version by blind-retrying a non-idempotent write.
+    is surfaced immediately so we never create a duplicate immutable catalog
+    revision by blind-retrying a non-idempotent write.
     """
     try:
         return retry_bursar_operation(
@@ -104,16 +90,11 @@ def _retry_transient[T](op: Callable[[], T], *, what: str) -> T:
                 max_delay_seconds=_RETRY_MAX_DELAY,
                 factor=2,
                 jitter=False,
-                should_retry=_is_transient,
+                should_retry=_is_safe_to_retry,
             ),
         )
     except Exception as exc:
         print(f"Failed to {what}: {exc}", file=sys.stderr)
-        if _is_transient(exc):
-            print(
-                "Tip: run 'bursar migrate' and wait for the PostgREST schema cache to refresh.",
-                file=sys.stderr,
-            )
         raise SystemExit(1) from exc
 
 
@@ -151,27 +132,32 @@ def _store_from_env(
 # ── File loading ─────────────────────────────────────────────────────────────
 
 
-def _load_pricing_file(filepath: str) -> dict[str, Any]:
-    """Read a JSON or YAML pricing config into a dict.
+def _load_config_file(filepath: str) -> dict[str, Any]:
+    """Read a JSON or YAML Bursar config into a dict.
 
     All failure modes (missing file, directory, permission denied, parse error,
     empty/non-object payload) print a clean message to stderr and exit 1 — no
-    tracebacks (M12).
+    tracebacks.
     """
-    is_yaml = filepath.endswith((".yaml", ".yml"))
-
     if filepath == "-":
         raw = sys.stdin.read()
-        data = _parse_pricing_text(raw, is_yaml=False, source="<stdin>")
+        data = _parse_config_text(raw, is_yaml=False, source="<stdin>")
     else:
         path = Path(filepath)
+        suffix = path.suffix.lower()
+        if suffix not in {".json", ".yaml", ".yml"}:
+            print(
+                f"Unsupported config file format: {suffix or '<none>'}. Expected .json, .yaml, or .yml",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
         if path.is_dir():
             print(f"Not a file (is a directory): {filepath}", file=sys.stderr)
             raise SystemExit(1)
         try:
             raw = path.read_text()
         except FileNotFoundError:
-            print(f"File not found: {filepath}", file=sys.stderr)
+            print(f"Config file not found: {filepath}", file=sys.stderr)
             raise SystemExit(1) from None
         except PermissionError:
             print(f"Permission denied: {filepath}", file=sys.stderr)
@@ -179,24 +165,24 @@ def _load_pricing_file(filepath: str) -> dict[str, Any]:
         except OSError as exc:
             print(f"Could not read {filepath}: {exc}", file=sys.stderr)
             raise SystemExit(1) from None
-        data = _parse_pricing_text(raw, is_yaml=is_yaml, source=filepath)
+        data = _parse_config_text(raw, is_yaml=suffix in {".yaml", ".yml"}, source=filepath)
 
     if not isinstance(data, dict):
-        print(f"Pricing config must be a JSON/YAML object, got {type(data).__name__}", file=sys.stderr)
+        print(f"Bursar config must be a JSON/YAML object, got {type(data).__name__}", file=sys.stderr)
         raise SystemExit(1)
     if not data:
-        print("Pricing config is empty.", file=sys.stderr)
+        print("Bursar config is empty.", file=sys.stderr)
         raise SystemExit(1)
     return data
 
 
-def _parse_pricing_text(raw: str, *, is_yaml: bool, source: str) -> Any:
+def _parse_config_text(raw: str, *, is_yaml: bool, source: str) -> Any:
     """Parse *raw* as YAML or JSON, exiting 1 with a clean message on failure."""
     if is_yaml:
         try:
             import yaml
         except ImportError:
-            print("PyYAML required for .yaml files: pip install bursar[postgres]", file=sys.stderr)
+            print("PyYAML is required to read YAML configuration files", file=sys.stderr)
             raise SystemExit(1) from None
 
         class _StrictYamlLoader(yaml.SafeLoader):
@@ -351,7 +337,7 @@ def _cmd_tenant_status(args: argparse.Namespace) -> None:
 def _cmd_config_validate(args: argparse.Namespace) -> None:
     from bursar.config import ConfigError, load_config_from_dict
 
-    data = _load_pricing_file(args.file)
+    data = _load_config_file(args.file)
     try:
         load_config_from_dict(data)
     except ConfigError as exc:
@@ -363,13 +349,13 @@ def _cmd_config_validate(args: argparse.Namespace) -> None:
     if args.json:
         print(json.dumps({"valid": True, "errors": []}, indent=2))
     else:
-        print("Pricing config is valid.")
+        print("Bursar config is valid.")
 
 
 def _validated_config(filepath: str) -> dict[str, Any]:
     from bursar.config import ConfigError, canonical_bursar_config_dict
 
-    data = _load_pricing_file(filepath)
+    data = _load_config_file(filepath)
     try:
         return canonical_bursar_config_dict(data)
     except ConfigError as exc:
@@ -390,7 +376,7 @@ def _validated_rollout(
         load_config_from_dict,
     )
 
-    data = _load_pricing_file(filepath)
+    data = _load_config_file(filepath)
     try:
         parsed_config = load_config_from_dict(config) if config is not None else None
         return canonical_catalog_rollout_dict(data, parsed_config)
@@ -411,19 +397,19 @@ def _set_config(
 
     # Abort if identical to the currently active version to avoid pointless
     # version churn. First-time setup always proceeds.
-    active = store.get_active_pricing()
+    active = store.get_active_catalog()
     if active is not None and data == active.config:
         if rollout is not None and rollout.get("plans"):
-            _retry_transient(
-                lambda: store.activate_pricing(active.version, rollout),
+            _retry_store_operation(
+                lambda: store.activate_catalog_revision(active.version, rollout),
                 what="apply catalog rollout",
             )
             return True
         return False
 
-    _retry_transient(
-        lambda: store.set_active_pricing(data, label=label, rollout=rollout),
-        what="set pricing",
+    _retry_store_operation(
+        lambda: store.publish_and_activate_catalog(data, label=label, rollout=rollout),
+        what="publish catalog",
     )
     return True
 
@@ -468,7 +454,7 @@ def _cmd_tenant_bootstrap(args: argparse.Namespace) -> None:
 
 def _cmd_config_get(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
-    result = _retry_transient(store.get_active_pricing, what="get pricing")
+    result = _retry_store_operation(store.get_active_catalog, what="get active catalog")
     if result is None:
         print("No active Bursar config.", file=sys.stderr)
         raise SystemExit(1)
@@ -477,7 +463,7 @@ def _cmd_config_get(args: argparse.Namespace) -> None:
 
 def _cmd_config_list(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
-    rows = _retry_transient(store.get_pricing_history, what="list pricing")
+    rows = _retry_store_operation(store.get_catalog_history, what="list catalog revisions")
     if not rows:
         print("No Bursar configs found.", file=sys.stderr)
         raise SystemExit(1)
@@ -490,17 +476,17 @@ def _cmd_config_list(args: argparse.Namespace) -> None:
 def _cmd_config_activate(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
     rollout = _validated_rollout(args.rollout)
-    _retry_transient(
-        lambda: store.activate_pricing(args.version, rollout),
-        what="activate pricing",
+    _retry_store_operation(
+        lambda: store.activate_catalog_revision(args.version, rollout),
+        what="activate catalog revision",
     )
-    print(f"Pricing v{args.version} activated.")
+    print(f"Catalog revision {args.version} activated.")
 
 
 def _cmd_config_pin(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
     pinned = not args.unpin
-    changed = _retry_transient(
+    changed = _retry_store_operation(
         lambda: store.set_plan_revision_pin(args.subject_id, pinned),
         what="update plan revision pin",
     )
@@ -513,7 +499,7 @@ def _cmd_config_pin(args: argparse.Namespace) -> None:
 
 def _cmd_config_apply_due(args: argparse.Namespace) -> None:
     store = _store_from_env(args.store)
-    applied = _retry_transient(
+    applied = _retry_store_operation(
         lambda: store.apply_due_plan_changes(args.limit),
         what="apply due plan changes",
     )
@@ -524,7 +510,7 @@ def _cmd_config_export(args: argparse.Namespace) -> None:
     from bursar.config import BursarConfig
 
     store = _store_from_env(args.store)
-    result = _retry_transient(lambda: store.get_bursar_config(args.version), what="fetch pricing")
+    result = _retry_store_operation(lambda: store.get_catalog_revision(args.version), what="fetch catalog revision")
     if result is None:
         print(f"Version {args.version} not found.", file=sys.stderr)
         raise SystemExit(1)
@@ -536,10 +522,10 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
 
     store = _store_from_env(args.store)
 
-    def _fetch() -> tuple[BursarConfigResult | None, BursarConfigResult | None]:
-        return store.get_bursar_config(args.version_a), store.get_bursar_config(args.version_b)
+    def _fetch() -> tuple[CatalogRevision | None, CatalogRevision | None]:
+        return store.get_catalog_revision(args.version_a), store.get_catalog_revision(args.version_b)
 
-    a, b = _retry_transient(_fetch, what="fetch pricing configs")
+    a, b = _retry_store_operation(_fetch, what="fetch catalog revisions")
     if a is None:
         print(f"Version {args.version_a} not found.", file=sys.stderr)
         raise SystemExit(1)
@@ -559,7 +545,7 @@ def _cmd_config_diff(args: argparse.Namespace) -> None:
 
 
 def _cmd_config_schema(_args: argparse.Namespace) -> None:
-    """Print the pricing config JSON Schema (for editor autocompletion/validation)."""
+    """Print the Bursar config JSON Schema for editors and validation."""
     from bursar.config import BursarConfig
 
     print(json.dumps(BursarConfig.model_json_schema(), indent=2))
@@ -569,7 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser with subcommands."""
     parser = argparse.ArgumentParser(
         prog="bursar",
-        description="bursar — credit calculation engine: migrations & pricing management.",
+        description="Bursar SDK: database migrations and catalog management.",
     )
     parser.add_argument(
         "--store",
@@ -629,7 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_tenant_bootstrap.add_argument("slug", help="Unique tenant slug")
     p_tenant_bootstrap.add_argument(
         "file",
-        help="JSON/YAML pricing file, or '-' for stdin",
+        help="JSON/YAML Bursar config file, or '-' for stdin",
     )
     p_tenant_bootstrap.add_argument(
         "--id",
@@ -658,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tenant_status.set_defaults(func=_cmd_tenant_status)
 
-    # pricing
+    # config
     p_config = sub.add_parser(
         "config",
         help="Manage Bursar config",
@@ -667,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     psub = p_config.add_subparsers(dest="subcommand", metavar="<subcommand>")
 
     p_set = psub.add_parser("set", help="Apply config (always creates a new version)")
-    p_set.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
+    p_set.add_argument("file", help="JSON/YAML Bursar config file, or '-' for stdin")
     p_set.add_argument("--label", default=None, help="Optional label/message for this version")
     p_set.add_argument(
         "--rollout",
@@ -680,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_get = psub.add_parser("get", help="Show the active Bursar config as JSON")
     p_get.set_defaults(func=_cmd_config_get)
 
-    p_list = psub.add_parser("list", help="List all pricing versions (* = active)")
+    p_list = psub.add_parser("list", help="List catalog revisions (* = active)")
     p_list.set_defaults(func=_cmd_config_list)
 
     p_activate = psub.add_parser("activate", help="Switch the active version")
@@ -717,8 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_apply_due.set_defaults(func=_cmd_config_apply_due)
 
-    p_validate = psub.add_parser("validate", help="Validate a pricing file without applying it")
-    p_validate.add_argument("file", help="JSON/YAML pricing file, or '-' for stdin")
+    p_validate = psub.add_parser("validate", help="Validate a Bursar config without applying it")
+    p_validate.add_argument("file", help="JSON/YAML Bursar config file, or '-' for stdin")
     p_validate.add_argument("--json", action="store_true", help="Emit native validator errors as JSON")
     p_validate.set_defaults(func=_cmd_config_validate)
 
@@ -734,7 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("version", type=int, help="Version number to export")
     p_export.set_defaults(func=_cmd_config_export)
 
-    p_config.set_defaults(_pricing_parser=p_config)
+    p_config.set_defaults(_config_parser=p_config)
     return parser
 
 
@@ -749,7 +735,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # `config` with no subcommand: show its help and exit non-zero.
     if not hasattr(args, "func"):
-        sub_parser = getattr(args, "_pricing_parser", parser)
+        sub_parser = getattr(args, "_config_parser", parser)
         sub_parser.print_help(sys.stderr)
         raise SystemExit(1)
 

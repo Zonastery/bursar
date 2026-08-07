@@ -206,7 +206,10 @@ Connect the store to your tenant and build the facade:
   ```ts
   import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-  const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+  const store = new PostgresStore({
+    postgres: process.env.DATABASE_URL!,
+    tenantId,
+  });
   const bursar = new Bursar({ creditStore: store });
   ```
 
@@ -272,7 +275,7 @@ This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
       measures: { input_tokens: 800 },
       dimensions: { model: "gpt-4o" },
     },
-    "turn_12345",
+    { idempotencyKey: "turn_12345" },
   );
   console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
   ```
@@ -380,15 +383,15 @@ bursar's actual schema, config, and SDKs rather than the agent's guesswork.
 
 The skill bundles:
 
-| File | What it's for |
-| --- | --- |
-| `SKILL.md` | Core instructions — when the skill fires and how to integrate bursar safely |
-| `references/getting-started.md` | First integration: install the schema, build the facade, and charge for a first completion |
-| `references/pricing-config.md` | Authoring the strict, versioned pricing config: operations, rate cards, buckets, plans |
-| `references/credit-lifecycle.md` | Balances, the append-only ledger, and atomic reserve/settle leases |
-| `references/billing-integration.md` | Subscriptions, billing events, and auto-recharge guardrails |
-| `references/financial-safety.md` | Idempotency keys, exact decimals, and audit invariants that keep money state correct |
-| `assets/pricing.config.example.yaml` | A complete, annotated example config to adapt |
+| File                                 | What it's for                                                                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `SKILL.md`                           | Core instructions — when the skill fires and how to integrate bursar safely                |
+| `references/getting-started.md`      | First integration: install the schema, build the facade, and charge for a first completion |
+| `references/pricing-config.md`       | Authoring the strict, versioned pricing config: operations, rate cards, buckets, plans     |
+| `references/credit-lifecycle.md`     | Balances, the append-only ledger, and atomic reserve/settle leases                         |
+| `references/billing-integration.md`  | Subscriptions, billing events, and auto-recharge guardrails                                |
+| `references/financial-safety.md`     | Idempotency keys, exact decimals, and audit invariants that keep money state correct       |
+| `assets/pricing.config.example.yaml` | A complete, annotated example config to adapt                                              |
 
 ## Related links
 
@@ -1707,7 +1710,7 @@ Setup first: publish the canonical configuration (see
   import { USER_ADA, baseConfig, publishConfig } from "./shared";
 
   const bursar = await publishConfig(
-    new PostgresStore(databaseUrl, tenantId),
+    new PostgresStore({ postgres: databaseUrl, tenantId }),
     baseConfig(),
   );
   const userId = USER_ADA;
@@ -1809,11 +1812,15 @@ exact `Decimal`), then charges in one atomic transaction:
 **TypeScript:**
 
   ```ts
-  const charge = await bursar.credits.deduct(userId, {
-    operation: "completion",
-    measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
-    dimensions: { model: "gpt-4o-mini" },
-  }, "chat:turn:42");
+  const charge = await bursar.credits.deduct(
+    userId,
+    {
+      operation: "completion",
+      measures: { input_tokens: 4000, output_tokens: 1200, cache_read_tokens: 6000 },
+      dimensions: { model: "gpt-4o-mini" },
+    },
+    { idempotencyKey: "chat:turn:42" },
+  );
   console.log(charge.amount, charge.allowanceConsumed, charge.balanceAfter);
   ```
 
@@ -1847,8 +1854,10 @@ id; pass an `amount` for a partial refund:
   ```ts
   const refund = await bursar.credits.refundCredits(
     charge.entryId,
-    new Decimal("0.000030"),
-    "user_reported_bad_output",
+    {
+      amount: new Decimal("0.000030"),
+      reason: "user_reported_bad_output",
+    },
   );
   console.log(refund.refundEntryId, refund.newBalance);
   ```
@@ -2119,7 +2128,7 @@ id — so the audit trail always shows which charge a refund reverses.
 
   ```ts
   const charge = await bursar.credits.deductCredits(userId, 10);
-  const refund = await bursar.credits.refundCredits(charge.entryId, 5);
+  const refund = await bursar.credits.refundCredits(charge.entryId, { amount: 5 });
   console.log(refund.amount, refund.newBalance);
   ```
 
@@ -2220,7 +2229,7 @@ package top level; the optional runtime composition root lives in
   import { PostgresStore } from "@zonastery/bursar";
   import { createBursarRuntime } from "@zonastery/bursar/node";
 
-  const store = new PostgresStore(databaseUrl, tenantId);
+  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
 
   const runtime = await createBursarRuntime({
     postgres: databaseUrl,
@@ -2331,10 +2340,10 @@ options when an application needs subscriptions, top-ups, or auto-recharge:
   import { Bursar, PostgresBillingStore, PostgresStore } from "@zonastery/bursar";
   import { StripeProvider } from "@zonastery/bursar/providers";
 
-  const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+  const billingStore = new PostgresBillingStore({ postgres: databaseUrl, tenantId });
 
   const bursar = new Bursar({
-    creditStore: new PostgresStore(databaseUrl, tenantId),
+    creditStore: new PostgresStore({ postgres: databaseUrl, tenantId }),
     billingStore,
     commerceOptions: {
       defaultProvider: "stripe",
@@ -2573,7 +2582,7 @@ second positional argument.
 **TypeScript:**
 
   ```ts
-  const store = new PostgresStore(databaseUrl, tenantId);
+  const store = new PostgresStore({ postgres: databaseUrl, tenantId });
   ```
 
 No store performs installation. Run `bursar migrate` with `DATABASE_URL` and
@@ -3342,7 +3351,7 @@ npm install @zonastery/bursar
 ## Constructing the facade
 
 ```ts
-const store = new PostgresStore(databaseUrl, tenantId);
+const store = new PostgresStore({ postgres: databaseUrl, tenantId });
 const bursar = new Bursar({
   creditStore: store,
   billingStore: undefined,
@@ -3602,7 +3611,7 @@ const grant = await bursar.credits.addCredits(userId, 100, {
 const charge = await bursar.credits.deductCredits(userId, 5, {
   entryType: "adjustment",
 });
-const refund = await bursar.credits.refundCredits(charge.entryId, undefined, "clawback");
+const refund = await bursar.credits.refundCredits(charge.entryId, { reason: "clawback" });
 ```
 
 `addCredits` and `deductCredits` move a raw amount; `refundCredits` reverses a
@@ -3612,28 +3621,22 @@ row (`entryId` for adjustments, `refundEntryId` for refunds). `getBalance`,
 
 ### Idempotency — read carefully
 
-`addCredits` and `refundCredits` accept an `idempotencyKey` for replay-safe
+All three adjustment methods accept an `idempotencyKey` for replay-safe
 retries: retrying with the same key replays the original result instead of
 double-applying.
-
-**`deductCredits` does not accept an `idempotencyKey`** — its options are
-`entryType`, `bucket`, and `metadata` only. It is an administrative adjustment
-(a refund clawback), not the metered path; do not build retries on it. For
-replay-safe charging, use `deduct(userId, metrics, idempotencyKey)` — the
-high-volume, idempotency-keyed path (see below).
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
 | `addCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { type?, metadata?, expiresAt?, bucket?, idempotencyKey? }` | `Promise<AddCreditsResult>` |
-| `deductCredits` | `userId: string`, `amount: Decimal \| number`, `options?: { entryType?, bucket?, metadata? }` | `Promise<AddCreditsResult>` |
-| `refundCredits` | `entryId: string`, `amount?`, `reason?`, `metadata?`, `idempotencyKey?` | `Promise<RefundResult>` |
+| `deductCredits` | `userId: string`, `amount: Decimal \| number`, `options?: DeductCreditsOptions` | `Promise<AddCreditsResult>` |
+| `refundCredits` | `entryId: string`, `options?: RefundCreditsOptions` | `Promise<RefundResult>` |
 | `getBalance` | `userId: string` | `Promise<BalanceResult>` |
 | `getAvailable` | `userId: string` | `Promise<AvailableResult>` |
 | `getBucketBalances` | `userId: string` | `Promise<BucketBalancesResult>` |
 
 ## Metered charging
 
-`deduct(userId, metrics, idempotencyKey?, metadata?, feature?)` prices a
+`deduct(userId, metrics, options?)` prices a
 `UsageMetrics` event with the active pricing engine and charges the cost in
 one atomic, idempotency-keyed transaction. The idempotency key is **the**
 replay guard for metered usage: the same key returns the same
@@ -3649,7 +3652,7 @@ const result = await bursar.credits.deduct(
     measures: { input_tokens: 500, output_tokens: 200 },
     dimensions: { model: "gpt-4o" },
   },
-  "request:9f8c",
+  { idempotencyKey: "request:9f8c" },
 );
 ```
 
@@ -3662,8 +3665,8 @@ reverses every deduction of a given entry type, and
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
-| `deduct` | `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
-| `deductFlatJob` | `userId: string`, `jobName: string`, `idempotencyKey?`, `metadata?`, `feature?` | `Promise<DeductionResult>` |
+| `deduct` | `userId: string`, `metrics: UsageMetrics`, `options?: DeductOptions` | `Promise<DeductionResult>` |
+| `deductFlatJob` | `userId: string`, `jobName: string`, `options?: DeductFlatJobOptions` | `Promise<DeductionResult>` |
 | `revokeCreditsByEntryType` | `userId: string`, `entryType: string` | `Promise<Record<string, unknown>>` |
 | `sweepExpiredCredits` | `dryRun = false` | `Promise<SweepResult>` |
 
@@ -3806,13 +3809,13 @@ await bursar.credits.deductTeam(
     measures: { jobs: 1 },
     dimensions: { model: "gpt-4o" },
   },
-  "team:run:3",
+  { idempotencyKey: "team:run:3" },
 );
 ```
 
 | Method | Parameters | Returns |
 | --- | --- | --- |
-| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `idempotencyKey?`, `metadata?` | `Promise<TeamDeductionResult>` |
+| `deductTeam` | `teamId: string`, `userId: string`, `metrics: UsageMetrics`, `options?: DeductTeamOptions` | `Promise<TeamDeductionResult>` |
 
 See [Credit lifecycle](/docs/guides/credit-lifecycle) for the full account
 model, and [Leases and financial safety](/docs/guides/financial-safety) for
@@ -3832,7 +3835,9 @@ abstract contract a custom backend must implement.
 ## PostgresStore
 
 ```ts
-const store = new PostgresStore(databaseUrl, tenantId, {
+const store = new PostgresStore({
+  postgres: databaseUrl,
+  tenantId,
   connectionTimeoutMs: 10_000,
   statementTimeoutMs: 30_000,
   onPoolError: (error) => console.error("Bursar pool error", error),
@@ -3843,12 +3848,11 @@ Connects through `pg` and runs every mutation as a canonical SQL function
 (RPC). `tenantId` is a required positional argument that scopes every
 transaction to one tenant.
 
-| Parameter             | Type                                                           | Meaning                                                               |
-| --------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `databaseUrl`         | `string`                                                       | Postgres connection string                                            |
-| `tenantId`            | `string`                                                       | Required tenant UUID scoping every transaction                        |
-| `poolOrCtorOrOptions` | `Pool \| PoolConstructor \| PostgresStoreOptions \| undefined` | Reuse a pool, pass a pool constructor, or configure an SDK-owned pool |
-| `storageOptions`      | `PostgresStoreOptions \| undefined`                            | Options when the third argument is a pool or constructor              |
+| Option            | Type                 | Meaning                                                        |
+| ----------------- | -------------------- | -------------------------------------------------------------- |
+| `postgres`        | `string \| pg.Pool`   | Connection string for an owned pool, or an application pool    |
+| `tenantId`        | `string`             | Required tenant UUID scoping every transaction                 |
+| `poolConstructor` | `PoolConstructor`    | Optional constructor for testing or custom `pg` initialization |
 
 The store owns a pool it creates from `databaseUrl`: call `await store.close()`
 to drain it. A supplied pool is borrowed and is never ended by the store.
@@ -3875,17 +3879,18 @@ with the original driver error in `cause`.
 ## PostgresBillingStore
 
 ```ts
-const billingStore = new PostgresBillingStore(databaseUrl, tenantId);
+const billingStore = new PostgresBillingStore({ postgres: databaseUrl, tenantId });
 ```
 
-Same shape: `poolOrUrl` (a `pg.Pool` or connection string) plus `tenantId`.
+It uses the same object shape: `postgres` (a `pg.Pool` or connection string)
+plus `tenantId`.
 It wraps all billing repositories (offer, topup, customer, subscription,
 event, payment, refund, invoice, dispute, config) behind one interface and is
 passed as `billingStore:` to `new Bursar({...})` to enable the billing and
 commerce capabilities.
 
-Its optional third argument is `PostgresBillingStoreOptions` and accepts the
-same reliability controls listed above plus `billingPayloadBackend`.
+`PostgresBillingStoreOptions` accepts the same reliability controls listed
+above plus `billingPayloadBackend`.
 
 ## The CreditStore contract
 

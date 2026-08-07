@@ -55,15 +55,59 @@ export interface CreditsServiceOptions {
   /** Sweep a subject's expired credits before balance-sensitive operations. */
   lazyExpiry?: boolean;
   /**
-   * Pricing-engine cache TTL in milliseconds. A value of 0 disables automatic
-   * reloads. Concurrent reloads are deduplicated.
+   * Catalog cache TTL in milliseconds. A value of 0 disables automatic
+   * reloads. Concurrent reloads are deduplicated. Defaults to 300,000.
    */
-  pricingTtl?: number;
+  catalogCacheTtlMs?: number;
   /**
    * Awaited after a committed, non-replayed deduction. Hook failures are
    * isolated from the committed credit charge.
    */
   postDeduction?: ((context: PostDeductionContext) => void | Promise<void>) | null;
+}
+
+export interface AddCreditsOptions {
+  type?: string;
+  metadata?: CreditMetadata | null;
+  expiresAt?: Date | null;
+  /** Target credit bucket; omitted resolves to the catalog's default bucket. */
+  bucket?: string | null;
+  /** Stable replay key for the ledger mutation. */
+  idempotencyKey?: string | null;
+}
+
+export interface DeductCreditsOptions {
+  entryType?: string;
+  bucket?: string | null;
+  metadata?: CreditMetadata | null;
+  /** Stable replay key for the ledger mutation. */
+  idempotencyKey?: string | null;
+}
+
+export interface DeductOptions {
+  idempotencyKey?: string | null;
+  metadata?: CreditMetadata | null;
+  /** Entitlement feature required for this operation. */
+  feature?: string | null;
+}
+
+export type DeductFlatJobOptions = DeductOptions;
+
+export interface RecordUsageOptions {
+  idempotencyKey?: string | null;
+  metadata?: CreditMetadata | null;
+}
+
+export interface RefundCreditsOptions {
+  amount?: Decimal | number;
+  reason?: string;
+  metadata?: CreditMetadata | null;
+  idempotencyKey?: string | null;
+}
+
+export interface DeductTeamOptions {
+  idempotencyKey?: string | null;
+  metadata?: CreditMetadata | null;
 }
 
 export interface ReserveOptions {
@@ -95,8 +139,6 @@ export interface GrantSubscriptionCycleOptions {
   bucket?: string;
   expiresAt?: Date;
   ttlDays?: number;
-  /** Expire the prior cycle balance first. Defaults to true. */
-  replacePrior?: boolean;
   planKey?: string;
   idempotencyKey?: string;
   metadata?: CreditMetadata | null;

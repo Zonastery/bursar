@@ -3,7 +3,7 @@
 The ``CostBreakdown`` model holds per-category credit costs (all
 :class:`decimal.Decimal`, quantized to 6 dp ROUND_HALF_UP) and a ``total``.
 
-Single source of truth (M3): ``total`` is computed **once**, by the engine,
+``total`` is computed once by the engine,
 and passed in. The model no longer recomputes/overwrites it in a validator,
 so there is exactly one place that decides clamping + rounding.
 

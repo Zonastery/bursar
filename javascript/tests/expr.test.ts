@@ -3,8 +3,21 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import Decimal from "decimal.js";
-import { evaluateExpression, validateExpression, quantizeMoney } from "../src/expr.js";
+import {
+  evaluateExpression,
+  validateExpression as validateSdkExpression,
+  quantizeMoney,
+} from "../src/expr.js";
 import { ExpressionError } from "../src/errors.js";
+
+const TEST_VARIABLES = new Set(["input_tokens", "output_tokens", "tool_calls", "x"]);
+
+function validateExpression(
+  expression: string,
+  knownVariables: Iterable<string> = TEST_VARIABLES,
+): void {
+  validateSdkExpression(expression, knownVariables);
+}
 
 // Helper: evaluate then quantize to a 6dp string, like the engine cost boundary.
 function evalStr(expr: string, vars: Record<string, number>): string {

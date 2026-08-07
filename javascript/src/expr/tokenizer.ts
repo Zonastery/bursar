@@ -39,24 +39,30 @@ function readNumber(source: string, start: number): { value: string; next: numbe
   let index = start;
   let value = "";
   let dotSeen = false;
-  while (index < source.length && /[0-9.]/.test(source[index])) {
-    if (source[index] === ".") {
+  while (index < source.length && /[0-9.]/.test(source.charAt(index))) {
+    const character = source.charAt(index);
+    if (character === ".") {
       if (dotSeen) throw new ExpressionError(`invalid number literal: '${value}.'`);
       dotSeen = true;
     }
-    value += source[index++];
+    value += character;
+    index++;
   }
   if (value === "." || !/^[0-9]*\.?[0-9]*$/.test(value) || !/[0-9]/.test(value)) {
     throw new ExpressionError(`invalid number literal: '${value}'`);
   }
 
-  if (index < source.length && /[eE]/.test(source[index])) {
-    value += source[index++];
-    if (index < source.length && /[+-]/.test(source[index])) value += source[index++];
-    if (index >= source.length || !/[0-9]/.test(source[index])) {
+  if (index < source.length && /[eE]/.test(source.charAt(index))) {
+    value += source.charAt(index++);
+    if (index < source.length && /[+-]/.test(source.charAt(index))) {
+      value += source.charAt(index++);
+    }
+    if (index >= source.length || !/[0-9]/.test(source.charAt(index))) {
       throw new ExpressionError(`invalid number literal: '${value}'`);
     }
-    while (index < source.length && /[0-9]/.test(source[index])) value += source[index++];
+    while (index < source.length && /[0-9]/.test(source.charAt(index))) {
+      value += source.charAt(index++);
+    }
   }
   return { value, next: index };
 }
@@ -64,8 +70,8 @@ function readNumber(source: string, start: number): { value: string; next: numbe
 function readWord(source: string, start: number): { value: string; next: number } {
   let index = start;
   let value = "";
-  while (index < source.length && /[a-zA-Z0-9_]/.test(source[index])) {
-    value += source[index++];
+  while (index < source.length && /[a-zA-Z0-9_]/.test(source.charAt(index))) {
+    value += source.charAt(index++);
   }
   return { value, next: index };
 }
@@ -74,7 +80,7 @@ export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
   while (index < source.length) {
-    const character = source[index];
+    const character = source.charAt(index);
     if (/\s/.test(character)) {
       index++;
       continue;

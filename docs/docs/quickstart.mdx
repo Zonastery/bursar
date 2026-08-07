@@ -128,7 +128,10 @@ Connect the store to your tenant and build the facade:
   ```ts
   import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-  const store = new PostgresStore(process.env.DATABASE_URL!, tenantId);
+  const store = new PostgresStore({
+    postgres: process.env.DATABASE_URL!,
+    tenantId,
+  });
   const bursar = new Bursar({ creditStore: store });
   ```
 
@@ -204,7 +207,7 @@ This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
       measures: { input_tokens: 800 },
       dimensions: { model: "gpt-4o" },
     },
-    "turn_12345",
+    { idempotencyKey: "turn_12345" },
   );
   console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
   ```

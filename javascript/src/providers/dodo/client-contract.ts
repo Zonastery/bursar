@@ -60,7 +60,20 @@ interface DodoPlanChangePreview {
   } | null;
 }
 
+/** Provider payload after Dodo has verified and parsed the webhook request. */
+export interface DodoWebhookPayload {
+  type: string;
+  timestamp: string | Date;
+  data: unknown;
+}
+
 export interface DodoClient {
+  webhooks: {
+    unwrap(
+      body: string,
+      options: { headers: Record<string, string>; key?: string },
+    ): DodoWebhookPayload;
+  };
   checkoutSessions: {
     create(
       body: Parameters<DodoPayments["checkoutSessions"]["create"]>[0],

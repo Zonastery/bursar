@@ -20,6 +20,14 @@ const quantize = (value: Decimal): Decimal => value.toDecimalPlaces(6, Decimal.R
 
 type DimensionValue = string | Decimal | boolean;
 
+function requiredMeasure(measures: Record<string, Decimal>, name: string): Decimal {
+  const measure = measures[name];
+  if (measure === undefined) {
+    throw new ConfigError(`price charge references missing usage measure '${name}'`);
+  }
+  return measure;
+}
+
 export class PricingEngine {
   constructor(private readonly config: ParsedBursarConfig) {}
 
@@ -131,13 +139,16 @@ export class PricingEngine {
       return requested;
     }
     const keys = Object.keys(cards);
-    if (keys.length === 1) return keys[0];
+    const onlyCard = keys[0];
+    if (keys.length === 1 && onlyCard !== undefined) return onlyCard;
     throw new ConfigError("rateCard is required when more than one rate card is configured");
   }
 
   private operationPricing(cardKey: string, operation: string): OperationPricing {
     const card = this.config.pricing!.rateCards[cardKey];
-    if (card.operations[operation]) return card.operations[operation];
+    if (!card) throw new ConfigError(`unknown rate card '${cardKey}'`);
+    const operationPrice = card.operations[operation];
+    if (operationPrice) return operationPrice;
     if (!card.extends)
       throw new ConfigError(`rate card '${cardKey}' has no price for operation '${operation}'`);
     return this.operationPricing(card.extends, operation);
@@ -180,9 +191,9 @@ export class PricingEngine {
   private evaluateCharge(charge: Charge, measures: Record<string, Decimal>): Decimal {
     if (charge.type === "flat") return charge.amount;
     if (charge.type === "per_unit")
-      return measures[charge.measure].div(charge.unitSize).mul(charge.rate);
+      return requiredMeasure(measures, charge.measure).div(charge.unitSize).mul(charge.rate);
     if (charge.type === "package") {
-      const packages = measures[charge.measure].div(charge.units);
+      const packages = requiredMeasure(measures, charge.measure).div(charge.units);
       const rounded =
         charge.rounding === "ceil"
           ? packages.ceil()
@@ -192,7 +203,7 @@ export class PricingEngine {
       return rounded.mul(charge.amount);
     }
     if (charge.type === "graduated") {
-      let remaining = measures[charge.measure];
+      let remaining = requiredMeasure(measures, charge.measure);
       let previous = new Decimal(0);
       let total = new Decimal(0);
       for (const tier of charge.tiers) {
@@ -208,11 +219,12 @@ export class PricingEngine {
       return total;
     }
     if (charge.type === "volume") {
-      const value = measures[charge.measure];
-      const tier = charge.tiers.find(
-        (candidate) => candidate.upTo == null || value.lte(candidate.upTo),
-      );
-      return value.mul((tier ?? charge.tiers.at(-1)!).rate);
+      const value = requiredMeasure(measures, charge.measure);
+      const tier =
+        charge.tiers.find((candidate) => candidate.upTo == null || value.lte(candidate.upTo)) ??
+        charge.tiers.at(-1);
+      if (!tier) throw new ConfigError("volume charge requires at least one tier");
+      return value.mul(tier.rate);
     }
     if (charge.type === "expression") return evaluateExpression(charge.formula, measures);
     if (charge.type === "sum")

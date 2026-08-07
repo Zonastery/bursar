@@ -16,7 +16,13 @@ from bursar.billing.types import (
     ProviderRef,
 )
 from bursar.bursar import BillingEventSink
-from bursar.providers._shared import call_billing_event_sink, parse_status
+from bursar.providers._shared import (
+    call_billing_event_sink,
+    parse_status,
+    require_currency,
+    require_minor_units,
+    require_provider_string,
+)
 from bursar.providers.types import ProviderLogger, StdlibProviderLogger
 
 STRIPE_CHECKOUT_EXPAND = ("line_items",)
@@ -44,12 +50,12 @@ def _timestamp(value: int | float | None) -> str | None:
     return datetime.fromtimestamp(value, tz=UTC).isoformat()
 
 
-def _build_end_from_invoice(invoice: Any) -> str:
-    return _timestamp(invoice.get("period_end")) or datetime.now(UTC).isoformat()
+def _build_end_from_invoice(invoice: Any) -> str | None:
+    return _timestamp(invoice.get("period_end"))
 
 
-def _build_start_from_invoice(invoice: Any) -> str:
-    return _timestamp(invoice.get("period_start")) or datetime.now(UTC).isoformat()
+def _build_start_from_invoice(invoice: Any) -> str | None:
+    return _timestamp(invoice.get("period_start"))
 
 
 def _subscription_refs(sub: Any) -> ProviderRef | None:
@@ -58,13 +64,12 @@ def _subscription_refs(sub: Any) -> ProviderRef | None:
     price = (item_data[0].get("price") if item_data else None) or {}
     price_id = price.get("id")
     product = price.get("product")
-    product_id = (
-        product
-        if isinstance(product, str)
-        else product.get("id")
-        if hasattr(product, "get")
-        else getattr(product, "id", None)
-    )
+    if isinstance(product, str):
+        product_id = product
+    else:
+        get_product_value = getattr(product, "get", None)
+        raw_product_id = get_product_value("id") if callable(get_product_value) else getattr(product, "id", None)
+        product_id = raw_product_id if isinstance(raw_product_id, str) else None
     if not price_id and not product_id:
         return None
     return ProviderRef(price_id=price_id, product_id=product_id)
@@ -156,11 +161,21 @@ async def _handle_checkout_completed(
         price_id = price.get("id")
         product_id = price.get("product")
 
+        payment_intent = session.get("payment_intent")
+        provider_payment_id = payment_intent.get("id") if isinstance(payment_intent, dict) else payment_intent
         payment_info = BillingPaymentInfo(
-            provider_payment_id=str(session.get("payment_intent") or session.get("id")),
-            amount_minor=session.get("amount_total") or 0,
-            currency=(session.get("currency") or "usd").upper(),
+            provider_payment_id=require_provider_string(
+                provider_payment_id,
+                "Stripe checkout session.payment_intent",
+            ),
+            amount_minor=require_minor_units(
+                session.get("amount_total"),
+                "Stripe checkout session.amount_total",
+            ),
+            tax_minor=0,
+            currency=require_currency(session.get("currency"), "Stripe checkout session.currency"),
             purpose="credit_topup",
+            status="succeeded",
             refs=ProviderRef(
                 product_id=str(product_id) if product_id else None,
                 price_id=price_id,
@@ -343,10 +358,16 @@ async def _handle_invoice_paid(
             ),
             invoice=BillingInvoiceInfo(
                 provider_invoice_id=invoice.get("id"),
-                status=invoice.get("status") or "open",
-                amount_paid_minor=invoice.get("amount_paid"),
-                amount_due_minor=invoice.get("amount_due"),
-                currency=(invoice.get("currency") or "usd").upper(),
+                status="paid",
+                amount_paid_minor=require_minor_units(
+                    invoice.get("amount_paid"),
+                    "Stripe invoice.amount_paid",
+                ),
+                amount_due_minor=require_minor_units(
+                    invoice.get("amount_due"),
+                    "Stripe invoice.amount_due",
+                ),
+                currency=require_currency(invoice.get("currency"), "Stripe invoice.currency"),
             ),
         ),
     )
@@ -371,9 +392,10 @@ async def _handle_payment_intent_event(
         return
 
     payment_info = BillingPaymentInfo(
-        provider_payment_id=intent.get("id"),
-        amount_minor=intent.get("amount", 0),
-        currency=(intent.get("currency") or "usd").upper(),
+        provider_payment_id=require_provider_string(intent.get("id"), "Stripe payment intent.id"),
+        amount_minor=require_minor_units(intent.get("amount"), "Stripe payment intent.amount"),
+        tax_minor=0,
+        currency=require_currency(intent.get("currency"), "Stripe payment intent.currency"),
         purpose="credit_topup",
         status=payment_status,
         refs=ProviderRef(
@@ -424,10 +446,13 @@ async def _handle_refund_event(
         case _:
             refund_status = "pending"
     refund_info = BillingRefundInfo(
-        provider_refund_id=refund.get("id"),
-        provider_payment_id=payment_intent_id,
-        amount_minor=refund.get("amount", 0),
-        currency=(refund.get("currency") or "usd").upper(),
+        provider_refund_id=require_provider_string(refund.get("id"), "Stripe refund.id"),
+        provider_payment_id=require_provider_string(
+            payment_intent_id,
+            "Stripe refund.payment_intent",
+        ),
+        amount_minor=require_minor_units(refund.get("amount"), "Stripe refund.amount", positive=True),
+        currency=require_currency(refund.get("currency"), "Stripe refund.currency"),
         reason=refund.get("reason"),
         status=refund_status,
     )
@@ -488,7 +513,9 @@ async def handle_stripe_billing_event(
     logger: ProviderLogger | None = None,
     event_created: int | float | None = None,
 ) -> None:
-    occurred_at = _timestamp(event_created) or datetime.now(UTC).isoformat()
+    occurred_at = _timestamp(event_created)
+    if occurred_at is None:
+        raise ValueError("Stripe event.created is required")
     if logger is None:
         logger = _log
 

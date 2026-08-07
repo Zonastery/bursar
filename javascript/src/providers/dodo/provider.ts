@@ -24,11 +24,22 @@ import type {
   WebhookResult,
 } from "../types.js";
 import type { BillingEventSink } from "../../bursar.js";
-import type { DodoClient } from "./client-contract.js";
-import { handleDodoBillingEvent } from "./event-mapper.js";
+import type { DodoClient, DodoWebhookPayload } from "./client-contract.js";
+import { dodoBillingEventId, handleDodoBillingEvent } from "./event-mapper.js";
+
+export interface DodoWebhookProcessorOptions {
+  eventSink: BillingEventSink;
+  resolveUser?: ResolveUserCallback;
+  logger?: ProviderLogger | null;
+}
+
+export interface DodoProviderOptions extends DodoWebhookProcessorOptions {
+  getClient: () => DodoClient;
+  webhookKey: string;
+  setupProductId?: string;
+}
 
 const NORMALIZED_DODO_EVENT_TYPES: Record<string, string> = {
-  "checkout.expired": "checkout.expired",
   "subscription.active": "subscription.created",
   "subscription.renewed": "subscription.renewed",
   "subscription.cancelled": "subscription.canceled",
@@ -36,13 +47,48 @@ const NORMALIZED_DODO_EVENT_TYPES: Record<string, string> = {
   "subscription.failed": "subscription.updated",
   "subscription.on_hold": "subscription.updated",
   "subscription.updated": "subscription.updated",
-  "subscription.cancellation_scheduled": "subscription.cancellation_scheduled",
-  "subscription.cancellation_unscheduled": "subscription.cancellation_unscheduled",
   "subscription.plan_changed": "subscription.plan_changed",
   "payment.succeeded": "payment.succeeded",
   "payment.failed": "payment.failed",
   "refund.succeeded": "refund.created",
+  "refund.failed": "refund.failed",
+  "dispute.opened": "dispute.created",
+  "dispute.challenged": "dispute.created",
+  "dispute.won": "dispute.closed",
+  "dispute.lost": "dispute.closed",
+  "dispute.accepted": "dispute.closed",
+  "dispute.cancelled": "dispute.closed",
+  "dispute.expired": "dispute.closed",
 };
+
+const BURSAR_METADATA_KEYS = new Set([
+  "userId",
+  "plan_slug",
+  "billing_interval",
+  "credits",
+  "checkout_intent_id",
+]);
+
+function normalizeMetadata(value: unknown): Record<string, string> {
+  if (value === null || value === undefined) return {};
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Dodo webhook metadata must be an object");
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      if (
+        (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") ||
+        (typeof item === "number" && !Number.isFinite(item))
+      ) {
+        throw new TypeError(`Dodo webhook metadata.${key} must be a scalar value`);
+      }
+      if (BURSAR_METADATA_KEYS.has(key) && typeof item !== "string") {
+        throw new TypeError(`Dodo webhook metadata.${key} must be a string`);
+      }
+      return [key, String(item)];
+    }),
+  );
+}
 
 function identityInput(
   provider: string,
@@ -77,20 +123,96 @@ function identityInput(
   };
 }
 
-export class DodoProvider implements PaymentProvider {
-  readonly provider = "dodo" as const;
-
-  constructor(
-    private getClient: () => DodoClient,
-    private config: { webhookKey: string; setupProductId?: string },
-    private sink: BillingEventSink,
-    private resolveUser?: ResolveUserCallback,
-    logger?: ProviderLogger | null,
-  ) {
-    this.logger = normalizeProviderLogger(logger);
+function restoreSignedExtensionFields(
+  payload: DodoWebhookPayload,
+  rawBody: string,
+): DodoWebhookPayload {
+  // Some Dodo SDK versions omit provider extension fields from the typed
+  // result. The raw body is safe to consult only after unwrap has verified it.
+  let signedData: Record<string, unknown>;
+  try {
+    signedData = (JSON.parse(rawBody) as { data?: Record<string, unknown> }).data ?? {};
+  } catch {
+    return payload;
   }
 
-  private logger: ReturnType<typeof normalizeProviderLogger>;
+  const verifiedData = (payload.data ?? {}) as Record<string, unknown>;
+  const productCart = signedData.product_cart;
+  const cartProductId = Array.isArray(productCart)
+    ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
+    : undefined;
+  return {
+    ...payload,
+    data: {
+      ...verifiedData,
+      ...(verifiedData.metadata == null && signedData.metadata != null
+        ? { metadata: signedData.metadata }
+        : {}),
+      ...(verifiedData.product_id == null && (signedData.product_id ?? cartProductId) != null
+        ? { product_id: signedData.product_id ?? cartProductId }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Maps an already verified Dodo payload into Bursar's provider-neutral billing
+ * lifecycle. Framework integrations use this after the official Dodo adapter
+ * has performed request parsing, signature verification, and schema validation.
+ */
+export class DodoWebhookProcessor {
+  private readonly sink: BillingEventSink;
+  private readonly resolveUser?: ResolveUserCallback;
+  private readonly logger: ReturnType<typeof normalizeProviderLogger>;
+
+  constructor(options: DodoWebhookProcessorOptions) {
+    this.sink = options.eventSink;
+    this.resolveUser = options.resolveUser;
+    this.logger = normalizeProviderLogger(options.logger);
+  }
+
+  async handle(payload: DodoWebhookPayload): Promise<WebhookResult> {
+    if (typeof payload.data !== "object" || payload.data === null || Array.isArray(payload.data)) {
+      throw new TypeError("Dodo webhook data must be an object");
+    }
+    const data = payload.data as Record<string, unknown>;
+    const type = payload.type;
+    const metadata = normalizeMetadata(data.metadata);
+    let userId: string | null = metadata.userId ?? null;
+
+    const resolvesUserWithoutMetadata = type !== "payment.failed";
+    if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
+      userId = await this.resolveUser(identityInput("dodo", type, data, metadata));
+    }
+
+    await handleDodoBillingEvent(payload, userId, metadata, this.sink, this.logger);
+    return {
+      received: true,
+      retryable: false,
+      provider: "dodo",
+      eventId: dodoBillingEventId(payload),
+      eventType: type,
+    };
+  }
+}
+
+export class DodoProvider implements PaymentProvider {
+  readonly provider = "dodo" as const;
+  private readonly getClient: () => DodoClient;
+  private readonly config: { webhookKey: string; setupProductId?: string };
+  private readonly logger: ReturnType<typeof normalizeProviderLogger>;
+  private readonly webhookProcessor: DodoWebhookProcessor;
+
+  constructor(options: DodoProviderOptions) {
+    if (!options.webhookKey.trim()) throw new TypeError("webhookKey must not be empty");
+    this.getClient = options.getClient;
+    this.config = {
+      webhookKey: options.webhookKey,
+      ...(options.setupProductId ? { setupProductId: options.setupProductId } : {}),
+    };
+    this.logger = normalizeProviderLogger(options.logger);
+    this.webhookProcessor = new DodoWebhookProcessor(options);
+  }
 
   async createCheckoutSession(
     params: CheckoutParams,
@@ -142,14 +264,11 @@ export class DodoProvider implements PaymentProvider {
   }
 
   async handleWebhook(req: WebhookRequest): Promise<WebhookResult> {
-    const { verifyWebhookPayload } = await import("@dodopayments/core/webhook");
-
-    let payload: { type: string; data?: unknown };
+    let payload: DodoWebhookPayload;
     try {
-      payload = await verifyWebhookPayload({
-        webhookKey: this.config.webhookKey,
+      payload = this.getClient().webhooks.unwrap(req.rawBody, {
         headers: req.headers,
-        body: req.rawBody,
+        key: this.config.webhookKey,
       });
     } catch (error) {
       this.logger.warn("[DodoProvider] webhook verification failed", {
@@ -164,49 +283,12 @@ export class DodoProvider implements PaymentProvider {
       };
     }
 
-    // The Dodo SDK verifier validates and returns the event, but some SDK
-    // versions omit provider extension fields such as metadata/product_id.
-    // The raw body is already signature-verified above, so merge those fields
-    // back from the signed payload before mapping the billing event.
-    let signedData: Record<string, unknown> = {};
-    try {
-      signedData = (JSON.parse(req.rawBody) as { data?: Record<string, unknown> }).data ?? {};
-    } catch {
-      // Verification succeeded, so the SDK payload remains authoritative.
-    }
-    const verifiedData = (payload.data ?? {}) as Record<string, unknown>;
-    const productCart = signedData.product_cart;
-    const cartProductId = Array.isArray(productCart)
-      ? (productCart[0] as { product_id?: unknown } | undefined)?.product_id
-      : undefined;
-    const data: Record<string, unknown> = {
-      ...verifiedData,
-      ...(verifiedData.metadata == null && signedData.metadata != null
-        ? { metadata: signedData.metadata }
-        : {}),
-      ...(verifiedData.product_id == null && (signedData.product_id ?? cartProductId) != null
-        ? { product_id: signedData.product_id ?? cartProductId }
-        : {}),
-    };
-    const type: string = payload.type;
-    const metadata = (data.metadata ?? {}) as Record<string, string>;
-    let userId: string | null = metadata.userId ?? null;
+    return this.handleVerifiedWebhook(restoreSignedExtensionFields(payload, req.rawBody));
+  }
 
-    const resolvesUserWithoutMetadata = type !== "payment.failed" && type !== "checkout.expired";
-    if (!userId && this.resolveUser && resolvesUserWithoutMetadata) {
-      userId = await this.resolveUser(identityInput(this.provider, type, data, metadata));
-    }
-
-    await handleDodoBillingEvent(type, data, userId, metadata, this.sink, this.logger);
-    const rawEventId =
-      data.id ?? data.payment_id ?? data.subscription_id ?? data.refund_id ?? data.dispute_id;
-    return {
-      received: true,
-      retryable: false,
-      provider: this.provider,
-      eventId: rawEventId == null ? null : String(rawEventId),
-      eventType: type,
-    };
+  /** Process a payload already verified and parsed by an official Dodo adapter. */
+  async handleVerifiedWebhook(payload: DodoWebhookPayload): Promise<WebhookResult> {
+    return this.webhookProcessor.handle(payload);
   }
 
   async cancelSubscription(subscriptionId: string, idempotencyKey?: string): Promise<void> {
@@ -288,15 +370,12 @@ export class DodoProvider implements PaymentProvider {
           expiryMonth: pm.card!.expiry_month ? Number(pm.card!.expiry_month) : 0,
           expiryYear: pm.card!.expiry_year ? Number(pm.card!.expiry_year) : 0,
         }));
-      return deduplicatePaymentMethods(methods);
+      const deduplicated = deduplicatePaymentMethods(methods);
+      if (deduplicated.length === 1) deduplicated[0]!.isDefault = true;
+      return deduplicated;
     } catch {
       return [];
     }
-  }
-
-  async getDefaultPaymentMethod(customerId: string): Promise<PaymentMethodInfo | null> {
-    const methods = await this.listPaymentMethods(customerId);
-    return methods.length === 1 ? methods[0] : null;
   }
 
   async previewSavedPaymentCharge(
@@ -413,7 +492,7 @@ export class DodoProvider implements PaymentProvider {
           prorationFactor: item.proration_factor,
           currency: item.currency,
           tax: item.tax ?? 0,
-          subtotal: 0,
+          subtotal: Math.round(item.unit_price * item.quantity * item.proration_factor),
         });
       }
     }

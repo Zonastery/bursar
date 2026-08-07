@@ -14,31 +14,46 @@ function truthy(value: Decimal): boolean {
   return !value.isZero();
 }
 
+function requiredArgument(name: string, args: readonly Decimal[], index: number): Decimal {
+  const argument = args[index];
+  if (argument === undefined) {
+    throw new ExpressionError(`${name}() received an invalid number of arguments`);
+  }
+  return argument;
+}
+
 function evaluateCall(name: string, args: Decimal[]): Decimal {
   switch (name) {
     case "ceil":
-      return args[0].ceil();
+      return requiredArgument(name, args, 0).ceil();
     case "floor":
-      return args[0].floor();
+      return requiredArgument(name, args, 0).floor();
     case "min":
       return Decimal.min(...args);
     case "max":
       return Decimal.max(...args);
     case "round": {
-      const digits = args.length === 2 ? args[1].toNumber() : 0;
-      return args[0].toDecimalPlaces(digits, Decimal.ROUND_HALF_UP);
+      const digits = args.length === 2 ? requiredArgument(name, args, 1).toNumber() : 0;
+      return requiredArgument(name, args, 0).toDecimalPlaces(digits, Decimal.ROUND_HALF_UP);
     }
     case "if":
-      return truthy(args[0]) ? args[1] : args[2];
+      return truthy(requiredArgument(name, args, 0))
+        ? requiredArgument(name, args, 1)
+        : requiredArgument(name, args, 2);
     case "tier": {
-      const value = args[0];
+      const value = requiredArgument(name, args, 0);
       for (let index = 1; index < args.length - 1; index += 2) {
-        if (value.lessThan(args[index])) return args[index + 1];
+        if (value.lessThan(requiredArgument(name, args, index))) {
+          return requiredArgument(name, args, index + 1);
+        }
       }
-      return args[args.length - 1];
+      return requiredArgument(name, args, args.length - 1);
     }
     case "clamp":
-      return Decimal.max(args[1], Decimal.min(args[0], args[2]));
+      return Decimal.max(
+        requiredArgument(name, args, 1),
+        Decimal.min(requiredArgument(name, args, 0), requiredArgument(name, args, 2)),
+      );
     case "percentile":
       return percentile(args);
     default:
@@ -47,29 +62,31 @@ function evaluateCall(name: string, args: Decimal[]): Decimal {
 }
 
 function percentile(args: Decimal[]): Decimal {
-  const percentage = args[0];
+  const percentage = requiredArgument("percentile", args, 0);
   if (percentage.lessThan(0) || percentage.greaterThan(100)) {
     throw new ExpressionError("percentile() p must be between 0 and 100");
   }
   const sorted = args.slice(1).sort((left, right) => left.comparedTo(right));
-  if (sorted.length === 1) return sorted[0];
+  if (sorted.length === 1) return requiredArgument("percentile", sorted, 0);
 
   const rank = percentage.dividedBy(100).times(sorted.length - 1);
   const lower = rank.floor();
   const lowerIndex = lower.toNumber();
   const upperIndex = Math.min(lowerIndex + 1, sorted.length - 1);
   const fraction = rank.minus(lower);
-  return sorted[lowerIndex].times(ONE.minus(fraction)).plus(sorted[upperIndex].times(fraction));
+  return requiredArgument("percentile", sorted, lowerIndex)
+    .times(ONE.minus(fraction))
+    .plus(requiredArgument("percentile", sorted, upperIndex).times(fraction));
 }
 
 export function evaluateNode(node: Node, variables: Record<string, number | Decimal>): Decimal {
   switch (node.type) {
     case "number":
       return new Decimal(node.value);
-    case "identifier":
-      return Object.prototype.hasOwnProperty.call(variables, node.name)
-        ? asDecimal(variables[node.name])
-        : ZERO;
+    case "identifier": {
+      const value = variables[node.name];
+      return value === undefined ? ZERO : asDecimal(value);
+    }
     case "unary": {
       const value = evaluateNode(node.operand, variables);
       if (node.op === "not") return truthy(value) ? ZERO : ONE;

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import { requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import { StoreError } from "../../../errors.js";
 
 const UserPlanRowSchema = z
   .object({
@@ -149,12 +150,12 @@ export class PlanRepository {
   ): Promise<SetUserPlanRow> {
     const planRows = await this.callproc("resolve_active_plan", [planKey]);
     const planRow = planRows[0] as Record<string, unknown> | undefined;
-    if (planRow?.id == null) throw new Error(`unknown active plan '${planKey}'`);
+    if (planRow?.id == null) throw new StoreError(`Unknown active plan '${planKey}'`);
     const planId = String(planRow.id);
     const params = planAssignedAt ? [userId, planId, planAssignedAt] : [userId, planId];
     const rows = await this.callproc("assign_plan", params);
-    if (rows?.[0] !== true) {
-      throw new Error("PlanRepository.setUserPlan: assign_plan returned false");
+    if (requireRow(rows, "PlanRepository.setUserPlan") !== true) {
+      throw new StoreError("PlanRepository.setUserPlan: assign_plan returned false");
     }
     const assigned = await this.getUserPlan(userId);
     return safeParse(
@@ -171,8 +172,8 @@ export class PlanRepository {
   /** Remove a user's plan assignment. */
   async unsetUserPlan(userId: string): Promise<UnsetPlanRow> {
     const rows = await this.callproc("unassign_plan", [userId, "sdk_unassignment"]);
-    if (rows?.[0] !== true) {
-      throw new Error("PlanRepository.unsetUserPlan: unassign_plan returned false");
+    if (requireRow(rows, "PlanRepository.unsetUserPlan") !== true) {
+      throw new StoreError("PlanRepository.unsetUserPlan: unassign_plan returned false");
     }
     return safeParse(UnsetPlanRowSchema, { user_id: userId }, "PlanRepository.unsetUserPlan");
   }
@@ -180,13 +181,13 @@ export class PlanRepository {
   /** Pin or unpin the user's current assignment to its catalog revision. */
   async setPlanRevisionPin(userId: string, pinned: boolean): Promise<boolean> {
     const rows = await this.callproc("set_plan_revision_pin", [userId, pinned]);
-    return rows?.[0] === true;
+    return requireRow(rows, "PlanRepository.setPlanRevisionPin") === true;
   }
 
   /** Apply one bounded batch of renewal-effective plan changes. */
   async applyDuePlanChanges(limit: number): Promise<number> {
     const rows = await this.callproc("apply_due_plan_assignment_changes", [limit]);
-    return Number(rows?.[0] ?? 0);
+    return Number(requireRow(rows, "PlanRepository.applyDuePlanChanges"));
   }
 
   /** Check a user's remaining free allowance. */
@@ -197,7 +198,7 @@ export class PlanRepository {
     const rows = await this.callproc("start_plan_migration", [fromPlanId, toPlanId]);
     return safeParse(
       PlanMigrationStartRowSchema,
-      rows?.[0] ?? null,
+      requireRow(rows, "PlanRepository.startPlanMigration"),
       "PlanRepository.startPlanMigration",
     );
   }
@@ -206,7 +207,7 @@ export class PlanRepository {
     const rows = await this.callproc("migrate_plan_batch", [migrationId, batchSize ?? 100]);
     return safeParse(
       PlanMigrationBatchRowSchema,
-      rows?.[0] ?? {},
+      requireRow(rows, "PlanRepository.migratePlanBatch"),
       "PlanRepository.migratePlanBatch",
     );
   }

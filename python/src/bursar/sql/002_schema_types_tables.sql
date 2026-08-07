@@ -533,6 +533,7 @@ CREATE TABLE bursar.catalog_plans (
         OR
         (
             credit_allowance_amount IS NOT null
+            AND credit_allowance_priority IS NOT null
             AND credit_allowance_bucket IS NOT null
             AND credit_allowance_reset_unit IS NOT null
             AND credit_allowance_reset_count IS NOT null

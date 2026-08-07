@@ -169,10 +169,11 @@ def test_postgres_client_configures_deadlines_and_tenant_scope() -> None:
     )
 
     assert client.query("SELECT 1") == [{"ok": True}]
-    configuration = cursor.calls[0]
+    assert cursor.calls[0][0] == "SET LOCAL ROLE bursar_client"
+    configuration = cursor.calls[1]
     assert "statement_timeout" in configuration[0]
     assert configuration[1] == [TENANT_ID, "postgres", "postgres", "1234", "5678"]
-    assert cursor.calls[1][0] == "SET LOCAL search_path TO bursar, public"
+    assert cursor.calls[2][0] == "SET LOCAL search_path TO bursar, public"
     assert pool.put_calls == [(connection, False)]
 
 
@@ -211,6 +212,8 @@ def test_postgres_options_validate_and_classify_timeouts() -> None:
     assert PostgresConnectionOptions().statement_timeout_ms == 30_000
     with pytest.raises(ValueError, match="max_connections"):
         PostgresConnectionOptions(max_connections=0)
+    with pytest.raises(ValueError, match="access_role"):
+        PostgresClient.from_pool(FakePool(FakeConnection(FakeCursor())), access_role="owner")  # type: ignore[arg-type]
 
     timeout = DriverError("canceling statement due to statement timeout", "57014")
     client = PostgresClient.from_pool(FakePool(FakeConnection(FakeCursor(query_error=timeout))), tenant_id=TENANT_ID)

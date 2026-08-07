@@ -16,7 +16,7 @@ npm install @zonastery/bursar
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(databaseUrl, tenantId);
+const store = new PostgresStore({ postgres: databaseUrl, tenantId });
 const bursar = new Bursar({
   creditStore: store,
   billingStore: undefined,

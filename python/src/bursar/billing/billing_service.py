@@ -38,7 +38,7 @@ from bursar.billing.types import (
     BillingEventHandler,
     BillingEventResult,
     BillingEventType,
-    BillingInvoiceInfo,
+    BillingInvoiceRecord,
     BillingOfferResult,
     BillingPreferences,
     BillingSubscriptionChange,
@@ -49,6 +49,7 @@ from bursar.billing.types import (
     BillingTopupResult,
     CheckoutIntent,
 )
+from bursar.errors import StoreError
 from bursar.shared.diagnostics import bounded_diagnostic_message
 from bursar.shared.logger import NormalizedLogger, normalize_logger
 
@@ -378,7 +379,7 @@ class BillingService:
         """Insert or update billing preferences for a user."""
         self._store.upsert_billing_preferences(prefs)
 
-    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceInfo]:
+    def list_billing_invoices(self, user_id: str) -> list[BillingInvoiceRecord]:
         return self._store.list_billing_invoices(user_id)
 
     def upsert_billing_subscription(self, state: BillingSubscriptionState) -> None:
@@ -457,9 +458,9 @@ class BillingService:
     def get_auto_recharge_profile(self, user_id: str) -> BillingAutoRechargeProfile | None:
         return self._store.get_auto_recharge_profile(user_id)
 
-    def get_active_bursar_config(self) -> dict[str, Any] | None:
-        """Return the active canonical public Bursar configuration."""
-        return self._store.get_active_bursar_config()
+    def get_active_catalog_document(self) -> dict[str, Any] | None:
+        """Return the source document for the active catalog revision."""
+        return self._store.get_active_catalog_document()
 
     def upsert_auto_recharge_profile(
         self,
@@ -744,7 +745,7 @@ class BillingService:
         grace_expired_at: str | None = None,
     ) -> BillingSubscriptionState:
         if not event.subscription:
-            raise ValueError("no_subscription_data")
+            raise TypeError("billing subscription event requires subscription data")
         sub = event.subscription
         merger = SubscriptionStateMerge(sub, existing)
 
@@ -1085,9 +1086,11 @@ class BillingService:
         if existing is None:
             offer, offer_key, plan_key, offer_id = self._offer_for_event(event)
             if not offer_id:
-                raise RuntimeError(
+                raise StoreError(
                     "cannot persist cancellation for unknown subscription "
-                    f"{event.provider}/{sub_id}: offer could not be resolved"
+                    f"{event.provider}/{sub_id}: offer could not be resolved",
+                    retryable=True,
+                    details={"provider": event.provider, "provider_subscription_id": sub_id},
                 )
 
         self._store.upsert_billing_subscription(
@@ -1161,6 +1164,8 @@ class BillingService:
         return BillingEventResult(handled=True, action="trial_will_end_notified")
 
     def _handle_invoice_paid(self, event: BillingEvent) -> BillingEventResult:
+        if event.invoice is None:
+            return BillingEventResult(handled=False, error="no_invoice_data")
         renewal_result = (
             self._handle_subscription_renewed(event)
             if event.subscription
@@ -1169,7 +1174,7 @@ class BillingService:
         if not renewal_result.handled:
             return renewal_result
         uid = self._resolve_user_id(event)
-        if uid and event.invoice:
+        if uid:
             self._store.upsert_billing_invoice(
                 BillingInvoiceUpsert(
                     provider=event.provider,
@@ -1178,10 +1183,10 @@ class BillingService:
                         event.subscription.provider_subscription_id if event.subscription else None
                     ),
                     user_id=uid,
-                    status=event.invoice.status or "paid",
+                    status=event.invoice.status,
                     amount_paid_minor=event.invoice.amount_paid_minor,
                     amount_due_minor=event.invoice.amount_due_minor,
-                    currency=event.invoice.currency or "USD",
+                    currency=event.invoice.currency,
                     period_start=event.invoice.period_start,
                     period_end=event.invoice.period_end,
                     provider_updated_at=event.occurred_at,
@@ -1209,7 +1214,7 @@ class BillingService:
             payment_metadata: dict | None = None
             if topup_config and event.payment.purpose == "credit_topup":
                 payment_metadata = {
-                    "credits_per_unit": str(topup_config.credits_per_unit or 1000),
+                    "credits_per_unit": str(topup_config.credits_per_unit),
                 }
             payment_id = self._store.upsert_billing_payment(
                 BillingPaymentUpsert(
@@ -1221,7 +1226,7 @@ class BillingService:
                     tax_minor=event.payment.tax_minor,
                     currency=event.payment.currency,
                     purpose=event.payment.purpose,
-                    status=event.payment.status or "succeeded",
+                    status=event.payment.status,
                     provider_updated_at=event.occurred_at,
                     metadata=payment_metadata,
                 )
@@ -1229,8 +1234,8 @@ class BillingService:
 
         if topup_config and event.payment.purpose == "credit_topup" and uid:
             amt = event.payment.amount_minor
-            below_minimum = topup_config.min_amount_minor is not None and amt < topup_config.min_amount_minor
-            above_maximum = topup_config.max_amount_minor is not None and amt > topup_config.max_amount_minor
+            below_minimum = amt < topup_config.min_amount_minor
+            above_maximum = amt > topup_config.max_amount_minor
             if below_minimum or above_maximum:
                 self._logger.warn(
                     "topup amount outside configured bounds",
@@ -1242,14 +1247,14 @@ class BillingService:
                 )
                 return BillingEventResult(handled=True, action="payment_succeeded_out_of_bounds")
             credits = self._store.compute_topup_credits(amt, topup_config)
-            unit_amount = topup_config.amount_minor or 0
+            unit_amount = topup_config.amount_minor
             quantity = amt // unit_amount if unit_amount and amt % unit_amount == 0 else 0
-            if credits > 0 and payment_id and quantity > 0 and topup_config.credits_per_unit:
+            if credits > 0 and payment_id and quantity > 0:
                 grant_id = self._store.create_billing_credit_grant(
                     BillingCreditGrantCreate(
                         payment_id=payment_id,
                         topup_id=topup_config.topup_id,
-                        configured_credits=Decimal(str(topup_config.credits_per_unit)),
+                        configured_credits=topup_config.credits_per_unit,
                         quantity=quantity,
                     )
                 )
@@ -1301,29 +1306,31 @@ class BillingService:
         return BillingEventResult(handled=True, action="payment_succeeded")
 
     def _handle_payment_failed(self, event: BillingEvent) -> BillingEventResult:
+        if event.payment is None:
+            return BillingEventResult(handled=False, error="no_payment_data")
         uid = self._resolve_user_id(event)
-        if uid and event.payment:
+        if uid:
             self._store.upsert_billing_payment(
                 BillingPaymentUpsert(
                     provider=event.provider,
                     provider_payment_id=event.payment.provider_payment_id,
                     user_id=uid,
                     amount_minor=event.payment.amount_minor,
+                    tax_minor=event.payment.tax_minor,
                     currency=event.payment.currency,
                     purpose=event.payment.purpose,
-                    status=event.payment.status or "failed",
+                    status=event.payment.status,
                     provider_updated_at=event.occurred_at,
                 )
             )
-        if event.payment:
-            self._store.update_auto_recharge_attempt_by_provider_payment(
-                AutoRechargeProviderPaymentUpdate(
-                    provider=event.provider,
-                    provider_payment_id=event.payment.provider_payment_id,
-                    state="failed",
-                    failure_code="provider_payment_failed",
-                )
+        self._store.update_auto_recharge_attempt_by_provider_payment(
+            AutoRechargeProviderPaymentUpdate(
+                provider=event.provider,
+                provider_payment_id=event.payment.provider_payment_id,
+                state="failed",
+                failure_code="provider_payment_failed",
             )
+        )
         if uid and event.subscription:
             existing = self._store.get_billing_subscription(event.provider, event.subscription.provider_subscription_id)
             grace_base = datetime.fromisoformat(event.occurred_at)
@@ -1346,8 +1353,10 @@ class BillingService:
         return BillingEventResult(handled=True, action="payment_failed_recorded")
 
     def _handle_refund_created(self, event: BillingEvent) -> BillingEventResult:
+        if event.refund is None:
+            return BillingEventResult(handled=False, error="no_refund_data")
         uid = self._resolve_user_id(event)
-        if uid and event.refund:
+        if uid:
             refund = event.refund
             refund_id = self._store.upsert_billing_refund(
                 BillingRefundUpsert(
@@ -1358,14 +1367,14 @@ class BillingService:
                     amount_minor=refund.amount_minor,
                     currency=refund.currency,
                     reason=refund.reason,
-                    status=refund.status or "pending",
+                    status=refund.status,
                     provider_updated_at=event.occurred_at,
                 )
             )
-            if refund.status == "succeeded" and refund.provider_payment_id:
+            if refund.status == "succeeded":
                 payment = self._store.get_billing_payment(event.provider, refund.provider_payment_id)
-                if payment and payment.get("purpose") == "credit_topup" and payment.get("id"):
-                    grant_id = self._store.get_billing_credit_grant_by_payment(str(payment["id"]))
+                if payment and payment.purpose == "credit_topup":
+                    grant_id = self._store.get_billing_credit_grant_by_payment(payment.id)
                     if grant_id:
                         result = self._store.post_billing_refund(
                             refund_id,
@@ -1373,42 +1382,40 @@ class BillingService:
                             refund.amount_minor,
                             f"billing:{event.event_id}:refund",
                         )
-                        if not result.get("error_code"):
+                        if not result.error_code:
                             return BillingEventResult(handled=True, action="refund_clawback")
         return BillingEventResult(handled=True, action="refund_recorded")
 
     def _handle_dispute_created(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
-        if uid and event.dispute:
-            self._store.upsert_billing_dispute(
-                BillingDisputeUpsert(
-                    provider=event.provider,
-                    provider_dispute_id=event.dispute.provider_dispute_id,
-                    provider_payment_id=event.dispute.provider_payment_id,
-                    user_id=uid,
-                    status="needs_response",
-                    reason=event.dispute.reason,
-                    provider_updated_at=event.occurred_at,
-                    metadata=event.metadata,
-                )
+        if event.dispute is None:
+            return BillingEventResult(handled=False, error="no_dispute_data")
+        self._store.upsert_billing_dispute(
+            BillingDisputeUpsert(
+                provider=event.provider,
+                provider_dispute_id=event.dispute.provider_dispute_id,
+                provider_payment_id=event.dispute.provider_payment_id,
+                status=event.dispute.status,
+                reason=event.dispute.reason,
+                provider_updated_at=event.occurred_at,
+                metadata=event.metadata,
             )
+        )
         return BillingEventResult(handled=True, action="dispute_recorded")
 
     def _handle_dispute_closed(self, event: BillingEvent) -> BillingEventResult:
-        uid = self._resolve_user_id(event)
-        if uid and event.dispute:
-            self._store.upsert_billing_dispute(
-                BillingDisputeUpsert(
-                    provider=event.provider,
-                    provider_dispute_id=event.dispute.provider_dispute_id,
-                    provider_payment_id=event.dispute.provider_payment_id,
-                    user_id=uid,
-                    status="closed",
-                    reason=event.dispute.reason,
-                    provider_updated_at=event.occurred_at,
-                    metadata=event.metadata,
-                )
+        if event.dispute is None:
+            return BillingEventResult(handled=False, error="no_dispute_data")
+        self._store.upsert_billing_dispute(
+            BillingDisputeUpsert(
+                provider=event.provider,
+                provider_dispute_id=event.dispute.provider_dispute_id,
+                provider_payment_id=event.dispute.provider_payment_id,
+                status=event.dispute.status,
+                reason=event.dispute.reason,
+                provider_updated_at=event.occurred_at,
+                metadata=event.metadata,
             )
+        )
         return BillingEventResult(handled=True, action="dispute_closed")
 
     def _provision_subscription(
@@ -1484,14 +1491,21 @@ class BillingService:
             event.subscription.provider_subscription_id,
         )
         if not subscription or not subscription.subscription_id:
-            raise RuntimeError("subscription cycle grant requires a persisted subscription")
+            raise StoreError(
+                "subscription cycle grant requires a persisted subscription",
+                indeterminate=True,
+                details={
+                    "provider": event.provider,
+                    "provider_subscription_id": event.subscription.provider_subscription_id,
+                },
+            )
 
         payment = (
             self._store.get_billing_payment(event.provider, event.payment.provider_payment_id)
             if event.payment
             else None
         )
-        payment_id = str(payment["id"]) if payment and payment.get("id") else None
+        payment_id = payment.id if payment else None
         grant_id = self._store.create_billing_credit_grant(
             BillingCreditGrantCreate(
                 payment_id=payment_id,

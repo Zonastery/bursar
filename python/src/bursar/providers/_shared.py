@@ -14,6 +14,39 @@ class _BillingClaimBusyError(Exception):
     pass
 
 
+def require_provider_string(value: object, field: str) -> str:
+    """Return a non-empty provider value without manufacturing an identifier."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def require_minor_units(value: object, field: str, *, positive: bool = False) -> int:
+    """Validate an integral provider amount before it crosses the billing boundary."""
+
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be an integer")
+    if isinstance(value, int):
+        amount = value
+    elif isinstance(value, str) and value.isascii() and value.isdigit():
+        amount = int(value)
+    else:
+        raise ValueError(f"{field} must be an integer")
+    if amount < (1 if positive else 0):
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{field} must be {qualifier}")
+    return amount
+
+
+def require_currency(value: object, field: str) -> str:
+    """Validate and normalize an ISO-style three-letter currency code."""
+
+    if not isinstance(value, str) or len(value) != 3 or not value.isascii() or not value.isalpha():
+        raise ValueError(f"{field} must be a three-letter currency code")
+    return value.upper()
+
+
 def call_billing_event_sink(sink: BillingEventSink, event: BillingEvent) -> BillingEventResult:
     """Dispatch a billing event and raise on unexpected failures."""
 

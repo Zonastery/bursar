@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import datetime
+from typing import Literal
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_identifier_result, validate_non_empty
+from bursar.errors import StoreError
 
 
 class BillingRefundRepository:
@@ -19,14 +20,14 @@ class BillingRefundRepository:
         self,
         provider: str,
         provider_refund_id: str,
-        provider_payment_id: str | None,
-        user_id: str | None,
+        provider_payment_id: str,
+        user_id: str,
         amount_minor: int,
         currency: str,
         reason: str | None,
         metadata: str | None,
-        status: str = "pending",
-        provider_updated_at: str | None = None,
+        status: Literal["pending", "succeeded", "failed", "canceled"],
+        provider_updated_at: str,
     ) -> str:
         """Insert or update a billing refund record.
 
@@ -51,19 +52,23 @@ class BillingRefundRepository:
             [provider, provider_payment_id],
         )
         if not payments or not isinstance(payments[0], dict) or not payments[0].get("id"):
-            raise ValueError("refund payment not found")
+            raise StoreError(
+                "refund payment not found",
+                retryable=True,
+                details={"provider": provider, "provider_payment_id": provider_payment_id},
+            )
         rows = self._execute(
-            "SELECT bursar.upsert_billing_refund(%s::uuid, %s, %s, %s, %s, %s, %s::uuid, %s::char(3), %s::jsonb)",
+            "SELECT bursar.upsert_billing_refund(%s::uuid, %s, %s, %s, %s, %s, %s::uuid, %s::char(3), %s::jsonb) AS id",
             [
                 payments[0]["id"],
                 provider_refund_id,
                 amount_minor,
                 status,
                 reason,
-                provider_updated_at or datetime.datetime.now(datetime.UTC).isoformat(),
+                provider_updated_at,
                 user_id,
                 currency,
                 metadata or "{}",
             ],
         )
-        return str(next(iter(rows[0].values())))
+        return require_identifier_result(rows, "id", "BillingRefundRepository.upsert")

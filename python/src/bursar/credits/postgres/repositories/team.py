@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_amount, validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_row, validate_amount, validate_non_empty
 from bursar.credits.postgres.repositories.schemas import (
     AddTeamMemberRow,
     CreateTeamRow,
@@ -9,6 +9,7 @@ from bursar.credits.postgres.repositories.schemas import (
     TeamDeductionRow,
     TeamMemberRow,
 )
+from bursar.errors import StoreError
 
 
 class TeamRepository:
@@ -66,7 +67,7 @@ class TeamRepository:
         user_id: str,
         role: str,
         spend_cap: str | None,
-    ) -> AddTeamMemberRow | None:
+    ) -> AddTeamMemberRow:
         """Add a member to a team with an optional spend cap.
 
         Args:
@@ -81,8 +82,8 @@ class TeamRepository:
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("set_team_member", [team_id, user_id, role, spend_cap])
-        if not rows or rows[0] is not True:
-            return None
+        if require_row(rows, "TeamRepository.add_team_member") is not True:
+            raise StoreError("TeamRepository.add_team_member: set_team_member returned false")
         return AddTeamMemberRow(team_id=team_id, user_id=user_id, role=role)
 
     def get_team_members(self, team_id: str) -> list[TeamMemberRow]:
@@ -110,7 +111,7 @@ class TeamRepository:
         validate_non_empty(team_id, "team_id")
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("remove_team_member", [team_id, user_id]) or []
-        return bool(rows and rows[0] is True)
+        return require_row(rows, "TeamRepository.remove_team_member") is True
 
     def deduct_team(
         self,

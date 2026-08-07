@@ -3,34 +3,42 @@
 -- defined in their baseline schema files. This step only installs the runtime
 -- role, forced RLS, partition policy helper, and operator tenant lifecycle RPCs.
 
--- Tenant RPCs execute as a dedicated, non-BYPASSRLS owner. This is essential
--- on Supabase, where service_role and postgres bypass RLS. Operator/storage
--- functions retain their migration owner and are never granted to tenant
--- callers.
+-- Tenant RPCs execute as a dedicated, non-BYPASSRLS owner. Applications call
+-- those RPCs through the least-privilege bursar_client group role. Cross-tenant
+-- maintenance is exposed separately through bursar_operator.
 DO $$
 DECLARE
     v_migration_role name := current_user;
+    v_role name;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_roles WHERE rolname = 'bursar_runtime'
-    ) THEN
-        CREATE ROLE bursar_runtime
-        NOLOGIN
-        NOSUPERUSER
-        NOCREATEDB
-        NOCREATEROLE
-        NOINHERIT
-        NOBYPASSRLS;
-    END IF;
+    FOREACH v_role IN ARRAY ARRAY[
+        'bursar_runtime',
+        'bursar_client',
+        'bursar_operator'
+    ]::name[]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_roles WHERE rolname = v_role
+        ) THEN
+            EXECUTE format(
+                'CREATE ROLE %I '
+                'NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
+                'NOINHERIT NOREPLICATION NOBYPASSRLS',
+                v_role
+            );
+        END IF;
+    END LOOP;
 
-    -- Roles are cluster-global and can survive schema resets. A managed
-    -- Supabase migration role is intentionally not a superuser, so it cannot
-    -- reassert NOSUPERUSER/NOREPLICATION/NOBYPASSRLS with ALTER ROLE. Verify
-    -- the complete fail-closed shape instead of requiring forbidden authority.
+    -- Roles are cluster-global and can survive schema resets. Verify their
+    -- complete fail-closed shape instead of silently trusting an existing role.
     IF EXISTS (
         SELECT 1
         FROM pg_roles
-        WHERE rolname = 'bursar_runtime'
+        WHERE rolname IN (
+            'bursar_runtime',
+            'bursar_client',
+            'bursar_operator'
+        )
           AND (
               rolcanlogin
               OR rolsuper
@@ -41,7 +49,7 @@ BEGIN
               OR rolbypassrls
           )
     ) THEN
-        RAISE EXCEPTION 'bursar_runtime has unsafe role attributes'
+        RAISE EXCEPTION 'a Bursar role has unsafe attributes'
             USING ERRCODE = '55000';
     END IF;
 
@@ -50,23 +58,42 @@ BEGIN
         FROM pg_auth_members AS membership
         JOIN pg_roles AS member_role
           ON member_role.oid = membership.member
-        WHERE member_role.rolname = 'bursar_runtime'
+        WHERE member_role.rolname IN (
+            'bursar_runtime',
+            'bursar_client',
+            'bursar_operator'
+        )
     ) THEN
-        RAISE EXCEPTION 'bursar_runtime must not inherit from another role'
+        RAISE EXCEPTION 'Bursar roles must not inherit from other roles'
             USING ERRCODE = '55000';
     END IF;
 
-    -- PostgreSQL 16+ gives a non-superuser CREATEROLE caller ADMIN over a
-    -- newly-created role but not SET by default. Object ownership transfer
-    -- requires SET permission on the destination role, so grant only that
-    -- membership option explicitly. This is required by managed Supabase,
-    -- whose postgres role intentionally is not a superuser.
+    -- Object ownership transfer requires SET permission on the destination
+    -- role. The migration connection may SET the two caller roles explicitly,
+    -- so one trusted deployment DSN remains a complete default setup without
+    -- leaking operator authority into ordinary transactions.
     EXECUTE format(
         'GRANT bursar_runtime TO %I WITH INHERIT FALSE, SET TRUE',
         v_migration_role
     );
+    EXECUTE format(
+        'GRANT bursar_client TO %I WITH INHERIT FALSE, SET TRUE',
+        v_migration_role
+    );
+    EXECUTE format(
+        'GRANT bursar_operator TO %I WITH INHERIT FALSE, SET TRUE',
+        v_migration_role
+    );
 END
 $$;
+
+REVOKE ALL ON SCHEMA bursar FROM bursar_client, bursar_operator;
+REVOKE ALL ON ALL TABLES IN SCHEMA bursar
+FROM bursar_client, bursar_operator;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA bursar
+FROM bursar_client, bursar_operator;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA bursar
+FROM bursar_client, bursar_operator;
 
 GRANT USAGE ON SCHEMA bursar TO bursar_runtime;
 GRANT CREATE ON SCHEMA bursar TO bursar_runtime;
@@ -194,6 +221,127 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- Only the documented, tenant-scoped RPC surface is callable by application
+-- connections. Runtime-owned helpers remain private even though tenant RPCs
+-- need them internally through SECURITY DEFINER execution.
+GRANT USAGE ON SCHEMA bursar TO bursar_client;
+
+-- The migration role has SET-only membership in the runtime owner role. Run
+-- this grant as the actual function owner, then restore the migration role for
+-- the migration-owned integration helpers below.
+SET LOCAL ROLE bursar_runtime;
+
+DO $$
+DECLARE
+    v_function text;
+    v_client_functions constant text[] := ARRAY[
+        'bursar.publish_and_activate_catalog(integer,jsonb,text,boolean,jsonb)',
+        'bursar.catalog_revision_by_number(bigint)',
+        'bursar.list_catalog_revisions(integer)',
+        'bursar.activate_catalog_revision(bigint,jsonb)',
+        'bursar.active_catalog_revision()',
+        'bursar.execute_grant_program(text,text,uuid,text,uuid,text,jsonb)',
+        'bursar.post_credit(uuid,bursar.ledger_entry_kind,numeric,text,text,jsonb,text,uuid,timestamptz,numeric)',
+        'bursar.record_usage(uuid,text,numeric,text,text,text,text,jsonb,jsonb,jsonb)',
+        'bursar.charge_usage_for_operation(uuid,text,numeric,text,text,text,text,jsonb,jsonb,jsonb)',
+        'bursar.refund_credit_by_entry(uuid,numeric,text,text,jsonb)',
+        'bursar.revoke_subject_credits_by_operation(uuid,text)',
+        'bursar.deduct_team(uuid,uuid,numeric,text,text,jsonb)',
+        'bursar.create_team(uuid,text,numeric)',
+        'bursar.set_team_member(uuid,uuid,text,numeric)',
+        'bursar.remove_team_member(uuid,uuid)',
+        'bursar.list_team_members(uuid)',
+        'bursar.get_team_balance(uuid)',
+        'bursar.grant_billing_credit(uuid,text)',
+        'bursar.post_billing_refund(uuid,uuid,bigint,text)',
+        'bursar.create_lease_for_operation(uuid,text,numeric,text,interval,jsonb,text,jsonb,jsonb,numeric,integer)',
+        'bursar.settle_lease(uuid,uuid,numeric,text,text,text,text,jsonb,jsonb,jsonb)',
+        'bursar.renew_lease(uuid,uuid,interval)',
+        'bursar.release_lease(uuid,uuid)',
+        'bursar.sweep_expired_lots(integer,uuid,boolean)',
+        'bursar.expire_leases(integer)',
+        'bursar.revoke_lot(uuid,numeric,text)',
+        'bursar.claim_billing_event(text,text,text,jsonb,integer,integer)',
+        'bursar.complete_billing_event(text,text,uuid)',
+        'bursar.fail_billing_event(text,text,uuid,text)',
+        'bursar.record_subscription_conflict(uuid,text,text,text,text,jsonb)',
+        'bursar.select_entitlement_source(uuid,uuid)',
+        'bursar.mark_subscription_grace_expired(uuid,timestamptz,timestamptz)',
+        'bursar.pseudonymize_financial_subject(uuid)',
+        'bursar.claim_auto_recharge_attempt(uuid,text)',
+        'bursar.advance_auto_recharge_attempt(uuid,bursar.recharge_attempt_status,text,text,text,jsonb)',
+        'bursar.upsert_billing_customer(uuid,text,text,text)',
+        'bursar.upsert_billing_subscription(uuid,text,text,text,uuid,bursar.billing_subscription_status,timestamptz,timestamptz,boolean,jsonb,timestamptz,timestamptz,timestamptz,timestamptz,timestamptz)',
+        'bursar.upsert_billing_payment(uuid,text,text,bigint,bigint,text,text,bursar.billing_payment_status,timestamptz,text,jsonb)',
+        'bursar.create_billing_credit_grant(uuid,uuid,uuid,numeric,integer,uuid)',
+        'bursar.upsert_billing_refund(uuid,text,bigint,text,text,timestamptz,uuid,text,jsonb)',
+        'bursar.upsert_auto_recharge_profile(uuid,boolean,text,uuid,integer,numeric,integer,text,integer,text,text,boolean,text,boolean)',
+        'bursar.upsert_billing_preferences(uuid,boolean,boolean,boolean,boolean,boolean)',
+        'bursar.upsert_billing_invoice(uuid,text,text,uuid,text,bigint,bigint,text,timestamptz,timestamptz,jsonb,timestamptz)',
+        'bursar.upsert_billing_dispute(text,text,uuid,text,text,jsonb,timestamptz)',
+        'bursar.create_checkout_intent(uuid,text,text,text,bytea,timestamptz,text,text,text)',
+        'bursar.advance_checkout_intent(uuid,text,text,text)',
+        'bursar.assign_plan(uuid,uuid,timestamptz,timestamptz)',
+        'bursar.unassign_plan(uuid,text)',
+        'bursar.set_plan_revision_pin(uuid,boolean)',
+        'bursar.start_plan_migration(uuid,uuid)',
+        'bursar.migrate_plan_batch(uuid,integer)',
+        'bursar.open_subscription_change(uuid,uuid,timestamptz,text,text,text)',
+        'bursar.advance_subscription_change(bigint,text,text,text)',
+        'bursar.apply_due_plan_assignment_changes(integer)',
+        'bursar.get_credit_bucket_balances(uuid)',
+        'bursar.get_credit_state(uuid)',
+        'bursar.get_credit_operation_details(uuid,uuid,text)',
+        'bursar.get_credit_grant_details(uuid,uuid)',
+        'bursar.get_credit_lease(uuid,uuid)',
+        'bursar.get_credit_lease_pricing_context(uuid,uuid)',
+        'bursar.resolve_active_plan(text)',
+        'bursar.get_subject_plan(uuid)',
+        'bursar.get_subject_allowance(uuid,timestamptz)',
+        'bursar.get_subject_entitlements(uuid,timestamptz)',
+        'bursar.get_subject_quota_state(uuid,text)',
+        'bursar.list_subject_quota_events(uuid,timestamptz,integer,text,uuid)',
+        'bursar.get_billing_customer(uuid,text)',
+        'bursar.get_billing_customer_by_provider(text,text)',
+        'bursar.get_billing_subscription_by_provider(text,text)',
+        'bursar.list_billing_subscriptions(uuid)',
+        'bursar.list_expired_grace_subscriptions(timestamptz,integer)',
+        'bursar.get_billing_payment_by_provider(text,text)',
+        'bursar.get_billing_preferences(uuid)',
+        'bursar.get_auto_recharge_profile(uuid)',
+        'bursar.get_auto_recharge_attempt(uuid)',
+        'bursar.get_auto_recharge_attempt_by_provider(text,text)',
+        'bursar.count_auto_recharge_attempts(uuid,timestamptz)',
+        'bursar.resolve_catalog_offer(text,text,text)',
+        'bursar.resolve_active_catalog_offer(text)',
+        'bursar.get_catalog_offer_context(uuid,uuid)',
+        'bursar.resolve_catalog_topup(text,text,text)',
+        'bursar.resolve_catalog_plan(text,text,text)',
+        'bursar.get_checkout_intent(uuid,uuid)',
+        'bursar.get_open_billing_subscription_change(text,text)',
+        'bursar.get_billing_subscription_change(bigint)',
+        'bursar.get_billing_credit_grant_by_payment(uuid)',
+        'bursar.list_billing_invoices(uuid,timestamptz,uuid,integer)',
+        'bursar.list_ledger(uuid,timestamptz,uuid,integer,text[],timestamptz,timestamptz,boolean)',
+        'bursar.list_usage_charges(uuid,timestamptz,uuid,integer,timestamptz,timestamptz,boolean)',
+        'bursar.get_ledger_entry(uuid,uuid)',
+        'bursar.spend_by_user(timestamptz,timestamptz)',
+        'bursar.spend_by_model(timestamptz,timestamptz)',
+        'bursar.daily_spend(timestamptz,timestamptz)',
+        'bursar.aggregate_usage_stats(timestamptz,timestamptz)'
+    ];
+BEGIN
+    FOREACH v_function IN ARRAY v_client_functions LOOP
+        EXECUTE format(
+            'GRANT EXECUTE ON FUNCTION %s TO bursar_client',
+            v_function
+        );
+    END LOOP;
+END
+$$;
+
+RESET ROLE;
 
 -- The runtime-owned trigger is the stable host-integration API. Its only
 -- cross-tenant capability is resolving one active tenant slug through the
@@ -459,32 +607,54 @@ $$;
 REVOKE ALL ON FUNCTION bursar.create_tenant(uuid, text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.set_tenant_status(uuid, text) FROM PUBLIC;
 
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_roles WHERE rolname = 'service_role'
-    ) THEN
-        GRANT EXECUTE
-        ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
-        TO service_role;
-        GRANT EXECUTE
-        ON FUNCTION bursar.claim_outbox_events(uuid, integer, integer, text[])
-        TO service_role;
-        GRANT EXECUTE
-        ON FUNCTION bursar.create_tenant(uuid, text, text)
-        TO service_role;
-        GRANT EXECUTE
-        ON FUNCTION bursar.set_tenant_status(uuid, text)
-        TO service_role;
-    END IF;
-END
-$$;
+-- Cross-tenant workers and deployment tooling use a distinct caller role.
+-- These functions remain owned by the trusted migration role and are never
+-- reachable through bursar_client or bursar_runtime.
+GRANT USAGE ON SCHEMA bursar TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.get_storage_settings()
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.configure_storage(
+    integer, integer, integer, integer, integer, integer,
+    integer, integer, integer, integer, integer, integer,
+    integer, integer
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
+    integer, integer, text[]
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
+    uuid, integer, integer, text[]
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.export_usage_charge(uuid)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.export_billing_event_payload(uuid)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.complete_outbox_event(bigint, uuid)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.archive_billing_event_payload(
+    uuid, text, text
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.fail_outbox_event(
+    bigint, uuid, text, integer, integer
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.run_storage_partition_maintenance(
+    text, timestamptz
+) TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.run_storage_maintenance(timestamptz)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.create_tenant(uuid, text, text)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.set_tenant_status(uuid, text)
+TO bursar_operator;
+GRANT EXECUTE ON FUNCTION bursar.resolve_active_tenant_for_trigger(text)
+TO bursar_operator;
 
 COMMENT ON TABLE bursar.tenants IS
 'SaaS tenant boundary for all Bursar catalog, credit, billing, and usage data.';
 
 COMMENT ON FUNCTION bursar.current_tenant_id() IS
-'Returns the transaction-bound tenant UUID or trusted JWT app_metadata tenant UUID.';
+'Returns the tenant UUID explicitly bound to the current transaction.';
 
 COMMENT ON FUNCTION bursar.require_tenant_id() IS
 'Returns the current tenant UUID and fails closed when no tenant is bound.';

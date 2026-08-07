@@ -14,8 +14,12 @@ describe("CreditEventEmitter", () => {
       const calls1: number[] = [];
       const calls2: number[] = [];
 
-      const handler1 = () => calls1.push(1);
-      const handler2 = () => calls2.push(2);
+      const handler1 = () => {
+        calls1.push(1);
+      };
+      const handler2 = () => {
+        calls2.push(2);
+      };
 
       emitter.on("credits.deducted", handler1);
       emitter.on("credits.deducted", handler2);
@@ -48,8 +52,12 @@ describe("CreditEventEmitter", () => {
       const deductedCalls: number[] = [];
       const addedCalls: number[] = [];
 
-      emitter.on("credits.deducted", () => deductedCalls.push(1));
-      emitter.on("credits.added", () => addedCalls.push(1));
+      emitter.on("credits.deducted", () => {
+        deductedCalls.push(1);
+      });
+      emitter.on("credits.added", () => {
+        addedCalls.push(1);
+      });
 
       emitter.clearType("credits.deducted");
 
@@ -74,10 +82,18 @@ describe("CreditEventEmitter", () => {
       const emitter = new CreditEventEmitter();
       const calls: string[] = [];
 
-      emitter.on("credits.deducted", () => calls.push("deducted"));
-      emitter.on("credits.added", () => calls.push("added"));
-      emitter.on("credits.refunded", () => calls.push("refunded"));
-      emitter.on("credits.low_balance", () => calls.push("low_balance"));
+      emitter.on("credits.deducted", () => {
+        calls.push("deducted");
+      });
+      emitter.on("credits.added", () => {
+        calls.push("added");
+      });
+      emitter.on("credits.refunded", () => {
+        calls.push("refunded");
+      });
+      emitter.on("credits.low_balance", () => {
+        calls.push("low_balance");
+      });
 
       emitter.clearAll();
 
@@ -104,7 +120,9 @@ describe("CreditEventEmitter", () => {
 
       const otherCalls: number[] = [];
       emitter.on("credits.deducted", selfRemovingHandler);
-      emitter.on("credits.deducted", () => otherCalls.push(1));
+      emitter.on("credits.deducted", () => {
+        otherCalls.push(1);
+      });
 
       expect(() => emitter.emit(makeEvent("credits.deducted"))).not.toThrow();
 
@@ -125,31 +143,23 @@ describe("CreditEventEmitter", () => {
     it("emitting an event type with no handlers does not throw", () => {
       const emitter = new CreditEventEmitter();
       // No handlers registered for any type.
-      expect(() => emitter.emit(makeEvent("credits.cap_reached"))).not.toThrow();
+      expect(() => emitter.emit(makeEvent("credits.quota_blocked"))).not.toThrow();
       expect(() => emitter.emit(makeEvent("credits.deduct_failed"))).not.toThrow();
     });
   });
 
-  // ── New event types (lazy expiry / subscription cycles) ────────────────────
-  describe("credits.cycle_renewed and credits.floor_breach are valid event types", () => {
+  // ── Subscription-cycle events ──────────────────────────────────────────────
+  describe("credits.cycle_renewed", () => {
     it("credits.cycle_renewed round-trips through on()/emit() like any other type", () => {
       const emitter = new CreditEventEmitter();
       const calls: CreditEvent[] = [];
-      emitter.on("credits.cycle_renewed", (e) => calls.push(e));
+      emitter.on("credits.cycle_renewed", (event) => {
+        calls.push(event);
+      });
 
       emitter.emit(makeEvent("credits.cycle_renewed"));
       expect(calls).toHaveLength(1);
-      expect(calls[0].type).toBe("credits.cycle_renewed");
-    });
-
-    it("credits.floor_breach round-trips through on()/emit() like any other type", () => {
-      const emitter = new CreditEventEmitter();
-      const calls: CreditEvent[] = [];
-      emitter.on("credits.floor_breach", (e) => calls.push(e));
-
-      emitter.emit(makeEvent("credits.floor_breach"));
-      expect(calls).toHaveLength(1);
-      expect(calls[0].type).toBe("credits.floor_breach");
+      expect(calls[0]!.type).toBe("credits.cycle_renewed");
     });
   });
 
@@ -162,7 +172,9 @@ describe("CreditEventEmitter", () => {
       emitter.on("credits.deducted", () => {
         throw new Error("handler 1 explosion");
       });
-      emitter.on("credits.deducted", () => secondCalls.push(1));
+      emitter.on("credits.deducted", () => {
+        secondCalls.push(1);
+      });
 
       // emit must not propagate the thrown error.
       expect(() => emitter.emit(makeEvent("credits.deducted"))).not.toThrow();
@@ -188,9 +200,11 @@ describe("CreditEventEmitter", () => {
     it("thenable handler rejections are isolated like native promises", async () => {
       const emitter = new CreditEventEmitter();
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      emitter.on("credits.added", () => ({
-        then: (_resolve, reject) => reject?.(new Error("thenable rejection")),
-      }));
+      const rejection: PromiseLike<void> = {
+        then: (onFulfilled, onRejected) =>
+          Promise.reject(new Error("thenable rejection")).then(onFulfilled, onRejected),
+      };
+      emitter.on("credits.added", () => rejection);
 
       expect(() => emitter.emit(makeEvent("credits.added"))).not.toThrow();
       await vi.waitFor(() => expect(consoleSpy).toHaveBeenCalledOnce());

@@ -17,11 +17,6 @@ export interface S3BillingArchiveOptions {
   endpoint?: string;
   forcePathStyle?: boolean;
   prefix?: string;
-  /**
-   * Purge a legacy PostgreSQL envelope after S3 confirms the upload.
-   * New S3-routed events are staged only in the transactional outbox.
-   */
-  purgePostgresPayload?: boolean;
 }
 
 function requireNonEmpty(value: string, name: string): string {
@@ -36,7 +31,6 @@ function normalizePrefix(prefix: string | undefined): string {
 
 /** Archives received billing webhook envelopes under deterministic keys. */
 export class S3BillingArchive implements BillingPayloadArchive {
-  readonly purgePostgresPayload: boolean;
   private readonly bucket: string;
   private readonly region: string;
   private readonly credentials: S3Credentials;
@@ -58,7 +52,6 @@ export class S3BillingArchive implements BillingPayloadArchive {
     this.endpoint = options.endpoint ? requireNonEmpty(options.endpoint, "S3 endpoint") : undefined;
     this.forcePathStyle = options.forcePathStyle ?? false;
     this.prefix = normalizePrefix(options.prefix);
-    this.purgePostgresPayload = options.purgePostgresPayload ?? true;
   }
 
   async archive(event: BillingEventPayloadExport): Promise<BillingPayloadArchiveResult> {

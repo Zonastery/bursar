@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_row, validate_non_empty
 from bursar.credits.postgres.repositories.schemas import (
     AllowanceRow,
     PlanMigrationBatchRow,
@@ -11,6 +11,7 @@ from bursar.credits.postgres.repositories.schemas import (
     UnsetUserPlanRow,
     UserPlanRow,
 )
+from bursar.errors import StoreError
 
 
 class PlanRepository:
@@ -56,7 +57,7 @@ class PlanRepository:
         user_id: str,
         plan_key: str,
         plan_assigned_at: str | None,
-    ) -> SetUserPlanRow | None:
+    ) -> SetUserPlanRow:
         """Assign a plan to a user.
 
         Args:
@@ -71,14 +72,14 @@ class PlanRepository:
         validate_non_empty(plan_key, "plan_key")
         plan_rows = self._callproc("resolve_active_plan", [plan_key])
         if not plan_rows or not isinstance(plan_rows[0], dict) or plan_rows[0].get("id") is None:
-            raise ValueError(f"unknown active plan {plan_key!r}")
+            raise StoreError(f"Unknown active plan {plan_key!r}")
         plan_id = str(plan_rows[0]["id"])
         params = [user_id, plan_id]
         if plan_assigned_at is not None:
             params.append(plan_assigned_at)
         rows = self._callproc("assign_plan", params)
-        if not rows or rows[0] is not True:
-            return None
+        if require_row(rows, "PlanRepository.set_user_plan") is not True:
+            raise StoreError("PlanRepository.set_user_plan: assign_plan returned false")
         assigned = self.get_user_plan(user_id)
         return SetUserPlanRow(
             user_id=user_id,
@@ -86,7 +87,7 @@ class PlanRepository:
             plan_assigned_at=(assigned.plan_assigned_at if assigned is not None else plan_assigned_at),
         )
 
-    def unset_user_plan(self, user_id: str) -> UnsetUserPlanRow | None:
+    def unset_user_plan(self, user_id: str) -> UnsetUserPlanRow:
         """Remove the plan assignment from a user.
 
         Args:
@@ -97,20 +98,20 @@ class PlanRepository:
         """
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("unassign_plan", [user_id, "sdk_unassignment"])
-        if not rows or rows[0] is not True:
-            return None
+        if require_row(rows, "PlanRepository.unset_user_plan") is not True:
+            raise StoreError("PlanRepository.unset_user_plan: unassign_plan returned false")
         return UnsetUserPlanRow(user_id=user_id)
 
     def set_plan_revision_pin(self, user_id: str, pinned: bool) -> bool:
         """Pin or unpin the user's current assignment to its catalog revision."""
         validate_non_empty(user_id, "user_id")
         rows = self._callproc("set_plan_revision_pin", [user_id, pinned])
-        return bool(rows and rows[0] is True)
+        return require_row(rows, "PlanRepository.set_plan_revision_pin") is True
 
     def apply_due_plan_changes(self, limit: int) -> int:
         """Apply one bounded batch of renewal-effective plan changes."""
         rows = self._callproc("apply_due_plan_assignment_changes", [limit]) or []
-        return int(rows[0]) if rows else 0
+        return int(require_row(rows, "PlanRepository.apply_due_plan_changes"))
 
     def start_plan_migration(
         self,

@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+from bursar.billing.types import BillingEvent
 from bursar.bursar import BillingEventSink
-from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from bursar.providers.types import (
     ChangePlanParams,
     ChangePlanPreview,
@@ -17,7 +17,6 @@ from bursar.providers.types import (
     PaymentProvider,
     PortalParams,
     PreviewChangePlanParams,
-    ProviderLogger,
     ProviderUrlResult,
     ResolveIdentityInput,
     ResolveUserCallback,
@@ -27,7 +26,6 @@ from bursar.providers.types import (
     UpdatePaymentMethodParams,
     WebhookRequest,
     WebhookResult,
-    normalize_provider_logger,
 )
 
 
@@ -36,13 +34,12 @@ class MockPaymentProvider(PaymentProvider):
 
     def __init__(
         self,
-        sink: BillingEventSink,
+        *,
+        event_sink: BillingEventSink,
         resolve_user: ResolveUserCallback | None = None,
-        logger: ProviderLogger | None = None,
     ) -> None:
-        self._sink = sink
+        self._sink = event_sink
         self._resolve_user = resolve_user
-        self._logger = normalize_provider_logger(logger)
 
     async def create_checkout_session(self, params: CheckoutParams) -> CheckoutSessionResult:
         return CheckoutSessionResult(url=params.return_url)
@@ -72,13 +69,6 @@ class MockPaymentProvider(PaymentProvider):
 
     async def list_payment_methods(self, customer_id: str) -> list[PaymentMethodInfo]:
         return []
-
-    async def get_default_payment_method(
-        self,
-        customer_id: str,
-    ) -> PaymentMethodInfo | None:
-        methods = await self.list_payment_methods(customer_id)
-        return methods[0] if methods else None
 
     async def charge_saved_payment_method(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeResult:
         return SavedPaymentChargeResult(
@@ -132,29 +122,28 @@ class MockPaymentProvider(PaymentProvider):
                 event_type=None,
             )
 
-        data = payload.get("data", {}) or {}
-        metadata = data.get("metadata", {}) or {}
-        metadata = {str(k): str(v) for k, v in metadata.items()}
-        user_id: str | None = metadata.get("userId")
+        event = BillingEvent.model_validate({**payload, "provider": self.provider})
+        user_id = event.user_id
 
         if not user_id and self._resolve_user:
-            event_type = str(payload.get("type", ""))
-            customer = data.get("customer")
-            customer_dict = customer if isinstance(customer, dict) else {}
-            customer_id = str(data.get("customer_id") or customer_dict.get("customer_id") or "").strip() or None
-            email_value = customer_dict.get("email")
+            metadata: dict[str, str] = {}
+            for key, value in (event.metadata or {}).items():
+                if not isinstance(value, str):
+                    raise ValueError(f"mock billing event metadata.{key} must be a string")
+                metadata[key] = value
             user_id = await self._resolve_user(
                 ResolveIdentityInput(
                     provider=self.provider,
-                    provider_event_type=event_type,
-                    normalized_event_type=event_type or None,
-                    customer_id=customer_id,
-                    email=str(email_value).strip().lower() if email_value else None,
+                    provider_event_type=event.event_type.value,
+                    normalized_event_type=event.event_type.value,
+                    customer_id=(event.customer.provider_customer_id if event.customer else None),
+                    email=(event.customer.email if event.customer else None),
                     metadata=metadata,
-                    successful=event_type in {"payment.succeeded", "subscription.active", "subscription.renewed"},
+                    successful=event.event_type.value
+                    in {"payment.succeeded", "subscription.created", "subscription.renewed"},
                     checkout_kind=(
                         "subscription"
-                        if event_type.startswith("subscription.")
+                        if event.event_type.value.startswith("subscription.")
                         else "credit_topup"
                         if metadata.get("credits")
                         else None
@@ -162,34 +151,13 @@ class MockPaymentProvider(PaymentProvider):
                 )
             )
 
-        await handle_dodo_billing_event(
-            str(payload.get("type", "")),
-            data,
-            user_id,
-            metadata,
-            self._sink,
-            self._logger,
-        )
-
-        event_type = str(payload.get("type", "")) or None
-        raw_event_id = next(
-            (
-                data.get(key)
-                for key in (
-                    "id",
-                    "payment_id",
-                    "subscription_id",
-                    "refund_id",
-                    "dispute_id",
-                )
-                if data.get(key) is not None
-            ),
-            None,
-        )
+        if user_id is not None:
+            event = event.model_copy(update={"user_id": user_id})
+        self._sink.ingest_billing_event(event)
         return WebhookResult(
             received=True,
             retryable=False,
             provider=self.provider,
-            event_id=str(raw_event_id) if raw_event_id is not None else None,
-            event_type=event_type,
+            event_id=event.event_id,
+            event_type=event.event_type.value,
         )

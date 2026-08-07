@@ -1,7 +1,7 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { safeParse } from "../../../shared/postgres-validation.js";
+import { requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
 const BucketEnvelopeRowSchema = z
   .object({
@@ -59,6 +59,10 @@ export class BucketRepository {
   /** Sweep expired credit grants. */
   async sweepExpiredCredits(dryRun = false, userId?: string, limit = 100): Promise<SweepRow> {
     const rows = await this.callproc("sweep_expired_lots", [limit, userId ?? null, dryRun]);
-    return safeParse(SweepRowSchema, rows?.[0] ?? {}, "BucketRepository.sweepExpiredCredits");
+    return safeParse(
+      SweepRowSchema,
+      requireRow(rows, "BucketRepository.sweepExpiredCredits"),
+      "BucketRepository.sweepExpiredCredits",
+    );
   }
 }

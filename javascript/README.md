@@ -25,8 +25,10 @@ npm install @zonastery/bursar
 ```
 
 Optional peer dependencies: `pg` (PostgresStore), `stripe` and `dodopayments`
-(provider billing), `js-yaml` (YAML config loading). No peer is required for
-core credits.
+(provider billing), `js-yaml` (YAML config loading), plus framework adapters
+such as `@dodopayments/nextjs`, `@dodopayments/better-auth`, `next`, and
+`better-auth`, and `@dodopayments/react-native-checkout`. No peer is required
+for core credits.
 
 ## Database setup
 
@@ -44,7 +46,9 @@ bursar migrate
 ```ts
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
-const store = new PostgresStore(process.env.DATABASE_URL!, tenantId, {
+const store = new PostgresStore({
+  postgres: process.env.DATABASE_URL!,
+  tenantId,
   connectionTimeoutMs: 10_000,
   statementTimeoutMs: 30_000,
   onPoolError: (error) => console.error("Bursar PostgreSQL pool error", error),
@@ -77,6 +81,85 @@ document:
 ```ts
 await bursar.catalog.publishAndActivate(config);
 ```
+
+## Framework integrations
+
+Framework integrations are optional subpaths; the credits, metering, and
+billing core does not import them. For Next.js, Dodo's official adapter verifies
+and validates the request before Bursar maps the event:
+
+```ts
+// app/api/dodo/webhook/route.ts
+import { createDodoNextWebhookHandler } from "@zonastery/bursar/providers/dodo/nextjs";
+
+export const POST = createDodoNextWebhookHandler({
+  webhookKey: process.env.DODO_PAYMENTS_WEBHOOK_SECRET!,
+  getEventSink: () => bursar.requireBilling(),
+  resolveUser: async ({ customerId, email, metadata }) => {
+    return metadata.userId ?? lookupAccount(customerId, email);
+  },
+});
+```
+
+React Native apps can compose a Bursar-created checkout intent with Dodo's
+official native SDK. The app receives the checkout URL and persists only the
+Bursar intent needed for recovery; API keys and payment confirmation remain on
+the backend:
+
+```ts
+import { createDodoReactNativeCheckout } from "@zonastery/bursar/providers/dodo/react-native";
+
+const checkout = createDodoReactNativeCheckout({
+  returnUrl: "myappcheckout://return",
+  store: pendingCheckoutStore,
+  getCheckoutStatus: async (intentId) => (await api.checkoutStatus(intentId)).status,
+});
+
+const session = await api.createCheckout(input);
+const result = await checkout.start(session); // UI hint only
+await checkout.reconcile(); // authoritative Bursar status
+```
+
+Install `@dodopayments/react-native-checkout` directly in the native app, use
+its Expo/native callback-scheme configuration, and forward React Native
+`Linking` events to `checkout.handleOpenURL`. The adapter also exposes Dodo's
+abandoned-session recovery without moving provider secrets into the app.
+
+Better Auth users can compose Bursar with Dodo's official plugin. The Bursar
+plugin provisions accounts and adopts the `dodoCustomerId` maintained by the
+official adapter, avoiding two customer owners:
+
+```ts
+import { dodopayments, portal } from "@dodopayments/better-auth";
+import { bursarBetterAuth } from "@zonastery/bursar/integrations/better-auth";
+import {
+  dodoBetterAuthCustomer,
+  dodoBetterAuthWebhooks,
+} from "@zonastery/bursar/providers/dodo/better-auth";
+
+plugins: [
+  dodopayments({
+    client: dodoClient,
+    createCustomerOnSignUp: true,
+    use: [
+      portal(),
+      dodoBetterAuthWebhooks({
+        webhookKey: process.env.DODO_PAYMENTS_WEBHOOK_SECRET!,
+        getEventSink: () => bursar.requireBilling(),
+      }),
+    ],
+  }),
+  bursarBetterAuth({
+    getBursar: () => bursar,
+    resolveProviderCustomer: dodoBetterAuthCustomer,
+  }),
+];
+```
+
+Run Better Auth's schema generator after enabling the official Dodo plugin; it
+adds the optional `dodoCustomerId` user field. Checkout and portal operations
+may still call `bursar.requireCommerce()` when the application needs Bursar's
+checkout intents, provider selection, or idempotency guarantees.
 
 ## Errors, deadlines, and retries
 

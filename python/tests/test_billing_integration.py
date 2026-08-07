@@ -2,8 +2,8 @@
 JavaScript tests/billing-integration.test.ts.
 
 Tests sync/resolve round-trips, customer/subscription CRUD, event
-idempotency, topup credits, and the full subscription lifecycle against
-a real Postgres 16.
+idempotency, topup credits, and the full subscription lifecycle against a
+compatible PostgreSQL database.
 """
 
 from __future__ import annotations
@@ -34,8 +34,8 @@ from bursar.billing.types import (
 )
 from bursar.credits.service import CreditsService
 from bursar.errors import StoreError
-from bursar.providers.dodo.event_mapper import handle_dodo_billing_event
 from tests.conftest import TEST_TENANT_ID
+from tests.dodo_fixtures import map_dodo_event
 
 pytestmark = [pytest.mark.integration]
 
@@ -103,6 +103,7 @@ PRICING_DICT = {
             "rate_card": "standard",
             "credit_allowance": {
                 "amount": "1000",
+                "priority": 5,
                 "window": {
                     "type": "calendar",
                     "unit": "month",
@@ -117,6 +118,7 @@ PRICING_DICT = {
             "rate_card": "standard",
             "credit_allowance": {
                 "amount": "100000",
+                "priority": 5,
                 "window": {
                     "type": "calendar",
                     "unit": "month",
@@ -131,6 +133,7 @@ PRICING_DICT = {
             "rate_card": "standard",
             "credit_allowance": {
                 "amount": "1000000",
+                "priority": 5,
                 "window": {
                     "type": "calendar",
                     "unit": "month",
@@ -230,20 +233,6 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _bootstrap_auth_users(pg_database_url: str) -> None:
-    conn = psycopg2.connect(pg_database_url)
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            for uid in (USER_ID, USER_ID2, USER_ID3, USER_ID4, USER_ID5):
-                cur.execute(
-                    "INSERT INTO auth.users (id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    (uid,),
-                )
-    finally:
-        conn.close()
-
-
 def _bind_tenant(cursor: psycopg2.extensions.cursor) -> None:
     cursor.execute(
         "SELECT set_config('bursar.tenant_id', %s, true)",
@@ -259,8 +248,8 @@ def _make_components(
         pg_database_url,
         tenant_id=TEST_TENANT_ID,
     )
-    cm = CreditsService(pg_store)  # type: ignore[arg-type]
-    cm.publish_pricing_from_dict(PRICING_DICT)
+    cm = CreditsService(store=pg_store)  # type: ignore[arg-type]
+    cm.publish_and_activate_catalog(PRICING_DICT)
     sink = BillingService(bs, provisioning=cm)
     return bs, cm, sink
 
@@ -270,7 +259,6 @@ def _make_components(
 
 class TestBillingSync:
     def test_config_sync_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         offer = bs.resolve_billing_offer(PROVIDER, product_id=None, price_id=PRICE_ID)
         assert offer is not None
@@ -278,14 +266,12 @@ class TestBillingSync:
         assert offer.plan == "pro"
 
     def test_config_resolve_by_canonical_lookup(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         offer = bs.resolve_billing_offer(PROVIDER, price_id=PRICE_ID)
         assert offer is not None
         assert offer.offer_key == "pro_monthly"
 
     def test_topup_config_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         topup = bs.resolve_credit_topup(PROVIDER, product_id=None, price_id=PRICE_ID_TOPUP)
         assert topup is not None
@@ -293,12 +279,10 @@ class TestBillingSync:
         assert topup.credits_per_unit == 1000
 
     def test_unresolved_offer_returns_null(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.resolve_billing_offer(PROVIDER, product_id=None, price_id="nonexistent") is None
 
     def test_resolve_billing_offer_no_match(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.resolve_billing_offer("nonexistent_provider", product_id=None, price_id=PRICE_ID) is None
 
@@ -312,7 +296,6 @@ class TestCheckoutIntentIdempotency:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _bootstrap_auth_users(pg_database_url)
         _make_components(pg_database_url, pg_store)
         first_expiry = datetime.now(UTC) + timedelta(hours=1)
         retry_expiry = first_expiry + timedelta(hours=1)
@@ -385,7 +368,6 @@ class TestCheckoutIntentIdempotency:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _bootstrap_auth_users(pg_database_url)
         _make_components(pg_database_url, pg_store)
         digest = "22" * 32
         retry_expiry = datetime.now(UTC) + timedelta(hours=2)
@@ -456,7 +438,6 @@ class TestAutoRechargeProfile:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _bootstrap_auth_users(pg_database_url)
         config = deepcopy(PRICING_DICT)
         config["commerce"]["auto_recharge"] = {
             "eligible_topups": ["standard_topup"],
@@ -477,7 +458,7 @@ class TestAutoRechargeProfile:
                 "cooldown": {"unit": "hour", "count": 1},
             },
         }
-        CreditsService(pg_store).publish_pricing_from_dict(config)  # type: ignore[arg-type]
+        CreditsService(store=pg_store).publish_and_activate_catalog(config)  # type: ignore[arg-type]
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
             _bind_tenant(cursor)
@@ -517,7 +498,6 @@ class TestAutoRechargeProfile:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _bootstrap_auth_users(pg_database_url)
         _make_components(pg_database_url, pg_store)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
@@ -598,7 +578,6 @@ class TestAutoRechargeProfile:
         pg_database_url: str,
         pg_store: object,
     ) -> None:
-        _bootstrap_auth_users(pg_database_url)
         _make_components(pg_database_url, pg_store)
 
         with psycopg2.connect(pg_database_url) as connection, connection.cursor() as cursor:
@@ -686,19 +665,16 @@ class TestAutoRechargeProfile:
 
 class TestCustomerCrud:
     def test_customer_created_roundtrip(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID, "test@example.com")
         uid = bs.get_billing_customer(PROVIDER, CUSTOMER_ID)
         assert uid == USER_ID
 
     def test_customer_not_found(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.get_billing_customer(PROVIDER, "nonexistent_cus") is None
 
     def test_customer_remap_to_different_user_rejected(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer(PROVIDER, CUSTOMER_ID, USER_ID)
         with pytest.raises(StoreError) as failure:
@@ -709,7 +685,6 @@ class TestCustomerCrud:
         assert bs.get_billing_customer(PROVIDER, CUSTOMER_ID) == USER_ID
 
     def test_multiple_providers_same_customer_id(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_customer("stripe", CUSTOMER_ID, USER_ID)
         bs.upsert_billing_customer("dodo", CUSTOMER_ID, USER_ID2)
@@ -722,7 +697,6 @@ class TestCustomerCrud:
 
 class TestSubscriptionCrud:
     def test_subscription_upsert_and_read(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         state = BillingSubscriptionState(
             user_id=USER_ID,
@@ -743,12 +717,10 @@ class TestSubscriptionCrud:
         assert result.plan == "pro"
 
     def test_subscription_not_found(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         assert bs.get_billing_subscription(PROVIDER, "nonexistent_sub") is None
 
     def test_subscription_update(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         bs.upsert_billing_subscription(
             BillingSubscriptionState(
@@ -777,7 +749,6 @@ class TestSubscriptionCrud:
 
 class TestEventIdempotency:
     def test_event_idempotency(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, sink = _make_components(pg_database_url, pg_store)
         event = BillingEvent(
             provider=PROVIDER,
@@ -785,6 +756,7 @@ class TestEventIdempotency:
             event_type=BillingEventType.customer_created,
             occurred_at=_now(),
             user_id=USER_ID,
+            customer=BillingCustomerInfo(provider_customer_id="cus_event_idempotency"),
         )
         r1 = sink.ingest_billing_event(event)
         assert r1.handled is True
@@ -792,7 +764,6 @@ class TestEventIdempotency:
         assert r2.action == "duplicate"
 
     def test_event_claim_complete_fail_cycle(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         c1 = bs.claim_billing_event(PROVIDER, "evt_claim_cycle", "test.event")
         assert c1.status == "claimed"
@@ -802,7 +773,6 @@ class TestEventIdempotency:
         assert c2.status == "duplicate"
 
     def test_event_fail_then_reclaim(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         c1 = bs.claim_billing_event(PROVIDER, "evt_fail_retry", "test.event")
         assert c1.status == "claimed"
@@ -813,14 +783,12 @@ class TestEventIdempotency:
 
     @pytest.mark.concurrency
     def test_concurrent_event_claims_admit_one_worker(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         barrier = Barrier(12)
 
         def claim(_: int):
             pool = psycopg2.pool.ThreadedConnectionPool(1, 1, pg_database_url)
             local = PostgresBillingStore(
-                pg_database_url,
                 tenant_id=TEST_TENANT_ID,
                 pool=pool,
             )
@@ -842,7 +810,6 @@ class TestEventIdempotency:
 
     def test_event_handler_dispatched_for_matching_event(self, pg_database_url: str, pg_store: object) -> None:
         """Mirrors JavaScript test: eventHandlers dispatch on matching event type."""
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
 
         called = False
@@ -865,6 +832,9 @@ class TestEventIdempotency:
                 event_type=BillingEventType.subscription_trial_will_end,
                 occurred_at=_now(),
                 user_id=USER_ID,
+                subscription=BillingSubscriptionInfo(
+                    provider_subscription_id="sub_handler_test",
+                ),
             ),
         )
         assert result.handled is True
@@ -876,14 +846,12 @@ class TestEventIdempotency:
 
 class TestTopup:
     def test_compute_topup_credits(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
         assert topup is not None
         assert bs.compute_topup_credits(2000, topup) == 2000
 
     def test_compute_topup_credits_odd_amount(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
         topup = bs.resolve_credit_topup(PROVIDER, price_id=PRICE_ID_TOPUP)
         assert topup is not None
@@ -895,7 +863,6 @@ class TestTopup:
 
 class TestBillingServiceLifecycle:
     def test_subscription_lifecycle_full(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -963,7 +930,6 @@ class TestBillingServiceLifecycle:
         assert plan2.plan_id is None
 
     def test_topup_credit_grant(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -987,9 +953,11 @@ class TestBillingServiceLifecycle:
                 payment=BillingPaymentInfo(
                     provider_payment_id="py_test456",
                     amount_minor=2000,
+                    tax_minor=0,
                     currency="USD",
                     refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
                     purpose="credit_topup",
+                    status="succeeded",
                 ),
             )
         )
@@ -998,7 +966,6 @@ class TestBillingServiceLifecycle:
         assert balance.balance == Decimal("2000")
 
     def test_refund_clawback_deducts_credits(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
         uid = "00000000-0000-0000-0000-000000000005"
         payment_id = "py_refund_clawback"
@@ -1024,9 +991,11 @@ class TestBillingServiceLifecycle:
                 payment=BillingPaymentInfo(
                     provider_payment_id=payment_id,
                     amount_minor=2000,
+                    tax_minor=0,
                     currency="USD",
                     refs=ProviderRef(product_id="prod_topup", price_id=PRICE_ID_TOPUP),
                     purpose="credit_topup",
+                    status="succeeded",
                 ),
             )
         )
@@ -1055,7 +1024,6 @@ class TestBillingServiceLifecycle:
         assert balance_after_refund.balance == Decimal("0")
 
     def test_subscription_pause_resume(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1118,7 +1086,6 @@ class TestBillingServiceLifecycle:
         assert cm.get_user_plan(USER_ID2).plan_id is not None
 
     def test_unknown_event_type_ignored(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, sink = _make_components(pg_database_url, pg_store)
         result = sink.ingest_billing_event(
             BillingEvent.model_construct(
@@ -1133,7 +1100,6 @@ class TestBillingServiceLifecycle:
         assert result.error == "unhandled_event_type"
 
     def test_duplicate_event_skips_side_effects(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1161,7 +1127,6 @@ class TestBillingServiceLifecycle:
         assert bs.get_billing_customer(PROVIDER, "cus_dup_test") == USER_ID
 
     def test_provider_scoped_event_id(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _cm, _sink = _make_components(pg_database_url, pg_store)
 
         c1 = bs.claim_billing_event("stripe", "evt_prov_scope", "test.event")
@@ -1171,7 +1136,6 @@ class TestBillingServiceLifecycle:
         assert c2.status == "claimed"
 
     def test_sync_offers_adds_new(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, _sink = _make_components(pg_database_url, pg_store)
         config = deepcopy(PRICING_DICT)
         config["commerce"]["offers"]["new_offer"] = {
@@ -1187,13 +1151,12 @@ class TestBillingServiceLifecycle:
                 },
             },
         }
-        cm.publish_pricing_from_dict(config)
+        cm.publish_and_activate_catalog(config)
         new_offer = bs.resolve_billing_offer("stripe", product_id=None, price_id="price_new_offer")
         assert new_offer is not None
         assert new_offer.offer_key == "new_offer"
 
     def test_cycle_grant_credits_granted(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1232,7 +1195,6 @@ class TestBillingServiceLifecycle:
         assert balance.balance == Decimal("5000")
 
     def test_cycle_grant_replace_prior(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1299,7 +1261,6 @@ class TestBillingServiceLifecycle:
 
 class TestDodoBillingIntegration:
     def test_full_subscription_lifecycle(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, cm, sink = _make_components(pg_database_url, pg_store)
 
         # customer created — ingest directly
@@ -1316,7 +1277,7 @@ class TestDodoBillingIntegration:
 
         # subscription.active → subscription.created via Dodo mapper
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.active",
                 {
                     "subscription_id": "sub_dodo_lifecycle",
@@ -1352,7 +1313,6 @@ class TestDodoBillingIntegration:
         assert plan.plan_assigned_at is not None
 
     def test_duplicate_event_returns_duplicate(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1367,7 +1327,7 @@ class TestDodoBillingIntegration:
         )
 
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.active",
                 {"subscription_id": "sub_dodo_dup", "status": "active", "product_id": DODO_PRODUCT_ID},
                 USER_ID5,
@@ -1375,10 +1335,12 @@ class TestDodoBillingIntegration:
                 sink,
             )
         )
-        assert bs.get_billing_subscription("dodo", "sub_dodo_dup").status == "active"
+        subscription = bs.get_billing_subscription("dodo", "sub_dodo_dup")
+        assert subscription is not None
+        assert subscription.status == "active"
 
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.active",
                 {"subscription_id": "sub_dodo_dup", "status": "active", "product_id": DODO_PRODUCT_ID},
                 USER_ID5,
@@ -1386,10 +1348,11 @@ class TestDodoBillingIntegration:
                 sink,
             )
         )
-        assert bs.get_billing_subscription("dodo", "sub_dodo_dup").status == "active"
+        subscription = bs.get_billing_subscription("dodo", "sub_dodo_dup")
+        assert subscription is not None
+        assert subscription.status == "active"
 
     def test_multiple_events_distinct_ids(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1404,7 +1367,7 @@ class TestDodoBillingIntegration:
         )
 
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.active",
                 {"subscription_id": "sub_dodo_multi_1", "status": "active", "product_id": DODO_PRODUCT_ID},
                 USER_ID5,
@@ -1413,7 +1376,7 @@ class TestDodoBillingIntegration:
             )
         )
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.renewed",
                 {"subscription_id": "sub_dodo_multi_1", "status": "active", "product_id": DODO_PRODUCT_ID},
                 USER_ID5,
@@ -1422,7 +1385,7 @@ class TestDodoBillingIntegration:
             )
         )
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.updated",
                 {"subscription_id": "sub_dodo_multi_1", "status": "active"},
                 USER_ID5,
@@ -1434,7 +1397,6 @@ class TestDodoBillingIntegration:
         assert bs.get_billing_subscription("dodo", "sub_dodo_multi_1") is not None
 
     def test_js_date_parsed_to_valid_iso(self, pg_database_url: str, pg_store: object) -> None:
-        _bootstrap_auth_users(pg_database_url)
         bs, _, sink = _make_components(pg_database_url, pg_store)
 
         sink.ingest_billing_event(
@@ -1454,7 +1416,7 @@ class TestDodoBillingIntegration:
         )
 
         asyncio.run(
-            handle_dodo_billing_event(
+            map_dodo_event(
                 "subscription.active",
                 {
                     "subscription_id": "sub_dodo_date",

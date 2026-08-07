@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from bursar.billing.types import (
     BillingEvent,
@@ -52,13 +52,13 @@ class BillingPaymentUpsert(_BillingContract):
     provider: str
     provider_payment_id: str
     provider_invoice_id: str | None = None
-    user_id: str | None = None
-    amount_minor: int = 0
-    tax_minor: int | None = None
-    currency: str | None = None
-    purpose: str = "unknown"
-    status: Literal["pending", "succeeded", "failed", "canceled"] = "succeeded"
-    provider_updated_at: str | None = None
+    user_id: str
+    amount_minor: int = Field(ge=0)
+    tax_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    purpose: Literal["subscription", "credit_topup"]
+    status: Literal["pending", "succeeded", "failed", "canceled"]
+    provider_updated_at: str
     metadata: dict[str, Any] | None = None
 
 
@@ -67,20 +67,20 @@ class BillingCreditGrantCreate(_BillingContract):
     subscription_id: str | None = None
     topup_id: str | None = None
     configured_credits: Decimal
-    quantity: int = 1
+    quantity: int = Field(gt=0)
     billing_event_id: str | None = None
 
 
 class BillingRefundUpsert(_BillingContract):
     provider: str
     provider_refund_id: str
-    provider_payment_id: str | None = None
-    user_id: str | None = None
-    amount_minor: int = 0
-    currency: str | None = None
+    provider_payment_id: str
+    user_id: str
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     reason: str | None = None
-    status: Literal["pending", "succeeded", "failed", "canceled"] = "pending"
-    provider_updated_at: str | None = None
+    status: Literal["pending", "succeeded", "failed", "canceled"]
+    provider_updated_at: str
     metadata: dict[str, Any] | None = None
 
 
@@ -88,26 +88,25 @@ class BillingInvoiceUpsert(_BillingContract):
     provider: str
     provider_invoice_id: str
     provider_subscription_id: str | None = None
-    user_id: str | None = None
-    status: str | None = None
-    amount_paid_minor: int | None = None
-    amount_due_minor: int | None = None
-    currency: str | None = None
+    user_id: str
+    status: Literal["draft", "open", "paid", "void", "uncollectible"]
+    amount_paid_minor: int = Field(ge=0)
+    amount_due_minor: int = Field(ge=0)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     period_start: str | None = None
     period_end: str | None = None
     metadata: dict[str, Any] | None = None
-    provider_updated_at: str | None = None
+    provider_updated_at: str
 
 
 class BillingDisputeUpsert(_BillingContract):
     provider: str
     provider_dispute_id: str
-    provider_payment_id: str | None = None
-    user_id: str | None = None
-    status: str = "needs_response"
+    provider_payment_id: str
+    status: Literal["needs_response", "under_review", "won", "lost", "closed"]
     reason: str | None = None
     metadata: dict[str, Any] | None = None
-    provider_updated_at: str | None = None
+    provider_updated_at: str
 
 
 class AutoRechargeAttemptClaim(_BillingContract):

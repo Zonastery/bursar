@@ -5,7 +5,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bursar.credits.postgres.repositories._types import DbQuery
+from bursar.credits.postgres.repositories._utils import require_identifier_result
 from bursar.credits.postgres.repositories.schemas import SubscriptionRow
+from bursar.errors import StoreError
 
 
 def provider_timestamp_sort_key(row: dict[str, Any]) -> tuple[bool, float]:
@@ -64,10 +66,10 @@ class BillingSubscriptionRepository:
         if not user_id or not offer_id:
             raise ValueError("subscription.upsert: subject, provider, subscription, and offer are required")
 
-        self._execute(
+        rows = self._execute(
             "SELECT bursar.upsert_billing_subscription("
             "%s::uuid,%s,%s,%s,%s::uuid,%s::bursar.billing_subscription_status,"
-            "%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)",
+            "%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) AS id",
             [
                 user_id,
                 provider,
@@ -86,6 +88,7 @@ class BillingSubscriptionRepository:
                 state.get("grace_ends_at"),
             ],
         )
+        require_identifier_result(rows, "id", "BillingSubscriptionRepository.upsert")
 
     def _with_offer_context(self, row: dict[str, Any]) -> dict[str, Any]:
         if row.get("offer_id") is None or row.get("catalog_revision_id") is None:
@@ -94,7 +97,15 @@ class BillingSubscriptionRepository:
             "SELECT * FROM bursar.get_catalog_offer_context(%s::uuid,%s::uuid)",
             [row["offer_id"], row["catalog_revision_id"]],
         )
-        context = context_rows[0] if context_rows and isinstance(context_rows[0], dict) else {}
+        context = context_rows[0] if context_rows and isinstance(context_rows[0], dict) else None
+        if context is None or context.get("offer_key") is None:
+            raise StoreError(
+                "billing subscription offer context is missing",
+                details={
+                    "offer_id": row["offer_id"],
+                    "catalog_revision_id": row["catalog_revision_id"],
+                },
+            )
         return {
             **row,
             **context,
@@ -110,7 +121,13 @@ class BillingSubscriptionRepository:
             **self._with_offer_context(row),
             "user_id": row.get("subject_id"),
         }
-        return SubscriptionRow.model_validate(mapped)
+        try:
+            return SubscriptionRow.model_validate(mapped)
+        except ValueError as exc:
+            raise StoreError(
+                "BillingSubscriptionRepository: subscription row validation failed",
+                cause=exc,
+            ) from exc
 
     def get(self, provider: str, provider_subscription_id: str) -> SubscriptionRow | None:
         rows = self._execute(

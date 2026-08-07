@@ -2,7 +2,7 @@ import type Decimal from "decimal.js";
 
 import type {
   BillingAutoRechargeStatus,
-  BillingInvoiceInfo,
+  BillingInvoiceRecord,
   BillingPreferences,
   BillingSubscriptionChange,
   BillingSubscriptionState,
@@ -141,15 +141,28 @@ export type PlanChangeClassification =
   | "lateral"
   | "cadence_change";
 
-export interface PlanChangePreviewResult {
-  unchanged: boolean;
-  classification: PlanChangeClassification;
-  scheduled: boolean;
+interface PlanChangePreviewResultBase {
   planId: string;
   interval: "month" | "year";
-  preview?: ChangePlanPreview;
-  quoteFingerprint?: string;
 }
+
+/**
+ * A plan-change preview. The discriminant makes it impossible to confirm an
+ * unchanged plan or accidentally omit the provider quote from a real change.
+ */
+export type PlanChangePreviewResult =
+  | (PlanChangePreviewResultBase & {
+      unchanged: true;
+      classification: "unchanged";
+      scheduled: false;
+    })
+  | (PlanChangePreviewResultBase & {
+      unchanged: false;
+      classification: Exclude<PlanChangeClassification, "unchanged">;
+      scheduled: boolean;
+      preview: ChangePlanPreview;
+      quoteFingerprint: string;
+    });
 
 export interface PreviewPlanChangeInput {
   accountId: string;
@@ -219,8 +232,7 @@ export interface CreditSpendSource {
   type: "allowance" | "bucket";
   key: string;
   label: string;
-  /** Null is the backward-compatible allowance-first sentinel. */
-  priority: number | null;
+  priority: number;
 }
 
 export interface AccountCommerceOverview {
@@ -250,7 +262,7 @@ export interface AccountCommerceOverview {
   preferences: BillingPreferences;
   paymentMethods: PaymentMethodInfo[];
   documents: BillingDocumentRef[];
-  providerInvoices: BillingInvoiceInfo[];
+  providerInvoices: BillingInvoiceRecord[];
   transactions: LedgerEntry[];
   usage: UsageCharge[];
   autoRecharge: BillingAutoRechargeStatus | null;

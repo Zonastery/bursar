@@ -15,7 +15,7 @@ import type {
   AllowanceResult,
   AvailableResult,
   BalanceResult,
-  BursarConfigResult,
+  CatalogRevision,
   BucketBalancesResult,
   CanAffordResult,
   CheckFeatureResult,
@@ -53,41 +53,63 @@ import type { UsageMetrics } from "../metrics.js";
 import { raiseDeductError } from "./service-errors.js";
 import { LowBalanceMonitor } from "./low-balance-monitor.js";
 import { CreditQueries } from "./queries.js";
-import { PricingRuntime, toDecimal } from "./pricing-runtime.js";
+import { CatalogRuntime, toDecimal } from "./catalog-runtime.js";
 import { CreditLeaseWorkflow } from "./lease-workflow.js";
 import type {
+  AddCreditsOptions,
+  BeginBilledOperationOptions,
+  BilledOperation,
   CanAffordOptions,
   CreditsServiceOptions,
+  DeductCreditsOptions,
+  DeductFlatJobOptions,
+  DeductOptions,
+  DeductTeamOptions,
   GrantSubscriptionCycleOptions,
   MetricsOrAmount,
   PolicyPreset,
   PostDeductionContext,
+  RecordUsageOptions,
+  RefundCreditsOptions,
   ReserveOptions,
   RunBilledOptions,
   SettleOptions,
-  BeginBilledOperationOptions,
-  BilledOperation,
 } from "./service-types.js";
 export type {
+  AddCreditsOptions,
+  BeginBilledOperationOptions,
+  BilledOperation,
   CanAffordOptions,
   CreditsServiceOptions,
+  DeductCreditsOptions,
+  DeductFlatJobOptions,
+  DeductOptions,
+  DeductTeamOptions,
   GrantSubscriptionCycleOptions,
   LowBalanceConfig,
   PolicyPreset,
+  PostDeductionContext,
+  RecordUsageOptions,
+  RefundCreditsOptions,
   ReserveOptions,
   RunBilledOptions,
   SettleOptions,
-  PostDeductionContext,
-  BeginBilledOperationOptions,
-  BilledOperation,
 } from "./service-types.js";
 /**
- * Default lease TTL (seconds) for ``reserve``/``runBilled`` (interface plan §3).
+ * Default lease TTL (seconds) for ``reserve`` and ``runBilled``.
  * Long batch/agentic jobs call the configured lease TTL before this elapses.
  */
 const DEFAULT_LEASE_TTL_SECONDS = 600;
 
 const POLICY_PRESETS = new Set<PolicyPreset>(["strict_prepaid", "overdraft"]);
+
+function positiveAmount(value: Decimal | number, operation: string): Decimal {
+  const amount = toDecimal(value);
+  if (!amount.isFinite() || !amount.gt(0)) {
+    throw new RangeError(`${operation} amount must be finite and greater than zero`);
+  }
+  return amount;
+}
 
 import { type NormalizedLogger, normalizeLogger } from "../shared/logger.js";
 
@@ -96,10 +118,9 @@ import { type NormalizedLogger, normalizeLogger } from "../shared/logger.js";
  *
  * The deduction path is a single atomic, idempotency-keyed store call
  * (``deductWithAllowance``) that consumes free allowance, enforces plan policy,
- * and debits the net amount in one transaction
- * (contract §2). The manager is a thin layer that calculates the cost, maps
+ * and debits the net amount in one transaction. The service calculates the cost, maps
  * the store's typed ``error`` codes to exceptions, and emits lifecycle events
- * **only after** the operation has succeeded (contract §6).
+ * **only after** the operation has succeeded.
  *
  * Optionally accepts a ``CreditEventEmitter`` to emit lifecycle events
  * (deducted, deduct_failed, added, refunded, refund_failed, expired,
@@ -108,7 +129,7 @@ import { type NormalizedLogger, normalizeLogger } from "../shared/logger.js";
 export class CreditsService {
   private readonly store: CreditStore;
   private readonly queries: CreditQueries;
-  private readonly pricing: PricingRuntime;
+  private readonly catalogRuntime: CatalogRuntime;
   private readonly leases: CreditLeaseWorkflow;
   private emitter: CreditEventEmitter | null = null;
   private balanceMonitor: LowBalanceMonitor;
@@ -141,11 +162,11 @@ export class CreditsService {
     if (emitter) this.emitter = emitter;
     this.logger = normalizeLogger(options?.logger);
     if (options?.postDeduction) this.postDeductionHooks.add(options.postDeduction);
-    this.pricing = new PricingRuntime(
+    this.catalogRuntime = new CatalogRuntime(
       store,
       engine ?? null,
       this.logger,
-      options?.pricingTtl ?? 300_000,
+      options?.catalogCacheTtlMs ?? 300_000,
     );
     this.balanceMonitor = new LowBalanceMonitor(
       options?.lowBalance,
@@ -155,7 +176,7 @@ export class CreditsService {
     this.lazyExpiry = options?.lazyExpiry ?? false;
     this.leases = new CreditLeaseWorkflow(
       store,
-      this.pricing,
+      this.catalogRuntime,
       this.logger,
       this.balanceMonitor,
       policy,
@@ -196,8 +217,8 @@ export class CreditsService {
     }
   }
 
-  async getActivePricing(): Promise<BursarConfigResult | null> {
-    return this.queries.getActivePricing();
+  async getActiveCatalog(): Promise<CatalogRevision | null> {
+    return this.queries.getActiveCatalog();
   }
 
   async getUserPlan(userId: string): Promise<GetUserPlanResult> {
@@ -314,80 +335,75 @@ export class CreditsService {
     }
   }
 
-  /** Load pricing from a raw dict and sync it. */
-  async publishPricingFromDict(data: Record<string, unknown>): Promise<void> {
-    await this.pricing.publishFromDict(data);
-  }
-
-  /** Load the active pricing config from the store. */
-  async loadPricingFromStore(): Promise<void> {
-    await this.pricing.loadFromStore();
+  /** Load the active catalog revision from the store. */
+  async loadCatalogFromStore(): Promise<void> {
+    await this.catalogRuntime.loadFromStore();
   }
 
   /**
    * If the cached PricingEngine is stale (TTL expired), reload it from the
    * store. Concurrent callers are deduplicated via the underlying
-   * ``lru-cache.fetch()`` — only one ``loadPricingFromStore`` runs and all
+   * ``lru-cache.fetch()`` — only one ``loadCatalogFromStore`` runs and all
    * callers await the same result.
    *
-   * When ``pricingTtl`` is ``0``, this is a no-op (the consumer must call
-   * ``loadPricingFromStore`` manually).
+   * When ``catalogCacheTtlMs`` is ``0``, this is a no-op (the consumer must call
+   * ``loadCatalogFromStore`` manually).
    */
-  async refreshIfStale(): Promise<void> {
-    await this.pricing.refreshIfStale();
+  async refreshCatalogIfStale(): Promise<void> {
+    await this.catalogRuntime.refreshIfStale();
   }
 
   /**
-   * Invalidate the pricing cache so the next ``refreshIfStale`` call
-   * reloads from the store. Useful after a manual ``loadPricingFromStore``
+   * Invalidate the catalog cache so the next ``refreshCatalogIfStale`` call
+   * reloads from the store. Useful after a manual ``loadCatalogFromStore``
    * that bypasses the cache, or when the consumer knows the remote config
    * has changed.
    */
-  invalidatePricing(): void {
-    this.pricing.invalidate();
+  invalidateCatalog(): void {
+    this.catalogRuntime.invalidate();
   }
 
   /**
-   * Publish new pricing and update the engine in one call.
+   * Publish and activate a catalog revision, then update the local engine.
    *
-   * H10: the store write is now **awaited** (was a fire-and-forget `void`), so
+   * The store write is awaited, so
    * a persistence failure surfaces to the caller instead of becoming an
    * unhandled promise rejection.
    */
-  async publishPricing(
+  async publishAndActivateCatalog(
     config: Record<string, unknown>,
     label?: string | null,
     rollout?: CatalogRollout | Record<string, unknown> | null,
-  ): Promise<void> {
-    await this.pricing.publish(config, label, rollout);
+  ): Promise<string> {
+    return this.catalogRuntime.publishAndActivate(config, label, rollout);
   }
 
   /** Publish a validated, inactive catalog draft. */
-  async publishPricingDraft(
+  async publishCatalogDraft(
     config: Record<string, unknown>,
     label?: string | null,
   ): Promise<string> {
-    return this.pricing.publishDraft(config, label);
+    return this.catalogRuntime.publishDraft(config, label);
   }
 
   /** Activate an existing catalog version and reload the local engine. */
-  async activatePricing(
+  async activateCatalogRevision(
     version: number,
     rollout?: CatalogRollout | Record<string, unknown> | null,
   ): Promise<string> {
-    return this.pricing.activate(version, rollout);
+    return this.catalogRuntime.activateRevision(version, rollout);
   }
 
   /** The current PricingEngine, or null if not loaded. */
   get pricingEngine(): PricingEngine | null {
-    return this.pricing.currentEngine;
+    return this.catalogRuntime.currentEngine;
   }
 
   /**
    * Set a user's subscription plan and emit ``credits.plan_changed``.
    *
    * The store call is awaited so a persistence failure surfaces to the caller.
-   * The event is emitted only after the store write succeeds (contract §6).
+   * The event is emitted only after the store write succeeds.
    */
   async setUserPlan(userId: string, planKey: string, planAssignedAt?: Date | null): Promise<void> {
     this.logger.info("[CreditsService] setUserPlan", { planKey, planAssignedAt });
@@ -435,21 +451,13 @@ export class CreditsService {
   async addCredits(
     userId: string,
     amount: Decimal | number,
-    options?: {
-      type?: string;
-      metadata?: CreditMetadata | null;
-      expiresAt?: Date | null;
-      /** Target credit bucket; omitted resolves to the config's default bucket. */
-      bucket?: string | null;
-      /** Replay-safe idempotency key (parity with `deduct`/`settle`/`refund`). */
-      idempotencyKey?: string | null;
-    },
+    options?: AddCreditsOptions,
   ): Promise<AddCreditsResult> {
     const type = options?.type ?? "adjustment";
     this.logger.info("[CreditsService] addCredits", { amount, type, bucket: options?.bucket });
     const result = await this.store.addCredits(
       userId,
-      toDecimal(amount),
+      positiveAmount(amount, "addCredits"),
       type,
       options?.metadata,
       options?.expiresAt,
@@ -478,11 +486,7 @@ export class CreditsService {
   async deductCredits(
     userId: string,
     amount: Decimal | number,
-    options?: {
-      entryType?: string;
-      bucket?: string | null;
-      metadata?: CreditMetadata | null;
-    },
+    options?: DeductCreditsOptions,
   ): Promise<AddCreditsResult> {
     const entryType = options?.entryType ?? "adjustment";
     this.logger.info("[CreditsService] deductCredits", {
@@ -492,28 +496,31 @@ export class CreditsService {
     });
     const result = await this.store.addCredits(
       userId,
-      toDecimal(amount).neg(),
+      positiveAmount(amount, "deductCredits").neg(),
       entryType,
       options?.metadata ?? null,
       null,
       options?.bucket ?? undefined,
-      undefined,
+      options?.idempotencyKey,
     );
     this.emit("credits.deducted", userId, {
       entryId: result.entryId,
       amount: result.amount,
       newBalance: result.newBalance,
       entryType,
-    });
-    await this.afterDeduction(userId, "raw", {
-      entryId: result.entryId,
-      userId,
-      amount: result.amount.abs(),
-      allowanceConsumed: new Decimal(0),
-      balanceAfter: result.newBalance,
       idempotent: result.idempotent ?? false,
-      usageChargeId: null,
     });
+    if (!result.idempotent) {
+      await this.afterDeduction(userId, "raw", {
+        entryId: result.entryId,
+        userId,
+        amount: result.amount.abs(),
+        allowanceConsumed: new Decimal(0),
+        balanceAfter: result.newBalance,
+        idempotent: false,
+        usageChargeId: null,
+      });
+    }
     return result;
   }
 
@@ -525,14 +532,12 @@ export class CreditsService {
    * 1. At most one of ``expiresAt``/``ttlDays`` may be given (throws
    *    ``ConfigError`` otherwise).
    * 2. When ``ttlDays`` is given, ``expiresAt = now + ttlDays`` days.
-   * 3. When ``replacePrior`` (default ``true``), any remaining balance in
-   *    ``bucket`` is expired immediately via a direct ``store.addCredits``
-   *    negative adjustment — naturally idempotent (a replay finds the bucket
-   *    already at zero and skips the call).
-   * 4. The new cycle is granted via a direct ``store.addCredits`` call
+   * 3. The new cycle is granted via a direct ``store.addCredits`` call
    *    (bypassing {@link addCredits} so only ``credits.cycle_renewed`` fires,
    *    not a duplicate ``credits.added``), threading ``idempotencyKey`` so a
    *    redelivered webhook replays the prior grant instead of double-crediting.
+   * 4. Existing bucket credits are never removed here. Subscription renewal
+   *    policies that replace prior lots run atomically through BillingService.
    * 5. When ``planKey`` is given, assigns it via {@link setUserPlan}.
    * 6. Emits ``credits.cycle_renewed`` and returns the grant result.
    */
@@ -552,23 +557,13 @@ export class CreditsService {
       );
     }
     const bucket = options?.bucket ?? "subscription";
-    const replacePrior = options?.replacePrior ?? true;
     const expiresAt: Date | undefined =
       options?.ttlDays != null
         ? new Date(Date.now() + options.ttlDays * 86_400_000)
         : options?.expiresAt;
-    const amountDec = toDecimal(amount);
+    const amountDec = positiveAmount(amount, "grantSubscriptionCycle");
 
-    // Snapshot the bucket's leftover balance before granting. A redelivered
-    // webhook must skip the replace-prior wipe as well as the duplicate grant.
-    let priorLeftover = new Decimal(0);
-    if (replacePrior) {
-      const bucketsBefore = await this.getBucketBalances(userId);
-      const current = bucketsBefore.buckets.find((t) => t.bucketKey === bucket);
-      if (current) priorLeftover = current.balance;
-    }
-
-    let result = await this.store.addCredits(
+    const result = await this.store.addCredits(
       userId,
       amountDec,
       "purchase",
@@ -581,22 +576,13 @@ export class CreditsService {
     // The store contract exposes the mutation's replay result directly, avoiding
     // a racy lifetime-balance comparison and an extra database round trip.
     const isFreshGrant = !result.idempotent;
-    if (replacePrior && isFreshGrant && priorLeftover.gt(0)) {
-      await this.store.addCredits(
-        userId,
-        priorLeftover.negated(),
-        "adjustment",
-        { reason: "cycle_replaced" },
-        undefined,
-        bucket,
-      );
-      // Reflect the post-replace balance so the returned result is accurate
-      // (the grant call above only knows the pre-replace balance).
-      result = { ...result, newBalance: (await this.getBalance(userId)).balance };
-    }
-
     if (options?.planKey) {
-      await this.setUserPlan(userId, options.planKey);
+      // A fresh cycle intentionally re-anchors plan-assignment windows. On a
+      // webhook replay, repair a previously interrupted grant->assignment saga
+      // without re-anchoring an assignment that already succeeded.
+      if (isFreshGrant || (await this.getUserPlan(userId)).planKey !== options.planKey) {
+        await this.setUserPlan(userId, options.planKey);
+      }
     }
 
     this.emit("credits.cycle_renewed", userId, {
@@ -606,12 +592,13 @@ export class CreditsService {
       bucket,
       planKey: options?.planKey ?? null,
       idempotencyKey: options?.idempotencyKey ?? null,
+      idempotent: result.idempotent,
     });
 
     return result;
   }
 
-  // ── Lease lifecycle: atomic admission (interface plan §3/§4) ────────
+  // ── Lease lifecycle: atomic admission ───────────────────────────────
 
   async reserve(
     userId: string,
@@ -669,7 +656,7 @@ export class CreditsService {
   }
 
   /**
-   * Full deduction flow as one atomic store call (contract §2).
+   * Full deduction flow as one atomic store call.
    *
    * 1. ``breakdown = engine.calculate(metrics)``; ``cost = breakdown.total``
    *    (exact `Decimal`, **no truncation**).
@@ -682,26 +669,26 @@ export class CreditsService {
   async deduct(
     userId: string,
     metrics: UsageMetrics,
-    idempotencyKey?: string | null,
-    metadata?: CreditMetadata | null,
-    /** Entitlement feature required for this operation. */
-    feature?: string | null,
+    options?: DeductOptions,
   ): Promise<DeductionResult> {
     await this.maybeLazyExpire(userId);
-    this.logger.debug("[CreditsService] deduct", { model: metrics.dimensions?.model, feature });
-    const engine = await this.pricing.engineForUser(userId);
+    this.logger.debug("[CreditsService] deduct", {
+      model: metrics.dimensions?.model,
+      feature: options?.feature,
+    });
+    const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
-    const effectiveIdempotencyKey = idempotencyKey ?? `usage:${randomUUID()}`;
+    const effectiveIdempotencyKey = options?.idempotencyKey ?? `usage:${randomUUID()}`;
 
-    // 1) Calculate cost — exact Decimal, never truncated (H1).
+    // 1) Calculate cost as an exact Decimal, never truncated.
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const cost = breakdown.total;
 
     // Build ledger metadata: caller fields FIRST, system fields LAST so the
-    // system fields win (contract §5 / M7).
+    // protected system fields win.
     const meta: Record<string, unknown> = {};
-    if (metadata) {
-      for (const [k, v] of Object.entries(metadata)) {
+    if (options?.metadata) {
+      for (const [k, v] of Object.entries(options.metadata)) {
         if (v != null) meta[k] = v;
       }
     }
@@ -711,10 +698,10 @@ export class CreditsService {
     meta["breakdownTotal"] = breakdown.total.toString();
     meta["idempotencyKey"] = effectiveIdempotencyKey;
 
-    const options: DeductWithAllowanceOptions = {
+    const deductionOptions: DeductWithAllowanceOptions = {
       idempotencyKey: effectiveIdempotencyKey,
       operation: metrics.operation,
-      feature: feature ?? null,
+      feature: options?.feature ?? null,
       model: typeof metrics.dimensions?.model === "string" ? metrics.dimensions.model : null,
       region: typeof metrics.dimensions?.region === "string" ? metrics.dimensions.region : null,
       measures: { ...(metrics.measures ?? {}) },
@@ -724,7 +711,7 @@ export class CreditsService {
 
     // 2) Atomic charge. This records zero-cost usage too, so authorization,
     // quotas, and usage history cannot be bypassed by a free rate.
-    const result = await this.store.deductWithAllowance(userId, cost, options);
+    const result = await this.store.deductWithAllowance(userId, cost, deductionOptions);
 
     if (result.error) {
       if (result.error === "quota_exceeded") {
@@ -734,7 +721,7 @@ export class CreditsService {
         error: result.error,
         amount: cost,
         model: metrics.dimensions?.model,
-        feature,
+        feature: options?.feature,
       });
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
@@ -754,7 +741,7 @@ export class CreditsService {
       idempotent: result.idempotent,
     });
 
-    // low_balance is EDGE-triggered (M18): only fire when THIS deduction crossed
+    // low_balance is edge-triggered: only fire when this deduction crossed
     // the threshold. A replayed (idempotent) result did not move the balance, so
     // it never crosses. balanceBefore = balanceAfter + amount charged.
     if (!result.idempotent) {
@@ -776,16 +763,15 @@ export class CreditsService {
   async recordUsage(
     userId: string,
     metrics: UsageMetrics,
-    idempotencyKey?: string | null,
-    metadata?: CreditMetadata | null,
+    options?: RecordUsageOptions,
   ): Promise<UsageRecordResult> {
-    const engine = await this.pricing.engineForUser(userId);
+    const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
-    const effectiveIdempotencyKey = idempotencyKey ?? `usage-record:${randomUUID()}`;
+    const effectiveIdempotencyKey = options?.idempotencyKey ?? `usage-record:${randomUUID()}`;
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
     const meta: Record<string, unknown> = {};
-    if (metadata) {
-      for (const [key, value] of Object.entries(metadata)) {
+    if (options?.metadata) {
+      for (const [key, value] of Object.entries(options.metadata)) {
         if (value != null) meta[key] = value;
       }
     }
@@ -822,34 +808,25 @@ export class CreditsService {
   async deductFlatJob(
     userId: string,
     jobName: string,
-    idempotencyKey?: string | null,
-    metadata?: CreditMetadata | null,
-    feature?: string | null,
+    options?: DeductFlatJobOptions,
   ): Promise<DeductionResult> {
-    return this.deduct(
-      userId,
-      { operation: jobName, measures: { jobs: 1 } },
-      idempotencyKey,
-      metadata,
-      feature,
-    );
+    return this.deduct(userId, { operation: jobName, measures: { jobs: 1 } }, options);
   }
 
-  async refundCredits(
-    entryId: string,
-    amount?: Decimal | number,
-    reason?: string,
-    metadata?: CreditMetadata | null,
-    idempotencyKey?: string | null,
-  ): Promise<RefundResult> {
-    const refundAmount = amount != null ? toDecimal(amount) : undefined;
-    this.logger.info("[CreditsService] refundCredits", { entryId, refundAmount, reason });
+  async refundCredits(entryId: string, options?: RefundCreditsOptions): Promise<RefundResult> {
+    const refundAmount =
+      options?.amount != null ? positiveAmount(options.amount, "refundCredits") : undefined;
+    this.logger.info("[CreditsService] refundCredits", {
+      entryId,
+      refundAmount,
+      reason: options?.reason,
+    });
     const result = await this.store.refundCredits(
       entryId,
       refundAmount,
-      reason,
-      metadata,
-      idempotencyKey,
+      options?.reason,
+      options?.metadata,
+      options?.idempotencyKey,
     );
 
     if (result.error) {
@@ -860,7 +837,7 @@ export class CreditsService {
       this.emit("credits.refund_failed", result.userId, {
         entryId,
         error: result.error,
-        reason: reason ?? null,
+        reason: options?.reason ?? null,
       });
       throw new RefundError(`Refund rejected: ${result.error}`);
     }
@@ -870,7 +847,7 @@ export class CreditsService {
       refundEntryId: result.refundEntryId,
       amount: result.amount,
       newBalance: result.newBalance,
-      reason: reason ?? null,
+      reason: options?.reason ?? null,
     });
     return result;
   }
@@ -880,19 +857,18 @@ export class CreditsService {
    *
    * Calculates the cost via the pricing engine (exact `Decimal`, no truncation),
    * then debits the team balance. Threads an optional ``idempotencyKey`` through
-   * to the store so retried team charges are not double-counted (H12).
+   * to the store so retried team charges are not double-counted.
    */
   async deductTeam(
     teamId: string,
     userId: string,
     metrics: UsageMetrics,
-    idempotencyKey?: string | null,
-    metadata?: CreditMetadata | null,
+    options?: DeductTeamOptions,
   ): Promise<TeamDeductionResult> {
     await this.maybeLazyExpire(userId);
     // Lazy expiry is scoped to the individual member's credits, not the team's
     // shared pool — there's no per-team expiry concept.
-    const engine = await this.pricing.engineForUser(userId);
+    const engine = await this.catalogRuntime.engineForUser(userId);
     const plan = await this.store.getUserPlan(userId);
 
     const breakdown = engine.calculate(metrics, { rateCard: plan.rateCard ?? undefined });
@@ -910,7 +886,7 @@ export class CreditsService {
     }
 
     const teamMetadata: CreditMetadata = {
-      ...(metadata ?? {}),
+      ...(options?.metadata ?? {}),
       operation: metrics.operation,
       measures: { ...(metrics.measures ?? {}) },
       dimensions: Object.fromEntries(
@@ -918,8 +894,14 @@ export class CreditsService {
       ),
       breakdownTotal: breakdown.total.toString(),
     };
-    const result = await this.store.deductTeam(teamId, userId, cost, teamMetadata, idempotencyKey);
-    // H2 fix: surface store errors — emit credits.deduct_failed and throw,
+    const result = await this.store.deductTeam(
+      teamId,
+      userId,
+      cost,
+      teamMetadata,
+      options?.idempotencyKey,
+    );
+    // Surface store errors: emit credits.deduct_failed and throw,
     // mirroring the Python credit service implementation. Previously returned a silent
     // success-shaped object with an .error field, so failed charges looked OK.
     if (result.error) {

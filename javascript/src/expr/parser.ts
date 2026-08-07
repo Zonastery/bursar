@@ -31,11 +31,14 @@ export class ExpressionParser {
   }
 
   private previous(): Token {
-    return this.tokens[this.position - 1];
+    const token = this.tokens[this.position - 1];
+    if (!token) throw new ExpressionError("invalid parser state: no previous token");
+    return token;
   }
 
   private check(...types: TokenType[]): boolean {
-    return !this.isAtEnd() && types.includes(this.tokens[this.position].type);
+    const token = this.peek();
+    return token !== undefined && types.includes(token.type);
   }
 
   private match(...types: TokenType[]): boolean {
@@ -49,7 +52,11 @@ export class ExpressionParser {
   }
 
   private consume(type: TokenType, message: string): Token {
-    if (this.check(type)) return this.tokens[this.position++];
+    const token = this.peek();
+    if (token?.type === type) {
+      this.position++;
+      return token;
+    }
     throw new ExpressionError(message);
   }
 

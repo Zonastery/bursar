@@ -39,26 +39,6 @@ BEGIN
             v_balance, v_ledger_total, v_lot_available;
     END IF;
 
-    IF to_regclass('bursar.credit_transactions') IS NOT NULL
-       OR to_regclass('bursar.user_credit_buckets') IS NOT NULL
-       OR to_regclass('bursar.user_credits') IS NOT NULL
-       OR to_regclass('bursar.credit_reservations') IS NOT NULL THEN
-        RAISE EXCEPTION 'removed compatibility table exists';
-    END IF;
-
-    IF EXISTS (
-        SELECT 1
-        FROM pg_proc p
-        JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'bursar'
-          AND p.proname IN (
-              'project_credit_transaction',
-              'list_transactions',
-              'list_transactions_cursor_with_total'
-          )
-    ) THEN
-        RAISE EXCEPTION 'removed compatibility function exists';
-    END IF;
 END;
 $$;
 

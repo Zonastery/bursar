@@ -273,6 +273,13 @@ def test_allowance_priority_must_not_conflict_with_a_bucket() -> None:
         load_config_from_dict(data)
 
 
+def test_allowance_priority_is_required() -> None:
+    data = base_config()
+    del data["plans"]["pro"]["credit_allowance"]["priority"]
+    with pytest.raises(ConfigError, match="priority"):
+        load_config_from_dict(data)
+
+
 def test_default_bucket_and_plan_policy_references_are_validated() -> None:
     data = base_config()
     data["credits"]["default_bucket"] = "typo"
@@ -316,7 +323,11 @@ def test_numeric_matcher_decimal_strings_are_normalized() -> None:
     }
 
     config = load_config_from_dict(data)
-    matcher = config.pricing.rate_cards["standard"].operations["completion"].rules[0].when["model"]
+    pricing = config.pricing
+    assert pricing is not None
+    rate_cards = pricing.rate_cards
+    assert rate_cards is not None
+    matcher = rate_cards["standard"].operations["completion"].rules[0].when["model"]
 
     assert isinstance(matcher, EqualMatcher)
     assert matcher.value == Decimal("1.5")
@@ -443,7 +454,9 @@ def test_public_catalog_preserves_prices_without_provider_identifiers() -> None:
 
     assert public["default_plan"] == "pro"
     assert public["credit_display"] == {"currency": "USD", "units_per_major": "1000"}
-    assert public["plans"][0]["allowance"]["priority"] == 15
+    allowance = public["plans"][0].get("allowance")
+    assert allowance is not None
+    assert allowance["priority"] == 15
     assert public["plans"][0]["offers"][0]["price"]["amount_minor"] == 1200
     assert "price_secret_pro_monthly" not in str(public)
 

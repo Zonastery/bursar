@@ -76,7 +76,10 @@ entry = bursar.credits.get_ledger_entry(user_id, charged.entry_id)
 import { Bursar, PostgresStore } from "@zonastery/bursar";
 
 const bursar = new Bursar({
-  creditStore: new PostgresStore(process.env.DATABASE_URL!, tenantId),
+  creditStore: new PostgresStore({
+    postgres: process.env.DATABASE_URL!,
+    tenantId,
+  }),
 });
 
 const added = await bursar.credits.addCredits(userId, 1_000, {

@@ -126,7 +126,9 @@ describe("CreditsService mirror regressions", () => {
     } as unknown as PricingEngine;
     const emitter = new CreditEventEmitter();
     const events: Array<Record<string, unknown> | undefined> = [];
-    emitter.on("credits.deducted", (event) => events.push(event.data));
+    emitter.on("credits.deducted", (event) => {
+      events.push(event.data);
+    });
 
     const result = await new CreditsService(store, engine, emitter).deduct("user-1", {
       operation: "free_operation",

@@ -1,10 +1,4 @@
-/**
- * Shared bootstrap utilities for JS integration tests against a real Postgres.
- *
- * Extracted from store-integration.test.ts, billing-integration.test.ts, and
- * security-rls.test.ts to eliminate duplication and ensure consistent
- * auth.uid()/auth.role() stubs across all three files.
- */
+/** Shared migration utilities for integration tests against PostgreSQL. */
 import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -14,71 +8,6 @@ import pg from "pg";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = join(__dirname, "../../../python/src/bursar/sql");
 export const TEST_TENANT_ID = "00000000-0000-0000-0000-000000000001";
-
-const BOOTSTRAP_SQL = `
-DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (id uuid PRIMARY KEY);
-
--- Mirror the host application's Better Auth user table so integration
--- fixtures exercise the same database topology as the application.
-CREATE TABLE IF NOT EXISTS public."user" (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Bursar's billing tables share the host application's standard timestamp
--- trigger. The production Supabase baseline supplies it; bare Postgres tests
--- provide the same minimal contract before applying the Bursar baseline.
-CREATE OR REPLACE FUNCTION public.handle_updated_at() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-  NEW.updated_at = now();
-  RETURN NEW;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION auth.role() RETURNS text
-LANGUAGE SQL STABLE AS $$
-  SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), 'service_role')
-$$;
-
-CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid
-LANGUAGE SQL STABLE AS $$
-  SELECT coalesce(
-    nullif(current_setting('request.jwt.claim.sub', true), ''),
-    current_setting('request.jwt.claims', true)::jsonb ->> 'sub'
-  )::uuid
-$$;
-
-DO $$
-BEGIN
-  IF NOT COALESCE(
-    (SELECT rolbypassrls FROM pg_roles WHERE rolname = 'service_role'),
-    FALSE
-  ) THEN
-    ALTER ROLE service_role BYPASSRLS;
-  END IF;
-END
-$$;
-GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
-`;
-
-export { BOOTSTRAP_SQL };
 
 function migrationFiles(): string[] {
   return readdirSync(SQL_DIR)

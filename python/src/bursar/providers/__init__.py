@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from typing import TYPE_CHECKING
 
 from bursar.providers._shared import call_billing_event_sink, parse_status
@@ -41,21 +42,21 @@ if TYPE_CHECKING:
     from bursar.providers.mock.provider import MockPaymentProvider
     from bursar.providers.stripe.provider import StripeProvider
 
+_LAZY_EXPORTS = {
+    "DodoProvider": ("bursar.providers.dodo.provider", "DodoProvider"),
+    "MockPaymentProvider": ("bursar.providers.mock.provider", "MockPaymentProvider"),
+    "StripeProvider": ("bursar.providers.stripe.provider", "StripeProvider"),
+}
 
-def __getattr__(name: str):
+
+def __getattr__(name: str) -> object:
     """Lazy-import providers — each requires its own optional dependency (stripe, dodopayments)."""
-    if name == "DodoProvider":
-        from bursar.providers.dodo.provider import DodoProvider  # pyright: ignore[reportUnsupportedDunderAll]
-
-        return DodoProvider
-    if name == "MockPaymentProvider":
-        from bursar.providers.mock.provider import MockPaymentProvider  # pyright: ignore[reportUnsupportedDunderAll]
-
-        return MockPaymentProvider
-    if name == "StripeProvider":
-        from bursar.providers.stripe.provider import StripeProvider  # pyright: ignore[reportUnsupportedDunderAll]
-
-        return StripeProvider
+    target = _LAZY_EXPORTS.get(name)
+    if target is not None:
+        module_name, attribute_name = target
+        value = getattr(import_module(module_name), attribute_name)
+        globals()[name] = value
+        return value
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
 

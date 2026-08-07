@@ -1,8 +1,23 @@
 from __future__ import annotations
 
-from bursar.billing.types import BillingInvoiceInfo
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import ValidationError
+
+from bursar.billing.types import BillingInvoiceRecord
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import validate_non_empty
+from bursar.credits.postgres.repositories._utils import require_identifier_result, validate_non_empty
+from bursar.errors import StoreError
+
+
+def _optional_utc_iso(value: object) -> str | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        raise ValueError("invoice timestamp must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 class BillingInvoiceRepository:
@@ -14,26 +29,35 @@ class BillingInvoiceRepository:
     def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
-    def list_for_user(self, user_id: str) -> list[BillingInvoiceInfo]:
+    def list_for_user(self, user_id: str) -> list[BillingInvoiceRecord]:
         validate_non_empty(user_id, "user_id")
         rows = self._execute(
             "SELECT * FROM bursar.list_billing_invoices(%s::uuid)",
             [user_id],
         )
-        return [
-            BillingInvoiceInfo(
-                provider=str(row.get("provider") or ""),
-                provider_invoice_id=str(row.get("provider_invoice_id") or ""),
-                status=str(row["status"]) if row.get("status") is not None else None,
-                amount_paid_minor=(int(row["amount_paid_minor"]) if row.get("amount_paid_minor") is not None else None),
-                amount_due_minor=(int(row["amount_due_minor"]) if row.get("amount_due_minor") is not None else None),
-                currency=(str(row["currency"]) if row.get("currency") is not None else None),
-                period_start=(str(row["period_start"]) if row.get("period_start") is not None else None),
-                period_end=(str(row["period_end"]) if row.get("period_end") is not None else None),
-            )
-            for row in rows
-            if isinstance(row, dict)
-        ]
+        invoices: list[BillingInvoiceRecord] = []
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise StoreError(
+                    "BillingInvoiceRepository.list_for_user: expected an object row",
+                    details={"row_index": index},
+                )
+            try:
+                payload = dict(row)
+                payload.update(
+                    {
+                        "period_start": _optional_utc_iso(row.get("period_start")),
+                        "period_end": _optional_utc_iso(row.get("period_end")),
+                    }
+                )
+                invoices.append(BillingInvoiceRecord.model_validate(payload))
+            except (ValidationError, ValueError) as exc:
+                raise StoreError(
+                    "BillingInvoiceRepository.list_for_user: result validation failed",
+                    cause=exc,
+                    details={"row_index": index},
+                ) from exc
+        return invoices
 
     def upsert(
         self,
@@ -41,9 +65,9 @@ class BillingInvoiceRepository:
         provider: str,
         provider_invoice_id: str,
         subscription_id: str | None,
-        status: str | None,
-        amount_due_minor: int | None,
-        amount_paid_minor: int | None,
+        status: Literal["draft", "open", "paid", "void", "uncollectible"],
+        amount_due_minor: int,
+        amount_paid_minor: int,
         currency: str,
         period_start: str | None,
         period_end: str | None,
@@ -68,8 +92,8 @@ class BillingInvoiceRepository:
         validate_non_empty(subject_id, "subject_id")
         validate_non_empty(provider, "provider")
         validate_non_empty(provider_invoice_id, "provider_invoice_id")
-        self._execute(
-            "SELECT bursar.upsert_billing_invoice(%s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)",
+        rows = self._execute(
+            "SELECT bursar.upsert_billing_invoice(%s::uuid,%s,%s,%s::uuid,%s,%s,%s,%s,%s,%s,%s::jsonb,%s) AS id",
             [
                 subject_id,
                 provider,
@@ -85,3 +109,4 @@ class BillingInvoiceRepository:
                 provider_updated_at,
             ],
         )
+        require_identifier_result(rows, "id", "BillingInvoiceRepository.upsert")

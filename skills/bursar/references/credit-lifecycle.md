@@ -67,7 +67,7 @@ const result = await bursar.credits.deduct(
     measures: { input_tokens: 800 },
     dimensions: { model: "gpt-4o" },
   },
-  "turn_12345",
+  { idempotencyKey: "turn_12345" },
 );
 console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
 ```
@@ -83,8 +83,8 @@ zero-cost usage is still recorded, so quotas cannot be bypassed by a free
 rate. Unmetered models are rejected by `unmatched: reject`; replaying
 `deduct` with the same `idempotency_key` is a no-op.
 
-- **Flat jobs** — `deduct_flat_job(user_id, job_name, idempotency_key)` /
-  `deductFlatJob(userId, jobName, idempotencyKey)` charges a named job's
+- **Flat jobs** — `deduct_flat_job(user_id, job_name, idempotency_key=...)` /
+  `deductFlatJob(userId, jobName, { idempotencyKey })` charges a named job's
   fixed cost (`UsageMetrics(operation=job_name,
 measures={"jobs": Decimal("1")})`).
 - **Feature gates** — pass `feature="voice_mode"` (Python) /
@@ -222,8 +222,10 @@ print(refund.refund_entry_id, refund.new_balance)
 ```ts
 const refund = await bursar.credits.refundCredits(
   charge.entryId,
-  new Decimal("0.000030"),
-  "user_reported_bad_output",
+  {
+    amount: new Decimal("0.000030"),
+    reason: "user_reported_bad_output",
+  },
 );
 console.log(refund.refundEntryId, refund.newBalance);
 ```

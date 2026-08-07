@@ -431,8 +431,7 @@ $$;
 CREATE FUNCTION bursar.archive_billing_event_payload(
     p_event_id uuid,
     p_object_key text,
-    p_object_version text DEFAULT NULL,
-    p_purge_postgres_payload boolean DEFAULT TRUE
+    p_object_version text DEFAULT NULL
 )
 RETURNS boolean
 LANGUAGE plpgsql
@@ -469,11 +468,9 @@ BEGIN
         payload_object_version = p_object_version
     WHERE id = p_event_id;
 
-    IF p_purge_postgres_payload THEN
-        DELETE FROM bursar.billing_event_payloads
-        WHERE event_id = p_event_id
-          AND received_at = v_event.payload_received_at;
-    END IF;
+    DELETE FROM bursar.billing_event_payloads
+    WHERE event_id = p_event_id
+      AND received_at = v_event.payload_received_at;
 
     RETURN true;
 END
@@ -1220,9 +1217,9 @@ IS 'Return one billing event envelope and its current archive pointer.';
 COMMENT ON FUNCTION bursar.complete_outbox_event(bigint, uuid)
 IS 'Acknowledge one claimed outbox event as delivered.';
 COMMENT ON FUNCTION bursar.archive_billing_event_payload(
-    uuid, text, text, boolean
+    uuid, text, text
 )
-IS 'Record an external webhook-envelope object and optionally purge its PostgreSQL payload.';
+IS 'Record an external webhook-envelope object and purge its PostgreSQL payload.';
 COMMENT ON FUNCTION bursar.fail_outbox_event(bigint, uuid, text, integer, integer)
 IS 'Release or dead-letter one claimed outbox event after delivery failure.';
 COMMENT ON FUNCTION bursar.run_storage_partition_maintenance(
@@ -1248,7 +1245,7 @@ REVOKE ALL ON FUNCTION bursar.export_usage_charge(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.export_billing_event_payload(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.complete_outbox_event(bigint, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.archive_billing_event_payload(
-    uuid, text, text, boolean
+    uuid, text, text
 ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.fail_outbox_event(
     bigint, uuid, text, integer, integer
@@ -1259,42 +1256,3 @@ REVOKE ALL ON FUNCTION bursar.run_storage_partition_maintenance(
 REVOKE ALL ON FUNCTION bursar.run_storage_maintenance(timestamptz) FROM PUBLIC;
 REVOKE ALL ON FUNCTION bursar.maybe_run_storage_maintenance(timestamptz)
 FROM PUBLIC;
-
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
-        GRANT EXECUTE ON FUNCTION bursar.get_storage_settings()
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.configure_storage(
-            integer, integer, integer, integer, integer, integer,
-            integer, integer, integer, integer, integer, integer,
-            integer, integer
-        ) TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(integer, integer, text[])
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.claim_outbox_events(
-            uuid, integer, integer, text[]
-        ) TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.export_usage_charge(uuid)
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.export_billing_event_payload(uuid)
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.complete_outbox_event(bigint, uuid)
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.archive_billing_event_payload(
-            uuid, text, text, boolean
-        ) TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.fail_outbox_event(
-            bigint, uuid, text, integer, integer
-        ) TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.run_storage_partition_maintenance(
-            text, timestamptz
-        ) TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.run_storage_maintenance(timestamptz)
-            TO service_role;
-        GRANT EXECUTE ON FUNCTION bursar.maybe_run_storage_maintenance(
-            timestamptz
-        ) TO service_role;
-    END IF;
-END
-$$;

@@ -233,13 +233,13 @@ def _now() -> str:
 
 def _bursar(pg_database_url: str, pg_store: object) -> tuple[Bursar, PostgresBillingStore, IntegrationMockProvider]:
     billing_store = PostgresBillingStore(pg_database_url, tenant_id=TEST_TENANT_ID)
-    provider = IntegrationMockProvider(None)  # type: ignore[arg-type]
-    bursar = Bursar.create(
+    provider = IntegrationMockProvider(event_sink=None)  # type: ignore[arg-type]
+    bursar = Bursar(
         credit_store=pg_store,  # type: ignore[arg-type]
         billing_store=billing_store,
         commerce_options=CommerceOptions(providers={"stripe": lambda context: provider}),
     )
-    bursar.credits.publish_pricing_from_dict(CONFIG)
+    bursar.credits.publish_and_activate_catalog(CONFIG)
     return bursar, billing_store, provider
 
 
@@ -277,6 +277,7 @@ async def test_commerce_checkout_persists_intent_and_topup_payment_grants_credit
                 payment=BillingPaymentInfo(
                     provider_payment_id="pay_topup_1",
                     amount_minor=500,
+                    tax_minor=0,
                     currency="USD",
                     refs=ProviderRef(price_id="price_topup_500"),
                     purpose="credit_topup",
@@ -415,7 +416,9 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
         assert action_required is not None
         assert action_required.state == "paused"
         assert action_required.suspended_reason == "auto_recharge_paused"
-        assert billing_store.get_auto_recharge_profile(USER_ID2).state == "paused"
+        profile = billing_store.get_auto_recharge_profile(USER_ID2)
+        assert profile is not None
+        assert profile.state == "paused"
 
         billing_store.update_auto_recharge_attempt_by_provider_payment(
             AutoRechargeProviderPaymentUpdate(
@@ -430,7 +433,9 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
                 (USER_ID2,),
             )
             assert cursor.fetchone() == ("succeeded",)
-        assert billing_store.get_auto_recharge_profile(USER_ID2).state == "active"
+        profile = billing_store.get_auto_recharge_profile(USER_ID2)
+        assert profile is not None
+        assert profile.state == "active"
 
         provider.charges[:] = [
             SavedPaymentChargeResult(
@@ -500,7 +505,9 @@ async def test_commerce_auto_recharge_processes_saved_payment_attempts(
             assert {row[0] for row in cursor.fetchall()} == {"failed", "processing"}
 
         bursar.commerce.auto_recharge.disable(USER_ID)
-        assert billing_store.get_auto_recharge_profile(USER_ID).enabled is False
+        profile = billing_store.get_auto_recharge_profile(USER_ID)
+        assert profile is not None
+        assert profile.enabled is False
         disabled = await bursar.commerce.auto_recharge.process_if_needed(
             AutoRechargeInput(
                 account_id=USER_ID,
