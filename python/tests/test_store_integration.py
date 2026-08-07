@@ -436,6 +436,7 @@ def test_lease_settlement_and_refund_follow_revamped_rpc_contracts(store: Postgr
             idempotency_key="lease-contract-reserve",
         ),
     )
+    assert lease.lease_id is not None
     renewed = service.renew(USER_ID, lease.lease_id, ttl=300)
 
     # A plan/catalog change after admission must not reprice work already in

@@ -1242,7 +1242,7 @@ class CreditsService:
         allowance_credit = Decimal(0)
         try:
             ar = self._store.check_allowance(user_id)
-            allowance_credit = ar.allowance_remaining
+            allowance_credit = ar.allowance_remaining if ar is not None else Decimal(0)
         except Exception as exc:
             self._logger.debug(
                 "allowance fetch failed in can_afford",
@@ -1278,7 +1278,7 @@ class CreditsService:
         :meth:`get_balance`/:meth:`get_available`)."""
         return self._store.get_bucket_balances(user_id)
 
-    def check_allowance(self, user_id: str) -> AllowanceResult:
+    def check_allowance(self, user_id: str) -> AllowanceResult | None:
         """Get the database-owned current allowance window."""
         return self._store.check_allowance(user_id)
 
@@ -1802,6 +1802,8 @@ class CreditsService:
 
         if cost <= 0:
             team_bal = self._store.get_team_balance(team_id)
+            if team_bal is None:
+                raise StoreError(f"Team not found: {team_id}")
             return TeamDeductionResult(
                 entry_id=None,
                 team_id=team_id,

@@ -479,7 +479,7 @@ class CreditStore(ABC):
         ...
 
     @abstractmethod
-    def check_allowance(self, user_id: str) -> AllowanceResult:
+    def check_allowance(self, user_id: str) -> AllowanceResult | None:
         """Get the database-owned current allowance window."""
         ...
 
@@ -690,14 +690,15 @@ class CreditStore(ABC):
         """
         raise CapabilityNotSupportedError("create_team is not supported by this store")
 
-    def get_team_balance(self, team_id: str) -> TeamBalanceResult:
+    def get_team_balance(self, team_id: str) -> TeamBalanceResult | None:
         """Fetch team balance and member count.
 
         Args:
             team_id: The team's UUID.
 
         Returns:
-            ``TeamBalanceResult`` with balance and member count.
+            ``TeamBalanceResult`` with balance and member count, or ``None``
+            when the team does not exist.
         """
         raise CapabilityNotSupportedError("get_team_balance is not supported by this store")
 

@@ -114,7 +114,7 @@ and subscription grants never double-post:
           event_type=BillingEventType.subscription_created,
           occurred_at=datetime.now(UTC).isoformat(),
           user_id=user_id,
-          customer=BillingCustomerInfo(provider_customer_id="cus_123", email="ada@prompta.ai"),
+          customer=BillingCustomerInfo(provider_customer_id="cus_123", email="billing@example.com"),
           subscription=BillingSubscriptionInfo(
               provider_subscription_id="sub_123",
               status="active",
@@ -144,7 +144,7 @@ and subscription grants never double-post:
     eventType: BillingEventType.subscription_created,
     occurredAt: new Date().toISOString(),
     userId,
-    customer: { providerCustomerId: "cus_123", email: "ada@prompta.ai" },
+    customer: { providerCustomerId: "cus_123", email: "billing@example.com" },
     subscription: {
       providerSubscriptionId: "sub_123",
       status: "active",

@@ -163,7 +163,7 @@ export interface CommerceCredits {
   getAvailable(accountId: string): Promise<AvailableResult>;
   getBucketBalances(accountId: string): Promise<BucketBalancesResult>;
   getUserPlan(accountId: string): Promise<GetUserPlanResult>;
-  checkAllowance(accountId: string): Promise<AllowanceResult>;
+  checkAllowance(accountId: string): Promise<AllowanceResult | null>;
   listLedgerEntries(accountId: string, options: ListLedgerEntriesOptions): Promise<LedgerPage>;
   listUsageCharges(accountId: string, options: ListUsageChargesOptions): Promise<UsageChargePage>;
   getLedgerEntry(accountId: string, entryId: string): Promise<LedgerEntry | null>;
@@ -1147,6 +1147,7 @@ export class CommerceService {
       core.entitlement.creditPolicy?.type === "credit_line"
         ? (core.entitlement.creditPolicy.creditLimit ?? new Decimal(0)).negated()
         : new Decimal(0);
+    const allowanceRemaining = core.allowance?.allowanceRemaining ?? new Decimal(0);
     const spendOrder: CreditSpendSource[] = [
       ...(core.entitlement.allowance
         ? [
@@ -1174,15 +1175,13 @@ export class CommerceService {
       accountId,
       credits: {
         ledgerBalance: core.balance.balance,
-        effectiveSpendableBalance: core.available.available
-          .plus(core.allowance.allowanceRemaining)
-          .minus(floor),
+        effectiveSpendableBalance: core.available.available.plus(allowanceRemaining).minus(floor),
         lifetimePurchases: core.balance.lifetimePurchased,
         allowance: {
-          remaining: core.allowance.allowanceRemaining,
+          remaining: allowanceRemaining,
           limit: core.entitlement.allowance?.amount ?? null,
-          periodStart: core.allowance.periodStart ?? null,
-          periodEnd: core.allowance.periodEnd ?? null,
+          periodStart: core.allowance?.periodStart ?? null,
+          periodEnd: core.allowance?.periodEnd ?? null,
         },
         buckets: core.bucketBalances.buckets,
         bucketsByKey: Object.fromEntries(

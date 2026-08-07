@@ -1,36 +1,27 @@
-# Skills in this repository
+# Agent skills
 
-This repository ships one Agent Skill:
+This repository publishes one portable [Agent Skill](https://agentskills.io/specification): [`bursar`](bursar/SKILL.md).
 
-| Skill                       | Purpose                                                                                                                                                                                                                                                                                                       |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`bursar`](bursar/SKILL.md) | Integrate Bursar, the credit billing engine for AI SaaS, into a Python or TypeScript application: usage metering, prepaid credits, the credit ledger, plans and allowances, subscriptions, quotas, spend caps, leases, idempotent billing, pricing configs and rate cards, auto-recharge, and billing events. |
+The skill guides coding agents through Bursar integration and review work. It contains only agent-specific procedure, source lookup order, financial invariants, and verification gates. Tutorials and API details remain in the [Bursar documentation](https://zonastery.github.io/bursar/docs/) so maintainers update each fact in one place.
 
-The `bursar` skill follows the [Agent Skills](https://agentskills.io/specification)
-format: YAML frontmatter (`name`, `description`, `license`, `compatibility`,
-`metadata`) plus markdown instructions — the mental model, hard money
-invariants, the standard install → tenant → config → facade → metering
-workflow, side-by-side Python and TypeScript recipes, and one-level-deep
-`references/*.md` pointers into the full docs at
-https://zonastery.github.io/bursar/docs/.
+## Install
 
-## Installing the skill
-
-Install all skills from this repository:
+Install the Bursar skill at project scope:
 
 ```bash
-npx skills add zonastery/bursar
+npx skills add zonastery/bursar@bursar
 ```
 
-Install only the `bursar` skill:
+Install it globally only when every local project should use the skill:
 
 ```bash
-npx skills add zonastery/bursar --skill bursar
+npx skills add zonastery/bursar@bursar --global
 ```
 
-Skills are installed at **project scope** by default. Pass `--global` to
-install them for all projects:
+Update project-scoped skills after a release:
 
 ```bash
-npx skills add zonastery/bursar --global
+npx skills update --project
 ```
+
+Review the [Skills CLI](https://github.com/vercel-labs/skills) documentation for supported agents and non-interactive options.

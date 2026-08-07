@@ -639,7 +639,7 @@ export class CreditsService {
     return this.leases.getBucketBalances(userId);
   }
 
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
+  async checkAllowance(userId: string): Promise<AllowanceResult | null> {
     return this.leases.checkAllowance(userId);
   }
 
@@ -880,6 +880,9 @@ export class CreditsService {
 
     if (cost.lte(0)) {
       const teamBal = await this.store.getTeamBalance(teamId);
+      if (teamBal === null) {
+        throw new StoreError(`Team not found: ${teamId}`);
+      }
       return {
         entryId: null,
         teamId,

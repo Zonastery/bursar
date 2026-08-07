@@ -1,7 +1,7 @@
 """Shared helpers for the bursar notebook series.
 
 Every notebook in this series tells one chapter of the same story: you are
-building *prompta*, an AI assistant SaaS, and integrating bursar to meter
+building an AI application and integrating Bursar to meter
 usage, sell credits, and bill your users.
 
 Helpers here:

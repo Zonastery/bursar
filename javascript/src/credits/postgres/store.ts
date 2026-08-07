@@ -811,16 +811,14 @@ export class PostgresStore extends CreditStore {
     }));
   }
 
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
+  async checkAllowance(userId: string): Promise<AllowanceResult | null> {
     const row = await this.planRepo.checkAllowance(userId);
-    if (!row) {
-      return { planId: "", allowanceRemaining: ZERO, periodStart: "", periodEnd: "" };
-    }
+    if (!row) return null;
     return {
-      planId: String(row.plan_id ?? ""),
+      planId: row.plan_id,
       allowanceRemaining: dec(row.allowance_remaining),
-      periodStart: String(row.period_start ?? ""),
-      periodEnd: String(row.period_end ?? ""),
+      periodStart: row.period_start,
+      periodEnd: row.period_end,
     };
   }
 
@@ -1002,19 +1000,14 @@ export class PostgresStore extends CreditStore {
     };
   }
 
-  async getTeamBalance(teamId: string): Promise<TeamBalanceResult> {
+  async getTeamBalance(teamId: string): Promise<TeamBalanceResult | null> {
     const row = await this.teamRepo.getTeamBalance(teamId);
-    if (!row) {
-      return { teamId, name: "", balance: ZERO, memberCount: 0 };
-    }
-    if ("error" in row && row.error) {
-      return { teamId, name: "", balance: ZERO, memberCount: 0 };
-    }
+    if (!row) return null;
     return {
-      teamId: String(row.team_id ?? teamId),
-      name: String(row.name ?? ""),
+      teamId: row.team_id,
+      name: row.name,
       balance: dec(row.balance),
-      memberCount: Number(row.member_count ?? 0),
+      memberCount: row.member_count,
     };
   }
 

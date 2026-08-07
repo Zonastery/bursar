@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bursar"
+  short_description: "Integrate usage metering and credit billing"
+  default_prompt: "Use $bursar to add a replay-safe metered billing workflow to this application."

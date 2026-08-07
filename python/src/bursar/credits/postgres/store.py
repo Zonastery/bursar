@@ -1115,22 +1115,23 @@ class PostgresStore(CreditStore):
             for row in rows
         ]
 
-    def check_allowance(self, user_id: str) -> AllowanceResult:
+    def check_allowance(self, user_id: str) -> AllowanceResult | None:
         """Check the remaining plan allowance for a user.
 
         Args:
             user_id: The user ID.
         Returns:
-            AllowanceResult with remaining allowance or zero defaults.
+            AllowanceResult with the current window, or ``None`` when the
+            subject has no active allowance policy.
         """
         result = self._plan_repo.check_allowance(user_id)
         if result is None:
-            return AllowanceResult(plan_id="", allowance_remaining=Decimal(0), period_start="", period_end="")
+            return None
         return AllowanceResult(
-            plan_id=str(getattr(result, "plan_id", "")),
+            plan_id=result.plan_id,
             allowance_remaining=_dec(result.allowance_remaining),
-            period_start=_text(getattr(result, "period_start", None)),
-            period_end=_text(getattr(result, "period_end", None)),
+            period_start=_require_text(result.period_start, "get_subject_allowance"),
+            period_end=_require_text(result.period_end, "get_subject_allowance"),
         )
 
     def list_quota_events(
@@ -1490,25 +1491,23 @@ class PostgresStore(CreditStore):
             name=name,
         )
 
-    def get_team_balance(self, team_id: str) -> TeamBalanceResult:
+    def get_team_balance(self, team_id: str) -> TeamBalanceResult | None:
         """Get the credit balance and member count for a team.
 
         Args:
             team_id: The team ID.
 
         Returns:
-            TeamBalanceResult with balance details or defaults if team not found.
+            TeamBalanceResult with balance details, or ``None`` if not found.
         """
         result = self._team_repo.get_team_balance(team_id)
         if result is None:
-            return TeamBalanceResult(team_id=team_id, name="", balance=Decimal(0), member_count=0)
-        if result.error is not None:
-            raise StoreError(f"get_team_balance failed: {result.error}")
+            return None
         return TeamBalanceResult(
-            team_id=str(getattr(result, "team_id", team_id)),
-            name=str(getattr(result, "name", "")),
+            team_id=result.team_id,
+            name=result.name,
             balance=_dec(result.balance),
-            member_count=int(getattr(result, "member_count", 0)),
+            member_count=result.member_count,
         )
 
     def add_team_member(

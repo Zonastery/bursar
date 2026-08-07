@@ -52,21 +52,12 @@ const SetUserPlanRowSchema = z
 
 const AllowanceRowSchema = z
   .object({
-    plan_id: z.string().nullable().optional(),
-    allowance_remaining: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    period_start: z
-      .union([z.string(), z.date().transform((value) => value.toISOString())])
-      .nullable()
-      .optional(),
-    period_end: z
-      .union([z.string(), z.date().transform((value) => value.toISOString())])
-      .nullable()
-      .optional(),
+    plan_id: z.string().min(1),
+    allowance_remaining: z.union([z.string(), z.number()] as const),
+    period_start: z.union([z.string().min(1), z.date().transform((value) => value.toISOString())]),
+    period_end: z.union([z.string().min(1), z.date().transform((value) => value.toISOString())]),
   })
-  .passthrough();
+  .strict();
 
 const UnsetPlanRowSchema = z
   .object({

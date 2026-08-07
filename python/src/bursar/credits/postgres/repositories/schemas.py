@@ -204,12 +204,11 @@ class PlanMigrationBatchRow(BaseModel):
 
 
 class AllowanceRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    plan_id: str | None = None
-    allowance_amount: str | Decimal | None = None
-    allowance_remaining: str | Decimal | None = None
-    period_start: str | datetime | date | None = None
-    period_end: str | datetime | date | None = None
+    model_config = ConfigDict(extra="forbid")
+    plan_id: str
+    allowance_remaining: str | Decimal
+    period_start: str | datetime | date
+    period_end: str | datetime | date
 
 
 class CapCheckRow(BaseModel):
@@ -302,12 +301,11 @@ class CreateTeamRow(BaseModel):
 
 
 class TeamBalanceRow(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    team_id: str = ""
-    name: str = ""
-    balance: str | Decimal | None = None
-    member_count: int = 0
-    error: str | None = None
+    model_config = ConfigDict(extra="forbid")
+    team_id: str
+    name: str
+    balance: str | Decimal
+    member_count: int
 
 
 class AddTeamMemberRow(BaseModel):

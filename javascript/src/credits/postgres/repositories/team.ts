@@ -12,16 +12,12 @@ const CreateTeamRowSchema = z
 
 const TeamBalanceRowSchema = z
   .object({
-    team_id: z.string().optional(),
-    name: z.string().optional(),
-    balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    member_count: z.coerce.number().optional(),
-    error: z.string().nullable().optional(),
+    team_id: z.string().min(1),
+    name: z.string().min(1),
+    balance: z.union([z.string().min(1), z.number().finite()] as const),
+    member_count: z.coerce.number().int().nonnegative(),
   })
-  .passthrough();
+  .strict();
 
 const AddTeamMemberRowSchema = z
   .object({

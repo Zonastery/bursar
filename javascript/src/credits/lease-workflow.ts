@@ -327,7 +327,8 @@ export class CreditLeaseWorkflow {
     }
     let allowanceRemaining = new Decimal(0);
     try {
-      allowanceRemaining = (await this.store.checkAllowance(userId)).allowanceRemaining;
+      allowanceRemaining =
+        (await this.store.checkAllowance(userId))?.allowanceRemaining ?? new Decimal(0);
     } catch (error) {
       this.logger.debug("[CreditsService] allowance fetch failed in canAfford", {
         error: error instanceof Error ? error.message : String(error),
@@ -362,13 +363,13 @@ export class CreditLeaseWorkflow {
    * Get remaining free allowance for the current billing period.
    *
    * Convenience wrapper that routes through the manager so callers never need
-   * to reach past it into the raw store. Returns a zero-allowance result for
-   * planless users (no exception).
+   * to reach past it into the raw store. Returns `null` when the subject has no
+   * active allowance policy.
    *
    * Window calculation is database-owned and supports the full normalized
    * policy tuple, including timezone and arbitrary interval counts.
    */
-  async checkAllowance(userId: string): Promise<AllowanceResult> {
+  async checkAllowance(userId: string): Promise<AllowanceResult | null> {
     return await this.store.checkAllowance(userId);
   }
 

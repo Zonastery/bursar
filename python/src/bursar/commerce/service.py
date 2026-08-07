@@ -238,7 +238,7 @@ class _CommerceCreditsPort(Protocol):
 
     def get_user_plan(self, account_id: str, /) -> GetUserPlanResult: ...
 
-    def check_allowance(self, account_id: str, /) -> AllowanceResult: ...
+    def check_allowance(self, account_id: str, /) -> AllowanceResult | None: ...
 
     def list_ledger_entries(self, account_id: str, /, *, limit: int) -> LedgerPage: ...
 
@@ -1389,6 +1389,7 @@ class CommerceService:
             if credit_policy is not None and credit_policy.type == "credit_line"
             else Decimal(0)
         )
+        allowance_remaining = allowance.allowance_remaining if allowance is not None else Decimal(0)
         spend_order = [
             *(
                 [
@@ -1417,13 +1418,13 @@ class CommerceService:
             account_id=account_id,
             credits=AccountCreditOverview(
                 ledger_balance=balance.balance,
-                effective_spendable_balance=(available.available + allowance.allowance_remaining - floor),
+                effective_spendable_balance=(available.available + allowance_remaining - floor),
                 lifetime_purchases=balance.lifetime_purchased,
                 allowance=AccountAllowanceOverview(
-                    remaining=allowance.allowance_remaining,
+                    remaining=allowance_remaining,
                     limit=entitlement.allowance.amount if entitlement.allowance is not None else None,
-                    period_start=allowance.period_start or None,
-                    period_end=allowance.period_end or None,
+                    period_start=allowance.period_start if allowance is not None else None,
+                    period_end=allowance.period_end if allowance is not None else None,
                 ),
                 buckets=buckets.buckets,
                 buckets_by_key={bucket.bucket_key: bucket.balance for bucket in buckets.buckets},

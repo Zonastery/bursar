@@ -235,7 +235,7 @@ export abstract class CreditStore {
   abstract checkFeature(userId: string, feature: string): Promise<CheckFeatureResult>;
   abstract getQuotaState(userId: string, quotaKey?: string | null): Promise<QuotaState[]>;
   abstract listQuotaEvents(userId: string, options?: ListQuotaEventsOptions): Promise<QuotaEvent[]>;
-  abstract checkAllowance(userId: string): Promise<AllowanceResult>;
+  abstract checkAllowance(userId: string): Promise<AllowanceResult | null>;
 
   abstract revokeCreditsByEntryType(
     userId: string,
@@ -345,7 +345,7 @@ export abstract class CreditStore {
   ): Promise<CreateTeamResult> {
     throw new CapabilityNotSupportedError("createTeam is not supported by this store");
   }
-  async getTeamBalance(_teamId: string): Promise<TeamBalanceResult> {
+  async getTeamBalance(_teamId: string): Promise<TeamBalanceResult | null> {
     throw new CapabilityNotSupportedError("getTeamBalance is not supported by this store");
   }
   async addTeamMember(

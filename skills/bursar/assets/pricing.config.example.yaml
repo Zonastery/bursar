@@ -1,4 +1,4 @@
-# BursarConfig example — "prompta", a fictional AI assistant.
+# Complete BursarConfig template for an example AI application.
 #
 # One strict, versioned document drives pricing, credit buckets, plans, and
 # commerce. Validates with:  bursar config validate pricing.config.example.yaml

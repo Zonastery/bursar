@@ -171,7 +171,7 @@ class PlanRepository:
         rows = self._callproc("get_subject_allowance", [user_id])
         if not rows:
             return None
-        return AllowanceRow.model_validate(rows[0]) if isinstance(rows[0], dict) else None
+        return AllowanceRow.model_validate(rows[0])
 
     def list_quota_events(
         self,
