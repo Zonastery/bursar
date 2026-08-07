@@ -95,15 +95,29 @@ export interface DeductWithAllowanceOptions {
   metadata?: CreditMetadata | null;
 }
 
-export interface RefundResult {
-  refundEntryId: string;
+interface RefundResultBase {
   originalEntryId: string;
+  userId: string | null;
+}
+
+export interface RefundSuccess extends RefundResultBase {
+  error: null;
+  refundEntryId: string;
   userId: string;
   amount: Decimal;
   newBalance: Decimal;
-  error?: string | null;
-  bucketBreakdown?: Record<string, Decimal> | null;
+  bucketBreakdown: Record<string, Decimal> | null;
 }
+
+export interface RefundFailure extends RefundResultBase {
+  error: string;
+  refundEntryId: null;
+  amount: Decimal | null;
+  newBalance: Decimal | null;
+  bucketBreakdown: null;
+}
+
+export type RefundResult = RefundSuccess | RefundFailure;
 
 export interface SweepResult {
   expiredCount: number;

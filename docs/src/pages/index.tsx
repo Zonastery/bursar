@@ -1,49 +1,106 @@
 import type {ReactNode} from 'react';
-import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
-import Layout from '@theme/Layout';
 import Link from '@docusaurus/Link';
+import Layout from '@theme/Layout';
+import CodeBlock from '@theme/CodeBlock';
 import Heading from '@theme/Heading';
+import styles from './index.module.css';
 
-function Hero(): ReactNode {
-  const {siteConfig} = useDocusaurusContext();
+const capabilities = [
+  {
+    number: '01',
+    title: 'Price every operation',
+    description:
+      'Define metered operations, exact-decimal rates, and plan-specific pricing in one validated configuration.',
+    to: '/docs/concepts/pricing',
+  },
+  {
+    number: '02',
+    title: 'Control spend before work starts',
+    description:
+      'Enforce allowances, quotas, entitlements, and concurrency limits in the same transaction as admission.',
+    to: '/docs/guides/financial-safety',
+  },
+  {
+    number: '03',
+    title: 'Maintain an auditable ledger',
+    description:
+      'Record grants, purchases, charges, refunds, and expiry as immutable entries with replay-safe mutations.',
+    to: '/docs/concepts/data-model',
+  },
+  {
+    number: '04',
+    title: 'Connect payments when needed',
+    description:
+      'Map provider events to subscriptions, top-ups, plan changes, and guarded auto-recharge workflows.',
+    to: '/docs/guides/subscription-integration',
+  },
+];
+
+const pythonExample = `from bursar import Bursar, PostgresStore
+
+store = PostgresStore(database_url, tenant_id=tenant_id)
+bursar = Bursar.create(credit_store=store)
+
+charge = bursar.credits.deduct(
+    account_id,
+    usage_metrics,
+    idempotency_key="request:0195",
+)`;
+
+const typescriptExample = `import { Bursar, PostgresStore } from "@zonastery/bursar";
+
+const store = new PostgresStore({
+  postgres: process.env.DATABASE_URL!,
+  tenantId,
+});
+const bursar = new Bursar({ creditStore: store });
+
+const charge = await bursar.credits.deduct(accountId, usageMetrics, {
+  idempotencyKey: "request:0195",
+});`;
+
+function CapabilityGrid(): ReactNode {
   return (
-    <header className="hero hero--primary">
-      <div className="container">
-        <Heading as="h1" className="hero__title">
-          {siteConfig.title}
-        </Heading>
-        <p className="hero__subtitle">{siteConfig.tagline}</p>
-        <div className="margin-top--lg">
-          <Link
-            className="button button--secondary button--lg margin-right--md"
-            to="/docs/intro">
-            Get Started
-          </Link>
-          <Link
-            className="button button--secondary button--lg"
-            to="https://github.com/zonastery/bursar">
-            GitHub
-          </Link>
-        </div>
-      </div>
-    </header>
+    <div className={styles.capabilityGrid}>
+      {capabilities.map((capability) => (
+        <Link
+          className={styles.capabilityCard}
+          key={capability.number}
+          to={capability.to}>
+          <span className={styles.capabilityNumber} aria-hidden="true">
+            {capability.number}
+          </span>
+          <Heading as="h3">{capability.title}</Heading>
+          <p>{capability.description}</p>
+          <span className={styles.cardLink}>Read the guide</span>
+        </Link>
+      ))}
+    </div>
   );
 }
 
-function Feature({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}): ReactNode {
+function SystemDiagram(): ReactNode {
   return (
-    <div className="col col--4 margin-bottom--lg">
-      <div className="card">
-        <div className="card__header">
-          <Heading as="h3">{title}</Heading>
-        </div>
-        <div className="card__body">{children}</div>
+    <div className={styles.systemDiagram} aria-label="Bursar system boundary">
+      <div className={styles.diagramSources}>
+        <span>Application usage</span>
+        <span>Pricing config</span>
+        <span>Provider events</span>
+      </div>
+      <div className={styles.diagramConnector} aria-hidden="true">
+        <span />
+      </div>
+      <div className={styles.diagramCore}>
+        <span className={styles.diagramEyebrow}>Application boundary</span>
+        <strong>Bursar</strong>
+        <span>Credits · Catalog · Accounts · Billing · Commerce</span>
+      </div>
+      <div className={styles.diagramConnector} aria-hidden="true">
+        <span />
+      </div>
+      <div className={styles.diagramStore}>
+        <strong>PostgreSQL</strong>
+        <span>Tenant isolation · Append-only ledger · Exact decimals</span>
       </div>
     </div>
   );
@@ -52,39 +109,138 @@ function Feature({
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="bursar — Declarative Credit Calculation Engine"
-      description="Add usage-based credits to your AI SaaS in minutes. Multi-language, database-backed pricing with a safe expression engine.">
-      <Hero />
+      title="Usage metering and billing infrastructure"
+      description="Bursar adds exact usage metering, prepaid credits, plans, and billing to AI products through Python and TypeScript SDKs.">
       <main>
-        <section className="margin-vert--xl">
+        <header className={styles.hero}>
+          <div className={`container ${styles.heroGrid}`}>
+            <div className={styles.heroCopy}>
+              <p className={styles.eyebrow}>Open-source billing infrastructure</p>
+              <Heading as="h1">
+                Meter usage. Protect spend. Bill with confidence.
+              </Heading>
+              <p className={styles.lead}>
+                Bursar gives AI products one exact ledger for usage pricing,
+                prepaid credits, plans, allowances, and subscriptions.
+              </p>
+              <div className={styles.actions}>
+                <Link className="button button--primary button--lg" to="/docs/quickstart">
+                  Read the Quickstart
+                </Link>
+                <Link
+                  className="button button--outline button--secondary button--lg"
+                  href="https://github.com/zonastery/bursar">
+                  View on GitHub
+                </Link>
+              </div>
+              <ul className={styles.supportList} aria-label="Supported platforms">
+                <li>Python 3.12+</li>
+                <li>Node.js 22+</li>
+                <li>PostgreSQL 16+</li>
+                <li>AGPL-3.0</li>
+              </ul>
+            </div>
+            <div className={styles.heroCode}>
+              <div className={styles.codeHeader}>
+                <span>One workflow, two SDKs</span>
+                <span className={styles.status}>1.x stable</span>
+              </div>
+              <CodeBlock language="python" title="Python">
+                {pythonExample}
+              </CodeBlock>
+            </div>
+          </div>
+        </header>
+
+        <section className={styles.section} aria-labelledby="capabilities-heading">
           <div className="container">
-            <div className="row">
-              <Feature title="Multi-Language">
-                Use the same pricing config from Python or TypeScript. Identical
-                expression engine, identical results.
-              </Feature>
-              <Feature title="Safe Expressions">
-                AST-based evaluator with strict allowlists. No eval(), no
-                exec(), no arbitrary code execution.
-              </Feature>
-              <Feature title="Database-Backed">
-                Pricing lives in <code>bursar_config</code>. Update live
-                without redeploys. Dict loading for testing.
-              </Feature>
-              <Feature title="Credit Lifecycle">
-                Reserve-then-deduct pattern with idempotency keys, reservation
-                expiry, and min-balance enforcement.
-              </Feature>
-              <Feature title="PostgreSQL-First">
-                One canonical schema, applied by <code>bursar migrate</code>. The
-                <code>CreditStore</code> abstraction keeps room for custom
-                stores.
-              </Feature>
-              <Feature title="Open Source">
-                AGPL-3.0 license. Use it, fork it, contribute.{' '}
-                <code>pip install bursar</code> or{' '}
-                <code>npm install @zonastery/bursar</code>.
-              </Feature>
+            <div className={styles.sectionHeading}>
+              <p className={styles.eyebrow}>Complete billing lifecycle</p>
+              <Heading id="capabilities-heading" as="h2">
+                Keep pricing, access, and money state consistent
+              </Heading>
+              <p>
+                Each capability shares the same versioned configuration,
+                tenant boundary, and transactional ledger.
+              </p>
+            </div>
+            <CapabilityGrid />
+          </div>
+        </section>
+
+        <section className={`${styles.section} ${styles.systemSection}`} aria-labelledby="system-heading">
+          <div className={`container ${styles.systemGrid}`}>
+            <div className={styles.sectionHeading}>
+              <p className={styles.eyebrow}>One system of record</p>
+              <Heading id="system-heading" as="h2">
+                Put the financial boundary behind one facade
+              </Heading>
+              <p>
+                Bursar prices usage, checks policy, and commits the result in
+                one transaction. Payment integrations remain optional.
+              </p>
+              <Link className={styles.textLink} to="/docs/concepts/architecture">
+                Explore the architecture
+              </Link>
+            </div>
+            <SystemDiagram />
+          </div>
+        </section>
+
+        <section className={styles.section} aria-labelledby="sdk-heading">
+          <div className="container">
+            <div className={styles.sectionHeading}>
+              <p className={styles.eyebrow}>Behavioral parity</p>
+              <Heading id="sdk-heading" as="h2">
+                Use the same model from Python and TypeScript
+              </Heading>
+              <p>
+                Both SDKs share the configuration schema, expression fixtures,
+                PostgreSQL migrations, rounding rules, and error contract.
+              </p>
+            </div>
+            <div className={styles.sdkGrid}>
+              <div className={styles.sdkPanel}>
+                <div className={styles.sdkPanelHeader}>
+                  <strong>Python</strong>
+                  <code>pip install bursar[postgres]</code>
+                </div>
+                <CodeBlock language="python">{pythonExample}</CodeBlock>
+                <Link to="/docs/python-api">Browse the Python API</Link>
+              </div>
+              <div className={styles.sdkPanel}>
+                <div className={styles.sdkPanelHeader}>
+                  <strong>TypeScript</strong>
+                  <code>npm install @zonastery/bursar</code>
+                </div>
+                <CodeBlock language="typescript">{typescriptExample}</CodeBlock>
+                <Link to="/docs/javascript-api">Browse the TypeScript API</Link>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className={styles.cta} aria-labelledby="cta-heading">
+          <div className={`container ${styles.ctaInner}`}>
+            <div>
+              <p className={styles.eyebrow}>Start with an isolated ledger</p>
+              <Heading id="cta-heading" as="h2">
+                Build the first metered charge
+              </Heading>
+              <p>
+                Install the schema, publish a config, create an account, and
+                inspect the resulting ledger entry.
+              </p>
+            </div>
+            <div className={styles.actions}>
+              <Link className="button button--primary button--lg" to="/docs/quickstart">
+                Open the Quickstart
+              </Link>
+              <Link
+                className="button button--outline button--secondary button--lg"
+                to="/docs/tutorials">
+                Browse Tutorials
+              </Link>
             </div>
           </div>
         </section>

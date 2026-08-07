@@ -152,7 +152,7 @@ export class DeductionRepository {
         entry_id: row.ledger_entry_id,
         amount: row.charged,
         allowance_consumed: row.allowance_covered,
-        balance_after: details?.balance_after ?? row.balance_after,
+        balance_after: details?.balance_after ?? row.balance_after ?? null,
         bucket_breakdown: details?.bucket_breakdown ?? row.bucket_breakdown,
         idempotent: row.replayed,
         error: row.error_code,

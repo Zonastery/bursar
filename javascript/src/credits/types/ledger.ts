@@ -81,13 +81,24 @@ export interface UsageChargePage {
 }
 
 /** Result of appending a usage event without creating another balance debit. */
-export interface UsageRecordResult {
-  usageId: string;
+interface UsageRecordResultBase {
   userId: string;
   requested: Decimal;
   idempotent: boolean;
-  error?: string | null;
 }
+
+export interface UsageRecordSuccess extends UsageRecordResultBase {
+  error: null;
+  usageId: string;
+}
+
+export interface UsageRecordFailure extends UsageRecordResultBase {
+  error: string;
+  usageId: null;
+  idempotent: false;
+}
+
+export type UsageRecordResult = UsageRecordSuccess | UsageRecordFailure;
 
 /** Cursor-only options for the usage-only ledger view. */
 export interface ListUsageEntriesOptions {

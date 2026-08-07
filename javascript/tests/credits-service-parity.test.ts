@@ -59,11 +59,14 @@ describe("CreditsService mirror regressions", () => {
     });
     const settleLease = vi.fn().mockResolvedValue({
       entryId: "entry-1",
+      usageChargeId: "usage-1",
       userId: "user-1",
       amount: new Decimal(8),
       allowanceConsumed: new Decimal(0),
       balanceAfter: new Decimal(92),
       idempotent: true,
+      error: null,
+      bucketBreakdown: null,
     });
     const store = {
       getUserPlan: vi.fn().mockResolvedValue({
@@ -105,12 +108,15 @@ describe("CreditsService mirror regressions", () => {
 
   it("records zero-cost usage through the authoritative charge RPC", async () => {
     const deductWithAllowance = vi.fn().mockResolvedValue({
-      entryId: "",
+      entryId: null,
+      usageChargeId: "usage-free-1",
       userId: "user-1",
       amount: new Decimal(0),
       allowanceConsumed: new Decimal(0),
       balanceAfter: new Decimal(25),
       idempotent: false,
+      error: null,
+      bucketBreakdown: null,
     });
     const store = {
       getUserPlan: vi.fn().mockResolvedValue({

@@ -1,135 +1,140 @@
 ---
-title: Quickstart
-description: Ten minutes to a working credit ledger — install the schema, publish a pricing config, grant credits, and charge for usage from Python or TypeScript.
+title: Create your first metered charge
+sidebar_label: Quickstart
+description: Install Bursar, publish a pricing configuration, create an account, and record one usage charge.
+keywords:
+  - Bursar quickstart
+  - usage metering
+  - credit ledger
+  - pricing configuration
 ---
-
-# Quickstart
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-Ten minutes to a working credit ledger. You build *prompta*, an AI assistant,
-and wire Bursar to meter completions, hold balances, and charge users.
+# Create your first metered charge
+
+This tutorial creates an isolated Bursar tenant, publishes one pricing rule, grants prepaid credits, and records a usage charge. The final ledger entry proves which account was charged, why it was charged, and which balance resulted.
 
 ## Prerequisites
 
-- Python 3.12+ with `pip install bursar[postgres]`, or Node.js 22+ with
-  `npm install @zonastery/bursar`
-- PostgreSQL 16+ reachable from `DATABASE_URL`, with pg_partman 5.x and
-  pg_jsonschema 0.3+ available to the migration role (Bursar installs them in
-  the `partman` and `extensions` schemas)
+Prepare these dependencies before continuing:
 
-## 1. Install the schema
+- Python 3.12 or 3.13 for the Bursar command-line interface (CLI)
+- PostgreSQL 16 or newer with `pg_partman` 5.x and `pg_jsonschema` 0.3+ available to the migration role
+- A PostgreSQL connection string for a database you may modify
+- Node.js 22 or newer if you will use the TypeScript example
 
-```bash title="Terminal"
-export DATABASE_URL=postgresql://...
-bursar migrate
-```
+:::caution Use a development database
 
-:::note
-
-`bursar migrate` applies the ordered SQL baseline, records checksums for every
-file, and fails if an applied file changed. It is safe to re-run — a second run
-is a no-op.
+`bursar migrate` creates and secures the `bursar` schema. Run this tutorial against a development database, not an existing production tenant.
 
 :::
 
-Create a tenant (the printed UUID is your tenant id):
+## 1. Install the package and schema
+
+Install the Python package with PostgreSQL support. The package supplies the CLI used by both SDK integrations.
 
 ```bash title="Terminal"
-bursar tenant create acme
-# 018f7f5f-7b4a-7000-8000-000000000001
-export BURSAR_TENANT_ID=018f7f5f-7b4a-7000-8000-000000000001
+python -m pip install "bursar[postgres]"
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/bursar"
+bursar migrate
 ```
 
-## 2. Publish a config
+TypeScript applications also install the Node.js package:
 
-One strict, versioned document drives pricing, buckets, and plans. Save it as
-`pricing.yaml`:
+```bash title="Terminal"
+npm install @zonastery/bursar
+```
+
+`bursar migrate` applies the ordered SQL baseline and records each file checksum. Re-running the command is a no-op. The command fails if an applied migration file has changed.
+
+## 2. Create a tenant
+
+Create a tenant and retain the returned universally unique identifier (UUID). Every store binds to one tenant before it reads or writes business data.
+
+```bash title="Terminal"
+bursar tenant create acme --display-name "Acme"
+export BURSAR_TENANT_ID="018f7f5f-7b4a-7000-8000-000000000001"
+```
+
+Use the UUID printed by your command for `BURSAR_TENANT_ID`. The value above is an example.
+
+## 3. Define and publish pricing
+
+Save this minimal configuration as `pricing.yaml`. It defines one metered operation, one rate card, one credit bucket, and one plan.
 
 ```yaml title="pricing.yaml"
 version: 1
 catalog:
-  default_plan: free
+  default_plan: standard
 pricing:
   operations:
     completion:
       measures:
-        input_tokens: { unit: token }
-        output_tokens: { unit: token }
+        input_tokens: {unit: token}
       dimensions:
-        model: { type: string }
+        model: {type: string}
   rate_cards:
     standard:
       operations:
         completion:
-          rules:
-            - when:
-                model:
-                  op: in
-                  values: [gpt-4o, gpt-4o-mini]
-              charge:
-                type: per_unit
-                measure: input_tokens
-                rate: "0.0025"
-                unit_size: "1000000"
           unmatched:
-            action: reject
+            action: charge
+            charge:
+              type: per_unit
+              measure: input_tokens
+              rate: "0.25"
+              unit_size: "1000"
 credits:
   buckets:
-    promotional: { priority: 1 }
-    purchased: { priority: 10 }
+    purchased: {priority: 10}
   default_bucket: purchased
 plans:
-  free:
-    display_name: Free
+  standard:
     rate_card: standard
     allowed_operations: [completion]
-    credit_allowance:
-      amount: "10000"
-      priority: 5
-      window: { type: calendar, unit: month, count: 1 }
 ```
 
-:::info Strict schema
-
-The schema is strict: unknown fields are rejected, and all exact decimal
-values are strings.
-
-:::
-
-Validate, then publish:
+Validate the file before publishing it:
 
 ```bash title="Terminal"
 bursar config validate pricing.yaml
-bursar config set pricing.yaml
+bursar config set pricing.yaml --label "quickstart"
+bursar config list
 ```
 
-`config set` validates again, creates an immutable version, and activates it.
-Check with `bursar config list`.
+The schema rejects unknown fields. Exact decimal values such as `rate` and `unit_size` remain strings so parsing does not introduce floating-point values.
 
-## 3. First credits
+## 4. Construct the facade
 
-Connect the store to your tenant and build the facade:
+Read the connection and tenant identifiers from the environment, then bind one store to the tenant.
 
-<Tabs groupId="lang">
+<Tabs groupId="language">
   <TabItem value="python" label="Python">
 
   ```python
+  import os
   from bursar import Bursar, PostgresStore
+
+  database_url = os.environ["DATABASE_URL"]
+  tenant_id = os.environ["BURSAR_TENANT_ID"]
 
   store = PostgresStore(database_url, tenant_id=tenant_id)
   bursar = Bursar.create(credit_store=store)
   ```
 
   </TabItem>
-  <TabItem value="ts" label="TypeScript">
+  <TabItem value="typescript" label="TypeScript">
 
-  ```ts
+  ```typescript
   import { Bursar, PostgresStore } from "@zonastery/bursar";
 
+  const databaseUrl = process.env.DATABASE_URL!;
+  const tenantId = process.env.BURSAR_TENANT_ID!;
+
   const store = new PostgresStore({
-    postgres: process.env.DATABASE_URL!,
+    postgres: databaseUrl,
     tenantId,
   });
   const bursar = new Bursar({ creditStore: store });
@@ -138,129 +143,133 @@ Connect the store to your tenant and build the facade:
   </TabItem>
 </Tabs>
 
-Register Ada and give her an account, a plan, and some credits. The free plan
-carries a 10,000-credit monthly allowance:
+Keep the store tenant-bound for its full lifetime. Never set a session-scoped tenant value on a shared connection pool.
 
-<Tabs groupId="lang">
-  <TabItem value="python" label="Python">
+## 5. Create and fund an account
 
-  ```python
-  ada = "11111111-1111-4111-8111-111111111111"
+Create a stable account identifier in your application database. Notify Bursar after signup, then post a purchase with a replay-safe idempotency key.
 
-  bursar.accounts.on_account_created(ada, event_key="signup")
-  bursar.credits.add_credits(ada, 1000, entry_type="purchase")
-
-  balance = bursar.credits.get_balance(ada)
-  print(balance.balance, balance.lifetime_purchased)
-  ```
-
-  </TabItem>
-  <TabItem value="ts" label="TypeScript">
-
-  ```ts
-  const ada = "11111111-1111-4111-8111-111111111111";
-
-  await bursar.accounts.onAccountCreated({ accountId: ada, eventKey: "signup" });
-  await bursar.credits.addCredits(ada, 1000, { type: "purchase" });
-
-  const balance = await bursar.credits.getBalance(ada);
-  console.log(balance.balance, balance.lifetimePurchased);
-  ```
-
-  </TabItem>
-</Tabs>
-
-`on_account_created` assigns the default plan and runs eligible signup grants;
-`add_credits` with `entry_type="purchase"` grants into the default bucket and
-appends a `purchase` ledger entry.
-
-## 4. Charge for usage
-
-Meter one completion as a `UsageMetrics` and deduct in a single atomic call.
-This is 800 input tokens on gpt-4o, which the `standard` rate card prices at
-`0.0025` credits per million tokens: `800 / 1,000,000 × 0.0025 = 0.000002`.
-
-<Tabs groupId="lang">
+<Tabs groupId="language">
   <TabItem value="python" label="Python">
 
   ```python
   from decimal import Decimal
-  from bursar.metrics import UsageMetrics
 
-  metrics = UsageMetrics(
-      operation="completion",
-      measures={"input_tokens": Decimal(800)},
-      dimensions={"model": "gpt-4o"},
+  account_id = "11111111-1111-4111-8111-111111111111"
+  bursar.accounts.on_account_created(
+      account_id,
+      event_key="signup:11111111",
   )
-  result = bursar.credits.deduct(ada, metrics, idempotency_key="turn_12345")
-  print(result.amount, result.allowance_consumed, result.balance_after)
+  grant = bursar.credits.add_credits(
+      account_id,
+      Decimal("100.000000"),
+      entry_type="purchase",
+      idempotency_key="purchase:quickstart:11111111",
+  )
+  print(grant.entry_id, grant.new_balance)
   ```
 
   </TabItem>
-  <TabItem value="ts" label="TypeScript">
+  <TabItem value="typescript" label="TypeScript">
 
-  ```ts
-  const result = await bursar.credits.deduct(
-    ada,
-    {
-      operation: "completion",
-      measures: { input_tokens: 800 },
-      dimensions: { model: "gpt-4o" },
-    },
-    { idempotencyKey: "turn_12345" },
-  );
-  console.log(result.amount, result.allowanceConsumed, result.balanceAfter);
+  ```typescript
+  const accountId = "11111111-1111-4111-8111-111111111111";
+  await bursar.accounts.onAccountCreated({
+    accountId,
+    eventKey: "signup:11111111",
+  });
+  const grant = await bursar.credits.addCredits(accountId, "100.000000", {
+    type: "purchase",
+    idempotencyKey: "purchase:quickstart:11111111",
+  });
+  console.log(grant.entryId, grant.newBalance);
   ```
 
   </TabItem>
 </Tabs>
 
-The `DeductionResult` reports the split between allowance and balance:
+The signup event assigns the `standard` plan from `catalog.default_plan`. The purchase appends one ledger entry and creates spendable credit in the `purchased` bucket.
 
-| Field | Meaning |
-| --- | --- |
-| `amount` | Net charge debited from the balance (after allowance) |
-| `allowance_consumed` | Amount covered by the plan's free allowance |
-| `balance_after` | Exact balance after the charge |
+## 6. Meter and charge usage
 
-On the free plan the 0.000002-credit charge is covered by the monthly
-allowance, so `amount` is 0, `allowance_consumed` is 0.000002, and
-`balance_after` is 1000.000000. Replaying `deduct` with the same
-`idempotency_key` is a no-op. Unmetered models are rejected by the
-`unmatched: reject` policy.
+Record 800 input tokens. The rate card prices 1,000 tokens at 0.25 credits, so this call charges 0.20 credits.
 
-Every mutation is visible in the append-only ledger. Each ledger entry
-exposes its entry id, type, exact amount, and creation time:
-
-<Tabs groupId="lang">
+<Tabs groupId="language">
   <TabItem value="python" label="Python">
 
   ```python
-  for entry in bursar.credits.list_ledger_entries(ada, limit=50).items:
-      print(entry.entry_id, entry.entry_type, entry.amount, entry.created_at)
+  from bursar.metrics import UsageMetrics
+
+  usage = UsageMetrics(
+      operation="completion",
+      measures={"input_tokens": Decimal("800")},
+      dimensions={"model": "example-model"},
+  )
+  charge = bursar.credits.deduct(
+      account_id,
+      usage,
+      idempotency_key="request:quickstart:0195",
+  )
+  print(charge.amount, charge.balance_after, charge.entry_id)
   ```
 
   </TabItem>
-  <TabItem value="ts" label="TypeScript">
+  <TabItem value="typescript" label="TypeScript">
 
-  ```ts
-  const page = await bursar.credits.listLedgerEntries(ada, { limit: 50 });
+  ```typescript
+  const usage = {
+    operation: "completion",
+    measures: { input_tokens: "800" },
+    dimensions: { model: "example-model" },
+  };
+  const charge = await bursar.credits.deduct(accountId, usage, {
+    idempotencyKey: "request:quickstart:0195",
+  });
+  console.log(charge.amount, charge.balanceAfter, charge.entryId);
+  ```
+
+  </TabItem>
+</Tabs>
+
+Call `deduct` again with the same idempotency key and payload. Bursar returns the original result without adding another ledger entry. Reusing the key with a different payload returns a conflict.
+
+## 7. Verify the ledger
+
+Read the canonical balance and the latest entries. The account should hold 99.800000 credits after the 0.200000 charge.
+
+<Tabs groupId="language">
+  <TabItem value="python" label="Python">
+
+  ```python
+  balance = bursar.credits.get_balance(account_id)
+  page = bursar.credits.list_ledger_entries(account_id, limit=10)
+
+  print(balance.balance)
+  for entry in page.items:
+      print(entry.entry_type, entry.amount, entry.balance_after)
+  ```
+
+  </TabItem>
+  <TabItem value="typescript" label="TypeScript">
+
+  ```typescript
+  const balance = await bursar.credits.getBalance(accountId);
+  const page = await bursar.credits.listLedgerEntries(accountId, { limit: 10 });
+
+  console.log(balance.balance);
   for (const entry of page.items) {
-    console.log(entry.entryId, entry.entryType, entry.amount, entry.createdAt);
+    console.log(entry.entryType, entry.amount, entry.balanceAfter);
   }
   ```
 
   </TabItem>
 </Tabs>
 
-## 5. Next steps
+The ledger is the accounting history. Do not maintain a second application-level balance counter.
 
-- [The data model](./concepts/data-model.mdx) — accounts, ledger, lots, leases.
-- [Canonical configuration](./concepts/configuration.mdx) — the full config
-  shape and validation rules.
-- [Expressions](./concepts/expressions.mdx) — formula charges for exotic
-  pricing.
-- [Architecture](./concepts/architecture.mdx) — facade and schema internals.
-- Notebooks: [Your first pricing config](/docs/notebooks/first_pricing_config) and
-  [The credit lifecycle](/docs/notebooks/credit_lifecycle) walk the same story
-  end to end.
+## Continue with a production workflow
+
+- Follow [Manage the credit lifecycle](./guides/credit-lifecycle.mdx) for refunds, expiry, revocation, and cursor-based ledger reads
+- Follow [Protect long-running work](./guides/financial-safety.mdx) for reserve, renew, settle, and release workflows
+- Read [Author the canonical configuration](./concepts/configuration.mdx) before adding plans, quotas, entitlements, or payment offers
+- Run the [executable tutorial collection](/docs/tutorials) to explore the same APIs against disposable PostgreSQL environments

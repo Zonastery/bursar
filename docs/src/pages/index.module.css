@@ -1,0 +1,525 @@
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: clamp(4rem, 9vw, 7.5rem) 0;
+  background:
+    radial-gradient(circle at 85% 12%, rgba(247, 148, 30, 0.18), transparent 28rem),
+    linear-gradient(145deg, #f7fafc 0%, #ffffff 52%, #fff8ef 100%);
+  border-bottom: 1px solid var(--bursar-border);
+}
+
+.hero::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: '';
+  background-image:
+    linear-gradient(rgba(16, 42, 67, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(16, 42, 67, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(to bottom, black, transparent 88%);
+}
+
+.heroGrid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(22rem, 0.92fr);
+  gap: clamp(3rem, 7vw, 6.5rem);
+  align-items: center;
+}
+
+.heroCopy,
+.heroCode,
+.sectionHeading,
+.sdkPanel {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  color: var(--bursar-accent-strong);
+  font-size: 0.76rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.hero h1 {
+  max-width: 13ch;
+  margin: 0;
+  color: var(--bursar-ink);
+  font-size: clamp(3rem, 6.7vw, 5.6rem);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+  text-wrap: balance;
+}
+
+.lead {
+  max-width: 39rem;
+  margin: 1.75rem 0 0;
+  color: var(--bursar-muted);
+  font-size: clamp(1.05rem, 2vw, 1.28rem);
+  line-height: 1.7;
+  text-wrap: pretty;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 2rem;
+}
+
+.actions :global(.button) {
+  min-height: 3rem;
+}
+
+.supportList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1.4rem;
+  padding: 1.5rem 0 0;
+  margin: 2.25rem 0 0;
+  color: var(--bursar-muted);
+  font-size: 0.86rem;
+  border-top: 1px solid var(--bursar-border);
+  list-style: none;
+}
+
+.supportList li::before {
+  display: inline-block;
+  width: 0.38rem;
+  height: 0.38rem;
+  margin-right: 0.55rem;
+  vertical-align: 0.1rem;
+  content: '';
+  background: var(--bursar-accent);
+  border-radius: 50%;
+}
+
+.heroCode {
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(16, 42, 67, 0.12);
+  border-radius: 1.25rem;
+  box-shadow: 0 28px 70px rgba(16, 42, 67, 0.14);
+  backdrop-filter: blur(18px);
+}
+
+.heroCode :global(.theme-code-block) {
+  margin-bottom: 0;
+  border-radius: 0.9rem;
+  box-shadow: none;
+}
+
+.codeHeader {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.25rem 0.35rem 0.9rem;
+  color: var(--bursar-muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+}
+
+.status {
+  padding: 0.24rem 0.58rem;
+  color: #166534;
+  background: #dcfce7;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+}
+
+.section {
+  padding: clamp(4rem, 8vw, 7rem) 0;
+}
+
+.sectionHeading {
+  max-width: 46rem;
+  margin-bottom: 2.5rem;
+}
+
+.sectionHeading h2,
+.cta h2 {
+  margin: 0;
+  color: var(--bursar-ink);
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: 1.08;
+  letter-spacing: -0.04em;
+  text-wrap: balance;
+}
+
+.sectionHeading > p:last-child,
+.cta p {
+  margin: 1rem 0 0;
+  color: var(--bursar-muted);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  text-wrap: pretty;
+}
+
+.capabilityGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.capabilityCard {
+  display: flex;
+  min-height: 20rem;
+  padding: 1.5rem;
+  color: inherit;
+  flex-direction: column;
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--bursar-border);
+  border-radius: 1rem;
+  box-shadow: 0 8px 28px rgba(16, 42, 67, 0.055);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.capabilityCard:hover {
+  color: inherit;
+  text-decoration: none;
+  border-color: var(--bursar-accent);
+  box-shadow: 0 16px 38px rgba(16, 42, 67, 0.1);
+  transform: translateY(-3px);
+}
+
+.capabilityCard:focus-visible {
+  color: inherit;
+  text-decoration: none;
+  outline: 3px solid color-mix(in srgb, var(--ifm-color-primary) 42%, transparent);
+  outline-offset: 3px;
+}
+
+.capabilityNumber {
+  color: var(--bursar-accent-strong);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.capabilityCard h3 {
+  margin: 3rem 0 0.8rem;
+  color: var(--bursar-ink);
+  font-size: 1.25rem;
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+.capabilityCard p {
+  margin: 0;
+  color: var(--bursar-muted);
+  font-size: 0.92rem;
+  line-height: 1.65;
+}
+
+.cardLink {
+  margin-top: auto;
+  padding-top: 1.5rem;
+  color: var(--ifm-color-primary);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.cardLink::after,
+.textLink::after {
+  margin-left: 0.35rem;
+  content: '→';
+}
+
+.systemSection {
+  background: var(--bursar-surface-subtle);
+  border-block: 1px solid var(--bursar-border);
+}
+
+.systemGrid {
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.72fr) minmax(0, 1.28fr);
+  gap: clamp(3rem, 8vw, 7rem);
+  align-items: center;
+}
+
+.systemGrid .sectionHeading {
+  margin-bottom: 0;
+}
+
+.textLink {
+  display: inline-block;
+  margin-top: 1.5rem;
+  font-weight: 700;
+}
+
+.systemDiagram {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.72fr) 2.5rem minmax(13rem, 1.3fr) 2.5rem minmax(10rem, 0.9fr);
+  align-items: stretch;
+}
+
+.diagramSources {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.diagramSources span,
+.diagramCore,
+.diagramStore {
+  display: flex;
+  padding: 1rem;
+  justify-content: center;
+  flex-direction: column;
+  background: var(--ifm-background-surface-color);
+  border: 1px solid var(--bursar-border-strong);
+  border-radius: 0.8rem;
+}
+
+.diagramSources span {
+  min-height: 3rem;
+  color: var(--bursar-muted);
+  font-size: 0.8rem;
+  font-weight: 650;
+  text-align: center;
+}
+
+.diagramCore {
+  color: #fff;
+  background: var(--bursar-ink);
+  border-color: var(--bursar-ink);
+  box-shadow: 0 16px 38px rgba(16, 42, 67, 0.16);
+}
+
+.diagramCore strong,
+.diagramStore strong {
+  font-size: 1.2rem;
+}
+
+.diagramCore > span:last-child,
+.diagramStore span {
+  margin-top: 0.5rem;
+  color: #d9e2ec;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.diagramStore span {
+  color: var(--bursar-muted);
+}
+
+.diagramEyebrow {
+  margin-bottom: 0.45rem;
+  color: #fbd38d;
+  font-size: 0.65rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.diagramConnector {
+  display: flex;
+  align-items: center;
+}
+
+.diagramConnector span {
+  position: relative;
+  width: 100%;
+  height: 1px;
+  background: var(--bursar-border-strong);
+}
+
+.diagramConnector span::after {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  width: 7px;
+  height: 7px;
+  content: '';
+  border-top: 1px solid var(--bursar-border-strong);
+  border-right: 1px solid var(--bursar-border-strong);
+  transform: rotate(45deg);
+}
+
+.sdkGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.sdkPanel {
+  padding: 1rem;
+  background: var(--bursar-surface-subtle);
+  border: 1px solid var(--bursar-border);
+  border-radius: 1rem;
+}
+
+.sdkPanel :global(.theme-code-block) {
+  margin-bottom: 1rem;
+  border: 1px solid var(--bursar-border);
+  box-shadow: none;
+}
+
+.sdkPanel > a {
+  display: inline-block;
+  padding: 0.3rem 0.25rem 0.15rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.sdkPanelHeader {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.25rem 1rem;
+}
+
+.sdkPanelHeader code {
+  overflow-wrap: anywhere;
+  color: var(--bursar-muted);
+  font-size: 0.72rem;
+}
+
+.cta {
+  padding: clamp(4rem, 8vw, 6rem) 0;
+  background: #fff8ef;
+  border-top: 1px solid #f3dcc0;
+}
+
+.ctaInner {
+  display: flex;
+  gap: 2rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ctaInner > div:first-child {
+  max-width: 43rem;
+}
+
+.cta .actions {
+  flex-shrink: 0;
+  margin-top: 0;
+}
+
+@media (max-width: 996px) {
+  .heroGrid,
+  .systemGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .heroCode {
+    max-width: 45rem;
+  }
+
+  .capabilityGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .systemDiagram {
+    overflow-x: auto;
+    padding-bottom: 0.5rem;
+  }
+
+  .ctaInner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cta .actions {
+    margin-top: 0.5rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero {
+    padding: 3.5rem 0 4rem;
+  }
+
+  .heroGrid {
+    gap: 2.75rem;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.7rem, 14vw, 4.1rem);
+  }
+
+  .capabilityGrid,
+  .sdkGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .capabilityCard {
+    min-height: 16rem;
+  }
+
+  .systemDiagram {
+    grid-template-columns: minmax(7.5rem, 0.72fr) 1.5rem minmax(12rem, 1.3fr) 1.5rem minmax(9rem, 0.9fr);
+  }
+
+  .sdkPanelHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .actions :global(.button) {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capabilityCard {
+    transition: none;
+  }
+
+  .capabilityCard:hover {
+    transform: none;
+  }
+}
+
+[data-theme='dark'] .hero {
+  background:
+    radial-gradient(circle at 85% 12%, rgba(247, 148, 30, 0.13), transparent 28rem),
+    linear-gradient(145deg, #091826 0%, #0b1f31 55%, #25190e 100%);
+}
+
+[data-theme='dark'] .hero::before {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+}
+
+[data-theme='dark'] .heroCode {
+  background: rgba(9, 24, 38, 0.8);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+[data-theme='dark'] .status {
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.28);
+  border-color: rgba(134, 239, 172, 0.25);
+}
+
+[data-theme='dark'] .diagramCore {
+  color: #102a43;
+  background: #f0f4f8;
+  border-color: #f0f4f8;
+}
+
+[data-theme='dark'] .diagramCore > span:last-child {
+  color: #486581;
+}
+
+[data-theme='dark'] .cta {
+  background: #20160c;
+  border-color: #4a3420;
+}

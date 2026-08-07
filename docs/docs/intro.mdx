@@ -1,92 +1,84 @@
 ---
-title: Introduction
-description: Bursar is a reusable credit ledger and billing engine for AI SaaS — one config, two SDKs (Python and JavaScript), exact money on a single PostgreSQL schema.
+title: What Bursar manages
+sidebar_label: Overview
+description: Understand the boundary Bursar owns, the guarantees it enforces, and where to begin integrating it.
+keywords:
+  - usage metering
+  - prepaid credits
+  - AI billing
+  - PostgreSQL ledger
 ---
 
-import useBaseUrl from '@docusaurus/useBaseUrl';
+# What Bursar manages
 
-# Introduction
+Bursar is an open-source usage metering, credit ledger, and billing library for AI products. It prices operations, enforces account policy, and records each monetary change in PostgreSQL through matching Python and TypeScript software development kits (SDKs).
 
-<img
-  className="bursar-docs-logo"
-  src={useBaseUrl('/img/logo.png')}
-  alt="Bursar logo: a smiling orange wallet holding credit cards and coins"
-  width={1024}
-  height={1024}
-  loading="eager"
-  decoding="async"
- />
+## The boundary Bursar owns
 
-Bursar is a reusable credit ledger and billing engine for AI SaaS. It gives
-your application one place to meter usage, sell prepaid credits, run plans and
-allowances, and orchestrate subscriptions — over a single PostgreSQL schema,
-from identical Python and JavaScript SDKs.
-
-## The problem
-
-AI costs are per-token and unpredictable. A completion's price depends on the
-model, input length, output length, and cache behavior, and the invoice lands
-long after the request. Naive approaches fail in familiar ways:
-
-- **Balances in Redis** drift under concurrency and lose history.
-- **Billing providers** know your prices but not your product — they cannot
-  meter `input_tokens` against a rate card, enforce a free plan's monthly
-  allowance, or gate a paid feature.
-- **Hand-rolled ledger code** is where float rounding, double spends, and
-  unreconcilable balances live.
-
-Bursar pushes metering, pricing, and money state into one system of record.
-
-## What you get
-
-- **One canonical config.** A single strict, versioned document drives pricing
-  operations and rate cards, credit buckets, entitlements, plans, quotas,
-  offers, and auto-recharge guardrails. The same document bills identically
-  in Python and JavaScript.
-- **An exact, append-only ledger.** All money is exact decimal, stored as
-  `numeric(20,6)` with half-up rounding. Every mutation appends a ledger entry
-  with a `balance_after` invariant; there is no floating-point drift.
-- **Atomic reserve/settle leases.** Long-running work reserves credits
-  up front, then settles the actual cost or releases the hold. Entitlements,
-  quotas, and concurrency limits are enforced atomically at admission.
-- **Idempotent mutations.** Every write is replay-safe through a per-account
-  idempotency key, so webhooks, retries, and worker redeliveries are no-ops.
-- **Per-tenant isolation.** One schema serves every tenant; row-level security
-  and composite foreign keys keep tenant data separate even under buggy code.
-- **Two SDKs, one schema.** The Python and JavaScript SDKs share API shape
-  (snake_case ↔ camelCase 1:1) and the same Postgres schema and config.
-
-## How it fits together
-
-Applications construct one `Bursar` facade and call its capabilities:
+AI products need to decide whether work may start before they know its final cost. Bursar puts pricing, admission, and accounting behind one application boundary so those decisions use the same state.
 
 ```mermaid
-flowchart TB
-    B["Bursar"] --> C1["credits — credit lifecycle: balances, ledger, leases"]
-    B --> C2["catalog — active versioned config"]
-    B --> C3["accounts — signup: default plan + grant programs"]
-    B --> C4["billing — provider events, subscriptions, invoices (optional)"]
-    B --> C5["commerce — checkout, offers, auto-recharge (optional)"]
-    C1 --> P[("PostgreSQL: one schema, per-tenant RLS, append-only ledger")]
-    C2 --> P
-    C3 --> P
-    C4 --> P
-    C5 --> P
+flowchart LR
+    A[Application usage] --> B[Bursar facade]
+    C[Versioned configuration] --> B
+    D[Payment provider events] --> B
+    B --> E[(PostgreSQL)]
+    E --> F[Balance and ledger]
+    E --> G[Plans and allowances]
+    E --> H[Billing state]
 ```
 
-`billing` and `commerce` are present only when a `billing_store` (and, for
-`commerce`, `commerce_options`) is supplied at construction.
+Your application calls one `Bursar` facade. The facade exposes these capabilities:
 
-## Language support
+| Capability | Responsibility |
+| --- | --- |
+| `credits` | Balances, ledger entries, metered charges, leases, refunds, quotas, and analytics |
+| `catalog` | Validation, publication, activation, and rollback of configuration versions |
+| `accounts` | Default plan assignment and account-created grant programs |
+| `billing` | Normalized provider events, subscriptions, invoices, payments, and disputes |
+| `commerce` | Checkout, plan changes, top-ups, and auto-recharge |
 
-| SDK | Runtime | Install |
+`billing` and `commerce` are optional. Configure them only when Bursar should coordinate a payment provider.
+
+## The guarantees Bursar enforces
+
+Bursar concentrates the rules that are difficult to maintain across application handlers and background workers:
+
+- **Exact money**: decimal values use fixed precision and half-up rounding. Configuration stores exact values as strings
+- **Append-only accounting**: grants, purchases, charges, refunds, expiry, and revocation create ledger entries instead of rewriting history
+- **Replay-safe writes**: stable idempotency keys prevent retries and webhook redelivery from posting a second mutation
+- **Atomic admission**: plans, entitlements, quotas, allowances, balance floors, and lease capacity are checked in the transaction that admits work
+- **Tenant isolation**: mandatory tenant identifiers, composite foreign keys, and forced row-level security keep tenant data separate
+- **Cross-SDK parity**: Python and TypeScript share configuration fixtures, SQL migrations, expression cases, error categories, and rounding behavior
+
+Read [Financial safety](./guides/financial-safety.mdx) before integrating any path that moves money or admits long-running work.
+
+## What remains outside Bursar
+
+Bursar does not replace your product database, identity provider, tax system, general ledger, or payment processor. Your application still owns account identity, product workflows, and the user interface. Bursar owns the metered-credit boundary and can project payment-provider events into that boundary.
+
+Use Bursar when your product needs one or more of these controls:
+
+- Prepaid balances or promotional credit grants
+- Per-operation pricing based on token, model, job, or compute measures
+- Plans with allowances, entitlements, quotas, and spend caps
+- Reservations for work whose final cost is unknown at admission
+- Replay-safe subscription, top-up, refund, and auto-recharge workflows
+- An auditable account ledger shared across Python and TypeScript services
+
+## Supported platforms
+
+| Surface | Supported version | Package |
 | --- | --- | --- |
-| Python | Python 3.12+ | `pip install bursar[postgres]` |
-| JavaScript | Node.js 22+ | `npm install @zonastery/bursar` |
-| Database | PostgreSQL 16+ + pg_partman 5.x + pg_jsonschema 0.3+ | one `bursar` schema, one migration runner |
+| Python SDK and command-line interface | Python 3.12 and 3.13 | `bursar` |
+| TypeScript SDK | Node.js 22 or newer | `@zonastery/bursar` |
+| Database | PostgreSQL 16 or newer | `pg_partman` 5.x and `pg_jsonschema` 0.3+ |
 
-## Next
+The current documentation tracks Bursar 1.x. Docusaurus version snapshots will be added only when a future major release changes user-facing behavior.
 
-Start with the [Quickstart](./quickstart.mdx) — schema, first config, first
-credits, and a first charge in about ten minutes. For the mental model first,
-read [The data model](./concepts/data-model.mdx).
+## Choose the next document
+
+- Follow [Create your first metered charge](./quickstart.mdx) to install the schema and post one usage charge
+- Run the [executable tutorials](/docs/tutorials) to learn each workflow against an isolated PostgreSQL environment
+- Read [The Bursar data model](./concepts/data-model.mdx) to understand accounts, ledger entries, lots, leases, and allowances
+- Open the [Python API](./python-api/index.mdx) or [TypeScript API](./javascript-api/index.mdx) for exact call signatures

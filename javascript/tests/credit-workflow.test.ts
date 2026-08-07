@@ -24,11 +24,14 @@ const leaseResult = (overrides: Record<string, unknown> = {}) => ({
 
 const deductionResult = (overrides: Record<string, unknown> = {}) => ({
   entryId: "entry-1",
+  usageChargeId: "usage-1",
   userId: "user-1",
   amount: new Decimal(8),
   allowanceConsumed: new Decimal(0),
   balanceAfter: new Decimal(92),
   idempotent: false,
+  error: null,
+  bucketBreakdown: null,
   ...overrides,
 });
 

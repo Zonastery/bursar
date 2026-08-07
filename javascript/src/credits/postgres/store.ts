@@ -359,16 +359,21 @@ export class PostgresStore extends CreditStore {
       dimensions: JSON.stringify(options?.dimensions ?? {}),
       metadata: JSON.stringify(options?.metadata ?? {}),
     });
-    const usageId =
-      row.error_code == null
-        ? requireText(row.charge_id, "record_usage")
-        : String(row.charge_id ?? "");
+    if (row.error_code !== null) {
+      return {
+        usageId: null,
+        userId,
+        requested: dec(row.requested),
+        idempotent: false,
+        error: row.error_code,
+      };
+    }
     return {
-      usageId,
+      usageId: requireText(row.charge_id, "record_usage"),
       userId,
       requested: dec(row.requested),
       idempotent: Boolean(row.replayed),
-      error: row.error_code != null ? String(row.error_code) : null,
+      error: null,
     };
   }
 
@@ -395,14 +400,14 @@ export class PostgresStore extends CreditStore {
     const availability = await this.getAvailable(userId);
     if ("error" in row && row.error) {
       return {
-        leaseId: "",
+        leaseId: null,
         userId,
-        amount: ZERO,
+        amount: row.amount == null ? null : dec(row.amount),
         available: availability.available,
         reservedTotal: availability.reserved,
-        minimumBalance: ZERO,
+        minimumBalance: row.minimum_balance == null ? null : dec(row.minimum_balance),
         billingMode: options?.billingMode ?? "strict",
-        expiresAt: "",
+        expiresAt: null,
         error: String(row.error),
       };
     }
@@ -415,6 +420,7 @@ export class PostgresStore extends CreditStore {
       minimumBalance: dec(row.minimum_balance),
       billingMode: dec(row.minimum_balance).lt(0) ? "overdraft" : "strict",
       expiresAt: requireText(row.expires_at, "create_lease_for_operation"),
+      error: null,
     };
   }
 
@@ -493,6 +499,20 @@ export class PostgresStore extends CreditStore {
     }
     const row = await this.leaseRepo.renewLease(userId, leaseId, ttlSeconds);
     const availability = await this.getAvailable(userId);
+    if (row.error !== null) {
+      return {
+        leaseId: null,
+        userId,
+        amount: row.amount == null ? null : dec(row.amount),
+        available: availability.available,
+        reservedTotal: availability.reserved,
+        minimumBalance: row.minimum_balance == null ? null : dec(row.minimum_balance),
+        billingMode:
+          row.minimum_balance != null && dec(row.minimum_balance).lt(0) ? "overdraft" : "strict",
+        expiresAt: null,
+        error: row.error,
+      };
+    }
     const minimumBalance = dec(row.minimum_balance);
     return {
       leaseId: requireText(row.lease_id, "renew_lease"),
@@ -503,7 +523,7 @@ export class PostgresStore extends CreditStore {
       minimumBalance,
       billingMode: minimumBalance.lt(0) ? "overdraft" : "strict",
       expiresAt: requireText(row.expires_at, "renew_lease"),
-      error: row.error != null ? String(row.error) : null,
+      error: null,
     };
   }
 
@@ -827,12 +847,13 @@ export class PostgresStore extends CreditStore {
     );
     if ("error" in row && row.error) {
       return {
-        refundEntryId: "",
+        refundEntryId: null,
         originalEntryId: entryId,
-        userId: String(row.user_id ?? ""),
-        amount: ZERO,
-        newBalance: dec(row.new_balance),
+        userId: row.user_id ?? null,
+        amount: row.amount == null ? null : dec(row.amount),
+        newBalance: row.new_balance == null ? null : dec(row.new_balance),
         error: String(row.error),
+        bucketBreakdown: null,
       };
     }
     return {
@@ -841,6 +862,7 @@ export class PostgresStore extends CreditStore {
       userId: String(row.user_id ?? ""),
       amount: dec(row.amount),
       newBalance: dec(row.new_balance),
+      error: null,
       bucketBreakdown: decRecord(row.bucket_breakdown),
     };
   }

@@ -1,17 +1,30 @@
 import type { Decimal } from "decimal.js";
 import type { BillingMode } from "./account.js";
 
-export interface LeaseResult {
-  leaseId: string;
+interface LeaseResultBase {
   userId: string;
-  amount: Decimal;
   available: Decimal;
   reservedTotal: Decimal;
-  minimumBalance: Decimal;
   billingMode: BillingMode;
-  expiresAt: string;
-  error?: string | null;
 }
+
+export interface LeaseSuccess extends LeaseResultBase {
+  error: null;
+  leaseId: string;
+  amount: Decimal;
+  minimumBalance: Decimal;
+  expiresAt: string;
+}
+
+export interface LeaseFailure extends LeaseResultBase {
+  error: string;
+  leaseId: null;
+  amount: Decimal | null;
+  minimumBalance: Decimal | null;
+  expiresAt: null;
+}
+
+export type LeaseResult = LeaseSuccess | LeaseFailure;
 
 /** Immutable pricing references captured when an operation lease is admitted. */
 export interface LeasePricingContext {
