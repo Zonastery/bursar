@@ -27,9 +27,9 @@ $$;
 
 REVOKE ALL
 ON FUNCTION extensions.json_matches_schema(json, json),
-            extensions.jsonb_matches_schema(json, jsonb),
-            extensions.jsonschema_is_valid(json),
-            extensions.jsonschema_validation_errors(json, json)
+extensions.jsonb_matches_schema(json, jsonb),
+extensions.jsonschema_is_valid(json),
+extensions.jsonschema_validation_errors(json, json)
 FROM PUBLIC;
 
 -- pg_partman owns the generic creation and retirement of Bursar's monthly

@@ -61,7 +61,7 @@ CREATE TABLE bursar.credit_lots (
         AND bursar.matches_catalog_fragment(
             expiry_policy_snapshot,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'BucketDefinition'->'properties'->'expiry'
+            -> '$defs' -> 'BucketDefinition' -> 'properties' -> 'expiry'
         )
     ),
     source_type text NOT NULL DEFAULT 'ledger'

@@ -242,7 +242,7 @@ CREATE TABLE bursar.catalog_buckets (
         AND bursar.matches_catalog_fragment(
             expiry_policy,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'BucketDefinition'->'properties'->'expiry'
+            -> '$defs' -> 'BucketDefinition' -> 'properties' -> 'expiry'
         )
     ),
     expiry_type text NOT NULL
@@ -307,7 +307,7 @@ CREATE TABLE bursar.catalog_operations (
         AND bursar.matches_catalog_fragment(
             measures,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'OperationDefinition'->'properties'->'measures'
+            -> '$defs' -> 'OperationDefinition' -> 'properties' -> 'measures'
         )
     ),
     dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
@@ -316,7 +316,7 @@ CREATE TABLE bursar.catalog_operations (
         AND bursar.matches_catalog_fragment(
             dimensions,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'OperationDefinition'->'properties'->'dimensions'
+            -> '$defs' -> 'OperationDefinition' -> 'properties' -> 'dimensions'
         )
     ),
     definition jsonb NOT NULL
@@ -578,7 +578,7 @@ CREATE TABLE bursar.catalog_plan_quotas (
         AND bursar.matches_catalog_fragment(
             window_policy,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'QuotaDefinition'->'properties'->'window'
+            -> '$defs' -> 'QuotaDefinition' -> 'properties' -> 'window'
         )
     ),
     enforcement text NOT NULL CHECK (enforcement IN ('block', 'allow')),
@@ -623,7 +623,7 @@ CREATE TABLE bursar.catalog_grant_programs (
             AND bursar.matches_catalog_fragment(
                 availability,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'Availability'
+                -> '$defs' -> 'Availability'
             )
         )
     ),
@@ -633,7 +633,7 @@ CREATE TABLE bursar.catalog_grant_programs (
         AND bursar.matches_catalog_fragment(
             eligibility,
             bursar.catalog_document_shape_schema()
-                ->'$defs'->'GrantEligibility'
+            -> '$defs' -> 'GrantEligibility'
         )
     ),
     max_awards_per_subject integer NOT NULL DEFAULT 1
@@ -670,7 +670,7 @@ CREATE TABLE bursar.catalog_grant_awards (
             AND bursar.matches_catalog_fragment(
                 expiry_policy,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'GrantAward'->'properties'->'expiry'
+                -> '$defs' -> 'GrantAward' -> 'properties' -> 'expiry'
             )
         )
     ),
@@ -709,7 +709,7 @@ CREATE TABLE bursar.catalog_offers (
             AND bursar.matches_catalog_fragment(
                 availability,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'Availability'
+                -> '$defs' -> 'Availability'
             )
         )
     ),
@@ -728,7 +728,7 @@ CREATE TABLE bursar.catalog_offers (
             AND bursar.matches_catalog_fragment(
                 trial_policy,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'BillingInterval'
+                -> '$defs' -> 'BillingInterval'
             )
         )
     ),
@@ -750,7 +750,7 @@ CREATE TABLE bursar.catalog_offers (
             AND bursar.matches_catalog_fragment(
                 cycle_grant_expiry_policy,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'CycleGrant'->'properties'->'expiry'
+                -> '$defs' -> 'CycleGrant' -> 'properties' -> 'expiry'
             )
         )
     ),
@@ -802,7 +802,7 @@ CREATE TABLE bursar.catalog_topups (
             AND bursar.matches_catalog_fragment(
                 availability,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'Availability'
+                -> '$defs' -> 'Availability'
             )
         )
     ),
@@ -827,7 +827,7 @@ CREATE TABLE bursar.catalog_topups (
             AND bursar.matches_catalog_fragment(
                 expiry_policy,
                 bursar.catalog_document_shape_schema()
-                    ->'$defs'->'TopupOffer'->'properties'->'expiry'
+                -> '$defs' -> 'TopupOffer' -> 'properties' -> 'expiry'
             )
         )
     ),
