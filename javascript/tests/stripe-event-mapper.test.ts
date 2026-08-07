@@ -78,13 +78,22 @@ describe("Stripe webhook mapper", () => {
         mode: "subscription",
         subscription: "sub_1",
         customer: "cus_1",
+        amount_subtotal: 0,
+        amount_total: 0,
+        currency: "usd",
         metadata: { plan_slug: "pro" },
       }),
       target,
       fakeStripe,
     );
     await handleStripeWebhook(
-      event("checkout.session.completed", { id: "cs_2", mode: "payment" }),
+      event("checkout.session.completed", {
+        id: "cs_2",
+        mode: "payment",
+        amount_subtotal: 0,
+        amount_total: 0,
+        currency: "usd",
+      }),
       target,
       fakeStripe,
     );

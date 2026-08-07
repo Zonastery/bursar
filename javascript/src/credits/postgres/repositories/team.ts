@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { CallProc } from "../../../shared/postgres-types.js";
-import { requireRow, safeParse } from "../../../shared/postgres-validation.js";
+import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 import { StoreError } from "../../../errors.js";
 
 const CreateTeamRowSchema = z
@@ -49,21 +49,21 @@ const TeamMemberRowSchema = z
 const TeamDeductionRowSchema = z
   .object({
     entry_id: z.string().nullable().optional(),
-    team_id: z.string().optional(),
-    user_id: z.string().optional(),
-    amount: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    team_balance_after: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    error: z.string().nullable().optional(),
-    error_code: z.string().nullable().optional(),
-    replayed: z.union([z.boolean(), z.string(), z.number()]).optional(),
+    team_id: z.string().min(1),
+    user_id: z.string().min(1),
+    amount: z.union([z.string().min(1), z.number().finite()] as const),
+    team_balance_after: z.union([z.string().min(1), z.number().finite()] as const).nullable(),
+    error: z.string().min(1).nullable(),
+    replayed: pgBoolean,
   })
-  .passthrough();
+  .superRefine((row, context) => {
+    if (row.error === null && (row.entry_id == null || row.team_balance_after === null)) {
+      context.addIssue({
+        code: "custom",
+        message: "successful team deductions require entry and balance fields",
+      });
+    }
+  });
 
 export type CreateTeamRow = z.infer<typeof CreateTeamRowSchema>;
 export type TeamBalanceRow = z.infer<typeof TeamBalanceRowSchema>;

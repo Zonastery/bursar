@@ -350,6 +350,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       { operation: "completion" },
       "team-charge-1",
     );
+    if (firstTeamCharge.error !== null) throw new Error(firstTeamCharge.error);
     expect(firstTeamCharge.teamBalanceAfter.toString()).toBe("8");
     const cappedTeamCharge = await store.deductTeam(
       team.teamId,

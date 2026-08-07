@@ -40,11 +40,24 @@ export interface AddTeamMemberResult {
 }
 
 /** Result of deducting credits from a team pool. */
-export interface TeamDeductionResult {
-  entryId: string;
+interface TeamDeductionResultBase {
   teamId: string;
   userId: string;
   amount: Decimal;
-  teamBalanceAfter: Decimal;
-  error?: string | null;
+  idempotent: boolean;
 }
+
+export interface TeamDeductionSuccess extends TeamDeductionResultBase {
+  error: null;
+  entryId: string | null;
+  teamBalanceAfter: Decimal;
+}
+
+export interface TeamDeductionFailure extends TeamDeductionResultBase {
+  error: string;
+  entryId: null;
+  teamBalanceAfter: Decimal | null;
+  idempotent: false;
+}
+
+export type TeamDeductionResult = TeamDeductionSuccess | TeamDeductionFailure;

@@ -328,12 +328,19 @@ class TeamMemberRow(BaseModel):
 
 class TeamDeductionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    entry_id: str = ""
-    team_id: str = ""
-    user_id: str = ""
-    amount: str | Decimal | None = None
+    entry_id: str | None = None
+    team_id: str
+    user_id: str
+    amount: str | Decimal
     team_balance_after: str | Decimal | None = None
+    replayed: bool
     error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_success(self) -> Self:
+        if self.error is None and (self.entry_id is None or self.team_balance_after is None):
+            raise ValueError("successful team deductions require entry and balance fields")
+        return self
 
 
 class BucketEnvelopeRow(BaseModel):

@@ -879,11 +879,13 @@ export class CreditsService {
     if (cost.lte(0)) {
       const teamBal = await this.store.getTeamBalance(teamId);
       return {
-        entryId: "",
+        entryId: null,
         teamId,
         userId,
         amount: new Decimal(0),
         teamBalanceAfter: teamBal.balance,
+        idempotent: false,
+        error: null,
       };
     }
 
@@ -906,7 +908,7 @@ export class CreditsService {
     // Surface store errors: emit credits.deduct_failed and throw,
     // mirroring the Python credit service implementation. Previously returned a silent
     // success-shaped object with an .error field, so failed charges looked OK.
-    if (result.error) {
+    if (result.error !== null) {
       this.emit("credits.deduct_failed", userId, {
         error: result.error,
         amount: cost,

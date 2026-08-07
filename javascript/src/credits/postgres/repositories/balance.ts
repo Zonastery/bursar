@@ -3,53 +3,42 @@ import Decimal from "decimal.js";
 import type { CallProc } from "../../../shared/postgres-types.js";
 import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
-const BalanceRowSchema = z
-  .object({
-    user_id: z.string(),
-    balance: z.union([z.string(), z.number()] as const).nullable(),
-    lifetime_purchased: z.union([z.string(), z.number()] as const).nullable(),
-  })
-  .partial()
-  .passthrough();
+const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+
+const BalanceRowSchema = z.object({
+  user_id: z.string().min(1),
+  balance: decimal,
+  lifetime_purchased: decimal,
+});
 
 const AddCreditsRowSchema = z
   .object({
     entry_id: z.string().nullable().optional(),
-    user_id: z.string().optional(),
-    amount: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    new_balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    lifetime_purchased: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    bucket: z.string().optional(),
-    idempotent: pgBoolean.nullable().optional(),
-    error: z.string().nullable().optional(),
+    user_id: z.string().min(1),
+    amount: decimal,
+    new_balance: decimal.nullable(),
+    lifetime_purchased: decimal.nullable(),
+    bucket: z.string().min(1),
+    idempotent: pgBoolean,
+    error: z.string().min(1).nullable(),
   })
-  .passthrough();
+  .superRefine((row, context) => {
+    if (
+      row.error === null &&
+      (row.entry_id === null || row.new_balance === null || row.lifetime_purchased === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "successful credit postings require entry and balance fields",
+      });
+    }
+  });
 
-const AvailableRowSchema = z
-  .object({
-    balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    reserved: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-    available: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
-  })
-  .passthrough();
+const AvailableRowSchema = z.object({
+  balance: decimal,
+  reserved: decimal,
+  available: decimal,
+});
 
 const GrantProgramAwardRowSchema = z
   .object({
@@ -137,8 +126,8 @@ export class BalanceRepository {
         ...row,
         user_id: userId,
         amount,
-        new_balance: row.balance_after,
-        lifetime_purchased: state?.lifetime_purchased,
+        new_balance: row.balance_after ?? null,
+        lifetime_purchased: state?.lifetime_purchased ?? null,
         bucket: grant?.bucket_key ?? bucket ?? "default",
         idempotent: row.replayed,
         error: row.error_code,
@@ -150,7 +139,10 @@ export class BalanceRepository {
   /** Fetch available balance (balance minus reserved holds). */
   async getAvailable(userId: string): Promise<AvailableRow> {
     const rows = await this.callproc("get_credit_state", [userId]);
-    return safeParse(AvailableRowSchema, rows?.[0] ?? {}, "BalanceRepository.getAvailable");
+    if (!rows || rows.length === 0) {
+      return { balance: "0", reserved: "0", available: "0" };
+    }
+    return safeParse(AvailableRowSchema, rows[0], "BalanceRepository.getAvailable");
   }
 
   /** Execute a configured grant-program event and return every award row. */

@@ -41,9 +41,10 @@ class AddTeamMemberResult(BaseModel):
 
 
 class TeamDeductionResult(BaseModel):
-    entry_id: str
+    entry_id: str | None
     team_id: str
     user_id: str
     amount: Decimal
-    team_balance_after: Decimal
+    team_balance_after: Decimal | None
+    idempotent: bool
     error: str | None = None

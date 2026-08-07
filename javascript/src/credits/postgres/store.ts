@@ -1053,11 +1053,12 @@ export class PostgresStore extends CreditStore {
     );
     if ("error" in row && row.error) {
       return {
-        entryId: "",
+        entryId: null,
         teamId,
         userId,
-        amount: ZERO,
-        teamBalanceAfter: dec(row.team_balance_after),
+        amount: dec(row.amount),
+        teamBalanceAfter: row.team_balance_after == null ? null : dec(row.team_balance_after),
+        idempotent: false,
         error: String(row.error),
       };
     }
@@ -1067,6 +1068,8 @@ export class PostgresStore extends CreditStore {
       userId: String(row.user_id ?? userId),
       amount: dec(row.amount),
       teamBalanceAfter: dec(row.team_balance_after),
+      idempotent: Boolean(row.replayed),
+      error: null,
     };
   }
 

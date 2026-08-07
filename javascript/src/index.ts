@@ -143,6 +143,8 @@ export type {
   Team,
   TeamBalanceResult,
   TeamDeductionResult,
+  TeamDeductionFailure,
+  TeamDeductionSuccess,
   TeamMember,
   TopUserRow,
   UsageAnalyticsStore,

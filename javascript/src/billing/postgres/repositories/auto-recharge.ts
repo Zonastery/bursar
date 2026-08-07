@@ -149,7 +149,7 @@ export class BillingAutoRechargeRepository {
         profile.provider,
         profile.topupId,
         profile.quantity,
-        profile.threshold,
+        profile.threshold.toString(),
         profile.maxChargesPerWindow,
         profile.windowUnit,
         profile.windowCount,

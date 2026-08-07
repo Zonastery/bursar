@@ -4,14 +4,13 @@ import { DeductionRowSchema } from "./deduction.js";
 import type { DeductionRow } from "./deduction.js";
 import { pgBoolean, requireRow, safeParse } from "../../../shared/postgres-validation.js";
 
+const decimal = z.union([z.string().min(1), z.number().finite()] as const);
+
 const LeaseRowSchema = z
   .object({
     lease_id: z.string().nullable().optional(),
-    user_id: z.string().optional(),
-    amount: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
+    user_id: z.string().min(1),
+    amount: decimal.nullable(),
     available: z
       .union([z.string(), z.number()] as const)
       .nullable()
@@ -21,16 +20,26 @@ const LeaseRowSchema = z
       .nullable()
       .optional(),
     billing_mode: z.string().optional(),
-    minimum_balance: z
-      .union([z.string(), z.number()] as const)
-      .nullable()
-      .optional(),
+    minimum_balance: decimal.nullable(),
     expires_at: z
       .union([z.string(), z.date().transform((value) => value.toISOString())])
-      .optional(),
-    error: z.string().nullable().optional(),
+      .nullable(),
+    error: z.string().min(1).nullable(),
   })
-  .passthrough();
+  .superRefine((row, context) => {
+    if (
+      row.error === null &&
+      (row.lease_id === null ||
+        row.amount === null ||
+        row.minimum_balance === null ||
+        row.expires_at === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "successful lease acquisition requires lease and policy fields",
+      });
+    }
+  });
 
 const ReleaseRowSchema = z
   .object({
@@ -96,8 +105,8 @@ export class LeaseRepository {
         ...row,
         user_id: params.userId,
         amount: row.reserved_amount,
-        expires_at: lease?.expires_at,
-        minimum_balance: lease?.minimum_balance,
+        expires_at: lease?.expires_at ?? null,
+        minimum_balance: lease?.minimum_balance ?? null,
         error: row.error_code,
       },
       "LeaseRepository.createLease",
@@ -130,21 +139,25 @@ export class LeaseRepository {
       params.metadata,
     ]);
     const row = requireRow(rows, "LeaseRepository.settleLease") as Record<string, unknown>;
-    const charge = (
-      await this.callproc("get_credit_operation_details", [
-        params.userId,
-        row.ledger_entry_id ?? null,
-        params.idempotencyKey,
-      ])
-    )[0] as Record<string, unknown> | undefined;
+    const charge =
+      row.error_code == null
+        ? ((
+            await this.callproc("get_credit_operation_details", [
+              params.userId,
+              row.ledger_entry_id ?? null,
+              params.idempotencyKey,
+            ])
+          )[0] as Record<string, unknown> | undefined)
+        : undefined;
     return safeParse(
       DeductionRowSchema,
       {
         ...row,
+        user_id: params.userId,
         entry_id: row.ledger_entry_id,
         amount: row.settled_amount,
-        allowance_consumed: charge?.allowance_covered,
-        balance_after: charge?.balance_after,
+        allowance_consumed: charge?.allowance_covered ?? "0",
+        balance_after: charge?.balance_after ?? null,
         idempotent: row.replayed,
         error: row.error_code,
       },
@@ -192,6 +205,8 @@ export class LeaseRepository {
         ...lease,
         user_id: userId,
         amount: row.reserved_amount,
+        expires_at: lease?.expires_at ?? null,
+        minimum_balance: lease?.minimum_balance ?? null,
         error: row.error_code,
       },
       "LeaseRepository.renewLease",

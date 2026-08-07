@@ -296,17 +296,155 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
                 return_url="https://ok",
                 cancel_url="https://cancel",
                 metadata={},
+                email="u1@example.com",
+                idempotency_key="idem_1",
             )
         )
     )
     assert result.url == "https://checkout.test"
     assert result.customer_id == "cus_1"
+    assert result.provider_session_id == "cs_1"
     assert calls[0][0] == "customer"
+    assert calls[0][1]["email"] == "u1@example.com"
+    assert calls[0][1]["idempotency_key"] == "idem_1:customer"
     assert calls[1][1]["line_items"] == [{"price": "price_1", "quantity": 1}]
+    assert calls[1][1]["idempotency_key"] == "idem_1"
     webhook = run(provider.handle_webhook(WebhookRequest(raw_body="{}", headers={})))
     assert webhook.received is False
     assert webhook.retryable is False
     assert webhook.provider == "stripe"
+
+
+def test_stripe_uses_current_checkout_status_and_subscription_schedule_apis() -> None:
+    subscription_updates: list[tuple[str, dict[str, Any]]] = []
+    schedule_creates: list[dict[str, Any]] = []
+    schedule_updates: list[tuple[str, dict[str, Any]]] = []
+    schedule_releases: list[tuple[str, dict[str, Any]]] = []
+
+    class Checkout:
+        async def retrieve_async(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
+            assert kwargs == {"expand": ["payment_intent"]}
+            if session_id == "cs_open":
+                return {"status": "open", "payment_status": "unpaid"}
+            return {
+                "status": "complete",
+                "payment_status": "unpaid",
+                "payment_intent": {"status": "requires_payment_method"},
+            }
+
+    class Subscription:
+        async def retrieve_async(self, _subscription_id: str) -> dict[str, Any]:
+            return {
+                "customer": "cus_1",
+                "items": {
+                    "data": [
+                        {
+                            "id": "si_1",
+                            "current_period_start": 1_767_225_600,
+                            "current_period_end": 1_769_904_000,
+                        }
+                    ]
+                },
+            }
+
+        async def modify_async(self, subscription_id: str, **kwargs: Any) -> dict[str, str]:
+            subscription_updates.append((subscription_id, kwargs))
+            return {"latest_invoice": "in_1"}
+
+    class SubscriptionSchedule:
+        async def create_async(self, **kwargs: Any) -> dict[str, Any]:
+            schedule_creates.append(kwargs)
+            return {
+                "id": "sub_sched_1",
+                "phases": [
+                    {
+                        "items": [{"price": "price_old", "quantity": 1}],
+                        "start_date": 1_767_225_600,
+                        "end_date": 1_769_904_000,
+                    }
+                ],
+            }
+
+        async def modify_async(self, schedule_id: str, **kwargs: Any) -> dict[str, Any]:
+            schedule_updates.append((schedule_id, kwargs))
+            return {}
+
+        async def release_async(self, schedule_id: str, **kwargs: Any) -> dict[str, Any]:
+            schedule_releases.append((schedule_id, kwargs))
+            return {}
+
+    fake = SimpleNamespace(
+        checkout=SimpleNamespace(Session=Checkout()),
+        Subscription=Subscription(),
+        SubscriptionSchedule=SubscriptionSchedule(),
+    )
+    provider = StripeProvider(
+        event_sink=Sink(),
+        webhook_secret="test_webhook_secret",
+        get_client=lambda: fake,
+    )
+
+    assert run(provider.get_checkout_session_status("cs_open")).payment_status == "processing"
+    assert run(provider.get_checkout_session_status("cs_requires_method")).payment_status == "requires_payment_method"
+
+    scheduled = run(
+        provider.change_plan(
+            ChangePlanParams(
+                provider_subscription_id="sub_1",
+                product_id="price_new",
+                proration_billing_mode="do_not_bill",
+                effective_at="next_billing_date",
+                metadata={"plan": "pro"},
+                idempotency_key="plan_1",
+            )
+        )
+    )
+    assert scheduled.provider_operation_id == "sub_sched_1"
+    assert schedule_creates == [{"from_subscription": "sub_1", "idempotency_key": "plan_1:schedule-create"}]
+    schedule_id, schedule_kwargs = schedule_updates[0]
+    assert schedule_id == "sub_sched_1"
+    assert schedule_kwargs["idempotency_key"] == "plan_1:schedule-update"
+    assert schedule_kwargs["phases"][0]["items"] == [{"price": "price_old", "quantity": 1}]
+    assert schedule_kwargs["phases"][1] == {
+        "items": [{"price": "price_new", "quantity": 1}],
+        "start_date": 1_769_904_000,
+        "proration_behavior": "none",
+        "metadata": {"plan": "pro"},
+    }
+
+    immediate = run(
+        provider.change_plan(
+            ChangePlanParams(
+                provider_subscription_id="sub_1",
+                product_id="price_now",
+                proration_billing_mode="do_not_bill",
+                effective_at="immediately",
+                on_payment_failure="apply_change",
+                metadata={"plan": "team"},
+                idempotency_key="plan_2",
+            )
+        )
+    )
+    assert immediate.provider_operation_id == "in_1"
+    assert subscription_updates[-1] == (
+        "sub_1",
+        {
+            "items": [{"id": "si_1", "price": "price_now", "quantity": 1}],
+            "proration_behavior": "none",
+            "payment_behavior": "allow_incomplete",
+            "metadata": {"plan": "team"},
+            "idempotency_key": "plan_2:subscription-update",
+        },
+    )
+
+    run(provider.cancel_subscription("sub_1", "cancel_1"))
+    run(provider.reactivate_subscription("sub_1", "reactivate_1"))
+    run(provider.cancel_scheduled_plan_change("sub_1", "sub_sched_1", "release_1"))
+    assert subscription_updates[-2:] == [
+        ("sub_1", {"cancel_at_period_end": True, "idempotency_key": "cancel_1"}),
+        ("sub_1", {"cancel_at_period_end": False, "idempotency_key": "reactivate_1"}),
+    ]
+    assert schedule_releases == [("sub_sched_1", {"idempotency_key": "release_1"})]
 
 
 def test_mock_provider_is_a_complete_deterministic_test_double() -> None:

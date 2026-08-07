@@ -170,11 +170,14 @@ describe("payment provider adapter contracts", () => {
 
   it("maps Stripe checkout calls and rejects missing webhook signatures", async () => {
     const calls: Record<string, unknown>[] = [];
+    const customerCalls: unknown[][] = [];
     const checkoutCalls: unknown[][] = [];
+    const paymentIntentCalls: unknown[][] = [];
     const stripe = {
       customers: {
-        create: async (args: Record<string, unknown>) => {
-          calls.push(args);
+        create: async (...args: unknown[]) => {
+          customerCalls.push(args);
+          calls.push(args[0] as Record<string, unknown>);
           return { id: "cus_1" };
         },
         retrieve: async () => ({
@@ -186,7 +189,7 @@ describe("payment provider adapter contracts", () => {
         sessions: {
           create: async (...args: unknown[]) => {
             checkoutCalls.push(args);
-            return { url: "https://checkout.test" };
+            return { id: "cs_1", url: "https://checkout.test" };
           },
           retrieve: async () => ({ status: "expired" }),
         },
@@ -208,7 +211,10 @@ describe("payment provider adapter contracts", () => {
       },
       prices: { retrieve: async () => ({ unit_amount: 500, currency: "usd" }) },
       paymentIntents: {
-        create: async () => ({ id: "pi_auto", status: "succeeded", amount: 500, currency: "usd" }),
+        create: async (...args: unknown[]) => {
+          paymentIntentCalls.push(args);
+          return { id: "pi_auto", status: "succeeded", amount: 500, currency: "usd" };
+        },
       },
       invoices: { retrieve: async () => ({ hosted_invoice_url: "https://invoice.test" }) },
       subscriptions: { update: async (...args: unknown[]) => calls.push({ args }) },
@@ -229,7 +235,12 @@ describe("payment provider adapter contracts", () => {
         metadata: {},
         idempotencyKey: "idem_1",
       }),
-    ).resolves.toEqual({ url: "https://checkout.test", customerId: "cus_1" });
+    ).resolves.toEqual({
+      url: "https://checkout.test",
+      customerId: "cus_1",
+      providerSessionId: "cs_1",
+    });
+    expect(customerCalls[0]?.[1]).toEqual({ idempotencyKey: "idem_1:customer" });
     expect(checkoutCalls[0]?.[0]).toMatchObject({
       line_items: [{ price: "price_1", quantity: 1 }],
     });
@@ -249,6 +260,9 @@ describe("payment provider adapter contracts", () => {
         idempotencyKey: "auto_1",
       }),
     ).resolves.toMatchObject({ providerPaymentId: "pi_auto", status: "succeeded" });
+    expect(paymentIntentCalls[0]?.[0]).toMatchObject({
+      metadata: { purpose: "credit_topup", price_id: "price_topup" },
+    });
     await expect(provider.handleWebhook({ rawBody: "{}", headers: {} })).resolves.toEqual({
       received: false,
       retryable: false,
@@ -256,6 +270,118 @@ describe("payment provider adapter contracts", () => {
       eventId: null,
       eventType: null,
     });
+  });
+
+  it("uses Stripe's current checkout-status and subscription-schedule APIs", async () => {
+    const subscriptionUpdate = vi.fn(async () => ({ latest_invoice: "in_1" }));
+    const scheduleCreate = vi.fn(async () => ({
+      id: "sub_sched_1",
+      phases: [
+        {
+          items: [{ price: "price_old", quantity: 1 }],
+          start_date: 1_767_225_600,
+          end_date: 1_769_904_000,
+        },
+      ],
+    }));
+    const scheduleUpdate = vi.fn(async () => ({}));
+    const stripe = {
+      checkout: {
+        sessions: {
+          retrieve: async (id: string) => {
+            if (id === "cs_open") return { status: "open", payment_status: "unpaid" };
+            return {
+              status: "complete",
+              payment_status: "unpaid",
+              payment_intent: { status: "requires_payment_method" },
+            };
+          },
+        },
+      },
+      subscriptions: {
+        retrieve: async () => ({
+          customer: "cus_1",
+          items: {
+            data: [
+              {
+                id: "si_1",
+                current_period_start: 1_767_225_600,
+                current_period_end: 1_769_904_000,
+              },
+            ],
+          },
+        }),
+        update: subscriptionUpdate,
+      },
+      subscriptionSchedules: {
+        create: scheduleCreate,
+        update: scheduleUpdate,
+      },
+    } as unknown as Stripe;
+    const provider = new StripeProvider({
+      getClient: () => stripe,
+      webhookSecret: "secret",
+      eventSink: sink,
+    });
+
+    await expect(provider.getCheckoutSessionStatus("cs_open")).resolves.toEqual({
+      paymentStatus: "processing",
+    });
+    await expect(provider.getCheckoutSessionStatus("cs_requires_method")).resolves.toEqual({
+      paymentStatus: "requires_payment_method",
+    });
+
+    await expect(
+      provider.changePlan({
+        providerSubscriptionId: "sub_1",
+        productId: "price_new",
+        prorationBillingMode: "do_not_bill",
+        effectiveAt: "next_billing_date",
+        metadata: { plan: "pro" },
+        idempotencyKey: "plan_1",
+      }),
+    ).resolves.toEqual({ providerOperationId: "sub_sched_1" });
+    expect(scheduleCreate).toHaveBeenCalledWith(
+      { from_subscription: "sub_1" },
+      { idempotencyKey: "plan_1:schedule-create" },
+    );
+    expect(scheduleUpdate).toHaveBeenCalledWith(
+      "sub_sched_1",
+      expect.objectContaining({
+        phases: [
+          expect.objectContaining({
+            items: [{ price: "price_old", quantity: 1 }],
+            end_date: 1_769_904_000,
+          }),
+          expect.objectContaining({
+            items: [{ price: "price_new", quantity: 1 }],
+            start_date: 1_769_904_000,
+            metadata: { plan: "pro" },
+          }),
+        ],
+      }),
+      { idempotencyKey: "plan_1:schedule-update" },
+    );
+
+    await provider.changePlan({
+      providerSubscriptionId: "sub_1",
+      productId: "price_now",
+      prorationBillingMode: "do_not_bill",
+      effectiveAt: "immediately",
+      onPaymentFailure: "apply_change",
+      metadata: { plan: "team" },
+      idempotencyKey: "plan_2",
+    });
+    expect(subscriptionUpdate).toHaveBeenCalledWith(
+      "sub_1",
+      expect.objectContaining({
+        items: [{ id: "si_1", price: "price_now", quantity: 1 }],
+        proration_behavior: "none",
+        payment_behavior: "allow_incomplete",
+        metadata: { plan: "team" },
+      }),
+      { idempotencyKey: "plan_2:subscription-update" },
+    );
   });
 
   it("uses the Dodo SDK's typed not-found error", async () => {

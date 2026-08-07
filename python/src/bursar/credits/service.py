@@ -1782,11 +1782,12 @@ class CreditsService:
         if cost <= 0:
             team_bal = self._store.get_team_balance(team_id)
             return TeamDeductionResult(
-                entry_id="",
+                entry_id=None,
                 team_id=team_id,
                 user_id=user_id,
                 amount=Decimal(0),
                 team_balance_after=team_bal.balance,
+                idempotent=False,
             )
 
         team_metadata_data = metadata.model_dump(exclude_none=True) if metadata else {}
@@ -1827,6 +1828,9 @@ class CreditsService:
             raise InsufficientCreditsError(
                 f"Team deduction failed: {result.error}. Team={team_id}, user={user_id}, requested={cost}"
             )
+
+        if result.team_balance_after is None:
+            raise StoreError("team deduction succeeded without a committed balance")
 
         self._emit(
             "credits.deducted",

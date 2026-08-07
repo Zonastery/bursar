@@ -139,6 +139,7 @@ describe("PostgresStore", () => {
         balance_after: "200",
         lifetime_purchased: "100.5",
         replayed: false,
+        error_code: null,
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -254,6 +255,7 @@ describe("PostgresStore", () => {
           balance_after: "20",
           lifetime_purchased: "20",
           replayed: false,
+          error_code: null,
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -272,6 +274,7 @@ describe("PostgresStore", () => {
           balance_after: "10",
           lifetime_purchased: "10",
           replayed: false,
+          error_code: null,
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -293,6 +296,7 @@ describe("PostgresStore", () => {
             allowance_covered: "0.0000",
             balance_after: "5.0000",
             replayed: false,
+            error_code: null,
             bucket_breakdown: { gifted: "10.0000", purchased: "5.0000" },
           },
         ]),
@@ -307,7 +311,14 @@ describe("PostgresStore", () => {
     it("addCredits surfaces the post_credit error envelope", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([{ error_code: "missing_catalog_bucket" }]),
+        makeMockPool([
+          {
+            entry_id: null,
+            balance_after: null,
+            replayed: false,
+            error_code: "missing_catalog_bucket",
+          },
+        ]),
       );
       await expect(
         store.addCredits("user-1", D(10), "adjustment", null, null, "bogus"),
@@ -325,6 +336,7 @@ describe("PostgresStore", () => {
             allowance_covered: "0.0000",
             balance_after: "5.0000",
             replayed: false,
+            error_code: null,
           },
         ]),
       );
@@ -398,6 +410,7 @@ describe("PostgresStore", () => {
           allowance_covered: "0.0000",
           balance_after: "97.5000",
           replayed: false,
+          error_code: null,
         },
       ]);
       const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -442,6 +455,7 @@ describe("PostgresStore", () => {
             allowance_covered: "10.0000",
             balance_after: "85.0000",
             replayed: false,
+            error_code: null,
           },
         ]),
       );
@@ -494,6 +508,7 @@ describe("PostgresStore", () => {
             allowance_covered: "0.0000",
             balance_after: "90.0000",
             replayed: true,
+            error_code: null,
           },
         ]),
       );
@@ -955,10 +970,14 @@ describe("PostgresStore", () => {
           user_id: "user-1",
           balance_after: null,
           lifetime_purchased: "100",
+          replayed: false,
+          error_code: null,
         },
       ]),
     );
-    await expect(store.addCredits("user-1", D(50))).rejects.toThrow("missing or invalid Decimal");
+    await expect(store.addCredits("user-1", D(50))).rejects.toThrow(
+      "successful credit postings require entry and balance fields",
+    );
   });
 
   // PG3 — Decimal value sent as string for non-round amounts
@@ -970,6 +989,8 @@ describe("PostgresStore", () => {
         amount: "0.0001",
         balance_after: "0.0001",
         lifetime_purchased: "0.0001",
+        replayed: false,
+        error_code: null,
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -988,6 +1009,8 @@ describe("PostgresStore", () => {
         amount: "50",
         balance_after: "150",
         lifetime_purchased: "150",
+        replayed: false,
+        error_code: null,
       },
     ]);
     const store = new PostgresStore("postgresql://localhost/db", ctor);
@@ -1066,6 +1089,8 @@ describe("PostgresStore", () => {
           amount: "100.1234567890",
           balance_after: "100.1235",
           lifetime_purchased: "100.1235",
+          replayed: false,
+          error_code: null,
         },
       ]),
     );

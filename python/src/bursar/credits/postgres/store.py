@@ -1594,11 +1594,12 @@ class PostgresStore(CreditStore):
             raise StoreError("deduct_team returned no result")
         if result.error is not None:
             return TeamDeductionResult(
-                entry_id="",
+                entry_id=None,
                 team_id=team_id,
                 user_id=user_id,
-                amount=Decimal(0),
-                team_balance_after=_dec(result.team_balance_after),
+                amount=_dec(result.amount),
+                team_balance_after=(_dec(result.team_balance_after) if result.team_balance_after is not None else None),
+                idempotent=False,
                 error=str(result.error),
             )
         return TeamDeductionResult(
@@ -1607,6 +1608,7 @@ class PostgresStore(CreditStore):
             user_id=str(getattr(result, "user_id", user_id)),
             amount=_dec(result.amount),
             team_balance_after=_dec(result.team_balance_after),
+            idempotent=result.replayed,
         )
 
     # ── Credit expiry ───────────────────────────────────────────────────
