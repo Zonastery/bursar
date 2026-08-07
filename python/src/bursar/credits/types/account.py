@@ -58,13 +58,23 @@ class DeductionResult(BaseModel):
 
 
 class RefundResult(BaseModel):
-    refund_entry_id: str
+    refund_entry_id: str | None
     original_entry_id: str
-    user_id: str
-    amount: Decimal
-    new_balance: Decimal
+    user_id: str | None
+    amount: Decimal | None
+    new_balance: Decimal | None
     error: str | None = None
     bucket_breakdown: dict[str, Decimal] | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> RefundResult:
+        if self.error is None and (
+            self.refund_entry_id is None or self.user_id is None or self.amount is None or self.new_balance is None
+        ):
+            raise ValueError("successful refunds require identity, amount, and balance fields")
+        if self.error is not None and self.refund_entry_id is not None:
+            raise ValueError("failed refunds cannot expose a committed refund_entry_id")
+        return self
 
 
 class CanAffordResult(BaseModel):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class LedgerEntry(BaseModel):
@@ -78,11 +78,19 @@ class UsageChargePage(BaseModel):
 class UsageRecordResult(BaseModel):
     """Result of appending usage without creating another balance debit."""
 
-    usage_id: str
+    usage_id: str | None
     user_id: str
     requested: Decimal
     idempotent: bool
     error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if self.error is None and self.usage_id is None:
+            raise ValueError("successful usage records require a usage_id")
+        if self.error is not None and (self.usage_id is not None or self.idempotent):
+            raise ValueError("failed usage records cannot be committed or idempotent replays")
+        return self
 
 
 class ListUsageChargesOptions(BaseModel):

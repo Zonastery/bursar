@@ -831,7 +831,7 @@ export class CreditsService {
       options?.idempotencyKey,
     );
 
-    if (result.error) {
+    if (result.error !== null) {
       this.logger.warn("[CreditsService] refundCredits failed", {
         entryId,
         error: result.error,

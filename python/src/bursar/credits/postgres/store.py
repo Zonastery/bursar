@@ -526,15 +526,20 @@ class PostgresStore(CreditStore):
         result = self._deduction_repo.record_usage(params)
         if result is None:
             raise StoreError("record_usage returned no result")
-        usage_id = (
-            _require_text(result.charge_id, "record_usage") if result.error_code is None else _text(result.charge_id)
-        )
+        if result.error_code is not None:
+            return UsageRecordResult(
+                usage_id=None,
+                user_id=user_id,
+                requested=_dec(result.requested),
+                idempotent=False,
+                error=result.error_code,
+            )
         return UsageRecordResult(
-            usage_id=usage_id,
+            usage_id=_require_text(result.charge_id, "record_usage"),
             user_id=user_id,
             requested=_dec(result.requested),
             idempotent=bool(result.replayed),
-            error=result.error_code,
+            error=None,
         )
 
     # ── Lease lifecycle (atomic admission) ─────────────────────────────
@@ -600,14 +605,14 @@ class PostgresStore(CreditStore):
         availability = self.get_available(user_id)
         if result.error is not None:
             return LeaseResult(
-                lease_id="",
+                lease_id=None,
                 user_id=user_id,
-                amount=Decimal(0),
+                amount=_dec(result.amount) if result.amount is not None else None,
                 available=availability.available,
                 reserved_total=availability.reserved,
-                minimum_balance=Decimal(0),
+                minimum_balance=(_dec(result.minimum_balance) if result.minimum_balance is not None else None),
                 billing_mode=options.billing_mode,
-                expires_at="",
+                expires_at=None,
                 error=str(result.error),
             )
         minimum_balance = _dec(result.minimum_balance)
@@ -620,6 +625,7 @@ class PostgresStore(CreditStore):
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
             expires_at=_require_text(result.expires_at, "create_lease_for_operation"),
+            error=None,
         )
 
     def settle_lease(
@@ -731,19 +737,31 @@ class PostgresStore(CreditStore):
         availability = self.get_available(user_id)
         if result is None:
             raise StoreError("renew_lease returned no result")
+        if result.error is not None:
+            return LeaseResult(
+                lease_id=None,
+                user_id=user_id,
+                amount=_dec(result.amount) if result.amount is not None else None,
+                available=availability.available,
+                reserved_total=availability.reserved,
+                minimum_balance=(_dec(result.minimum_balance) if result.minimum_balance is not None else None),
+                billing_mode=(
+                    "overdraft" if result.minimum_balance is not None and _dec(result.minimum_balance) < 0 else "strict"
+                ),
+                expires_at=None,
+                error=result.error,
+            )
         minimum_balance = _dec(result.minimum_balance)
         return LeaseResult(
-            lease_id=(_require_text(result.lease_id, "renew_lease") if result.error is None else lease_id),
+            lease_id=_require_text(result.lease_id, "renew_lease"),
             user_id=user_id,
             amount=_dec(result.amount),
             available=availability.available,
             reserved_total=availability.reserved,
             minimum_balance=minimum_balance,
             billing_mode="overdraft" if minimum_balance < 0 else "strict",
-            expires_at=(
-                _require_text(result.expires_at, "renew_lease") if result.error is None else _text(result.expires_at)
-            ),
-            error=result.error,
+            expires_at=_require_text(result.expires_at, "renew_lease"),
+            error=None,
         )
 
     def expire_leases(self, limit: int = 100) -> int:
@@ -1183,19 +1201,21 @@ class PostgresStore(CreditStore):
             raise StoreError("refund_credit_by_entry returned no result")
         if result.error is not None:
             return RefundResult(
-                refund_entry_id="",
+                refund_entry_id=None,
                 original_entry_id=entry_id,
-                user_id=str(getattr(result, "user_id", "")),
-                amount=Decimal(0),
-                new_balance=_dec(result.new_balance),
+                user_id=result.user_id,
+                amount=_dec(result.amount) if result.amount is not None else None,
+                new_balance=_dec(result.new_balance) if result.new_balance is not None else None,
                 error=str(result.error),
+                bucket_breakdown=None,
             )
         return RefundResult(
             refund_entry_id=_require_text(result.refund_entry_id, "refund_credit_by_entry"),
             original_entry_id=entry_id,
-            user_id=str(getattr(result, "user_id", "")),
+            user_id=_require_text(result.user_id, "refund_credit_by_entry"),
             amount=_dec(result.amount),
             new_balance=_dec(result.new_balance),
+            error=None,
             bucket_breakdown=_dec_map(result.bucket_breakdown),
         )
 
