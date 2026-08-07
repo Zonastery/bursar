@@ -31,12 +31,14 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "db-schema-toolkit": "1.1.13",
     "@docusaurus/module-type-aliases": "3.10.1",
     "@docusaurus/tsconfig": "3.10.1",
     "@docusaurus/types": "3.10.1",
     "@types/react": "^19.0.0",
+    "db-schema-toolkit": "1.1.13",
+    "docusaurus-plugin-llms": "^0.5.1",
     "docusaurus-plugin-typedoc": "^1.2.0",
+    "prettier": "^3.6.2",
     "typedoc": "^0.28.0",
     "typedoc-plugin-markdown": "^4.6.0",
     "typescript": "~6.0.2"

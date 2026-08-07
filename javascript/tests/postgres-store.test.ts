@@ -93,7 +93,7 @@ describe("PostgresStore", () => {
     // Postgres returns NUMERIC as a string via pg.
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ bucket_key: "purchased", balance: "100.1234" }]),
+      makeMockPool([{ bucket_key: "purchased", balance: "100.1234", lifetime_purchased: "0" }]),
     );
     const result = await store.getBalance("user-1");
     expect(result.balance.toString()).toBe("100.1234");
@@ -137,6 +137,7 @@ describe("PostgresStore", () => {
         entry_id: "tx-1",
         user_id: "user-1",
         balance_after: "200",
+        lifetime_purchased: "100.5",
         replayed: false,
       },
     ]);
@@ -251,6 +252,7 @@ describe("PostgresStore", () => {
           entry_id: "tx-tier-1",
           user_id: "user-1",
           balance_after: "20",
+          lifetime_purchased: "20",
           replayed: false,
         },
       ]);
@@ -268,6 +270,7 @@ describe("PostgresStore", () => {
           entry_id: "tx-1",
           user_id: "user-1",
           balance_after: "10",
+          lifetime_purchased: "10",
           replayed: false,
         },
       ]);
@@ -420,6 +423,7 @@ describe("PostgresStore", () => {
         JSON.stringify({ input_tokens: 2 }),
         JSON.stringify({ model: "gpt-4", region: "us-east" }),
       ]);
+      if (result.error !== null) throw new Error(result.error);
       // Parses NUMERIC strings to exact Decimal.
       expect(result.amount.toString()).toBe("2.5");
       expect(result.allowanceConsumed.toString()).toBe("0");
@@ -449,17 +453,31 @@ describe("PostgresStore", () => {
     it("maps quota_exceeded error envelope to result.error (no throw)", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([{ error_code: "quota_exceeded" }]),
+        makeMockPool([
+          {
+            charged: "0",
+            allowance_covered: "0",
+            replayed: false,
+            error_code: "quota_exceeded",
+          },
+        ]),
       );
       const result = await store.deductWithAllowance("user-1", D(20));
       expect(result.error).toBe("quota_exceeded");
-      expect(result.entryId).toBe("");
+      expect(result.entryId).toBeNull();
     });
 
     it("maps insufficient_credits error envelope", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([{ error_code: "insufficient_credits" }]),
+        makeMockPool([
+          {
+            charged: "0",
+            allowance_covered: "0",
+            replayed: false,
+            error_code: "insufficient_credits",
+          },
+        ]),
       );
       const result = await store.deductWithAllowance("user-1", D(20));
       expect(result.error).toBe("insufficient_credits");
@@ -554,7 +572,7 @@ describe("PostgresStore", () => {
     it("normalized bucket rows are not mistaken for scalar RPC results", async () => {
       const store = new PostgresStore(
         "postgresql://localhost/db",
-        makeMockPool([{ bucket_key: "default", balance: "42" }]),
+        makeMockPool([{ bucket_key: "default", balance: "42", lifetime_purchased: "0" }]),
       );
       const result = await store.getBalance("u1");
       expect(result.balance.toString()).toBe("42");
@@ -743,30 +761,58 @@ describe("PostgresStore", () => {
   });
 
   it("orders subscription Date values without losing millisecond precision", async () => {
-    const query = vi.fn().mockResolvedValue({
-      rows: [
-        {
-          subject_id: "user-1",
-          provider: "stripe",
-          provider_subscription_id: "sub-invalid-date",
-          status: "active",
-          provider_updated_at: new Date(Number.NaN),
-        },
-        {
-          subject_id: "user-1",
-          provider: "stripe",
-          provider_subscription_id: "sub-older",
-          status: "active",
-          provider_updated_at: new Date("2026-07-18T05:15:24.100Z"),
-        },
-        {
-          subject_id: "user-1",
-          provider: "stripe",
-          provider_subscription_id: "sub-newer",
-          status: "active",
-          provider_updated_at: new Date("2026-07-18T05:15:24.900Z"),
-        },
-      ],
+    const subjectId = "00000000-0000-0000-0000-000000000011";
+    const offerId = "00000000-0000-0000-0000-000000000012";
+    const revisionId = "00000000-0000-0000-0000-000000000013";
+    const subscription = (id: string, providerUpdatedAt: Date) => ({
+      id,
+      subject_id: subjectId,
+      provider: "stripe",
+      provider_subscription_id: id.endsWith("14") ? "sub-older" : "sub-newer",
+      provider_customer_id: null,
+      offer_id: offerId,
+      catalog_revision_id: revisionId,
+      status: "active",
+      current_period_start: null,
+      current_period_end: null,
+      trial_end: null,
+      cancel_at: null,
+      ended_at: null,
+      grace_ends_at: null,
+      grace_expired_at: null,
+      provider_updated_at: providerUpdatedAt,
+      cancel_at_period_end: false,
+      metadata: {},
+    });
+    const query = vi.fn((text: string) => {
+      if (text.includes("list_billing_subscriptions")) {
+        return Promise.resolve({
+          rows: [
+            subscription(
+              "00000000-0000-0000-0000-000000000014",
+              new Date("2026-07-18T05:15:24.100Z"),
+            ),
+            subscription(
+              "00000000-0000-0000-0000-000000000015",
+              new Date("2026-07-18T05:15:24.900Z"),
+            ),
+          ],
+        });
+      }
+      if (text.includes("get_catalog_offer_context")) {
+        return Promise.resolve({
+          rows: [
+            {
+              offer_key: "pro_monthly",
+              plan_id: "00000000-0000-0000-0000-000000000016",
+              plan_key: "pro",
+              billing_unit: "month",
+              billing_count: 1,
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ rows: [] });
     });
     const pool = {
       query,
@@ -775,7 +821,7 @@ describe("PostgresStore", () => {
     } as unknown as import("pg").Pool;
     const store = new PostgresBillingStore(pool);
 
-    await expect(store.getUserSubscription("user-1", ["active"])).resolves.toMatchObject({
+    await expect(store.getUserSubscription(subjectId, ["active"])).resolves.toMatchObject({
       providerSubscriptionId: "sub-newer",
     });
   });
@@ -899,24 +945,20 @@ describe("PostgresStore", () => {
     expect(result.hasFeature).toBe(false);
   });
 
-  // PG2 — NULL value in NUMERIC column → converted to Decimal("0") (not NaN)
-  it("NULL amount in RPC row is converted to Decimal zero, not NaN (PG2)", async () => {
+  // PG2 — malformed financial rows fail closed instead of becoming a plausible zero.
+  it("rejects a NULL committed balance instead of fabricating zero (PG2)", async () => {
     const store = new PostgresStore(
       "postgresql://localhost/db",
       makeMockPool([
         {
           entry_id: "tx-1",
           user_id: "user-1",
-          amount: null,
-          new_balance: "100",
+          balance_after: null,
           lifetime_purchased: "100",
         },
       ]),
     );
-    const result = await store.addCredits("user-1", D(50));
-    // `dec(null)` returns ZERO — never NaN.
-    expect(result.amount.isNaN()).toBe(false);
-    expect(result.amount.toString()).toBe("50"); // falls back to the supplied `amount`
+    await expect(store.addCredits("user-1", D(50))).rejects.toThrow("missing or invalid Decimal");
   });
 
   // PG3 — Decimal value sent as string for non-round amounts
@@ -926,7 +968,7 @@ describe("PostgresStore", () => {
         entry_id: "tx-2",
         user_id: "user-1",
         amount: "0.0001",
-        new_balance: "0.0001",
+        balance_after: "0.0001",
         lifetime_purchased: "0.0001",
       },
     ]);
@@ -944,7 +986,7 @@ describe("PostgresStore", () => {
         entry_id: "tx-3",
         user_id: "user-1",
         amount: "50",
-        new_balance: "150",
+        balance_after: "150",
         lifetime_purchased: "150",
       },
     ]);
@@ -962,12 +1004,19 @@ describe("PostgresStore", () => {
   it("unknown RPC error code is surfaced as result.error without throwing (PG5)", async () => {
     const store = new PostgresStore(
       "postgresql://localhost/db",
-      makeMockPool([{ error_code: "some_unknown_code_xyz" }]),
+      makeMockPool([
+        {
+          charged: "0",
+          allowance_covered: "0",
+          replayed: false,
+          error_code: "some_unknown_code_xyz",
+        },
+      ]),
     );
     // deductWithAllowance maps ALL error envelopes to result.error — unknown codes included.
     const result = await store.deductWithAllowance("user-1", D(20));
     expect(result.error).toBe("some_unknown_code_xyz");
-    expect(result.entryId).toBe("");
+    expect(result.entryId).toBeNull();
   });
 
   // PG6 — Network/transport errors use the stable SDK taxonomy and retain cause.
@@ -1015,7 +1064,7 @@ describe("PostgresStore", () => {
           entry_id: "tx-pg7",
           user_id: "user-1",
           amount: "100.1234567890",
-          new_balance: "100.1235",
+          balance_after: "100.1235",
           lifetime_purchased: "100.1235",
         },
       ]),

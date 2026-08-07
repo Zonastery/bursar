@@ -57,7 +57,7 @@ async def test_supported_stripe_routes_emit_canonical_events(
     stripe = SimpleNamespace(
         subscriptions=SimpleNamespace(retrieve_async=AsyncMock()),
         Subscription=SimpleNamespace(
-            retrieve_async=AsyncMock(return_value={"metadata": {"userId": "u1"}, "status": "active"})
+            retrieve_async=AsyncMock(return_value={"id": "sub_1", "metadata": {"userId": "u1"}, "status": "active"})
         ),
     )
     await handle_stripe_billing_event(
@@ -82,7 +82,12 @@ async def test_checkout_subscription_emits_checkout_completed(sink: MagicMock) -
         ),
         Subscription=SimpleNamespace(
             retrieve_async=AsyncMock(
-                return_value={"status": "active", "current_period_start": 1764547200, "current_period_end": 1767225600}
+                return_value={
+                    "id": "sub_1",
+                    "status": "active",
+                    "current_period_start": 1764547200,
+                    "current_period_end": 1767225600,
+                }
             )
         ),
     )

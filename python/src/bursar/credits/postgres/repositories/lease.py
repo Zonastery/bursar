@@ -92,6 +92,7 @@ class LeaseRepository:
         details = dict(details_rows[0]) if details_rows else {}
         row.update(
             {
+                "user_id": params.user_id,
                 "entry_id": row.get("ledger_entry_id"),
                 "amount": row.get("settled_amount"),
                 "allowance_consumed": details.get("allowance_covered"),

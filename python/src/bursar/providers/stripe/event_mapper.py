@@ -30,18 +30,15 @@ STRIPE_CHECKOUT_EXPAND = ("line_items",)
 _log = StdlibProviderLogger(logging.getLogger(__name__))
 
 
-def _build_end(sub: Any) -> str | None:
-    raw = sub.get("current_period_end")
-    if raw:
-        return datetime.fromtimestamp(raw, tz=UTC).isoformat()
-    return None
-
-
-def _build_start(sub: Any) -> str | None:
-    raw = sub.get("current_period_start")
-    if raw:
-        return datetime.fromtimestamp(raw, tz=UTC).isoformat()
-    return None
+def _value(obj: Any, key: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    getter = getattr(obj, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return getattr(obj, key, default)
 
 
 def _timestamp(value: int | float | None) -> str | None:
@@ -50,205 +47,293 @@ def _timestamp(value: int | float | None) -> str | None:
     return datetime.fromtimestamp(value, tz=UTC).isoformat()
 
 
+def _expandable_id(raw: Any) -> str | None:
+    if isinstance(raw, str):
+        return raw
+    identifier = _value(raw, "id")
+    return str(identifier) if identifier else None
+
+
+def _metadata(raw: Any) -> dict[str, str]:
+    if not raw:
+        return {}
+    items = raw.items() if hasattr(raw, "items") else []
+    return {str(key): str(value) for key, value in items}
+
+
+def _subscription_period_value(sub: Any, field: str) -> int | float | None:
+    items = _value(_value(sub, "items", {}), "data", []) or []
+    item_value = _value(items[0], field) if items else None
+    if item_value is not None:
+        return item_value
+    # Compatibility for accounts deliberately pinned before 2025-03-31.basil.
+    return _value(sub, field)
+
+
+def _build_end(sub: Any) -> str | None:
+    return _timestamp(_subscription_period_value(sub, "current_period_end"))
+
+
+def _build_start(sub: Any) -> str | None:
+    return _timestamp(_subscription_period_value(sub, "current_period_start"))
+
+
 def _build_end_from_invoice(invoice: Any) -> str | None:
-    return _timestamp(invoice.get("period_end"))
+    return _timestamp(_value(invoice, "period_end"))
 
 
 def _build_start_from_invoice(invoice: Any) -> str | None:
-    return _timestamp(invoice.get("period_start"))
+    return _timestamp(_value(invoice, "period_start"))
 
 
 def _subscription_refs(sub: Any) -> ProviderRef | None:
-    items = sub.get("items") or {}
-    item_data = items.get("data") or []
-    price = (item_data[0].get("price") if item_data else None) or {}
-    price_id = price.get("id")
-    product = price.get("product")
-    if isinstance(product, str):
-        product_id = product
-    else:
-        get_product_value = getattr(product, "get", None)
-        raw_product_id = get_product_value("id") if callable(get_product_value) else getattr(product, "id", None)
-        product_id = raw_product_id if isinstance(raw_product_id, str) else None
+    items = _value(_value(sub, "items", {}), "data", []) or []
+    price = _value(items[0], "price", {}) if items else {}
+    price_id = _expandable_id(price)
+    product_id = _expandable_id(_value(price, "product"))
     if not price_id and not product_id:
         return None
     return ProviderRef(price_id=price_id, product_id=product_id)
 
 
-def _customer_id(raw: Any) -> str | None:
-    if isinstance(raw, str):
-        return raw
-    if hasattr(raw, "get"):
-        return raw.get("id")
-    return getattr(raw, "id", None)
+def _subscription_info(sub: Any, refs: ProviderRef | None = None) -> BillingSubscriptionInfo:
+    return BillingSubscriptionInfo(
+        provider_subscription_id=require_provider_string(_value(sub, "id"), "Stripe subscription.id"),
+        status=parse_status(_value(sub, "status")),
+        cancel_at_period_end=_value(sub, "cancel_at_period_end"),
+        period_start=_build_start(sub),
+        period_end=_build_end(sub),
+        trial_end=_timestamp(_value(sub, "trial_end")),
+        cancel_at=_timestamp(_value(sub, "cancel_at")),
+        ended_at=_timestamp(_value(sub, "ended_at")),
+        refs=refs if refs is not None else _subscription_refs(sub),
+    )
 
 
-def _customer_email(raw: Any) -> str | None:
-    if hasattr(raw, "get"):
-        return raw.get("email")
-    return getattr(raw, "email", None)
+def _customer_info(session: Any) -> BillingCustomerInfo | None:
+    raw_customer = _value(session, "customer")
+    customer_id = _expandable_id(raw_customer)
+    customer_email = None if isinstance(raw_customer, str) else _value(raw_customer, "email")
+    customer_details = _value(session, "customer_details", {}) or {}
+    email = customer_email or _value(customer_details, "email")
+    if not customer_id and not email:
+        return None
+    return BillingCustomerInfo(
+        provider_customer_id=customer_id,
+        email=str(email) if email else None,
+    )
 
 
-async def _handle_checkout_completed(
+def _checkout_payment_info(
+    session: Any,
+    expanded: Any,
+    status: Literal["succeeded", "failed"],
+) -> BillingPaymentInfo:
+    line_items = _value(expanded, "line_items", {}) or {}
+    line_data = _value(line_items, "data", []) or []
+    price = _value(line_data[0], "price", {}) if line_data else {}
+    price_id = _expandable_id(price)
+    product_id = _expandable_id(_value(price, "product"))
+    refs = ProviderRef(product_id=product_id, price_id=price_id) if product_id or price_id else None
+    total_details = _value(session, "total_details", {}) or {}
+    tax_minor = require_minor_units(
+        _value(total_details, "amount_tax", 0) or 0,
+        "Stripe checkout session.total_details.amount_tax",
+    )
+    subtotal = _value(session, "amount_subtotal")
+    if subtotal is None:
+        subtotal = max(0, int(_value(session, "amount_total", 0) or 0) - tax_minor)
+    payment_intent_id = _expandable_id(_value(session, "payment_intent"))
+    provider_payment_id = payment_intent_id or _value(session, "id")
+    return BillingPaymentInfo(
+        provider_payment_id=require_provider_string(
+            provider_payment_id,
+            "Stripe checkout session payment identifier",
+        ),
+        amount_minor=require_minor_units(subtotal, "Stripe checkout session.amount_subtotal"),
+        tax_minor=tax_minor,
+        currency=require_currency(_value(session, "currency"), "Stripe checkout session.currency"),
+        purpose="subscription" if _value(session, "mode") == "subscription" else "credit_topup",
+        status=status,
+        refs=refs,
+    )
+
+
+def _invoice_subscription_id(invoice: Any) -> str | None:
+    parent = _value(invoice, "parent", {}) or {}
+    details = _value(parent, "subscription_details", {}) or {}
+    current = _expandable_id(_value(details, "subscription"))
+    return current or _expandable_id(_value(invoice, "subscription"))
+
+
+def _invoice_metadata(invoice: Any) -> dict[str, str]:
+    parent = _value(invoice, "parent", {}) or {}
+    details = _value(parent, "subscription_details", {}) or {}
+    return {
+        **_metadata(_value(details, "metadata")),
+        **_metadata(_value(invoice, "metadata")),
+    }
+
+
+def _invoice_payment_id(invoice: Any) -> str:
+    payments = _value(_value(invoice, "payments", {}), "data", []) or []
+    for invoice_payment in payments:
+        payment = _value(invoice_payment, "payment", {}) or {}
+        payment_intent_id = _expandable_id(_value(payment, "payment_intent"))
+        if payment_intent_id:
+            return payment_intent_id
+    return require_provider_string(_value(invoice, "id"), "Stripe invoice.id")
+
+
+def _invoice_tax_minor(invoice: Any) -> int:
+    taxes = _value(invoice, "total_taxes", []) or []
+    return require_minor_units(
+        sum(int(_value(tax, "amount", 0) or 0) for tax in taxes),
+        "Stripe invoice.total_taxes",
+    )
+
+
+async def _handle_checkout_event(
     event_id: str,
     data: Any,
     user_id: str | None,
-    metadata: dict[str, str],
+    event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
+    *,
+    outcome: Literal["completed", "succeeded", "failed"],
 ) -> None:
     session = data
-    expanded = await stripe.checkout.Session.retrieve_async(
-        session.get("id"),
-        expand=STRIPE_CHECKOUT_EXPAND,
-    )
-
-    uid = user_id
-    if not uid:
-        logger.warning("Webhook: no client_reference_id", {"sessionId": session.get("id")})
+    if outcome == "completed" and _value(session, "payment_status") == "unpaid":
+        logger.debug(
+            "Stripe Checkout completed with a delayed payment",
+            {"sessionId": _value(session, "id")},
+        )
         return
 
-    cust_id = _customer_id(session.get("customer"))
-    cust_email = _customer_email(session.get("customer"))
-    customer_info = BillingCustomerInfo(
-        provider_customer_id=cust_id,
-        email=cust_email,
+    expanded = await stripe.checkout.Session.retrieve_async(
+        _value(session, "id"),
+        expand=STRIPE_CHECKOUT_EXPAND,
     )
+    metadata = {**event_metadata, **_metadata(_value(session, "metadata"))}
+    uid = user_id or _value(session, "client_reference_id") or metadata.get("userId")
+    customer = _customer_info(session)
+    subscription_id = _expandable_id(_value(session, "subscription"))
 
-    if session.get("mode") == "subscription" and session.get("subscription"):
-        sub_id = session["subscription"]
-        if not isinstance(sub_id, str):
-            sub_id = sub_id.get("id")
-        try:
-            sub = await stripe.Subscription.retrieve_async(sub_id)
-            period_end = _build_end(sub)
-            period_start = _build_start(sub)
-            plan_slug = (session.get("metadata") or {}).get("plan_slug")
-
-            call_billing_event_sink(
-                sink,
-                BillingEvent(
-                    provider="stripe",
-                    event_id=event_id,
-                    event_type=BillingEventType.checkout_completed,
-                    occurred_at=occurred_at,
-                    user_id=uid,
-                    customer=customer_info,
-                    subscription=BillingSubscriptionInfo(
-                        provider_subscription_id=sub_id,
-                        status=parse_status(sub.get("status")),
-                        cancel_at_period_end=sub.get("cancel_at_period_end"),
-                        period_start=period_start,
-                        period_end=period_end,
-                        trial_end=_timestamp(sub.get("trial_end")),
-                        cancel_at=_timestamp(sub.get("cancel_at")),
-                        ended_at=_timestamp(sub.get("ended_at")),
-                        refs=(ProviderRef(lookup_key=plan_slug) if plan_slug else _subscription_refs(sub)),
-                    ),
-                ),
-            )
-        except Exception as exc:
-            logger.error(
-                "Failed to process subscription",
-                {"userId": uid, "subscriptionId": sub_id, "err": str(exc)},
-            )
-    else:
-        line_items = expanded.get("line_items", {})
-        line_data = (line_items.get("data") or [{}])[0]
-        price = line_data.get("price") or {}
-        price_id = price.get("id")
-        product_id = price.get("product")
-
-        payment_intent = session.get("payment_intent")
-        provider_payment_id = payment_intent.get("id") if isinstance(payment_intent, dict) else payment_intent
-        payment_info = BillingPaymentInfo(
-            provider_payment_id=require_provider_string(
-                provider_payment_id,
-                "Stripe checkout session.payment_intent",
-            ),
-            amount_minor=require_minor_units(
-                session.get("amount_total"),
-                "Stripe checkout session.amount_total",
-            ),
-            tax_minor=0,
-            currency=require_currency(session.get("currency"), "Stripe checkout session.currency"),
-            purpose="credit_topup",
-            status="succeeded",
-            refs=ProviderRef(
-                product_id=str(product_id) if product_id else None,
-                price_id=price_id,
-            ),
-        )
-
+    if outcome == "failed":
+        subscription = None
+        if subscription_id:
+            subscription = _subscription_info(await stripe.Subscription.retrieve_async(subscription_id))
         call_billing_event_sink(
             sink,
             BillingEvent(
                 provider="stripe",
                 event_id=event_id,
-                event_type=BillingEventType.payment_succeeded,
+                event_type=BillingEventType.payment_failed,
                 occurred_at=occurred_at,
                 user_id=uid,
-                customer=customer_info,
-                payment=payment_info,
+                customer=customer,
+                subscription=subscription,
+                payment=_checkout_payment_info(session, expanded, "failed"),
+                metadata=metadata,
             ),
-        )
-
-
-async def _handle_subscription_updated(
-    event_id: str,
-    data: Any,
-    user_id: str | None,
-    metadata: dict[str, str],
-    sink: BillingEventSink,
-    stripe: Any,
-    logger: ProviderLogger,
-    occurred_at: str,
-) -> None:
-    sub = data
-    uid = user_id or (sub.get("metadata") or {}).get("userId")
-    if not uid:
-        logger.debug(
-            "customer.subscription.updated: no userId",
-            {"subscriptionId": sub.get("id")},
         )
         return
 
-    period_end = _build_end(sub)
-    period_start = _build_start(sub)
-    sub_status = sub.get("status")
-    cancel_at_end = sub.get("cancel_at_period_end")
-
-    if sub_status == "canceled":
-        evt_type = BillingEventType.subscription_canceled
-    elif cancel_at_end:
-        evt_type = BillingEventType.subscription_cancellation_scheduled
-    else:
-        evt_type = BillingEventType.subscription_updated
+    if _value(session, "mode") == "subscription" and subscription_id:
+        sub = await stripe.Subscription.retrieve_async(subscription_id)
+        plan_slug = metadata.get("plan_slug")
+        refs = ProviderRef(lookup_key=plan_slug) if plan_slug else _subscription_refs(sub)
+        call_billing_event_sink(
+            sink,
+            BillingEvent(
+                provider="stripe",
+                event_id=event_id,
+                event_type=BillingEventType.checkout_completed,
+                occurred_at=occurred_at,
+                user_id=uid,
+                customer=customer,
+                subscription=_subscription_info(sub, refs),
+                metadata=metadata,
+            ),
+        )
+        return
 
     call_billing_event_sink(
         sink,
         BillingEvent(
             provider="stripe",
             event_id=event_id,
-            event_type=evt_type,
+            event_type=BillingEventType.payment_succeeded,
             occurred_at=occurred_at,
             user_id=uid,
-            customer=BillingCustomerInfo(
-                provider_customer_id=_customer_id(sub.get("customer")),
-            ),
-            subscription=BillingSubscriptionInfo(
-                provider_subscription_id=sub.get("id"),
-                status=parse_status(sub_status),
-                cancel_at_period_end=cancel_at_end,
-                period_start=period_start,
-                period_end=period_end,
-                trial_end=_timestamp(sub.get("trial_end")),
-                cancel_at=_timestamp(sub.get("cancel_at")),
-                ended_at=_timestamp(sub.get("ended_at")),
-                refs=_subscription_refs(sub),
-            ),
+            customer=customer,
+            payment=_checkout_payment_info(session, expanded, "succeeded"),
+            metadata=metadata,
+        ),
+    )
+
+
+async def _handle_checkout_expired(
+    event_id: str,
+    data: Any,
+    user_id: str | None,
+    event_metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: Any,
+    logger: ProviderLogger,
+    occurred_at: str,
+) -> None:
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=BillingEventType.checkout_expired,
+            occurred_at=occurred_at,
+            user_id=user_id or _value(data, "client_reference_id") or metadata.get("userId"),
+            customer=_customer_info(data),
+            metadata=metadata,
+        ),
+    )
+
+
+async def _handle_subscription_updated(
+    event_id: str,
+    data: Any,
+    user_id: str | None,
+    event_metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: Any,
+    logger: ProviderLogger,
+    occurred_at: str,
+) -> None:
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    status = _value(data, "status")
+    if status == "canceled":
+        event_type = BillingEventType.subscription_canceled
+    elif _value(data, "cancel_at_period_end"):
+        event_type = BillingEventType.subscription_cancellation_scheduled
+    else:
+        event_type = BillingEventType.subscription_updated
+
+    customer_id = _expandable_id(_value(data, "customer"))
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=event_type,
+            occurred_at=occurred_at,
+            user_id=user_id or metadata.get("userId"),
+            customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
+            subscription=_subscription_info(data),
+            metadata=metadata,
         ),
     )
 
@@ -257,13 +342,21 @@ async def _handle_subscription_deleted(
     event_id: str,
     data: Any,
     user_id: str | None,
-    metadata: dict[str, str],
+    event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
-    sub = data
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    customer_id = _expandable_id(_value(data, "customer"))
+    subscription = _subscription_info(data).model_copy(
+        update={
+            "status": parse_status("canceled"),
+            "ended_at": _timestamp(_value(data, "ended_at")) or occurred_at,
+        }
+    )
     call_billing_event_sink(
         sink,
         BillingEvent(
@@ -271,19 +364,10 @@ async def _handle_subscription_deleted(
             event_id=event_id,
             event_type=BillingEventType.subscription_canceled,
             occurred_at=occurred_at,
-            customer=BillingCustomerInfo(
-                provider_customer_id=_customer_id(sub.get("customer")),
-            ),
-            subscription=BillingSubscriptionInfo(
-                provider_subscription_id=sub.get("id"),
-                status=parse_status("canceled"),
-                period_start=_build_start(sub),
-                period_end=_build_end(sub),
-                trial_end=_timestamp(sub.get("trial_end")),
-                cancel_at=_timestamp(sub.get("cancel_at")),
-                ended_at=_timestamp(sub.get("ended_at")) or occurred_at,
-                refs=_subscription_refs(sub),
-            ),
+            user_id=user_id or metadata.get("userId"),
+            customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
+            subscription=subscription,
+            metadata=metadata,
         ),
     )
 
@@ -292,49 +376,22 @@ async def _handle_invoice_paid(
     event_id: str,
     data: Any,
     user_id: str | None,
-    metadata: dict[str, str],
+    event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
     occurred_at: str,
 ) -> None:
-    invoice = data
-    subscription_id = invoice.get("subscription")
+    subscription_id = _invoice_subscription_id(data)
     if not subscription_id:
-        logger.debug("invoice.paid: no subscription reference", {"invoiceId": invoice.get("id")})
+        logger.debug("invoice.paid: no subscription reference", {"invoiceId": _value(data, "id")})
         return
 
-    invoice_metadata = invoice.get("metadata") or {}
-    parent = invoice.get("parent") or {}
-    subscription_details = (parent.get("subscription_details") if hasattr(parent, "get") else None) or {}
-    parent_metadata = (subscription_details.get("metadata") if hasattr(subscription_details, "get") else None) or {}
-    uid = invoice_metadata.get("userId") or parent_metadata.get("userId") or user_id
-    stripe_sub: Any = None
-    try:
-        stripe_sub = await stripe.Subscription.retrieve_async(subscription_id)
-        if not uid:
-            uid = (stripe_sub.get("metadata") or {}).get("userId")
-    except Exception as exc:
-        if not uid:
-            logger.error(
-                "invoice.paid: failed to retrieve subscription",
-                {"subscriptionId": subscription_id, "err": str(exc)},
-            )
-            return
-    if not uid:
-        logger.warning("invoice.paid: no userId", {"subscriptionId": subscription_id})
-        return
-
-    sub_status = (
-        stripe_sub.get("status")
-        if stripe_sub
-        else "active"
-        if invoice.get("collection_method") == "send_invoice"
-        else "incomplete"
-    )
-    period_end = _build_end(stripe_sub) if stripe_sub else _build_end_from_invoice(invoice)
-    period_start = _build_start(stripe_sub) if stripe_sub else _build_start_from_invoice(invoice)
-
+    metadata = {**event_metadata, **_invoice_metadata(data)}
+    sub = await stripe.Subscription.retrieve_async(subscription_id)
+    period_start = _build_start(sub) or _build_start_from_invoice(data)
+    period_end = _build_end(sub) or _build_end_from_invoice(data)
+    customer_id = _expandable_id(_value(data, "customer"))
     call_billing_event_sink(
         sink,
         BillingEvent(
@@ -342,33 +399,65 @@ async def _handle_invoice_paid(
             event_id=event_id,
             event_type=BillingEventType.invoice_paid,
             occurred_at=occurred_at,
-            user_id=uid,
-            customer=BillingCustomerInfo(
-                provider_customer_id=_customer_id(invoice.get("customer")),
-            ),
-            subscription=BillingSubscriptionInfo(
-                provider_subscription_id=subscription_id,
-                status=parse_status(sub_status),
-                period_start=period_start,
-                period_end=period_end,
-                trial_end=_timestamp(stripe_sub.get("trial_end")) if stripe_sub else None,
-                cancel_at=_timestamp(stripe_sub.get("cancel_at")) if stripe_sub else None,
-                ended_at=_timestamp(stripe_sub.get("ended_at")) if stripe_sub else None,
-                refs=_subscription_refs(stripe_sub) if stripe_sub else None,
+            user_id=user_id or metadata.get("userId") or _metadata(_value(sub, "metadata")).get("userId"),
+            customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
+            subscription=_subscription_info(sub).model_copy(
+                update={"period_start": period_start, "period_end": period_end}
             ),
             invoice=BillingInvoiceInfo(
-                provider_invoice_id=invoice.get("id"),
+                provider_invoice_id=require_provider_string(_value(data, "id"), "Stripe invoice.id"),
                 status="paid",
-                amount_paid_minor=require_minor_units(
-                    invoice.get("amount_paid"),
-                    "Stripe invoice.amount_paid",
-                ),
-                amount_due_minor=require_minor_units(
-                    invoice.get("amount_due"),
-                    "Stripe invoice.amount_due",
-                ),
-                currency=require_currency(invoice.get("currency"), "Stripe invoice.currency"),
+                amount_paid_minor=require_minor_units(_value(data, "amount_paid"), "Stripe invoice.amount_paid"),
+                amount_due_minor=require_minor_units(_value(data, "amount_due"), "Stripe invoice.amount_due"),
+                currency=require_currency(_value(data, "currency"), "Stripe invoice.currency"),
+                period_start=period_start,
+                period_end=period_end,
             ),
+            metadata=metadata,
+        ),
+    )
+
+
+async def _handle_invoice_payment_failed(
+    event_id: str,
+    data: Any,
+    user_id: str | None,
+    event_metadata: dict[str, str],
+    sink: BillingEventSink,
+    stripe: Any,
+    logger: ProviderLogger,
+    occurred_at: str,
+) -> None:
+    subscription_id = _invoice_subscription_id(data)
+    if not subscription_id:
+        logger.debug(
+            "invoice.payment_failed: no subscription reference",
+            {"invoiceId": _value(data, "id")},
+        )
+        return
+    metadata = {**event_metadata, **_invoice_metadata(data)}
+    sub = await stripe.Subscription.retrieve_async(subscription_id)
+    customer_id = _expandable_id(_value(data, "customer"))
+    call_billing_event_sink(
+        sink,
+        BillingEvent(
+            provider="stripe",
+            event_id=event_id,
+            event_type=BillingEventType.payment_failed,
+            occurred_at=occurred_at,
+            user_id=user_id or metadata.get("userId") or _metadata(_value(sub, "metadata")).get("userId"),
+            customer=(BillingCustomerInfo(provider_customer_id=customer_id) if customer_id else None),
+            subscription=_subscription_info(sub),
+            payment=BillingPaymentInfo(
+                provider_payment_id=_invoice_payment_id(data),
+                amount_minor=require_minor_units(_value(data, "subtotal"), "Stripe invoice.subtotal"),
+                tax_minor=_invoice_tax_minor(data),
+                currency=require_currency(_value(data, "currency"), "Stripe invoice.currency"),
+                purpose="subscription",
+                status="failed",
+                refs=_subscription_refs(sub),
+            ),
+            metadata=metadata,
         ),
     )
 
@@ -377,7 +466,7 @@ async def _handle_payment_intent_event(
     event_id: str,
     data: Any,
     user_id: str | None,
-    metadata: dict[str, str],
+    event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
@@ -386,23 +475,10 @@ async def _handle_payment_intent_event(
     billing_event_type: BillingEventType,
     payment_status: Literal["pending", "succeeded", "failed", "canceled"],
 ) -> None:
-    intent = data
-    md = intent.get("metadata") or {}
-    if not md.get("auto_recharge_attempt_id"):
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    if not metadata.get("auto_recharge_attempt_id"):
         return
-
-    payment_info = BillingPaymentInfo(
-        provider_payment_id=require_provider_string(intent.get("id"), "Stripe payment intent.id"),
-        amount_minor=require_minor_units(intent.get("amount"), "Stripe payment intent.amount"),
-        tax_minor=0,
-        currency=require_currency(intent.get("currency"), "Stripe payment intent.currency"),
-        purpose="credit_topup",
-        status=payment_status,
-        refs=ProviderRef(
-            product_id=md.get("product_id"),
-            price_id=md.get("price_id"),
-        ),
-    )
 
     call_billing_event_sink(
         sink,
@@ -411,9 +487,20 @@ async def _handle_payment_intent_event(
             event_id=event_id,
             event_type=billing_event_type,
             occurred_at=occurred_at,
-            user_id=user_id or md.get("userId"),
-            payment=payment_info,
-            metadata=md,
+            user_id=user_id or metadata.get("userId"),
+            payment=BillingPaymentInfo(
+                provider_payment_id=require_provider_string(_value(data, "id"), "Stripe payment intent.id"),
+                amount_minor=require_minor_units(_value(data, "amount"), "Stripe payment intent.amount"),
+                tax_minor=0,
+                currency=require_currency(_value(data, "currency"), "Stripe payment intent.currency"),
+                purpose="credit_topup",
+                status=payment_status,
+                refs=ProviderRef(
+                    product_id=metadata.get("product_id"),
+                    price_id=metadata.get("price_id"),
+                ),
+            ),
+            metadata=metadata,
         ),
     )
 
@@ -422,7 +509,7 @@ async def _handle_refund_event(
     event_id: str,
     data: Any,
     user_id: str | None,
-    metadata: dict[str, str],
+    event_metadata: dict[str, str],
     sink: BillingEventSink,
     stripe: Any,
     logger: ProviderLogger,
@@ -431,12 +518,9 @@ async def _handle_refund_event(
     billing_event_type: BillingEventType,
     forced_status: str | None = None,
 ) -> None:
-    refund = data
-    pi = refund.get("payment_intent") or {}
-    payment_intent_id = pi.get("id") if isinstance(pi, dict) else pi
-
-    ref_md = refund.get("metadata") or {}
-    match forced_status or refund.get("status"):
+    del stripe, logger
+    metadata = {**event_metadata, **_metadata(_value(data, "metadata"))}
+    match forced_status or _value(data, "status"):
         case "succeeded":
             refund_status = "succeeded"
         case "failed":
@@ -445,18 +529,6 @@ async def _handle_refund_event(
             refund_status = "canceled"
         case _:
             refund_status = "pending"
-    refund_info = BillingRefundInfo(
-        provider_refund_id=require_provider_string(refund.get("id"), "Stripe refund.id"),
-        provider_payment_id=require_provider_string(
-            payment_intent_id,
-            "Stripe refund.payment_intent",
-        ),
-        amount_minor=require_minor_units(refund.get("amount"), "Stripe refund.amount", positive=True),
-        currency=require_currency(refund.get("currency"), "Stripe refund.currency"),
-        reason=refund.get("reason"),
-        status=refund_status,
-    )
-
     call_billing_event_sink(
         sink,
         BillingEvent(
@@ -464,18 +536,32 @@ async def _handle_refund_event(
             event_id=event_id,
             event_type=billing_event_type,
             occurred_at=occurred_at,
-            user_id=user_id or ref_md.get("userId"),
-            refund=refund_info,
-            metadata=ref_md,
+            user_id=user_id or metadata.get("userId"),
+            refund=BillingRefundInfo(
+                provider_refund_id=require_provider_string(_value(data, "id"), "Stripe refund.id"),
+                provider_payment_id=require_provider_string(
+                    _expandable_id(_value(data, "payment_intent")),
+                    "Stripe refund.payment_intent",
+                ),
+                amount_minor=require_minor_units(_value(data, "amount"), "Stripe refund.amount", positive=True),
+                currency=require_currency(_value(data, "currency"), "Stripe refund.currency"),
+                reason=_value(data, "reason"),
+                status=refund_status,
+            ),
+            metadata=metadata,
         ),
     )
 
 
 _EVENT_HANDLERS: dict[str, Any] = {
-    "checkout.session.completed": _handle_checkout_completed,
+    "checkout.session.completed": partial(_handle_checkout_event, outcome="completed"),
+    "checkout.session.async_payment_succeeded": partial(_handle_checkout_event, outcome="succeeded"),
+    "checkout.session.async_payment_failed": partial(_handle_checkout_event, outcome="failed"),
+    "checkout.session.expired": _handle_checkout_expired,
     "customer.subscription.updated": _handle_subscription_updated,
     "customer.subscription.deleted": _handle_subscription_deleted,
     "invoice.paid": _handle_invoice_paid,
+    "invoice.payment_failed": _handle_invoice_payment_failed,
     "payment_intent.succeeded": partial(
         _handle_payment_intent_event,
         billing_event_type=BillingEventType.payment_succeeded,

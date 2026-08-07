@@ -270,7 +270,7 @@ def test_stripe_adapter_maps_requests_and_missing_signature_is_non_retryable() -
     class Checkout:
         async def create_async(self, **kwargs: Any) -> dict[str, str]:
             calls.append(("checkout", kwargs))
-            return {"url": "https://checkout.test"}
+            return {"id": "cs_1", "url": "https://checkout.test"}
 
     class Customers:
         async def create_async(self, **kwargs: Any) -> dict[str, str]:

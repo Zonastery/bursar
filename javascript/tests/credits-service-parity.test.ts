@@ -141,6 +141,7 @@ describe("CreditsService mirror regressions", () => {
       new Decimal(0),
       expect.objectContaining({ operation: "free_operation" }),
     );
+    if (result.error !== null) throw new Error(result.error);
     expect(result.amount.eq(0)).toBe(true);
     expect(result.balanceAfter.eq(25)).toBe(true);
     expect(events).toEqual([expect.objectContaining({ amount: new Decimal(0) })]);

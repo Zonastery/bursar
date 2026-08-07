@@ -326,6 +326,7 @@ describe.runIf(DATABASE_URL)("PostgresStore integration — public configuration
       (charge) => charge.idempotencyKey === "public-config-charge-1",
     );
     expect(recordedCharge?.charged.toString()).toBe("16");
+    if (result.entryId === null) throw new Error("expected a monetary ledger entry");
     expect(await service.getLedgerEntry(USER_ID, result.entryId)).toMatchObject({
       entryId: result.entryId,
       entryType: "usage",

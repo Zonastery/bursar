@@ -178,8 +178,8 @@ def test_lease_repository_uses_revamped_create_and_settle_rpc_shapes() -> None:
         if name == "settle_lease":
             return [
                 {
-                    "ledger_entry_id": ENTRY_ID,
                     "charge_id": USAGE_ID,
+                    "ledger_entry_id": ENTRY_ID,
                     "settled_amount": "8",
                     "replayed": False,
                     "error_code": None,
@@ -490,6 +490,7 @@ def test_deduction_repository_preserves_operation_usage_dimensions() -> None:
         if name == "charge_usage_for_operation":
             return [
                 {
+                    "charge_id": USAGE_ID,
                     "ledger_entry_id": ENTRY_ID,
                     "charged": "8",
                     "allowance_covered": "2",
