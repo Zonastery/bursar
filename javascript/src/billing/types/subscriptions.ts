@@ -47,7 +47,7 @@ export interface BillingSubscriptionState {
   offerKey?: string | null;
   planId?: string | null;
   plan?: string | null;
-  status?: BillingSubscriptionStatus;
+  status: BillingSubscriptionStatus;
   currentPeriodStart?: string | null;
   currentPeriodEnd?: string | null;
   trialEnd?: string | null;
@@ -55,8 +55,8 @@ export interface BillingSubscriptionState {
   endedAt?: string | null;
   graceEndsAt?: string | null;
   graceExpiredAt?: string | null;
-  providerUpdatedAt?: string | null;
-  cancelAtPeriodEnd?: boolean;
+  providerUpdatedAt: string;
+  cancelAtPeriodEnd: boolean;
   interval?: string | null;
   intervalCount?: number | null;
   metadata?: Record<string, unknown> | null;

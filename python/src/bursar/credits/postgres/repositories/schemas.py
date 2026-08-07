@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class BalanceRow(BaseModel):
@@ -398,29 +398,58 @@ class BillingTopupRow(BaseModel):
 
 class SubscriptionRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = ""
-    user_id: str = ""
-    provider: str = ""
-    provider_subscription_id: str = ""
+    id: UUID
+    user_id: UUID
+    provider: str = Field(min_length=1)
+    provider_subscription_id: str = Field(min_length=1)
     provider_customer_id: str | None = None
-    offer_id: str | None = None
-    offer_key: str | None = None
-    plan: str | None = None
-    status: str = "incomplete"
+    offer_id: UUID
+    offer_key: str = Field(min_length=1)
+    plan_id: UUID
+    plan: str = Field(min_length=1)
+    status: Literal[
+        "incomplete",
+        "incomplete_expired",
+        "trialing",
+        "active",
+        "past_due",
+        "canceled",
+        "unpaid",
+        "paused",
+        "expired",
+    ]
     current_period_start: str | datetime | None = None
     current_period_end: str | datetime | None = None
     trial_end: str | datetime | None = None
     cancel_at: str | datetime | None = None
     ended_at: str | datetime | None = None
-    cancel_at_period_end: bool = False
-    interval: str | None = None
-    interval_count: int | None = None
+    cancel_at_period_end: bool
+    interval: Literal["day", "week", "month", "year"]
+    interval_count: int = Field(gt=0)
     grace_ends_at: str | datetime | None = None
     grace_expired_at: str | datetime | None = None
-    provider_updated_at: str | datetime | None = None
-    metadata: dict[str, Any] | None = None
-    catalog_version: int | None = None
-    plan_version_id: str | None = None
+    provider_updated_at: datetime
+    metadata: dict[str, Any]
+
+    @field_validator(
+        "current_period_start",
+        "current_period_end",
+        "trial_end",
+        "cancel_at",
+        "ended_at",
+        "grace_ends_at",
+        "grace_expired_at",
+        "provider_updated_at",
+        mode="before",
+    )
+    @classmethod
+    def validate_timestamps(cls, value: str | datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("subscription timestamps must include a timezone")
+        return parsed
 
 
 class BillingEventRow(BaseModel):

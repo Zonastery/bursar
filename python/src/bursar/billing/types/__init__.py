@@ -343,19 +343,33 @@ class BillingSubscriptionState(BaseModel):
     offer_id: str | None = None
     plan: str | None = None
     plan_id: str | None = None
-    status: BillingSubscriptionStatus = BillingSubscriptionStatus.incomplete
+    status: BillingSubscriptionStatus
     current_period_start: str | None = None
     current_period_end: str | None = None
     trial_end: str | None = None
     cancel_at: str | None = None
     ended_at: str | None = None
-    cancel_at_period_end: bool = False
+    cancel_at_period_end: bool
     interval: str | None = None
     interval_count: int | None = None
     grace_ends_at: str | None = None
     grace_expired_at: str | None = None
-    provider_updated_at: str | None = None
+    provider_updated_at: str
     metadata: dict[str, Any] | None = None
+
+    @field_validator(
+        "current_period_start",
+        "current_period_end",
+        "trial_end",
+        "cancel_at",
+        "ended_at",
+        "grace_ends_at",
+        "grace_expired_at",
+        "provider_updated_at",
+    )
+    @classmethod
+    def normalize_timestamps(cls, value: str | None) -> str | None:
+        return _normalize_instant(value) if value is not None else None
 
 
 BillingSubscriptionChangeState = Literal[

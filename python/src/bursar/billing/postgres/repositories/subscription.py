@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
+from bursar.billing.types import BillingSubscriptionState
 from bursar.credits.postgres.repositories._types import DbQuery
-from bursar.credits.postgres.repositories._utils import require_identifier_result
+from bursar.credits.postgres.repositories._utils import optional_mapping_row, require_identifier_result
 from bursar.credits.postgres.repositories.schemas import SubscriptionRow
 from bursar.errors import StoreError
 
@@ -31,21 +32,18 @@ class BillingSubscriptionRepository:
     def __init__(self, execute: DbQuery) -> None:
         self._execute = execute
 
-    def upsert(self, state: dict[str, Any]) -> None:
-        provider = str(state.get("provider") or "")
-        provider_subscription_id = str(state.get("provider_subscription_id") or "")
-        user_id = str(state.get("user_id") or state.get("subject_id") or "")
-        provider_customer_id = state.get("provider_customer_id")
-        offer_id = str(state.get("offer_id") or "")
-
-        if not provider or not provider_subscription_id:
-            raise ValueError("subscription.upsert: subject, provider, subscription, and offer are required")
+    def upsert(self, state: BillingSubscriptionState) -> None:
+        provider = state.provider
+        provider_subscription_id = state.provider_subscription_id
+        user_id = state.user_id
+        provider_customer_id = state.provider_customer_id
+        offer_id = state.offer_id or ""
 
         existing = self._execute(
             "SELECT * FROM bursar.get_billing_subscription_by_provider(%s,%s)",
             [provider, provider_subscription_id],
         )
-        existing_row = existing[0] if existing and isinstance(existing[0], dict) else {}
+        existing_row = optional_mapping_row(existing, "BillingSubscriptionRepository.upsert.existing") or {}
         if not user_id and existing_row.get("subject_id") is not None:
             user_id = str(existing_row["subject_id"])
         if provider_customer_id is None and existing_row.get("provider_customer_id") is not None:
@@ -53,13 +51,13 @@ class BillingSubscriptionRepository:
         if not offer_id and existing_row.get("offer_id") is not None:
             offer_id = str(existing_row["offer_id"])
 
-        offer_key = str(state.get("offer_key") or "")
+        offer_key = state.offer_key or ""
         if not offer_id and offer_key:
             offer_rows = self._execute(
                 "SELECT * FROM bursar.resolve_active_catalog_offer(%s)",
                 [offer_key],
             )
-            offer_row = offer_rows[0] if offer_rows and isinstance(offer_rows[0], dict) else {}
+            offer_row = optional_mapping_row(offer_rows, "BillingSubscriptionRepository.upsert.offer") or {}
             if offer_row.get("id") is not None:
                 offer_id = str(offer_row["id"])
 
@@ -76,28 +74,28 @@ class BillingSubscriptionRepository:
                 provider_subscription_id,
                 provider_customer_id,
                 offer_id,
-                state.get("status", "incomplete"),
-                state.get("current_period_start"),
-                state.get("current_period_end"),
-                state.get("cancel_at_period_end", False),
-                json.dumps(state.get("metadata") or {}),
-                state.get("trial_end"),
-                state.get("cancel_at"),
-                state.get("ended_at"),
-                state.get("provider_updated_at") or datetime.now(UTC).isoformat(),
-                state.get("grace_ends_at"),
+                state.status,
+                state.current_period_start,
+                state.current_period_end,
+                state.cancel_at_period_end,
+                json.dumps(state.metadata or {}),
+                state.trial_end,
+                state.cancel_at,
+                state.ended_at,
+                state.provider_updated_at,
+                state.grace_ends_at,
             ],
         )
         require_identifier_result(rows, "id", "BillingSubscriptionRepository.upsert")
 
     def _with_offer_context(self, row: dict[str, Any]) -> dict[str, Any]:
         if row.get("offer_id") is None or row.get("catalog_revision_id") is None:
-            return row
+            raise StoreError("billing subscription is missing its catalog reference")
         context_rows = self._execute(
             "SELECT * FROM bursar.get_catalog_offer_context(%s::uuid,%s::uuid)",
             [row["offer_id"], row["catalog_revision_id"]],
         )
-        context = context_rows[0] if context_rows and isinstance(context_rows[0], dict) else None
+        context = optional_mapping_row(context_rows, "BillingSubscriptionRepository.offer_context")
         if context is None or context.get("offer_key") is None:
             raise StoreError(
                 "billing subscription offer context is missing",
@@ -133,7 +131,7 @@ class BillingSubscriptionRepository:
         rows = self._execute(
             "SELECT * FROM bursar.get_billing_subscription_by_provider(%s,%s)", [provider, provider_subscription_id]
         )
-        return self._map(rows[0] if rows and isinstance(rows[0], dict) else None)
+        return self._map(optional_mapping_row(rows, "BillingSubscriptionRepository.get"))
 
     def get_user_subscription(self, user_id: str, statuses: list[str] | None = None) -> SubscriptionRow | None:
         rows = self._execute("SELECT * FROM bursar.list_billing_subscriptions(%s::uuid)", [user_id])

@@ -90,19 +90,9 @@ class IntegrationMockProvider(MockPaymentProvider):
                 brand="visa",
                 expiry_month=12,
                 expiry_year=2030,
+                is_default=True,
             )
         ]
-
-    async def get_default_payment_method(self, customer_id: str) -> PaymentMethodInfo | None:
-        del customer_id
-        return PaymentMethodInfo(
-            id="pm_card_visa",
-            last4="4242",
-            brand="visa",
-            expiry_month=12,
-            expiry_year=2030,
-            is_default=True,
-        )
 
     async def preview_saved_payment_charge(self, params: SavedPaymentChargeParams) -> SavedPaymentChargeQuote:
         del params

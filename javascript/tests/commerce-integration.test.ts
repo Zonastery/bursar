@@ -183,19 +183,15 @@ class IntegrationProvider implements PaymentProvider {
 
   async listPaymentMethods() {
     return [
-      { id: "pm_card_visa", last4: "4242", brand: "visa", expiryMonth: 12, expiryYear: 2030 },
+      {
+        id: "pm_card_visa",
+        last4: "4242",
+        brand: "visa",
+        expiryMonth: 12,
+        expiryYear: 2030,
+        isDefault: true,
+      },
     ];
-  }
-
-  async getDefaultPaymentMethod() {
-    return {
-      id: "pm_card_visa",
-      last4: "4242",
-      brand: "visa",
-      expiryMonth: 12,
-      expiryYear: 2030,
-      isDefault: true,
-    };
   }
 
   async previewSavedPaymentCharge(): Promise<SavedPaymentChargeQuote> {

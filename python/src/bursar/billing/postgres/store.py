@@ -92,6 +92,13 @@ def _to_utc_iso(value: str | datetime | None) -> str | None:
     return parsed.astimezone(UTC).isoformat()
 
 
+def _required_utc_iso(value: str | datetime, context: str) -> str:
+    result = _to_utc_iso(value)
+    if result is None:  # pragma: no cover - excluded by the non-null input type
+        raise StoreError(f"{context}: timestamp is required")
+    return result
+
+
 def _billing_credit_posting_result(
     rows: list[Any] | None,
     context: str,
@@ -234,27 +241,28 @@ class PostgresBillingStore(BillingStore):
         if r is None:
             return None
         return BillingSubscriptionState(
-            subscription_id=str(r.id) if r.id else None,
+            subscription_id=str(r.id),
             user_id=str(r.user_id),
-            provider=str(r.provider),
-            provider_subscription_id=str(r.provider_subscription_id),
+            provider=r.provider,
+            provider_subscription_id=r.provider_subscription_id,
             provider_customer_id=str(r.provider_customer_id) if r.provider_customer_id else None,
-            offer_id=str(r.offer_id) if r.offer_id else None,
-            offer_key=str(r.offer_key) if r.offer_key else None,
-            plan=str(r.plan) if r.plan else None,
-            status=BillingSubscriptionStatus(str(r.status)) if r.status else BillingSubscriptionStatus.incomplete,
+            offer_id=str(r.offer_id),
+            offer_key=r.offer_key,
+            plan_id=str(r.plan_id),
+            plan=r.plan,
+            status=BillingSubscriptionStatus(r.status),
             current_period_start=_to_utc_iso(r.current_period_start),
             current_period_end=_to_utc_iso(r.current_period_end),
             trial_end=_to_utc_iso(r.trial_end),
             cancel_at=_to_utc_iso(r.cancel_at),
             ended_at=_to_utc_iso(r.ended_at),
-            cancel_at_period_end=bool(r.cancel_at_period_end),
-            interval=str(r.interval) if r.interval else None,
-            interval_count=int(r.interval_count) if r.interval_count is not None else None,
-            grace_ends_at=_to_utc_iso(getattr(r, "grace_ends_at", None)),
-            grace_expired_at=_to_utc_iso(getattr(r, "grace_expired_at", None)),
-            provider_updated_at=_to_utc_iso(getattr(r, "provider_updated_at", None)),
-            metadata=r.metadata if isinstance(r.metadata, dict) else None,
+            cancel_at_period_end=r.cancel_at_period_end,
+            interval=r.interval,
+            interval_count=r.interval_count,
+            grace_ends_at=_to_utc_iso(r.grace_ends_at),
+            grace_expired_at=_to_utc_iso(r.grace_expired_at),
+            provider_updated_at=_required_utc_iso(r.provider_updated_at, "billing subscription"),
+            metadata=r.metadata,
         )
 
     def _subscription_offer_contexts(
@@ -551,29 +559,7 @@ class PostgresBillingStore(BillingStore):
         Args:
             state: The subscription state to persist.
         """
-        self._subscription_repo.upsert(
-            {
-                "user_id": state.user_id,
-                "provider": state.provider,
-                "provider_subscription_id": state.provider_subscription_id,
-                "provider_customer_id": state.provider_customer_id,
-                "offer_id": state.offer_id,
-                "offer_key": state.offer_key,
-                "plan": state.plan,
-                "status": state.status,
-                "current_period_start": _to_utc_iso(state.current_period_start),
-                "current_period_end": _to_utc_iso(state.current_period_end),
-                "trial_end": _to_utc_iso(state.trial_end),
-                "cancel_at": _to_utc_iso(state.cancel_at),
-                "ended_at": _to_utc_iso(state.ended_at),
-                "provider_updated_at": _to_utc_iso(state.provider_updated_at),
-                "cancel_at_period_end": state.cancel_at_period_end,
-                "interval": state.interval,
-                "interval_count": state.interval_count,
-                "grace_ends_at": _to_utc_iso(state.grace_ends_at),
-                "metadata": state.metadata,
-            }
-        )
+        self._subscription_repo.upsert(state)
 
     def get_billing_customer(
         self,
